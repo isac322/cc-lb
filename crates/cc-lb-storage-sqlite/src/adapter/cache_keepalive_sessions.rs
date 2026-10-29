@@ -3,7 +3,8 @@ use cc_lb_storage_api::{
     CacheKeepaliveEnqueueState, CacheKeepaliveGenerationCheck, CacheKeepaliveHitRefreshRequest,
     CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
     CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl, StorageError,
-    StorageResult, cache_keepalive_job_key, cache_keepalive_state_version,
+    StorageResult, cache_keepalive_job_key, cache_keepalive_order_meta_key,
+    format_keepalive_order_meta, parse_keepalive_order_meta,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -62,10 +63,39 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .ok_or_else(missing_after_write)
     }
 
+    async fn allocate_cache_keepalive_completion_ticket(
+        &self,
+        session_key_hash: &str,
+    ) -> StorageResult<u64> {
+        let key = cache_keepalive_order_meta_key(session_key_hash);
+        let mut tx = self.begin_immediate().await?;
+        let existing = sqlx::query_scalar::<_, String>("SELECT value FROM meta_v1 WHERE key = ?")
+            .bind(&key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let (issued, applied) = parse_keepalive_order_meta(existing.as_deref());
+        let next_issued = issued.checked_add(1).ok_or_else(|| StorageError::Fatal {
+            message: "cache keepalive completion ticket overflow".to_owned(),
+        })?;
+        let updated = format_keepalive_order_meta(next_issued, applied);
+        sqlx::query(
+            "INSERT INTO meta_v1 (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(&key)
+        .bind(&updated)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(next_issued)
+    }
+
     async fn replace_from_real_request_fenced(
         &self,
         request: &CacheKeepaliveReplaceRequest,
-        expected_state_version: Option<u64>,
+        expected_ticket: Option<u64>,
     ) -> StorageResult<Option<CacheKeepaliveSessionRecord>> {
         let config_snapshot = serde_json::to_string(&request.config_snapshot)?;
         let last_message_at_ms = request
@@ -93,14 +123,6 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             )),
             None => None,
         };
-        if let Some(expected) = expected_state_version {
-            let current_version = cache_keepalive_state_version(
-                parsed_existing.map(|(generation, _, status, _, _)| (generation, status)),
-            );
-            if current_version != expected {
-                return Ok(None);
-            }
-        }
         if let Some((_, _, status, existing_anchor, existing_updated)) = parsed_existing {
             if existing_anchor > request.cache_anchor_at_unix_secs {
                 return Ok(None);
@@ -110,6 +132,29 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             {
                 return Ok(None);
             }
+        }
+        if let Some(ticket) = expected_ticket {
+            let order_key = cache_keepalive_order_meta_key(&request.session_key_hash);
+            let order_raw =
+                sqlx::query_scalar::<_, String>("SELECT value FROM meta_v1 WHERE key = ?")
+                    .bind(&order_key)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            let (issued, applied) = parse_keepalive_order_meta(order_raw.as_deref());
+            if ticket <= applied {
+                return Ok(None);
+            }
+            let updated_order = format_keepalive_order_meta(issued.max(ticket), ticket);
+            sqlx::query(
+                "INSERT INTO meta_v1 (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(&order_key)
+            .bind(&updated_order)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
         }
         let generation = parsed_existing
             .map(|(generation, _, _, _, _)| generation)
@@ -371,6 +416,57 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn cancel_cache_keepalive_fenced(
+        &self,
+        session_key_hash: &str,
+        expected_ticket: Option<u64>,
+        cancel_anchor_at_unix_secs: u64,
+        reason: CacheKeepaliveTerminalReason,
+        now_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        let mut tx = self.begin_immediate().await?;
+        if let Some(ticket) = expected_ticket {
+            let order_key = cache_keepalive_order_meta_key(session_key_hash);
+            let order_raw =
+                sqlx::query_scalar::<_, String>("SELECT value FROM meta_v1 WHERE key = ?")
+                    .bind(&order_key)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            let (issued, applied) = parse_keepalive_order_meta(order_raw.as_deref());
+            if ticket <= applied {
+                return Ok(false);
+            }
+            let updated_order = format_keepalive_order_meta(issued.max(ticket), ticket);
+            sqlx::query(
+                "INSERT INTO meta_v1 (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(&order_key)
+            .bind(&updated_order)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        let result = sqlx::query(
+            "UPDATE cache_keepalive_sessions SET status = 'terminal', terminal_reason = ?, running_since_unix_secs = NULL,
+             encrypted_payload = X'', updated_at = ?
+             WHERE session_key_hash = ? AND status = 'active' AND cache_anchor_at <= ?",
+        )
+        .bind(reason.as_str())
+        .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
+        .bind(session_key_hash)
+        .bind(u64_to_i64(
+            cancel_anchor_at_unix_secs,
+            "cache keepalive cancel_anchor_at",
+        )?)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn mark_latest_cache_keepalive_terminal(
         &self,
         session_key_hash: &str,
@@ -400,6 +496,13 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .execute(self.pool())
             .await
             .map_err(map_sqlx_error)?;
+        sqlx::query(
+            "DELETE FROM meta_v1 WHERE key LIKE 'keepalive_order:%'
+             AND substr(key, 17) NOT IN (SELECT session_key_hash FROM cache_keepalive_sessions)",
+        )
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
         Ok(result.rows_affected())
     }
 

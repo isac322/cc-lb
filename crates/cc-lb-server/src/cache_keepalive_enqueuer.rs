@@ -66,15 +66,13 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         &self,
         session_key_hash: &str,
     ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
-        let check = CacheKeepaliveSessionStore::check_cache_keepalive_generation(
+        let ticket = CacheKeepaliveSessionStore::allocate_cache_keepalive_completion_ticket(
             self.storage.as_ref(),
             session_key_hash,
         )
         .await
         .map_err(cache_keepalive_enqueue_error)?;
-        Ok(Some(cc_lb_storage_api::cache_keepalive_state_version(
-            check.map(|record| (record.generation, record.status)),
-        )))
+        Ok(Some(ticket))
     }
 
     async fn enqueue_cache_keepalive(
@@ -187,38 +185,16 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         let now_unix_secs = unix_secs(self.clock.now());
         let cancel_anchor_at_unix_secs =
             now_unix_secs.saturating_sub(request.cache_anchor_age.as_secs());
-        if let Some(existing) = CacheKeepaliveSessionStore::get_cache_keepalive_session(
+        CacheKeepaliveSessionStore::cancel_cache_keepalive_fenced(
             self.storage.as_ref(),
             &request.session_key_hash,
+            request.expected_generation,
+            cancel_anchor_at_unix_secs,
+            terminal_reason_from_cancel(request.reason),
+            now_unix_secs,
         )
         .await
-        .map_err(cache_keepalive_enqueue_error)?
-        {
-            let current_version = cc_lb_storage_api::cache_keepalive_state_version(Some((
-                existing.generation,
-                existing.status,
-            )));
-            if request
-                .expected_generation
-                .is_some_and(|expected| current_version != expected)
-            {
-                return Ok(());
-            }
-            if existing.cache_anchor_at_unix_secs > cancel_anchor_at_unix_secs {
-                return Ok(());
-            }
-            if existing.status == cc_lb_storage_api::CacheKeepaliveSessionStatus::Active {
-                CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
-                    self.storage.as_ref(),
-                    &request.session_key_hash,
-                    existing.generation,
-                    terminal_reason_from_cancel(request.reason),
-                    now_unix_secs,
-                )
-                .await
-                .map_err(cache_keepalive_enqueue_error)?;
-            }
-        }
+        .map_err(cache_keepalive_enqueue_error)?;
         Ok(())
     }
 

@@ -458,4 +458,62 @@ async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_s
         after_barrier_race.status,
         CacheKeepaliveSessionStatus::Terminal
     );
+
+    let inv_start_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let enqueue_done_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let older_enqueue_ticket = replica_a
+        .observe_session_generation("session-hash")
+        .await
+        .expect("older enqueue allocates ticket first");
+    let newer_cancel_ticket = replica_b
+        .observe_session_generation("session-hash")
+        .await
+        .expect("newer cancel allocates ticket second");
+    let a_inv_task = {
+        let replica_a = Arc::clone(&replica_a);
+        let inv_start_barrier = Arc::clone(&inv_start_barrier);
+        let enqueue_done_barrier = Arc::clone(&enqueue_done_barrier);
+        tokio::spawn(async move {
+            inv_start_barrier.wait().await;
+            let mut req = enqueue_request();
+            req.cache_anchor_age = std::time::Duration::ZERO;
+            req.expected_generation = older_enqueue_ticket;
+            replica_a
+                .enqueue_cache_keepalive(req)
+                .await
+                .expect("older enqueue commits first");
+            enqueue_done_barrier.wait().await;
+        })
+    };
+    let b_inv_task = {
+        let replica_b = Arc::clone(&replica_b);
+        let inv_start_barrier = Arc::clone(&inv_start_barrier);
+        let enqueue_done_barrier = Arc::clone(&enqueue_done_barrier);
+        tokio::spawn(async move {
+            inv_start_barrier.wait().await;
+            enqueue_done_barrier.wait().await;
+            replica_b
+                .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                    session_key_hash: "session-hash".to_owned(),
+                    reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
+                    expected_generation: newer_cancel_ticket,
+                    cache_anchor_age: std::time::Duration::ZERO,
+                })
+                .await
+                .expect("newer cancel runs second and cancels generation 3");
+        })
+    };
+    a_inv_task.await.expect("older enqueue task completes");
+    b_inv_task.await.expect("newer cancel task completes");
+    let after_inverse_race = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(after_inverse_race.generation, 3);
+    assert_eq!(
+        after_inverse_race.status,
+        CacheKeepaliveSessionStatus::Terminal
+    );
 }
