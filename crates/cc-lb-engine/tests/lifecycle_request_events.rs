@@ -85,6 +85,91 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
     Ok(())
 }
 
+#[tokio::test]
+async fn aside_main_worker_and_title_identities_persist() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut update_rx = test_bus.bus.subscribe();
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::new(TestState::default()),
+        Arc::new(CapturingDispatch::default()),
+        LifecycleConfig::default(),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    for (session_id, system, request_kind, parent_session_id) in [
+        (
+            "aside-main",
+            "You are Aside, a helpful, proactive, and smart AI browser.",
+            "main",
+            None,
+        ),
+        (
+            "aside:worker:aside-main:default",
+            "You are Aside, a helpful, proactive, and smart AI browser.",
+            "subagent",
+            Some("aside-main"),
+        ),
+        (
+            "aside-main",
+            "Generate a brief title that would help the user find this conversation later.",
+            "session_title",
+            None,
+        ),
+    ] {
+        let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
+            "model": "claude-test",
+            "system": system,
+            "messages": [{"role": "user", "content": "hello"}],
+        }))?);
+        let mut request = messages_request(body);
+        request.headers_mut().insert(
+            http::HeaderName::from_static("x-aside-provider-session-id"),
+            http::HeaderValue::from_static(session_id),
+        );
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("Aside request authenticates");
+        let response = lifecycle.handle(request, &auth).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    update_rx.recv().await.expect("request update delivered"),
+                    cc_lb_request_log::RequestEventUpdate::Final(_)
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("Aside final request event arrives");
+
+        let events = crate::common::stored_request_events(storage.as_ref()).await?;
+        assert!(
+            events.iter().any(|event| {
+                event.observed_session_id.as_deref() == Some(session_id)
+                    && event.thread_id.as_deref() == Some(session_id)
+                    && event.parent_session_id.as_deref() == parent_session_id
+                    && event.session_id_source.as_deref() == Some("x-aside-provider-session-id")
+                    && event.request_kind.as_deref() == Some(request_kind)
+            }),
+            "{request_kind} identity persists"
+        );
+    }
+    assert_eq!(
+        crate::common::stored_request_events(storage.as_ref())
+            .await?
+            .len(),
+        3
+    );
+    Ok(())
+}
+
 #[derive(Clone, Default)]
 struct CapturingDispatch {
     bodies: Arc<Mutex<Vec<Bytes>>>,

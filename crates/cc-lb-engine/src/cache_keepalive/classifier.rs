@@ -24,13 +24,13 @@ impl TurnDecision {
 }
 
 const BUILTIN_WAIT_FOR_USER_TOOLS: &[&str] = &[
-    "ask",
     "AskUserQuestion",
     "ExitPlanMode",
     "ask_followup_question",
     "ask_question",
     "cursor_ask_question",
     "question",
+    "ask",
     "attempt_completion",
     "submit_and_exit",
     "finish",

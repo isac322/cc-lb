@@ -88,10 +88,10 @@ defaults; every field is optional except `enabled`.
 | `classifier.treat_end_turn_as_ambiguous` | `false` | Treat `stop_reason: end_turn` as ambiguous. Because the LLM judge is reserved for a future release, ambiguous decisions currently fail closed as user-turn. |
 | `classifier.llm_judge` | `null` | Reserved for a future small-LLM judge. The admin API rejects non-null values in this release. |
 
-The built-in wait-for-user tool allow-list matches Claude Code, Cline,
-Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
-`AskUserQuestion`, `ExitPlanMode`, `ask_followup_question`, `ask_question`,
-`ask`, `cursor_ask_question`, `question`, `attempt_completion`,
+The built-in wait-for-user tool allow-list matches Claude Code, Oh My Pi,
+Cline, Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
+`AskUserQuestion`, `ExitPlanMode`, `ask`, `ask_followup_question`,
+`ask_question`, `cursor_ask_question`, `question`, `attempt_completion`,
 `submit_and_exit`, `finish`, `plan_mode_respond`, `act_mode_respond`,
 `report_bug`.
 
@@ -227,11 +227,17 @@ Checks, in order:
    is expected behavior.
 3. Is the session identifiable? Confirm one of
    `x-claude-code-session-id`, `x-claude-session-id`,
-   `x-session-affinity`, or `x-session-id` is present. If absent, cc-lb
-   falls back to `cache_prefix_hash` and per-request affinity may fail
-   to stick. When `x-claude-code-agent-id` is present, the agent id is
-   included with the thread id so subagent sessions cannot share a keep-alive
-   session with the main agent.
+   `x-hermes-session-id`, `x-aside-provider-session-id`,
+   `x-aside-session-id`, `x-session-affinity`, `x-opencode-session-id`,
+   `x-opencode-session`, `x-session-id`, `session_id`, `session-id`, or
+   `conversation_id` (or body session metadata) is present. If absent,
+   cc-lb falls back to `cache_prefix_hash` and per-request affinity may
+   fail to stick. Subagent requests (`x-claude-code-agent-id` or
+   `request_kind = "subagent"`) are scoped under their own agent key so
+   they do not overwrite or cancel the parent session's schedule, and
+   one-shot auxiliary requests (`recap`, `compaction`, `session_title`,
+   `auto_thinking`, `notification`, `side`, `look_at`) do not mutate
+   keep-alive state.
 4. Does the response report at least `.min_cache_tokens` cached input tokens?
    A completed `AgentInTurn` response below that threshold is cancelled with
    `reason="cached_prefix_too_small"` and is not scheduled.

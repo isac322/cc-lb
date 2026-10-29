@@ -79,6 +79,76 @@ async fn cache_keepalive_cancel_failure_does_not_change_proxy_response() {
     assert!(String::from_utf8_lossy(&body).contains("msg_cancel_fail"));
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
+#[tokio::test]
+async fn cache_keepalive_subagent_and_auxiliary_cancel_only_eligible_scopes() {
+    let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let enqueuer = Arc::new(KeyRecordingEnqueuer {
+        keys: Arc::clone(&keys),
+    });
+    let state = TestState::default();
+    let principal_view = Arc::new(PrincipalView::from_db(
+        &[principal_with_keepalive()],
+        std::collections::HashMap::new(),
+    ));
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::with_principal_view(state, principal_view),
+        Arc::new(FixedSuccessDispatch {
+            body: Bytes::from_static(
+                br#"{"type":"message","id":"msg_subagent","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#,
+            ),
+        }),
+        LifecycleConfig::default(),
+    )
+    .with_cache_keepalive_enqueuer(enqueuer);
+
+    let subagent = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("x-claude-code-session-id", "session-1")
+        .header("x-claude-code-agent-id", "agent-1")
+        .header("anthropic-version", "2023-06-01")
+        .body(Bytes::from_static(
+            br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
+        ))
+        .expect("subagent request builds");
+    let auth = lifecycle
+        .authenticate(subagent.headers())
+        .await
+        .expect("subagent authenticates");
+    lifecycle
+        .handle(subagent, &auth)
+        .await
+        .expect("subagent response handles");
+    settle().await;
+
+    let auxiliary_body = Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"Generate a concise, sentence-case title (3-7 words)"}]}"#,
+    );
+    let auxiliary = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("x-claude-code-session-id", "session-1")
+        .header("x-claude-code-request-class", "session_title")
+        .header("anthropic-version", "2023-06-01")
+        .body(auxiliary_body)
+        .expect("auxiliary request builds");
+    let auth = lifecycle
+        .authenticate(auxiliary.headers())
+        .await
+        .expect("auxiliary authenticates");
+    lifecycle
+        .handle(auxiliary, &auth)
+        .await
+        .expect("auxiliary response handles");
+    settle().await;
+
+    let keys = keys.lock().expect("recorded cancellation keys lock");
+    assert_eq!(keys.len(), 1, "auxiliary request must not cancel");
+    assert!(keys[0].ends_with("/thread:session-1/agent:agent-1"));
+    assert!(!keys.iter().any(|key| key.ends_with("/thread:session-1")));
+}
 
 #[tokio::test]
 async fn cache_keepalive_trimmed_uncached_tail_is_enqueued() {
@@ -232,7 +302,7 @@ async fn cache_keepalive_subagent_cancellation_is_scoped_away_from_parent() {
     assert!(
         enqueuer.cancelled()[0]
             .session_key_hash
-            .ends_with("/thread_agent:1:S:agent-sub-1")
+            .ends_with("/thread:S/agent:agent-sub-1")
     );
     assert!(
         !enqueuer.cancelled()[0]
@@ -485,6 +555,10 @@ struct RecordingCancelEnqueuer {
     calls: Arc<AtomicUsize>,
 }
 
+struct KeyRecordingEnqueuer {
+    keys: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
 struct FailingCancelEnqueuer {
     calls: Arc<AtomicUsize>,
 }
@@ -504,6 +578,34 @@ impl CacheKeepaliveEnqueuer for RecordingCancelEnqueuer {
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         assert!(request.session_key_hash.contains("thread:session-1"));
         self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        _request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CacheKeepaliveEnqueuer for KeyRecordingEnqueuer {
+    async fn enqueue_cache_keepalive(
+        &self,
+        _request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
+    }
+
+    async fn cancel_cache_keepalive(
+        &self,
+        request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.keys
+            .lock()
+            .expect("recorded cancellation keys lock")
+            .push(request.session_key_hash);
         Ok(())
     }
 
