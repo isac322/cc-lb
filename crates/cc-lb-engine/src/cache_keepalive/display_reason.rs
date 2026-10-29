@@ -16,6 +16,10 @@ pub(crate) enum CacheKeepaliveDisplayReason {
     },
     AmbiguousTurn,
     SnapshotTooLarge,
+    CachedPrefixTooSmall {
+        cached_tokens: u64,
+        min_cache_tokens: u64,
+    },
 }
 
 impl CacheKeepaliveDisplayReason {
@@ -62,6 +66,13 @@ impl fmt::Display for CacheKeepaliveDisplayReason {
             Self::UserTurn { stop_reason } => write!(f, "user turn (stop_reason={stop_reason})"),
             Self::AmbiguousTurn => f.write_str("ambiguous turn"),
             Self::SnapshotTooLarge => f.write_str("snapshot too large"),
+            Self::CachedPrefixTooSmall {
+                cached_tokens,
+                min_cache_tokens,
+            } => write!(
+                f,
+                "cached prefix too small ({cached_tokens} tokens < minimum {min_cache_tokens})"
+            ),
         }
     }
 }
@@ -128,5 +139,16 @@ mod tests {
 
         // Then: the UI gets a human-readable decision rather than an enum token.
         assert_eq!(reason, "user turn (stop_reason=end_turn)");
+    }
+    #[test]
+    fn cached_prefix_too_small_reason_describes_threshold() {
+        assert_eq!(
+            CacheKeepaliveDisplayReason::CachedPrefixTooSmall {
+                cached_tokens: 5_000,
+                min_cache_tokens: 10_000,
+            }
+            .to_string(),
+            "cached prefix too small (5000 tokens < minimum 10000)"
+        );
     }
 }

@@ -38,6 +38,7 @@ fn keepalive_config() -> CacheKeepaliveConfig {
         max_refreshes_per_session: 3,
         max_total_duration_secs: 600,
         snapshot_max_bytes: 524_288,
+        min_cache_tokens: 10_000,
         classifier: ClassifierConfig::default(),
     }
 }

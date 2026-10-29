@@ -207,9 +207,9 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
 
 fn terminal_reason_from_cancel(reason: CancelReason) -> CacheKeepaliveTerminalReason {
     match reason {
-        CancelReason::UserTurnDetected | CancelReason::SnapshotTooLarge => {
-            CacheKeepaliveTerminalReason::Cancelled
-        }
+        CancelReason::UserTurnDetected
+        | CancelReason::SnapshotTooLarge
+        | CancelReason::CachedPrefixTooSmall => CacheKeepaliveTerminalReason::Cancelled,
     }
 }
 

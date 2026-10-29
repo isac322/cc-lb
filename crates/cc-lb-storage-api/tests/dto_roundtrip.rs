@@ -266,6 +266,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         max_refreshes_per_session: 8,
         max_total_duration_secs: 7_200,
         snapshot_max_bytes: 262_144,
+        min_cache_tokens: 10_000,
         classifier: ClassifierConfig {
             extra_wait_for_user_tools: vec!["ask_human".to_owned()],
             treat_end_turn_as_ambiguous: true,

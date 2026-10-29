@@ -61,7 +61,7 @@ async fn cache_keepalive_without_scheduler_is_response_noop() {
 #[tokio::test]
 async fn cache_keepalive_enqueue_failure_does_not_change_proxy_response() {
     let upstream_body = Bytes::from_static(
-        br#"{"type":"message","id":"msg_keepalive_enqueue_fail","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":2}}"#,
+        br#"{"type":"message","id":"msg_keepalive_enqueue_fail","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"cache_read_input_tokens":12000,"output_tokens":2}}"#,
     );
     let state = TestState::default();
     let principal_view = Arc::new(PrincipalView::from_db(
@@ -177,6 +177,7 @@ fn principal_with_keepalive() -> PrincipalRecord {
             max_refreshes_per_session: 12,
             max_total_duration_secs: 14_400,
             snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
             classifier: ClassifierConfig::default(),
         }),
     }

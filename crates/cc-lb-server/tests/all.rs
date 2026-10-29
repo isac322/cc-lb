@@ -14,6 +14,8 @@ mod api_key_secret_hygiene;
 mod bad_postgres_url_fatal;
 #[path = "build_metadata_present.rs"]
 mod build_metadata_present;
+#[path = "cache_keepalive_real_session_simulation.rs"]
+mod cache_keepalive_real_session_simulation;
 #[path = "cache_keepalive_server_wiring.rs"]
 mod cache_keepalive_server_wiring;
 #[path = "claude_fable_5_proxy_path.rs"]

@@ -1,7 +1,7 @@
 use crate::common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -9,14 +9,14 @@ use bytes::Bytes;
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason,
 };
 use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
-use uuid::Uuid;
+use serde_json::json;
 
 use common::{TestAuthn, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle};
 
@@ -78,6 +78,302 @@ async fn cache_keepalive_cancel_failure_does_not_change_proxy_response() {
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_cancel_fail"));
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn cache_keepalive_trimmed_uncached_tail_is_enqueued() {
+    let request_body = serde_json::to_vec(&json!({
+        "model": "claude-test",
+        "max_tokens": 32,
+        "system": [{
+            "type": "text",
+            "text": "cached",
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }],
+        "messages": [{
+            "role": "user",
+            "content": "x".repeat(600_000)
+        }]
+    }))
+    .expect("request JSON serializes");
+    assert!(request_body.len() > 524_288);
+
+    let enqueuer = Arc::new(RecordingEnqueuer::default());
+    let response = handle_keepalive_response_with(
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "type": "message",
+                "id": "msg_trimmed_tail",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_trimmed_tail",
+                    "name": "Bash",
+                    "input": {}
+                }],
+                "stop_reason": "tool_use",
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_read_input_tokens": 12_000,
+                    "output_tokens": 2
+                }
+            }))
+            .expect("response JSON serializes"),
+        ),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal_with_keepalive(),
+        Bytes::from(request_body),
+        &[("x-claude-code-session-id", "trimmed-tail")],
+        false,
+    )
+    .await;
+
+    let (status, _headers, _body) = collect_body(response).await;
+    settle().await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(enqueuer.enqueued().len(), 1);
+    assert!(enqueuer.cancelled().is_empty());
+    assert!(enqueuer.not_tracked().is_empty());
+}
+
+#[tokio::test]
+async fn cache_keepalive_oversized_cached_prefix_durably_cancels_agent_and_user_turns() {
+    let request_body = oversized_cached_prefix_request("oversized-prefix");
+    for (response_body, expected_decision) in [
+        (
+            json!({
+                "type": "message",
+                "id": "msg_oversized_agent",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_oversized_agent",
+                    "name": "Bash",
+                    "input": {}
+                }],
+                "stop_reason": "tool_use",
+                "usage": {"cache_read_input_tokens": 12_000}
+            }),
+            "agent",
+        ),
+        (
+            json!({
+                "type": "message",
+                "id": "msg_oversized_user",
+                "content": [{"type": "text", "text": "done"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10}
+            }),
+            "user",
+        ),
+    ] {
+        let enqueuer = Arc::new(RecordingEnqueuer::default());
+        let response = handle_keepalive_response_with(
+            Bytes::from(serde_json::to_vec(&response_body).expect("response JSON serializes")),
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+            principal_with_keepalive(),
+            request_body.clone(),
+            &[("x-claude-code-session-id", expected_decision)],
+            false,
+        )
+        .await;
+
+        let (status, _headers, _body) = collect_body(response).await;
+        settle().await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(enqueuer.enqueued().is_empty());
+        assert_eq!(enqueuer.not_tracked().len(), 1);
+        assert_eq!(enqueuer.not_tracked()[0].reason, "snapshot too large");
+        assert_eq!(enqueuer.cancelled().len(), 1);
+        assert_eq!(
+            enqueuer.cancelled()[0].reason,
+            CancelReason::SnapshotTooLarge
+        );
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_subagent_cancellation_is_scoped_away_from_parent() {
+    let principal = principal_with_keepalive();
+    let enqueuer = Arc::new(RecordingEnqueuer::default());
+    let request_body = standard_keepalive_request();
+
+    let parent_response = handle_keepalive_response_with(
+        agent_turn_body("msg_parent", "Bash", 12_000),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal.clone(),
+        request_body.clone(),
+        &[("x-claude-code-session-id", "S")],
+        false,
+    )
+    .await;
+    let _ = collect_body(parent_response).await;
+    settle().await;
+    assert_eq!(enqueuer.enqueued().len(), 1);
+    assert!(
+        enqueuer.enqueued()[0]
+            .session_key_hash
+            .ends_with("/thread:S")
+    );
+
+    let subagent_response = handle_keepalive_response_with(
+        end_turn_body("msg_subagent"),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal.clone(),
+        request_body.clone(),
+        &[
+            ("x-claude-code-session-id", "S"),
+            ("x-claude-code-agent-id", "agent-sub-1"),
+        ],
+        false,
+    )
+    .await;
+    let _ = collect_body(subagent_response).await;
+    settle().await;
+    assert_eq!(enqueuer.cancelled().len(), 1);
+    assert!(
+        enqueuer.cancelled()[0]
+            .session_key_hash
+            .ends_with("/thread_agent:1:S:agent-sub-1")
+    );
+    assert!(
+        !enqueuer.cancelled()[0]
+            .session_key_hash
+            .ends_with("/thread:S")
+    );
+
+    let main_response = handle_keepalive_response_with(
+        end_turn_body("msg_main"),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal,
+        request_body,
+        &[
+            ("x-claude-code-session-id", "S"),
+            ("x-claude-code-agent-id", "main"),
+        ],
+        false,
+    )
+    .await;
+    let _ = collect_body(main_response).await;
+    settle().await;
+    assert_eq!(enqueuer.cancelled().len(), 2);
+    assert!(
+        enqueuer.cancelled()[1]
+            .session_key_hash
+            .ends_with("/thread:S")
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_omp_ask_tool_use_cancels_as_user_turn() {
+    let enqueuer = Arc::new(RecordingEnqueuer::default());
+    let response = handle_keepalive_response_with(
+        tool_use_body("msg_omp_ask", "ask", 12_000),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal_with_keepalive(),
+        standard_keepalive_request(),
+        &[("x-claude-code-session-id", "omp-ask")],
+        false,
+    )
+    .await;
+    let (status, _headers, _body) = collect_body(response).await;
+    settle().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(enqueuer.enqueued().is_empty());
+    assert_eq!(
+        enqueuer.not_tracked()[0].reason,
+        "user turn (stop_reason=tool_use)"
+    );
+    assert_eq!(
+        enqueuer.cancelled()[0].reason,
+        CancelReason::UserTurnDetected
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_small_cached_prefix_cancels_without_enqueue_json_and_sse() {
+    for streaming in [false, true] {
+        let enqueuer = Arc::new(RecordingEnqueuer::default());
+        let response = handle_keepalive_response_with(
+            tool_use_body("msg_small_prefix", "Bash", 3_547),
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+            principal_with_keepalive(),
+            standard_keepalive_request(),
+            &[(
+                "x-claude-code-session-id",
+                if streaming { "small-sse" } else { "small-json" },
+            )],
+            streaming,
+        )
+        .await;
+        let (status, _headers, _body) = collect_body(response).await;
+        settle().await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(enqueuer.enqueued().is_empty());
+        assert_eq!(
+            enqueuer.not_tracked()[0].reason,
+            "cached prefix too small (3547 tokens < minimum 10000)"
+        );
+        assert_eq!(
+            enqueuer.cancelled()[0].reason,
+            CancelReason::CachedPrefixTooSmall
+        );
+    }
+}
+
+#[derive(Default)]
+struct RecordingEnqueuer {
+    enqueued: Mutex<Vec<CacheKeepaliveEnqueueRequest>>,
+    cancelled: Mutex<Vec<CacheKeepaliveCancelRequest>>,
+    not_tracked: Mutex<Vec<CacheKeepaliveNotTrackedRequest>>,
+}
+
+impl RecordingEnqueuer {
+    fn enqueued(&self) -> Vec<CacheKeepaliveEnqueueRequest> {
+        self.enqueued.lock().expect("enqueued lock").clone()
+    }
+
+    fn cancelled(&self) -> Vec<CacheKeepaliveCancelRequest> {
+        self.cancelled.lock().expect("cancelled lock").clone()
+    }
+
+    fn not_tracked(&self) -> Vec<CacheKeepaliveNotTrackedRequest> {
+        self.not_tracked.lock().expect("not-tracked lock").clone()
+    }
+}
+
+#[async_trait]
+impl CacheKeepaliveEnqueuer for RecordingEnqueuer {
+    async fn enqueue_cache_keepalive(
+        &self,
+        request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.enqueued.lock().expect("enqueued lock").push(request);
+        Ok(())
+    }
+
+    async fn cancel_cache_keepalive(
+        &self,
+        request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.cancelled.lock().expect("cancelled lock").push(request);
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.not_tracked
+            .lock()
+            .expect("not-tracked lock")
+            .push(request);
+        Ok(())
+    }
+}
+
+struct FixedStreamingDispatch {
+    body: Bytes,
 }
 
 struct FixedSuccessDispatch {
@@ -157,10 +453,22 @@ impl UpstreamDispatch for FixedSuccessDispatch {
         Ok(response)
     }
 }
+#[async_trait]
+impl UpstreamDispatch for FixedStreamingDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let mut response = Response::new(Body::from(self.body.clone()));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        Ok(response)
+    }
+}
 
 fn principal_with_keepalive() -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: uuid::Uuid::new_v4(),
         name: "principal-test".to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["*".to_owned()],
@@ -179,6 +487,7 @@ fn principal_with_keepalive() -> PrincipalRecord {
             max_refreshes_per_session: 12,
             max_total_duration_secs: 14_400,
             snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
             classifier: ClassifierConfig::default(),
         }),
     }
@@ -188,31 +497,58 @@ async fn handle_keepalive_response(
     upstream_body: Bytes,
     enqueuer: Arc<dyn CacheKeepaliveEnqueuer>,
 ) -> Response<Body> {
+    handle_keepalive_response_with(
+        upstream_body,
+        enqueuer,
+        principal_with_keepalive(),
+        standard_keepalive_request(),
+        &[],
+        false,
+    )
+    .await
+}
+
+async fn handle_keepalive_response_with(
+    upstream_body: Bytes,
+    enqueuer: Arc<dyn CacheKeepaliveEnqueuer>,
+    principal: PrincipalRecord,
+    request_body: Bytes,
+    request_headers: &[(&str, &str)],
+    streaming: bool,
+) -> Response<Body> {
     let state = TestState::default();
     let principal_view = Arc::new(PrincipalView::from_db(
-        &[principal_with_keepalive()],
+        &[principal],
         std::collections::HashMap::new(),
     ));
     let authn = TestAuthn::with_principal_view(state, principal_view);
-    let lifecycle = lifecycle_with_parts(
-        authn,
+    let upstream_body = if streaming {
+        streaming_body_from_message(&upstream_body)
+    } else {
+        upstream_body
+    };
+    let dispatch: Arc<dyn UpstreamDispatch> = if streaming {
+        Arc::new(FixedStreamingDispatch {
+            body: upstream_body,
+        })
+    } else {
         Arc::new(FixedSuccessDispatch {
             body: upstream_body,
-        }),
-        LifecycleConfig::default(),
-    )
-    .with_cache_keepalive_enqueuer(enqueuer);
+        })
+    };
+    let lifecycle = lifecycle_with_parts(authn, dispatch, LifecycleConfig::default())
+        .with_cache_keepalive_enqueuer(enqueuer);
 
-    let request = http::Request::builder()
+    let mut request = http::Request::builder()
         .method(http::Method::POST)
         .uri("/v1/messages")
         .header("x-api-key", managed_api_key())
         .header("x-session-id", "session-1")
-        .header("anthropic-version", "2023-06-01")
-        .body(Bytes::from_static(
-            br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
-        ))
-        .expect("test request builds");
+        .header("anthropic-version", "2023-06-01");
+    for (name, value) in request_headers {
+        request = request.header(*name, *value);
+    }
+    let request = request.body(request_body).expect("test request builds");
     let auth = lifecycle
         .authenticate(request.headers())
         .await
@@ -221,4 +557,100 @@ async fn handle_keepalive_response(
         .handle(request, &auth)
         .await
         .expect("lifecycle handles keepalive response")
+}
+
+fn standard_keepalive_request() -> Bytes {
+    Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
+    )
+}
+
+fn oversized_cached_prefix_request(session: &str) -> Bytes {
+    Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "claude-test",
+            "max_tokens": 32,
+            "system": [{
+                "type": "text",
+                "text": "x".repeat(600_000),
+                "cache_control": {"type": "ephemeral", "ttl": "5m"}
+            }],
+            "messages": [{"role": "user", "content": session}]
+        }))
+        .expect("oversized request JSON serializes"),
+    )
+}
+
+fn agent_turn_body(id: &str, tool_name: &str, cached_tokens: u64) -> Bytes {
+    tool_use_body(id, tool_name, cached_tokens)
+}
+
+fn tool_use_body(id: &str, tool_name: &str, cached_tokens: u64) -> Bytes {
+    Bytes::from(
+        serde_json::to_vec(&json!({
+            "type": "message",
+            "id": id,
+            "content": [{
+                "type": "tool_use",
+                "id": format!("{id}-tool"),
+                "name": tool_name,
+                "input": {}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": cached_tokens,
+                "output_tokens": 2
+            }
+        }))
+        .expect("tool-use response JSON serializes"),
+    )
+}
+
+fn end_turn_body(id: &str) -> Bytes {
+    Bytes::from(
+        serde_json::to_vec(&json!({
+            "type": "message",
+            "id": id,
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 2}
+        }))
+        .expect("end-turn response JSON serializes"),
+    )
+}
+
+fn streaming_body_from_message(body: &Bytes) -> Bytes {
+    let value: serde_json::Value =
+        serde_json::from_slice(body).expect("streaming fixture message JSON parses");
+    let message_start = json!({
+        "type": "message_start",
+        "message": {
+            "id": value.get("id").cloned().unwrap_or_else(|| json!("msg")),
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "usage": value.get("usage").cloned().unwrap_or_else(|| json!({}))
+        }
+    });
+    let mut sse = format!("event: message_start\ndata: {message_start}\n\n");
+    if let Some(content) = value.get("content").and_then(|content| content.as_array()) {
+        for (index, block) in content.iter().enumerate() {
+            let event = json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": block
+            });
+            sse.push_str(&format!("event: content_block_start\ndata: {event}\n\n"));
+        }
+    }
+    let delta = json!({
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": value.get("stop_reason").cloned().unwrap_or_else(|| json!("end_turn"))
+        }
+    });
+    sse.push_str(&format!("event: message_delta\ndata: {delta}\n\n"));
+    sse.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    Bytes::from(sse)
 }

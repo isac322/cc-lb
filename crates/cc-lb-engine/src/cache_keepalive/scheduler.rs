@@ -106,7 +106,8 @@ mod tests {
             refresh_lead_time_1h_secs: 300,
             max_refreshes_per_session: 12,
             max_total_duration_secs: 14400,
-            snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
+            snapshot_max_bytes: 8_388_608,
             classifier: Default::default(),
         };
 
@@ -127,7 +128,8 @@ mod tests {
             refresh_lead_time_1h_secs: 300,
             max_refreshes_per_session: 12,
             max_total_duration_secs: 14400,
-            snapshot_max_bytes: 524_288,
+            snapshot_max_bytes: 8_388_608,
+            min_cache_tokens: 10_000,
             classifier: Default::default(),
         };
 

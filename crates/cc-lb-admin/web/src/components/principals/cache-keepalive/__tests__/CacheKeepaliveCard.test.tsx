@@ -27,6 +27,7 @@ const mockPrincipal: queries.Principal = {
     max_refreshes_per_session: 10,
     max_total_duration_secs: 7200,
     snapshot_max_bytes: 256000,
+    min_cache_tokens: 10000,
     classifier: {
       extra_wait_for_user_tools: [],
       treat_end_turn_as_ambiguous: true,
@@ -176,6 +177,34 @@ describe('CacheKeepaliveCard', () => {
     expect(screen.queryByText('$4.56')).toBeNull();
     expect(screen.getByRole('button', { name: 'Sessions' })).toBeDefined();
     expect(screen.getByRole('button', { name: 'Settings' })).toBeDefined();
+  });
+
+  it('uses the current defaults when enabling keepalive for the first time', () => {
+    const mutate = vi.fn();
+    vi.mocked(queries.useUpdatePrincipalCacheKeepalive).mockReturnValue({
+      mutate,
+      isPending: false,
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveCard
+        principal={{ ...mockPrincipal, cache_keepalive: null }}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole('switch', { name: 'Toggle cache keepalive' }),
+    );
+
+    expect(mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cache_keepalive: expect.objectContaining({
+          snapshot_max_bytes: 8_388_608,
+          min_cache_tokens: 10_000,
+        }),
+      }),
+      expect.any(Object),
+    );
   });
 
   it('locks the toggle during another write to the same principal', () => {

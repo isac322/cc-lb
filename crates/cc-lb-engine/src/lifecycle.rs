@@ -4871,6 +4871,9 @@ impl Lifecycle {
                 context.shaped_body,
                 &context.downstream_headers,
                 first_body_chunk_at.map_or(duration, |anchor| anchor.elapsed()),
+                usage
+                    .cache_read_input_tokens
+                    .saturating_add(usage.cache_creation_input_tokens),
             );
         }
         if usage.present
@@ -7140,6 +7143,9 @@ impl Lifecycle {
                     context.shaped_body,
                     &context.downstream_headers,
                     message_start_at.map_or(relay_start.elapsed(), |anchor| anchor.elapsed()),
+                    usage
+                        .cache_read_input_tokens
+                        .saturating_add(usage.cache_creation_input_tokens),
                 );
             }
             let elapsed_ms = |to: Option<Instant>| {

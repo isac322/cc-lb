@@ -123,6 +123,7 @@ export interface Principal {
     max_refreshes_per_session: number;
     max_total_duration_secs: number;
     snapshot_max_bytes: number;
+    min_cache_tokens?: number;
     classifier: {
       extra_wait_for_user_tools: string[];
       treat_end_turn_as_ambiguous: boolean;

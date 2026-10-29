@@ -55,6 +55,14 @@ so ciphertext cannot be replayed across sessions or generations. Downstream
 `Authorization` and `x-api-key` headers are never persisted; the worker signs at
 fire time from storage-backed upstream credentials.
 
+The keep-alive snapshot is trimmed to the last explicit `cache_control`
+breakpoint when top-level automatic caching is not present. This removes
+uncached trailing messages while preserving the matching user `tool_result`
+message after an assistant `tool_use`, and keeps a minimal user continuation
+when the breakpoint ends on an assistant turn. If only `system` or `tools`
+contains an explicit breakpoint, the request history is reduced to a minimal
+user turn.
+
 SQLite is supported for local development, CI, and bounded single-node use.
 Production multi-replica / HA deployments should use Postgres so Apalis claims
 and the generation fence are visible to every replica. Redis is a no-go for this
@@ -74,7 +82,8 @@ defaults; every field is optional except `enabled`.
 | `refresh_lead_time_1h_secs` | `300` | Fire 5 minutes before the 1-hour TTL expires. Schedule = 55m after `message_start` / response begin. |
 | `max_refreshes_per_session` | `12` | Hard cap on keep-alive fires per session. |
 | `max_total_duration_secs` | `14400` (4 h) | Wall-clock cap from first schedule. |
-| `snapshot_max_bytes` | `524288` (512 KiB) | Shaped body larger than this is not tracked. |
+| `snapshot_max_bytes` | `8388608` (8 MiB) | Shaped and trimmed body larger than this is not tracked. |
+| `min_cache_tokens` | `10000` (10,000 tokens) | Minimum cached input tokens (`cache_read_input_tokens + cache_creation_input_tokens`) required before an `AgentInTurn` response schedules renewals. |
 | `classifier.extra_wait_for_user_tools` | `[]` | Extra tool names to treat as "wait for user" on top of the built-in list. |
 | `classifier.treat_end_turn_as_ambiguous` | `false` | Treat `stop_reason: end_turn` as ambiguous. Because the LLM judge is reserved for a future release, ambiguous decisions currently fail closed as user-turn. |
 | `classifier.llm_judge` | `null` | Reserved for a future small-LLM judge. The admin API rejects non-null values in this release. |
@@ -82,7 +91,7 @@ defaults; every field is optional except `enabled`.
 The built-in wait-for-user tool allow-list matches Claude Code, Cline,
 Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
 `AskUserQuestion`, `ExitPlanMode`, `ask_followup_question`, `ask_question`,
-`cursor_ask_question`, `question`, `attempt_completion`,
+`ask`, `cursor_ask_question`, `question`, `attempt_completion`,
 `submit_and_exit`, `finish`, `plan_mode_respond`, `act_mode_respond`,
 `report_bug`.
 
@@ -119,6 +128,8 @@ Prometheus surface:
   session was torn down. `reason` values:
   - `user_turn_detected` — the classifier decided the user is now up.
   - `snapshot_too_large` — shaped body exceeded `snapshot_max_bytes`.
+  - `cached_prefix_too_small` — the completed response reported fewer than
+    `min_cache_tokens` cached input tokens.
 - `cc_lb_cache_keepalive_classifier_decisions_total{decision, source}` —
   every classifier verdict. `decision` is `"user_turn"`, `"agent_in_turn"`,
   or `"ambiguous"`. `source` is always `"heuristic"`. Not labelled by
@@ -140,7 +151,7 @@ Interpretation shortcuts:
 - `fired_total{result=error}` spiking = an unsupported upstream kind,
   upstream outage, or provider error. Investigate the upstream error log.
 - `cancelled_total{reason=snapshot_too_large}` = a principal's shaped
-  request bodies are above 512 KiB. Raise `snapshot_max_bytes` on that
+  request bodies are above 8 MiB. Raise `snapshot_max_bytes` on that
   principal, or accept that these sessions are not tracked.
 
 ## Runbook: enable for a principal
@@ -218,19 +229,24 @@ Checks, in order:
    `x-claude-code-session-id`, `x-claude-session-id`,
    `x-session-affinity`, or `x-session-id` is present. If absent, cc-lb
    falls back to `cache_prefix_hash` and per-request affinity may fail
-   to stick.
-4. `cc_lb_cache_keepalive_active_sessions{principal_id=<id>}` shows the
+   to stick. When `x-claude-code-agent-id` is present, the agent id is
+   included with the thread id so subagent sessions cannot share a keep-alive
+   session with the main agent.
+4. Does the response report at least `.min_cache_tokens` cached input tokens?
+   A completed `AgentInTurn` response below that threshold is cancelled with
+   `reason="cached_prefix_too_small"` and is not scheduled.
+5. `cc_lb_cache_keepalive_active_sessions{principal_id=<id>}` shows the
    session? If zero, either the classifier is deciding `user_turn` on
    every response (check
    `cc_lb_cache_keepalive_classifier_decisions_total{decision="user_turn"}`
    spike) or the snapshot capture is failing (check
    `cc_lb_cache_keepalive_cancelled_total{reason="snapshot_too_large"}`).
-5. `cc_lb_cache_keepalive_fired_total{result="miss"}` present? A miss
+6. `cc_lb_cache_keepalive_fired_total{result="miss"}` present? A miss
    means the fire reached Anthropic but Anthropic did not report a
    cache read. Common cause: the shape plugin has changed and the
    snapshot no longer matches the cache key. Re-establish the session
    with a fresh real request.
-6. `cc_lb_cache_keepalive_cancelled_total{reason="upstream_gone"}`?
+7. `cc_lb_cache_keepalive_cancelled_total{reason="upstream_gone"}`?
    Almost always means the upstream is not a direct Anthropic upstream.
    Bedrock / Vertex / OpenRouter are provider-gated in v1.
 

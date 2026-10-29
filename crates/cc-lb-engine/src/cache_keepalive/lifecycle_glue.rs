@@ -113,9 +113,8 @@ impl LifecycleKeepalive {
 
     /// Detaches classification and the serial keep-alive storage writes onto a
     /// background task so the client response path never awaits them. Loads the
-    /// principal's config and rejects an over-cap (or disabled) snapshot on the
-    /// borrowed inputs first, so an oversized request never pays for the deep
-    /// JSON clones the detached task would otherwise need.
+    /// principal's config and rejects disabled principals before cloning the
+    /// borrowed inputs for the detached task.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_response_completed(
         &self,
@@ -127,12 +126,13 @@ impl LifecycleKeepalive {
         shaped_body: Bytes,
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
+        cached_tokens: u64,
     ) {
         if self.enqueuer.is_none() {
             return;
         }
         let view = self.dynamic_view.load();
-        let Some(config) = view
+        let Some(_config) = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
@@ -140,11 +140,6 @@ impl LifecycleKeepalive {
         else {
             return;
         };
-        if shaped_body.len() > config.snapshot_max_bytes as usize {
-            let principal_name: Arc<str> = Arc::from(principal.id.as_str());
-            super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
-            return;
-        }
         let this = self.clone();
         let response_body_json = response_body_json.clone();
         let principal = principal.clone();
@@ -160,6 +155,7 @@ impl LifecycleKeepalive {
                 shaped_body,
                 &downstream_headers,
                 cache_anchor_age,
+                cached_tokens,
             )
             .await;
         });
@@ -176,6 +172,7 @@ impl LifecycleKeepalive {
         shaped_body: Bytes,
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
+        cached_tokens: u64,
     ) {
         let Some(enqueuer) = self.enqueuer.as_ref() else {
             return;
@@ -227,6 +224,8 @@ impl LifecycleKeepalive {
                     &CacheKeepaliveDisplayReason::SnapshotTooLarge.to_string(),
                 )
                 .await;
+                self.cancel_session(&session_key, principal, CancelReason::SnapshotTooLarge)
+                    .await;
                 super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
                 return;
             }
@@ -243,6 +242,30 @@ impl LifecycleKeepalive {
         let classifier = HeuristicClassifier::new(&config.classifier);
         match classifier.classify(request_json, response_body_json) {
             super::TurnDecision::AgentInTurn => {
+                if cached_tokens < config.min_cache_tokens {
+                    let reason = CacheKeepaliveDisplayReason::CachedPrefixTooSmall {
+                        cached_tokens,
+                        min_cache_tokens: config.min_cache_tokens,
+                    }
+                    .to_string();
+                    self.record_not_tracked(
+                        &session_key,
+                        principal,
+                        upstream_id,
+                        ttl,
+                        config,
+                        &reason,
+                    )
+                    .await;
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::CachedPrefixTooSmall,
+                    )
+                    .await;
+                    super::record_cancelled(&principal_name, CancelReason::CachedPrefixTooSmall);
+                    return;
+                }
                 let params =
                     super::ScheduleParams::from_cache_anchor_age(config, ttl, cache_anchor_age);
                 let display_reason =
@@ -391,6 +414,20 @@ impl StreamingKeepaliveResponse {
                 }
             }
             Some(b"message_delta") => {
+                if let Some(delta_usage) = value.get("usage").and_then(Value::as_object)
+                    && let Some(message) = self.message.as_mut().and_then(Value::as_object_mut)
+                {
+                    let usage = message
+                        .entry("usage".to_owned())
+                        .or_insert_with(|| Value::Object(Default::default()));
+                    if let Some(existing_usage) = usage.as_object_mut() {
+                        for (key, value) in delta_usage {
+                            existing_usage.insert(key.clone(), value.clone());
+                        }
+                    } else {
+                        *usage = Value::Object(delta_usage.clone());
+                    }
+                }
                 if let Some(stop_reason) = value
                     .get("delta")
                     .and_then(|delta| delta.get("stop_reason"))
@@ -438,7 +475,14 @@ fn cache_keepalive_session_key(
     let principal_id = uuid::Uuid::parse_str(&principal.id)
         .unwrap_or_else(|_| cache_keepalive_principal_uuid(&principal.id));
     if let Some(thread_id) = cache_metadata.thread_id.clone() {
-        return Some(SessionKey::from_thread_id(principal_id, thread_id));
+        let session_key = if let Some(agent_id) =
+            SessionKey::normalize_agent_id(cache_metadata.claude_agent_id.as_deref())
+        {
+            SessionKey::from_thread_and_agent(principal_id, thread_id, agent_id)
+        } else {
+            SessionKey::from_thread_id(principal_id, thread_id)
+        };
+        return Some(session_key);
     }
     cache_metadata
         .cache_prefix_hash
@@ -489,7 +533,7 @@ mod tests {
             b"event: message_start\ndata: {\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"cache_read_input_tokens\":2}}}\n\n",
         ));
         response.observe(&crate::usage_parser::parse_sse_event(
-            b"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            b"event: message_delta\ndata: {\"usage\":{\"cache_creation_input_tokens\":3},\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
         ));
 
         let value = response.into_value().expect("message_start captured");
@@ -504,6 +548,91 @@ mod tests {
                 .and_then(|usage| usage.get("cache_read_input_tokens"))
                 .and_then(Value::as_i64),
             Some(2)
+        );
+        assert_eq!(
+            value
+                .get("usage")
+                .and_then(|usage| usage.get("cache_creation_input_tokens"))
+                .and_then(Value::as_i64),
+            Some(3)
+        );
+    }
+    #[test]
+    fn session_key_uses_agent_identity_when_present() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.thread_id = Some("thread-1".to_owned());
+        metadata.claude_agent_id = Some("agent-a".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string(),
+            format!(
+                "{}/thread_agent:8:thread-1:agent-a",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+    }
+
+    #[test]
+    fn session_key_ignores_main_agent_identity() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.thread_id = Some("thread-1".to_owned());
+        metadata.claude_agent_id = Some(" main ".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string(),
+            format!(
+                "{}/thread:thread-1",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+    }
+    #[test]
+    fn session_key_without_agent_identity_uses_thread() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.thread_id = Some("thread-1".to_owned());
+        metadata.claude_agent_id = None;
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string(),
+            format!(
+                "{}/thread:thread-1",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+    }
+
+    #[test]
+    fn session_key_falls_back_to_prefix_without_thread() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.cache_prefix_hash = Some("prefix-1".to_owned());
+        metadata.claude_agent_id = Some("agent-a".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string(),
+            format!(
+                "{}/prefix:prefix-1",
+                cache_keepalive_principal_uuid("principal-test")
+            )
         );
     }
 }
