@@ -38,19 +38,63 @@ impl SessionKey {
     }
 }
 
+fn write_escaped_component(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
+    let mut start = 0;
+    for (idx, ch) in value.char_indices() {
+        let replacement = match ch {
+            '%' => "%25",
+            '/' => "%2F",
+            _ => continue,
+        };
+        if start < idx {
+            f.write_str(&value[start..idx])?;
+        }
+        f.write_str(replacement)?;
+        start = idx + ch.len_utf8();
+    }
+    if start < value.len() {
+        f.write_str(&value[start..])?;
+    }
+    Ok(())
+}
+
 impl fmt::Display for SessionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.session_id, &self.agent_scope) {
-            (SessionId::ThreadId(id), None) => write!(f, "{}/thread:{}", self.principal_id, id),
-            (SessionId::CachePrefixHash(hash), None) => {
-                write!(f, "{}/prefix:{}", self.principal_id, hash)
-            }
-            (SessionId::ThreadId(id), Some(scope)) => {
-                write!(f, "{}/thread:{}/agent:{}", self.principal_id, id, scope)
-            }
-            (SessionId::CachePrefixHash(hash), Some(scope)) => {
-                write!(f, "{}/prefix:{}/agent:{}", self.principal_id, hash, scope)
-            }
+        let (kind_tag, raw_id) = match &self.session_id {
+            SessionId::ThreadId(id) => ("thread", id.as_str()),
+            SessionId::CachePrefixHash(hash) => ("prefix", hash.as_str()),
+        };
+        write!(f, "{}/{kind_tag}:", self.principal_id)?;
+        write_escaped_component(f, raw_id)?;
+        if let Some(scope) = self.agent_scope.as_deref() {
+            f.write_str("/agent:")?;
+            write_escaped_component(f, scope)?;
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_escapes_delimiters_to_prevent_scope_collisions() {
+        let principal_id = Uuid::nil();
+        let unscoped_with_delimiter =
+            SessionKey::from_thread_id(principal_id, "a/agent:b").to_string();
+        let scoped = SessionKey::from_thread_id(principal_id, "a")
+            .with_agent_scope(Some("b".to_owned()))
+            .to_string();
+        let pre_escaped = SessionKey::from_thread_id(principal_id, "a%2Fagent:b").to_string();
+
+        assert_eq!(
+            unscoped_with_delimiter,
+            format!("{principal_id}/thread:a%2Fagent:b")
+        );
+        assert_eq!(scoped, format!("{principal_id}/thread:a/agent:b"));
+        assert_eq!(pre_escaped, format!("{principal_id}/thread:a%252Fagent:b"));
+        assert_ne!(unscoped_with_delimiter, scoped);
+        assert_ne!(unscoped_with_delimiter, pre_escaped);
     }
 }

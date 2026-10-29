@@ -579,6 +579,13 @@ mod tests {
         assert_ne!(main_key, claude_key);
         assert_ne!(main_key, generic_key);
         assert_ne!(claude_key, generic_key);
+
+        let mut delimiter_main = RequestCacheMetadata::default();
+        delimiter_main.thread_id = Some("session-1/agent:a70f-agent".to_owned());
+        let delimiter_main_key = cache_keepalive_session_key(&principal, &delimiter_main)
+            .expect("delimiter main session key")
+            .to_string();
+        assert_ne!(delimiter_main_key, claude_key);
     }
 
     #[test]
