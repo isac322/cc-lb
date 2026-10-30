@@ -82,6 +82,9 @@ const counts = req('evidence.counts', P.evidence?.counts);
 const publishedCountEntry = Array.isArray(counts)
   ? counts.find((c) => c?.key === 'published_contract_crates')
   : undefined;
+const releaseTrackCountEntry = Array.isArray(counts)
+  ? counts.find((c) => c?.key === 'release_track_crates')
+  : undefined;
 
 const V = {
   name: req('identity.name', P.identity?.name),
@@ -115,6 +118,9 @@ const V = {
   ),
   publishedCrateCount: Number(
     req('evidence.counts.published_contract_crates', publishedCountEntry?.value),
+  ),
+  releaseTrackCrateCount: Number(
+    req('evidence.counts.release_track_crates', releaseTrackCountEntry?.value),
   ),
   brandGuide: req('brand.guide', P.brand?.guide),
   brandAssets: new Map(Object.entries(req('brand.assets', P.brand?.assets) ?? {})),
@@ -462,12 +468,13 @@ field({
 });
 
 const releasePlz = Bun.TOML.parse(requireText('release-plz.toml'));
-const publishedCrates = releasePlz.package
+const publishedCrates = releasePlz.package.map((pkg) => pkg.name);
+const releaseTrackCrates = releasePlz.package
   .filter((pkg) => pkg.release === true)
   .map((pkg) => pkg.name);
 
 field({
-  file: 'release-plz.toml', name: 'release-plz.published-set', label: 'published crate set (release=true, manifests exist, count matches positioning evidence)',
+  file: 'release-plz.toml', name: 'release-plz.published-set', label: 'published crate set (package entries, manifests exist, count matches positioning evidence)',
   check() {
     const problems = [];
     for (const name of publishedCrates) {
@@ -475,12 +482,23 @@ field({
       if (!existsSync(manifest)) { problems.push(`${name}: no crates/${name}/Cargo.toml`); continue; }
       const t = readFileSync(manifest, 'utf8');
       if (!new RegExp(`^name[ \\t]*=[ \\t]*"${name}"`, 'm').test(t)) problems.push(`${name}: manifest name mismatch`);
-      if (!/^version[ \t]*=/m.test(t)) problems.push(`${name}: no version field`);
+      if (!/^version[ \\t]*=/m.test(t)) problems.push(`${name}: no version field`);
     }
     if (publishedCrates.length !== V.publishedCrateCount) {
-      problems.push(`release=true count ${publishedCrates.length} != positioning evidence.counts.published_contract_crates ${V.publishedCrateCount}`);
+      problems.push(`package count ${publishedCrates.length} != positioning evidence.counts.published_contract_crates ${V.publishedCrateCount}`);
     }
     return { found: true, actual: problems.length ? problems.join('; ') : `${publishedCrates.length} crates`, ok: problems.length === 0 };
+  },
+});
+
+field({
+  file: 'release-plz.toml', name: 'release-plz.release-track-set', label: 'release-track crate set (release=true, count matches positioning evidence)',
+  check() {
+    const problems = [];
+    if (releaseTrackCrates.length !== V.releaseTrackCrateCount) {
+      problems.push(`release=true count ${releaseTrackCrates.length} != positioning evidence.counts.release_track_crates ${V.releaseTrackCrateCount}`);
+    }
+    return { found: true, actual: problems.length ? problems.join('; ') : `${releaseTrackCrates.length} crates`, ok: problems.length === 0 };
   },
 });
 

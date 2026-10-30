@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Remove Wasmtime's unused global disk-cache feature and its obsolete zstd dependency graph; the runtime's in-process compiled-module cache remains unchanged.
 
+### Security
+
+- Update Wasmtime to 49.0.5 to address the latest Wasmtime RustSec advisories.
+
 ## [0.2.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.4...cc-lb-runtime-wasmtime-v0.2.0) - 2026-10-06
 
 ### Added

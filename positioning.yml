@@ -124,6 +124,10 @@ evidence:
       value: 5
       source: release-plz.toml:15-38
       shown_on: [/docs/plugins/]
+    - key: release_track_crates
+      value: 2
+      source: release-plz.toml:15-38
+      shown_on: []
   validation:
     - claim: supports the published filter and shape plugin contract
       scope: local source and published crate contract
