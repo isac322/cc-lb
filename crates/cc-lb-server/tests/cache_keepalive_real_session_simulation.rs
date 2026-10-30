@@ -36,6 +36,10 @@ use uuid::Uuid;
 
 const NOW: u64 = 1_800_000_000;
 const CACHE_TTL: u64 = 300;
+// A 4 MiB snapshot can take several seconds to encrypt, persist, and dispatch
+// under llvm-cov on the four-core CI runner. Keep the wait bounded at 20 seconds
+// without advancing the test clock before the due job has finished.
+const DUE_JOB_WAIT_ATTEMPTS: usize = 1_000;
 // Builtin API-key authentication carries the configured principal name into the
 // engine; lifecycle glue hashes non-UUID principal IDs before building SessionKey.
 const PRINCIPAL_NAME: &str = "real-session-principal";
@@ -557,7 +561,7 @@ impl Harness {
         .execute(&self.scheduler_pool)
         .await
         .expect("release due cache_keepalive jobs");
-        for _ in 0..200 {
+        for _ in 0..DUE_JOB_WAIT_ATTEMPTS {
             let due_remaining = sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive' AND status IN ('Pending', 'Running') AND run_at <= 0",
             )
