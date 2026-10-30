@@ -3,35 +3,46 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+
+## [2.1.0] - 2026-10-30
+
+### Added
+
+- Prompt-cache keep-alive session tracking now recognizes session identifiers used by Claude Code, Hermes, Aside, OpenCode, and related clients, including session metadata in request bodies. Subagent requests receive an agent-scoped session key, so they do not overwrite or cancel the parent session's schedule. Auxiliary requests such as recap, compaction, session-title, auto-thinking, notification, side, and look-at do not change keep-alive state.
+
+- Prompt-cache keep-alive persistence now fences generations and completion order in durable storage. Older queued or running work becomes a stale no-op when a newer real request supersedes it, and newer completions cannot be replaced by an older completion. PostgreSQL is the recommended backend for multi-replica deployments so all replicas see the same Apalis claims and generation fence.
+
 ### Changed
 
-- Subscription-quota aggregate reads now deduplicate identical token intervals before storage lookup while preserving the existing response and inclusive-range semantics.
+- Keep-alive snapshots are trimmed at the last explicit `cache_control` breakpoint when automatic top-level caching is absent. The trim preserves the matching user `tool_result` after an assistant `tool_use` and keeps a minimal user continuation when the breakpoint ends on an assistant turn. Snapshots larger than the default `8 MiB` are not tracked.
 
-- PostgreSQL request-event retention now deletes bounded batches through stable sequence IDs with `ANY(ARRAY(...))`, preserving cutoff and batch ordering semantics.
-- Supported Anthropic Messages, OpenAI Responses, and Gemini generation requests now preserve provider-owned continuation, file, container, cache, and response state through upstream affinity instead of rejecting supported generation bodies to protect cross-upstream load balancing. Stateless requests retain normal routing and failover; pinned requests stay on their owning upstream. Anthropic prompt-cache analysis remains provider-specific. SQLite provider storage preserves historical migration checksums and adds provider kinds through migration `0099`.
-- OpenAI and Gemini OAuth imports accept access-only bundles with `never_refresh: true`, an empty refresh-token string, and no refresh-token expiry. Updating the bundle replaces the stored credentials atomically. cc-lb never refreshes these tokens and rejects expired tokens before new signing operations; existing provider WebSocket connections are not closed just because the token expires. Refreshing credentials and Anthropic long-lived credentials are unchanged.
-- Responses WebSockets now apply current client authorization, owner routing, quota reservation, usage accounting, and request telemetry per supported turn, with lazy provider connections and bounded FIFO lanes. Ordinary `response.create` messages require an explicit model; steering auto-successors inherit the parent model. Independent full-history turns may reselect an upstream, while connection-local continuations stay on their exact provider connection. WebSocket `store: false` response ids remain connection-local, conversation ownership remains durable, and HTTP response-id behavior is unchanged. Closing or disconnecting cancels active work without adding a `response.cancel` operation.
+- Keep-alive renewals now require at least `10,000` cached input tokens by default for an `AgentInTurn` response. Responses below that threshold are cancelled with `reason="cached_prefix_too_small"` instead of scheduling a renewal. The principal API exposes `min_cache_tokens` and the classifier controls documented in the runtime-management reference.
 
-### Security
+- Subscription-quota aggregate reads now deduplicate identical `(upstream, start, end)` token intervals before storage lookup, then scatter the result back to every original interval while preserving the existing response and inclusive-range semantics.
 
-- Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.11`, and Wasmtime to `49.0.4` to address dependency security advisories.
-- TLS trust intentionally changes: `webpki-roots` removes the emSign ECC Root CA G3 and the C1/C3 roots, and `rustls-webpki` rejects distrusted emSign intermediate keys. Affected certificate chains can fail TLS validation.
-- Updated `ctutils` from `0.4.2` to `0.4.5` to address RUSTSEC-2026-0385 with constant-time mask generation and comparison hardening.
-- Removed the unused Wasmtime global disk-cache feature and updated Tokio and zstd dependencies to their RustSec-fixed release lines; cc-lb's in-process compiled-module cache and zstd payload behavior remain unchanged.
+- PostgreSQL request-event retention now deletes bounded batches through stable sequence IDs using `ANY(ARRAY(...))`, preserving cutoff handling and sequence ordering when rows are updated concurrently.
+
+- Pricing and limit calculations now carry total cache-creation input tokens through lifecycle accounting and apply configured token-threshold bands above their cliffs, including sparse tier-specific rates that inherit unspecified components from the default band.
 
 ### Fixed
 
 - `POST /v1/messages/count_tokens` now uses the Anthropic Messages capability path, restoring count-tokens routing.
 
-- Outbound dispatch no longer forwards the client's `Host` header, so HTTP/2 requests use only the upstream URL's `:authority`.
-- Identity SSE responses with a retained `Content-Length` now finalize lifecycle, usage, and terminal telemetry before yielding the final bytes, so a normally completed response is not recorded as a `499 client_closed_request`.
-- Limit reservations are now reconciled or refunded exactly once on successful, failed, and cancelled terminal paths, so upstream stream errors cannot hold a concurrent slot until TTL expiry.
-- Limit cost estimates for Gemini requests now use the model from the request URL and `generationConfig.maxOutputTokens`, so valid requests under a USD limit are no longer rejected as an unknown model.
-- Failover no longer sends a request to an Anthropic OAuth upstream that the subscription-preference filter has judged hard-exhausted; the request keeps the existing upstream error instead.
-- Gemini output usage now includes candidate and thought tokens once, so stored usage, cost, and limit reconciliation include billable reasoning output. Cumulative snapshots replace earlier counts; cache-input subtraction and the existing OpenAI and Anthropic reasoning subsets are unchanged.
-- Documentation source sync accepts implemented OpenAI and Gemini facts in the runtime reference while retaining unsupported-provider, endorsement, private-path, and availability-claim checks. Selecting a nested heading no longer drops later sibling sections from an already-selected ancestor.
-- OpenAI OAuth Responses requests now use the default Codex base `https://chatgpt.com/backend-api/codex` plus `/responses` for HTTP and WebSocket transport. Custom base URL prefixes and downstream queries are preserved; other provider URL construction is unchanged.
-- Responses WebSocket turns reconcile measured usage once even when they fail or are interrupted, release concurrent slots immediately at termination, and refund once when no usage was observed. A numeric zero is measured usage; `null` and empty usage objects are not. The existing HTTP error-refund policy is unchanged.
+- Outbound HTTP dispatch no longer forwards the client's `Host` header, so HTTP/2 requests use the upstream URL's `:authority`.
+
+- Identity SSE responses with a retained `Content-Length` now finalize lifecycle, usage, and terminal telemetry before yielding the final bytes, preventing a normally completed response from being recorded as `499 client_closed_request`.
+
+- Limit reservations now reconcile or refund exactly once on successful, failed, and cancelled terminal paths. Reconciliation also records a positive delta when measured usage exceeds the reservation.
+
+- Failover no longer sends a request to an Anthropic OAuth upstream that the subscription-preference filter has marked hard-exhausted; the current upstream error is relayed instead.
+
+### Security
+
+- Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.11`, and Wasmtime to `49.0.4` for dependency security advisories.
+
+- TLS trust changes with the dependency update: `webpki-roots` removes the emSign ECC Root CA G3 and the C1/C3 roots, and `rustls-webpki` rejects distrusted emSign intermediate keys. Some certificate chains may therefore fail TLS validation.
+
+- Updated `ctutils` from `0.4.2` to `0.4.5` for RUSTSEC-2026-0385, including constant-time mask generation and comparison hardening. The unused Wasmtime global disk-cache feature was removed, and Tokio and zstd moved to their RustSec-fixed release lines.
 
 ## [2.0.2] - 2026-10-16
 
@@ -492,8 +503,8 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.2...HEAD
-[2.0.2]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.1...cc-lb-v2.0.2
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.1.0...HEAD
+[2.1.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.2...cc-lb-v2.1.0
 [2.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.0...cc-lb-v2.0.1
 [2.0.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.1...cc-lb-v2.0.0
 [1.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.0...cc-lb-v1.0.1
