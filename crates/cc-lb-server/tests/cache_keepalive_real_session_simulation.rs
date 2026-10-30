@@ -36,6 +36,30 @@ use uuid::Uuid;
 
 const NOW: u64 = 1_800_000_000;
 const CACHE_TTL: u64 = 300;
+// Builtin API-key authentication carries the configured principal name into the
+// engine; lifecycle glue hashes non-UUID principal IDs before building SessionKey.
+const PRINCIPAL_NAME: &str = "real-session-principal";
+
+fn runtime_principal_uuid(principal_name: &str) -> Uuid {
+    let digest = Sha256::digest(principal_name.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn runtime_session_key_hash(
+    principal_name: &str,
+    thread_id: &str,
+    agent_id: Option<&str>,
+) -> String {
+    SessionKey::from_thread_id(runtime_principal_uuid(principal_name), thread_id)
+        .with_agent_scope(
+            agent_id
+                .and_then(|raw| SessionKey::normalize_agent_id(Some(raw)))
+                .map(ToOwned::to_owned),
+        )
+        .to_string()
+}
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     value.lock().unwrap_or_else(PoisonError::into_inner)
@@ -306,7 +330,7 @@ fn digest(value: &Value) -> String {
 }
 
 struct Harness {
-    principal_id: Uuid,
+    principal_name: String,
     _dir: TempDir,
     _app: cc_lb_server::App,
     _proxy_task: tokio::task::JoinHandle<Result<(), std::io::Error>>,
@@ -383,8 +407,9 @@ impl Harness {
         )
         .await
         .expect("create OAuth upstream");
+        let principal_name = PRINCIPAL_NAME.to_owned();
         let principal = PrincipalCreate {
-            name: "real-session-principal".to_owned(),
+            name: principal_name.clone(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),
             allowed_upstreams: vec![upstream.id],
@@ -400,14 +425,13 @@ impl Harness {
                 classifier: Default::default(),
             }),
         };
-        let principal = PrincipalStore::create(storage.as_ref(), principal, NOW)
+        PrincipalStore::create(storage.as_ref(), principal, NOW)
             .await
             .expect("create principal");
-        let principal_id = principal.id;
         let key_store = KeyStore::new(storage.clone());
         let (_record, secret) = key_store
             .create(
-                "real-session-principal",
+                &principal_name,
                 CreateParams {
                     label: "real-session".to_owned(),
                     description: None,
@@ -452,7 +476,7 @@ impl Harness {
         let proxy_task = tokio::spawn(async move { axum::serve(listener, router).await });
         sleep(Duration::from_millis(20)).await;
         Self {
-            principal_id,
+            principal_name,
             _dir: dir,
             _app: app,
             _proxy_task: proxy_task,
@@ -482,6 +506,10 @@ impl Harness {
         response.json().await.expect("proxy JSON")
     }
 
+    fn session_key_hash(&self, thread_id: &str, agent_id: Option<&str>) -> String {
+        runtime_session_key_hash(&self.principal_name, thread_id, agent_id)
+    }
+
     async fn wait_for_session_count(&self, status: &str, min_count: i64) {
         for _ in 0..200 {
             let query = if status == "cancelled" {
@@ -501,22 +529,22 @@ impl Harness {
         panic!("timed out waiting for {status} session count >= {min_count}");
     }
 
-    async fn wait_for_max_enqueued_generation(&self, session_key_hash: &str, min_generation: i64) {
+    async fn wait_for_enqueued_generation(&self, session_key_hash: &str, generation: i64) {
         for _ in 0..200 {
-            let max_gen = sqlx::query_scalar::<_, Option<i64>>(
-                "SELECT MAX(generation) FROM cache_keepalive_sessions WHERE session_key_hash = ? AND status = 'active' AND enqueue_state = 'enqueued'",
+            let present = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM cache_keepalive_sessions WHERE session_key_hash = ? AND generation = ? AND status = 'active' AND enqueue_state = 'enqueued'",
             )
             .bind(session_key_hash)
+            .bind(generation)
             .fetch_one(self.storage.pool())
             .await
-            .expect("query max generation")
-            .unwrap_or(0);
-            if max_gen >= min_generation {
+            .expect("query session generation");
+            if present > 0 {
                 return;
             }
             sleep(Duration::from_millis(20)).await;
         }
-        panic!("timed out waiting for session {session_key_hash} generation >= {min_generation}");
+        panic!("timed out waiting for session {session_key_hash} generation = {generation}");
     }
 
     async fn advance_and_dispatch_due(&self, delta: Duration) {
@@ -537,11 +565,12 @@ impl Harness {
             .await
             .expect("count due cache_keepalive jobs");
             if due_remaining == 0 {
-                break;
+                settle().await;
+                return;
             }
             sleep(Duration::from_millis(20)).await;
         }
-        settle().await;
+        panic!("timed out waiting for due cache_keepalive jobs to finish");
     }
 }
 
@@ -593,7 +622,7 @@ async fn settle() {
 async fn sim_principal_a_cap_crossing_long_gap_and_ask_tool() {
     let harness = Harness::new(8_388_608).await;
     let session = "00000000-0000-7000-8000-000000000001";
-    let session_key_hash = SessionKey::from_thread_id(harness.principal_id, session).to_string();
+    let session_key_hash = harness.session_key_hash(session, None);
     let t1 = harness
         .post(
             request_body(355_453, "principal-a-t1", 83_900, "bash", "tool_use", false),
@@ -603,7 +632,7 @@ async fn sim_principal_a_cap_crossing_long_gap_and_ask_tool() {
         .await;
     assert_eq!(t1["stop_reason"], "tool_use");
     harness
-        .wait_for_max_enqueued_generation(&session_key_hash, 1)
+        .wait_for_enqueued_generation(&session_key_hash, 1)
         .await;
     let t2 = harness
         .post(
@@ -614,7 +643,7 @@ async fn sim_principal_a_cap_crossing_long_gap_and_ask_tool() {
         .await;
     assert_eq!(t2["stop_reason"], "tool_use");
     harness
-        .wait_for_max_enqueued_generation(&session_key_hash, 2)
+        .wait_for_enqueued_generation(&session_key_hash, 2)
         .await;
     let t3 = harness
         .post(
@@ -632,7 +661,7 @@ async fn sim_principal_a_cap_crossing_long_gap_and_ask_tool() {
         .await;
     assert_eq!(t3["stop_reason"], "tool_use");
     harness
-        .wait_for_max_enqueued_generation(&session_key_hash, 3)
+        .wait_for_enqueued_generation(&session_key_hash, 3)
         .await;
     for _ in 0..3 {
         harness
@@ -763,10 +792,9 @@ async fn sim_principal_b_multi_agent_interleaving_and_4mb_gap() {
         )
         .await;
     assert_eq!(parent_gap["stop_reason"], "tool_use");
-    let parent_session_key_hash =
-        SessionKey::from_thread_id(harness.principal_id, session).to_string();
+    let parent_session_key_hash = harness.session_key_hash(session, None);
     harness
-        .wait_for_max_enqueued_generation(&parent_session_key_hash, 2)
+        .wait_for_enqueued_generation(&parent_session_key_hash, 2)
         .await;
     for _ in 0..3 {
         harness
