@@ -436,6 +436,7 @@ async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_s
             replica_b
                 .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                     session_key_hash: "session-hash".to_owned(),
+                    reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
                     expected_generation: cancel_ticket,
                     cache_anchor_age: std::time::Duration::ZERO,
                 })
