@@ -306,6 +306,7 @@ fn digest(value: &Value) -> String {
 }
 
 struct Harness {
+    principal_id: Uuid,
     _dir: TempDir,
     _app: cc_lb_server::App,
     _proxy_task: tokio::task::JoinHandle<Result<(), std::io::Error>>,
@@ -399,9 +400,10 @@ impl Harness {
                 classifier: Default::default(),
             }),
         };
-        PrincipalStore::create(storage.as_ref(), principal, NOW)
+        let principal = PrincipalStore::create(storage.as_ref(), principal, NOW)
             .await
             .expect("create principal");
+        let principal_id = principal.id;
         let key_store = KeyStore::new(storage.clone());
         let (_record, secret) = key_store
             .create(
@@ -450,6 +452,7 @@ impl Harness {
         let proxy_task = tokio::spawn(async move { axum::serve(listener, router).await });
         sleep(Duration::from_millis(20)).await;
         Self {
+            principal_id,
             _dir: dir,
             _app: app,
             _proxy_task: proxy_task,
@@ -495,13 +498,15 @@ impl Harness {
             }
             sleep(Duration::from_millis(20)).await;
         }
+        panic!("timed out waiting for {status} session count >= {min_count}");
     }
 
-    async fn wait_for_max_enqueued_generation(&self, min_generation: i64) {
+    async fn wait_for_max_enqueued_generation(&self, session_key_hash: &str, min_generation: i64) {
         for _ in 0..200 {
             let max_gen = sqlx::query_scalar::<_, Option<i64>>(
-                "SELECT MAX(generation) FROM cache_keepalive_sessions WHERE status = 'active' AND enqueue_state = 'enqueued'",
+                "SELECT MAX(generation) FROM cache_keepalive_sessions WHERE session_key_hash = ? AND status = 'active' AND enqueue_state = 'enqueued'",
             )
+            .bind(session_key_hash)
             .fetch_one(self.storage.pool())
             .await
             .expect("query max generation")
@@ -511,7 +516,9 @@ impl Harness {
             }
             sleep(Duration::from_millis(20)).await;
         }
+        panic!("timed out waiting for session {session_key_hash} generation >= {min_generation}");
     }
+
     async fn advance_and_dispatch_due(&self, delta: Duration) {
         self.clock.advance(delta);
         let now = i64::try_from(unix_secs(self.clock.now())).expect("now fits i64");
@@ -749,7 +756,11 @@ async fn sim_principal_b_multi_agent_interleaving_and_4mb_gap() {
         )
         .await;
     assert_eq!(parent_gap["stop_reason"], "tool_use");
-    harness.wait_for_max_enqueued_generation(2).await;
+    let parent_session_key_hash =
+        SessionKey::from_thread_id(harness.principal_id, session).to_string();
+    harness
+        .wait_for_max_enqueued_generation(&parent_session_key_hash, 2)
+        .await;
     for _ in 0..3 {
         harness
             .advance_and_dispatch_due(Duration::from_secs(270))
