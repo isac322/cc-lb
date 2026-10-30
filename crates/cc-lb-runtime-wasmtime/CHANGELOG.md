@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Breaking
+
+- Rebuild downstream integrations against Wasmtime 49: the public `Engine`, `Linker`, and `InstancePre` types exposed by the runtime now carry Wasmtime 49 type identity.
+
+### Changed
+
+- Remove Wasmtime's unused global disk-cache feature and its obsolete zstd dependency graph; the runtime's in-process compiled-module cache remains unchanged.
 
 ## [0.2.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.4...cc-lb-runtime-wasmtime-v0.2.0) - 2026-10-06
 

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Breaking
+
+- Rebuild conformance integrations against `cc-lb-runtime-wasmtime` 0.3.0 and Wasmtime 49: its public APIs expose `HotEngineConfig`, `ModuleInspection`, and `&WasmtimeRuntime`; the latter's engine, linker, admission, and `PluginCell::instance_pre` surfaces carry Wasmtime 49 type identity.
+
+### Changed
+
+- Follow the runtime's removal of the unused Wasmtime global disk-cache feature, eliminating the obsolete zstd dependency graph from conformance consumers.
+- Defer native OpenAI and Gemini fixture coverage until a compatible `cc-lb-plugin-wire` release is published.
 
 ## [0.3.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.4...cc-lb-plugin-conformance-v0.3.0) - 2026-10-06
 
