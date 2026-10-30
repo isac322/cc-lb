@@ -420,7 +420,8 @@ async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_s
             cancel_done_barrier.wait().await;
             let mut req = enqueue_request();
             req.cache_anchor_age = std::time::Duration::ZERO;
-            req.expected_generation = Some(stale_enqueue_ticket);
+            req.expected_generation =
+                stale_enqueue_ticket.expect("replica a observes active generation 2");
             replica_a
                 .enqueue_cache_keepalive(req)
                 .await
@@ -437,7 +438,8 @@ async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_s
                 .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                     session_key_hash: "session-hash".to_owned(),
                     reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
-                    expected_generation: Some(cancel_ticket),
+                    expected_generation: cancel_ticket
+                        .expect("replica b observes active generation 2"),
                     cache_anchor_age: std::time::Duration::ZERO,
                 })
                 .await
