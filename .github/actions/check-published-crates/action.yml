@@ -46,12 +46,21 @@ runs:
           fi
         }
 
-        # Crate versions are owned by release-plz, so a PR cannot bump them.
-        # A breaking change declared with a conventional-commit marker
-        # (`type(scope)!:` subject or `BREAKING CHANGE:` footer) on a commit
-        # that touched the crate since its last release tag is checked as a
-        # major release, which is the bump release-plz will apply. Undeclared
-        # breaks are still rejected. Requires full history and tags.
+        # This package-only release gate checks only the approved runtime and
+        # conformance crates. Crate versions are owned by release-plz, so a PR
+        # cannot bump them. A breaking change declared with a
+        # conventional-commit marker (`type(scope)!:` subject or
+        # `BREAKING CHANGE:` footer) on a commit that touched the crate since
+        # its last release tag is checked as a major release, which is the bump
+        # release-plz will apply. Undeclared breaks are still rejected.
+        # Requires full history and tags.
+        #
+        # cc-lb-plugin-wire is intentionally excluded: its release is pending
+        # separately and must not block this approved package-only release.
+        # The release-plz trusted publish job validates the final package.
+        #
+        # Runtime/conformance publish dry-runs stay out of this preflight
+        # because unpublished workspace dependencies make them invalid here.
         semver_check() {
           local crate="$1" pkgid version tag log
           local args=(--package "$crate")
@@ -69,12 +78,10 @@ runs:
           env CC_LB_SKIP_WASM_FIXTURE_BUILD=1 cargo semver-checks "${args[@]}"
         }
 
-        run_check "cargo semver-checks cc-lb-plugin-wire" \
-          semver_check cc-lb-plugin-wire
+        run_check "cargo semver-checks cc-lb-runtime-wasmtime" \
+          semver_check cc-lb-runtime-wasmtime
         run_check "cargo semver-checks cc-lb-plugin-conformance" \
           semver_check cc-lb-plugin-conformance
-        run_check "cargo publish --dry-run cc-lb-plugin-wire" \
-          cargo publish --dry-run -p cc-lb-plugin-wire
 
         exit "$status"
 
