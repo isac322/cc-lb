@@ -593,6 +593,7 @@ async fn settle() {
 async fn sim_principal_a_cap_crossing_long_gap_and_ask_tool() {
     let harness = Harness::new(8_388_608).await;
     let session = "00000000-0000-7000-8000-000000000001";
+    let session_key_hash = SessionKey::from_thread_id(harness.principal_id, session).to_string();
     let t1 = harness
         .post(
             request_body(355_453, "principal-a-t1", 83_900, "bash", "tool_use", false),
@@ -601,7 +602,9 @@ async fn sim_principal_a_cap_crossing_long_gap_and_ask_tool() {
         )
         .await;
     assert_eq!(t1["stop_reason"], "tool_use");
-    harness.wait_for_max_enqueued_generation(1).await;
+    harness
+        .wait_for_max_enqueued_generation(&session_key_hash, 1)
+        .await;
     let t2 = harness
         .post(
             request_body(583_888, "principal-a-t2", 91_366, "bash", "tool_use", false),
@@ -610,7 +613,9 @@ async fn sim_principal_a_cap_crossing_long_gap_and_ask_tool() {
         )
         .await;
     assert_eq!(t2["stop_reason"], "tool_use");
-    harness.wait_for_max_enqueued_generation(2).await;
+    harness
+        .wait_for_max_enqueued_generation(&session_key_hash, 2)
+        .await;
     let t3 = harness
         .post(
             request_body(
@@ -626,7 +631,9 @@ async fn sim_principal_a_cap_crossing_long_gap_and_ask_tool() {
         )
         .await;
     assert_eq!(t3["stop_reason"], "tool_use");
-    harness.wait_for_max_enqueued_generation(3).await;
+    harness
+        .wait_for_max_enqueued_generation(&session_key_hash, 3)
+        .await;
     for _ in 0..3 {
         harness
             .advance_and_dispatch_due(Duration::from_secs(270))
