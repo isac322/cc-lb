@@ -38,7 +38,7 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
-- Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.11`, and Wasmtime to `49.0.4` for dependency security advisories.
+- Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.11`, and Wasmtime to `49.0.5` for dependency security advisories.
 
 - TLS trust changes with the dependency update: `webpki-roots` removes the emSign ECC Root CA G3 and the C1/C3 roots, and `rustls-webpki` rejects distrusted emSign intermediate keys. Some certificate chains may therefore fail TLS validation.
 
@@ -505,6 +505,7 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 
 [Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.1.0...HEAD
 [2.1.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.2...cc-lb-v2.1.0
+[2.0.2]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.1...cc-lb-v2.0.2
 [2.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.0...cc-lb-v2.0.1
 [2.0.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.1...cc-lb-v2.0.0
 [1.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.0...cc-lb-v1.0.1
