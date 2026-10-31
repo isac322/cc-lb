@@ -1,43 +1,33 @@
 name: publish-check
 
-# PR-stage validation for the crates.io-published plugin ecosystem.
+# PR-stage validation for the approved runtime/conformance package release.
 #
-# The bug this workflow guards against: an editor removes a public trait
-# method (or otherwise makes a breaking API change) in cc-lb-plugin-wire
-# but forgets to bump the crate version. Workspace-local `cargo check`
-# still passes because path deps resolve to the fresh source, so nothing
-# downstream complains. release-plz then publishes cc-lb-plugin-wire at
-# the same version (skipped — already on crates.io) and tries to publish
-# the runtime crate, whose tarball verify pulls cc-lb-plugin-wire back
-# from crates.io using the workspace semver constraint. The old crates.io
-# trait definition mismatches the new local impl and the publish job
-# aborts mid-release. See PR #287 → release-plz run 28669111764 for the
-# incident this workflow closes.
+# The bug this workflow guards against: a public API change in one of the
+# approved crates is made without a release-plz-compatible version bump or
+# breaking-change marker. Workspace-local `cargo check` still passes because
+# path deps resolve to the fresh source, so nothing downstream complains.
+# release-plz then publishes a package with an incompatible API contract.
+# semver-checks catches that break at the source crate before publishing.
 #
-# Two checks:
+# This package-only gate intentionally excludes cc-lb-plugin-wire. Wire has a
+# separate pending release, and unrelated wire drift must not block this
+# approved runtime/conformance release.
 #
-# 1. cargo-semver-checks on every publish=true crate that already has a
-#    baseline on crates.io. It compares the current source's public API
-#    against the last published version and fails when a breaking change
-#    is not matched by a semver-appropriate version bump or declared as a
-#    breaking change (`type(scope)!:` / `BREAKING CHANGE:`) since the
-#    crate's last release tag; release-plz owns the actual version bump.
-#    This is the primary defense: it catches breakage at the SOURCE (the
-#    crate whose API changed) instead of waiting for downstream verify to
-#    fail.
+# Checks:
 #
-# 2. cargo publish --dry-run on cc-lb-plugin-wire. Foundation crate with
-#    no in-workspace unpublished deps, so packaging is self-contained
-#    and catches manifest regressions (missing description/license/
-#    repository, excluded source files, broken workspace inheritance).
+# 1. cargo-semver-checks on exactly the approved publish=true crates:
+#    cc-lb-runtime-wasmtime and cc-lb-plugin-conformance. It compares the
+#    current source's public API against the last published version and fails
+#    when a breaking change is not matched by a semver-appropriate version bump
+#    or declared as a breaking change (`type(scope)!:` /
+#    `BREAKING CHANGE:`) since the crate's last release tag. release-plz owns
+#    the actual version bump. Full history and tags are required.
 #
-# Downstream publish=true crates (cc-lb-pdk-wasmtime,
-# cc-lb-pdk-wasmtime-macros, cc-lb-plugin-conformance, cc-lb-runtime-wasmtime)
-# intentionally skip --dry-run: their workspace deps are typically not yet
-# published to crates.io at PR-review time, so --dry-run would flake on
-# unpublished-dep resolution instead of catching real bugs. semver-checks
-# covers their public-API contract; the workspace-wide cargo check in
-# ci.yml covers dep-constraint alignment.
+# 2. No cargo publish --dry-run is run in this preflight. Runtime/conformance
+#    workspace dependencies are typically not yet published at PR-review
+#    time, so dry-run would fail on unpublished-dependency resolution instead
+#    of catching a real package bug. The release-plz trusted publish job
+#    validates the final package.
 
 on:
   pull_request:
@@ -63,7 +53,7 @@ concurrency:
 
 jobs:
   published-crates:
-    name: published crates
+    name: approved runtime/conformance crates
     runs-on: cc-lb-2
     steps:
       - uses: actions/checkout@v7
