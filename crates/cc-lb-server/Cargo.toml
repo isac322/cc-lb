@@ -80,7 +80,7 @@ hex.workspace = true
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true
-parking_lot = "0.12"
+parking_lot = "0.13"
 rand = { version = "0.10", features = ["std", "std_rng"] }
 rkyv = { workspace = true, features = ["std", "bytecheck"] }
 reqwest.workspace = true

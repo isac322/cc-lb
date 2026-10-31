@@ -54,7 +54,7 @@ hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 chrono.workspace = true
 metrics.workspace = true
-parking_lot = "0.12"
+parking_lot = "0.13"
 opentelemetry.workspace = true
 rand = "0.10"
 reqwest.workspace = true
@@ -93,7 +93,7 @@ tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 tower = { workspace = true, features = ["util"] }
 trybuild = "1"
-syn = { version = "2.0.119", features = ["full", "visit"] }
+syn = { version = "3.0.6", features = ["full", "visit"] }
 
 [target.'cfg(loom)'.dependencies]
 arc-swap.workspace = true

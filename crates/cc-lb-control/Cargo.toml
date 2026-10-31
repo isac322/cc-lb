@@ -33,7 +33,7 @@ hyper = { workspace = true, features = ["client", "http1"] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true
-parking_lot = "0.12"
+parking_lot = "0.13"
 rand = "0.10"
 secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
