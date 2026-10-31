@@ -85,9 +85,11 @@ jobs:
 
       - name: Run release-plz release
         id: release-plz
-        uses: MarcoIeni/release-plz-action@v0.5.146
+        uses: MarcoIeni/release-plz-action@v0.5.147
         with:
           command: release
+          # Later musl builds hit the pest stack guard: release-plz/release-plz#3299.
+          version: "0.3.171"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
@@ -120,9 +122,11 @@ jobs:
       - uses: ./.github/actions/setup-rust-cache
 
       - name: Run release-plz release-pr
-        uses: MarcoIeni/release-plz-action@v0.5.146
+        uses: MarcoIeni/release-plz-action@v0.5.147
         with:
           command: release-pr
+          # Keep version generation on the same working engine as publication.
+          version: "0.3.171"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # release-pr runs cargo-doc on every crate to decide the next
