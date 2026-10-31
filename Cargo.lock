@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-conformance"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cc-lb-plugin-wire",
  "cc-lb-runtime-wasmtime",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-runtime-wasmtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.3.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.2.0...cc-lb-runtime-wasmtime-v0.3.0) - 2026-10-31
+
+### Fixed
+
+- *(plugins)* [**breaking**] align public Wasmtime 49 package contracts ([#982](https://github.com/isac322/cc-lb/pull/982))
 ### Breaking
 
 - Rebuild downstream integrations against Wasmtime 49: the public `Engine`, `Linker`, and `InstancePre` types exposed by the runtime now carry Wasmtime 49 type identity.
