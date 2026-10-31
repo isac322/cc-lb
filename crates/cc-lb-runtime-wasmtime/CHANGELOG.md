@@ -9,10 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.2.0...cc-lb-runtime-wasmtime-v0.3.0) - 2026-10-31
 
-### Added
-
-- extend plugins, error contracts, control plane, and observability for OpenAI and Gemini ([#972](https://github.com/isac322/cc-lb/pull/972))
-
 ### Fixed
 
 - *(plugins)* [**breaking**] align public Wasmtime 49 package contracts ([#982](https://github.com/isac322/cc-lb/pull/982))

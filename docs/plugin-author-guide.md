@@ -426,7 +426,7 @@ Add the conformance harness as a dev-dependency:
 
 ```toml
 [dev-dependencies]
-cc-lb-plugin-conformance = "0.3"
+cc-lb-plugin-conformance = "0.4"
 ```
 
 Use `ConformanceSuite::from_wasm` when the artifact exports one hook:

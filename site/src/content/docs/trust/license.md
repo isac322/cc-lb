@@ -10,7 +10,7 @@ The cc-lb workspace is licensed under [Apache License 2.0](https://www.apache.or
 
 - Workspace server version: `1.0.1`
 - Language: Rust, edition 2024
-- Published plugin contract: wire `0.9`, PDK `0.2`, runtime `0.2.0`, conformance `0.3`
+- Published plugin contract: wire `0.9`, PDK `0.2`, runtime `0.3.0`, conformance `0.4`
 - Website source: `site/`, built with Astro and Starlight through Bun
 
 The site curates selected source documents through `site/scripts/sync-docs.ts`. It does not publish the repository's internal QA logs, local working paths, legacy Korean HTML, or obsolete provider references.
