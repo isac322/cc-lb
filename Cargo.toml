@@ -44,7 +44,7 @@ cc-lb-pdk-wasmtime = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime-macros" }
 cc-lb-plugin-conformance = { version = "0.3", path = "crates/cc-lb-plugin-conformance" }
 
-wasmtime = { version = "49", default-features = false, features = [
+wasmtime = { version = "49.0.5", default-features = false, features = [
     "anyhow",
     "async",
     "backtrace",

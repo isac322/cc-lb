@@ -5,26 +5,26 @@
 # .github/workflows/release-server.yml. Do not run either release command
 # locally.
 #
-# Published contract crates (crates.io): cc-lb-plugin-wire,
-# cc-lb-pdk-wasmtime-macros, cc-lb-pdk-wasmtime, cc-lb-plugin-conformance,
-# and cc-lb-runtime-wasmtime.
+# Published contract crates (crates.io): cc-lb-plugin-conformance
+# and cc-lb-runtime-wasmtime. Wire and PDK crates are intentionally
+# excluded from this release track until their approved release.
 
 [workspace]
 release = false
 
 [[package]]
 name = "cc-lb-plugin-wire"
-release = true
+release = false
 semver_check = true
 
 [[package]]
 name = "cc-lb-pdk-wasmtime-macros"
-release = true
+release = false
 semver_check = true
 
 [[package]]
 name = "cc-lb-pdk-wasmtime"
-release = true
+release = false
 semver_check = true
 
 [[package]]

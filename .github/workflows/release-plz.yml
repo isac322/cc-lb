@@ -15,7 +15,7 @@ name: release-plz
 #      job fails no publish is attempted, so partial crates.io publishes
 #      cannot happen.
 #   2. `release` job runs after preflight succeeds. It detects new versions,
-#      creates package git tags + GitHub Releases, and publishes the five crates
+#      creates package git tags + GitHub Releases, and publishes the two crates
 #      managed in release-plz.toml to crates.io via trusted publishing (OIDC).
 #      Server tags and draft Releases are created by release-plz through
 #      release-plz-server.toml in release-server.yml.
@@ -85,7 +85,7 @@ jobs:
 
       - name: Run release-plz release
         id: release-plz
-        uses: MarcoIeni/release-plz-action@v0.5.142
+        uses: MarcoIeni/release-plz-action@v0.5.146
         with:
           command: release
         env:
@@ -120,7 +120,7 @@ jobs:
       - uses: ./.github/actions/setup-rust-cache
 
       - name: Run release-plz release-pr
-        uses: MarcoIeni/release-plz-action@v0.5.142
+        uses: MarcoIeni/release-plz-action@v0.5.146
         with:
           command: release-pr
         env:
