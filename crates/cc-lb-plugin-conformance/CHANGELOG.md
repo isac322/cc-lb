@@ -9,10 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.3.0...cc-lb-plugin-conformance-v0.4.0) - 2026-10-31
 
-### Added
-
-- [**breaking**] add native OpenAI Responses and Gemini proxy lifecycles ([#969](https://github.com/isac322/cc-lb/pull/969))
-
 ### Fixed
 
 - *(plugins)* [**breaking**] align public Wasmtime 49 package contracts ([#982](https://github.com/isac322/cc-lb/pull/982))
