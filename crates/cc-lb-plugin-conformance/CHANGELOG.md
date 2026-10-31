@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.3.0...cc-lb-plugin-conformance-v0.4.0) - 2026-10-31
+
+### Added
+
+- [**breaking**] add native OpenAI Responses and Gemini proxy lifecycles ([#969](https://github.com/isac322/cc-lb/pull/969))
+
+### Fixed
+
+- *(plugins)* [**breaking**] align public Wasmtime 49 package contracts ([#982](https://github.com/isac322/cc-lb/pull/982))
 ### Breaking
 
 - Rebuild conformance integrations against `cc-lb-runtime-wasmtime` 0.3.0 and Wasmtime 49: its public APIs expose `HotEngineConfig`, `ModuleInspection`, and `&WasmtimeRuntime`; the latter's engine, linker, admission, and `PluginCell::instance_pre` surfaces carry Wasmtime 49 type identity.
