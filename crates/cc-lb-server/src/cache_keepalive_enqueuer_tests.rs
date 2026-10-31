@@ -403,20 +403,24 @@ async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_s
     let replica_b = Arc::new(replica_b);
     let start_barrier = Arc::new(tokio::sync::Barrier::new(2));
     let cancel_done_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let stale_enqueue_ticket = replica_a
+        .observe_session_generation("session-hash")
+        .await
+        .expect("replica a observes active generation 2");
+    let cancel_ticket = replica_b
+        .observe_session_generation("session-hash")
+        .await
+        .expect("replica b observes active generation 2");
     let a_task = {
         let replica_a = Arc::clone(&replica_a);
         let start_barrier = Arc::clone(&start_barrier);
         let cancel_done_barrier = Arc::clone(&cancel_done_barrier);
         tokio::spawn(async move {
-            let observed = replica_a
-                .observe_session_generation("session-hash")
-                .await
-                .expect("observe active generation 2");
             start_barrier.wait().await;
             cancel_done_barrier.wait().await;
             let mut req = enqueue_request();
             req.cache_anchor_age = std::time::Duration::ZERO;
-            req.expected_generation = observed;
+            req.expected_generation = stale_enqueue_ticket;
             replica_a
                 .enqueue_cache_keepalive(req)
                 .await
@@ -428,16 +432,12 @@ async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_s
         let start_barrier = Arc::clone(&start_barrier);
         let cancel_done_barrier = Arc::clone(&cancel_done_barrier);
         tokio::spawn(async move {
-            let observed = replica_b
-                .observe_session_generation("session-hash")
-                .await
-                .expect("observe active generation 2");
             start_barrier.wait().await;
             replica_b
                 .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                     session_key_hash: "session-hash".to_owned(),
                     reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
-                    expected_generation: observed,
+                    expected_generation: cancel_ticket,
                     cache_anchor_age: std::time::Duration::ZERO,
                 })
                 .await
