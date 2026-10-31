@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [2.1.0] - 2026-10-30
+## [2.1.0] - 2026-10-31
 
 ### Added
 
@@ -43,6 +43,11 @@ All notable changes to this project will be documented in this file.
 - TLS trust changes with the dependency update: `webpki-roots` removes the emSign ECC Root CA G3 and the C1/C3 roots, and `rustls-webpki` rejects distrusted emSign intermediate keys. Some certificate chains may therefore fail TLS validation.
 
 - Updated `ctutils` from `0.4.2` to `0.4.5` for RUSTSEC-2026-0385, including constant-time mask generation and comparison hardening. The unused Wasmtime global disk-cache feature was removed, and Tokio and zstd moved to their RustSec-fixed release lines.
+
+### Upgrade notes
+
+- Back up the database before upgrading. SQLite migrations `0100`–`0101` and PostgreSQL migrations `0143`–`0144` are forward-only; an older binary cannot run against the upgraded database. To roll back, restore a pre-upgrade backup.
+- Building from source now requires Rust `1.99.1` or newer.
 
 ## [2.0.2] - 2026-10-16
 
