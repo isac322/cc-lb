@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 pub enum ThinkingModelRule {
     Only,
     BetweenTools,
+    AdaptiveEnabledDisabled,
     Disabled,
 }
 
@@ -17,6 +18,7 @@ pub fn model_thinking_rule(model: &str) -> Option<ThinkingModelRule> {
     match model {
         "claude-opus-5-5" => Some(ThinkingModelRule::Only),
         "claude-sonnet-5-5" => Some(ThinkingModelRule::BetweenTools),
+        "claude-opus-4-6" | "claude-sonnet-4-6" => Some(ThinkingModelRule::AdaptiveEnabledDisabled),
         "claude-haiku-5-5" | "claude-opus-5" => Some(ThinkingModelRule::Disabled),
         _ => None,
     }
@@ -36,6 +38,41 @@ pub fn validate_messages_request(value: &Value, headers: &HeaderMap) -> Result<(
         .get("max_tokens")
         .and_then(Value::as_u64)
         .ok_or_else(|| "max_tokens must be a non-negative integer".to_owned())?;
+    if max_tokens == 0 {
+        // Anthropic prompt caching limitations:
+        // https://platform.claude.com/docs/en/build-with-claude/prompt-caching#limitations
+        // (primary-source copy: /tmp/i988/caching.md:1547-1556)
+        // max_tokens=0 rejects stream=true, enabled thinking, structured outputs,
+        // and forced tool_choice variants. The existing pre-warming contract
+        // additionally requires stream to be omitted entirely.
+        if object.get("stream").is_some() {
+            return Err("renewal requests must omit stream".to_owned());
+        }
+        if object
+            .get("thinking")
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str)
+            == Some("enabled")
+        {
+            return Err("max_tokens=0 does not support thinking.type=enabled".to_owned());
+        }
+        if object
+            .get("output_config")
+            .and_then(|config| config.get("format"))
+            .is_some()
+        {
+            return Err("max_tokens=0 does not support output_config.format".to_owned());
+        }
+        if object
+            .get("tool_choice")
+            .and_then(|choice| choice.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|kind| matches!(kind, "tool" | "any"))
+        {
+            return Err("max_tokens=0 does not support forced tool_choice".to_owned());
+        }
+        validate_breakpoints(value)?;
+    }
     validate_thinking(
         object.get("thinking"),
         model,
@@ -46,13 +83,6 @@ pub fn validate_messages_request(value: &Value, headers: &HeaderMap) -> Result<(
     validate_effort(object.get("output_config"))?;
     validate_tool_choice(object.get("tool_choice"))?;
     validate_messages(object.get("messages"))?;
-    if max_tokens == 0 {
-        // /en/build-with-claude/prompt-caching, Pre-warming: max_tokens=0, non-streaming.
-        if object.get("stream").is_some() {
-            return Err("renewal requests must omit stream".to_owned());
-        }
-        validate_breakpoints(value)?;
-    }
     Ok(())
 }
 
@@ -285,6 +315,9 @@ fn validate_thinking(
         {
             return Err(format!("{model} rejects {kind} thinking"));
         }
+        Some(ThinkingModelRule::AdaptiveEnabledDisabled) if kind == "between_tools" => {
+            return Err(format!("{model} rejects between_tools thinking"));
+        }
         Some(ThinkingModelRule::Disabled)
             if kind != "adaptive" && !(kind == "disabled" && effort_allows_disabled(effort)) =>
         {
@@ -512,6 +545,69 @@ mod tests {
 
     fn base(thinking: Value) -> Value {
         json!({"model":"claude-opus-5-5","max_tokens":4096,"thinking":thinking,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]})
+    }
+    fn base_for_model(model: &str, max_tokens: u64, thinking: Value) -> Value {
+        json!({
+            "model": model,
+            "max_tokens": max_tokens,
+            "thinking": thinking,
+            "messages": [{"role":"user","content":[{"type":"text","text":"hi"}]}]
+        })
+    }
+
+    fn apply_zero_token_case(value: &mut Value, case: usize) {
+        match case {
+            0 => value["stream"] = json!(true),
+            1 => value["thinking"] = json!({"type":"enabled","budget_tokens":1024}),
+            2 => value["output_config"] = json!({"format":{"type":"json_schema"}}),
+            3 => value["tool_choice"] = json!({"type":"any"}),
+            _ => unreachable!("fixed self-test case"),
+        }
+    }
+
+    #[test]
+    fn zero_token_limitations_reject_and_live_bodies_accept() {
+        for (name, case) in [
+            ("stream", 0),
+            ("enabled thinking", 1),
+            ("structured output", 2),
+            ("forced any tool", 3),
+        ] {
+            let mut renewal = base_for_model("claude-opus-4-6", 0, json!({"type":"adaptive"}));
+            apply_zero_token_case(&mut renewal, case);
+            assert!(
+                validate_messages_request(&renewal, &headers(false)).is_err(),
+                "{name} must be rejected for max_tokens=0"
+            );
+
+            renewal["max_tokens"] = json!(4096);
+            assert!(
+                validate_messages_request(&renewal, &headers(false)).is_ok(),
+                "{name} must be accepted for live traffic"
+            );
+        }
+    }
+
+    #[test]
+    fn four_six_models_accept_adaptive_enabled_disabled_and_reject_between_tools() {
+        for model in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            for thinking in [
+                json!({"type":"adaptive"}),
+                json!({"type":"enabled","budget_tokens":1024}),
+                json!({"type":"disabled"}),
+            ] {
+                let value = base_for_model(model, 4096, thinking.clone());
+                assert!(
+                    validate_messages_request(&value, &headers(false)).is_ok(),
+                    "{model} should accept {thinking}"
+                );
+            }
+            let value = base_for_model(model, 4096, json!({"type":"between_tools"}));
+            assert!(
+                validate_messages_request(&value, &headers(false)).is_err(),
+                "{model} should reject between_tools"
+            );
+        }
     }
 
     #[test]

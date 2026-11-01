@@ -119,15 +119,28 @@ async fn run_wall_clock(backend: Backend, lock_delay_bound_secs: i64) {
     let lock_at = timing
         .lock_at
         .expect("locked cache keepalive job has lock_at");
-    let lock_delay = lock_at - run_at;
-    eprintln!(
-        "wall-clock {backend:?}: lock_at-run_at={lock_delay}s \
-         (run_at={run_at}, lock_at={lock_at})"
-    );
-    assert!(
-        (0..=lock_delay_bound_secs).contains(&lock_delay),
-        "lock_at - run_at must be between 0 and {lock_delay_bound_secs}s, got {lock_delay}s"
-    );
+    if backend == Backend::Postgres {
+        let lock_delay_ms = lock_at - run_at;
+        eprintln!(
+            "wall-clock {backend:?}: lock_at-run_at={lock_delay_ms}ms \
+             (run_at={run_at}, lock_at={lock_at})"
+        );
+        assert!(
+            (0..=lock_delay_bound_secs * 1_000).contains(&lock_delay_ms),
+            "lock_at - run_at must be between 0 and {}ms, got {lock_delay_ms}ms",
+            lock_delay_bound_secs * 1_000
+        );
+    } else {
+        let lock_delay = lock_at - run_at;
+        eprintln!(
+            "wall-clock {backend:?}: lock_at-run_at={lock_delay}s \
+             (run_at={run_at}, lock_at={lock_at})"
+        );
+        assert!(
+            (0..=lock_delay_bound_secs).contains(&lock_delay),
+            "lock_at - run_at must be between 0 and {lock_delay_bound_secs}s, got {lock_delay}s"
+        );
+    }
 
     // This is the sole bounded wait for the renewal attempt after scheduler
     // latency has been measured. Rejected attempts are still observable.
