@@ -1,5 +1,6 @@
 #![cfg(feature = "postgres")]
 
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
