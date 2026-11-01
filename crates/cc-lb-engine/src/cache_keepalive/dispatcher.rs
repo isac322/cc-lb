@@ -209,13 +209,18 @@ fn resolve_keepalive_url(
     snapshot: &RequestSnapshot,
     upstream: &UpstreamRecord,
 ) -> Result<Url, String> {
-    let Some(base_url) = upstream.base_url.as_ref() else {
-        return Ok(snapshot.url.clone());
+    let mut resolved = if let Some(base_url) = upstream.base_url.as_ref() {
+        cc_lb_upstream::upstream_request_url(base_url, snapshot.url.path(), snapshot.url.query())
+    } else {
+        snapshot.url.clone()
     };
-    let mut resolved = base_url
-        .join(snapshot.url.path())
-        .map_err(|source| format!("resolve keep-alive url: {source}"))?;
-    resolved.set_query(snapshot.url.query());
+    if upstream.kind == UpstreamKind::AnthropicOauth
+        && !resolved
+            .query_pairs()
+            .any(|(key, value)| key == "beta" && value == "true")
+    {
+        resolved.query_pairs_mut().append_pair("beta", "true");
+    }
     Ok(resolved)
 }
 

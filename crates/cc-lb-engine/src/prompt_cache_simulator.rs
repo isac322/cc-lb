@@ -1262,6 +1262,59 @@ mod tests {
     }
 
     #[test]
+    fn keepalive_disabled_thinking_splits_prefix_without_moving_effort_salt() {
+        let base = json!({
+            "model": "claude-opus-5-5",
+            "output_config": {"effort": "medium"},
+            "tools": [{
+                "name": "lookup",
+                "description": "lookup",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "system": [{
+                "type": "text",
+                "text": "system",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "message",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let mut adaptive = base.clone();
+        adaptive["thinking"] = json!({
+            "type": "adaptive",
+            "display": "summarized"
+        });
+        let mut disabled = base.clone();
+        disabled["thinking"] = json!({"type": "disabled"});
+
+        let adaptive = analyze_v3_prompt_cache(&adaptive, canonical_model_id("claude-opus-5-5"));
+        let disabled = analyze_v3_prompt_cache(&disabled, canonical_model_id("claude-opus-5-5"));
+        let omitted = analyze_v3_prompt_cache(&base, canonical_model_id("claude-opus-5-5"));
+        let prefix_keys = |analysis: &super::V3PromptCacheAnalysis| {
+            analysis
+                .breakpoints
+                .iter()
+                .map(|breakpoint| breakpoint.prefix_key.clone())
+                .collect::<Vec<_>>()
+        };
+        let adaptive_keys = prefix_keys(&adaptive);
+        let disabled_keys = prefix_keys(&disabled);
+        let omitted_keys = prefix_keys(&omitted);
+
+        assert_eq!(adaptive_keys[0], disabled_keys[0]);
+        assert_eq!(adaptive_keys[1], disabled_keys[1]);
+        assert_ne!(adaptive_keys[2], disabled_keys[2]);
+        assert_ne!(disabled_keys[2], omitted_keys[2]);
+    }
+
+    #[test]
     fn fast_speed_is_hash_neutral_when_model_does_not_honor_it() {
         let omitted = json!({
             "model": "claude-opus-4-6",

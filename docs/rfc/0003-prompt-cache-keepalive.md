@@ -161,8 +161,8 @@ Anthropic rejects that pre-warm form when `stream: true`, extended thinking
 or `tool_choice` of type `tool` or `any` is present, and it rejects the form
 inside Message Batches. The builder removes `stream`, removes
 `output_config.format`, coerces the incompatible tool choices to `auto`, and
-coerces any `thinking` object to `type: "disabled"` while removing
-`budget_tokens`.
+replaces any thinking object with `{"type": "disabled"}` so no enabled or
+adaptive thinking fields remain.
 
 The messages-scoped thinking salt keeps this thinking-disabled pre-warm
 prefix distinct from real thinking-enabled traffic. The probe can therefore

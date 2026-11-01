@@ -183,14 +183,15 @@ impl RequestSnapshot {
 /// Coercing any `thinking` object to `disabled` is deliberate: `max_tokens: 0` requires it.
 /// The messages-scoped thinking salt keeps the resulting prefix distinct from real
 /// thinking-enabled traffic, so it cannot fabricate a warm message-tier entry.
+/// Non-object `thinking` values are left unchanged for compatibility with opaque payloads.
 fn transform_for_keepalive(map: &mut Map<String, Value>) {
     map.insert("max_tokens".into(), Value::from(0));
     map.remove("stream");
     if let Some(thinking) = map.get_mut("thinking")
         && let Some(thinking_map) = thinking.as_object_mut()
     {
+        thinking_map.clear();
         thinking_map.insert("type".into(), Value::String("disabled".into()));
-        thinking_map.remove("budget_tokens");
     }
     if let Some(output_config) = map.get_mut("output_config")
         && let Some(output_map) = output_config.as_object_mut()
@@ -465,10 +466,7 @@ mod tests {
         let round: Value = serde_json::from_slice(&new_body).unwrap();
         assert_eq!(round.get("max_tokens"), Some(&Value::from(0)));
         assert!(round.get("stream").is_none());
-        assert_eq!(
-            round.get("thinking").unwrap().get("type").unwrap(),
-            &Value::String("disabled".into()),
-        );
+        assert_eq!(round.get("thinking"), Some(&json!({"type": "disabled"})));
         assert!(round.get("output_config").unwrap().get("format").is_none());
         assert_eq!(
             round.get("tool_choice").unwrap().get("type").unwrap(),
@@ -479,6 +477,122 @@ mod tests {
             round.get("messages"),
             Some(&json!([{"role": "user", "content": "."}]))
         );
+    }
+
+    #[test]
+    fn build_keepalive_body_collapses_thinking_and_keeps_effort() {
+        let original = json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 8193,
+            "stream": true,
+            "thinking": {
+                "type": "adaptive",
+                "display": "summarized",
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+            },
+            "output_config": {
+                "effort": "medium",
+                "format": {"type": "json_schema"}
+            },
+            "tool_choice": {"type": "tool", "name": "bash"},
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "cached",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let snapshot = empty_snapshot(Bytes::from(serde_json::to_vec(&original).unwrap()));
+
+        let round: Value =
+            serde_json::from_slice(&snapshot.build_keepalive_body().unwrap()).unwrap();
+
+        assert_eq!(round["thinking"], json!({"type": "disabled"}));
+        assert_eq!(round["output_config"], json!({"effort": "medium"}));
+        assert_eq!(round["max_tokens"], json!(0));
+        assert!(round.get("stream").is_none());
+        assert_eq!(round["tool_choice"], json!({"type": "auto"}));
+    }
+
+    #[test]
+    fn build_keepalive_body_leaves_non_object_thinking() {
+        for thinking in [Value::Null, Value::String("adaptive".to_owned())] {
+            let original = json!({
+                "model": "claude-opus-5-5",
+                "thinking": thinking,
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "cached",
+                        "cache_control": {"type": "ephemeral"}
+                    }]
+                }]
+            });
+            let snapshot = empty_snapshot(Bytes::from(serde_json::to_vec(&original).unwrap()));
+
+            let round: Value =
+                serde_json::from_slice(&snapshot.build_keepalive_body().unwrap()).unwrap();
+
+            assert_eq!(round["thinking"], original["thinking"]);
+        }
+    }
+
+    #[test]
+    fn capture_preserves_thinking_object_for_later_dispatch() {
+        let original = json!({
+            "model": "claude-opus-5-5",
+            "thinking": {
+                "type": "adaptive",
+                "display": "summarized",
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+            },
+            "output_config": {
+                "effort": "medium",
+                "format": {"type": "json_schema"}
+            },
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "cached",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let body = Bytes::from(serde_json::to_vec(&original).unwrap());
+        let snapshot = RequestSnapshot::capture(
+            "https://api.anthropic.com/v1/messages".parse().unwrap(),
+            Method::POST,
+            HeaderMap::new(),
+            body,
+            Uuid::nil(),
+            CacheTtl::Ttl5m,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let captured: Value = serde_json::from_slice(&snapshot.body).unwrap();
+        assert_eq!(captured["thinking"], original["thinking"]);
+        assert_eq!(
+            captured["output_config"]["format"],
+            original["output_config"]["format"]
+        );
+
+        let round = RequestSnapshot::from_persisted(snapshot.to_persisted()).unwrap();
+        let persisted: Value = serde_json::from_slice(&round.body).unwrap();
+        assert_eq!(persisted["thinking"], original["thinking"]);
+        assert_eq!(
+            persisted["output_config"]["format"],
+            original["output_config"]["format"]
+        );
+
+        let keepalive: Value =
+            serde_json::from_slice(&round.build_keepalive_body().unwrap()).unwrap();
+        assert_eq!(keepalive["thinking"], json!({"type": "disabled"}));
+        assert_eq!(keepalive["output_config"], json!({"effort": "medium"}));
     }
 
     #[test]

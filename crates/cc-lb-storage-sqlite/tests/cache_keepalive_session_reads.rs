@@ -216,6 +216,7 @@ async fn lists_frozen_session_and_decision_projection_rows() {
             &capped.session_key_hash,
             capped.generation,
             CacheKeepaliveTerminalReason::MaxRefreshes,
+            None,
             1_730_000_002,
         )
         .await
@@ -234,6 +235,7 @@ async fn lists_frozen_session_and_decision_projection_rows() {
             &expired.session_key_hash,
             expired.generation,
             CacheKeepaliveTerminalReason::Expired,
+            None,
             1_730_000_001,
         )
         .await
@@ -251,6 +253,7 @@ async fn lists_frozen_session_and_decision_projection_rows() {
             &max_duration.session_key_hash,
             max_duration.generation,
             CacheKeepaliveTerminalReason::MaxDuration,
+            None,
             1_730_000_000,
         )
         .await
@@ -397,6 +400,73 @@ async fn lists_frozen_session_and_decision_projection_rows() {
             expected_ids
         );
     }
+}
+
+#[tokio::test]
+async fn terminal_error_is_listed_and_cleared_after_real_request() {
+    let (_temp_dir, storage) = storage().await;
+    let record = storage
+        .replace_from_real_request(&request(
+            "terminal-error-session",
+            1_730_000_010,
+            "dispatch failed",
+        ))
+        .await
+        .expect("insert session");
+    storage
+        .mark_cache_keepalive_terminal(
+            &record.session_key_hash,
+            record.generation,
+            CacheKeepaliveTerminalReason::DispatchError,
+            Some("status=400 body=invalid"),
+            1_730_000_010,
+        )
+        .await
+        .expect("mark terminal error");
+
+    let filtered = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            principal_id: PRINCIPAL_ID.to_owned(),
+            horizon_start_ms: None,
+            filter: CacheKeepaliveSessionFilter::Error,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .expect("list terminal errors");
+    assert_eq!(
+        filtered
+            .rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["terminal-error-session"]
+    );
+    assert_eq!(
+        filtered.rows[0].error.as_deref(),
+        Some("status=400 body=invalid")
+    );
+
+    let replaced = storage
+        .replace_from_real_request(&request(
+            "terminal-error-session",
+            1_730_000_020,
+            "recovered",
+        ))
+        .await
+        .expect("replace recovered session");
+    assert_eq!(replaced.error, None);
+    let cleared = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            principal_id: PRINCIPAL_ID.to_owned(),
+            horizon_start_ms: None,
+            filter: CacheKeepaliveSessionFilter::Error,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .expect("list after recovery");
+    assert!(cleared.rows.is_empty());
 }
 
 #[tokio::test]

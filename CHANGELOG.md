@@ -3,6 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Fixed
+
+- Prompt-cache keep-alive renewals now replace the entire `thinking` object with `{"type": "disabled"}`, include `beta=true` on Anthropic OAuth renewal URLs, and persist terminal failure messages in `cache_keepalive_sessions.error` while resetting `enqueue_state` to `pending`.
 
 ## [2.1.0] - 2026-10-31
 

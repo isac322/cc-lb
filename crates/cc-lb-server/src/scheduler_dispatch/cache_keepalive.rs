@@ -43,7 +43,7 @@ impl SchedulerDispatch {
 
         let now = unix_secs(self.clock.now());
         if now >= record.expires_at_unix_secs {
-            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Expired)
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Expired, None)
                 .await?;
             return Ok(JobOutcome::Done);
         }
@@ -61,7 +61,7 @@ impl SchedulerDispatch {
         }
 
         if !self.cache_keepalive_still_authorized(&record) {
-            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled)
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled, None)
                 .await?;
             return Ok(JobOutcome::Done);
         }
@@ -76,10 +76,11 @@ impl SchedulerDispatch {
             &record.encrypted_payload,
         ) {
             Ok(payload) => payload,
-            Err(_) => {
+            Err(error) => {
                 self.mark_cache_keepalive_terminal(
                     &job,
                     CacheKeepaliveTerminalReason::DecryptFailed,
+                    Some(&error.to_string()),
                 )
                 .await?;
                 return Ok(JobOutcome::Done);
@@ -88,10 +89,11 @@ impl SchedulerDispatch {
         let needs_payload_rewrite = decoded_payload.needs_rewrite;
         let snapshot = match RequestSnapshot::from_persisted(decoded_payload.snapshot) {
             Ok(snapshot) => snapshot,
-            Err(_) => {
+            Err(error) => {
                 self.mark_cache_keepalive_terminal(
                     &job,
                     CacheKeepaliveTerminalReason::DecryptFailed,
+                    Some(&error.to_string()),
                 )
                 .await?;
                 return Ok(JobOutcome::Done);
@@ -100,10 +102,11 @@ impl SchedulerDispatch {
 
         let reservation = match self.reserve_cache_keepalive(&record, &snapshot).await {
             Ok(reservation) => reservation,
-            Err(_) => {
+            Err(error) => {
                 self.mark_cache_keepalive_terminal(
                     &job,
                     CacheKeepaliveTerminalReason::DispatchError,
+                    Some(&error.to_string()),
                 )
                 .await?;
                 return Ok(JobOutcome::Done);
@@ -119,7 +122,7 @@ impl SchedulerDispatch {
             )
             .await;
         if !self.cache_keepalive_still_authorized(&record) {
-            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled)
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled, None)
                 .await?;
             return Ok(JobOutcome::Done);
         }
@@ -155,22 +158,28 @@ impl SchedulerDispatch {
                     "miss",
                 )
                 .await?;
-                self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::CacheMiss)
-                    .await?;
-                Ok(JobOutcome::Done)
-            }
-            DispatchOutcome::UnsupportedProvider(_) => {
                 self.mark_cache_keepalive_terminal(
                     &job,
-                    CacheKeepaliveTerminalReason::UnsupportedProvider,
+                    CacheKeepaliveTerminalReason::CacheMiss,
+                    None,
                 )
                 .await?;
                 Ok(JobOutcome::Done)
             }
-            DispatchOutcome::Error(_) => {
+            DispatchOutcome::UnsupportedProvider(error) => {
+                self.mark_cache_keepalive_terminal(
+                    &job,
+                    CacheKeepaliveTerminalReason::UnsupportedProvider,
+                    Some(error.as_str()),
+                )
+                .await?;
+                Ok(JobOutcome::Done)
+            }
+            DispatchOutcome::Error(error) => {
                 self.mark_cache_keepalive_terminal(
                     &job,
                     CacheKeepaliveTerminalReason::DispatchError,
+                    Some(error.as_str()),
                 )
                 .await?;
                 Ok(JobOutcome::Done)
@@ -262,13 +271,21 @@ impl SchedulerDispatch {
     ) -> SchedulerResult<JobOutcome> {
         let now = unix_secs(self.clock.now());
         if record.refresh_count.saturating_add(1) >= job.max_refreshes {
-            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::MaxRefreshes)
-                .await?;
+            self.mark_cache_keepalive_terminal(
+                &job,
+                CacheKeepaliveTerminalReason::MaxRefreshes,
+                None,
+            )
+            .await?;
             return Ok(JobOutcome::Done);
         }
         if now.saturating_sub(record.first_scheduled_at_unix_secs) >= job.max_total_duration_secs {
-            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::MaxDuration)
-                .await?;
+            self.mark_cache_keepalive_terminal(
+                &job,
+                CacheKeepaliveTerminalReason::MaxDuration,
+                None,
+            )
+            .await?;
             return Ok(JobOutcome::Done);
         }
 
@@ -350,11 +367,20 @@ impl SchedulerDispatch {
                 Ok(JobOutcome::Done)
             }
             Err(error) => {
+                tracing::warn!(
+                    target: "cache_keepalive",
+                    session_key_hash = %updated.session_key_hash,
+                    generation = updated.generation,
+                    terminal_reason = CacheKeepaliveTerminalReason::DispatchError.as_str(),
+                    error = %error,
+                    "cache keepalive reschedule enqueue failed"
+                );
                 CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
                     self.storage.as_ref(),
                     &updated.session_key_hash,
                     updated.generation,
                     CacheKeepaliveTerminalReason::DispatchError,
+                    Some(&error.to_string()),
                     now,
                 )
                 .await
@@ -368,12 +394,26 @@ impl SchedulerDispatch {
         &self,
         job: &CacheKeepaliveJob,
         reason: CacheKeepaliveTerminalReason,
+        error: Option<&str>,
     ) -> SchedulerResult<bool> {
+        if let Some(error_text) = error {
+            tracing::warn!(
+                target: "cache_keepalive",
+                session_key_hash = %job.session_key_hash,
+                generation = job.generation,
+                principal_id = %job.principal_id,
+                upstream_id = %job.upstream_id,
+                terminal_reason = reason.as_str(),
+                error = %error_text,
+                "cache keepalive renewal terminated with error"
+            );
+        }
         CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
             self.storage.as_ref(),
             &job.session_key_hash,
             job.generation,
             reason,
+            error,
             unix_secs(self.clock.now()),
         )
         .await

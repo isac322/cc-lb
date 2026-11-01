@@ -78,6 +78,7 @@ struct MockEvent {
     cached_tokens: u64,
     hit: bool,
     synthetic: bool,
+    effort: Option<String>,
 }
 
 type CacheKey = (String, String, String);
@@ -87,6 +88,7 @@ struct MockAnthropic {
     clock: Arc<TestClock>,
     cache: Arc<Mutex<HashMap<CacheKey, CacheEntry>>>,
     events: Arc<Mutex<Vec<MockEvent>>>,
+    next_renewal_error: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -100,7 +102,12 @@ impl MockAnthropic {
             clock,
             cache: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(Vec::new())),
+            next_renewal_error: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn fail_next_renewal(&self, message: &str) {
+        *lock(&self.next_renewal_error) = Some(message.to_owned());
     }
 
     fn events(&self) -> Vec<MockEvent> {
@@ -151,10 +158,34 @@ async fn mock_messages(State(mock): State<MockAnthropic>, request: Request) -> R
         assert!(value.get("stream").is_none(), "keepalive removed stream");
         assert_eq!(value.get("max_tokens"), Some(&json!(0)));
         if let Some(thinking) = value.get("thinking") {
-            assert_eq!(
-                thinking.get("type").and_then(Value::as_str),
-                Some("disabled")
-            );
+            if thinking != &json!({"type": "disabled"}) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "extra fields are not permitted on disabled thinking"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if synthetic {
+        if let Some(message) = lock(&mock.next_renewal_error).take() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": message
+                    }
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -191,6 +222,11 @@ async fn mock_messages(State(mock): State<MockAnthropic>, request: Request) -> R
         cached_tokens: cached_read.max(cached_create),
         hit,
         synthetic,
+        effort: value
+            .get("output_config")
+            .and_then(|config| config.get("effort"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     });
 
     let tail_text = value
@@ -615,7 +651,93 @@ fn request_body(
     }
     serde_json::to_vec(&value).expect("request body")
 }
+fn adaptive_thinking_request_body(
+    target_size: usize,
+    prefix_label: &str,
+    prefix_tokens: u64,
+    tool: &str,
+    stop_reason: &str,
+) -> Vec<u8> {
+    let mut value: Value = serde_json::from_slice(&request_body(
+        target_size,
+        prefix_label,
+        prefix_tokens,
+        tool,
+        stop_reason,
+        false,
+    ))
+    .expect("adaptive request JSON");
+    value["thinking"] = json!({
+        "type": "adaptive",
+        "display": "summarized",
+        "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+    });
+    value["output_config"] = json!({"effort": "medium"});
+    serde_json::to_vec(&value).expect("adaptive request body")
+}
 
+#[tokio::test]
+async fn adaptive_thinking_session_renews_with_disabled_thinking_and_preserves_effort() {
+    let harness = Harness::new(8_388_608).await;
+    let session = "00000000-0000-7000-8000-000000000003";
+    let session_key_hash = harness.session_key_hash(session, None);
+    let first = harness
+        .post(
+            adaptive_thinking_request_body(
+                355_453,
+                "adaptive-thinking",
+                83_900,
+                "bash",
+                "tool_use",
+            ),
+            session,
+            None,
+        )
+        .await;
+    assert_eq!(first["stop_reason"], "tool_use");
+    harness
+        .wait_for_enqueued_generation(&session_key_hash, 1)
+        .await;
+    harness
+        .advance_and_dispatch_due(Duration::from_secs(270))
+        .await;
+    let renewal = harness.mock.last("renewal");
+    assert!(renewal.hit);
+    assert_eq!(renewal.effort.as_deref(), Some("medium"));
+    let events = harness.mock.events();
+    assert!(events.iter().any(|event| event.synthetic && event.hit));
+    let (status, error, enqueue_state) = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT status, error, enqueue_state FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+    )
+    .bind(&session_key_hash)
+    .fetch_one(harness.storage.pool())
+    .await
+    .expect("load active adaptive session");
+    assert_eq!(status, "active");
+    assert!(error.is_none());
+    assert_eq!(enqueue_state, "enqueued");
+
+    harness
+        .mock
+        .fail_next_renewal("renewal upstream rejected display");
+    harness
+        .advance_and_dispatch_due(Duration::from_secs(270))
+        .await;
+    let (status, error, enqueue_state) = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT status, error, enqueue_state FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+    )
+    .bind(&session_key_hash)
+    .fetch_one(harness.storage.pool())
+    .await
+    .expect("load failed adaptive session");
+    assert_eq!(status, "terminal");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|value| value.contains("renewal upstream rejected display"))
+    );
+    assert_eq!(enqueue_state, "pending");
+}
 async fn settle() {
     for _ in 0..20 {
         sleep(Duration::from_millis(10)).await;

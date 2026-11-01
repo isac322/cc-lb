@@ -43,6 +43,13 @@ fn cache_keepalive_session_reads_postgres() {
 }
 
 #[test]
+fn terminal_error_is_listed_and_cleared_after_real_request() {
+    run_postgres_case("terminal error read model", |url| async move {
+        terminal_error_is_listed_and_cleared_after_real_request_case(&url).await
+    });
+}
+
+#[test]
 fn direct_lookup_returns_exact_session() {
     run_postgres_case("ST-01 direct session", |url| async move {
         direct_lookup_returns_exact_session_case(&url).await
@@ -439,6 +446,69 @@ async fn read_model_contract(url: &str) -> Result<()> {
             .await?
             .is_empty()
     );
+
+    fixture.drop_schema().await
+}
+
+async fn terminal_error_is_listed_and_cleared_after_real_request_case(url: &str) -> Result<()> {
+    let (fixture, storage) = initialized_storage(url).await?;
+    let record = storage
+        .replace_from_real_request(&request(
+            "terminal-error-session",
+            1_730_000_010,
+            "dispatch failed",
+        ))
+        .await?;
+    storage
+        .mark_cache_keepalive_terminal(
+            &record.session_key_hash,
+            record.generation,
+            CacheKeepaliveTerminalReason::DispatchError,
+            Some("status=400 body=invalid"),
+            1_730_000_010,
+        )
+        .await?;
+
+    let filtered = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            principal_id: PRINCIPAL_ID.to_owned(),
+            horizon_start_ms: None,
+            filter: CacheKeepaliveSessionFilter::Error,
+            cursor: None,
+            limit: 10,
+        })
+        .await?;
+    assert_eq!(
+        filtered
+            .rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["terminal-error-session"]
+    );
+    assert_eq!(
+        filtered.rows[0].error.as_deref(),
+        Some("status=400 body=invalid")
+    );
+
+    let replaced = storage
+        .replace_from_real_request(&request(
+            "terminal-error-session",
+            1_730_000_020,
+            "recovered",
+        ))
+        .await?;
+    assert_eq!(replaced.error, None);
+    let cleared = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            principal_id: PRINCIPAL_ID.to_owned(),
+            horizon_start_ms: None,
+            filter: CacheKeepaliveSessionFilter::Error,
+            cursor: None,
+            limit: 10,
+        })
+        .await?;
+    assert!(cleared.rows.is_empty());
 
     fixture.drop_schema().await
 }
@@ -1195,6 +1265,7 @@ async fn terminalize(
             &record.session_key_hash,
             record.generation,
             reason,
+            None,
             now_unix_secs,
         )
         .await?;

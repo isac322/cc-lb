@@ -186,7 +186,7 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
             now_unix_secs.saturating_sub(self.config.stale_lock_threshold_secs);
         let recovered = sqlx::query(
             "UPDATE cache_keepalive_sessions
-             SET status = 'terminal', terminal_reason = 'stale', running_since_unix_secs = NULL, updated_at = ?1
+             SET status = 'terminal', terminal_reason = 'stale', enqueue_state = 'pending', running_since_unix_secs = NULL, updated_at = ?1
              WHERE status = 'active'
                AND enqueue_state = 'running'
                AND running_since_unix_secs IS NOT NULL
@@ -394,7 +394,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
             now_unix_secs.saturating_sub(self.config.stale_lock_threshold_secs);
         let recovered = sqlx::query(
             "UPDATE cache_keepalive_sessions
-             SET status = 'terminal', terminal_reason = 'stale', running_since_unix_secs = NULL, updated_at = $1
+             SET status = 'terminal', terminal_reason = 'stale', enqueue_state = 'pending', running_since_unix_secs = NULL, updated_at = $1
              WHERE status = 'active'
                AND enqueue_state = 'running'
                AND running_since_unix_secs IS NOT NULL

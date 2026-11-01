@@ -22,16 +22,66 @@ use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::CronJob;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Limit,
-    LimitKind, RequestEventStore,
+    CacheKeepaliveEnqueueState, CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore,
+    CacheKeepaliveTerminalReason, Limit, LimitKind, RequestEventStore,
 };
 use serde_json::Value;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::field::{Field, Visit};
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt as _};
 
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 
 use self::support::{FailingPusher, Fixture};
+
+#[derive(Clone, Default)]
+struct CacheKeepaliveWarnCapture {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl<S> Layer<S> for CacheKeepaliveWarnCapture
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
+        if event.metadata().level() != &Level::WARN
+            || event.metadata().target() != "cache_keepalive"
+        {
+            return;
+        }
+        let mut visitor = CacheKeepaliveEventVisitor::default();
+        event.record(&mut visitor);
+        let fields = visitor
+            .fields
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.events
+            .lock()
+            .expect("warning capture lock")
+            .push(fields);
+    }
+}
+
+#[derive(Default)]
+struct CacheKeepaliveEventVisitor {
+    fields: Vec<(String, String)>,
+}
+
+impl Visit for CacheKeepaliveEventVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields
+            .push((field.name().to_owned(), format!("{value:?}")));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .push((field.name().to_owned(), value.to_owned()));
+    }
+}
 
 struct StaticRenewalDispatcher {
     finalization: Mutex<Option<RenewalFinalization>>,
@@ -919,7 +969,10 @@ async fn durable_cache_keepalive_job_reschedules_without_rewriting_payload() {
 
     let requests = fixture.http.requests.lock().expect("requests lock").clone();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].url, "http://fake-upstream.local/v1/messages");
+    assert_eq!(
+        requests[0].url,
+        "http://fake-upstream.local/v1/messages?beta=true"
+    );
     assert_eq!(requests[0].headers["x-api-key"], "sk-ant-rotated");
     assert_eq!(requests[0].headers["anthropic-version"], "2023-06-01");
     let body: Value = serde_json::from_slice(&requests[0].body).expect("body json");
@@ -1011,6 +1064,14 @@ async fn cache_keepalive_missing_accounting_key_terminalizes_without_dispatch() 
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("accounting key is unavailable"))
+    );
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::DispatchError)
@@ -1035,27 +1096,11 @@ async fn cache_keepalive_missing_accounting_key_terminalizes_without_dispatch() 
 #[tokio::test]
 async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
     let fixture = Fixture::new().await;
-    let key_store = KeyStore::new(fixture.storage.clone());
-    let (record, _) = key_store
-        .create(
-            "principal",
-            CreateParams {
-                label: "renewal accounting".to_owned(),
-                description: None,
-                expires_at_unix_secs: None,
-                limit_overrides: vec![Limit {
-                    kind: LimitKind::Requests,
-                    window_secs: 60,
-                    cap_micros: 0,
-                }],
-            },
-        )
-        .await
-        .expect("create accounting key");
+    let key_id = create_accounting_key(&fixture, LimitKind::Requests, 0).await;
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let mut request = fixture.enqueue_request();
-    request.accounting_key_id = Some(record.key_hash_b64);
+    request.accounting_key_id = Some(key_id);
     enqueuer
         .enqueue_cache_keepalive(request)
         .await
@@ -1076,6 +1121,16 @@ async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Requests")),
+        "unexpected reserve error: {:?}",
+        record.error
+    );
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::DispatchError)
@@ -1198,6 +1253,14 @@ async fn hit_reschedule_enqueue_failure_terminalizes_new_generation() {
         .expect("session exists");
     assert_eq!(record.generation, 2);
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("forced apalis enqueue failure"))
+    );
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::DispatchError)
@@ -1230,6 +1293,14 @@ async fn cache_keepalive_job_terminalizes_on_decrypt_failure() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("payload"))
+    );
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::DecryptFailed)
@@ -1265,6 +1336,16 @@ async fn cache_keepalive_job_terminalizes_on_deserialization_failure() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| !error.is_empty()),
+        "unexpected deserialization error: {:?}",
+        record.error
+    );
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::DecryptFailed)
@@ -1299,6 +1380,9 @@ async fn cache_keepalive_miss_terminalizes_session() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(record.error.is_none());
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::CacheMiss)
@@ -1330,6 +1414,14 @@ async fn cache_keepalive_unsupported_provider_terminalizes_session() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("AnthropicApiKey"))
+    );
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::UnsupportedProvider)
@@ -1367,10 +1459,72 @@ async fn cache_keepalive_dispatch_error_terminalizes_session() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("500"))
+    );
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::DispatchError)
     );
+}
+#[tokio::test]
+async fn cache_keepalive_dispatch_error_persists_message_and_logs_warning() {
+    let fixture = Fixture::new().await;
+    fixture.http.return_status(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({"error":"thinking disabled does not accept display"}),
+    );
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let capture = CacheKeepaliveWarnCapture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let outcome = fixture
+        .dispatch(pusher)
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch cache keepalive job");
+
+    assert!(matches!(outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    let expected_error =
+        r#"status=400 Bad Request body={"error":"thinking disabled does not accept display"}"#;
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains(expected_error))
+    );
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::DispatchError)
+    );
+    let events = capture.events.lock().expect("warning capture lock").clone();
+    assert!(events.iter().any(|event| {
+        event.contains("session_key_hash=session-hash")
+            && event.contains("generation=1")
+            && event.contains("terminal_reason=dispatch_error")
+            && event.contains("thinking disabled does not accept display")
+    }));
 }
 
 #[tokio::test]
@@ -1400,6 +1554,9 @@ async fn cache_keepalive_hit_terminalizes_when_max_refreshes_reached() {
         .expect("session exists");
     assert_eq!(record.generation, 1);
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(record.error.is_none());
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::MaxRefreshes)
@@ -1435,6 +1592,9 @@ async fn cache_keepalive_hit_terminalizes_when_max_duration_reached() {
         .expect("session exists");
     assert_eq!(record.generation, 1);
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(record.error.is_none());
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::MaxDuration)
@@ -1536,6 +1696,9 @@ async fn cache_keepalive_expired_session_terminalizes_before_dispatch() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(record.error.is_none());
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::Expired)
@@ -1570,6 +1733,9 @@ async fn cache_keepalive_revoked_principal_terminalizes_before_dispatch() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(record.error.is_none());
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::Cancelled)

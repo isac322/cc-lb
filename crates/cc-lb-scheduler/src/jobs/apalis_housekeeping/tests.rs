@@ -185,24 +185,26 @@ mod sqlite {
             } => assert_eq!(cache_keepalive_sessions_removed, 1),
             other => panic!("expected completed housekeeping, got {other:?}"),
         }
-        let stale: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, terminal_reason, running_since_unix_secs
+        let stale: (String, Option<String>, String, Option<i64>) = sqlx::query_as(
+            "SELECT status, terminal_reason, enqueue_state, running_since_unix_secs
              FROM cache_keepalive_sessions WHERE session_key_hash = 'stale-running'",
         )
         .fetch_one(&pool)
         .await?;
         assert_eq!(stale.0, "terminal");
         assert_eq!(stale.1.as_deref(), Some("stale"));
-        assert_eq!(stale.2, None);
-        let fresh: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, terminal_reason, running_since_unix_secs
+        assert_eq!(stale.2, "pending");
+        assert_eq!(stale.3, None);
+        let fresh: (String, Option<String>, String, Option<i64>) = sqlx::query_as(
+            "SELECT status, terminal_reason, enqueue_state, running_since_unix_secs
              FROM cache_keepalive_sessions WHERE session_key_hash = 'fresh-running'",
         )
         .fetch_one(&pool)
         .await?;
         assert_eq!(fresh.0, "active");
         assert_eq!(fresh.1, None);
-        assert_eq!(fresh.2, Some(i64::try_from(NOW_SECS - 10)?));
+        assert_eq!(fresh.2, "running");
+        assert_eq!(fresh.3, Some(i64::try_from(NOW_SECS - 10)?));
         let (job_status, lock_by, lock_at): (String, Option<String>, Option<i64>) = sqlx::query_as(
             "SELECT status, lock_by, lock_at FROM Jobs WHERE id = 'stale-keepalive-job'",
         )
@@ -493,24 +495,26 @@ mod postgres {
             } => assert_eq!(cache_keepalive_sessions_removed, 1),
             other => panic!("expected completed housekeeping, got {other:?}"),
         }
-        let stale: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, terminal_reason, running_since_unix_secs
+        let stale: (String, Option<String>, String, Option<i64>) = sqlx::query_as(
+            "SELECT status, terminal_reason, enqueue_state, running_since_unix_secs
              FROM cache_keepalive_sessions WHERE session_key_hash = 'stale-running'",
         )
         .fetch_one(pool)
         .await?;
         assert_eq!(stale.0, "terminal");
         assert_eq!(stale.1.as_deref(), Some("stale"));
-        assert_eq!(stale.2, None);
-        let fresh: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, terminal_reason, running_since_unix_secs
+        assert_eq!(stale.2, "pending");
+        assert_eq!(stale.3, None);
+        let fresh: (String, Option<String>, String, Option<i64>) = sqlx::query_as(
+            "SELECT status, terminal_reason, enqueue_state, running_since_unix_secs
              FROM cache_keepalive_sessions WHERE session_key_hash = 'fresh-running'",
         )
         .fetch_one(pool)
         .await?;
         assert_eq!(fresh.0, "active");
         assert_eq!(fresh.1, None);
-        assert_eq!(fresh.2, Some(i64::try_from(NOW_SECS - 10)?));
+        assert_eq!(fresh.2, "running");
+        assert_eq!(fresh.3, Some(i64::try_from(NOW_SECS - 10)?));
         let (job_status, lock_by, lock_at): (String, Option<String>, Option<DateTime<Utc>>) =
             sqlx::query_as(
                 "SELECT status, lock_by, lock_at FROM apalis.jobs WHERE id = 'stale-keepalive-job'",
