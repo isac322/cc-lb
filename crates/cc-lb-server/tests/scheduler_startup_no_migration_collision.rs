@@ -61,7 +61,7 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
     assert_eq!(main_jobs_table_count, 0);
 
     for table_name in ["Jobs", "Workers"] {
-        let exists: i64 = scheduler_sqlx::query_scalar(
+        let exists: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
         )
         .bind(table_name)

@@ -72,7 +72,7 @@ impl Fixture {
     async fn with_oauth_state_and_scheduler(
         oauth_state: MockOAuthState,
     ) -> (Self, cc_lb_scheduler::admin::SchedulerAdminHandle) {
-        let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await

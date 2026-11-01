@@ -225,8 +225,11 @@ mod postgres {
     struct FixedTicks(std::vec::IntoIter<DateTime<Utc>>);
 
     impl apalis_cron::Schedule<Utc> for FixedTicks {
-        fn next_tick(&mut self, _: &Utc) -> Option<DateTime<Utc>> {
-            self.0.next()
+        fn next_tick(&mut self, _: &Utc) -> Option<apalis_cron::Tick<Utc>> {
+            self.0
+                .next()
+                .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+                .map(apalis_cron::Tick::new)
         }
     }
 
@@ -254,13 +257,17 @@ mod postgres {
         };
         let database = format!("cclb_pol10_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new().connect(&admin_url).await?;
-        sqlx::query(&format!(r#"CREATE DATABASE "{database}""#))
-            .execute(&admin)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"CREATE DATABASE "{database}""#
+        )))
+        .execute(&admin)
+        .await?;
         let result = run(&admin_url, &database).await;
-        sqlx::query(&format!(r#"DROP DATABASE "{database}" WITH (FORCE)"#))
-            .execute(&admin)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DROP DATABASE "{database}" WITH (FORCE)"#
+        )))
+        .execute(&admin)
+        .await?;
         admin.close().await;
         result
     }
@@ -276,10 +283,8 @@ mod postgres {
         let start = Utc::now().timestamp();
         let mut producers = Vec::new();
         for pool in [&pool_a, &pool_b] {
-            let storage = apalis_postgres::PostgresStorage::<CronJob>::new_with_notify(
-                pool,
-                &apalis_postgres::Config::new(CRON_QUEUE),
-            );
+            let storage = apalis_postgres::PostgresStorage::<CronJob>::new(pool)
+                .with_config(apalis_postgres::Config::default().queue(CRON_QUEUE));
             let factory: fn(u64) -> CronJob = factory;
             producers.push(tokio::spawn(
                 CronWorkerBuilder::singleton_queue_factory(ticks(start), storage, factory)

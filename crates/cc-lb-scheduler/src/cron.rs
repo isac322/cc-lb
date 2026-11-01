@@ -6,23 +6,62 @@
 //! every replica to exactly one queued job per tick, so no external leader
 //! election is required. See `docs/scheduler.md` section 5 for details.
 
-use apalis_core::backend::pipe::{Pipe, PipeExt};
+use apalis_core::backend::ext::pipe::{Pipe, PipeError, PipeExt};
 use apalis_core::backend::{TaskSink, TaskSinkError};
 use apalis_core::task::builder::TaskBuilder;
 use apalis_cron::Schedule;
 use chrono::Utc;
+use futures_util::stream::BoxStream;
 use thiserror::Error;
 
-pub trait CronStreamPipeToStorageExt<Storage, Args, Ctx>: Sized {
-    fn pipe_to_storage(self, storage: Storage) -> Pipe<Self, Storage, Args, Ctx>;
+pub trait CronStreamPipeToStorageExt<Storage, Args>: Sized {
+    fn pipe_to_storage(
+        self,
+        storage: Storage,
+    ) -> Pipe<Storage, BoxStream<'static, Result<Args, PipeError>>>;
 }
 
-impl<Stream, Storage, Args, Ctx> CronStreamPipeToStorageExt<Storage, Args, Ctx> for Stream
+impl<Stream, Storage, Args> CronStreamPipeToStorageExt<Storage, Args> for Stream
 where
-    Stream: PipeExt<Storage, Args, Ctx>,
+    Storage: apalis_core::backend::Backend + Unpin + Send + 'static,
+    Stream: PipeExt<Storage, Args>,
+    Args: Send + 'static,
 {
-    fn pipe_to_storage(self, storage: Storage) -> Pipe<Self, Storage, Args, Ctx> {
+    fn pipe_to_storage(
+        self,
+        storage: Storage,
+    ) -> Pipe<Storage, BoxStream<'static, Result<Args, PipeError>>> {
         self.pipe_to(storage)
+    }
+}
+
+pub trait CronStorageError: std::fmt::Display {
+    fn is_unique_violation(&self) -> bool;
+}
+
+impl CronStorageError for sqlx::Error {
+    fn is_unique_violation(&self) -> bool {
+        matches!(self, Self::Database(db_err) if db_err.is_unique_violation())
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl CronStorageError for apalis_sqlite::Error {
+    fn is_unique_violation(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(sqlx::Error::Database(db_err)) if db_err.is_unique_violation()
+        )
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl CronStorageError for apalis_postgres::Error {
+    fn is_unique_violation(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(sqlx::Error::Database(db_err)) if db_err.is_unique_violation()
+        )
     }
 }
 
@@ -48,15 +87,15 @@ pub enum CronError {
     Enqueue { message: String },
 }
 
-pub struct WorkerBuilder<Job, S, Storage, JobFactory> {
+pub struct WorkerBuilder<Job, S, Storage, JobFactory, Kind = ()> {
     schedule: S,
     storage: Storage,
     job_factory: JobFactory,
     max_ticks: Option<usize>,
-    _job: std::marker::PhantomData<fn() -> Job>,
+    _job: std::marker::PhantomData<fn() -> (Job, Kind)>,
 }
 
-impl<Job, S, Storage, JobFactory> WorkerBuilder<Job, S, Storage, JobFactory> {
+impl<Job, S, Storage, JobFactory, Kind> WorkerBuilder<Job, S, Storage, JobFactory, Kind> {
     pub fn singleton_queue_factory(schedule: S, storage: Storage, job_factory: JobFactory) -> Self {
         Self {
             schedule,
@@ -74,12 +113,13 @@ impl<Job, S, Storage, JobFactory> WorkerBuilder<Job, S, Storage, JobFactory> {
     }
 }
 
-impl<Job, S, Storage, JobFactory> WorkerBuilder<Job, S, Storage, JobFactory>
+impl<Job, S, Storage, JobFactory, Kind> WorkerBuilder<Job, S, Storage, JobFactory, Kind>
 where
     Job: SingletonCronJob + Send + 'static,
     JobFactory: IntoJobFactory<Job>,
     S: Schedule<Utc> + Unpin + Send + 'static,
-    Storage: TaskSink<Job, Error = sqlx::Error> + Send + 'static,
+    Storage: TaskSink<Job, Kind> + Send + 'static,
+    Storage::Error: CronStorageError,
 {
     /// Runs the cron producer loop on every replica. Duplicate pushes from
     /// sibling replicas are absorbed by the storage-level unique index on
@@ -103,26 +143,23 @@ where
             let Some(tick) = self.schedule.next_tick(&Utc) else {
                 break;
             };
-            let wait = tick
-                .signed_duration_since(Utc::now())
-                .to_std()
+            let tick_secs = tick.get_timestamp();
+            let target = std::time::UNIX_EPOCH + std::time::Duration::from_secs(tick_secs);
+            let wait = target
+                .duration_since(std::time::SystemTime::now())
                 .unwrap_or_default();
             if !wait.is_zero() {
                 tokio::time::sleep(wait).await;
             }
-            let tick_secs = u64::try_from(tick.timestamp()).map_err(|_| CronError::Stream {
-                message: "cron tick timestamp is before the unix epoch".to_owned(),
-            })?;
             let job = self.job_factory.call(tick_secs);
             let kind = job.singleton_kind();
-            let task = TaskBuilder::<Job, Storage::Context, Storage::IdType>::new(job)
+            let task = TaskBuilder::new(job)
                 .run_at_timestamp(tick_secs)
-                .with_idempotency_key(format!("cron:{kind}:{tick_secs}"))
+                .idempotency_key(format!("cron:{kind}:{tick_secs}"))
                 .build();
             match self.storage.push_task(task).await {
                 Ok(()) => {}
-                Err(TaskSinkError::PushError(sqlx::Error::Database(db_err)))
-                    if db_err.is_unique_violation() => {}
+                Err(TaskSinkError::PushError(err)) if err.is_unique_violation() => {}
                 Err(error) => {
                     return Err(CronError::Enqueue {
                         message: error.to_string(),

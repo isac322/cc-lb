@@ -8,7 +8,7 @@ pub async fn scheduler_with_next_warmup(
     upstream_id: Uuid,
     clock: cc_lb_clock::ClockHandle,
 ) -> SchedulerAdminHandle {
-    let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
@@ -19,7 +19,7 @@ pub async fn scheduler_with_next_warmup(
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .expect("scheduler migrations initialize");
-    scheduler_sqlx::query(
+    sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
          VALUES (?1, 'next-warmup', ?2, 'Pending', 0, 3, ?3, ?4)",
     )

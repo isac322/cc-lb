@@ -16,8 +16,8 @@ sqlite = [
     "cc-lb-engine/sqlite",
     "dep:apalis-sqlite",
     "dep:cc-lb-scheduler",
-    "dep:scheduler-sqlx",
-    "scheduler-sqlx/sqlite",
+    "dep:sqlx",
+    "sqlx/sqlite",
 ]
 postgres = [
     "cc-lb-scheduler/postgres",
@@ -26,9 +26,8 @@ postgres = [
     "dep:apalis-postgres",
     "dep:cc-lb-scheduler",
     "dep:cc-lb-storage-postgres",
-    "dep:scheduler-sqlx",
     "dep:sqlx",
-    "scheduler-sqlx/postgres",
+    "sqlx/postgres",
 ]
 
 [[bin]]
@@ -41,8 +40,8 @@ path = "tests/all.rs"
 
 [dependencies]
 anyhow.workspace = true
-apalis-postgres = { version = "^1.0.0-rc.8", optional = true }
-apalis-sqlite = { version = "^1.0.0-rc.8", optional = true }
+apalis-postgres = { version = "1.0.0", optional = true }
+apalis-sqlite = { version = "1.0.0", optional = true }
 async-stream.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true
@@ -80,7 +79,7 @@ hex.workspace = true
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true
-parking_lot = "0.12"
+parking_lot = "0.13"
 rand = { version = "0.10", features = ["std", "std_rng"] }
 rkyv = { workspace = true, features = ["std", "bytecheck"] }
 reqwest.workspace = true
@@ -93,7 +92,6 @@ sonic-rs.workspace = true
 zstd.workspace = true
 sha2.workspace = true
 siphasher = "1"
-scheduler-sqlx = { package = "sqlx", version = "=0.8.6", optional = true, default-features = false, features = ["chrono", "json", "migrate", "runtime-tokio", "tls-rustls-ring", "uuid"] }
 sqlx = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true

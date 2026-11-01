@@ -12,6 +12,9 @@ pub trait ApalisPostSetupMigrationDatabase: Database {
 #[cfg(feature = "sqlite")]
 impl ApalisPostSetupMigrationDatabase for sqlx::Sqlite {
     const POST_SETUP_MIGRATION_SQL: &'static [&'static str] = &[
+        // apalis-sqlite 1.0.0's SqliteStorage::setup sets synchronous = OFF;
+        // restore NORMAL immediately after setup.
+        "PRAGMA synchronous = NORMAL;",
         include_str!("../migrations/sqlite/0001_apalis_partial_unique.sql"),
         include_str!("../migrations/sqlite/0002_idempotency_tables.sql"),
         include_str!("../migrations/sqlite/0003_drop_redundant_state_tables.sql"),
@@ -47,7 +50,7 @@ where
     for<'executor> &'executor Pool<Db>: Executor<'executor, Database = Db>,
 {
     for sql in Db::POST_SETUP_MIGRATION_SQL {
-        sqlx::raw_sql(sql).execute(pool).await?;
+        sqlx::raw_sql(*sql).execute(pool).await?;
     }
     Ok(())
 }

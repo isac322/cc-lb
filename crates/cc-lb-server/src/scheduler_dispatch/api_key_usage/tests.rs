@@ -1895,7 +1895,7 @@ async fn pol15_idle_ticks_cost_nothing() {
             unreachable!("fixture uses sqlite")
         }
     };
-    let poll_jobs: i64 = scheduler_sqlx::query_scalar(
+    let poll_jobs: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM Jobs WHERE idempotency_key LIKE 'api_key_usage_poll:%'",
     )
     .fetch_one(&scheduler_pool)

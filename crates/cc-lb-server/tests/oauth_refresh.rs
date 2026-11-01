@@ -941,7 +941,7 @@ impl LazyRefreshHandle for RecordingLazyRefresh {
 async fn sqlite_scheduler_backend(path: &std::path::Path, clock: ClockHandle) -> SchedulerBackend {
     use std::str::FromStr as _;
 
-    use scheduler_sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     let database_url = format!("sqlite://{}", path.display());
     let options = SqliteConnectOptions::from_str(&database_url)

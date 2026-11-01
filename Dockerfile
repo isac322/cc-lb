@@ -23,7 +23,7 @@
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.10.0 AS xx
 
 # ---- Architecture-independent cc-lb-admin dashboard SPA build ----
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3-alpine AS admin-spa
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4-alpine AS admin-spa
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 ARG BUILDOS
@@ -275,7 +275,7 @@ RUN /usr/local/bin/cc-lb --version && \
 # base around the static binary. Digest-pinned for reproducible builds
 # (:nonroot is a rolling tag); bump alongside the other base images
 # (freshen-deps).
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS distroless
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS distroless
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
 USER 65532:65532
 EXPOSE 8080 9090 9091

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use apalis::layers::catch_panic::CatchPanicLayer;
-use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
+use apalis::prelude::{WorkerBuilder, WorkerError};
+use apalis_core::backend::ext::BackendExt as _;
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_scheduler::middleware::TraceparentLayer;
@@ -14,7 +15,7 @@ use cc_lb_scheduler::worker::{
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_storage_api::MetaStore;
 use sqlx::postgres::PgPoolOptions;
-use storage_sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
+use sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ImageExt, runners::AsyncRunner},
@@ -81,8 +82,16 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
         probe.clone(),
     );
     let cancel = CancellationToken::new();
+    let strategy = apalis_core::backend::ext::poll_strategy::Strategy::new()
+        .stream(apalis_postgres::Pubsub::new(
+            pool.clone(),
+            ADAPTIVE_QUEUE.to_owned(),
+        ))
+        .interval(Duration::from_millis(1));
     let worker = spawn_postgres_worker(
-        apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_notify(&pool, &config),
+        apalis_postgres::PostgresStorage::<AdaptiveJob>::new(&pool)
+            .with_config(config)
+            .poll_with_strategy(strategy),
         state,
         cancel.clone(),
     );
@@ -131,12 +140,16 @@ async fn create_test_databases(base_url: &str) -> TestResult<(String, String)> {
     let suffix = Uuid::new_v4().simple().to_string();
     let scheduler_db = format!("scheduler_{suffix}");
     let runtime_db = format!("runtime_{suffix}");
-    sqlx::query(&format!(r#"CREATE DATABASE "{scheduler_db}""#))
-        .execute(&admin)
-        .await?;
-    sqlx::query(&format!(r#"CREATE DATABASE "{runtime_db}""#))
-        .execute(&admin)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{scheduler_db}""#
+    )))
+    .execute(&admin)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{runtime_db}""#
+    )))
+    .execute(&admin)
+    .await?;
     admin.close().await;
     Ok((
         database_url(base_url, &scheduler_db)?,
@@ -161,23 +174,35 @@ fn spawn_postgres_worker(
             .data(state)
             .layer(TraceparentLayer::new().with_scheduler_metrics())
             .layer(RetryClass::Probe.layer())
-            .layer(CatchPanicLayer::new())
+            .layer(test_catch_panic_layer())
             .build(entity_job_handler::<cc_lb_storage_postgres::PostgresStorage>)
             .run_until(async move {
-                cancel.cancelled().await;
+                cancel.cancelled_owned().await;
                 Ok::<(), WorkerError>(())
             })
             .await
     })
 }
 
+fn test_catch_panic_layer() -> CatchPanicLayer<
+    impl FnMut(&Box<dyn std::any::Any + Send>) -> apalis_core::error::AbortError
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+    apalis_core::error::AbortError,
+> {
+    CatchPanicLayer::with_panic_handler(|_: &Box<dyn std::any::Any + Send>| {
+        apalis_core::error::AbortError::new(apalis::layers::catch_panic::PanicError(
+            "worker panicked".to_owned(),
+        ))
+    })
+}
+
 fn postgres_queue_config() -> apalis_postgres::Config {
-    let poll_strategy = StrategyBuilder::new()
-        .apply(IntervalStrategy::new(Duration::from_millis(1)))
-        .build();
-    apalis_postgres::Config::new(ADAPTIVE_QUEUE)
-        .with_poll_interval(poll_strategy)
-        .set_buffer_size(8)
+    apalis_postgres::Config::default()
+        .queue(ADAPTIVE_QUEUE)
+        .batch_size(8)
 }
 
 async fn postgres_metadata_count(pool: &sqlx::PgPool, upstream_id: Uuid) -> TestResult<i64> {

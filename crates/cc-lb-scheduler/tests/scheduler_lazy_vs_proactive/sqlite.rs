@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use apalis::layers::catch_panic::CatchPanicLayer;
-use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
+use apalis::prelude::{WorkerBuilder, WorkerError};
+use apalis_core::backend::ext::BackendExt as _;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::SystemClock;
 use cc_lb_config::AnthropicOAuthConfig;
@@ -74,7 +75,9 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     );
     let cancel = CancellationToken::new();
     let worker = spawn_sqlite_worker(
-        apalis_sqlite::SqliteStorage::new_with_config(&scheduler_pool, &config),
+        apalis_sqlite::SqliteStorage::new(&scheduler_pool)
+            .with_config(config)
+            .poll_with_interval(Duration::from_millis(1)),
         state,
         cancel.clone(),
     );
@@ -126,23 +129,35 @@ fn spawn_sqlite_worker(
             .data(state)
             .layer(TraceparentLayer::new().with_scheduler_metrics())
             .layer(RetryClass::Probe.layer())
-            .layer(CatchPanicLayer::new())
+            .layer(test_catch_panic_layer())
             .build(entity_job_handler::<cc_lb_storage_sqlite::SqliteStorage>)
             .run_until(async move {
-                cancel.cancelled().await;
+                cancel.cancelled_owned().await;
                 Ok::<(), WorkerError>(())
             })
             .await
     })
 }
 
+fn test_catch_panic_layer() -> CatchPanicLayer<
+    impl FnMut(&Box<dyn std::any::Any + Send>) -> apalis_core::error::AbortError
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+    apalis_core::error::AbortError,
+> {
+    CatchPanicLayer::with_panic_handler(|_: &Box<dyn std::any::Any + Send>| {
+        apalis_core::error::AbortError::new(apalis::layers::catch_panic::PanicError(
+            "worker panicked".to_owned(),
+        ))
+    })
+}
+
 fn sqlite_queue_config() -> apalis_sqlite::Config {
-    let poll_strategy = StrategyBuilder::new()
-        .apply(IntervalStrategy::new(Duration::from_millis(1)))
-        .build();
-    apalis_sqlite::Config::new(ADAPTIVE_QUEUE)
-        .with_poll_interval(poll_strategy)
-        .set_buffer_size(8)
+    apalis_sqlite::Config::default()
+        .queue(ADAPTIVE_QUEUE)
+        .batch_size(8)
 }
 
 async fn sqlite_metadata_count(pool: &sqlx::SqlitePool, upstream_id: Uuid) -> TestResult<i64> {

@@ -58,6 +58,7 @@ enum RunError {
 const ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 
 async fn run_admin(base_url: &str, command: AdminCommand) -> Result<(), AdminCliError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
         .build()
         .map_err(AdminCliError::Request)?;

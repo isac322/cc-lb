@@ -48,14 +48,16 @@ async fn replacement_worker_dispatches_distinct_job_from_same_postgres_backend()
     );
 
     let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-    sqlx::query(&create_database)
+    sqlx::query(sqlx::AssertSqlSafe(create_database))
         .execute(&admin_pool)
         .await
         .with_context(|| format!("create isolated database {database_name}"))?;
 
     let test_result = run_in_isolated_database(&admin_url, &database_name).await;
     let drop_database = format!(r#"DROP DATABASE "{database_name}" WITH (FORCE)"#);
-    let drop_result = sqlx::query(&drop_database).execute(&admin_pool).await;
+    let drop_result = sqlx::query(sqlx::AssertSqlSafe(drop_database))
+        .execute(&admin_pool)
+        .await;
     admin_pool.close().await;
 
     match (test_result, drop_result) {

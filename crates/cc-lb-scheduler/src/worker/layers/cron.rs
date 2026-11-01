@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use apalis::layers::catch_panic::CatchPanicLayer;
+use super::catch_panic_layer;
 use apalis::layers::limit::ConcurrencyLimitLayer;
 use apalis::layers::prometheus::PrometheusLayer;
 use apalis::prelude::{WorkerBuilder as ApalisWorkerBuilder, WorkerError};
@@ -15,7 +15,7 @@ use crate::retry::RetryClass;
 use super::super::backend::PostgresCronApalisStorage;
 #[cfg(feature = "sqlite")]
 use super::super::backend::SqliteCronApalisStorage;
-use super::super::dispatch::{SingletonHandlerFn, singleton_job_handler};
+use super::super::dispatch::singleton_job_handler;
 use super::super::{CRON_QUEUE, SchedulerBackend, SchedulerCtx};
 
 type CronWorkerFuture = Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send>>;
@@ -34,7 +34,9 @@ pub fn build_cron_worker(
     backend: &SchedulerBackend,
     ctx: SchedulerCtx,
 ) -> Result<CronWorker, SchedulerError> {
-    build_cron_worker_named(backend, ctx, CRON_QUEUE.to_owned())
+    let worker_instance_id = super::super::make_worker_instance_id(&*ctx.clock);
+    let worker_name = super::super::next_worker_name(CRON_QUEUE, &worker_instance_id);
+    build_cron_worker_named(backend, ctx, worker_name)
 }
 
 pub fn build_cron_worker_named(
@@ -73,13 +75,13 @@ fn build_sqlite_singleton_worker(
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Maintenance.layer())
-                    .layer(CatchPanicLayer::new())
+                    .layer(catch_panic_layer())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
-                    .build(singleton_job_handler as SingletonHandlerFn);
+                    .build(singleton_job_handler);
                 worker
                     .run_until(async move {
-                        cancel.cancelled().await;
+                        cancel.cancelled_owned().await;
                         Ok::<(), WorkerError>(())
                     })
                     .await
@@ -103,13 +105,13 @@ fn build_postgres_singleton_worker(
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Maintenance.layer())
-                    .layer(CatchPanicLayer::new())
+                    .layer(catch_panic_layer())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
-                    .build(singleton_job_handler as SingletonHandlerFn);
+                    .build(singleton_job_handler);
                 worker
                     .run_until(async move {
-                        cancel.cancelled().await;
+                        cancel.cancelled_owned().await;
                         Ok::<(), WorkerError>(())
                     })
                     .await

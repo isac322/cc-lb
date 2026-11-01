@@ -83,7 +83,7 @@ fn inspect_wasm_with_scope(
 
         match payload {
             Payload::ImportSection(imports) => {
-                let count = imports.into_iter().count();
+                let count = imports.into_imports().count();
                 if count > 0 {
                     return Err(WasmtimeRuntimeError::ModuleRejected {
                         reason: format!(

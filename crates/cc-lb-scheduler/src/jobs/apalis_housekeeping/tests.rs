@@ -344,9 +344,11 @@ mod sqlite {
     }
 
     async fn ids(pool: &SqlitePool, table: &str) -> Result<Vec<String>, sqlx::Error> {
-        sqlx::query_scalar::<_, String>(&format!("SELECT id FROM {table} ORDER BY id"))
-            .fetch_all(pool)
-            .await
+        sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM {table} ORDER BY id"
+        )))
+        .fetch_all(pool)
+        .await
     }
 
     async fn session_hashes(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
@@ -392,7 +394,7 @@ mod postgres {
             .max_connections(1)
             .connect_with(options.clone())
             .await?;
-        if let Err(error) = sqlx::query(&format!(r#"CREATE DATABASE "{db}""#))
+        if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(format!(r#"CREATE DATABASE "{db}""#)))
             .execute(&admin)
             .await
         {
@@ -406,9 +408,11 @@ mod postgres {
             .await?;
         let test_result = assert_postgres_housekeeping(&pool).await;
         pool.close().await;
-        let drop_result = sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{db}""#))
-            .execute(&admin)
-            .await;
+        let drop_result = sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DROP DATABASE IF EXISTS "{db}""#
+        )))
+        .execute(&admin)
+        .await;
         admin.close().await;
         test_result?;
         drop_result?;
@@ -640,9 +644,11 @@ mod postgres {
     }
 
     async fn ids(pool: &PgPool, table: &str) -> Result<Vec<String>, sqlx::Error> {
-        sqlx::query_scalar::<_, String>(&format!("SELECT id FROM {table} ORDER BY id"))
-            .fetch_all(pool)
-            .await
+        sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM {table} ORDER BY id"
+        )))
+        .fetch_all(pool)
+        .await
     }
 
     async fn session_hashes(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {

@@ -100,10 +100,8 @@ async fn run_postgres_singleton_cron_loop(
         if cancel.is_cancelled() {
             break;
         }
-        let storage = apalis_postgres::PostgresStorage::<CronJob>::new_with_notify(
-            &pool,
-            &apalis_postgres::Config::new(CRON_QUEUE),
-        );
+        let storage = apalis_postgres::PostgresStorage::<CronJob>::new(&pool)
+            .with_config(apalis_postgres::Config::default().queue(CRON_QUEUE));
         let worker = CronWorkerBuilder::singleton_queue_factory(
             spec.schedule.clone(),
             storage,
@@ -144,12 +142,13 @@ async fn run_sqlite_singleton_cron_loop(
     }
 }
 
-async fn run_one_cron_attempt<Storage>(
+async fn run_one_cron_attempt<Storage, Kind>(
     name: &'static str,
-    worker: CronWorkerBuilder<CronJob, IntervalSchedule, Storage, CronJobFactory>,
+    worker: CronWorkerBuilder<CronJob, IntervalSchedule, Storage, CronJobFactory, Kind>,
     cancel: &CancellationToken,
 ) where
-    Storage: apalis::prelude::TaskSink<CronJob, Error = sqlx::Error> + Send + 'static,
+    Storage: apalis::prelude::TaskSink<CronJob, Kind> + Send + 'static,
+    Storage::Error: crate::cron::CronStorageError,
 {
     tokio::select! {
         result = worker.run() => {
@@ -316,13 +315,14 @@ impl IntervalSchedule {
 }
 
 impl apalis_cron::Schedule<Utc> for IntervalSchedule {
-    fn next_tick(&mut self, _: &Utc) -> Option<DateTime<Utc>> {
+    fn next_tick(&mut self, _: &Utc) -> Option<apalis_cron::Tick<Utc>> {
         let next = match self.next {
             Some(next) => next,
             None => DateTime::<Utc>::from(self.clock.now()).checked_add_signed(self.first_delay)?,
         };
         self.next = Some(next.checked_add_signed(self.interval)?);
-        Some(next)
+        let tick_secs = u64::try_from(next.timestamp()).ok()?;
+        Some(apalis_cron::Tick::new(tick_secs))
     }
 }
 
