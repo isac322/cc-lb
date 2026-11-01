@@ -81,7 +81,14 @@ pub fn validate_messages_request(value: &Value, headers: &HeaderMap) -> Result<(
         headers,
     )?;
     validate_effort(object.get("output_config"))?;
-    validate_tool_choice(object.get("tool_choice"))?;
+    validate_tool_choice(
+        object.get("tool_choice"),
+        model,
+        object
+            .get("thinking")
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str),
+    )?;
     validate_messages(object.get("messages"))?;
     Ok(())
 }
@@ -385,7 +392,11 @@ fn validate_effort(value: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_tool_choice(value: Option<&Value>) -> Result<(), String> {
+fn validate_tool_choice(
+    value: Option<&Value>,
+    model: &str,
+    thinking_kind: Option<&str>,
+) -> Result<(), String> {
     // /en/api/messages/create.md, ToolChoiceAuto/Any/Tool/None: variant fields.
     let Some(value) = value else {
         return Ok(());
@@ -399,6 +410,22 @@ fn validate_tool_choice(value: Option<&Value>) -> Result<(), String> {
         .ok_or_else(|| "tool_choice.type is required".to_owned())?;
     if !matches!(kind, "auto" | "any" | "tool" | "none") {
         return Err("tool_choice.type is invalid".to_owned());
+    }
+    // https://platform.claude.com/docs/en/build-with-claude/thinking#limits-and-feature-compatibility
+    // Forced tool use is incompatible with manual extended thinking. These
+    // four models reject it on every request, regardless of thinking mode.
+    if matches!(kind, "any" | "tool") {
+        if matches!(
+            model,
+            "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-fable-5-1" | "claude-mythos-5-1"
+        ) {
+            return Err(format!(
+                "{model} rejects forced tool_choice on every request"
+            ));
+        }
+        if thinking_kind == Some("enabled") {
+            return Err("forced tool_choice is incompatible with thinking.type=enabled".to_owned());
+        }
     }
     if kind == "tool" && object.get("name").and_then(Value::as_str).is_none() {
         return Err("tool_choice.tool requires name".to_owned());
@@ -607,6 +634,44 @@ mod tests {
                 validate_messages_request(&value, &headers(false)).is_err(),
                 "{model} should reject between_tools"
             );
+        }
+    }
+
+    #[test]
+    fn forced_tools_reject_incompatible_models_on_live_and_renewal_requests() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+        ] {
+            for max_tokens in [0, 4096] {
+                for choice in [json!({"type":"any"}), json!({"type":"tool","name":"bash"})] {
+                    let mut value = base_for_model(model, max_tokens, json!({"type":"adaptive"}));
+                    value["tool_choice"] = choice;
+                    assert!(
+                        validate_messages_request(&value, &headers(false)).is_err(),
+                        "{model} must reject forced tools at max_tokens={max_tokens}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forced_tools_accept_adaptive_and_reject_manual_thinking_on_four_six_models() {
+        for model in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            for choice in [json!({"type":"any"}), json!({"type":"tool","name":"bash"})] {
+                let mut value = base_for_model(model, 4096, json!({"type":"adaptive"}));
+                value["tool_choice"] = choice;
+                assert!(validate_messages_request(&value, &headers(false)).is_ok());
+                value["thinking"] = json!({"type":"enabled","budget_tokens":1024});
+                assert!(validate_messages_request(&value, &headers(false)).is_err());
+                for choice in [json!({"type":"auto"}), json!({"type":"none"})] {
+                    value["tool_choice"] = choice;
+                    assert!(validate_messages_request(&value, &headers(false)).is_ok());
+                }
+            }
         }
     }
 

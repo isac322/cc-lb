@@ -535,6 +535,52 @@ impl Harness {
         }
         panic!("timed out waiting for session {hash} generation = {generation}");
     }
+
+    /// Waits for this fresh session's durable classification, not elapsed time.
+    /// Not-tracked decisions are persisted without creating a session row.
+    pub async fn wait_for_enqueued_or_not_tracked(&self, hash: &str) -> Option<u64> {
+        tokio::time::timeout(DISPATCH_WAIT, async {
+            loop {
+                let outcome: Option<(Option<i64>, Option<String>)> = match &self.storage {
+                    StorageBackend::Sqlite(storage) => sqlx::query_as(
+                        "SELECT generation, NULL FROM cache_keepalive_sessions \
+                         WHERE session_key_hash = ? AND status = 'active' \
+                         AND enqueue_state = 'enqueued' \
+                         UNION ALL \
+                         SELECT NULL, reason FROM cache_keepalive_decisions \
+                         WHERE session_key_hash = ? AND decision = 'not_tracked' LIMIT 1",
+                    )
+                    .bind(hash)
+                    .bind(hash)
+                    .fetch_optional(storage.pool())
+                    .await
+                    .expect("read session enqueue or not-tracked decision"),
+                    #[cfg(feature = "postgres")]
+                    StorageBackend::Postgres(storage) => sqlx::query_as(
+                        "SELECT generation, NULL::text FROM cache_keepalive_sessions \
+                         WHERE session_key_hash = $1 AND status = 'active' \
+                         AND enqueue_state = 'enqueued' \
+                         UNION ALL \
+                         SELECT NULL::bigint, reason FROM cache_keepalive_decisions \
+                         WHERE session_key_hash = $1 AND decision = 'not_tracked' LIMIT 1",
+                    )
+                    .bind(hash)
+                    .fetch_optional(storage.pool())
+                    .await
+                    .expect("read session enqueue or not-tracked decision"),
+                };
+                if let Some((generation, reason)) = outcome {
+                    println!("keepalive decision session={hash} generation={generation:?} not_tracked={reason:?}");
+                    return generation.map(|value| {
+                        u64::try_from(value).expect("enqueued generation must be non-negative")
+                    });
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no durable enqueue or not-tracked decision for session {hash}"))
+    }
     pub async fn wait_for_not_tracked(&self, hash: &str, timeout: Duration) -> bool {
         tokio::time::timeout(timeout, async {
             loop {
