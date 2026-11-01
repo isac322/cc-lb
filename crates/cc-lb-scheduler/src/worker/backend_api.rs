@@ -12,6 +12,8 @@ use super::{
     ADAPTIVE_QUEUE, AdaptiveJob, CACHE_KEEPALIVE_QUEUE, CRON_QUEUE, CronJob, SchedulerBackend,
 };
 
+const DEFAULT_MAX_ATTEMPTS: i32 = 5;
+
 #[cfg(feature = "sqlite")]
 fn from_sqlite_apalis_error(error: apalis_sqlite::Error) -> SchedulerError {
     match error {
@@ -195,7 +197,7 @@ where
     let default_max_attempts = task
         .max_attempts()
         .and_then(|v| i32::try_from(v).ok())
-        .unwrap_or(25);
+        .unwrap_or(DEFAULT_MAX_ATTEMPTS);
     let max_attempts = max_attempts.unwrap_or(default_max_attempts);
     let priority = task
         .priority()
@@ -243,7 +245,7 @@ where
     let default_max_attempts = task
         .max_attempts()
         .and_then(|v| i32::try_from(v).ok())
-        .unwrap_or(25);
+        .unwrap_or(DEFAULT_MAX_ATTEMPTS);
     let max_attempts = max_attempts.unwrap_or(default_max_attempts);
     let priority = task
         .priority()
@@ -299,7 +301,7 @@ where
     let max_attempts = task
         .max_attempts()
         .and_then(|v| i32::try_from(v).ok())
-        .unwrap_or(25);
+        .unwrap_or(DEFAULT_MAX_ATTEMPTS);
     scheduler_task_row(
         args,
         idempotency_key,
@@ -325,7 +327,7 @@ where
     let max_attempts = task
         .max_attempts()
         .and_then(|v| i32::try_from(v).ok())
-        .unwrap_or(25);
+        .unwrap_or(DEFAULT_MAX_ATTEMPTS);
     scheduler_task_row(
         args,
         idempotency_key,
@@ -429,5 +431,46 @@ mod tests {
             .await
             .expect("read max_attempts");
         assert_eq!(max_attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_insert_defaults_max_attempts_to_five_when_none() {
+        let pool = SqlitePool::connect(":memory:").await.expect("sqlite pool");
+        sqlx::query(CREATE_JOBS)
+            .execute(&pool)
+            .await
+            .expect("create Jobs table");
+        let job = CacheKeepaliveJob {
+            session_key_hash: "session-hash".to_owned(),
+            generation: 1,
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::from_u128(1),
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 1_800_000_000,
+            expires_at_unix_secs: 1_800_000_300,
+            refresh_delay_secs: 270,
+            max_refreshes: 12,
+            max_total_duration_secs: 14_400,
+            traceparent: None,
+        };
+
+        insert_sqlite_task(
+            &pool,
+            ADAPTIVE_QUEUE,
+            SchedulerPushTask {
+                args: AdaptiveJob::CacheKeepalive(job),
+                idempotency_key: Some("cache_keepalive:session-hash:default".to_owned()),
+                run_at_unix_secs: Some(1_800_000_270),
+                max_attempts: None,
+            },
+        )
+        .await
+        .expect("insert scheduler task");
+
+        let max_attempts: i64 = sqlx::query_scalar("SELECT max_attempts FROM Jobs")
+            .fetch_one(&pool)
+            .await
+            .expect("read max_attempts");
+        assert_eq!(max_attempts, 5);
     }
 }
