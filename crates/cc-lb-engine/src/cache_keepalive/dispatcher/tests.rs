@@ -501,7 +501,10 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_disabled_thinking() {
         "https://api.anthropic.com/v1/messages?beta=true"
     );
     let body: Value = serde_json::from_slice(requests[0].body()).unwrap();
-    assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "adaptive", "display": "summarized"})
+    );
     assert_eq!(body["max_tokens"], json!(0));
 
     let api_key_record = UpstreamRecord {

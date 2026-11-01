@@ -157,21 +157,30 @@ async fn mock_messages(State(mock): State<MockAnthropic>, request: Request) -> R
     if synthetic {
         assert!(value.get("stream").is_none(), "keepalive removed stream");
         assert_eq!(value.get("max_tokens"), Some(&json!(0)));
-        if let Some(thinking) = value.get("thinking") {
-            if thinking != &json!({"type": "disabled"}) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "type": "error",
-                        "error": {
-                            "type": "invalid_request_error",
-                            "message": "extra fields are not permitted on disabled thinking"
-                        }
-                    })),
-                )
-                    .into_response();
-            }
-        }
+    }
+    let thinking_type = value
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str);
+    let disabled_with_extra_keys = value
+        .get("thinking")
+        .and_then(Value::as_object)
+        .is_some_and(|thinking| {
+            thinking.get("type").and_then(Value::as_str) == Some("disabled") && thinking.len() > 1
+        });
+    if disabled_with_extra_keys || (model == "claude-opus-5-5" && thinking_type != Some("adaptive"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "invalid thinking configuration"
+                }
+            })),
+        )
+            .into_response();
     }
     if synthetic {
         if let Some(message) = lock(&mock.next_renewal_error).take() {
@@ -330,6 +339,13 @@ fn prefix_digest(value: &Value) -> String {
     let mut prefix = json!({
         "tools": value.get("tools").cloned().unwrap_or(Value::Null),
         "system": value.get("system").cloned().unwrap_or(Value::Null),
+        "thinking": value.get("thinking").cloned().unwrap_or(Value::Null),
+        "effort": value
+            .get("output_config")
+            .and_then(|config| config.get("effort"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "tool_choice": value.get("tool_choice").cloned().unwrap_or(Value::Null),
         "messages": []
     });
     let Some(messages) = value.get("messages").and_then(Value::as_array) else {
@@ -635,8 +651,13 @@ fn request_body(
         "model": "claude-opus-5-5",
         "max_tokens": 256,
         "stream": false,
-        "thinking": {"type": "enabled", "budget_tokens": 1024},
-        "tools": [{"name": "bash", "description": "test tool", "input_schema": {"type": "object"}}],
+        "thinking": {
+            "type": "adaptive",
+            "display": "summarized",
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+        },
+        "output_config": {"effort": "medium"},
+        "tool_choice": {"type": "any"},
         "system": [{"type": "text", "text": prefix, "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "cached breakpoint", "cache_control": {"type": "ephemeral", "ttl": "5m"}}, {"type": "text", "text": ""}]},
@@ -701,8 +722,10 @@ async fn adaptive_thinking_session_renews_with_disabled_thinking_and_preserves_e
     harness
         .advance_and_dispatch_due(Duration::from_secs(270))
         .await;
+    let live = harness.mock.last("proxy");
     let renewal = harness.mock.last("renewal");
     assert!(renewal.hit);
+    assert_eq!(live.prefix_digest, renewal.prefix_digest);
     assert_eq!(renewal.effort.as_deref(), Some("medium"));
     let events = harness.mock.events();
     assert!(events.iter().any(|event| event.synthetic && event.hit));

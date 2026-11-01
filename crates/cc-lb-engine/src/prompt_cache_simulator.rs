@@ -940,7 +940,6 @@ mod tests {
     use super::{
         V3PromptCacheBlockSource, analyze_v3_prompt_cache, cacheable_breakpoint_prefix_keys,
     };
-
     #[test]
     fn flattens_tools_system_messages_in_provider_order() {
         let request = json!({
@@ -1262,10 +1261,13 @@ mod tests {
     }
 
     #[test]
-    fn keepalive_disabled_thinking_splits_prefix_without_moving_effort_salt() {
-        let base = json!({
+    fn keepalive_preserves_adaptive_thinking_effort_and_tool_choice_prefix() {
+        let mut base = json!({
             "model": "claude-opus-5-5",
+            "max_tokens": 8193,
+            "stream": true,
             "output_config": {"effort": "medium"},
+            "tool_choice": {"type": "any"},
             "tools": [{
                 "name": "lookup",
                 "description": "lookup",
@@ -1286,32 +1288,47 @@ mod tests {
                 }]
             }]
         });
-        let mut adaptive = base.clone();
-        adaptive["thinking"] = json!({
+        base["thinking"] = json!({
             "type": "adaptive",
             "display": "summarized"
         });
+
+        let snapshot = crate::cache_keepalive::RequestSnapshot::capture(
+            "https://api.anthropic.com/v1/messages".parse().unwrap(),
+            http::Method::POST,
+            http::HeaderMap::new(),
+            bytes::Bytes::from(serde_json::to_vec(&base).unwrap()),
+            uuid::Uuid::nil(),
+            cc_lb_storage_api::CacheTtl::Ttl5m,
+            1_000_000,
+        )
+        .unwrap();
+        let keepalive: serde_json::Value =
+            serde_json::from_slice(&snapshot.build_keepalive_body().unwrap()).unwrap();
+
+        let live = analyze_v3_prompt_cache(&base, canonical_model_id("claude-opus-5-5"));
+        let renewal = analyze_v3_prompt_cache(&keepalive, canonical_model_id("claude-opus-5-5"));
+        assert_eq!(
+            live.breakpoints[2].prefix_key,
+            renewal.breakpoints[2].prefix_key
+        );
+
         let mut disabled = base.clone();
         disabled["thinking"] = json!({"type": "disabled"});
-
-        let adaptive = analyze_v3_prompt_cache(&adaptive, canonical_model_id("claude-opus-5-5"));
         let disabled = analyze_v3_prompt_cache(&disabled, canonical_model_id("claude-opus-5-5"));
-        let omitted = analyze_v3_prompt_cache(&base, canonical_model_id("claude-opus-5-5"));
-        let prefix_keys = |analysis: &super::V3PromptCacheAnalysis| {
-            analysis
-                .breakpoints
-                .iter()
-                .map(|breakpoint| breakpoint.prefix_key.clone())
-                .collect::<Vec<_>>()
-        };
-        let adaptive_keys = prefix_keys(&adaptive);
-        let disabled_keys = prefix_keys(&disabled);
-        let omitted_keys = prefix_keys(&omitted);
+        assert_ne!(
+            live.breakpoints[2].prefix_key,
+            disabled.breakpoints[2].prefix_key
+        );
 
-        assert_eq!(adaptive_keys[0], disabled_keys[0]);
-        assert_eq!(adaptive_keys[1], disabled_keys[1]);
-        assert_ne!(adaptive_keys[2], disabled_keys[2]);
-        assert_ne!(disabled_keys[2], omitted_keys[2]);
+        let mut changed_tool_choice = keepalive;
+        changed_tool_choice["tool_choice"] = json!({"type": "none"});
+        let changed_tool_choice =
+            analyze_v3_prompt_cache(&changed_tool_choice, canonical_model_id("claude-opus-5-5"));
+        assert_ne!(
+            live.breakpoints[2].prefix_key,
+            changed_tool_choice.breakpoints[2].prefix_key
+        );
     }
 
     #[test]

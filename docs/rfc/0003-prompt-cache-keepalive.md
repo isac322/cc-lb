@@ -155,20 +155,7 @@ breakpoint. An assistant breakpoint preserves the following user
 user continuation. If the only explicit breakpoint is in `system` or `tools`,
 uncached multi-turn history is replaced with a minimal user turn.
 
-`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`.
-Anthropic rejects that pre-warm form when `stream: true`, extended thinking
-(`thinking.type = "enabled"`), structured outputs (`output_config.format`),
-or `tool_choice` of type `tool` or `any` is present, and it rejects the form
-inside Message Batches. The builder removes `stream`, removes
-`output_config.format`, coerces the incompatible tool choices to `auto`, and
-replaces any thinking object with `{"type": "disabled"}` so no enabled or
-adaptive thinking fields remain.
-
-The messages-scoped thinking salt keeps this thinking-disabled pre-warm
-prefix distinct from real thinking-enabled traffic. The probe can therefore
-refresh genuine tools- and system-tier entries without creating a false
-message-tier warm entry. `output_config.effort` remains on the keep-alive
-body because it participates in the message-tier prefix.
+`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`, removes `stream`, and trims uncached trailing messages after the last explicit `cache_control` breakpoint. It preserves `thinking`, `output_config`, and `tool_choice` unchanged from the captured request so renewals hit the same prompt-cache entry as follow-up requests.
 
 ### Classifier — `HeuristicClassifier`
 
