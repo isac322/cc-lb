@@ -4,7 +4,8 @@ use axum::http::HeaderMap;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-/// Anthropic model acceptance table from `thinking.md` lines 81-103.
+/// Anthropic per-model thinking table:
+/// <https://platform.claude.com/docs/en/build-with-claude/thinking#configuring-thinking>
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThinkingModelRule {
     Only,
@@ -41,7 +42,6 @@ pub fn validate_messages_request(value: &Value, headers: &HeaderMap) -> Result<(
     if max_tokens == 0 {
         // Anthropic prompt caching limitations:
         // https://platform.claude.com/docs/en/build-with-claude/prompt-caching#limitations
-        // (primary-source copy: /tmp/i988/caching.md:1547-1556)
         // max_tokens=0 rejects stream=true, enabled thinking, structured outputs,
         // and forced tool_choice variants. The existing pre-warming contract
         // additionally requires stream to be omitted entirely.
