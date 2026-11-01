@@ -3,6 +3,8 @@ use cc_lb_clock::{Clock, ClockHandle};
 
 use super::{ADAPTIVE_QUEUE, AdaptiveJob, CACHE_KEEPALIVE_QUEUE, CRON_QUEUE, CronJob};
 
+const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 #[derive(Clone, Debug)]
 pub enum SchedulerBackend {
     #[cfg(feature = "sqlite")]
@@ -12,17 +14,15 @@ pub enum SchedulerBackend {
 }
 
 #[cfg(feature = "sqlite")]
-pub type SqliteApalisStorage = apalis_sqlite::SqliteStorage<
-    AdaptiveJob,
-    apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
-    apalis_sqlite::fetcher::SqliteFetcher,
+pub type SqliteApalisStorage = apalis_core::backend::ext::poll_strategy::PollWith<
+    apalis_sqlite::SqliteStorage<AdaptiveJob>,
+    apalis_core::backend::ext::poll_strategy::IntervalStrategy,
 >;
 
 #[cfg(feature = "sqlite")]
-pub(crate) type SqliteCronApalisStorage = apalis_sqlite::SqliteStorage<
-    CronJob,
-    apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
-    apalis_sqlite::fetcher::SqliteFetcher,
+pub(crate) type SqliteCronApalisStorage = apalis_core::backend::ext::poll_strategy::PollWith<
+    apalis_sqlite::SqliteStorage<CronJob>,
+    apalis_core::backend::ext::poll_strategy::IntervalStrategy,
 >;
 
 #[cfg(feature = "sqlite")]
@@ -47,21 +47,24 @@ impl SqliteSchedulerBackend {
     }
 
     pub(crate) fn adaptive_storage(&self) -> SqliteApalisStorage {
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(
-            &self.pool,
-            ADAPTIVE_QUEUE,
-        )
+        use apalis_core::backend::ext::BackendExt as _;
+        apalis_sqlite::SqliteStorage::new(&self.pool)
+            .with_config(apalis_sqlite::Config::default().queue(ADAPTIVE_QUEUE))
+            .poll_with_interval(DEFAULT_POLL_INTERVAL)
     }
 
     pub(crate) fn keepalive_storage(&self) -> SqliteApalisStorage {
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(
-            &self.pool,
-            CACHE_KEEPALIVE_QUEUE,
-        )
+        use apalis_core::backend::ext::BackendExt as _;
+        apalis_sqlite::SqliteStorage::new(&self.pool)
+            .with_config(apalis_sqlite::Config::default().queue(CACHE_KEEPALIVE_QUEUE))
+            .poll_with_interval(DEFAULT_POLL_INTERVAL)
     }
 
     pub(crate) fn cron_storage(&self) -> SqliteCronApalisStorage {
-        apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_in_queue(&self.pool, CRON_QUEUE)
+        use apalis_core::backend::ext::BackendExt as _;
+        apalis_sqlite::SqliteStorage::new(&self.pool)
+            .with_config(apalis_sqlite::Config::default().queue(CRON_QUEUE))
+            .poll_with_interval(DEFAULT_POLL_INTERVAL)
     }
 }
 
@@ -76,20 +79,26 @@ impl std::fmt::Debug for SqliteSchedulerBackend {
 }
 
 #[cfg(feature = "postgres")]
-pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<
-    AdaptiveJob,
-    apalis_postgres::CompactType,
-    apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
-    apalis_postgres::PgNotify,
+pub type PostgresApalisStorage = apalis_core::backend::ext::poll_strategy::PollWith<
+    apalis_postgres::PostgresStorage<AdaptiveJob>,
+    apalis_core::backend::ext::poll_strategy::Strategy,
 >;
 
 #[cfg(feature = "postgres")]
-pub(crate) type PostgresCronApalisStorage = apalis_postgres::PostgresStorage<
-    CronJob,
-    apalis_postgres::CompactType,
-    apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
-    apalis_postgres::PgNotify,
+pub(crate) type PostgresCronApalisStorage = apalis_core::backend::ext::poll_strategy::PollWith<
+    apalis_postgres::PostgresStorage<CronJob>,
+    apalis_core::backend::ext::poll_strategy::Strategy,
 >;
+
+#[cfg(feature = "postgres")]
+fn postgres_worker_strategy(
+    pool: &sqlx::PgPool,
+    queue: &str,
+) -> apalis_core::backend::ext::poll_strategy::Strategy {
+    apalis_core::backend::ext::poll_strategy::Strategy::new()
+        .stream(apalis_postgres::Pubsub::new(pool.clone(), queue.to_owned()))
+        .interval(DEFAULT_POLL_INTERVAL)
+}
 
 #[cfg(feature = "postgres")]
 #[derive(Clone)]
@@ -108,42 +117,38 @@ impl PostgresSchedulerBackend {
     }
 
     pub(crate) fn adaptive_worker_storage(&self) -> PostgresApalisStorage {
-        apalis_postgres::PostgresStorage::new_with_notify(
-            &self.pool,
-            &apalis_postgres::Config::new(ADAPTIVE_QUEUE),
-        )
+        use apalis_core::backend::ext::BackendExt as _;
+        apalis_postgres::PostgresStorage::new(&self.pool)
+            .with_config(apalis_postgres::Config::default().queue(ADAPTIVE_QUEUE))
+            .poll_with_strategy(postgres_worker_strategy(&self.pool, ADAPTIVE_QUEUE))
     }
 
     pub(crate) fn keepalive_worker_storage(&self) -> PostgresApalisStorage {
-        apalis_postgres::PostgresStorage::new_with_notify(
-            &self.pool,
-            &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
-        )
+        use apalis_core::backend::ext::BackendExt as _;
+        apalis_postgres::PostgresStorage::new(&self.pool)
+            .with_config(apalis_postgres::Config::default().queue(CACHE_KEEPALIVE_QUEUE))
+            .poll_with_strategy(postgres_worker_strategy(&self.pool, CACHE_KEEPALIVE_QUEUE))
     }
 
     pub(crate) fn cron_worker_storage(&self) -> PostgresCronApalisStorage {
-        apalis_postgres::PostgresStorage::new_with_notify(
-            &self.pool,
-            &apalis_postgres::Config::new(CRON_QUEUE),
-        )
+        use apalis_core::backend::ext::BackendExt as _;
+        apalis_postgres::PostgresStorage::new(&self.pool)
+            .with_config(apalis_postgres::Config::default().queue(CRON_QUEUE))
+            .poll_with_strategy(postgres_worker_strategy(&self.pool, CRON_QUEUE))
     }
 
     pub(crate) fn adaptive_operation_storage(
         &self,
     ) -> apalis_postgres::PostgresStorage<AdaptiveJob> {
-        apalis_postgres::PostgresStorage::new_with_config(
-            &self.pool,
-            &apalis_postgres::Config::new(ADAPTIVE_QUEUE),
-        )
+        apalis_postgres::PostgresStorage::new(&self.pool)
+            .with_config(apalis_postgres::Config::default().queue(ADAPTIVE_QUEUE))
     }
 
     pub(crate) fn keepalive_operation_storage(
         &self,
     ) -> apalis_postgres::PostgresStorage<AdaptiveJob> {
-        apalis_postgres::PostgresStorage::new_with_config(
-            &self.pool,
-            &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
-        )
+        apalis_postgres::PostgresStorage::new(&self.pool)
+            .with_config(apalis_postgres::Config::default().queue(CACHE_KEEPALIVE_QUEUE))
     }
 }
 

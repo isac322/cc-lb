@@ -529,6 +529,8 @@ impl Harness {
         let router = app.router.clone();
         let proxy_task = tokio::spawn(async move { axum::serve(listener, router).await });
         sleep(Duration::from_millis(20)).await;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = Client::new();
         Self {
             principal_name,
             _dir: dir,
@@ -539,7 +541,7 @@ impl Harness {
             scheduler_pool,
             clock,
             mock,
-            client: Client::new(),
+            client,
             key: secret.expose().to_owned(),
         }
     }

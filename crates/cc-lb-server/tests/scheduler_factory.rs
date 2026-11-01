@@ -27,20 +27,28 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
         #[cfg(feature = "postgres")]
         SchedulerBackend::Postgres(_) => panic!("expected sqlite backend"),
     };
-    let table_count: i64 = scheduler_sqlx::query_scalar(
+    let table_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Jobs'",
     )
     .fetch_one(sqlite.pool())
     .await
     .expect("Jobs table query succeeds");
     assert_eq!(table_count, 1);
-    let index_sql: String = scheduler_sqlx::query_scalar(
+    let index_sql: String = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_jobs_idempotency_key'",
     )
     .fetch_one(sqlite.pool())
     .await
     .expect("partial index query succeeds");
     assert!(!index_sql.contains("WHERE"));
+    let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+        .fetch_one(sqlite.pool())
+        .await
+        .expect("PRAGMA synchronous query succeeds");
+    assert_eq!(
+        synchronous, 1,
+        "post-setup migrations must restore PRAGMA synchronous = NORMAL (1)"
+    );
     sqlite.pool().close().await;
 }
 
@@ -81,13 +89,13 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
         return;
     }
     let database_name = format!("cc_lb_scheduler_factory_{}", uuid::Uuid::new_v4().simple());
-    let admin_pool = scheduler_sqlx::postgres::PgPoolOptions::new()
+    let admin_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&admin_url)
         .await
         .expect("admin postgres connects");
     let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-    if let Err(error) = scheduler_sqlx::query(&create_database)
+    if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(create_database))
         .execute(&admin_pool)
         .await
     {
@@ -111,13 +119,13 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
     let SchedulerBackend::Postgres(postgres) = opened.backend else {
         panic!("expected postgres backend")
     };
-    let table_count: i64 = scheduler_sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'apalis' AND table_name = 'jobs'").fetch_one(postgres.pool()).await.expect("jobs table query succeeds");
+    let table_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'apalis' AND table_name = 'jobs'").fetch_one(postgres.pool()).await.expect("jobs table query succeeds");
     assert_eq!(table_count, 1);
-    let predicate: Option<String> = scheduler_sqlx::query_scalar("SELECT pg_get_expr(indexes.indpred, indexes.indrelid) FROM pg_index indexes JOIN pg_class classes ON classes.oid = indexes.indexrelid JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace WHERE namespaces.nspname = 'apalis' AND classes.relname = 'idx_jobs_idempotency_key'").fetch_one(postgres.pool()).await.expect("idempotency index query succeeds");
+    let predicate: Option<String> = sqlx::query_scalar("SELECT pg_get_expr(indexes.indpred, indexes.indrelid) FROM pg_index indexes JOIN pg_class classes ON classes.oid = indexes.indexrelid JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace WHERE namespaces.nspname = 'apalis' AND classes.relname = 'idx_jobs_idempotency_key'").fetch_one(postgres.pool()).await.expect("idempotency index query succeeds");
     assert!(predicate.is_none());
     postgres.pool().close().await;
     let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)"#);
-    scheduler_sqlx::query(&drop_database)
+    sqlx::query(sqlx::AssertSqlSafe(drop_database))
         .execute(&admin_pool)
         .await
         .expect("temporary database drops");

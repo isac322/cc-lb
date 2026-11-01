@@ -5,7 +5,7 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink};
+use apalis::prelude::TaskSink;
 use cc_lb_clock::SystemClock;
 use cc_lb_config::SchedulerConfig;
 use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
@@ -86,8 +86,7 @@ fn scheduler_metrics_cover_worker_lifecycle() -> Result<(), Box<dyn Error>> {
 #[cfg(feature = "sqlite")]
 async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> {
     let config = fast_queue_config(ADAPTIVE_QUEUE);
-    let mut storage =
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(pool, &config);
+    let mut storage = apalis_sqlite::SqliteStorage::<AdaptiveJob>::new(pool).with_config(config);
     for job in entity_jobs(Uuid::new_v4()) {
         storage.push(job).await?;
     }
@@ -119,8 +118,7 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
 #[cfg(feature = "sqlite")]
 async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> {
     let config = fast_queue_config(CRON_QUEUE);
-    let mut storage =
-        apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_with_config(pool, &config);
+    let mut storage = apalis_sqlite::SqliteStorage::<CronJob>::new(pool).with_config(config);
     for job in singleton_jobs() {
         storage.push(job).await?;
     }
@@ -174,12 +172,7 @@ async fn sqlite_test_db() -> Result<SqliteTestDb, Box<dyn Error>> {
 
 #[cfg(feature = "sqlite")]
 fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
-    let poll_strategy = StrategyBuilder::new()
-        .apply(IntervalStrategy::new(Duration::from_millis(10)))
-        .build();
-    apalis_sqlite::Config::new(queue)
-        .with_poll_interval(poll_strategy)
-        .set_buffer_size(16)
+    apalis_sqlite::Config::default().queue(queue).batch_size(16)
 }
 
 fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {

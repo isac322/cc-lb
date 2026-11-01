@@ -26,6 +26,7 @@ pub(crate) struct JwksCache {
 
 impl JwksCache {
     pub(crate) fn new(url: String) -> Self {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Self {
             url,
             client: reqwest::Client::builder()

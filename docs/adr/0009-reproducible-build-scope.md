@@ -32,11 +32,15 @@ The only wasm fixture build change in this batch is to require `--locked` when t
 
 SQLx PR #4136's deterministic migration ordering fix is present in SQLx 0.9.0 but not 0.8.6. The repository's own migration sites use the workspace SQLx 0.9 stack; the remaining 0.8.6 risk is coupled to Apalis and dev/test support. Upgrading or removing it requires an Apalis compatibility move and is out of scope for this reproducible-build hardening pass.
 
+Historical note: After this batch, Apalis 1.0.0 stable shipped with `sqlx ^0.9` and `ulid ^3`; the `scheduler-sqlx =0.8.6` stack was subsequently removed and unified onto workspace `sqlx 0.9`.
+
 ### 4. Preserve explicit exclusions
 
 This batch will not perform Docker base-image digest pinning, `apk`/`apt` package version pinning, SQLite-only feature-graph rewiring, or Cargo path-hash mitigation. Those are separate policy or structural changes.
 
 ## Consequences
+
+Historical outcome: When Apalis 1.0.0 stable shipped with `sqlx ^0.9` and `ulid ^3`, the previously retained `scheduler-sqlx =0.8.6` stack was subsequently removed and unified onto workspace `sqlx 0.9`.
 
 ### Positive
 

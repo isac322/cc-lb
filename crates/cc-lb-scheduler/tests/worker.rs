@@ -5,7 +5,7 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink, WorkerError};
+use apalis::prelude::{TaskSink, WorkerError};
 use cc_lb_clock::SystemClock;
 use cc_lb_config::SchedulerConfig;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
@@ -37,8 +37,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
     let pool = db.pool.clone();
     let queue = ADAPTIVE_QUEUE;
     let config = fast_queue_config(queue);
-    let mut storage =
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config);
+    let mut storage = apalis_sqlite::SqliteStorage::<AdaptiveJob>::new(&pool).with_config(config);
     let upstream_id = Uuid::new_v4();
 
     for job in entity_jobs(upstream_id) {
@@ -85,12 +84,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
 
 #[cfg(feature = "sqlite")]
 fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
-    let poll_strategy = StrategyBuilder::new()
-        .apply(IntervalStrategy::new(Duration::from_millis(10)))
-        .build();
-    apalis_sqlite::Config::new(queue)
-        .with_poll_interval(poll_strategy)
-        .set_buffer_size(5)
+    apalis_sqlite::Config::default().queue(queue).batch_size(5)
 }
 
 #[cfg(feature = "sqlite")]

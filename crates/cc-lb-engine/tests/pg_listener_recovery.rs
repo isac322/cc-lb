@@ -42,7 +42,10 @@ async fn pg_listener_reconnects_after_backend_close() -> TestResult<()> {
     let listener_task = PgListener::spawn(
         listener_pool.clone(),
         consumer_bus,
-        reqwest::Client::new(),
+        {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            reqwest::Client::new()
+        },
         SecretString::new(CLUSTER_TOKEN.to_owned().into()),
         "http://listener.local".to_owned(),
         shutdown_rx,
@@ -76,6 +79,7 @@ async fn pg_listener_shuts_down_during_reconnect_sleep() -> TestResult<()> {
     let invalid_pool = invalid_pg_pool(&database_url)?;
     let consumer_bus = Arc::new(InMemoryBus::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let listener_task = PgListener::spawn(
         invalid_pool.clone(),
         consumer_bus,

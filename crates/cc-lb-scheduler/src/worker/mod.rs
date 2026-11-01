@@ -152,7 +152,7 @@ pub fn make_worker_instance_id(clock: &dyn Clock) -> String {
 
 static WORKER_RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn next_worker_name(queue: &str, worker_instance_id: &str) -> String {
+pub(in crate::worker) fn next_worker_name(queue: &str, worker_instance_id: &str) -> String {
     let seq = WORKER_RUN_SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{queue}-{worker_instance_id}-{seq}")
 }

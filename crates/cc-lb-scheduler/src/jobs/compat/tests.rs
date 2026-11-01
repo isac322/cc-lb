@@ -216,7 +216,7 @@ async fn postgres_etags() -> Result<
     };
     let admin = PgPool::connect(&url).await?;
     let schema = format!("jobs_compat_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&admin)
         .await?;
     let options = sqlx::postgres::PgConnectOptions::from_str(&url)?
@@ -243,7 +243,7 @@ async fn jobs_compat_unchanged_hash_skips_value_write_postgres() -> Result<()> {
         return Ok(());
     };
     let outcome = exercise_unchanged_hash_skips_value_write(etags).await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
         .await?;
     outcome

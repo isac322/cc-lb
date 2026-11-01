@@ -39,7 +39,7 @@ pub trait SchedulerMetricPayload {
     fn scheduler_job_type(&self) -> &'static str;
 }
 
-impl<P, Ctx, IdType> SchedulerMetricPayload for Task<P, Ctx, IdType>
+impl<P> SchedulerMetricPayload for Task<P>
 where
     P: SchedulerMetricPayload,
 {

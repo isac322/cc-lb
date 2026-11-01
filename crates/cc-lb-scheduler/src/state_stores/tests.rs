@@ -76,7 +76,7 @@ async fn idempotency_postgres_stores_cover_insert_read_ttl_and_atomic_bump() -> 
     };
     let admin = PgPool::connect(&url).await?;
     let schema = format!("idempotency_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&admin)
         .await?;
     let options = sqlx::postgres::PgConnectOptions::from_str(&url)?
@@ -98,7 +98,7 @@ async fn idempotency_postgres_stores_cover_insert_read_ttl_and_atomic_bump() -> 
     ))
     .await?;
     let outcome = exercise_stores!(pool);
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
         .await?;
     outcome

@@ -80,7 +80,7 @@ async fn postgres_pool(max_connections: u32) -> Result<Option<(PgPool, PgPool, S
     };
     let admin = PgPool::connect(&url).await?;
     let schema = format!("oauth_usage_poll_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&admin)
         .await?;
     let options = sqlx::postgres::PgConnectOptions::from_str(&url)?
@@ -101,7 +101,7 @@ async fn postgres_pool(max_connections: u32) -> Result<Option<(PgPool, PgPool, S
 }
 
 async fn drop_schema(admin: &PgPool, schema: &str) -> Result<()> {
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(admin)
         .await?;
     Ok(())

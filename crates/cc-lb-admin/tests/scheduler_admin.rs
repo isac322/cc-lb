@@ -81,9 +81,11 @@ async fn scheduler_admin_postgres_status_and_failures() -> Result<(), Box<dyn st
     }
     .await;
     fixture.pool.close().await;
-    scheduler_sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{db_name}""#))
-        .execute(&admin)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}""#
+    )))
+    .execute(&admin)
+    .await?;
     admin.close().await;
     result
 }

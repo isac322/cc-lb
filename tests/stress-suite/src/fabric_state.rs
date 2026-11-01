@@ -3,7 +3,7 @@ use crate::topology_decision::{
     BlockedStage, CleanupReceipt, NodeAddress, SCHEMA_VERSION, TopologyDecision, Verdict,
 };
 
-pub const ALPINE_IMAGE: &str = "alpine:3.21";
+pub const ALPINE_IMAGE: &str = "alpine:3.24";
 pub const POSTGRES_IMAGE: &str = "postgres:18";
 pub const SUBNET: &str = "172.30.0.0/24";
 pub const PROBE_IP: &str = "172.30.0.2";

@@ -91,7 +91,9 @@ impl PostgresFixture {
             .connect_with(PgConnectOptions::from_str(&url)?)
             .await?;
         let create_schema_sql = format!("CREATE SCHEMA {}", quote_ident(&schema));
-        sqlx::query(&create_schema_sql).execute(&admin_pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(create_schema_sql))
+            .execute(&admin_pool)
+            .await?;
         let pool = PgPoolOptions::new()
             .max_connections(2)
             .connect_with(
@@ -116,7 +118,7 @@ impl PostgresFixture {
             "DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&self.schema)
         );
-        sqlx::query(&drop_schema_sql)
+        sqlx::query(sqlx::AssertSqlSafe(drop_schema_sql))
             .execute(&self.admin_pool)
             .await?;
         self.admin_pool.close().await;

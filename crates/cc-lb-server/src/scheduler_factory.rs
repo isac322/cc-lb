@@ -79,7 +79,7 @@ async fn open_sqlite(
     use std::str::FromStr as _;
     use std::time::Duration;
 
-    use scheduler_sqlx::sqlite::{
+    use sqlx::sqlite::{
         SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
     };
 
@@ -147,7 +147,7 @@ async fn open_postgres(
     use std::str::FromStr as _;
     use std::time::Duration;
 
-    use scheduler_sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     let ssl_mode = parse_ssl_mode(&scheduler.separate_pool.sslmode)?;
     let connect_options = PgConnectOptions::from_str(url)
@@ -167,10 +167,10 @@ async fn open_postgres(
             Box::pin(async move {
                 let statement_timeout =
                     format!("SET statement_timeout = '{statement_timeout_ms}ms'");
-                scheduler_sqlx::query(&statement_timeout)
+                sqlx::query(sqlx::AssertSqlSafe(statement_timeout))
                     .execute(&mut *connection)
                     .await?;
-                scheduler_sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
+                sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
                     .execute(&mut *connection)
                     .await?;
                 Ok(())
@@ -187,38 +187,38 @@ async fn open_postgres(
 
 #[cfg(feature = "postgres")]
 async fn run_postgres_scheduler_setup(
-    connect_options: &scheduler_sqlx::postgres::PgConnectOptions,
-    pool: &scheduler_sqlx::PgPool,
+    connect_options: &sqlx::postgres::PgConnectOptions,
+    pool: &sqlx::PgPool,
 ) -> Result<(), SchedulerFactoryError> {
     let connect_options = connect_options.clone();
     let pool = pool.clone();
     tokio::spawn(async move {
-        use scheduler_sqlx::Connection as _;
+        use sqlx::Connection as _;
 
-        let mut conn = scheduler_sqlx::PgConnection::connect_with(&connect_options)
+        let mut conn = sqlx::PgConnection::connect_with(&connect_options)
             .await
             .map_err(migration_error)?;
-        scheduler_sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
+        sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
             .execute(&mut conn)
             .await
             .map_err(migration_error)?;
-        scheduler_sqlx::query("SELECT pg_advisory_lock($1)")
+        sqlx::query("SELECT pg_advisory_lock($1)")
             .bind(SCHEDULER_SETUP_LOCK_KEY)
             .execute(&mut conn)
             .await
             .map_err(migration_error)?;
-        scheduler_sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
             .execute(&mut conn)
             .await
             .map_err(migration_error)?;
-        let migrator = apalis_postgres::PostgresStorage::<(), (), ()>::migrations();
-        let apalis_result = migrator.run_direct(&mut conn).await;
+        let migrator = apalis_postgres::PostgresStorage::<()>::migrations();
+        let apalis_result = migrator.run_direct(None, &mut conn, false).await;
         let post_setup_result = if apalis_result.is_ok() {
             cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await
         } else {
             Ok(())
         };
-        let _ = scheduler_sqlx::query("SELECT pg_advisory_unlock($1)")
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(SCHEDULER_SETUP_LOCK_KEY)
             .execute(&mut conn)
             .await;
@@ -230,7 +230,7 @@ async fn run_postgres_scheduler_setup(
 }
 
 #[cfg(feature = "sqlite")]
-fn connection_error(error: scheduler_sqlx::Error) -> SchedulerFactoryError {
+fn connection_error(error: sqlx::Error) -> SchedulerFactoryError {
     SchedulerFactoryError::ConnectionFailed {
         message: error.to_string(),
     }
@@ -243,17 +243,15 @@ fn migration_error(error: impl std::fmt::Display) -> SchedulerFactoryError {
 }
 
 #[cfg(feature = "postgres")]
-fn connection_error_with_host(url: &str, error: scheduler_sqlx::Error) -> SchedulerFactoryError {
+fn connection_error_with_host(url: &str, error: sqlx::Error) -> SchedulerFactoryError {
     SchedulerFactoryError::ConnectionFailed {
         message: host_only(url) + ": " + &error.to_string(),
     }
 }
 
 #[cfg(feature = "postgres")]
-fn parse_ssl_mode(
-    value: &str,
-) -> Result<scheduler_sqlx::postgres::PgSslMode, SchedulerFactoryError> {
-    use scheduler_sqlx::postgres::PgSslMode;
+fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, SchedulerFactoryError> {
+    use sqlx::postgres::PgSslMode;
     match value.to_ascii_lowercase().as_str() {
         "disable" => Ok(PgSslMode::Disable),
         "allow" => Ok(PgSslMode::Allow),

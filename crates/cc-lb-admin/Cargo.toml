@@ -61,6 +61,7 @@ semver = "1"
 tower.workspace = true
 thiserror.workspace = true
 ring.workspace = true
+rustls = { workspace = true }
 sonic-rs.workspace = true
 subtle = "2.6.1"
 url.workspace = true
@@ -82,8 +83,7 @@ mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oaut
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
-apalis-postgres = "^1.0.0-rc.8"
-apalis-sqlite = "^1.0.0-rc.8"
+apalis-postgres = "1.0.0"
+apalis-sqlite = "1.0.0"
 sqlx.workspace = true
-scheduler-sqlx = { package = "sqlx", version = "=0.8.6", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }
 wiremock = "0.6"

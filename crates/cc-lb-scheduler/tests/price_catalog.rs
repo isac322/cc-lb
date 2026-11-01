@@ -218,7 +218,7 @@ impl PostgresFixture {
         };
         let admin = sqlx::PgPool::connect(&url).await?;
         let schema = format!("price_catalog_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
             .execute(&admin)
             .await?;
         let options = sqlx::postgres::PgConnectOptions::from_str(&url)?
@@ -241,9 +241,12 @@ impl PostgresFixture {
 
     async fn drop_schema(self) -> Result<()> {
         self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA {} CASCADE",
+            self.schema
+        )))
+        .execute(&self.admin)
+        .await?;
         self.admin.close().await;
         Ok(())
     }
