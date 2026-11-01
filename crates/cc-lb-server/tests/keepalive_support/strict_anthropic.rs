@@ -71,8 +71,8 @@ pub fn validate_messages_request(value: &Value, headers: &HeaderMap) -> Result<(
         {
             return Err("max_tokens=0 does not support forced tool_choice".to_owned());
         }
-        validate_breakpoints(value)?;
     }
+    validate_breakpoints(value)?;
     validate_thinking(
         object.get("thinking"),
         model,
@@ -506,7 +506,7 @@ fn validate_breakpoints(value: &Value) -> Result<(), String> {
         }
     }
     if count > 4 {
-        return Err("renewal has more than four cache breakpoints".to_owned());
+        return Err("request has more than four cache breakpoints".to_owned());
     }
     Ok(())
 }
@@ -762,5 +762,15 @@ mod tests {
         let mut changed = original.clone();
         changed["messages"][0]["content"][0]["text"] = json!("changed earlier block");
         assert_ne!(cache_key(&original), cache_key(&changed));
+    }
+
+    #[test]
+    fn live_request_with_five_breakpoints_is_rejected() {
+        let mut value = base(json!({"type":"adaptive"}));
+        let block = json!({"type":"text","text":"b","cache_control":{"type":"ephemeral"}});
+        value["messages"][0]["content"] = json!([block, block, block, block]);
+        assert!(validate_messages_request(&value, &headers(false)).is_ok());
+        value["system"] = json!([block]);
+        assert!(validate_messages_request(&value, &headers(false)).is_err());
     }
 }
