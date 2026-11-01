@@ -88,7 +88,6 @@ struct MockAnthropic {
     clock: Arc<TestClock>,
     cache: Arc<Mutex<HashMap<CacheKey, CacheEntry>>>,
     events: Arc<Mutex<Vec<MockEvent>>>,
-    next_renewal_error: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -102,12 +101,7 @@ impl MockAnthropic {
             clock,
             cache: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(Vec::new())),
-            next_renewal_error: Arc::new(Mutex::new(None)),
         }
-    }
-
-    fn fail_next_renewal(&self, message: &str) {
-        *lock(&self.next_renewal_error) = Some(message.to_owned());
     }
 
     fn events(&self) -> Vec<MockEvent> {
@@ -182,18 +176,31 @@ async fn mock_messages(State(mock): State<MockAnthropic>, request: Request) -> R
         )
             .into_response();
     }
-    if synthetic && let Some(message) = lock(&mock.next_renewal_error).take() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "type": "error",
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": message
-                }
-            })),
-        )
-            .into_response();
+    if synthetic {
+        let has_output_format = value
+            .get("output_config")
+            .and_then(|config| config.get("format"))
+            .is_some();
+        let has_forced_tool_choice = matches!(
+            value
+                .get("tool_choice")
+                .and_then(|choice| choice.get("type"))
+                .and_then(Value::as_str),
+            Some("tool" | "any")
+        );
+        if has_output_format || has_forced_tool_choice {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "zero-token renewal rejects output_config.format and forced tool_choice"
+                    }
+                })),
+            )
+                .into_response();
+        }
     }
 
     let prefix_digest = prefix_digest(&value);
@@ -657,7 +664,7 @@ fn request_body(
             "block_binding": {"prefix_mismatch_behavior": "drop_block"}
         },
         "output_config": {"effort": "medium"},
-        "tool_choice": {"type": "any"},
+        "tool_choice": {"type": "auto"},
         "system": [{"type": "text", "text": prefix, "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "cached breakpoint", "cache_control": {"type": "ephemeral", "ttl": "5m"}}, {"type": "text", "text": ""}]},
@@ -672,44 +679,20 @@ fn request_body(
     }
     serde_json::to_vec(&value).expect("request body")
 }
-fn adaptive_thinking_request_body(
-    target_size: usize,
-    prefix_label: &str,
-    prefix_tokens: u64,
-    tool: &str,
-    stop_reason: &str,
-) -> Vec<u8> {
-    let mut value: Value = serde_json::from_slice(&request_body(
-        target_size,
-        prefix_label,
-        prefix_tokens,
-        tool,
-        stop_reason,
-        false,
-    ))
-    .expect("adaptive request JSON");
-    value["thinking"] = json!({
-        "type": "adaptive",
-        "display": "summarized",
-        "block_binding": {"prefix_mismatch_behavior": "drop_block"}
-    });
-    value["output_config"] = json!({"effort": "medium"});
-    serde_json::to_vec(&value).expect("adaptive request body")
-}
-
 #[tokio::test]
-async fn adaptive_thinking_session_renews_with_disabled_thinking_and_preserves_effort() {
+async fn adaptive_thinking_session_renews_with_preserved_thinking_and_effort() {
     let harness = Harness::new(8_388_608).await;
     let session = "00000000-0000-7000-8000-000000000003";
     let session_key_hash = harness.session_key_hash(session, None);
     let first = harness
         .post(
-            adaptive_thinking_request_body(
+            request_body(
                 355_453,
                 "adaptive-thinking",
                 83_900,
                 "bash",
                 "tool_use",
+                false,
             ),
             session,
             None,
@@ -740,9 +723,27 @@ async fn adaptive_thinking_session_renews_with_disabled_thinking_and_preserves_e
     assert!(error.is_none());
     assert_eq!(enqueue_state, "enqueued");
 
+    let mut forced_tool_body: Value = serde_json::from_slice(&request_body(
+        355_453,
+        "adaptive-thinking-forced-tool",
+        83_900,
+        "bash",
+        "tool_use",
+        false,
+    ))
+    .expect("forced tool request JSON");
+    forced_tool_body["tool_choice"] = json!({"type": "any"});
+    let second = harness
+        .post(
+            serde_json::to_vec(&forced_tool_body).expect("forced tool request body"),
+            session,
+            None,
+        )
+        .await;
+    assert_eq!(second["stop_reason"], "tool_use");
     harness
-        .mock
-        .fail_next_renewal("renewal upstream rejected display");
+        .wait_for_enqueued_generation(&session_key_hash, 3)
+        .await;
     harness
         .advance_and_dispatch_due(Duration::from_secs(270))
         .await;
@@ -755,9 +756,10 @@ async fn adaptive_thinking_session_renews_with_disabled_thinking_and_preserves_e
     .expect("load failed adaptive session");
     assert_eq!(status, "terminal");
     assert!(
-        error
-            .as_deref()
-            .is_some_and(|value| value.contains("renewal upstream rejected display"))
+        error.as_deref().is_some_and(|value| {
+            value.contains("zero-token renewal rejects output_config.format and forced tool_choice")
+        }),
+        "unexpected terminal error: {error:?}"
     );
     assert_eq!(enqueue_state, "pending");
 }

@@ -430,7 +430,7 @@ fn resolve_keepalive_url_oauth_none_base_url_adds_beta() {
 }
 
 #[tokio::test]
-async fn oauth_keepalive_dispatch_records_beta_url_and_disabled_thinking() {
+async fn oauth_keepalive_dispatch_records_beta_url_and_preserves_thinking() {
     use cc_lb_control::api_keys::principal_view::PrincipalView;
     use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
 
