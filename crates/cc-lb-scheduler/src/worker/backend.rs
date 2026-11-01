@@ -23,14 +23,68 @@ pub enum SchedulerBackend {
 #[cfg(feature = "sqlite")]
 pub type SqliteApalisStorage = apalis_core::backend::ext::poll_strategy::PollWith<
     apalis_sqlite::SqliteStorage<AdaptiveJob>,
-    apalis_core::backend::ext::poll_strategy::IntervalStrategy,
+    apalis_core::backend::ext::poll_strategy::Strategy,
 >;
 
 #[cfg(feature = "sqlite")]
 pub(crate) type SqliteCronApalisStorage = apalis_core::backend::ext::poll_strategy::PollWith<
     apalis_sqlite::SqliteStorage<CronJob>,
-    apalis_core::backend::ext::poll_strategy::IntervalStrategy,
+    apalis_core::backend::ext::poll_strategy::Strategy,
 >;
+
+#[cfg(feature = "sqlite")]
+struct SqliteWorkerPollStrategy {
+    poll_interval: std::time::Duration,
+    interval_delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteWorkerPollStrategy {
+    fn new(poll_interval: std::time::Duration) -> Self {
+        Self {
+            poll_interval,
+            interval_delay: None,
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl apalis_core::backend::ext::poll_strategy::PollStrategy for SqliteWorkerPollStrategy {
+    fn poll_drive(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        _snapshot: &apalis_core::backend::ext::poll_strategy::PollSnapshot,
+    ) -> std::task::Poll<Option<()>> {
+        use std::task::Poll;
+
+        let mut ready = false;
+        loop {
+            let delay = self
+                .interval_delay
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(self.poll_interval)));
+            match delay.as_mut().poll(cx) {
+                Poll::Ready(()) => {
+                    ready = true;
+                    self.interval_delay = Some(Box::pin(tokio::time::sleep(self.poll_interval)));
+                }
+                Poll::Pending => break,
+            }
+        }
+        if ready {
+            Poll::Ready(Some(()))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_worker_strategy(
+    poll_interval: std::time::Duration,
+) -> apalis_core::backend::ext::poll_strategy::Strategy {
+    apalis_core::backend::ext::poll_strategy::Strategy::new()
+        .apply(SqliteWorkerPollStrategy::new(poll_interval))
+}
 
 #[cfg(feature = "sqlite")]
 #[derive(Clone)]
@@ -57,21 +111,21 @@ impl SqliteSchedulerBackend {
         use apalis_core::backend::ext::BackendExt as _;
         apalis_sqlite::SqliteStorage::new(&self.pool)
             .with_config(apalis_sqlite::Config::default().queue(ADAPTIVE_QUEUE))
-            .poll_with_interval(DEFAULT_POLL_INTERVAL)
+            .poll_with_strategy(sqlite_worker_strategy(DEFAULT_POLL_INTERVAL))
     }
 
     pub(crate) fn keepalive_storage(&self) -> SqliteApalisStorage {
         use apalis_core::backend::ext::BackendExt as _;
         apalis_sqlite::SqliteStorage::new(&self.pool)
             .with_config(apalis_sqlite::Config::default().queue(CACHE_KEEPALIVE_QUEUE))
-            .poll_with_interval(DEFAULT_POLL_INTERVAL)
+            .poll_with_strategy(sqlite_worker_strategy(DEFAULT_POLL_INTERVAL))
     }
 
     pub(crate) fn cron_storage(&self) -> SqliteCronApalisStorage {
         use apalis_core::backend::ext::BackendExt as _;
         apalis_sqlite::SqliteStorage::new(&self.pool)
             .with_config(apalis_sqlite::Config::default().queue(CRON_QUEUE))
-            .poll_with_interval(DEFAULT_POLL_INTERVAL)
+            .poll_with_strategy(sqlite_worker_strategy(DEFAULT_POLL_INTERVAL))
     }
 }
 
@@ -587,5 +641,76 @@ mod tests {
         );
         drop(strategy);
         pool.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod sqlite_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+    use std::time::Duration;
+
+    use apalis_core::backend::ext::poll_strategy::{PollSnapshot, PollStrategy as _};
+
+    use super::{DEFAULT_POLL_INTERVAL, sqlite_worker_strategy};
+
+    struct CountingWaker {
+        wakes: AtomicUsize,
+        notify: tokio::sync::Notify,
+    }
+
+    impl CountingWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                wakes: AtomicUsize::new(0),
+                notify: tokio::sync::Notify::new(),
+            })
+        }
+
+        fn count(&self) -> usize {
+            self.wakes.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            self.notify.notify_waiters();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            self.notify.notify_waiters();
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_worker_strategy_keeps_timer_waker_armed_when_polled_after_interval_elapses() {
+        let mut strategy = sqlite_worker_strategy(DEFAULT_POLL_INTERVAL);
+        let snapshot = PollSnapshot::new();
+        let initial_waker = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&initial_waker));
+        let mut cx = Context::from_waker(&waker);
+        let _ = strategy.poll_drive(&mut cx, &snapshot);
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let next_waker = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&next_waker));
+        let notified = next_waker.notify.notified();
+        {
+            let mut cx = Context::from_waker(&waker);
+            let poll = strategy.poll_drive(&mut cx, &snapshot);
+            assert!(
+                poll.is_ready(),
+                "elapsed sqlite interval must report ready on completion poll"
+            );
+        }
+
+        tokio::time::timeout(Duration::from_millis(500), notified)
+            .await
+            .expect("sqlite replacement interval timer must register waker and fire on next tick");
+        assert!(next_waker.count() >= 1);
     }
 }

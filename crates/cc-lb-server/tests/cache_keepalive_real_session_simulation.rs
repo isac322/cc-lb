@@ -565,7 +565,7 @@ impl Harness {
         .expect("release due cache_keepalive jobs");
         for _ in 0..DUE_JOB_WAIT_ATTEMPTS {
             let due_remaining = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive' AND status IN ('Pending', 'Running') AND run_at <= 0",
+                "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive' AND status IN ('Pending', 'Queued', 'Running') AND run_at <= 0",
             )
             .fetch_one(&self.scheduler_pool)
             .await

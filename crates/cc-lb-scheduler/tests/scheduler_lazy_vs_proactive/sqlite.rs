@@ -74,10 +74,12 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
         probe.clone(),
     );
     let cancel = CancellationToken::new();
+    let strategy = apalis_core::backend::ext::poll_strategy::Strategy::new()
+        .interval(Duration::from_millis(1));
     let worker = spawn_sqlite_worker(
         apalis_sqlite::SqliteStorage::new(&scheduler_pool)
             .with_config(config)
-            .poll_with_interval(Duration::from_millis(1)),
+            .poll_with_strategy(strategy),
         state,
         cancel.clone(),
     );
