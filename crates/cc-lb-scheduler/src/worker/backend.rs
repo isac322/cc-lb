@@ -9,6 +9,8 @@ const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 const DEFAULT_POSTGRES_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 #[cfg(feature = "postgres")]
 const PUBSUB_RECONNECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(feature = "postgres")]
+const MAX_PUBSUB_NOTIFICATIONS_PER_DRIVE: usize = 32;
 
 #[derive(Clone, Debug)]
 pub enum SchedulerBackend {
@@ -134,6 +136,20 @@ impl apalis_core::backend::ext::poll_strategy::PollStrategy for PostgresWorkerPo
         let mut ready = false;
 
         loop {
+            let delay = self
+                .interval_delay
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(self.poll_interval)));
+            match delay.as_mut().poll(cx) {
+                Poll::Ready(()) => {
+                    ready = true;
+                    self.interval_delay = Some(Box::pin(tokio::time::sleep(self.poll_interval)));
+                }
+                Poll::Pending => break,
+            }
+        }
+
+        let mut drained_notifications = 0usize;
+        loop {
             if let Some(delay) = self.pubsub_reconnect_delay.as_mut() {
                 match delay.as_mut().poll(cx) {
                     Poll::Ready(()) => {
@@ -148,6 +164,11 @@ impl apalis_core::backend::ext::poll_strategy::PollStrategy for PostgresWorkerPo
             match Pin::new(&mut self.pubsub).poll_next(cx) {
                 Poll::Ready(Some(Ok(_))) => {
                     ready = true;
+                    drained_notifications = drained_notifications.saturating_add(1);
+                    if drained_notifications >= MAX_PUBSUB_NOTIFICATIONS_PER_DRIVE {
+                        cx.waker().wake_by_ref();
+                        break;
+                    }
                 }
                 Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
                     self.pubsub_reconnect_delay =
@@ -156,20 +177,6 @@ impl apalis_core::backend::ext::poll_strategy::PollStrategy for PostgresWorkerPo
                 Poll::Pending => break,
             }
         }
-
-        loop {
-            let delay = self
-                .interval_delay
-                .get_or_insert_with(|| Box::pin(tokio::time::sleep(self.poll_interval)));
-            match delay.as_mut().poll(cx) {
-                Poll::Ready(()) => {
-                    ready = true;
-                    self.interval_delay = Some(Box::pin(tokio::time::sleep(self.poll_interval)));
-                }
-                Poll::Pending => break,
-            }
-        }
-
         if ready {
             Poll::Ready(Some(()))
         } else {
@@ -414,5 +421,87 @@ mod tests {
             elapsed >= Duration::from_millis(60) && elapsed < Duration::from_millis(400),
             "custom 80ms interval fired in {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_worker_strategy_bounds_notification_drain_and_arms_interval_timer() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&database_url)
+            .await
+            .expect("connect postgres");
+        let queue = format!("notify_flood_{}", ulid::Ulid::generate());
+        let mut strategy = super::PostgresWorkerPollStrategy::new(
+            pool.clone(),
+            queue.clone(),
+            Duration::from_millis(80),
+        );
+        let snapshot = PollSnapshot::new();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waker_state = CountingWaker::new();
+                let waker = Waker::from(Arc::clone(&waker_state));
+                let mut cx = Context::from_waker(&waker);
+                let _ = strategy.poll_drive(&mut cx, &snapshot);
+                let listening: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND pid <> pg_backend_pid()
+                       AND query ILIKE 'LISTEN %apalis::job::insert%'",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("query listen count");
+                if listening > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("pubsub listener connects");
+
+        for _ in 0..80 {
+            let payload = serde_json::json!({
+                "job_type": queue,
+                "id": ulid::Ulid::generate().to_string(),
+            });
+            sqlx::query("SELECT pg_notify('apalis::job::insert', $1)")
+                .bind(payload.to_string())
+                .execute(&pool)
+                .await
+                .expect("emit pg_notify");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let waker_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&waker_state));
+        let mut cx = Context::from_waker(&waker);
+        let first_poll = strategy.poll_drive(&mut cx, &snapshot);
+        assert!(
+            first_poll.is_ready(),
+            "first bounded drain must report ready"
+        );
+        assert!(
+            strategy.interval_delay.is_some(),
+            "interval delay must be armed even during a notification flood"
+        );
+        assert!(
+            waker_state.count() >= 1,
+            "hitting the notification drain cap must self-wake for remaining notifications"
+        );
+
+        let second_poll = strategy.poll_drive(&mut cx, &snapshot);
+        assert!(
+            second_poll.is_ready(),
+            "remaining buffered notifications must still be available on the next poll_drive"
+        );
+        drop(strategy);
+        pool.close().await;
     }
 }
