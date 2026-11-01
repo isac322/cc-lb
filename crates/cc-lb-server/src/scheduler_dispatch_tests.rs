@@ -1259,7 +1259,9 @@ async fn hit_reschedule_enqueue_failure_terminalizes_new_generation() {
         record
             .error
             .as_deref()
-            .is_some_and(|error| error.contains("forced apalis enqueue failure"))
+            .is_some_and(|error| error.contains("forced reschedule enqueue failure")),
+        "unexpected reschedule error: {:?}",
+        record.error
     );
     assert_eq!(
         record.terminal_reason,
