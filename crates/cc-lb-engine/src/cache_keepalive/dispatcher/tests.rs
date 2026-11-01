@@ -494,7 +494,7 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_disabled_thinking() {
         )
         .await;
     assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
-    let requests = http.requests.lock().unwrap();
+    let requests = http.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].url().as_str(),
@@ -532,7 +532,6 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_disabled_thinking() {
         http.clone(),
     );
     let before = requests.len();
-    drop(requests);
     let outcome = api_key_dispatcher
         .dispatch(
             &snapshot,

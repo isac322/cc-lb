@@ -182,20 +182,18 @@ async fn mock_messages(State(mock): State<MockAnthropic>, request: Request) -> R
         )
             .into_response();
     }
-    if synthetic {
-        if let Some(message) = lock(&mock.next_renewal_error).take() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": message
-                    }
-                })),
-            )
-                .into_response();
-        }
+    if synthetic && let Some(message) = lock(&mock.next_renewal_error).take() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": message
+                }
+            })),
+        )
+            .into_response();
     }
 
     let prefix_digest = prefix_digest(&value);

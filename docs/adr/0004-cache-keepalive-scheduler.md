@@ -74,7 +74,7 @@ Unchanged by the Section 1' amendment.
 
 - **Set `max_tokens = 0`.** Response is `content: []`, `stop_reason: "max_tokens"`, and (on hit) `usage.cache_read_input_tokens > 0`.
 - **Strip `stream`.** `stream: true` + `max_tokens: 0` is rejected as `invalid_request_error` (400).
-- **Preserve `thinking`, `output_config`, and `tool_choice` unchanged.** Keep these fields exactly as captured so the renewal matches the live prompt-cache prefix and remains valid on adaptive-thinking models.
+- **Preserve `thinking`, `output_config`, and `tool_choice` unchanged.** Keep these fields exactly as captured so the renewal matches the live prompt-cache prefix and remains valid on adaptive-thinking models. Rewriting `thinking` or `tool_choice` invalidates message-tier cache keys (producing a cache entry follow-up requests never read), so combinations that upstream rejects at `max_tokens: 0` instead terminate the session and record the upstream error in `cache_keepalive_sessions.error`.
 - **Trim uncached history.** When top-level automatic `cache_control` is absent, retain messages and content blocks only through the last explicit breakpoint. Preserve the matching user `tool_result` after an assistant `tool_use`; otherwise end with a minimal user continuation. If only `system` or `tools` has a breakpoint, replace the message history with a minimal user turn.
 - **Reject non-Anthropic upstreams.** OpenRouter's schema requires `max_tokens >= 1`; Bedrock and Vertex have not been verified. v1 hard-gates on the upstream `kind` in the dispatcher.
 

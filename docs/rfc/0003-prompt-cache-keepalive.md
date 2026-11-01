@@ -155,7 +155,7 @@ breakpoint. An assistant breakpoint preserves the following user
 user continuation. If the only explicit breakpoint is in `system` or `tools`,
 uncached multi-turn history is replaced with a minimal user turn.
 
-`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`, removes `stream`, and trims uncached trailing messages after the last explicit `cache_control` breakpoint. It preserves `thinking`, `output_config`, and `tool_choice` unchanged from the captured request so renewals hit the same prompt-cache entry as follow-up requests.
+`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`, removes `stream`, and trims uncached trailing messages after the last explicit `cache_control` breakpoint. It preserves `thinking`, `output_config`, and `tool_choice` unchanged from the captured request so renewals hit the same prompt-cache entry as follow-up requests; if an upstream rejects a zero-output combination, the session terminates with `terminal_reason = dispatch_error` and persists the upstream error in `cache_keepalive_sessions.error`.
 
 ### Classifier — `HeuristicClassifier`
 
