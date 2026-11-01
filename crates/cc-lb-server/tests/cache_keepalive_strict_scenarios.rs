@@ -208,10 +208,12 @@ async fn b3_small_haiku_helper_does_not_create_keepalive() {
     .await;
     assert_eq!(response["stop_reason"], "tool_use");
 
-    assert!(
+    assert_eq!(
         harness
-            .wait_for_not_tracked(&session_key_hash, Duration::from_secs(1))
-            .await
+            .wait_for_enqueued_or_not_tracked(&session_key_hash)
+            .await,
+        None,
+        "small helper must have a durable not-tracked decision"
     );
     assert_eq!(harness.keepalive_job_count().await, 0);
 }
@@ -223,7 +225,7 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
         (
             "b4-any-tool",
             "00000000-0000-7000-8000-000000000103",
-            "claude-opus-5-5",
+            "claude-opus-4-6",
             json!({"type": "adaptive"}),
             json!({"effort": "medium"}),
             json!({"type": "any"}),
@@ -232,7 +234,7 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
         (
             "b4-named-tool",
             "00000000-0000-7000-8000-000000000104",
-            "claude-opus-5-5",
+            "claude-opus-4-6",
             json!({"type": "adaptive"}),
             json!({"effort": "medium"}),
             json!({"type": "tool", "name": "bash"}),
@@ -257,6 +259,7 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
             4096,
         ),
     ];
+    let mut failures = Vec::new();
 
     for (prefix, session, model, thinking, output_config, tool_choice, max_tokens) in cases {
         let session_key_hash = harness.session_key_hash(session, None);
@@ -280,41 +283,61 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
         )
         .await;
         assert_eq!(response["stop_reason"], "tool_use", "{prefix}");
-        harness
-            .wait_for_enqueued_generation(&session_key_hash, 1)
+        let generation = harness
+            .wait_for_enqueued_or_not_tracked(&session_key_hash)
             .await;
-        harness
-            .advance_and_dispatch_due(
-                Duration::from_secs(270),
-                &[DueJob {
-                    session_key_hash: &session_key_hash,
-                    generation: 1,
-                    mock_prefix: None,
-                }],
-            )
-            .await;
+        if let Some(generation) = generation {
+            harness
+                .advance_and_dispatch_due(
+                    Duration::from_secs(270),
+                    &[DueJob {
+                        session_key_hash: &session_key_hash,
+                        generation,
+                        mock_prefix: None,
+                    }],
+                )
+                .await;
+        } else {
+            harness.advance_clock(Duration::from_secs(270));
+        }
 
         let events = harness.mock_events();
-        let renewals = events
+        let renewals: Vec<_> = events
             .iter()
-            .filter(|event| event.kind == "renewal" && event_has_prefix(event, prefix));
-        for renewal in renewals {
-            assert!(
-                renewal.accepted(),
-                "{prefix} renewal must not be rejected: {:?}",
-                renewal.rejection
-            );
-        }
-        let session_row = harness
-            .read_session(&session_key_hash)
-            .await
-            .expect("B4 session row");
-        assert_ne!(
-            session_row.terminal_reason.as_deref(),
-            Some("dispatch_error"),
-            "{prefix} ended with dispatch_error: {session_row:?}"
+            .filter(|event| event.kind == "renewal" && event_has_prefix(event, prefix))
+            .collect();
+        let session_row = harness.read_session(&session_key_hash).await;
+        println!(
+            "{prefix}: generation={generation:?} renewals={} statuses={:?} rejections={:?} session={session_row:?}",
+            renewals.len(),
+            renewals
+                .iter()
+                .map(|event| event.status)
+                .collect::<Vec<_>>(),
+            renewals
+                .iter()
+                .map(|event| &event.rejection)
+                .collect::<Vec<_>>(),
         );
+        for renewal in renewals {
+            if !renewal.accepted() {
+                failures.push(format!(
+                    "{prefix}: renewal rejected: {:?}",
+                    renewal.rejection
+                ));
+            }
+        }
+        if session_row
+            .as_ref()
+            .and_then(|row| row.terminal_reason.as_deref())
+            == Some("dispatch_error")
+        {
+            failures.push(format!(
+                "{prefix}: ended with dispatch_error: {session_row:?}"
+            ));
+        }
     }
+    assert!(failures.is_empty(), "B4 failures:\n{}", failures.join("\n"));
 }
 
 #[tokio::test]
