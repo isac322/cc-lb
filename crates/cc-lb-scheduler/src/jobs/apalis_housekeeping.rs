@@ -22,6 +22,7 @@ const CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX: &str = "cache_keepalive:%";
 const SECONDS_PER_DAY: u64 = 86_400;
 const STALE_LOCK_LAST_RESULT: &str =
     "{\"Err\":\"Re-enqueued by cc-lb housekeeping: stale Running lock exceeded threshold.\"}";
+const STALE_KEEPALIVE_SESSION_ERROR: &str = "keepalive renewal timed out while running";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ApalisHousekeepingJob {
@@ -186,7 +187,8 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
             now_unix_secs.saturating_sub(self.config.stale_lock_threshold_secs);
         let recovered = sqlx::query(
             "UPDATE cache_keepalive_sessions
-             SET status = 'terminal', terminal_reason = 'stale', running_since_unix_secs = NULL, updated_at = ?1
+             SET status = 'terminal', terminal_reason = 'stale', enqueue_state = 'pending',
+                 error = ?3, running_since_unix_secs = NULL, encrypted_payload = X'', updated_at = ?1
              WHERE status = 'active'
                AND enqueue_state = 'running'
                AND running_since_unix_secs IS NOT NULL
@@ -194,6 +196,7 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         )
         .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
         .bind(unix_i64(stale_running_cutoff, "stale_running_cutoff")?)
+        .bind(STALE_KEEPALIVE_SESSION_ERROR)
         .execute(&self.pool)
         .await;
         let recovered = match recovered {
@@ -394,7 +397,8 @@ impl ApalisHousekeepingJobHandler<Postgres> {
             now_unix_secs.saturating_sub(self.config.stale_lock_threshold_secs);
         let recovered = sqlx::query(
             "UPDATE cache_keepalive_sessions
-             SET status = 'terminal', terminal_reason = 'stale', running_since_unix_secs = NULL, updated_at = $1
+             SET status = 'terminal', terminal_reason = 'stale', enqueue_state = 'pending',
+                 error = $3, running_since_unix_secs = NULL, encrypted_payload = ''::bytea, updated_at = $1
              WHERE status = 'active'
                AND enqueue_state = 'running'
                AND running_since_unix_secs IS NOT NULL
@@ -402,6 +406,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         )
         .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
         .bind(unix_i64(stale_running_cutoff, "stale_running_cutoff")?)
+        .bind(STALE_KEEPALIVE_SESSION_ERROR)
         .execute(&self.pool)
         .await;
         let recovered = match recovered {

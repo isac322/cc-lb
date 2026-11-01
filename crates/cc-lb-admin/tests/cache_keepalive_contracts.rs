@@ -288,6 +288,13 @@ async fn cache_keepalive_list_filters_base_states_and_orthogonal_errors() {
     let (status, _headers, raw) = authed_bytes(app(state.clone()), "GET", &error_uri, None).await;
     assert_eq!(status, StatusCode::OK, "error status filter: {raw:?}");
     let status_error: Value = serde_json::from_slice(&raw).expect("error response JSON");
+    let error_rows = status_error["rows"].as_array().expect("error rows");
+    assert!(!error_rows.is_empty());
+    assert!(
+        error_rows
+            .iter()
+            .any(|row| row["id"] == "error-overlaps-reason")
+    );
     let boolean_uri =
         format!("/admin/v1/principals/{principal_id}/cache-keepalive?horizon=all&error=true");
     let (status, _headers, raw) = authed_bytes(app(state), "GET", &boolean_uri, None).await;

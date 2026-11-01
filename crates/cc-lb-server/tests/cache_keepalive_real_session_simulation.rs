@@ -78,6 +78,7 @@ struct MockEvent {
     cached_tokens: u64,
     hit: bool,
     synthetic: bool,
+    effort: Option<String>,
 }
 
 type CacheKey = (String, String, String);
@@ -150,11 +151,55 @@ async fn mock_messages(State(mock): State<MockAnthropic>, request: Request) -> R
     if synthetic {
         assert!(value.get("stream").is_none(), "keepalive removed stream");
         assert_eq!(value.get("max_tokens"), Some(&json!(0)));
-        if let Some(thinking) = value.get("thinking") {
-            assert_eq!(
-                thinking.get("type").and_then(Value::as_str),
-                Some("disabled")
-            );
+    }
+    let thinking_type = value
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str);
+    let disabled_with_extra_keys = value
+        .get("thinking")
+        .and_then(Value::as_object)
+        .is_some_and(|thinking| {
+            thinking.get("type").and_then(Value::as_str) == Some("disabled") && thinking.len() > 1
+        });
+    if disabled_with_extra_keys || (model == "claude-opus-5-5" && thinking_type != Some("adaptive"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "invalid thinking configuration"
+                }
+            })),
+        )
+            .into_response();
+    }
+    if synthetic {
+        let has_output_format = value
+            .get("output_config")
+            .and_then(|config| config.get("format"))
+            .is_some();
+        let has_forced_tool_choice = matches!(
+            value
+                .get("tool_choice")
+                .and_then(|choice| choice.get("type"))
+                .and_then(Value::as_str),
+            Some("tool" | "any")
+        );
+        if has_output_format || has_forced_tool_choice {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "zero-token renewal rejects output_config.format and forced tool_choice"
+                    }
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -191,6 +236,11 @@ async fn mock_messages(State(mock): State<MockAnthropic>, request: Request) -> R
         cached_tokens: cached_read.max(cached_create),
         hit,
         synthetic,
+        effort: value
+            .get("output_config")
+            .and_then(|config| config.get("effort"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     });
 
     let tail_text = value
@@ -294,6 +344,13 @@ fn prefix_digest(value: &Value) -> String {
     let mut prefix = json!({
         "tools": value.get("tools").cloned().unwrap_or(Value::Null),
         "system": value.get("system").cloned().unwrap_or(Value::Null),
+        "thinking": value.get("thinking").cloned().unwrap_or(Value::Null),
+        "effort": value
+            .get("output_config")
+            .and_then(|config| config.get("effort"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "tool_choice": value.get("tool_choice").cloned().unwrap_or(Value::Null),
         "messages": []
     });
     let Some(messages) = value.get("messages").and_then(Value::as_array) else {
@@ -565,7 +622,7 @@ impl Harness {
         .expect("release due cache_keepalive jobs");
         for _ in 0..DUE_JOB_WAIT_ATTEMPTS {
             let due_remaining = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive' AND status IN ('Pending', 'Running') AND run_at <= 0",
+                "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive' AND status IN ('Pending', 'Queued', 'Running') AND run_at <= 0",
             )
             .fetch_one(&self.scheduler_pool)
             .await
@@ -601,8 +658,13 @@ fn request_body(
         "model": "claude-opus-5-5",
         "max_tokens": 256,
         "stream": false,
-        "thinking": {"type": "enabled", "budget_tokens": 1024},
-        "tools": [{"name": "bash", "description": "test tool", "input_schema": {"type": "object"}}],
+        "thinking": {
+            "type": "adaptive",
+            "display": "summarized",
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+        },
+        "output_config": {"effort": "medium"},
+        "tool_choice": {"type": "auto"},
         "system": [{"type": "text", "text": prefix, "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "cached breakpoint", "cache_control": {"type": "ephemeral", "ttl": "5m"}}, {"type": "text", "text": ""}]},
@@ -617,7 +679,90 @@ fn request_body(
     }
     serde_json::to_vec(&value).expect("request body")
 }
+#[tokio::test]
+async fn adaptive_thinking_session_renews_with_preserved_thinking_and_effort() {
+    let harness = Harness::new(8_388_608).await;
+    let session = "00000000-0000-7000-8000-000000000003";
+    let session_key_hash = harness.session_key_hash(session, None);
+    let first = harness
+        .post(
+            request_body(
+                355_453,
+                "adaptive-thinking",
+                83_900,
+                "bash",
+                "tool_use",
+                false,
+            ),
+            session,
+            None,
+        )
+        .await;
+    assert_eq!(first["stop_reason"], "tool_use");
+    harness
+        .wait_for_enqueued_generation(&session_key_hash, 1)
+        .await;
+    harness
+        .advance_and_dispatch_due(Duration::from_secs(270))
+        .await;
+    let live = harness.mock.last("proxy");
+    let renewal = harness.mock.last("renewal");
+    assert!(renewal.hit);
+    assert_eq!(live.prefix_digest, renewal.prefix_digest);
+    assert_eq!(renewal.effort.as_deref(), Some("medium"));
+    let events = harness.mock.events();
+    assert!(events.iter().any(|event| event.synthetic && event.hit));
+    let (status, error, enqueue_state) = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT status, error, enqueue_state FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+    )
+    .bind(&session_key_hash)
+    .fetch_one(harness.storage.pool())
+    .await
+    .expect("load active adaptive session");
+    assert_eq!(status, "active");
+    assert!(error.is_none());
+    assert_eq!(enqueue_state, "enqueued");
 
+    let mut forced_tool_body: Value = serde_json::from_slice(&request_body(
+        355_453,
+        "adaptive-thinking-forced-tool",
+        83_900,
+        "bash",
+        "tool_use",
+        false,
+    ))
+    .expect("forced tool request JSON");
+    forced_tool_body["tool_choice"] = json!({"type": "any"});
+    let second = harness
+        .post(
+            serde_json::to_vec(&forced_tool_body).expect("forced tool request body"),
+            session,
+            None,
+        )
+        .await;
+    assert_eq!(second["stop_reason"], "tool_use");
+    harness
+        .wait_for_enqueued_generation(&session_key_hash, 3)
+        .await;
+    harness
+        .advance_and_dispatch_due(Duration::from_secs(270))
+        .await;
+    let (status, error, enqueue_state) = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT status, error, enqueue_state FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+    )
+    .bind(&session_key_hash)
+    .fetch_one(harness.storage.pool())
+    .await
+    .expect("load failed adaptive session");
+    assert_eq!(status, "terminal");
+    assert!(
+        error.as_deref().is_some_and(|value| {
+            value.contains("zero-token renewal rejects output_config.format and forced tool_choice")
+        }),
+        "unexpected terminal error: {error:?}"
+    );
+    assert_eq!(enqueue_state, "pending");
+}
 async fn settle() {
     for _ in 0..20 {
         sleep(Duration::from_millis(10)).await;

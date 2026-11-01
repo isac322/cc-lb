@@ -662,15 +662,12 @@ async fn reactivation_increments_generation_and_resets_summary_inputs() {
                 &renewed.session_key_hash,
                 renewed.generation,
                 CacheKeepaliveTerminalReason::DispatchError,
+                Some("old failure"),
                 NOW_UNIX_SECS - 8,
             )
             .await
             .expect("terminalize session")
     );
-    sqlx::query("UPDATE cache_keepalive_sessions SET error = 'old failure' WHERE session_key_hash = 'reactivated-session'")
-        .execute(storage.pool())
-        .await
-        .expect("seed terminal error");
 
     let detail_uri =
         format!("/admin/v1/principals/{principal_id}/cache-keepalive/reactivated-session");

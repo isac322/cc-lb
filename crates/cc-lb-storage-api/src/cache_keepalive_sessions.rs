@@ -6,6 +6,20 @@ use uuid::Uuid;
 
 use crate::{CacheTtl, StorageResult};
 
+pub const MAX_CACHE_KEEPALIVE_ERROR_BYTES: usize = 512;
+
+#[must_use]
+pub fn truncate_cache_keepalive_error(error: &str) -> &str {
+    if error.len() <= MAX_CACHE_KEEPALIVE_ERROR_BYTES {
+        return error;
+    }
+    let mut end = MAX_CACHE_KEEPALIVE_ERROR_BYTES;
+    while end > 0 && !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    &error[..end]
+}
+
 mod reads;
 
 pub use reads::*;
@@ -300,6 +314,7 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         session_key_hash: &str,
         generation: u64,
         reason: CacheKeepaliveTerminalReason,
+        error: Option<&str>,
         now_unix_secs: u64,
     ) -> StorageResult<bool>;
 
@@ -392,7 +407,7 @@ mod tests {
             current_job_key: cache_keepalive_job_key("session", 1),
             encrypted_payload: b"ciphertext-bytes".to_vec(),
             display_reason: "agent-in-turn".to_owned(),
-            error: None,
+            error: Some("status=400 body=invalid thinking".to_owned()),
             config_snapshot: None,
             terminal_reason: None,
             expires_at_unix_secs: 310,
@@ -403,6 +418,7 @@ mod tests {
         let debug = format!("{record:?}");
 
         assert!(!debug.contains("ciphertext-bytes"));
+        assert!(debug.contains("error: Some(\"status=400 body=invalid thinking\")"));
         assert!(debug.contains("redacted"));
     }
 }

@@ -39,6 +39,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     update_payload_only_mutates_matching_pending_generation(&storage).await?;
     cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_generation(&storage).await?;
     conditional_enqueue_terminal_and_purge_are_generation_safe(&storage).await?;
+    terminal_error_is_truncated_and_resets_running_enqueue_state(&storage).await?;
     mark_latest_terminal_only_mutates_active_latest_session(&storage).await?;
     purge_stale_pending_keeps_enqueued_work(&storage).await?;
     concurrent_replace_from_real_request_bumps_each_generation(&storage).await?;
@@ -224,6 +225,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
                 "terminal-session",
                 record.generation + 1,
                 CacheKeepaliveTerminalReason::CacheMiss,
+                None,
                 102,
             )
             .await?
@@ -234,6 +236,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
                 "terminal-session",
                 record.generation,
                 CacheKeepaliveTerminalReason::CacheMiss,
+                None,
                 102,
             )
             .await?
@@ -248,7 +251,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
         .await?
         .expect("row exists");
     assert_eq!(check.status, CacheKeepaliveSessionStatus::Terminal);
-    assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Enqueued);
+    assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Pending);
 
     let removed = storage.purge_cache_keepalive_expired(351).await?;
     assert_eq!(removed, 1);
@@ -258,6 +261,108 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
             .await?
             .is_none()
     );
+    Ok(())
+}
+
+async fn terminal_error_is_truncated_and_resets_running_enqueue_state(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let record = storage
+        .replace_from_real_request(&replace_request(
+            "terminal-error-session",
+            b"ciphertext",
+            400,
+        ))
+        .await?;
+    storage
+        .mark_cache_keepalive_enqueued(&record.session_key_hash, record.generation, 401)
+        .await?;
+    storage
+        .claim_cache_keepalive_turn(&record.session_key_hash, record.generation, 402)
+        .await?;
+    let error = "é".repeat(300);
+    storage
+        .mark_cache_keepalive_terminal(
+            &record.session_key_hash,
+            record.generation,
+            CacheKeepaliveTerminalReason::DispatchError,
+            Some(&error),
+            403,
+        )
+        .await?;
+    let terminal = storage
+        .get_cache_keepalive_session(&record.session_key_hash)
+        .await?
+        .expect("terminal session exists");
+    let persisted_error = terminal.error.as_deref().expect("terminal error exists");
+    assert_eq!(persisted_error.len(), 512);
+    assert_eq!(persisted_error.chars().count(), 256);
+    assert_eq!(terminal.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+
+    let cancelled = storage
+        .replace_from_real_request(&replace_request("cancelled-session", b"ciphertext", 410))
+        .await?;
+    storage
+        .mark_cache_keepalive_enqueued(&cancelled.session_key_hash, cancelled.generation, 411)
+        .await?;
+    storage
+        .claim_cache_keepalive_turn(&cancelled.session_key_hash, cancelled.generation, 412)
+        .await?;
+    storage
+        .cancel_cache_keepalive_fenced(
+            &cancelled.session_key_hash,
+            None,
+            410,
+            CacheKeepaliveTerminalReason::Cancelled,
+            413,
+        )
+        .await?;
+    let cancelled = storage
+        .get_cache_keepalive_session(&cancelled.session_key_hash)
+        .await?
+        .expect("cancelled session exists");
+    assert_eq!(cancelled.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert_eq!(cancelled.error, None);
+
+    let latest = storage
+        .replace_from_real_request(&replace_request("latest-session", b"ciphertext", 420))
+        .await?;
+    storage
+        .mark_cache_keepalive_enqueued(&latest.session_key_hash, latest.generation, 421)
+        .await?;
+    storage
+        .claim_cache_keepalive_turn(&latest.session_key_hash, latest.generation, 422)
+        .await?;
+    storage
+        .mark_latest_cache_keepalive_terminal(
+            &latest.session_key_hash,
+            CacheKeepaliveTerminalReason::Cancelled,
+            423,
+        )
+        .await?;
+    let latest = storage
+        .get_cache_keepalive_session(&latest.session_key_hash)
+        .await?
+        .expect("latest session exists");
+    assert_eq!(latest.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert_eq!(latest.error, None);
+
+    let active = storage
+        .replace_from_real_request(&replace_request("reschedule-session", b"ciphertext", 430))
+        .await?;
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET error = $1 WHERE session_key_hash = $2 AND generation = $3",
+    )
+    .bind("stale error")
+    .bind(&active.session_key_hash)
+    .bind(i64::try_from(active.generation)?)
+    .execute(storage.pool())
+    .await?;
+    let refreshed = storage
+        .reschedule_after_cache_hit(&hit_request(&active.session_key_hash, active.generation))
+        .await?
+        .expect("rescheduled session exists");
+    assert_eq!(refreshed.error, None);
     Ok(())
 }
 

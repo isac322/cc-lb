@@ -167,12 +167,15 @@ pub async fn seed_cache_keepalive_contract_rows(
             .expect("seed cache keepalive session");
 
         if let Some(reason) = session.terminal_reason {
+            let error = (reason == CacheKeepaliveTerminalReason::DispatchError)
+                .then_some("renewal dispatch unavailable");
             assert!(
                 storage
                     .mark_cache_keepalive_terminal(
                         &record.session_key_hash,
                         record.generation,
                         reason,
+                        error,
                         now + 1,
                     )
                     .await

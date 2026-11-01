@@ -940,7 +940,6 @@ mod tests {
     use super::{
         V3PromptCacheBlockSource, analyze_v3_prompt_cache, cacheable_breakpoint_prefix_keys,
     };
-
     #[test]
     fn flattens_tools_system_messages_in_provider_order() {
         let request = json!({
@@ -1258,6 +1257,77 @@ mod tests {
         assert_ne!(
             omitted.breakpoints[0].prefix_key,
             disabled.breakpoints[0].prefix_key
+        );
+    }
+
+    #[test]
+    fn keepalive_preserves_adaptive_thinking_effort_and_tool_choice_prefix() {
+        let mut base = json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 8193,
+            "stream": true,
+            "output_config": {"effort": "medium"},
+            "tool_choice": {"type": "any"},
+            "tools": [{
+                "name": "lookup",
+                "description": "lookup",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "system": [{
+                "type": "text",
+                "text": "system",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "message",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        base["thinking"] = json!({
+            "type": "adaptive",
+            "display": "summarized"
+        });
+
+        let snapshot = crate::cache_keepalive::RequestSnapshot::capture(
+            "https://api.anthropic.com/v1/messages".parse().unwrap(),
+            http::Method::POST,
+            http::HeaderMap::new(),
+            bytes::Bytes::from(serde_json::to_vec(&base).unwrap()),
+            uuid::Uuid::nil(),
+            cc_lb_storage_api::CacheTtl::Ttl5m,
+            1_000_000,
+        )
+        .unwrap();
+        let keepalive: serde_json::Value =
+            serde_json::from_slice(&snapshot.build_keepalive_body().unwrap()).unwrap();
+
+        let live = analyze_v3_prompt_cache(&base, canonical_model_id("claude-opus-5-5"));
+        let renewal = analyze_v3_prompt_cache(&keepalive, canonical_model_id("claude-opus-5-5"));
+        assert_eq!(
+            live.breakpoints[2].prefix_key,
+            renewal.breakpoints[2].prefix_key
+        );
+
+        let mut disabled = base.clone();
+        disabled["thinking"] = json!({"type": "disabled"});
+        let disabled = analyze_v3_prompt_cache(&disabled, canonical_model_id("claude-opus-5-5"));
+        assert_ne!(
+            live.breakpoints[2].prefix_key,
+            disabled.breakpoints[2].prefix_key
+        );
+
+        let mut changed_tool_choice = keepalive;
+        changed_tool_choice["tool_choice"] = json!({"type": "none"});
+        let changed_tool_choice =
+            analyze_v3_prompt_cache(&changed_tool_choice, canonical_model_id("claude-opus-5-5"));
+        assert_ne!(
+            live.breakpoints[2].prefix_key,
+            changed_tool_choice.breakpoints[2].prefix_key
         );
     }
 
