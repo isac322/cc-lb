@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- PostgreSQL scheduler workers now drive task polling with a dedicated 1-second interval and auto-reconnecting notification strategy, preventing future-scheduled keep-alive and OAuth refresh jobs from stalling across idle intervals or listener disconnects.
+
 ## [2.1.0] - 2026-10-31
 
 ### Added
