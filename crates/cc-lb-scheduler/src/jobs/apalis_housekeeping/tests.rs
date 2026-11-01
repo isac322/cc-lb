@@ -185,24 +185,49 @@ mod sqlite {
             } => assert_eq!(cache_keepalive_sessions_removed, 1),
             other => panic!("expected completed housekeeping, got {other:?}"),
         }
-        let stale: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, terminal_reason, running_since_unix_secs
+        let stale: (
+            String,
+            Option<String>,
+            String,
+            Option<i64>,
+            Option<String>,
+            Vec<u8>,
+        ) = sqlx::query_as(
+            "SELECT status, terminal_reason, enqueue_state, running_since_unix_secs,
+                    error, encrypted_payload
              FROM cache_keepalive_sessions WHERE session_key_hash = 'stale-running'",
         )
         .fetch_one(&pool)
         .await?;
         assert_eq!(stale.0, "terminal");
         assert_eq!(stale.1.as_deref(), Some("stale"));
-        assert_eq!(stale.2, None);
-        let fresh: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, terminal_reason, running_since_unix_secs
+        assert_eq!(stale.2, "pending");
+        assert_eq!(stale.3, None);
+        assert_eq!(
+            stale.4.as_deref(),
+            Some("keepalive renewal timed out while running")
+        );
+        assert!(stale.5.is_empty());
+        let fresh: (
+            String,
+            Option<String>,
+            String,
+            Option<i64>,
+            Option<String>,
+            Vec<u8>,
+        ) = sqlx::query_as(
+            "SELECT status, terminal_reason, enqueue_state, running_since_unix_secs,
+                    error, encrypted_payload
              FROM cache_keepalive_sessions WHERE session_key_hash = 'fresh-running'",
         )
         .fetch_one(&pool)
         .await?;
         assert_eq!(fresh.0, "active");
         assert_eq!(fresh.1, None);
-        assert_eq!(fresh.2, Some(i64::try_from(NOW_SECS - 10)?));
+        assert_eq!(fresh.2, "running");
+        assert_eq!(fresh.3, Some(i64::try_from(NOW_SECS - 10)?));
+        assert_eq!(fresh.4, None);
+        assert!(!fresh.5.is_empty());
         let (job_status, lock_by, lock_at): (String, Option<String>, Option<i64>) = sqlx::query_as(
             "SELECT status, lock_by, lock_at FROM Jobs WHERE id = 'stale-keepalive-job'",
         )
@@ -247,7 +272,9 @@ mod sqlite {
                 expires_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 terminal_reason TEXT,
-                running_since_unix_secs INTEGER
+                running_since_unix_secs INTEGER,
+                error TEXT,
+                encrypted_payload BLOB NOT NULL DEFAULT X''
             )",
         )
         .execute(pool)
@@ -316,18 +343,20 @@ mod sqlite {
         .bind(i64::try_from(NOW_SECS).expect("test timestamp fits i64"))
         .execute(pool)
         .await?;
-        for (session_key_hash, running_since_unix_secs) in [
-            ("stale-running", NOW_SECS - 300),
-            ("fresh-running", NOW_SECS - 10),
+        for (session_key_hash, running_since_unix_secs, encrypted_payload) in [
+            ("stale-running", NOW_SECS - 300, vec![1_u8, 2, 3]),
+            ("fresh-running", NOW_SECS - 10, vec![4_u8, 5, 6]),
         ] {
             sqlx::query(
                 "INSERT INTO cache_keepalive_sessions
-                 (session_key_hash, status, enqueue_state, expires_at, updated_at, terminal_reason, running_since_unix_secs)
-                 VALUES (?1, 'active', 'running', ?2, ?2, NULL, ?3)",
+                 (session_key_hash, status, enqueue_state, expires_at, updated_at, terminal_reason,
+                  running_since_unix_secs, error, encrypted_payload)
+                 VALUES (?1, 'active', 'running', ?2, ?2, NULL, ?3, NULL, ?4)",
             )
             .bind(session_key_hash)
             .bind(i64::try_from(NOW_SECS + DAY_SECS).expect("test timestamp fits i64"))
             .bind(i64::try_from(running_since_unix_secs).expect("test timestamp fits i64"))
+            .bind(encrypted_payload)
             .execute(pool)
             .await?;
         }
@@ -459,18 +488,20 @@ mod postgres {
     async fn assert_postgres_stale_running_keepalive_recovery(
         pool: &PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        for (session_key_hash, running_since_unix_secs) in [
-            ("stale-running", NOW_SECS - 300),
-            ("fresh-running", NOW_SECS - 10),
+        for (session_key_hash, running_since_unix_secs, encrypted_payload) in [
+            ("stale-running", NOW_SECS - 300, vec![1_u8, 2, 3]),
+            ("fresh-running", NOW_SECS - 10, vec![4_u8, 5, 6]),
         ] {
             sqlx::query(
                 "INSERT INTO cache_keepalive_sessions
-                 (session_key_hash, status, enqueue_state, expires_at, updated_at, terminal_reason, running_since_unix_secs)
-                 VALUES ($1, 'active', 'running', $2, $2, NULL, $3)",
+                 (session_key_hash, status, enqueue_state, expires_at, updated_at, terminal_reason,
+                  running_since_unix_secs, error, encrypted_payload)
+                 VALUES ($1, 'active', 'running', $2, $2, NULL, $3, NULL, $4)",
             )
             .bind(session_key_hash)
             .bind(i64::try_from(NOW_SECS + DAY_SECS)?)
             .bind(i64::try_from(running_since_unix_secs)?)
+            .bind(encrypted_payload)
             .execute(pool)
             .await?;
         }
@@ -497,24 +528,49 @@ mod postgres {
             } => assert_eq!(cache_keepalive_sessions_removed, 1),
             other => panic!("expected completed housekeeping, got {other:?}"),
         }
-        let stale: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, terminal_reason, running_since_unix_secs
+        let stale: (
+            String,
+            Option<String>,
+            String,
+            Option<i64>,
+            Option<String>,
+            Vec<u8>,
+        ) = sqlx::query_as(
+            "SELECT status, terminal_reason, enqueue_state, running_since_unix_secs,
+                    error, encrypted_payload
              FROM cache_keepalive_sessions WHERE session_key_hash = 'stale-running'",
         )
         .fetch_one(pool)
         .await?;
         assert_eq!(stale.0, "terminal");
         assert_eq!(stale.1.as_deref(), Some("stale"));
-        assert_eq!(stale.2, None);
-        let fresh: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, terminal_reason, running_since_unix_secs
+        assert_eq!(stale.2, "pending");
+        assert_eq!(stale.3, None);
+        assert_eq!(
+            stale.4.as_deref(),
+            Some("keepalive renewal timed out while running")
+        );
+        assert!(stale.5.is_empty());
+        let fresh: (
+            String,
+            Option<String>,
+            String,
+            Option<i64>,
+            Option<String>,
+            Vec<u8>,
+        ) = sqlx::query_as(
+            "SELECT status, terminal_reason, enqueue_state, running_since_unix_secs,
+                    error, encrypted_payload
              FROM cache_keepalive_sessions WHERE session_key_hash = 'fresh-running'",
         )
         .fetch_one(pool)
         .await?;
         assert_eq!(fresh.0, "active");
         assert_eq!(fresh.1, None);
-        assert_eq!(fresh.2, Some(i64::try_from(NOW_SECS - 10)?));
+        assert_eq!(fresh.2, "running");
+        assert_eq!(fresh.3, Some(i64::try_from(NOW_SECS - 10)?));
+        assert_eq!(fresh.4, None);
+        assert!(!fresh.5.is_empty());
         let (job_status, lock_by, lock_at): (String, Option<String>, Option<DateTime<Utc>>) =
             sqlx::query_as(
                 "SELECT status, lock_by, lock_at FROM apalis.jobs WHERE id = 'stale-keepalive-job'",
@@ -604,7 +660,9 @@ mod postgres {
                 expires_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL,
                 terminal_reason TEXT,
-                running_since_unix_secs BIGINT
+                running_since_unix_secs BIGINT,
+                error TEXT,
+                encrypted_payload BYTEA NOT NULL DEFAULT ''::bytea
             )",
         )
         .execute(pool)

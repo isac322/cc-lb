@@ -271,6 +271,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe() {
                 "session-hash",
                 record.generation + 1,
                 CacheKeepaliveTerminalReason::CacheMiss,
+                None,
                 102,
             )
             .await
@@ -282,6 +283,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe() {
                 "session-hash",
                 record.generation,
                 CacheKeepaliveTerminalReason::CacheMiss,
+                None,
                 102,
             )
             .await
@@ -299,7 +301,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe() {
         .expect("check")
         .expect("row exists");
     assert_eq!(check.status, CacheKeepaliveSessionStatus::Terminal);
-    assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Enqueued);
+    assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Pending);
 
     let removed = storage
         .purge_cache_keepalive_expired(401)
@@ -313,6 +315,154 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe() {
             .expect("get after purge")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn terminal_error_is_truncated_and_resets_running_enqueue_state() {
+    let (_dir, storage) = storage().await;
+    let record = storage
+        .replace_from_real_request(&replace_request(b"ciphertext", 100))
+        .await
+        .expect("insert session");
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("session-hash", record.generation, 101)
+            .await
+            .expect("mark enqueued")
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn("session-hash", record.generation, 102)
+            .await
+            .expect("claim turn")
+    );
+
+    let error = "é".repeat(300);
+    assert!(
+        storage
+            .mark_cache_keepalive_terminal(
+                "session-hash",
+                record.generation,
+                CacheKeepaliveTerminalReason::DispatchError,
+                Some(&error),
+                103,
+            )
+            .await
+            .expect("mark terminal")
+    );
+
+    let terminal = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load terminal session")
+        .expect("terminal session exists");
+    let persisted_error = terminal.error.as_deref().expect("terminal error exists");
+    assert_eq!(persisted_error.len(), 512);
+    assert_eq!(persisted_error.chars().count(), 256);
+    assert!(persisted_error.is_char_boundary(persisted_error.len()));
+    assert_eq!(terminal.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+}
+
+#[tokio::test]
+async fn fenced_terminal_paths_reset_enqueue_state_and_reschedule_clears_error() {
+    let (_dir, storage) = storage().await;
+    let record = storage
+        .replace_from_real_request(&replace_request(b"ciphertext", 100))
+        .await
+        .expect("insert session");
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("session-hash", record.generation, 101)
+            .await
+            .expect("mark enqueued")
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn("session-hash", record.generation, 102)
+            .await
+            .expect("claim turn")
+    );
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                "session-hash",
+                None,
+                100,
+                CacheKeepaliveTerminalReason::Cancelled,
+                103,
+            )
+            .await
+            .expect("cancel session")
+    );
+    let cancelled = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load cancelled session")
+        .expect("cancelled session exists");
+    assert_eq!(cancelled.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert_eq!(cancelled.error, None);
+
+    let active = storage
+        .replace_from_real_request(&replace_request(b"ciphertext-two", 110))
+        .await
+        .expect("replace session");
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("session-hash", active.generation, 111)
+            .await
+            .expect("mark replacement enqueued")
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn("session-hash", active.generation, 112)
+            .await
+            .expect("claim replacement turn")
+    );
+    assert!(
+        storage
+            .mark_latest_cache_keepalive_terminal(
+                "session-hash",
+                CacheKeepaliveTerminalReason::Cancelled,
+                113,
+            )
+            .await
+            .expect("mark latest terminal")
+    );
+    let latest = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load latest session")
+        .expect("latest session exists");
+    assert_eq!(latest.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert_eq!(latest.error, None);
+
+    let active = storage
+        .replace_from_real_request(&replace_request(b"ciphertext-three", 120))
+        .await
+        .expect("replace for reschedule");
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET error = ? WHERE session_key_hash = ? AND generation = ?",
+    )
+    .bind("stale error")
+    .bind(&active.session_key_hash)
+    .bind(i64::try_from(active.generation).expect("generation fits i64"))
+    .execute(storage.pool())
+    .await
+    .expect("seed active error");
+    let refreshed = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: active.session_key_hash,
+            generation: active.generation,
+            cache_anchor_at_unix_secs: 121,
+            run_at_unix_secs: 391,
+            expires_at_unix_secs: 421,
+            encrypted_payload: None,
+            now_unix_secs: 121,
+        })
+        .await
+        .expect("reschedule after cache hit")
+        .expect("rescheduled session exists");
+    assert_eq!(refreshed.error, None);
 }
 
 #[tokio::test]

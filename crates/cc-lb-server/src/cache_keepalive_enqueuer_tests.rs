@@ -9,8 +9,8 @@ use cc_lb_engine::cache_keepalive::{
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::worker::{Filter, TaskStatus};
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
-    CacheKeepaliveSessionStatus, CacheTtl, MetaStore,
+    CacheKeepaliveEnqueueState, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
+    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStatus, CacheTtl, MetaStore,
 };
 use http::{HeaderMap, Method};
 use tempfile::TempDir;
@@ -92,6 +92,14 @@ async fn enqueue_failure_terminalizes_committed_pending_session() {
         .expect("load cache keepalive session")
         .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert!(record.running_since_unix_secs.is_none());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("forced apalis enqueue failure"))
+    );
     assert_eq!(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::DispatchError)

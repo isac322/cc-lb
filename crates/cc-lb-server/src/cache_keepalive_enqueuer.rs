@@ -164,11 +164,20 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
                 Ok(())
             }
             Err(error) => {
+                tracing::warn!(
+                    target: "cache_keepalive",
+                    session_key_hash = %record.session_key_hash,
+                    generation = record.generation,
+                    terminal_reason = CacheKeepaliveTerminalReason::DispatchError.as_str(),
+                    error = %error,
+                    "cache keepalive initial enqueue failed"
+                );
                 CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
                     self.storage.as_ref(),
                     &record.session_key_hash,
                     record.generation,
                     CacheKeepaliveTerminalReason::DispatchError,
+                    Some(&error.to_string()),
                     now_unix_secs,
                 )
                 .await

@@ -181,6 +181,7 @@ impl RenewalAccountingScenario {
                     &session.session_key_hash,
                     session.generation,
                     reason,
+                    None,
                     1_003,
                 )
                 .await
