@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 use super::keepalive_support::harness::{DueJob, Harness, HarnessOptions, NOW};
 use super::keepalive_support::mock_upstream::MockEvent;
 const SESSION: &str = "00000000-0000-7000-8000-000000000101";
-const NAMED_SESSION: &str = "00000000-0000-7000-8000-000000000102";
 const AGENT: &str = "subagent-worker-01";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const CLAUDE_CODE_BETA: &str =
@@ -218,110 +217,104 @@ async fn b3_small_haiku_helper_does_not_create_keepalive() {
 }
 
 #[tokio::test]
-async fn b4_any_and_named_tool_choice_are_preserved_and_hit() {
+async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
     let harness = Harness::new(8_388_608).await;
-    let session_key_hash = harness.session_key_hash(SESSION, None);
-    let named_session_key_hash = harness.session_key_hash(NAMED_SESSION, None);
-
-    let response = post_with_claude_code_headers(
-        &harness,
-        strict_body(
-            "claude-opus-5-5",
+    let cases = [
+        (
             "b4-any-tool",
-            83_900,
-            "5m",
-            "any",
-            json!({"type": "any"}),
-        ),
-        SESSION,
-        None,
-    )
-    .await;
-    assert_eq!(response["stop_reason"], "tool_use");
-    harness
-        .wait_for_enqueued_generation(&session_key_hash, 1)
-        .await;
-    harness
-        .advance_and_dispatch_due(
-            Duration::from_secs(270),
-            &[DueJob {
-                session_key_hash: &session_key_hash,
-                generation: 1,
-                mock_prefix: Some("b4-any-tool"),
-            }],
-        )
-        .await;
-
-    let events = harness.mock_events();
-    let any_live = event_for_prefix(&events, "proxy", "b4-any-tool").expect("B4 any live event");
-    let any_renewal =
-        event_for_prefix(&events, "renewal", "b4-any-tool").expect("B4 any renewal event");
-    assert!(
-        any_renewal.accepted(),
-        "renewal rejected: {:?}",
-        any_renewal.rejection
-    );
-    assert_eq!(any_renewal.body["tool_choice"], json!({"type": "any"}));
-    assert_eq!(
-        any_renewal.body["tool_choice"],
-        any_live.body["tool_choice"]
-    );
-    assert!(any_renewal.hit, "renewal with tool_choice any must HIT");
-    assert_eq!(any_renewal.cache_key, any_live.cache_key);
-
-    let named = post_with_claude_code_headers(
-        &harness,
-        strict_body(
+            "00000000-0000-7000-8000-000000000103",
             "claude-opus-5-5",
-            "b4-named-tool",
-            83_900,
-            "5m",
-            "named",
-            json!({"type": "tool", "name": "bash"}),
+            json!({"type": "adaptive"}),
+            json!({"effort": "medium"}),
+            json!({"type": "any"}),
+            256,
         ),
-        NAMED_SESSION,
-        None,
-    )
-    .await;
-    assert_eq!(named["stop_reason"], "tool_use");
-    harness
-        .wait_for_enqueued_generation(&named_session_key_hash, 1)
-        .await;
-    harness
-        .advance_and_dispatch_due(
-            Duration::from_secs(270),
-            &[DueJob {
-                session_key_hash: &named_session_key_hash,
-                generation: 1,
-                mock_prefix: Some("b4-named-tool"),
-            }],
+        (
+            "b4-named-tool",
+            "00000000-0000-7000-8000-000000000104",
+            "claude-opus-5-5",
+            json!({"type": "adaptive"}),
+            json!({"effort": "medium"}),
+            json!({"type": "tool", "name": "bash"}),
+            256,
+        ),
+        (
+            "b4-structured-output",
+            "00000000-0000-7000-8000-000000000105",
+            "claude-opus-5-5",
+            json!({"type": "adaptive"}),
+            json!({"effort": "medium", "format": {"type": "json_schema"}}),
+            json!({"type": "auto"}),
+            256,
+        ),
+        (
+            "b4-enabled-thinking",
+            "00000000-0000-7000-8000-000000000106",
+            "claude-opus-4-6",
+            json!({"type": "enabled", "budget_tokens": 1024}),
+            json!({"effort": "medium"}),
+            json!({"type": "auto"}),
+            4096,
+        ),
+    ];
+
+    for (prefix, session, model, thinking, output_config, tool_choice, max_tokens) in cases {
+        let session_key_hash = harness.session_key_hash(session, None);
+        let response = post_with_claude_code_headers(
+            &harness,
+            strict_body_with_options(
+                model,
+                prefix,
+                83_900,
+                "5m",
+                prefix,
+                StrictBodyOptions {
+                    max_tokens,
+                    thinking,
+                    output_config,
+                    tool_choice,
+                },
+            ),
+            session,
+            None,
         )
         .await;
+        assert_eq!(response["stop_reason"], "tool_use", "{prefix}");
+        harness
+            .wait_for_enqueued_generation(&session_key_hash, 1)
+            .await;
+        harness
+            .advance_and_dispatch_due(
+                Duration::from_secs(270),
+                &[DueJob {
+                    session_key_hash: &session_key_hash,
+                    generation: 1,
+                    mock_prefix: None,
+                }],
+            )
+            .await;
 
-    let events = harness.mock_events();
-    let named_live =
-        event_for_prefix(&events, "proxy", "b4-named-tool").expect("B4 named live event");
-    let Some(named_renewal) = event_for_prefix(&events, "renewal", "b4-named-tool") else {
-        panic!(
-            "B4 named renewal event missing; {}; events={events:#?}",
-            harness.debug_keepalive(&named_session_key_hash).await,
+        let events = harness.mock_events();
+        let renewals = events
+            .iter()
+            .filter(|event| event.kind == "renewal" && event_has_prefix(event, prefix));
+        for renewal in renewals {
+            assert!(
+                renewal.accepted(),
+                "{prefix} renewal must not be rejected: {:?}",
+                renewal.rejection
+            );
+        }
+        let session_row = harness
+            .read_session(&session_key_hash)
+            .await
+            .expect("B4 session row");
+        assert_ne!(
+            session_row.terminal_reason.as_deref(),
+            Some("dispatch_error"),
+            "{prefix} ended with dispatch_error: {session_row:?}"
         );
-    };
-    assert!(
-        named_renewal.accepted(),
-        "renewal rejected: {:?}",
-        named_renewal.rejection
-    );
-    assert_eq!(
-        named_renewal.body["tool_choice"],
-        json!({"type": "tool", "name": "bash"})
-    );
-    assert_eq!(
-        named_renewal.body["tool_choice"],
-        named_live.body["tool_choice"]
-    );
-    assert!(named_renewal.hit, "renewal with named tool_choice must HIT");
-    assert_eq!(named_renewal.cache_key, named_live.cache_key);
+    }
 }
 
 #[tokio::test]
@@ -418,17 +411,47 @@ fn strict_body(
     turn: &str,
     tool_choice: Value,
 ) -> Vec<u8> {
+    strict_body_with_options(
+        model,
+        prefix_label,
+        prefix_tokens,
+        ttl,
+        turn,
+        StrictBodyOptions {
+            max_tokens: 256,
+            thinking: json!({
+                "type": "adaptive",
+                "display": "summarized",
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+            }),
+            output_config: json!({"effort": "medium"}),
+            tool_choice,
+        },
+    )
+}
+
+struct StrictBodyOptions {
+    max_tokens: u64,
+    thinking: Value,
+    output_config: Value,
+    tool_choice: Value,
+}
+
+fn strict_body_with_options(
+    model: &str,
+    prefix_label: &str,
+    prefix_tokens: u64,
+    ttl: &str,
+    turn: &str,
+    options: StrictBodyOptions,
+) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "model": model,
-        "max_tokens": 256,
+        "max_tokens": options.max_tokens,
         "stream": false,
-        "thinking": {
-            "type": "adaptive",
-            "display": "summarized",
-            "block_binding": {"prefix_mismatch_behavior": "drop_block"}
-        },
-        "output_config": {"effort": "medium"},
-        "tool_choice": tool_choice,
+        "thinking": options.thinking,
+        "output_config": options.output_config,
+        "tool_choice": options.tool_choice,
         "tools": [{
             "name": "bash",
             "description": "test tool",

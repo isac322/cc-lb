@@ -259,6 +259,9 @@ async fn c6_postgres_http_400_invalid_request_terminalizes_when_available() {
     };
 
     let session_key_hash = harness.session_key_hash(SESSION_ID, None);
+    harness
+        .mock
+        .fail_next_renewals(1, StatusCode::BAD_REQUEST, ERROR_BODY.to_owned());
     let live = harness
         .post(
             request_body(
@@ -274,9 +277,6 @@ async fn c6_postgres_http_400_invalid_request_terminalizes_when_available() {
         )
         .await;
     assert_eq!(live["stop_reason"], "tool_use");
-    harness
-        .mock
-        .fail_next_renewals(1, StatusCode::BAD_REQUEST, ERROR_BODY.to_owned());
 
     let terminal = harness
         .wait_for_session_terminal(&session_key_hash, Duration::from_secs(20))

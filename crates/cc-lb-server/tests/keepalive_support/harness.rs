@@ -155,9 +155,9 @@ impl StorageBackend {
 }
 
 enum SchedulerPool {
-    Sqlite(scheduler_sqlx::SqlitePool),
+    Sqlite(sqlx::SqlitePool),
     #[cfg(feature = "postgres")]
-    Postgres(scheduler_sqlx::PgPool),
+    Postgres(sqlx::PgPool),
 }
 
 /// Shared test harness. PostgreSQL tests are isolated in a private database
@@ -297,6 +297,12 @@ impl Harness {
         };
         config.price_catalog.url = "http://127.0.0.1:9/price-catalog.json".to_owned();
         config.body.messages_cap_bytes = 12 * 1024 * 1024;
+        if matches!(options.clock, ClockMode::System) {
+            // Disable unrelated recurring inserts so D1/D2 cannot borrow their notification wakes.
+            for job in config.scheduler.recurring_jobs.values_mut() {
+                job.enabled = false;
+            }
+        }
         config.listener.proxy_addr = "127.0.0.1:0"
             .parse()
             .map_err(|error: std::net::AddrParseError| HarnessError::Setup(error.to_string()))?;
@@ -563,14 +569,14 @@ impl Harness {
 
     pub async fn keepalive_job_count(&self) -> i64 {
         match &self.scheduler_pool {
-            SchedulerPool::Sqlite(pool) => scheduler_sqlx::query_scalar(
-                "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive'",
-            )
-            .fetch_one(pool)
-            .await
-            .expect("keepalive job count"),
+            SchedulerPool::Sqlite(pool) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive'")
+                    .fetch_one(pool)
+                    .await
+                    .expect("keepalive job count")
+            }
             #[cfg(feature = "postgres")]
-            SchedulerPool::Postgres(pool) => scheduler_sqlx::query_scalar(
+            SchedulerPool::Postgres(pool) => sqlx::query_scalar(
                 "SELECT COUNT(*) FROM apalis.jobs WHERE job_type = 'cache_keepalive'",
             )
             .fetch_one(pool)
@@ -689,21 +695,19 @@ impl Harness {
     }
     pub async fn read_job_timing(&self, job_key: &str) -> Option<JobTiming> {
         match &self.scheduler_pool {
-            SchedulerPool::Sqlite(pool) => {
-                scheduler_sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
-                    "SELECT lock_at, run_at FROM Jobs \
+            SchedulerPool::Sqlite(pool) => sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+                "SELECT lock_at, run_at FROM Jobs \
                      WHERE idempotency_key = ? ORDER BY id DESC LIMIT 1",
-                )
-                .bind(job_key)
-                .fetch_optional(pool)
-                .await
-                .expect("read job timing")
-                .map(|(lock_at, run_at)| JobTiming { lock_at, run_at })
-            }
+            )
+            .bind(job_key)
+            .fetch_optional(pool)
+            .await
+            .expect("read job timing")
+            .map(|(lock_at, run_at)| JobTiming { lock_at, run_at }),
             #[cfg(feature = "postgres")]
             SchedulerPool::Postgres(pool) => {
                 type Timestamp = chrono::DateTime<chrono::Utc>;
-                let row = scheduler_sqlx::query_as::<_, (Option<Timestamp>, Option<Timestamp>)>(
+                let row = sqlx::query_as::<_, (Option<Timestamp>, Option<Timestamp>)>(
                     "SELECT lock_at, run_at FROM apalis.jobs \
                      WHERE idempotency_key = $1 ORDER BY id DESC LIMIT 1",
                 )
@@ -712,8 +716,8 @@ impl Harness {
                 .await
                 .expect("read job timing");
                 row.map(|(lock_at, run_at)| JobTiming {
-                    lock_at: lock_at.map(|value| value.timestamp_micros() / 1_000_000),
-                    run_at: run_at.map(|value| value.timestamp_micros() / 1_000_000),
+                    lock_at: lock_at.map(|value| value.timestamp_micros() / 1_000),
+                    run_at: run_at.map(|value| value.timestamp_micros() / 1_000),
                 })
             }
         }
@@ -760,7 +764,7 @@ impl Harness {
         let jobs = match (&self.scheduler_pool, current_job_key.as_deref()) {
             (SchedulerPool::Sqlite(pool), Some(key)) => format!(
                 "{:?}",
-                scheduler_sqlx::query_as::<_, (String, String, Option<i64>, Option<i64>)>(
+                sqlx::query_as::<_, (String, String, Option<i64>, Option<i64>)>(
                     "SELECT id, status, lock_at, run_at FROM Jobs WHERE idempotency_key = ?"
                 )
                 .bind(key)
@@ -771,7 +775,7 @@ impl Harness {
             #[cfg(feature = "postgres")]
             (SchedulerPool::Postgres(pool), Some(key)) => format!(
                 "{:?}",
-                scheduler_sqlx::query_as::<
+                sqlx::query_as::<
                     _,
                     (
                         String,
@@ -795,24 +799,22 @@ impl Harness {
     }
     pub async fn read_keepalive_worker(&self) -> Option<WorkerTiming> {
         match &self.scheduler_pool {
-            SchedulerPool::Sqlite(pool) => {
-                scheduler_sqlx::query_as::<_, (String, Option<i64>, Option<i64>)>(
-                    "SELECT id, started_at, last_seen FROM Workers \
+            SchedulerPool::Sqlite(pool) => sqlx::query_as::<_, (String, Option<i64>, Option<i64>)>(
+                "SELECT id, started_at, last_seen FROM Workers \
                      WHERE worker_type = 'cache_keepalive' ORDER BY last_seen DESC LIMIT 1",
-                )
-                .fetch_optional(pool)
-                .await
-                .expect("read keepalive worker")
-                .map(|(id, started_at, last_heartbeat)| WorkerTiming {
-                    id,
-                    started_at,
-                    last_heartbeat,
-                })
-            }
+            )
+            .fetch_optional(pool)
+            .await
+            .expect("read keepalive worker")
+            .map(|(id, started_at, last_heartbeat)| WorkerTiming {
+                id,
+                started_at,
+                last_heartbeat,
+            }),
             #[cfg(feature = "postgres")]
             SchedulerPool::Postgres(pool) => {
                 type Timestamp = chrono::DateTime<chrono::Utc>;
-                scheduler_sqlx::query_as::<_, (String, Option<Timestamp>, Timestamp)>(
+                sqlx::query_as::<_, (String, Option<Timestamp>, Timestamp)>(
                     "SELECT id, started_at, last_seen FROM apalis.workers \
                      WHERE worker_type = 'cache_keepalive' ORDER BY last_seen DESC LIMIT 1",
                 )
@@ -839,6 +841,7 @@ impl Harness {
         .await
         .ok()
     }
+
     pub fn mock_events(&self) -> Vec<MockEvent> {
         self.mock.events()
     }
@@ -865,7 +868,7 @@ impl Harness {
         for job in expected_jobs {
             let key =
                 cc_lb_storage_api::cache_keepalive_job_key(job.session_key_hash, job.generation);
-            let row = scheduler_sqlx::query_as::<_, (String, String, Option<i64>)>(
+            let row = sqlx::query_as::<_, (String, String, Option<i64>)>(
                 "SELECT id, status, run_at FROM Jobs WHERE idempotency_key = ?",
             )
             .bind(&key)
@@ -896,7 +899,7 @@ impl Harness {
                 run_at.is_some_and(|scheduled| scheduled <= now),
                 "expected job {key} is not due: run_at={run_at:?}, now={now}"
             );
-            scheduler_sqlx::query(
+            sqlx::query(
                 "UPDATE Jobs SET run_at = 0 WHERE id = ? \
                  AND idempotency_key = ? AND status = 'Pending'",
             )
@@ -910,7 +913,7 @@ impl Harness {
         for (job, key, id, _, attempt_count) in expected {
             let terminal = tokio::time::timeout(DISPATCH_WAIT, async {
                 loop {
-                    let status = scheduler_sqlx::query_scalar::<_, String>(
+                    let status = sqlx::query_scalar::<_, String>(
                         "SELECT status FROM Jobs WHERE id = ? AND idempotency_key = ?",
                     )
                     .bind(&id)
@@ -1013,6 +1016,38 @@ impl Harness {
     }
 }
 
+#[cfg(feature = "postgres")]
+fn drop_postgres_database(admin_url: &str, database: &str) {
+    let admin_url = admin_url.to_owned();
+    let database = database.to_owned();
+    let _ = std::thread::Builder::new()
+        .name("cc-lb-keepalive-db-cleanup".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let Ok(runtime) = runtime else {
+                return;
+            };
+            runtime.block_on(async move {
+                if let Ok(pool) = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&admin_url)
+                    .await
+                {
+                    let sql = format!("DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
+                    let _ = sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&pool).await;
+                    pool.close().await;
+                }
+            });
+        })
+        .and_then(|handle| {
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("database cleanup thread panicked"))
+        });
+}
+
 impl Drop for Harness {
     fn drop(&mut self) {
         if let Some(app) = self.app.take() {
@@ -1021,20 +1056,8 @@ impl Drop for Harness {
         self._proxy_task.abort();
         self._admin_task.abort();
         #[cfg(feature = "postgres")]
-        if let Some((admin_url, database)) = self.postgres_database.take()
-            && let Ok(handle) = tokio::runtime::Handle::try_current()
-        {
-            handle.spawn(async move {
-                if let Ok(pool) = scheduler_sqlx::postgres::PgPoolOptions::new()
-                    .max_connections(1)
-                    .connect(&admin_url)
-                    .await
-                {
-                    let sql = format!("DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
-                    let _ = scheduler_sqlx::query(&sql).execute(&pool).await;
-                    pool.close().await;
-                }
-            });
+        if let Some((admin_url, database)) = self.postgres_database.take() {
+            drop_postgres_database(&admin_url, &database);
         }
     }
 }
@@ -1083,7 +1106,7 @@ async fn setup_sqlite(
         .await
         .map_err(|error| HarnessError::Setup(error.to_string()))?;
     let scheduler_path = path.with_extension("scheduler.sqlite");
-    let scheduler_pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+    let scheduler_pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect(&format!("sqlite://{}?mode=rwc", scheduler_path.display()))
         .await
@@ -1118,51 +1141,61 @@ async fn setup_postgres(
     let admin_url = std::env::var("CI_POSTGRES_URL").map_err(|_| HarnessError::PostgresUrlUnset)?;
     let parsed = Url::parse(&admin_url).map_err(|error| HarnessError::Setup(error.to_string()))?;
     let database = format!("cc_lb_keepalive_{}", Uuid::new_v4().simple());
-    let admin_pool = scheduler_sqlx::postgres::PgPoolOptions::new()
+    let admin_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&admin_url)
         .await
         .map_err(|error| HarnessError::Setup(error.to_string()))?;
     let create = format!("CREATE DATABASE \"{database}\"");
-    scheduler_sqlx::query(&create)
+    if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(create))
         .execute(&admin_pool)
         .await
-        .map_err(|error| HarnessError::Setup(error.to_string()))?;
+    {
+        admin_pool.close().await;
+        return Err(HarnessError::Setup(error.to_string()));
+    }
     admin_pool.close().await;
-    let mut db_url = parsed;
-    db_url.set_path(&format!("/{database}"));
-    let database_url = db_url.to_string();
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(8)
-        .connect(&database_url)
-        .await
-        .map_err(|error| HarnessError::Setup(error.to_string()))?;
-    let storage = Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
-    storage
-        .initialize()
-        .await
-        .map_err(|error| HarnessError::Setup(error.to_string()))?;
-    let managed: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
-        pool.clone(),
-        Arc::new(RetryPolicy::default()),
-        clock.clone(),
-    ));
-    let scheduler_pool = scheduler_sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await
-        .map_err(|error| HarnessError::Setup(error.to_string()))?;
-    Ok((
-        StorageBackend::Postgres(storage),
-        managed,
-        StorageConfig::Postgres {
-            url: database_url.clone(),
-            pool: PostgresPoolConfig::default(),
-        },
-        SchedulerPool::Postgres(scheduler_pool),
-        Some((admin_url, database)),
-        None,
-    ))
+    let setup = async {
+        let mut db_url = parsed;
+        db_url.set_path(&format!("/{database}"));
+        let database_url = db_url.to_string();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&database_url)
+            .await
+            .map_err(|error| HarnessError::Setup(error.to_string()))?;
+        let storage = Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
+        storage
+            .initialize()
+            .await
+            .map_err(|error| HarnessError::Setup(error.to_string()))?;
+        let managed: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
+            pool.clone(),
+            Arc::new(RetryPolicy::default()),
+            clock.clone(),
+        ));
+        let scheduler_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .map_err(|error| HarnessError::Setup(error.to_string()))?;
+        Ok((
+            StorageBackend::Postgres(storage),
+            managed,
+            StorageConfig::Postgres {
+                url: database_url.clone(),
+                pool: PostgresPoolConfig::default(),
+            },
+            SchedulerPool::Postgres(scheduler_pool),
+            Some((admin_url.clone(), database.clone())),
+            None,
+        ))
+    }
+    .await;
+    if setup.is_err() {
+        drop_postgres_database(&admin_url, &database);
+    }
+    setup
 }
 
 #[cfg(not(feature = "postgres"))]
