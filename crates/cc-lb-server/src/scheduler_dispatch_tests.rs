@@ -1745,3 +1745,244 @@ async fn cache_keepalive_revoked_principal_terminalizes_before_dispatch() {
     let requests = fixture.http.requests.lock().expect("requests lock").clone();
     assert!(requests.is_empty());
 }
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
+    use std::panic::AssertUnwindSafe;
+
+    use cc_lb_config::SchedulerConfig;
+    use cc_lb_engine::cache_keepalive::ScheduleParams;
+    use cc_lb_scheduler::worker::{AdaptiveDispatchFn, CronDispatchFn, PostgresSchedulerBackend};
+    use futures_util::FutureExt as _;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        eprintln!("SKIP: DATABASE_URL not set; skipping postgres keepalive QA-09");
+        return;
+    };
+    let options: PgConnectOptions = database_url.parse().expect("parse postgres test URL");
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone())
+        .await
+        .expect("connect postgres admin");
+    let database_name = format!("cclb_keepalive_qa09_{}", Uuid::new_v4().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE \"{database_name}\""
+    )))
+    .execute(&admin_pool)
+    .await
+    .expect("create isolated keepalive database");
+    let pg_pool = PgPoolOptions::new()
+        .max_connections(16)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_lazy_with(options.clone().database(&database_name));
+    let cancel = CancellationToken::new();
+    let mut handles = Vec::new();
+
+    // Catch assertions as well as timeouts so the isolated database is dropped on failure.
+    let result = AssertUnwindSafe(async {
+        apalis_postgres::PostgresStorage::setup(&pg_pool)
+            .await
+            .expect("setup postgres scheduler");
+        cc_lb_scheduler::migrations::apply_post_setup_migrations(&pg_pool)
+            .await
+            .expect("apply postgres scheduler migrations");
+        let worker_pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_millis(120))
+            .connect_with(options.database(&database_name))
+            .await
+            .expect("connect worker pool");
+        let pg_backend =
+            SchedulerBackend::Postgres(PostgresSchedulerBackend::new(worker_pool.clone()));
+        let mut fixture = Fixture::new().await;
+        fixture.backend.backend = pg_backend.clone();
+        fixture.http.return_cache_hit_usage(100, 0, 10);
+        let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(pg_backend.clone());
+        let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+        let dispatch = fixture.dispatch(pusher);
+        let adaptive_dispatch: AdaptiveDispatchFn = Arc::new(move |job| {
+            let dispatch = dispatch.clone();
+            Box::pin(async move {
+                match job {
+                    AdaptiveJob::CacheKeepalive(job) => {
+                        dispatch.dispatch_cache_keepalive(job).await
+                    }
+                    _ => Ok(JobOutcome::Noop),
+                }
+            })
+        });
+        let cron_dispatch: CronDispatchFn = Arc::new(|_| Box::pin(async { Ok(JobOutcome::Noop) }));
+        handles = pg_backend
+            .spawn(
+                SchedulerCtx::new(
+                    SchedulerConfig::default(),
+                    adaptive_dispatch,
+                    cron_dispatch,
+                    Arc::new(SystemClock),
+                ),
+                cancel.clone(),
+            )
+            .await
+            .expect("spawn postgres scheduler");
+
+        let listener_pids = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let registered: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM apalis.workers WHERE worker_type = 'cache_keepalive'
+                     )",
+                )
+                .fetch_one(&pg_pool)
+                .await
+                .expect("check keepalive worker registration");
+                let listener_pids: Vec<i32> = sqlx::query_scalar(
+                    "SELECT pid FROM pg_stat_activity
+                     WHERE datname = current_database() AND query ILIKE 'LISTEN %'",
+                )
+                .fetch_all(&pg_pool)
+                .await
+                .expect("find postgres scheduler listeners");
+                // All three consumers listen on the same channel. Drop every listener
+                // in this isolated database so the keepalive listener is included.
+                if registered && listener_pids.len() >= 3 {
+                    break listener_pids;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("keepalive worker and postgres listeners register");
+        let mut held = vec![worker_pool.acquire().await.expect("acquire free slot")];
+        let grab_pool = worker_pool.clone();
+        let grabber = tokio::spawn(async move {
+            while held.len() < 4 {
+                if let Ok(conn) = grab_pool.acquire().await {
+                    held.push(conn);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(held);
+        });
+        let _ = listener_pids;
+        let terminated: Vec<bool> = sqlx::query_scalar(
+            "SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND query ILIKE 'LISTEN %'",
+        )
+        .fetch_all(&pg_pool)
+        .await
+        .expect("terminate postgres scheduler listeners");
+        assert!(
+            terminated.len() >= 3 && terminated.iter().all(|t| *t),
+            "all three postgres scheduler listeners must terminate"
+        );
+        grabber.await.expect("join pool saturation task");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut request = fixture.enqueue_request();
+        request.params = ScheduleParams {
+            delay: Duration::from_secs(2),
+            max_refreshes: 3,
+            max_total_duration_secs: Duration::from_secs(600).as_secs(),
+        };
+        enqueuer
+            .enqueue_cache_keepalive(request)
+            .await
+            .expect("enqueue postgres keepalive");
+        let record = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load scheduled keepalive")
+            .expect("scheduled keepalive exists");
+        let expires_at_unix_secs = record.run_at_unix_secs + 4;
+        let updated = sqlx::query(
+            "UPDATE cache_keepalive_sessions SET expires_at = ?1 WHERE session_key_hash = ?2",
+        )
+        .bind(i64::try_from(expires_at_unix_secs).expect("test expiry fits i64"))
+        .bind("session-hash")
+        .execute(fixture.storage.pool())
+        .await
+        .expect("shorten keepalive session expiry");
+        assert_eq!(updated.rows_affected(), 1);
+        let updated = sqlx::query(
+            "UPDATE apalis.jobs
+             SET job = convert_to(
+                 jsonb_set(
+                     convert_from(job, 'UTF8')::jsonb,
+                     '{payload,expires_at_unix_secs}',
+                     to_jsonb($1::bigint)
+                 )::text, 'UTF8'
+             )
+             WHERE job_type = 'cache_keepalive' AND idempotency_key = $2
+               AND status = 'Pending'",
+        )
+        .bind(i64::try_from(expires_at_unix_secs).expect("test expiry fits i64"))
+        .bind(format!(
+            "cache_keepalive:session-hash:{}",
+            record.generation
+        ))
+        .execute(&pg_pool)
+        .await
+        .expect("shorten queued keepalive payload expiry");
+        assert_eq!(updated.rows_affected(), 1);
+
+        // QA-09: an idle worker must renew before the four-second expiry margin,
+        // even after losing LISTEN notifications.
+        let record = tokio::time::timeout(Duration::from_secs(7), async {
+            loop {
+                let record = fixture
+                    .storage
+                    .get_cache_keepalive_session("session-hash")
+                    .await
+                    .expect("load keepalive renewal")
+                    .expect("keepalive session exists");
+                if record.refresh_count == 1 {
+                    break record;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("postgres idle keepalive renews within seven seconds");
+        (record, Arc::clone(&fixture.http))
+    })
+    .catch_unwind()
+    .await;
+
+    cancel.cancel();
+    for mut handle in handles {
+        if tokio::time::timeout(Duration::from_secs(5), &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+    pg_pool.close().await;
+    let dropped = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE \"{database_name}\" WITH (FORCE)"
+    )))
+    .execute(&admin_pool)
+    .await;
+    admin_pool.close().await;
+    dropped.expect("drop isolated keepalive database");
+    let (record, http) = match result {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(record.terminal_reason, None);
+    assert_ne!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Expired)
+    );
+    assert_eq!(record.refresh_count, 1);
+    assert_eq!(http.requests.lock().expect("requests lock").len(), 1);
+}

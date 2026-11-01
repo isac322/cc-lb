@@ -3,9 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+
 ### Fixed
 
 - Prompt-cache keep-alive renewals now preserve request `thinking`, `output_config`, and `tool_choice` fields unchanged instead of rewriting `thinking` to `disabled`, include `beta=true` on Anthropic OAuth renewal URLs, and persist terminal failure messages in `cache_keepalive_sessions.error` while resetting `enqueue_state` to `pending`.
+
+- PostgreSQL scheduler workers now drive task polling with a dedicated 1-second interval and auto-reconnecting notification strategy, preventing future-scheduled keep-alive and OAuth refresh jobs from stalling across idle intervals or listener disconnects.
 
 ## [2.1.0] - 2026-10-31
 
