@@ -98,25 +98,46 @@ pub(crate) type PostgresCronApalisStorage = apalis_core::backend::ext::poll_stra
 >;
 
 #[cfg(feature = "postgres")]
+type PgNotificationStream =
+    futures_util::stream::BoxStream<'static, Result<sqlx::postgres::PgNotification, sqlx::Error>>;
+
+#[cfg(feature = "postgres")]
+enum PostgresListenerState {
+    Starting,
+    Connecting(
+        apalis_core::backend::future::BoxSyncFuture<
+            Result<apalis_postgres::PgListener, sqlx::Error>,
+        >,
+    ),
+    Listening(std::sync::Mutex<PgNotificationStream>),
+    ReconnectDelay(std::pin::Pin<Box<tokio::time::Sleep>>),
+}
+
+#[cfg(feature = "postgres")]
+fn get_mut_unpoisoned<T>(mutex: &mut std::sync::Mutex<T>) -> &mut T {
+    match mutex.get_mut() {
+        Ok(inner) => inner,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(feature = "postgres")]
 struct PostgresWorkerPollStrategy {
     pool: sqlx::PgPool,
     queue: String,
     poll_interval: std::time::Duration,
-    pubsub: apalis_postgres::Pubsub,
-    pubsub_reconnect_delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    listener: PostgresListenerState,
     interval_delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 #[cfg(feature = "postgres")]
 impl PostgresWorkerPollStrategy {
     fn new(pool: sqlx::PgPool, queue: String, poll_interval: std::time::Duration) -> Self {
-        let pubsub = apalis_postgres::Pubsub::new(pool.clone(), queue.clone());
         Self {
             pool,
             queue,
             poll_interval,
-            pubsub,
-            pubsub_reconnect_delay: None,
+            listener: PostgresListenerState::Starting,
             interval_delay: None,
         }
     }
@@ -129,8 +150,7 @@ impl apalis_core::backend::ext::poll_strategy::PollStrategy for PostgresWorkerPo
         cx: &mut std::task::Context<'_>,
         _snapshot: &apalis_core::backend::ext::poll_strategy::PollSnapshot,
     ) -> std::task::Poll<Option<()>> {
-        use futures_util::Stream as _;
-        use std::pin::Pin;
+        use futures_util::StreamExt as _;
         use std::task::Poll;
 
         let mut ready = false;
@@ -148,33 +168,62 @@ impl apalis_core::backend::ext::poll_strategy::PollStrategy for PostgresWorkerPo
             }
         }
 
-        let mut drained_notifications = 0usize;
+        let mut raw_notifications = 0usize;
         loop {
-            if let Some(delay) = self.pubsub_reconnect_delay.as_mut() {
-                match delay.as_mut().poll(cx) {
-                    Poll::Ready(()) => {
-                        self.pubsub_reconnect_delay = None;
-                        self.pubsub =
-                            apalis_postgres::Pubsub::new(self.pool.clone(), self.queue.clone());
-                    }
+            match &mut self.listener {
+                PostgresListenerState::Starting => {
+                    let pool = self.pool.clone();
+                    let fut = Box::pin(async move {
+                        let mut listener = apalis_postgres::PgListener::connect_with(&pool).await?;
+                        listener.listen("apalis::job::insert").await?;
+                        Ok(listener)
+                    });
+                    self.listener = PostgresListenerState::Connecting(
+                        apalis_core::backend::future::BoxSyncFuture::new(fut),
+                    );
+                }
+                PostgresListenerState::Connecting(fut) => match fut.poll_unpin(cx) {
                     Poll::Pending => break,
-                }
-            }
-
-            match Pin::new(&mut self.pubsub).poll_next(cx) {
-                Poll::Ready(Some(Ok(_))) => {
-                    ready = true;
-                    drained_notifications = drained_notifications.saturating_add(1);
-                    if drained_notifications >= MAX_PUBSUB_NOTIFICATIONS_PER_DRIVE {
-                        cx.waker().wake_by_ref();
-                        break;
+                    Poll::Ready(Ok(listener)) => {
+                        self.listener = PostgresListenerState::Listening(std::sync::Mutex::new(
+                            listener.into_stream().boxed(),
+                        ));
+                    }
+                    Poll::Ready(Err(_)) => {
+                        self.listener = PostgresListenerState::ReconnectDelay(Box::pin(
+                            tokio::time::sleep(PUBSUB_RECONNECT_INTERVAL),
+                        ));
+                    }
+                },
+                PostgresListenerState::ReconnectDelay(delay) => match delay.as_mut().poll(cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(()) => {
+                        self.listener = PostgresListenerState::Starting;
+                    }
+                },
+                PostgresListenerState::Listening(stream) => {
+                    match get_mut_unpoisoned(stream).poll_next_unpin(cx) {
+                        Poll::Pending => break,
+                        Poll::Ready(Some(Ok(notification))) => {
+                            if let Ok(event) = serde_json::from_str::<apalis_postgres::InsertEvent>(
+                                notification.payload(),
+                            ) && event.job_type == self.queue
+                            {
+                                ready = true;
+                            }
+                            raw_notifications = raw_notifications.saturating_add(1);
+                            if raw_notifications >= MAX_PUBSUB_NOTIFICATIONS_PER_DRIVE {
+                                cx.waker().wake_by_ref();
+                                break;
+                            }
+                        }
+                        Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
+                            self.listener = PostgresListenerState::ReconnectDelay(Box::pin(
+                                tokio::time::sleep(PUBSUB_RECONNECT_INTERVAL),
+                            ));
+                        }
                     }
                 }
-                Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
-                    self.pubsub_reconnect_delay =
-                        Some(Box::pin(tokio::time::sleep(PUBSUB_RECONNECT_INTERVAL)));
-                }
-                Poll::Pending => break,
             }
         }
         if ready {
@@ -438,7 +487,7 @@ mod tests {
         let mut strategy = super::PostgresWorkerPollStrategy::new(
             pool.clone(),
             queue.clone(),
-            Duration::from_millis(80),
+            Duration::from_secs(5),
         );
         let snapshot = PollSnapshot::new();
 
@@ -466,6 +515,41 @@ mod tests {
         .await
         .expect("pubsub listener connects");
 
+        let other_queue = format!("other_flood_{}", ulid::Ulid::generate());
+        for _ in 0..80 {
+            let payload = serde_json::json!({
+                "job_type": other_queue,
+                "id": ulid::Ulid::generate().to_string(),
+            });
+            sqlx::query("SELECT pg_notify('apalis::job::insert', $1)")
+                .bind(payload.to_string())
+                .execute(&pool)
+                .await
+                .expect("emit cross-queue pg_notify");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let cross_waker_state = CountingWaker::new();
+        let cross_waker = Waker::from(Arc::clone(&cross_waker_state));
+        let mut cross_cx = Context::from_waker(&cross_waker);
+        let cross_poll = strategy.poll_drive(&mut cross_cx, &snapshot);
+        assert!(
+            cross_poll.is_pending(),
+            "cross-queue flood must return Pending after bounding raw notification drain"
+        );
+        assert!(
+            strategy.interval_delay.is_some(),
+            "interval delay must remain armed during a cross-queue notification flood"
+        );
+        assert!(
+            cross_waker_state.count() >= 1,
+            "hitting raw notification drain cap on cross-queue flood must self-wake"
+        );
+        // Drain remaining cross-queue notifications before testing same-queue flood.
+        for _ in 0..4 {
+            let _ = strategy.poll_drive(&mut cross_cx, &snapshot);
+        }
+
         for _ in 0..80 {
             let payload = serde_json::json!({
                 "job_type": queue,
@@ -475,7 +559,7 @@ mod tests {
                 .bind(payload.to_string())
                 .execute(&pool)
                 .await
-                .expect("emit pg_notify");
+                .expect("emit same-queue pg_notify");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
 
