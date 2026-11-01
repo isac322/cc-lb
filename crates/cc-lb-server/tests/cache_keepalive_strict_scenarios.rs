@@ -127,6 +127,17 @@ async fn b1_multi_turn_adaptive_keepalive_preserves_live_options_and_oauth() {
         renewal.anthropic_version.as_deref(),
         Some(ANTHROPIC_VERSION)
     );
+
+    let row = harness
+        .read_session(&session_key_hash)
+        .await
+        .expect("active adaptive session after renewal");
+    assert_eq!(row.status, "active");
+    assert!(
+        row.error.is_none(),
+        "unexpected adaptive renewal error: {row:?}"
+    );
+    assert_eq!(row.enqueue_state, "enqueued");
 }
 
 #[tokio::test]
