@@ -1401,11 +1401,10 @@ mod tests {
             let scheduler_db_url =
                 format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
             use std::str::FromStr as _;
-            let scheduler_options =
-                scheduler_sqlx::sqlite::SqliteConnectOptions::from_str(&scheduler_db_url)
-                    .expect("parse url")
-                    .create_if_missing(true);
-            let scheduler_pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+            let scheduler_options = sqlx::sqlite::SqliteConnectOptions::from_str(&scheduler_db_url)
+                .expect("parse url")
+                .create_if_missing(true);
+            let scheduler_pool = sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(5)
                 .connect_with(scheduler_options)
                 .await

@@ -431,7 +431,7 @@ async fn create_from_oauth_draft_rollback_rebuilds_view_from_compensated_state()
 /// non-conflict error.
 #[cfg(feature = "sqlite")]
 async fn failing_scheduler() -> cc_lb_scheduler::admin::SchedulerAdminHandle {
-    let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await

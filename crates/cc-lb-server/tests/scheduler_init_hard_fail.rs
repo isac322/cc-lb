@@ -152,7 +152,7 @@ fn scheduler_sqlite_path(path: &Path) -> std::path::PathBuf {
 async fn precreate_jobs_without_idempotency_key(path: &Path) -> TestResult {
     use std::str::FromStr as _;
 
-    use scheduler_sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     let database_url = format!("sqlite://{}", path.display());
     let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
@@ -160,7 +160,7 @@ async fn precreate_jobs_without_idempotency_key(path: &Path) -> TestResult {
         .max_connections(1)
         .connect_with(options)
         .await?;
-    scheduler_sqlx::query("CREATE TABLE Jobs (id TEXT PRIMARY KEY)")
+    sqlx::query("CREATE TABLE Jobs (id TEXT PRIMARY KEY)")
         .execute(&pool)
         .await?;
     pool.close().await;
@@ -171,7 +171,7 @@ async fn precreate_jobs_without_idempotency_key(path: &Path) -> TestResult {
 async fn assert_scheduler_workers_not_spawned(path: &Path) -> TestResult {
     use std::str::FromStr as _;
 
-    use scheduler_sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     let database_url = format!("sqlite://{}", path.display());
     let options = SqliteConnectOptions::from_str(&database_url)?;
@@ -179,7 +179,7 @@ async fn assert_scheduler_workers_not_spawned(path: &Path) -> TestResult {
         .max_connections(1)
         .connect_with(options)
         .await?;
-    let workers_table_count: i64 = scheduler_sqlx::query_scalar(
+    let workers_table_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Workers'",
     )
     .fetch_one(&pool)
@@ -189,7 +189,7 @@ async fn assert_scheduler_workers_not_spawned(path: &Path) -> TestResult {
         return Ok(());
     }
 
-    let worker_rows: i64 = scheduler_sqlx::query_scalar("SELECT COUNT(*) FROM Workers")
+    let worker_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM Workers")
         .fetch_one(&pool)
         .await?;
     pool.close().await;

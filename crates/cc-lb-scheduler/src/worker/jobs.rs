@@ -98,7 +98,7 @@ impl TraceparentCarrier for AdaptiveJob {
     }
 }
 
-impl<Ctx, IdType> TraceparentCarrier for Task<AdaptiveJob, Ctx, IdType> {
+impl TraceparentCarrier for Task<AdaptiveJob> {
     fn traceparent(&self) -> Option<&str> {
         self.args.traceparent()
     }
@@ -108,9 +108,9 @@ impl<Ctx, IdType> TraceparentCarrier for Task<AdaptiveJob, Ctx, IdType> {
     }
 }
 
-impl<Ctx, IdType> RetryPayload for Task<AdaptiveJob, Ctx, IdType> {
+impl RetryPayload for Task<AdaptiveJob> {
     fn attempt_count(&self) -> u32 {
-        u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
+        u32::try_from(self.attempt()).unwrap_or(u32::MAX)
     }
 }
 
@@ -150,7 +150,7 @@ impl TraceparentCarrier for CronJob {
     }
 }
 
-impl<Ctx, IdType> TraceparentCarrier for Task<CronJob, Ctx, IdType> {
+impl TraceparentCarrier for Task<CronJob> {
     fn traceparent(&self) -> Option<&str> {
         self.args.traceparent()
     }
@@ -160,9 +160,9 @@ impl<Ctx, IdType> TraceparentCarrier for Task<CronJob, Ctx, IdType> {
     }
 }
 
-impl<Ctx, IdType> RetryPayload for Task<CronJob, Ctx, IdType> {
+impl RetryPayload for Task<CronJob> {
     fn attempt_count(&self) -> u32 {
-        u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
+        u32::try_from(self.attempt()).unwrap_or(u32::MAX)
     }
 }
 

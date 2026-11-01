@@ -12,6 +12,22 @@ use super::{
     ADAPTIVE_QUEUE, AdaptiveJob, CACHE_KEEPALIVE_QUEUE, CRON_QUEUE, CronJob, SchedulerBackend,
 };
 
+#[cfg(feature = "sqlite")]
+fn from_sqlite_apalis_error(error: apalis_sqlite::Error) -> SchedulerError {
+    match error {
+        apalis_sqlite::Error::Database(db_err) => SchedulerError::Database(db_err),
+        other => SchedulerError::Job(other.to_string()),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn from_postgres_apalis_error(error: apalis_postgres::Error) -> SchedulerError {
+    match error {
+        apalis_postgres::Error::Database(db_err) => SchedulerError::Database(db_err),
+        other => SchedulerError::Job(other.to_string()),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerTaskRow<Args> {
     pub args: Args,
@@ -86,7 +102,7 @@ impl SchedulerBackend {
                 storage
                     .list_tasks(filter)
                     .await
-                    .map_err(SchedulerError::Database)?
+                    .map_err(from_sqlite_apalis_error)?
                     .into_iter()
                     .map(sqlite_task_to_row)
                     .collect()
@@ -97,7 +113,7 @@ impl SchedulerBackend {
                 storage
                     .list_tasks(filter)
                     .await
-                    .map_err(SchedulerError::Database)?
+                    .map_err(from_postgres_apalis_error)?
                     .into_iter()
                     .map(postgres_task_to_row)
                     .collect()
@@ -116,7 +132,7 @@ impl SchedulerBackend {
                 storage
                     .list_tasks(filter)
                     .await
-                    .map_err(SchedulerError::Database)?
+                    .map_err(from_sqlite_apalis_error)?
                     .into_iter()
                     .map(sqlite_task_to_row)
                     .collect()
@@ -127,7 +143,7 @@ impl SchedulerBackend {
                 storage
                     .list_tasks(filter)
                     .await
-                    .map_err(SchedulerError::Database)?
+                    .map_err(from_postgres_apalis_error)?
                     .into_iter()
                     .map(postgres_task_to_row)
                     .collect()
@@ -138,23 +154,18 @@ impl SchedulerBackend {
 
 #[cfg(feature = "sqlite")]
 fn build_sqlite_task<Args>(task: SchedulerPushTask<Args>) -> apalis_sqlite::SqliteTask<Args> {
-    build_apalis_task::<Args, apalis_sqlite::SqliteContext, ulid::Ulid>(task)
+    build_apalis_task(task)
 }
 
 #[cfg(feature = "postgres")]
 fn build_postgres_task<Args>(task: SchedulerPushTask<Args>) -> apalis_postgres::PgTask<Args> {
-    build_apalis_task::<Args, apalis_postgres::PgContext, ulid::Ulid>(task)
+    build_apalis_task(task)
 }
 
-fn build_apalis_task<Args, Ctx, IdType>(
-    task: SchedulerPushTask<Args>,
-) -> apalis_core::task::Task<Args, Ctx, IdType>
-where
-    Ctx: Default,
-{
+fn build_apalis_task<Args>(task: SchedulerPushTask<Args>) -> apalis_core::task::Task<Args> {
     let builder = TaskBuilder::new(task.args);
     let builder = match task.idempotency_key {
-        Some(idempotency_key) => builder.with_idempotency_key(idempotency_key),
+        Some(idempotency_key) => builder.idempotency_key(idempotency_key),
         None => builder,
     };
     let builder = match task.run_at_unix_secs {
@@ -176,22 +187,34 @@ where
     let max_attempts = task.max_attempts;
     let task = build_sqlite_task(task);
     let payload = encode_task_args(&task.args)?;
-    let run_at = u64_to_i64(task.parts.run_at, "run_at_unix_secs")?;
-    let max_attempts = max_attempts.unwrap_or_else(|| task.parts.ctx.max_attempts());
-    let metadata = serde_json::to_string(task.parts.ctx.meta())
+    let default_run_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let run_at = u64_to_i64(task.run_at().unwrap_or(default_run_at), "run_at_unix_secs")?;
+    let default_max_attempts = task
+        .max_attempts()
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(25);
+    let max_attempts = max_attempts.unwrap_or(default_max_attempts);
+    let priority = task
+        .priority()
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(0);
+    let metadata = serde_json::to_string(task.metadata())
         .map_err(|error| SchedulerError::Job(format!("encode task metadata: {error}")))?;
     sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, lock_at, lock_by, done_at, priority, metadata, idempotency_key) \
          VALUES (?1, ?2, ?3, 'Pending', 0, ?4, ?5, NULL, NULL, NULL, NULL, ?6, ?7, ?8)",
     )
     .bind(payload)
-    .bind(ulid::Ulid::new().to_string())
+    .bind(ulid::Ulid::generate().to_string())
     .bind(queue)
     .bind(max_attempts)
     .bind(run_at)
-    .bind(task.parts.ctx.priority())
+    .bind(priority)
     .bind(metadata)
-    .bind(task.parts.idempotency_key)
+    .bind(task.idempotency_key().map(ToOwned::to_owned))
     .execute(pool)
     .await
     .map_err(SchedulerError::from_task_push_sqlx_error)?;
@@ -210,23 +233,33 @@ where
     let max_attempts = task.max_attempts;
     let task = build_postgres_task(task);
     let payload = encode_task_args(&task.args)?;
-    let run_at = u64_to_i64(task.parts.run_at, "run_at_unix_secs")?;
+    let default_run_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let run_at = u64_to_i64(task.run_at().unwrap_or(default_run_at), "run_at_unix_secs")?;
     let run_at = chrono::DateTime::<chrono::Utc>::from_timestamp(run_at, 0)
         .ok_or_else(|| SchedulerError::Job("run_at outside chrono timestamp range".to_owned()))?;
-    let metadata = serde_json::Value::Object(task.parts.ctx.meta().clone());
-    let max_attempts = max_attempts.unwrap_or_else(|| task.parts.ctx.max_attempts());
+    let default_max_attempts = task
+        .max_attempts()
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(25);
+    let max_attempts = max_attempts.unwrap_or(default_max_attempts);
+    let priority = task
+        .priority()
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(0);
     sqlx::query(
         "INSERT INTO apalis.jobs (id, job_type, job, status, attempts, max_attempts, run_at, priority, metadata, idempotency_key) \
-         VALUES ($1, $2, $3, 'Pending', 0, $4, $5, $6, $7, $8)",
+         VALUES ($1, $2, $3, 'Pending', 0, $4, $5, $6, ''::hstore, $7)",
     )
-    .bind(ulid::Ulid::new().to_string())
+    .bind(ulid::Ulid::generate().to_string())
     .bind(queue)
     .bind(payload)
     .bind(max_attempts)
     .bind(run_at)
-    .bind(task.parts.ctx.priority())
-    .bind(metadata)
-    .bind(task.parts.idempotency_key)
+    .bind(priority)
+    .bind(task.idempotency_key().map(ToOwned::to_owned))
     .execute(pool)
     .await
     .map_err(SchedulerError::from_task_push_sqlx_error)?;
@@ -237,35 +270,69 @@ fn encode_task_args<Args>(args: &Args) -> Result<Vec<u8>, SchedulerError>
 where
     Args: DeserializeOwned + serde::Serialize,
 {
-    apalis_codec::json::JsonCodec::<Vec<u8>>::encode(args)
+    apalis_codec::json::JsonCodec::<Vec<u8>>::default()
+        .encode(args)
         .map_err(|error| SchedulerError::Job(format!("encode scheduler task: {error}")))
+}
+
+fn decode_task_args<Args>(bytes: &[u8]) -> Result<Args, SchedulerError>
+where
+    Args: DeserializeOwned + serde::Serialize,
+{
+    apalis_codec::json::JsonCodec::<Vec<u8>>::default()
+        .decode(&bytes.to_vec())
+        .map_err(|error| SchedulerError::Job(format!("decode scheduler task: {error}")))
 }
 
 #[cfg(feature = "sqlite")]
 fn sqlite_task_to_row<Args>(
-    task: apalis_sqlite::SqliteTask<Args>,
-) -> Result<SchedulerTaskRow<Args>, SchedulerError> {
+    task: apalis_sqlite::SqliteTask,
+) -> Result<SchedulerTaskRow<Args>, SchedulerError>
+where
+    Args: DeserializeOwned + serde::Serialize,
+{
+    let args = decode_task_args(&task.args)?;
+    let idempotency_key = task.idempotency_key().map(ToOwned::to_owned);
+    let run_at = task.run_at().unwrap_or(0);
+    let status = task.status();
+    let attempts = task.attempt();
+    let max_attempts = task
+        .max_attempts()
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(25);
     scheduler_task_row(
-        task.args,
-        task.parts.idempotency_key,
-        task.parts.run_at,
-        task.parts.status.load(),
-        task.parts.attempt.current(),
-        task.parts.ctx.max_attempts(),
+        args,
+        idempotency_key,
+        run_at,
+        status,
+        attempts,
+        max_attempts,
     )
 }
 
 #[cfg(feature = "postgres")]
 fn postgres_task_to_row<Args>(
-    task: apalis_postgres::PgTask<Args>,
-) -> Result<SchedulerTaskRow<Args>, SchedulerError> {
+    task: apalis_postgres::PgTask,
+) -> Result<SchedulerTaskRow<Args>, SchedulerError>
+where
+    Args: DeserializeOwned + serde::Serialize,
+{
+    let args = decode_task_args(&task.args)?;
+    let idempotency_key = task.idempotency_key().map(ToOwned::to_owned);
+    let run_at = task.run_at().unwrap_or(0);
+    let status = task.status();
+    let attempts = task.attempt();
+    let max_attempts = task
+        .max_attempts()
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(25);
     scheduler_task_row(
-        task.args,
-        task.parts.idempotency_key,
-        task.parts.run_at,
-        task.parts.status.load(),
-        task.parts.attempt.current(),
-        task.parts.ctx.max_attempts(),
+        args,
+        idempotency_key,
+        run_at,
+        status,
+        attempts,
+        max_attempts,
     )
 }
 

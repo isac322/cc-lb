@@ -19,7 +19,7 @@ Both paths need an Anthropic API key or Anthropic OAuth account for an upstream,
 
 ### Prerequisites
 
-- A Linux host with Git, [rustup](https://rustup.rs/), and Bun 1.4.3 or newer.
+- A Linux host with Git, [rustup](https://rustup.rs/), and Bun 1.4.4 or newer.
 - Rust 1.99.1 from the repository's `rust-toolchain.toml`.
 - The `wasm32-unknown-unknown` Rust target for bundled Wasmtime fixtures.
 - `openssl` for generating local secrets.

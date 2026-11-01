@@ -1,8 +1,10 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use apalis_core::backend::codec::Codec as _;
 use apalis_core::backend::{Backend, TaskSink, TaskSinkError};
 use apalis_core::task::Task;
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
-use futures_util::stream::{self, BoxStream};
 use futures_util::{Stream, StreamExt as _};
 use sqlx::SqlitePool;
 
@@ -26,36 +28,70 @@ impl SqliteSingletonCronStorage {
 }
 
 impl Backend for SqliteSingletonCronStorage {
-    type Args = CronJob;
-    type IdType = ulid::Ulid;
-    type Context = apalis_sqlite::SqliteContext;
+    type Task = Task<CronJob>;
     type Error = sqlx::Error;
-    type Stream = BoxStream<
-        'static,
-        std::result::Result<Option<Task<Self::Args, Self::Context, Self::IdType>>, Self::Error>,
-    >;
-    type Beat = BoxStream<'static, std::result::Result<(), Self::Error>>;
-    type Layer = ();
 
-    fn heartbeat(&self, _worker: &apalis_core::worker::context::WorkerContext) -> Self::Beat {
-        stream::empty().boxed()
+    fn poll_ready(
+        &mut self,
+        _cx: &mut Context<'_>,
+        _worker: &apalis_core::worker::context::WorkerContext,
+    ) -> Poll<std::result::Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
-    fn middleware(&self) -> Self::Layer {}
+    fn poll_next(
+        &mut self,
+        _cx: &mut Context<'_>,
+        _worker: &apalis_core::worker::context::WorkerContext,
+    ) -> Poll<Option<std::result::Result<Self::Task, Self::Error>>> {
+        Poll::Ready(None)
+    }
 
-    fn poll(self, _worker: &apalis_core::worker::context::WorkerContext) -> Self::Stream {
-        stream::empty().boxed()
+    fn poll_close(
+        &mut self,
+        _cx: &mut Context<'_>,
+        _worker: &apalis_core::worker::context::WorkerContext,
+    ) -> Poll<std::result::Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 }
 
-impl TaskSink<CronJob> for SqliteSingletonCronStorage {
+impl TaskSink<CronJob, ()> for SqliteSingletonCronStorage {
+    fn start_send(
+        self: Pin<&mut Self>,
+        _item: Task<CronJob>,
+    ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
+        Ok(())
+    }
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<std::result::Result<(), TaskSinkError<Self::Error>>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<std::result::Result<(), TaskSinkError<Self::Error>>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<std::result::Result<(), TaskSinkError<Self::Error>>> {
+        Poll::Ready(Ok(()))
+    }
+
     async fn push(&mut self, job: CronJob) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         let payload = encode_singleton_job(&job)?;
         insert_singleton_job(
             &self.pool,
             self.queue,
             payload,
-            ulid::Ulid::new().to_string(),
+            ulid::Ulid::generate().to_string(),
             DEFAULT_MAX_ATTEMPTS,
             now_unix_secs_sqlx(&*self.clock)?,
             DEFAULT_PRIORITY,
@@ -88,32 +124,39 @@ impl TaskSink<CronJob> for SqliteSingletonCronStorage {
 
     async fn push_task(
         &mut self,
-        task: Task<CronJob, Self::Context, Self::IdType>,
+        task: Task<CronJob>,
     ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         let payload = encode_singleton_job(&task.args)?;
+        let run_at_u64 = task.run_at().unwrap_or_else(|| unix_secs(self.clock.now()));
         let idempotency_key = task
-            .parts
-            .idempotency_key
-            .clone()
-            .unwrap_or_else(|| singleton_tick_idempotency_key(&task.args, task.parts.run_at));
-        let metadata = serde_json::to_string(task.parts.ctx.meta())
+            .idempotency_key()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| singleton_tick_idempotency_key(&task.args, run_at_u64));
+        let metadata = serde_json::to_string(task.metadata())
             .map_err(|error| TaskSinkError::CodecError(error.into()))?;
         let id = task
-            .parts
-            .task_id
-            .map(|task_id| task_id.to_string())
-            .unwrap_or_else(|| ulid::Ulid::new().to_string());
-        let run_at = i64::try_from(task.parts.run_at).map_err(|_| {
+            .task_id()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| ulid::Ulid::generate().to_string());
+        let run_at = i64::try_from(run_at_u64).map_err(|_| {
             TaskSinkError::PushError(sqlx::Error::Protocol("run_at exceeds i64::MAX".to_owned()))
         })?;
+        let max_attempts = task
+            .max_attempts()
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(DEFAULT_MAX_ATTEMPTS);
+        let priority = task
+            .priority()
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(DEFAULT_PRIORITY);
         insert_singleton_job(
             &self.pool,
             self.queue,
             payload,
             id,
-            task.parts.ctx.max_attempts(),
+            max_attempts,
             run_at,
-            task.parts.ctx.priority(),
+            priority,
             metadata,
             idempotency_key,
         )
@@ -123,7 +166,7 @@ impl TaskSink<CronJob> for SqliteSingletonCronStorage {
 
     async fn push_all(
         &mut self,
-        mut tasks: impl Stream<Item = Task<CronJob, Self::Context, Self::IdType>> + Unpin + Send,
+        mut tasks: impl Stream<Item = Task<CronJob>> + Unpin + Send,
     ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         while let Some(task) = tasks.next().await {
             self.push_task(task).await?;
@@ -138,7 +181,8 @@ pub(crate) async fn push_entity_job(
     job: AdaptiveJob,
     clock: &dyn Clock,
 ) -> Result<()> {
-    let payload = apalis_codec::json::JsonCodec::<Vec<u8>>::encode(&job)
+    let payload = apalis_codec::json::JsonCodec::<Vec<u8>>::default()
+        .encode(&job)
         .map_err(|error| SchedulerError::Job(format!("encode entity job: {error}")))?;
     let run_at = now_unix_secs(clock)?;
     let idempotency_key = entity_idempotency_key(&job, run_at)?;
@@ -148,7 +192,7 @@ pub(crate) async fn push_entity_job(
          ON CONFLICT(job_type, idempotency_key) DO NOTHING",
     )
     .bind(payload)
-    .bind(ulid::Ulid::new().to_string())
+    .bind(ulid::Ulid::generate().to_string())
     .bind(queue)
     .bind(DEFAULT_MAX_ATTEMPTS)
     .bind(run_at)
@@ -160,7 +204,8 @@ pub(crate) async fn push_entity_job(
 }
 
 fn encode_singleton_job(job: &CronJob) -> std::result::Result<Vec<u8>, TaskSinkError<sqlx::Error>> {
-    apalis_codec::json::JsonCodec::<Vec<u8>>::encode(job)
+    apalis_codec::json::JsonCodec::<Vec<u8>>::default()
+        .encode(job)
         .map_err(|error| TaskSinkError::CodecError(error.into()))
 }
 

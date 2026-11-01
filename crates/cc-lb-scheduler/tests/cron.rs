@@ -38,9 +38,11 @@ impl FixedTicks {
 }
 
 impl Schedule<Utc> for FixedTicks {
-    fn next_tick(&mut self, _: &Utc) -> Option<DateTime<Utc>> {
+    fn next_tick(&mut self, _: &Utc) -> Option<apalis_cron::Tick<Utc>> {
         self.polls.fetch_add(1, Ordering::SeqCst);
-        self.ticks.lock().expect("fixed ticks lock").pop_front()
+        let dt = self.ticks.lock().expect("fixed ticks lock").pop_front()?;
+        let secs = u64::try_from(dt.timestamp()).unwrap_or(0);
+        Some(apalis_cron::Tick::new(secs))
     }
 }
 
@@ -57,7 +59,8 @@ fn shared_tick() -> DateTime<Utc> {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn cron_sqlite_records_one_tick_across_replicas() -> Result<(), Box<dyn std::error::Error>> {
-    use apalis_sqlite::{PoolOptions, Sqlite, SqliteStorage};
+    use apalis_sqlite::SqliteStorage;
+    use sqlx::{Sqlite, pool::PoolOptions};
 
     let queue = "cron_conformance_sqlite";
     let pool = PoolOptions::<Sqlite>::new()
@@ -73,13 +76,15 @@ async fn cron_sqlite_records_one_tick_across_replicas() -> Result<(), Box<dyn st
     let replica_two = FixedTicks::once(tick);
     let worker_one = WorkerBuilder::singleton_queue_factory(
         replica_one.clone(),
-        SqliteStorage::<CronConformanceJob, (), ()>::new_in_queue(&pool, queue),
+        SqliteStorage::<CronConformanceJob>::new(&pool)
+            .with_config(apalis_sqlite::Config::default().queue(queue)),
         conformance_factory(),
     )
     .max_ticks(1);
     let worker_two = WorkerBuilder::singleton_queue_factory(
         replica_two.clone(),
-        SqliteStorage::<CronConformanceJob, (), ()>::new_in_queue(&pool, queue),
+        SqliteStorage::<CronConformanceJob>::new(&pool)
+            .with_config(apalis_sqlite::Config::default().queue(queue)),
         conformance_factory(),
     )
     .max_ticks(1);
@@ -102,7 +107,8 @@ async fn cron_sqlite_records_one_tick_across_replicas() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn cron_sqlite_fires_elapsed_tick_instead_of_erroring()
 -> Result<(), Box<dyn std::error::Error>> {
-    use apalis_sqlite::{PoolOptions, Sqlite, SqliteStorage};
+    use apalis_sqlite::SqliteStorage;
+    use sqlx::{Sqlite, pool::PoolOptions};
 
     let queue = "cron_elapsed_tick_sqlite";
     let pool = PoolOptions::<Sqlite>::new()
@@ -118,7 +124,8 @@ async fn cron_sqlite_fires_elapsed_tick_instead_of_erroring()
     let elapsed = DateTime::<Utc>::from(SystemClock.now()) - Duration::seconds(30);
     let worker = WorkerBuilder::singleton_queue_factory(
         FixedTicks::once(elapsed),
-        SqliteStorage::<CronConformanceJob, (), ()>::new_in_queue(&pool, queue),
+        SqliteStorage::<CronConformanceJob>::new(&pool)
+            .with_config(apalis_sqlite::Config::default().queue(queue)),
         conformance_factory(),
     )
     .max_ticks(1);
@@ -154,7 +161,10 @@ mod postgres_tests {
             .await?;
 
         let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-        if let Err(error) = sqlx::query(&create_database).execute(&admin_pool).await {
+        if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(create_database))
+            .execute(&admin_pool)
+            .await
+        {
             eprintln!("SKIP: could not create temporary postgres database: {error}");
             admin_pool.close().await;
             return Ok(());
@@ -172,7 +182,9 @@ mod postgres_tests {
         // terminate any lingering sessions on this database before drop.
         // Requires PostgreSQL 13+.
         let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)"#);
-        let drop_result = sqlx::query(&drop_database).execute(&admin_pool).await;
+        let drop_result = sqlx::query(sqlx::AssertSqlSafe(drop_database))
+            .execute(&admin_pool)
+            .await;
         admin_pool.close().await;
 
         test_result?;
@@ -186,19 +198,19 @@ mod postgres_tests {
         let queue = "cron_conformance_postgres";
         PostgresStorage::setup(pool).await?;
 
-        let config = Config::new(queue);
+        let config = Config::default().queue(queue);
         let tick = shared_tick();
         let replica_one = FixedTicks::once(tick);
         let replica_two = FixedTicks::once(tick);
         let worker_one = WorkerBuilder::singleton_queue_factory(
             replica_one.clone(),
-            PostgresStorage::<CronConformanceJob>::new_with_config(pool, &config),
+            PostgresStorage::<CronConformanceJob>::new(pool).with_config(config.clone()),
             conformance_factory(),
         )
         .max_ticks(1);
         let worker_two = WorkerBuilder::singleton_queue_factory(
             replica_two.clone(),
-            PostgresStorage::<CronConformanceJob>::new_with_config(pool, &config),
+            PostgresStorage::<CronConformanceJob>::new(pool).with_config(config),
             conformance_factory(),
         )
         .max_ticks(1);

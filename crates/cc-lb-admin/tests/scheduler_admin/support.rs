@@ -83,9 +83,9 @@ pub async fn request(
 }
 
 #[cfg(feature = "sqlite")]
-pub async fn sqlite_fixture()
--> Result<RouteFixture<scheduler_sqlx::SqlitePool>, Box<dyn std::error::Error>> {
-    let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+pub async fn sqlite_fixture() -> Result<RouteFixture<sqlx::SqlitePool>, Box<dyn std::error::Error>>
+{
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await?;
@@ -102,10 +102,8 @@ pub async fn sqlite_fixture()
 }
 
 #[cfg(feature = "sqlite")]
-pub async fn seed_sqlite_failed_warmup(
-    pool: &scheduler_sqlx::SqlitePool,
-) -> scheduler_sqlx::Result<()> {
-    scheduler_sqlx::query(
+pub async fn seed_sqlite_failed_warmup(pool: &sqlx::SqlitePool) -> sqlx::Result<()> {
+    sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, done_at, idempotency_key) \
          VALUES (?1, 'failed-warmup', 'adaptive', 'Failed', 5, 5, ?2, 'dial timeout', ?2, ?3)",
     )
@@ -118,10 +116,8 @@ pub async fn seed_sqlite_failed_warmup(
 }
 
 #[cfg(feature = "postgres")]
-pub async fn seed_postgres_failed_warmup(
-    pool: &scheduler_sqlx::PgPool,
-) -> scheduler_sqlx::Result<()> {
-    scheduler_sqlx::query(
+pub async fn seed_postgres_failed_warmup(pool: &sqlx::PgPool) -> sqlx::Result<()> {
+    sqlx::query(
         "INSERT INTO apalis.jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, done_at, idempotency_key) \
          VALUES ($1, 'failed-warmup', 'adaptive', 'Failed', 5, 5, to_timestamp($2), '{\"Err\":\"dial timeout\"}'::jsonb, to_timestamp($2), $3)",
     )
@@ -134,14 +130,12 @@ pub async fn seed_postgres_failed_warmup(
 }
 
 #[cfg(feature = "sqlite")]
-pub async fn seed_sqlite_usage_rollup(
-    pool: &scheduler_sqlx::SqlitePool,
-) -> scheduler_sqlx::Result<()> {
+pub async fn seed_sqlite_usage_rollup(pool: &sqlx::SqlitePool) -> sqlx::Result<()> {
     let payload = serde_json::to_vec(&cc_lb_scheduler::worker::CronJob::UsageRollup(
         cc_lb_scheduler::jobs::usage_rollup::UsageRollupTask::default(),
     ))
-    .map_err(|error| scheduler_sqlx::Error::Protocol(error.to_string()))?;
-    scheduler_sqlx::query(
+    .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
          VALUES (?1, 'usage-rollup', ?2, 'Pending', 0, 1, ?3, 'cron:usage_rollup')",
     )
@@ -154,14 +148,8 @@ pub async fn seed_sqlite_usage_rollup(
 }
 
 #[cfg(feature = "postgres")]
-pub async fn postgres_fixture() -> Result<
-    Option<(
-        scheduler_sqlx::PgPool,
-        String,
-        RouteFixture<scheduler_sqlx::PgPool>,
-    )>,
-    Box<dyn std::error::Error>,
-> {
+pub async fn postgres_fixture()
+-> Result<Option<(sqlx::PgPool, String, RouteFixture<sqlx::PgPool>)>, Box<dyn std::error::Error>> {
     use std::str::FromStr as _;
 
     let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -170,13 +158,13 @@ pub async fn postgres_fixture() -> Result<
     if !(url.contains("localhost") || url.contains("127.0.0.1") || url.contains("cc_lb_test")) {
         return Ok(None);
     }
-    let options = scheduler_sqlx::postgres::PgConnectOptions::from_str(&url)?;
-    let admin = scheduler_sqlx::postgres::PgPoolOptions::new()
+    let options = sqlx::postgres::PgConnectOptions::from_str(&url)?;
+    let admin = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect_with(options.clone())
         .await?;
     let db = format!("cc_lb_admin_scheduler_{}", uuid::Uuid::new_v4().simple());
-    if scheduler_sqlx::query(&format!(r#"CREATE DATABASE "{db}""#))
+    if sqlx::query(sqlx::AssertSqlSafe(format!(r#"CREATE DATABASE "{db}""#)))
         .execute(&admin)
         .await
         .is_err()
@@ -184,7 +172,7 @@ pub async fn postgres_fixture() -> Result<
         admin.close().await;
         return Ok(None);
     }
-    let pool = scheduler_sqlx::postgres::PgPoolOptions::new()
+    let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect_with(options.database(&db))
         .await?;

@@ -12,12 +12,6 @@ use super::{AdaptiveJob, CronJob, SchedulerCtx};
 pub(super) const SINGLETON_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const ENTITY_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub(super) type EntityHandlerFn =
-    fn(
-        AdaptiveJob,
-        Data<SchedulerCtx>,
-    ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
-
 pub(super) fn entity_job_handler(
     job: AdaptiveJob,
     ctx: Data<SchedulerCtx>,
@@ -34,12 +28,6 @@ pub(super) fn entity_job_handler(
         }
     })
 }
-
-pub(super) type SingletonHandlerFn =
-    fn(
-        CronJob,
-        Data<SchedulerCtx>,
-    ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
 
 pub(super) fn singleton_job_handler(
     job: CronJob,

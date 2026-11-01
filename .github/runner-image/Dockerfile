@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.25
+# syntax=docker/dockerfile:1.27
 #
 # cc-lb Actions Runner Controller image on Wolfi (glibc).
 #
@@ -12,24 +12,24 @@
 # gnutar must stay installed: busybox tar rejects the -P flag that
 # actions/cache passes, so cache restore and save both fail on this image.
 
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:88a20e2d017bd20cdc0cb3910de603e7bea9512a6c351a8dd3c9df212ab03d73
 LABEL org.opencontainers.image.source="https://github.com/isac322/cc-lb"
 
 ARG TARGETARCH
-ARG RUNNER_VERSION=2.338.0
+ARG RUNNER_VERSION=2.338.2
 ARG RUNNER_CONTAINER_HOOKS_VERSION=0.8.1
-ARG DOCKER_VERSION=29.9.1
-ARG BUILDX_VERSION=0.38.0
-ARG SCCACHE_VERSION=0.18.0
-ARG GH_VERSION=2.102.0
-ARG PROMETHEUS_VERSION=3.15.0
+ARG DOCKER_VERSION=29.9.2
+ARG BUILDX_VERSION=0.38.1
+ARG SCCACHE_VERSION=0.19.0
+ARG GH_VERSION=2.103.3
+ARG PROMETHEUS_VERSION=3.15.1
 ARG HADOLINT_VERSION=2.15.1
 ARG RUSTUP_VERSION=1.29.2
 
-# linux-arm64 runner tarball SHA-256 from the v2.338.0 release notes.
-ARG RUNNER_SHA256_ARM64=628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b
-ARG GH_SHA256_ARM64=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
-ARG PROMETHEUS_SHA256_ARM64=f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbde02d067823
+# linux-arm64 runner tarball SHA-256 from the v2.338.2 release notes.
+ARG RUNNER_SHA256_ARM64=670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945
+ARG GH_SHA256_ARM64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
+ARG PROMETHEUS_SHA256_ARM64=ceb6d21493c37ca0b4513b147642797c68cf39a0f50a444d50e1e80c74f21b26
 ARG HADOLINT_SHA256_ARM64=f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d
 ARG RUSTUP_SHA256_ARM64=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
 
@@ -123,7 +123,7 @@ RUN set -eux; \
         gh_sha256="${GH_SHA256_ARM64}"; \
         docker_arch=aarch64; \
         sccache_target="aarch64-unknown-linux-musl"; \
-        sccache_sha256="2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a"; \
+        sccache_sha256="3e47fc4a71b1ddd1b4294a0de9d34498922fdf41e3cd0bda5df3954e3d6deb9d"; \
         rustup_target="aarch64-unknown-linux-gnu"; \
         rustup_sha256="${RUSTUP_SHA256_ARM64}"; \
         prometheus_sha256="${PROMETHEUS_SHA256_ARM64}"; \

@@ -64,7 +64,7 @@ mod tests {
     use cc_lb_control::{DynamicViewBuilder, anthropic_api_key::AnthropicOrgApi};
     use cc_lb_scheduler::admin::SchedulerAdminHandle;
     use cc_lb_scheduler::worker::{CRON_QUEUE, SchedulerBackend, SqliteSchedulerBackend};
-    use scheduler_sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use tempfile::TempDir;
 
     use super::*;
@@ -96,7 +96,7 @@ mod tests {
 
     struct Harness {
         _dir: TempDir,
-        pool: scheduler_sqlx::SqlitePool,
+        pool: sqlx::SqlitePool,
         state: AdminState,
     }
 
@@ -155,8 +155,8 @@ mod tests {
         }
     }
 
-    async fn poll_jobs(pool: &scheduler_sqlx::SqlitePool) -> Vec<(String, Vec<u8>)> {
-        scheduler_sqlx::query_as(
+    async fn poll_jobs(pool: &sqlx::SqlitePool) -> Vec<(String, Vec<u8>)> {
+        sqlx::query_as(
             "SELECT idempotency_key, job FROM Jobs WHERE job_type = ?1 ORDER BY idempotency_key",
         )
         .bind(CRON_QUEUE)

@@ -44,7 +44,7 @@ cc-lb-pdk-wasmtime = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime-macros" }
 cc-lb-plugin-conformance = { version = "0.4", path = "crates/cc-lb-plugin-conformance" }
 
-wasmtime = { version = "49.0.5", default-features = false, features = [
+wasmtime = { version = "50.0.1", default-features = false, features = [
     "anyhow",
     "async",
     "backtrace",
@@ -73,7 +73,7 @@ wasmtime = { version = "49.0.5", default-features = false, features = [
 ]}
 rkyv      = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.259"
+wasmparser = "0.263"
 
 anyhow = "1"
 arc-swap = "1"
@@ -92,10 +92,10 @@ flate2 = "1"
 brotli = "9"
 zstd = "0.14.3"
 globset = "0.4"
-h2 = "0.4.19"
+h2 = "0.4.20"
 hickory-resolver = "0.26"
 hex = "0.4"
-hyper = "1.11.1"
+hyper = "1.12.0"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
@@ -113,12 +113,10 @@ opentelemetry_sdk = { version = "0.33.1", features = ["trace"] }
 proptest = "1"
 rand = "0.10"
 regex = "1"
-# Held at 0.12: reqwest 0.13 dropped its ring provider feature. `rustls` now
-# forces the aws-lc-rs backend (a second crypto stack, plus a C/asm build
-# dependency in the musl cross build) and `rustls-no-provider` panics at
-# Client construction unless a process-default CryptoProvider is installed
-# first. Both are architecture decisions, not a version bump. See PR body.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# reqwest 0.13 uses `rustls-no-provider` so we stay on the workspace's single
+# `ring` crypto stack without pulling in `aws-lc-rs`. HTTP client constructors
+# install `rustls::crypto::ring::default_provider()` before building a client.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 ring = "0.17"
 rust-embed = { version = "8", features = ["deterministic-timestamps"] }
 secrecy = "0.10"
@@ -133,10 +131,10 @@ sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }
 tempfile = "3"
 thiserror = "2"
-tokio = "1.53.3"
+tokio = "1.54.1"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
-toml = "1.1.6"
+toml = "1.1.8"
 tower = "0.5"
 tower-service = "0.3"
 tower-http = "0.7"

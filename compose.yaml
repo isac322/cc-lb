@@ -26,7 +26,7 @@ services:
   # Trace collection backend. Point `[observability] otlp_endpoint` at
   # http://127.0.0.1:4317 to export proxy spans here.
   tempo:
-    image: grafana/tempo:3.0.3
+    image: grafana/tempo:3.1.1
     container_name: cc-lb-tempo
     restart: unless-stopped
     # Local-dev only: root lets the container read the bind-mounted config

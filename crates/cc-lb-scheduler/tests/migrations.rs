@@ -142,7 +142,10 @@ mod postgres {
             .await?;
 
         let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-        if let Err(error) = sqlx::query(&create_database).execute(&admin_pool).await {
+        if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(create_database))
+            .execute(&admin_pool)
+            .await
+        {
             eprintln!("SKIP: could not create temporary postgres database: {error}");
             admin_pool.close().await;
             return Ok(());
@@ -156,7 +159,9 @@ mod postgres {
         test_pool.close().await;
 
         let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}""#);
-        let drop_result = sqlx::query(&drop_database).execute(&admin_pool).await;
+        let drop_result = sqlx::query(sqlx::AssertSqlSafe(drop_database))
+            .execute(&admin_pool)
+            .await;
         admin_pool.close().await;
 
         test_result?;

@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use apalis::layers::catch_panic::CatchPanicLayer;
+use super::catch_panic_layer;
 use apalis::layers::limit::ConcurrencyLimitLayer;
 use apalis::layers::prometheus::PrometheusLayer;
 use apalis::prelude::{WorkerBuilder as ApalisWorkerBuilder, WorkerError};
@@ -15,7 +15,7 @@ use crate::retry::RetryClass;
 use super::super::PostgresApalisStorage;
 #[cfg(feature = "sqlite")]
 use super::super::SqliteApalisStorage;
-use super::super::dispatch::{EntityHandlerFn, entity_job_handler};
+use super::super::dispatch::entity_job_handler;
 use super::super::{ADAPTIVE_QUEUE, SchedulerBackend, SchedulerCtx};
 
 type AdaptiveWorkerFuture = Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send>>;
@@ -34,7 +34,9 @@ pub(in crate::worker) fn build_backend_adaptive_worker(
     backend: &SchedulerBackend,
     ctx: SchedulerCtx,
 ) -> Result<AdaptiveWorker, SchedulerError> {
-    build_backend_adaptive_worker_named(backend, ctx, ADAPTIVE_QUEUE.to_owned())
+    let worker_instance_id = super::super::make_worker_instance_id(&*ctx.clock);
+    let worker_name = super::super::next_worker_name(ADAPTIVE_QUEUE, &worker_instance_id);
+    build_backend_adaptive_worker_named(backend, ctx, worker_name)
 }
 
 pub(in crate::worker) fn build_backend_adaptive_worker_named(
@@ -111,13 +113,13 @@ fn build_sqlite_worker(
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Adaptive.layer())
-                    .layer(CatchPanicLayer::new())
+                    .layer(catch_panic_layer())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
-                    .build(entity_job_handler as EntityHandlerFn);
+                    .build(entity_job_handler);
                 worker
                     .run_until(async move {
-                        cancel.cancelled().await;
+                        cancel.cancelled_owned().await;
                         Ok::<(), WorkerError>(())
                     })
                     .await
@@ -141,13 +143,13 @@ fn build_postgres_worker(
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Adaptive.layer())
-                    .layer(CatchPanicLayer::new())
+                    .layer(catch_panic_layer())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
-                    .build(entity_job_handler as EntityHandlerFn);
+                    .build(entity_job_handler);
                 worker
                     .run_until(async move {
-                        cancel.cancelled().await;
+                        cancel.cancelled_owned().await;
                         Ok::<(), WorkerError>(())
                     })
                     .await
