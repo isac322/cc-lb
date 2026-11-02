@@ -326,6 +326,29 @@ impl LifecycleKeepalive {
                 return;
             }
         };
+        if let Some(reason) = zero_token_renewal_unsupported_reason(request_json) {
+            self.record_not_tracked(
+                &session_key,
+                principal,
+                upstream_id,
+                ttl,
+                config,
+                &reason.to_string(),
+            )
+            .await;
+            if is_latest {
+                self.cancel_session(
+                    &session_key,
+                    principal,
+                    CancelReason::ZeroTokenRenewalUnsupported,
+                    expected_generation,
+                    cache_anchor_age,
+                )
+                .await;
+                super::record_cancelled(&principal_name, CancelReason::ZeroTokenRenewalUnsupported);
+            }
+            return;
+        }
         let url =
             Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
         let snapshot = match RequestSnapshot::capture(
@@ -638,6 +661,39 @@ fn keepalive_forward_headers(headers: &HeaderMap) -> HeaderMap {
     out
 }
 
+/// Fields Anthropic rejects with `max_tokens: 0` cannot be rewritten without
+/// changing the live request's cache prefix. Inspect the already-parsed body
+/// before capturing a snapshot or classifying the response.
+fn zero_token_renewal_unsupported_reason(request: &Value) -> Option<CacheKeepaliveDisplayReason> {
+    let feature = if request
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        == Some("enabled")
+    {
+        "enabled thinking"
+    } else if request
+        .get("output_config")
+        .and_then(|config| config.get("format"))
+        .is_some()
+    {
+        "structured output"
+    } else if matches!(
+        request
+            .get("tool_choice")
+            .and_then(|choice| choice.get("type"))
+            .and_then(Value::as_str),
+        Some("tool" | "any")
+    ) {
+        "forced tool_choice"
+    } else {
+        return None;
+    };
+    Some(CacheKeepaliveDisplayReason::ZeroTokenRenewalUnsupported(
+        feature,
+    ))
+}
+
 fn is_keepalive_eligible_request_kind(request_kind: Option<&str>) -> bool {
     !matches!(
         request_kind,
@@ -687,6 +743,41 @@ const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
 mod tests {
     use super::*;
     use http::HeaderValue;
+    #[test]
+    fn keepalive_zero_token_eligibility_has_stable_reasons_and_preserves_controls() {
+        for (request, expected) in [
+            (
+                serde_json::json!({"thinking": {"type": "enabled"}}),
+                Some("enabled thinking"),
+            ),
+            (
+                serde_json::json!({"output_config": {"format": null}}),
+                Some("structured output"),
+            ),
+            (
+                serde_json::json!({"tool_choice": {"type": "any"}}),
+                Some("forced tool_choice"),
+            ),
+            (
+                serde_json::json!({"tool_choice": {"type": "tool", "name": "Bash"}}),
+                Some("forced tool_choice"),
+            ),
+            (
+                serde_json::json!({"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}, "tool_choice": {"type": "auto"}, "stream": true}),
+                None,
+            ),
+            (
+                serde_json::json!({"thinking": {"type": "disabled"}, "tool_choice": {"type": "none"}}),
+                None,
+            ),
+            (serde_json::json!({}), None),
+        ] {
+            assert_eq!(
+                zero_token_renewal_unsupported_reason(&request).map(|reason| reason.to_string()),
+                expected.map(|feature| format!("zero-token renewal unsupported: {feature}")),
+            );
+        }
+    }
 
     #[test]
     fn keepalive_forward_headers_preserve_protocol_headers_without_auth_secrets() {

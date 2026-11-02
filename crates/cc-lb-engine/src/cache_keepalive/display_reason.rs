@@ -16,6 +16,7 @@ pub(crate) enum CacheKeepaliveDisplayReason {
     },
     AmbiguousTurn,
     SnapshotTooLarge,
+    ZeroTokenRenewalUnsupported(&'static str),
     CachedPrefixTooSmall {
         cached_tokens: u64,
         min_cache_tokens: u64,
@@ -66,6 +67,9 @@ impl fmt::Display for CacheKeepaliveDisplayReason {
             Self::UserTurn { stop_reason } => write!(f, "user turn (stop_reason={stop_reason})"),
             Self::AmbiguousTurn => f.write_str("ambiguous turn"),
             Self::SnapshotTooLarge => f.write_str("snapshot too large"),
+            Self::ZeroTokenRenewalUnsupported(feature) => {
+                write!(f, "zero-token renewal unsupported: {feature}")
+            }
             Self::CachedPrefixTooSmall {
                 cached_tokens,
                 min_cache_tokens,
