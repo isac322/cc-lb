@@ -1367,10 +1367,11 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     pattern: 'prompt_cache_shadow.grace_margin_secs',
     guidance: {
       description:
-        "Margin subtracted from the observed TTL when a cache observation's expiry is recorded.",
-      lower: 'Entries live closer to their true TTL, risking stale warm hits.',
+        'Optional shortening of the provider TTL anchored at request dispatch; the default 0 preserves the full dispatch-anchored TTL.',
+      lower:
+        'Keep 0 to preserve the full dispatch-anchored TTL; values below 0 are not available.',
       higher:
-        'Entries expire earlier, absorbing provider-side TTL jitter at the cost of fewer warm hits.',
+        'Expires entries earlier than the dispatch-anchored TTL, resulting in fewer warm hits.',
       impactDimensions: ['latency'],
     },
   },

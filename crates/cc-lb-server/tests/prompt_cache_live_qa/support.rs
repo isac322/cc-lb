@@ -21,6 +21,7 @@ pub struct CacheEvent {
 pub struct CacheObservation {
     pub ttl_class: String,
     pub expires_at: i64,
+    pub last_observed_at: i64,
     pub hash_schema_version: i64,
     pub prefix_content_block_index: i64,
     pub estimated_prefix_tokens: i64,
@@ -202,25 +203,69 @@ pub async fn fetch_matched_observation(
     pool: &SqlitePool,
     model: &str,
     event: &CacheEvent,
+    ttl_class: &str,
+    minimum_observed_at: i64,
 ) -> CacheObservation {
-    let row = sqlx::query(
-        "SELECT ttl_class, expires_at, hash_schema_version, prefix_content_block_index, \
-         estimated_prefix_tokens, token_estimate_source FROM prompt_cache_observations \
-         WHERE upstream_id = ? AND canonical_model_id = ? AND v3_prefix_key = ?",
-    )
-    .bind(&event.upstream_id)
-    .bind(model)
-    .bind(&event.matched_key)
-    .fetch_one(pool)
-    .await
-    .expect("matched prompt-cache observation exists");
-    CacheObservation {
-        ttl_class: row.get("ttl_class"),
-        expires_at: row.get("expires_at"),
-        hash_schema_version: row.get("hash_schema_version"),
-        prefix_content_block_index: row.get("prefix_content_block_index"),
-        estimated_prefix_tokens: row.get("estimated_prefix_tokens"),
-        token_estimate_source: row.get("token_estimate_source"),
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut interval = tokio::time::interval(Duration::from_millis(20));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let row = sqlx::query(
+            "SELECT ttl_class, expires_at, last_observed_at, hash_schema_version, \
+             prefix_content_block_index, estimated_prefix_tokens, token_estimate_source \
+             FROM prompt_cache_observations \
+             WHERE upstream_id = ? AND canonical_model_id = ? AND v3_prefix_key = ? \
+             AND ttl_class = ? AND last_observed_at >= ?",
+        )
+        .bind(&event.upstream_id)
+        .bind(model)
+        .bind(&event.matched_key)
+        .bind(ttl_class)
+        .bind(minimum_observed_at)
+        .fetch_optional(pool)
+        .await
+        .expect("query matched prompt-cache observation");
+        if let Some(row) = row {
+            return CacheObservation {
+                ttl_class: row.get("ttl_class"),
+                expires_at: row.get("expires_at"),
+                last_observed_at: row.get("last_observed_at"),
+                hash_schema_version: row.get("hash_schema_version"),
+                prefix_content_block_index: row.get("prefix_content_block_index"),
+                estimated_prefix_tokens: row.get("estimated_prefix_tokens"),
+                token_estimate_source: row.get("token_estimate_source"),
+            };
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let rows = sqlx::query(
+                "SELECT ttl_class, expires_at, last_observed_at \
+                 FROM prompt_cache_observations \
+                 WHERE upstream_id = ? AND canonical_model_id = ? AND v3_prefix_key = ? \
+                 ORDER BY last_observed_at DESC",
+            )
+            .bind(&event.upstream_id)
+            .bind(model)
+            .bind(&event.matched_key)
+            .fetch_all(pool)
+            .await
+            .expect("query matched prompt-cache observation timeout diagnostics");
+            let diagnostics = rows
+                .iter()
+                .map(|row| {
+                    format!(
+                        "ttl={} expires_at={} last_observed_at={}",
+                        row.get::<String, _>("ttl_class"),
+                        row.get::<i64, _>("expires_at"),
+                        row.get::<i64, _>("last_observed_at"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting 10s for ttl_class={ttl_class:?} matched prompt-cache observation with last_observed_at >= {minimum_observed_at}; upstream={} model={} key={} rows={diagnostics:?}",
+                event.upstream_id, model, event.matched_key,
+            );
+        }
     }
 }
 

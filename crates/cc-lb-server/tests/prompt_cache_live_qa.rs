@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 const DIAGNOSTICS_CONFIG: &str = "[observability]\nrequest_diagnostics_log = true";
 const MODEL: &str = "claude-sonnet-4-5-20250929";
+const READ_DELAY_SECS: u64 = 3;
 const TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
 const HASH_SCHEMA_VERSION: i64 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION as i64;
 
@@ -35,7 +36,7 @@ async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_subscriptio
     let mut read = ScriptedMessageResponse::ok();
     read.body["usage"]["cache_creation_input_tokens"] = json!(0);
     read.body["usage"]["cache_read_input_tokens"] = json!(3072);
-    read.delay = Duration::from_secs(3);
+    read.delay = Duration::from_secs(READ_DELAY_SECS);
     script.push_response(creation);
     script.push_response(read);
     let fake_config = AppConfig {
@@ -119,14 +120,24 @@ async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_subscriptio
     assert_eq!(event.predicted_creation_tokens_1h, 0);
     assert_eq!(event.token_estimate_source, TOKEN_ESTIMATE_SOURCE);
 
-    let observation = support::fetch_matched_observation(&pool, MODEL, &event).await;
+    // Request events and prompt-cache observations are written by independent workers. Gate on
+    // the persisted observation clock captured from the second request's start plus the known
+    // provider delay, rather than assuming request-event visibility means the row is refreshed.
+    let observation = support::fetch_matched_observation(
+        &pool,
+        MODEL,
+        &event,
+        "0",
+        second_request_started + READ_DELAY_SECS as i64,
+    )
+    .await;
     assert_eq!(observation.ttl_class, "0");
     assert_eq!(observation.hash_schema_version, HASH_SCHEMA_VERSION);
     assert_eq!(observation.prefix_content_block_index, event.matched_index);
     assert!(observation.estimated_prefix_tokens > 0);
     assert_eq!(observation.token_estimate_source, TOKEN_ESTIMATE_SOURCE);
-    assert!(observation.expires_at >= second_request_started + 269);
-    assert!(observation.expires_at <= second_request_started + 271);
+    assert!(observation.expires_at >= second_request_started + 300);
+    assert!(observation.expires_at <= observation.last_observed_at + 300 - READ_DELAY_SECS as i64);
 }
 
 /// Top-level `cache_control` (automatic caching) must produce a breakpoint and hold affinity.

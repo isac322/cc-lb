@@ -4,9 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `cc_lb_cache_prediction_total{outcome}` exposes request-level prompt-cache prediction outcomes across four fixed values, comparing positive predictions with final observed cache reads.
+
 ### Fixed
 
 - Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
+- Prompt-cache routing now defaults `prompt_cache_shadow.grace_margin_secs` to `0` (previously `30`), avoiding early expiry of live cache observations. Explicitly configured grace margins remain effective. Buffered and SSE observations now share the upstream request-dispatch expiry anchor, so TTFB and response generation cannot extend the provider TTL. (#1002)
 
 - Prompt-cache keep-alive now skips live requests with enabled thinking, structured output (`output_config.format`), or forced tool choice (`tool` / `any`), recording a `not_tracked` reason instead of sending a renewal Anthropic rejects at `max_tokens: 0`. An incompatible turn cancels any existing active session. Adaptive thinking with automatic tool choice continues renewing unchanged.
   Eligibility checks the actual upstream-shaped body, so shape plugins cannot introduce an incompatible renewal unnoticed; unchanged bodies reuse the existing JSON parse.
@@ -14,6 +19,10 @@ All notable changes to this project will be documented in this file.
 - Prompt-cache keep-alive renewals now preserve request `thinking`, `output_config`, and `tool_choice` fields unchanged instead of rewriting `thinking` to `disabled`, include `beta=true` on Anthropic OAuth renewal URLs, and persist terminal failure messages in `cache_keepalive_sessions.error` while resetting `enqueue_state` to `pending`.
 
 - PostgreSQL scheduler workers now drive task polling with a dedicated 1-second interval and auto-reconnecting notification strategy, preventing future-scheduled keep-alive and OAuth refresh jobs from stalling across idle intervals or listener disconnects.
+
+### Upgrade notes
+
+- Existing stored prompt-cache observations keep their recorded expiry and need no migration. The new default and dispatch anchor apply to newly recorded or refreshed observations; set `prompt_cache_shadow.grace_margin_secs = 30` to retain the previous margin.
 
 ## [2.1.0] - 2026-10-31
 

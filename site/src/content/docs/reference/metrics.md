@@ -18,6 +18,34 @@ For example, the per-upstream 429 rate is `sum by (upstream) (rate(cc_lb_request
 
 `cc_lb_stream_terminations_total{outcome,cause,upstream,model}` counts response body outcomes per routed upstream and requested model. Use it with request correlation logs to distinguish an upstream error from a client cancellation.
 
+## Prompt-cache prediction
+
+`cc_lb_cache_prediction_total{outcome}` is a counter that compares the latest successful route prediction with the final observed provider result at request level. It is emitted only when the client status is 200, cache breakpoints are present, and usage is observed.
+
+A positive prediction is `predicted_cache_read_tokens=Some(n)` where `n > 0`. `Some(0)` and `None` are grouped as no positive prediction; `None` means prediction metadata was unavailable, not that the router explicitly predicted a miss. An actual hit has final `cache_read_input_tokens > 0`; cache creation without a cache read is an actual miss.
+
+| Outcome | Meaning |
+| --- | --- |
+| `predicted_hit_actual_hit` | Positive prediction and actual hit |
+| `unpredicted_hit` | No positive prediction and actual hit |
+| `predicted_miss_actual_miss` | No positive prediction and actual miss |
+| `predicted_hit_actual_miss` | Positive prediction and actual miss |
+
+The metric measures binary request-level comparison, not token-estimation accuracy or miss-reason attribution. Dropped lifecycle events or evicted partials can omit samples or leave prediction context incomplete; this is best-effort telemetry, not exact accounting.
+
+The share of actual hits with no positive prediction is:
+
+```text
+sum(rate(cc_lb_cache_prediction_total{outcome="unpredicted_hit"}[5m]))
+/
+(
+  sum(rate(cc_lb_cache_prediction_total{outcome="predicted_hit_actual_hit"}[5m]))
+  + sum(rate(cc_lb_cache_prediction_total{outcome="unpredicted_hit"}[5m]))
+)
+```
+
+This ratio is the share of actual hits with no positive prediction. It is undefined when there are no actual hits.
+
 ## Request diagnostics log
 
 `cc_lb_request_diagnostics_lines_total{outcome}` counts stdout diagnostics lines when `observability.request_diagnostics_log` is on. `outcome` is `written`, `encode_error`, or `write_error`.
