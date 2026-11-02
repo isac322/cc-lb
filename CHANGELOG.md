@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
+
 - Prompt-cache keep-alive now skips live requests with enabled thinking, structured output (`output_config.format`), or forced tool choice (`tool` / `any`), recording a `not_tracked` reason instead of sending a renewal Anthropic rejects at `max_tokens: 0`. An incompatible turn cancels any existing active session. Adaptive thinking with automatic tool choice continues renewing unchanged.
   Eligibility checks the actual upstream-shaped body, so shape plugins cannot introduce an incompatible renewal unnoticed; unchanged bodies reuse the existing JSON parse.
 

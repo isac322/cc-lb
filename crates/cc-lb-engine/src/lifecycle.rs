@@ -71,6 +71,7 @@ use crate::error_format::{
     provider_error_response, provider_error_response_with_retry_after,
 };
 use crate::hop_by_hop::strip_hop_by_hop;
+use crate::limit_input_estimate::estimate_anthropic_input;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
@@ -136,7 +137,7 @@ const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
 const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
 const DEFAULT_GEMINI_CODE_ASSIST_BASE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
-const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
+pub(super) const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 const DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER: usize = 4;
 const INCOMPLETE_SSE_EVENT_BUDGET_BODY_CAP_MULTIPLIER: usize = 1;
 const SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES: usize = 1024 * 1024;
@@ -2203,6 +2204,15 @@ pub trait LimitCostEstimator: Send + Sync {
         &self,
         model: &str,
         max_input: u64,
+        max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<i64>;
+
+    /// Prices disjoint submitted-input regions without adding a prefix twice.
+    fn estimate_max_with_local_cache(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
         max_output: u64,
         service_tier: Option<&str>,
     ) -> Option<i64>;
@@ -4479,25 +4489,38 @@ impl Lifecycle {
             tracing::Span::current().record("cc_lb.limit.decision", "not_applicable");
             return Ok(None);
         };
-        let limit_request = body_view.limit_request(&ctx.canonical_model_id);
+        let limit_request = body_view.limit_request(
+            &ctx.canonical_model_id,
+            classify_provider_capability(&ctx.method, &ctx.path),
+            &ctx.cache_breakpoints,
+        );
         let max_input_estimate = limit_request.input_tokens_estimate;
-        let estimated_cache_tokens = ctx
-            .cache_breakpoints
-            .iter()
-            .map(|bp| bp.prefix_bytes.as_token_estimate())
-            .max()
-            .unwrap_or(0);
-        let can_cross_cache_cliff =
-            ctx.cache_breakpoints.is_empty() && limit_request.can_cross_cache_cliff;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
-            estimator.estimate_max_with_cache(
-                &limit_request.model,
-                max_input_estimate as u64,
-                limit_request.max_tokens.max(0) as u64,
-                estimated_cache_tokens,
-                can_cross_cache_cliff,
-                limit_request.service_tier.as_deref(),
-            )
+            if let Some(input) = limit_request.local_cache_input {
+                estimator.estimate_max_with_local_cache(
+                    &limit_request.model,
+                    input,
+                    limit_request.max_tokens.max(0) as u64,
+                    limit_request.service_tier.as_deref(),
+                )
+            } else {
+                let estimated_cache_tokens = ctx
+                    .cache_breakpoints
+                    .iter()
+                    .map(|bp| bp.prefix_bytes.as_token_estimate())
+                    .max()
+                    .unwrap_or(0);
+                let can_cross_cache_cliff =
+                    ctx.cache_breakpoints.is_empty() && limit_request.can_cross_cache_cliff;
+                estimator.estimate_max_with_cache(
+                    &limit_request.model,
+                    max_input_estimate as u64,
+                    limit_request.max_tokens.max(0) as u64,
+                    estimated_cache_tokens,
+                    can_cross_cache_cliff,
+                    limit_request.service_tier.as_deref(),
+                )
+            }
         });
 
         match limit_engine.reserve(
@@ -7932,8 +7955,13 @@ impl RequestBodyView {
             .map(ToOwned::to_owned)
     }
 
-    fn limit_request(&self, fallback_model: &str) -> LimitRequest {
-        LimitRequest::from_value(self.value(), fallback_model)
+    fn limit_request(
+        &self,
+        fallback_model: &str,
+        capability: Option<ProviderCapability>,
+        breakpoints: &[CacheBreakpoint],
+    ) -> LimitRequest {
+        LimitRequest::from_value(self.value(), fallback_model, capability, breakpoints)
     }
 }
 
@@ -7942,6 +7970,7 @@ struct LimitRequest {
     model: String,
     max_tokens: i64,
     input_tokens_estimate: i64,
+    local_cache_input: Option<cc_lb_pricing::LocalCacheInputEstimate>,
     can_cross_cache_cliff: bool,
     stream: bool,
     service_tier: Option<String>,
@@ -7950,7 +7979,15 @@ impl LimitRequest {
     /// `fallback_model` is the request's canonical model id. It is used only
     /// when the body carries no `model` (e.g. Gemini, where the model lives in
     /// the request path); a body model always wins verbatim.
-    fn from_value(value: Option<&Value>, fallback_model: &str) -> Self {
+    fn from_value(
+        value: Option<&Value>,
+        fallback_model: &str,
+        capability: Option<ProviderCapability>,
+        breakpoints: &[CacheBreakpoint],
+    ) -> Self {
+        let anthropic_input = value
+            .filter(|_| capability == Some(ProviderCapability::AnthropicMessages))
+            .map(|value| estimate_anthropic_input(value, breakpoints));
         Self {
             model: value
                 .and_then(|v| v.get("model"))
@@ -7970,9 +8007,17 @@ impl LimitRequest {
                         })
                 })
                 .unwrap_or(0),
-            input_tokens_estimate: value
-                .map(estimate_input_tokens)
+            input_tokens_estimate: anthropic_input
+                .map(|input| {
+                    let whole = input
+                        .uncached_input_tokens
+                        .saturating_add(input.cache_prefix_5m_tokens)
+                        .saturating_add(input.cache_prefix_1h_tokens);
+                    i64::try_from(whole).unwrap_or(i64::MAX)
+                })
+                .or_else(|| value.map(estimate_input_tokens))
                 .unwrap_or(DEFAULT_MAX_INPUT_ESTIMATE),
+            local_cache_input: anthropic_input.filter(|_| !breakpoints.is_empty()),
             can_cross_cache_cliff: value.is_some_and(request_can_cross_cache_cliff),
             stream: value
                 .and_then(|v| v.get("stream"))
@@ -7986,8 +8031,54 @@ impl LimitRequest {
     }
 }
 
-const INPUT_ESTIMATE_MAX_NODES: usize = 16_384;
-const INPUT_ESTIMATE_MAX_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(test)]
+mod limit_request_estimate_tests {
+    use super::{LimitRequest, ProviderCapability, RequestBodyView};
+    use bytes::Bytes;
+    use serde_json::json;
+
+    #[test]
+    fn zero_and_negative_output_caps_keep_existing_top_level_precedence() {
+        for (value, expected) in [
+            (
+                json!({"max_tokens":0, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
+                0,
+            ),
+            (
+                json!({"max_tokens":-1, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
+                -1,
+            ),
+            (
+                json!({"max_output_tokens":-2, "generationConfig":{"maxOutputTokens":88}}),
+                -2,
+            ),
+        ] {
+            let request = LimitRequest::from_value(
+                Some(&value),
+                "claude-test",
+                Some(ProviderCapability::AnthropicMessages),
+                &[],
+            );
+            assert_eq!(request.max_tokens, expected);
+        }
+    }
+
+    #[test]
+    fn malformed_json_keeps_existing_default_without_local_regions() {
+        let view = RequestBodyView::new(&Bytes::from_static(b"{"));
+        let request = view.limit_request(
+            "claude-test",
+            Some(ProviderCapability::AnthropicMessages),
+            &[],
+        );
+        assert_eq!(request.input_tokens_estimate, 4_000);
+        assert_eq!(request.max_tokens, 0);
+        assert!(request.local_cache_input.is_none());
+    }
+}
+
+pub(super) const INPUT_ESTIMATE_MAX_NODES: usize = 16_384;
+pub(super) const INPUT_ESTIMATE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 fn estimate_input_tokens(value: &Value) -> i64 {
     let mut nodes = 0;
