@@ -4391,6 +4391,7 @@ impl Lifecycle {
                 cache_metadata: cache_metadata.clone(),
                 upstream_id: resolved_upstream_id,
                 shaped_body,
+                original_body: ctx.body_bytes.clone(),
                 downstream_headers: ctx.downstream_headers.clone(),
             }
         });
@@ -4872,6 +4873,7 @@ impl Lifecycle {
                 &context.cache_metadata,
                 context.upstream_id,
                 context.shaped_body,
+                context.original_body,
                 &context.downstream_headers,
                 first_body_chunk_at.map_or(duration, |anchor| anchor.elapsed()),
                 usage
@@ -7141,6 +7143,7 @@ impl Lifecycle {
                     &context.cache_metadata,
                     context.upstream_id,
                     context.shaped_body,
+                    context.original_body,
                     &context.downstream_headers,
                     message_start_at.map_or(relay_start.elapsed(), |anchor| anchor.elapsed()),
                     usage

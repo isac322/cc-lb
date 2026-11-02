@@ -392,6 +392,103 @@ async fn cache_keepalive_small_cached_prefix_cancels_without_enqueue_json_and_ss
 }
 
 #[tokio::test]
+async fn cache_keepalive_zero_token_incompatible_requests_are_not_tracked_json_and_sse() {
+    for streaming in [false, true] {
+        for (field, value, reason) in [
+            (
+                "thinking",
+                json!({"type": "enabled", "budget_tokens": 1024}),
+                "enabled thinking",
+            ),
+            (
+                "output_config",
+                json!({"format": {"type": "json_schema", "schema": {"type": "object"}}}),
+                "structured output",
+            ),
+            (
+                "output_config",
+                json!({"format": null}),
+                "structured output",
+            ),
+            ("tool_choice", json!({"type": "any"}), "forced tool_choice"),
+            (
+                "tool_choice",
+                json!({"type": "tool", "name": "Bash"}),
+                "forced tool_choice",
+            ),
+        ] {
+            let enqueuer = Arc::new(RecordingEnqueuer::default());
+            let mut request: serde_json::Value =
+                serde_json::from_slice(&standard_keepalive_request()).expect("request fixture");
+            request[field] = value;
+            request["max_tokens"] = json!(2048);
+            request["stream"] = json!(streaming);
+            let response = handle_keepalive_response_with(
+                tool_use_body("msg_incompatible", "Bash", 12_000),
+                Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                principal_with_keepalive(),
+                Bytes::from(serde_json::to_vec(&request).expect("request serializes")),
+                &[],
+                streaming,
+            )
+            .await;
+            assert_eq!(collect_body(response).await.0, StatusCode::OK);
+            enqueuer.wait_for_completion().await;
+            assert!(enqueuer.enqueued().is_empty());
+            assert_eq!(enqueuer.not_tracked().len(), 1);
+            assert_eq!(
+                enqueuer.not_tracked()[0].reason,
+                format!("zero-token renewal unsupported: {reason}")
+            );
+            assert_eq!(
+                enqueuer.cancelled()[0].reason.as_str(),
+                "zero_token_renewal_unsupported"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_adaptive_auto_requests_remain_eligible_json_and_sse() {
+    for streaming in [false, true] {
+        let enqueuer = Arc::new(RecordingEnqueuer::default());
+        let mut request: serde_json::Value =
+            serde_json::from_slice(&standard_keepalive_request()).expect("request fixture");
+        request["thinking"] = json!({"type": "adaptive"});
+        request["output_config"] = json!({"effort": "medium"});
+        request["tool_choice"] = json!({"type": "auto"});
+        request["stream"] = json!(streaming);
+        let response = handle_keepalive_response_with(
+            tool_use_body("msg_adaptive", "Bash", 12_000),
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+            principal_with_keepalive(),
+            Bytes::from(serde_json::to_vec(&request).expect("request serializes")),
+            &[],
+            streaming,
+        )
+        .await;
+        assert_eq!(collect_body(response).await.0, StatusCode::OK);
+        enqueuer.wait_for_completion().await;
+        assert!(enqueuer.not_tracked().is_empty());
+        assert!(enqueuer.cancelled().is_empty());
+        let enqueued = enqueuer.enqueued();
+        assert_eq!(enqueued.len(), 1);
+        let renewal: serde_json::Value = serde_json::from_slice(
+            &enqueued[0]
+                .snapshot
+                .build_keepalive_body()
+                .expect("renewal body"),
+        )
+        .expect("renewal JSON");
+        for field in ["thinking", "output_config", "tool_choice"] {
+            assert_eq!(renewal[field], request[field]);
+        }
+        assert_eq!(renewal["max_tokens"], 0);
+        assert!(renewal.get("stream").is_none());
+    }
+}
+
+#[tokio::test]
 async fn cache_keepalive_shared_lifecycle_serializes_buffered_and_streaming_completions() {
     struct SequenceDispatch {
         calls: AtomicUsize,
@@ -497,9 +594,16 @@ struct RecordingEnqueuer {
     enqueued: Mutex<Vec<CacheKeepaliveEnqueueRequest>>,
     cancelled: Mutex<Vec<CacheKeepaliveCancelRequest>>,
     not_tracked: Mutex<Vec<CacheKeepaliveNotTrackedRequest>>,
+    completed: tokio::sync::Notify,
 }
 
 impl RecordingEnqueuer {
+    async fn wait_for_completion(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.completed.notified())
+            .await
+            .expect("keepalive completion");
+    }
+
     fn enqueued(&self) -> Vec<CacheKeepaliveEnqueueRequest> {
         self.enqueued.lock().expect("enqueued lock").clone()
     }
@@ -520,6 +624,7 @@ impl CacheKeepaliveEnqueuer for RecordingEnqueuer {
         request: CacheKeepaliveEnqueueRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         self.enqueued.lock().expect("enqueued lock").push(request);
+        self.completed.notify_one();
         Ok(())
     }
 
@@ -528,6 +633,7 @@ impl CacheKeepaliveEnqueuer for RecordingEnqueuer {
         request: CacheKeepaliveCancelRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         self.cancelled.lock().expect("cancelled lock").push(request);
+        self.completed.notify_one();
         Ok(())
     }
 
