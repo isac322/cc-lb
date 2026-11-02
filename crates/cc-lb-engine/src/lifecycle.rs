@@ -4889,7 +4889,7 @@ impl Lifecycle {
             let decode = decode_prompt_cache_observations_pure(
                 context,
                 PromptCacheUsage::from(&usage),
-                response_start_unix_secs(dispatch_unix_secs, dispatch_started, None),
+                dispatch_unix_secs,
             );
             publish_prompt_cache_observations(context, &decode, now_unix_secs);
         }
@@ -6154,7 +6154,7 @@ impl Lifecycle {
                                         let decode = decode_prompt_cache_observations_pure(
                                             context,
                                             PromptCacheUsage::from(&usage),
-                                            now_unix_secs,
+                                            dispatch_unix_secs,
                                         );
                                         // Early direct publish: valid usage evidence is
                                         // enqueued at message_start, before any downstream
@@ -9800,6 +9800,76 @@ mod tests {
     }
 
     #[test]
+    fn issue_1002_default_observations_stay_warm_until_provider_ttl() {
+        let dispatch = 1_800_000_000;
+        let defaults = PromptCacheShadowConfig::default();
+        let explicit_grace = PromptCacheShadowConfig {
+            grace_margin_secs: 60,
+        };
+        for (ttl, ttl_secs) in [(TtlClass::Ephemeral5m, 300), (TtlClass::Ephemeral1h, 3_600)] {
+            for is_hit in [false, true] {
+                for (config_name, config, warm_for) in [
+                    ("default", &defaults, ttl_secs),
+                    ("explicit_grace", &explicit_grace, ttl_secs - 60),
+                ] {
+                    let context = PromptCacheObservationContext {
+                        upstream_id: Uuid::from_u128(1002),
+                        canonical_model_id: TEST_MODEL.to_owned(),
+                        cache_breakpoints: vec![cache_breakpoint(3, "cached", 2_400, ttl)],
+                        cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["cached"]),
+                        selected_match: is_hit.then(|| selected_match_hit("cached", 3, ttl, 2_400)),
+                        sink: Arc::new(RecordingPromptCacheObservationSink::new(Vec::new())),
+                        grace_margin_secs: config.grace_margin_secs,
+                    };
+                    let decoded = decode_prompt_cache_observations_pure(
+                        &context,
+                        PromptCacheUsage {
+                            cache_creation_input_tokens: if is_hit { 0 } else { 2_400 },
+                            cache_read_input_tokens: if is_hit { 2_400 } else { 0 },
+                        },
+                        dispatch,
+                    );
+                    let [observation] = decoded.observations.as_slice() else {
+                        panic!("successful cache usage must decode one observation");
+                    };
+                    let entries = [WarmCacheEntry {
+                        prefix_hash: observation.prefix_hash.clone(),
+                        expires_at_unix_secs: observation.expires_at_unix_secs,
+                        ttl_class: observation.ttl_class,
+                        last_observed_at_unix_secs: dispatch,
+                        content_block_index: observation.prefix_content_block_index,
+                        estimated_prefix_bytes: observation.estimated_prefix_bytes,
+                        hash_schema_version: HASH_SCHEMA_VERSION,
+                    }];
+                    for elapsed in [269, 270, warm_for - 1, warm_for] {
+                        let expected_warm = elapsed < warm_for;
+                        let matched = resolve_longest_warm_match(
+                            &entries,
+                            &context.cache_breakpoints,
+                            dispatch + elapsed,
+                        );
+                        assert_eq!(
+                            matched.is_some(),
+                            expected_warm,
+                            "{config_name} {ttl:?} hit={is_hit} at +{elapsed}s",
+                        );
+                        let Some(score) = build_cache_score_from_match(
+                            &context.cache_breakpoints,
+                            matched.as_ref(),
+                        ) else {
+                            panic!("a cacheable request must have a cache routing score");
+                        };
+                        assert_eq!(
+                            score.predicted_cache_read_tokens,
+                            if expected_warm { 2_400 } else { 0 },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn response_decoder_decodes_observations_without_side_effects() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000221").unwrap();
         let now = 1_800_000_000;
@@ -10334,26 +10404,144 @@ mod tests {
         );
     }
 
-    #[test]
-    fn expiry_anchored_at_start_not_completion() {
-        let dispatch_started = Instant::now();
-        let dispatch_unix_secs = 1_000_u64;
-        let message_start_at = dispatch_started + Duration::from_secs(2);
-        let anchor =
-            response_start_unix_secs(dispatch_unix_secs, dispatch_started, Some(message_start_at));
-        assert_eq!(anchor, 1_002);
-
-        let grace = 60;
-        let expires = prompt_cache_observation_expires_at(anchor, TtlClass::Ephemeral5m, grace);
-        assert_eq!(expires, 1_002 + 300 - 60);
-
-        let completion_unix = dispatch_unix_secs + 62;
-        let completion_expires =
-            prompt_cache_observation_expires_at(completion_unix, TtlClass::Ephemeral5m, grace);
-        assert!(
-            expires < completion_expires,
-            "start anchor must not extend expiry by the generation duration"
+    #[tokio::test]
+    async fn issue_1002_sse_relay_expires_from_dispatch_not_message_start()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const MESSAGE_START: &[u8] = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":",
+            "{\"input_tokens\":10,\"output_tokens\":1,\"cache_creation_input_tokens\":2400}}}\n\n",
+        )
+        .as_bytes();
+        let upstream_id = Uuid::from_u128(1002);
+        let dispatch_unix_secs = 1_800_000_000;
+        let principal_view = failure_principal_view("principal-test", default_artifacts());
+        let record = upstream_record(upstream_id);
+        let cached = principal_view
+            .get("principal-test")
+            .ok_or("missing principal")?;
+        let (route, _) = route_for_record(&record, cached).map_err(|_| "route does not resolve")?;
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let mut lifecycle = provenance_lifecycle(
+            provenance_view(principal_view, Arc::new(TestSignerFactory), vec![record]),
+            Arc::new(QueueDispatch::new(Vec::new())),
+            &bus,
         );
+        let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(3, "cached", 2_400, TtlClass::Ephemeral5m)],
+            cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["cached"]),
+            selected_match: None,
+            sink: sink.clone(),
+            grace_margin_secs: 0,
+        };
+        let upstream_body = Body::from_stream(async_stream::stream! {
+            yield Ok::<_, Infallible>(Bytes::from_static(MESSAGE_START));
+            std::future::pending::<()>().await;
+        });
+        let response = Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(upstream_body)?;
+        // std::time::Instant is deliberately backdated: Tokio's paused clock
+        // does not advance the production relay's monotonic timing source.
+        let dispatch_started = Instant::now() - Duration::from_secs(40);
+        let event_ctx = RequestEventContext {
+            request_id: "issue-1002-relay".to_owned(),
+            canonical_model_id: TEST_MODEL.to_owned(),
+            upstream_name: format!("upstream-{upstream_id}"),
+            requested_model: Some(TEST_MODEL.to_owned()),
+            proxy_setup_ms: None,
+            stage_timings: AttemptTimings::default(),
+        };
+        let transform_ctx = ResponseTransformContext {
+            principal: Principal {
+                id: "principal-test".to_owned(),
+                kind: PrincipalKind::InternalKey,
+            },
+            upstream: route.upstream,
+            request_method: http::Method::POST,
+            request_path: "/v1/messages".to_owned(),
+            dialect: route.dialect,
+            gemini_oauth: false,
+        };
+        let affinity_ctx = ResponseAffinityContext {
+            capability: ProviderCapability::AnthropicMessages,
+            store: None,
+            principal_id: "principal-test".to_owned(),
+            upstream_id,
+            pending_request_keys: Vec::new(),
+            observe_response_keys: false,
+            ttl_secs: 3_600,
+        };
+        let response = lifecycle.relay_response(
+            response,
+            Arc::new(TestSigner),
+            StatusCode::OK,
+            None,
+            event_ctx.clone(),
+            transform_ctx.clone(),
+            Some(context.clone()),
+            affinity_ctx.clone(),
+            None,
+            None,
+            dispatch_started,
+            dispatch_unix_secs,
+        );
+        let mut body = response.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await?
+            .ok_or("message_start was not relayed")??;
+        let data = frame.into_data().map_err(|_| "expected a data frame")?;
+        assert_eq!(data.as_ref(), MESSAGE_START);
+        // The upstream is still pending: observation publication and event
+        // delivery must not wait for completion or message_stop.
+        let records = sink.upserts();
+        let [record] = records.as_slice() else {
+            panic!("message_start must publish exactly one cache observation");
+        };
+        assert_eq!(record.expires_at_unix_secs, dispatch_unix_secs + 300);
+        assert!(record.last_observed_at_unix_secs >= dispatch_unix_secs + 40);
+        drop(body);
+
+        // Buffered responses publish at completion, independently of expiry.
+        let completion_unix_secs = dispatch_unix_secs + 90;
+        lifecycle.clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(completion_unix_secs));
+        const BUFFERED: &[u8] =
+            br#"{"usage":{"input_tokens":10,"output_tokens":1,"cache_creation_input_tokens":2400}}"#;
+        let response = lifecycle
+            .finish_success_response(
+                upstream_response(StatusCode::OK, BUFFERED),
+                Arc::new(TestSigner),
+                None,
+                None,
+                Duration::from_secs(90),
+                StatusCode::OK,
+                event_ctx,
+                transform_ctx,
+                Some(context),
+                affinity_ctx,
+                None,
+                None,
+                dispatch_started,
+                dispatch_unix_secs,
+            )
+            .await;
+        assert_eq!(response.into_body().collect().await?.to_bytes(), BUFFERED);
+        let records = sink.upserts();
+        let [_, buffered_record] = records.as_slice() else {
+            panic!("buffered usage must publish one additional cache observation");
+        };
+        assert_eq!(
+            buffered_record.expires_at_unix_secs,
+            dispatch_unix_secs + 300
+        );
+        assert_eq!(
+            buffered_record.last_observed_at_unix_secs,
+            completion_unix_secs
+        );
+        Ok(())
     }
 
     #[test]

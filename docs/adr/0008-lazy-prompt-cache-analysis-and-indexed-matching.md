@@ -122,7 +122,7 @@ Memory must be bounded without corrupting matching truth:
 
 ### Response observation carries the selected match
 
-Copy the **immutable routing-time match snapshot** consumed by response handling directly from the chosen candidate: matched prefix key, content-block index, actual stored TTL, estimated tokens, and token provenance. The qualifying membership is used during routing to populate the score/trace but does not need to be retained after the match content index and entry TTL are fixed; response write decisions use those two fields. Do **not** re-snapshot the warm map after routing — a concurrent upsert/expiry between routing and observation would attribute to a different entry than the one that drove the decision. Refreshed expiry is derived from response-start time rather than copied from the old entry.
+Copy the **immutable routing-time match snapshot** consumed by response handling directly from the chosen candidate: matched prefix key, content-block index, actual stored TTL, estimated tokens, and token provenance. The qualifying membership is used during routing to populate the score/trace but does not need to be retained after the match content index and entry TTL are fixed; response write decisions use those two fields. Do **not** re-snapshot the warm map after routing — a concurrent upsert/expiry between routing and observation would attribute to a different entry than the one that drove the decision. Expiry for new writes and inferred hit refreshes is derived from upstream request dispatch time on both buffered and SSE paths, not copied from the old entry. `last_observed` remains the time the response usage was observed.
 
 Response attribution is **inferential**, because Anthropic reports only aggregate `cache_read`/`cache_creation` usage and cannot say which local key hit:
 
@@ -131,7 +131,7 @@ Response attribution is **inferential**, because Anthropic reports only aggregat
 - provider read `= 0` with a predicted match → do not refresh; record the prediction disagreement (feeds the drift metric).
 - provider creation `> 0` → persist only the requested explicit or automatic breakpoints that the structural fold marked as needing a write (per `(breakpoint, TTL)`). Aggregate usage cannot prove per-breakpoint attribution (ADR 0007), and server-tool results may add their own 5-minute breakpoint, so this too stays explicitly inferential.
 
-**Anchor refreshed expiry to response-start, not response-completion.** `finish_success_response` decodes buffered usage after the whole response (`lifecycle.rs:2033`); computing `now + TTL - grace` there overextends provider cache state by the full generation duration. Use the upstream input-processing / SSE `message_start` time as the expiry anchor.
+**Anchor expiry to upstream request dispatch on buffered and SSE paths.** [Anthropic's prompt-caching documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) measures the TTL from the start of the request that writes or reads the cache entry. Dispatch is a conservative lower bound for that provider request start. Derive expiry from dispatch plus the requested TTL with the configured grace margin subtracted; TTFB and generation time must not extend it. Receiving SSE `message_start` or completing a buffered response supplies observation evidence, not a later expiry anchor.
 
 ### ABI / schema / migration
 
