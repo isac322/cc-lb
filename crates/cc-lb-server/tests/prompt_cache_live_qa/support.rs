@@ -357,10 +357,6 @@ impl SettledEvent {
                     .as_i64()
             })
     }
-
-    pub fn cache_candidate(&self, upstream_id: &str) -> Option<&serde_json::Value> {
-        selected_cache_candidate(&self.routing_trace, upstream_id)
-    }
 }
 
 pub async fn wait_for_settled_event(
