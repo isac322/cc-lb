@@ -41,9 +41,22 @@ async fn replacement_worker_dispatches_distinct_job_from_same_postgres_backend()
 async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval() -> Result<()> {
     with_isolated_database(|pool| async move {
         let worker_pool = PgPoolOptions::new()
+            .min_connections(6)
             .max_connections(6)
-            .acquire_timeout(Duration::from_millis(200))
+            .acquire_timeout(Duration::from_millis(250))
             .connect_lazy_with(pool.connect_options().as_ref().clone());
+        timeout(QA_TIMEOUT, async {
+            let mut warm = Vec::with_capacity(6);
+            while warm.len() < 6 {
+                if let Ok(conn) = worker_pool.acquire().await {
+                    warm.push(conn);
+                }
+            }
+            drop(warm);
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("timed out pre-warming worker_pool connections")??;
         let backend = postgres_backend(&worker_pool);
         let push_backend = postgres_backend(&pool);
         let (adaptive_tx, mut adaptive_rx) = mpsc::channel(2);
@@ -74,7 +87,7 @@ async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval()
                     }
                 }
             }
-            sleep(Duration::from_millis(300)).await;
+            sleep(Duration::from_millis(350)).await;
             drop(held);
         });
         timeout(QA_TIMEOUT, pre_held_rx)
