@@ -34,6 +34,14 @@ pub struct UpstreamRow {
     pub name: String,
 }
 
+#[derive(Debug)]
+pub struct PersistedObservation {
+    pub v3_prefix_key: String,
+    pub ttl_class: String,
+    pub prefix_content_block_index: i64,
+    pub estimated_prefix_tokens: i64,
+}
+
 pub async fn open_sqlite_pool(server: &common::TestServer) -> SqlitePool {
     SqlitePoolOptions::new()
         .max_connections(2)
@@ -269,6 +277,42 @@ pub async fn fetch_matched_observation(
     }
 }
 
+/// Waits for the asynchronous observation writer's commit boundary before a follow-up request.
+pub async fn wait_for_committed_observation(
+    pool: &SqlitePool,
+    upstream_id: &str,
+    model: &str,
+) -> PersistedObservation {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut interval = tokio::time::interval(Duration::from_millis(20));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let row = sqlx::query(
+            "SELECT v3_prefix_key, ttl_class, prefix_content_block_index, \
+             estimated_prefix_tokens FROM prompt_cache_observations \
+             WHERE upstream_id = ? AND canonical_model_id = ? \
+             ORDER BY prefix_content_block_index DESC LIMIT 1",
+        )
+        .bind(upstream_id)
+        .bind(model)
+        .fetch_optional(pool)
+        .await
+        .expect("query committed prompt-cache observation");
+        if let Some(row) = row {
+            return PersistedObservation {
+                v3_prefix_key: row.get("v3_prefix_key"),
+                ttl_class: row.get("ttl_class"),
+                prefix_content_block_index: row.get("prefix_content_block_index"),
+                estimated_prefix_tokens: row.get("estimated_prefix_tokens"),
+            };
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for committed prompt-cache observation");
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SettledEvent {
     pub id: i64,
@@ -312,6 +356,10 @@ impl SettledEvent {
                 selected_cache_candidate(&self.routing_trace, &self.upstream_id)?["predicted_cache_read_tokens"]
                     .as_i64()
             })
+    }
+
+    pub fn cache_candidate(&self, upstream_id: &str) -> Option<&serde_json::Value> {
+        selected_cache_candidate(&self.routing_trace, upstream_id)
     }
 }
 
