@@ -357,10 +357,12 @@ async fn burst_of_10_notifies_in_100ms_triggers_1_rebuild() {
     )
     .await;
 
+    tokio::time::pause();
     for _ in 0..10 {
         notifier.send(ChangeChannel::Upstream);
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::advance(Duration::from_millis(10)).await;
     }
+    tokio::time::resume();
     wait_for_generation(&fixture.holder, start + 1).await;
 
     tokio::time::sleep(Duration::from_millis(350)).await;
