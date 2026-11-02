@@ -12242,16 +12242,24 @@ mod tests {
     struct FakePromptCacheStore {
         records: Mutex<Vec<PromptCacheObservationRecord>>,
         lookups: AtomicUsize,
+        requested_keys: Mutex<Vec<String>>,
     }
     impl FakePromptCacheStore {
         fn new(records: Vec<PromptCacheObservationRecord>) -> Self {
             Self {
                 records: Mutex::new(records),
                 lookups: AtomicUsize::new(0),
+                requested_keys: Mutex::new(Vec::new()),
             }
         }
         fn lookup_count(&self) -> usize {
             self.lookups.load(Ordering::Relaxed)
+        }
+        fn requested_keys(&self) -> Vec<String> {
+            self.requested_keys
+                .lock()
+                .expect("requested keys lock")
+                .clone()
         }
     }
     #[async_trait]
@@ -12264,6 +12272,10 @@ mod tests {
             not_expired_at_unix_secs: u64,
         ) -> cc_lb_storage_api::StorageResult<Vec<PromptCacheObservationRecord>> {
             self.lookups.fetch_add(1, Ordering::Relaxed);
+            self.requested_keys
+                .lock()
+                .expect("requested keys lock")
+                .extend(v3_prefix_keys.iter().cloned());
             Ok(self
                 .records
                 .lock()
@@ -12296,6 +12308,53 @@ mod tests {
             estimated_prefix_tokens: 100,
             token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn shared_warm_lookup_unions_official_and_literal_bundle_keys() {
+        let official_id = Uuid::from_u128(1010);
+        let custom_id = Uuid::from_u128(1011);
+        let mut custom = upstream_record(custom_id);
+        custom.base_url = Some("https://proxy.example.com".parse().expect("custom URL"));
+        let store = Arc::new(FakePromptCacheStore::new(Vec::new()));
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(
+                &[principal_record("principal")],
+                HashMap::new(),
+            )))
+            .upstream_records(vec![upstream_record(official_id), custom])
+            .prompt_cache_observation_store(store.clone())
+            .build();
+        let official = cache_breakpoint(1, "official-union-key", 100, TtlClass::Ephemeral5m);
+        let literal = cache_breakpoint(1, "literal-union-key", 200, TtlClass::Ephemeral5m);
+        let bundles = PromptCacheBundles {
+            official: PromptCacheBundle {
+                cache_breakpoints: vec![official],
+                cacheable_breakpoint_prefix_keys: HashSet::new(),
+                request_breakpoints: Vec::new(),
+                cache_prefix_hash: None,
+            },
+            literal: PromptCacheBundle {
+                cache_breakpoints: vec![literal],
+                cacheable_breakpoint_prefix_keys: HashSet::new(),
+                request_breakpoints: Vec::new(),
+                cache_prefix_hash: None,
+            },
+        };
+        let snapshot = fetch_prompt_cache_warm_entries_for_bundles(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &bundles,
+            &cc_lb_clock::TestClock::new_at_secs(1_800_000_000),
+        )
+        .await;
+        assert_eq!(snapshot.len(), 2);
+        let keys = store.requested_keys();
+        assert!(keys.contains(&"official-union-key".to_owned()));
+        assert!(keys.contains(&"literal-union-key".to_owned()));
     }
 
     fn cache_score_view_with_store(
