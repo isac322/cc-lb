@@ -12493,13 +12493,19 @@ mod tests {
             official: PromptCacheBundle {
                 cache_breakpoints: official_breakpoints.clone(),
                 cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["official-prefix"]),
-                request_breakpoints: Vec::new(),
+                request_breakpoints: official_breakpoints
+                    .iter()
+                    .map(request_cache_breakpoint_from_plugin)
+                    .collect(),
                 cache_prefix_hash: Some("official-prefix".to_owned()),
             },
             literal: PromptCacheBundle {
-                cache_breakpoints: custom_breakpoints,
+                cache_breakpoints: custom_breakpoints.clone(),
                 cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["custom-prefix"]),
-                request_breakpoints: Vec::new(),
+                request_breakpoints: custom_breakpoints
+                    .iter()
+                    .map(request_cache_breakpoint_from_plugin)
+                    .collect(),
                 cache_prefix_hash: Some("custom-prefix".to_owned()),
             },
         };
