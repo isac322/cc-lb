@@ -736,12 +736,20 @@ async fn write_finalized_rows(
     // Diagnostic fields exist only in the log; every DB and bus reader sees the same row.
     let mut diagnostics = RequestDiagnostics::take_from(&mut row);
     if let Some(route) = partial.route.as_ref() {
-        diagnostics.matched_v3_cache_key = route.matched_v3_cache_key.clone().or_else(|| {
-            partial
-                .parse
-                .as_ref()
-                .and_then(|parse| parse.matched_v3_cache_key.clone())
-        });
+        if let Some(cache_breakpoints) = route.cache_breakpoints.clone() {
+            row.cache_breakpoints = cache_breakpoints.clone();
+            diagnostics.cache_breakpoints = cache_breakpoints;
+        }
+        diagnostics.matched_v3_cache_key = route
+            .cache_prefix_hash
+            .clone()
+            .or_else(|| route.matched_v3_cache_key.clone())
+            .or_else(|| {
+                partial
+                    .parse
+                    .as_ref()
+                    .and_then(|parse| parse.matched_v3_cache_key.clone())
+            });
         diagnostics.breakpoint_content_block_index =
             route.breakpoint_content_block_index.map(u64::from);
         diagnostics.matched_content_block_index = route.matched_content_block_index.map(u64::from);
@@ -3463,29 +3471,27 @@ mod tests {
         .unwrap();
         tx.send(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
-            result: Ok(RouteInfo {
-                upstream_id: Uuid::nil(),
-                upstream_name: "primary".to_owned(),
-                model: Some("claude-3-5-sonnet-20241022".to_owned()),
-                upstream_kind: Some("anthropic_key".to_owned()),
-                route_ms: Some(7),
-                routing_trace: None,
-                predicted_cache_read_tokens: None,
-                matched_v3_cache_key: None,
-                breakpoint_content_block_index: None,
-                matched_content_block_index: None,
-                lookback_distance: None,
-                predicted_cache_creation_tokens_5m: None,
-                predicted_cache_creation_tokens_1h: None,
-                token_estimate_source: None,
-                cache_value_micros: None,
-                formula_winner_upstream_id: None,
-                kept_upstream_id: None,
-                quota_urgency_5h: None,
-                quota_urgency_7d: None,
-                quota_urgency_combined: None,
-                quota_warning_multiplier: None,
-            }),
+            result: Ok(RouteInfo { cache_breakpoints: None, cache_prefix_hash: None, upstream_id: Uuid::nil(),
+            upstream_name: "primary".to_owned(),
+            model: Some("claude-3-5-sonnet-20241022".to_owned()),
+            upstream_kind: Some("anthropic_key".to_owned()),
+            route_ms: Some(7),
+            routing_trace: None,
+            predicted_cache_read_tokens: None,
+            matched_v3_cache_key: None,
+            breakpoint_content_block_index: None,
+            matched_content_block_index: None,
+            lookback_distance: None,
+            predicted_cache_creation_tokens_5m: None,
+            predicted_cache_creation_tokens_1h: None,
+            token_estimate_source: None,
+            cache_value_micros: None,
+            formula_winner_upstream_id: None,
+            kept_upstream_id: None,
+            quota_urgency_5h: None,
+            quota_urgency_7d: None,
+            quota_urgency_combined: None,
+            quota_warning_multiplier: None, }),
             routing_trace: None,
         })
         .await
@@ -3838,29 +3844,27 @@ mod tests {
         .unwrap();
         tx.send(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
-            result: Ok(RouteInfo {
-                upstream_id: Uuid::nil(),
-                upstream_name: "primary".to_owned(),
-                model: Some("claude-3-5-sonnet-20241022".to_owned()),
-                upstream_kind: Some("anthropic_key".to_owned()),
-                route_ms: Some(7),
-                routing_trace: None,
-                predicted_cache_read_tokens: None,
-                matched_v3_cache_key: None,
-                breakpoint_content_block_index: None,
-                matched_content_block_index: None,
-                lookback_distance: None,
-                predicted_cache_creation_tokens_5m: None,
-                predicted_cache_creation_tokens_1h: None,
-                token_estimate_source: None,
-                cache_value_micros: None,
-                formula_winner_upstream_id: None,
-                kept_upstream_id: None,
-                quota_urgency_5h: None,
-                quota_urgency_7d: None,
-                quota_urgency_combined: None,
-                quota_warning_multiplier: None,
-            }),
+            result: Ok(RouteInfo { cache_breakpoints: None, cache_prefix_hash: None, upstream_id: Uuid::nil(),
+            upstream_name: "primary".to_owned(),
+            model: Some("claude-3-5-sonnet-20241022".to_owned()),
+            upstream_kind: Some("anthropic_key".to_owned()),
+            route_ms: Some(7),
+            routing_trace: None,
+            predicted_cache_read_tokens: None,
+            matched_v3_cache_key: None,
+            breakpoint_content_block_index: None,
+            matched_content_block_index: None,
+            lookback_distance: None,
+            predicted_cache_creation_tokens_5m: None,
+            predicted_cache_creation_tokens_1h: None,
+            token_estimate_source: None,
+            cache_value_micros: None,
+            formula_winner_upstream_id: None,
+            kept_upstream_id: None,
+            quota_urgency_5h: None,
+            quota_urgency_7d: None,
+            quota_urgency_combined: None,
+            quota_warning_multiplier: None, }),
             routing_trace: None,
         })
         .await
@@ -4202,29 +4206,27 @@ mod tests {
         });
         bus.publish_lifecycle(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
-            result: Ok(RouteInfo {
-                upstream_id: Uuid::nil(),
-                upstream_name: "primary".to_owned(),
-                model: Some("claude-3-5-sonnet-20241022".to_owned()),
-                upstream_kind: Some("anthropic_key".to_owned()),
-                route_ms: Some(7),
-                routing_trace: None,
-                predicted_cache_read_tokens: None,
-                matched_v3_cache_key: None,
-                breakpoint_content_block_index: None,
-                matched_content_block_index: None,
-                lookback_distance: None,
-                predicted_cache_creation_tokens_5m: None,
-                predicted_cache_creation_tokens_1h: None,
-                token_estimate_source: None,
-                cache_value_micros: None,
-                formula_winner_upstream_id: None,
-                kept_upstream_id: None,
-                quota_urgency_5h: None,
-                quota_urgency_7d: None,
-                quota_urgency_combined: None,
-                quota_warning_multiplier: None,
-            }),
+            result: Ok(RouteInfo { cache_breakpoints: None, cache_prefix_hash: None, upstream_id: Uuid::nil(),
+            upstream_name: "primary".to_owned(),
+            model: Some("claude-3-5-sonnet-20241022".to_owned()),
+            upstream_kind: Some("anthropic_key".to_owned()),
+            route_ms: Some(7),
+            routing_trace: None,
+            predicted_cache_read_tokens: None,
+            matched_v3_cache_key: None,
+            breakpoint_content_block_index: None,
+            matched_content_block_index: None,
+            lookback_distance: None,
+            predicted_cache_creation_tokens_5m: None,
+            predicted_cache_creation_tokens_1h: None,
+            token_estimate_source: None,
+            cache_value_micros: None,
+            formula_winner_upstream_id: None,
+            kept_upstream_id: None,
+            quota_urgency_5h: None,
+            quota_urgency_7d: None,
+            quota_urgency_combined: None,
+            quota_warning_multiplier: None, }),
             routing_trace: None,
         });
         bus.publish_lifecycle(LifecycleEvent::UsageObserved {

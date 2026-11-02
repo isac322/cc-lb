@@ -12,8 +12,8 @@ use tokio::sync::Semaphore;
 #[cfg(test)]
 use super::analyze_v3_prompt_cache;
 use super::{
-    CacheBlockRef, PrefixBlockSerializer, SerializationScratch, V3PromptCacheAnalysis,
-    V3StructuralBreakpoint, analyze_v3_prompt_cache_structure,
+    CacheBlockRef, PrefixBlockSerializer, PromptCachePolicy, SerializationScratch,
+    V3PromptCacheAnalysis, V3StructuralBreakpoint, analyze_v3_prompt_cache_structure,
     analyze_v3_prompt_cache_with_tokenize_duration,
     cacheable_breakpoint_prefix_keys_with_tokenize_duration, finish_structural_analysis,
     unanalyzable_prompt_cache,
@@ -431,6 +431,7 @@ fn analyze_v3_prompt_cache_optimized(
     (analysis, stats)
 }
 
+
 fn analyze_v3_prompt_cache_optimized_scoped(
     value: &Value,
     canonical_model: &str,
@@ -444,8 +445,12 @@ fn analyze_v3_prompt_cache_optimized_scoped(
     let mut durations = PromptCacheAnalysisDurations::default();
     let mut serialization_scratch = SerializationScratch::default();
     let structure_started = Instant::now();
-    let structural =
-        analyze_v3_prompt_cache_structure(value, canonical_model, &mut serialization_scratch);
+    let structural = analyze_v3_prompt_cache_structure(
+        value,
+        canonical_model,
+        PromptCachePolicy::AnthropicOfficial,
+        &mut serialization_scratch,
+    );
     durations.structure = Some(structure_started.elapsed());
     let Some(structural) = structural else {
         return (
@@ -1095,8 +1100,13 @@ mod tests {
     fn exact_batch_prefix_bytes_match_reference_serializer() {
         let request = four_breakpoint_request("bytes }], 한글🙂");
         let mut structural_scratch = SerializationScratch::default();
-        let structural =
-            analyze_v3_prompt_cache_structure(&request, MODEL, &mut structural_scratch).unwrap();
+        let structural = analyze_v3_prompt_cache_structure(
+            &request,
+            MODEL,
+            PromptCachePolicy::AnthropicOfficial,
+            &mut structural_scratch,
+        )
+        .unwrap();
         let batch =
             prepare_exact_prefix_batch(MODEL, &structural.blocks, &structural.breakpoints).unwrap();
         let mut reference_scratch = SerializationScratch::default();
@@ -1179,9 +1189,12 @@ mod tests {
         assert_eq!(reference.blocks.len(), PRODUCTION_FIXTURE_MESSAGE_COUNT);
         assert_eq!(reference.breakpoints.len(), 4);
 
-        let mut structural_scratch = SerializationScratch::default();
-        let structural =
-            analyze_v3_prompt_cache_structure(&request, MODEL, &mut structural_scratch)
+        let structural = analyze_v3_prompt_cache_structure(
+            &request,
+            MODEL,
+            PromptCachePolicy::AnthropicOfficial,
+            &mut structural_scratch,
+        )
                 .expect("fixture remains analyzable");
         assert_eq!(structural.blocks.len(), PRODUCTION_FIXTURE_MESSAGE_COUNT);
         assert_eq!(structural.breakpoints.len(), 4);
@@ -1322,9 +1335,21 @@ mod tests {
             }]}]
         });
         let mut scratch = SerializationScratch::default();
-        let a = analyze_v3_prompt_cache_structure(&implicit, MODEL, &mut scratch).unwrap();
+        let a = analyze_v3_prompt_cache_structure(
+            &implicit,
+            MODEL,
+            PromptCachePolicy::AnthropicOfficial,
+            &mut scratch,
+        )
+        .unwrap();
         let a_batch = prepare_exact_prefix_batch(MODEL, &a.blocks, &a.breakpoints).unwrap();
-        let b = analyze_v3_prompt_cache_structure(&explicit, MODEL, &mut scratch).unwrap();
+        let b = analyze_v3_prompt_cache_structure(
+            &explicit,
+            MODEL,
+            PromptCachePolicy::AnthropicOfficial,
+            &mut scratch,
+        )
+        .unwrap();
         let b_batch = prepare_exact_prefix_batch(MODEL, &b.blocks, &b.breakpoints).unwrap();
         assert_eq!(a.breakpoints[0].prefix_key, b.breakpoints[0].prefix_key);
         assert_ne!(a_batch.token_prefix_keys[0], b_batch.token_prefix_keys[0]);

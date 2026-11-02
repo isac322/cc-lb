@@ -189,29 +189,27 @@ fn usage_snapshot(usage: &RenewalUsage) -> UsageSnapshot {
 }
 
 fn route_info(upstream: &UpstreamRecord, model: &str) -> RouteInfo {
-    RouteInfo {
-        upstream_id: upstream.id,
-        upstream_name: upstream.name.clone(),
-        model: Some(model.to_owned()),
-        upstream_kind: Some(upstream_kind_label(upstream.kind).to_owned()),
-        route_ms: None,
-        routing_trace: None,
-        predicted_cache_read_tokens: None,
-        matched_v3_cache_key: None,
-        breakpoint_content_block_index: None,
-        matched_content_block_index: None,
-        lookback_distance: None,
-        predicted_cache_creation_tokens_5m: None,
-        predicted_cache_creation_tokens_1h: None,
-        token_estimate_source: None,
-        cache_value_micros: None,
-        formula_winner_upstream_id: None,
-        kept_upstream_id: None,
-        quota_urgency_5h: None,
-        quota_urgency_7d: None,
-        quota_urgency_combined: None,
-        quota_warning_multiplier: None,
-    }
+    RouteInfo { cache_breakpoints: None, cache_prefix_hash: None, upstream_id: upstream.id,
+    upstream_name: upstream.name.clone(),
+    model: Some(model.to_owned()),
+    upstream_kind: Some(upstream_kind_label(upstream.kind).to_owned()),
+    route_ms: None,
+    routing_trace: None,
+    predicted_cache_read_tokens: None,
+    matched_v3_cache_key: None,
+    breakpoint_content_block_index: None,
+    matched_content_block_index: None,
+    lookback_distance: None,
+    predicted_cache_creation_tokens_5m: None,
+    predicted_cache_creation_tokens_1h: None,
+    token_estimate_source: None,
+    cache_value_micros: None,
+    formula_winner_upstream_id: None,
+    kept_upstream_id: None,
+    quota_urgency_5h: None,
+    quota_urgency_7d: None,
+    quota_urgency_combined: None,
+    quota_warning_multiplier: None, }
 }
 
 #[cfg(test)]

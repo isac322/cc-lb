@@ -74,8 +74,8 @@ use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
-    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
-    analyze_v3_prompt_cache,
+    PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
+    analyze_v3_prompt_cache, analyze_v3_prompt_cache_literal, cacheable_breakpoint_prefix_keys,
 };
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
@@ -121,13 +121,10 @@ pub type Body = AxumBody;
 
 /// Prefix-hash schema persisted with prompt-cache observations.
 ///
-/// Version 5 adds `thinking`, `redacted_thinking`, and `tool_reference` content blocks
-/// to the prefix chain, changing keys for requests that replay them. It also renames
-/// the unconditional hash domain tag from `cc-lb-cache-v4:*` to `cc-lb-cache-v5:*`,
-/// forcing a clean generational split for every prefix key. Hydration rejects
-/// mismatched versions, cold-starting warm state without a storage migration because
-/// the persisted schema-version column is an integer.
-pub const HASH_SCHEMA_VERSION: u8 = 5;
+/// Version 6 excludes the official Anthropic billing-header system block from
+/// effective cache identity while preserving literal custom-upstream identity.
+/// The version filter cold-starts older persisted observations.
+pub const HASH_SCHEMA_VERSION: u8 = 6;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
@@ -589,6 +586,25 @@ async fn fetch_prompt_cache_warm_entries(
     request_breakpoints: &[CacheBreakpoint],
     clock: &dyn Clock,
 ) -> HashMap<Uuid, Vec<WarmCacheEntry>> {
+    fetch_prompt_cache_warm_entries_for_bundles(
+        view,
+        principal_id,
+        request_kind,
+        canonical_model,
+        &PromptCacheBundles::single(request_breakpoints),
+        clock,
+    )
+    .await
+}
+
+async fn fetch_prompt_cache_warm_entries_for_bundles(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    canonical_model: &str,
+    bundles: &PromptCacheBundles,
+    clock: &dyn Clock,
+) -> HashMap<Uuid, Vec<WarmCacheEntry>> {
     let mut warm_entries: HashMap<Uuid, Vec<WarmCacheEntry>> = HashMap::new();
     let (Some(store), Some(allowed_upstreams)) = (
         view.prompt_cache_observation_store_opt(),
@@ -596,7 +612,13 @@ async fn fetch_prompt_cache_warm_entries(
     ) else {
         return warm_entries;
     };
-    if canonical_model.is_empty() || request_breakpoints.is_empty() {
+    if canonical_model.is_empty()
+        || bundles
+            .official
+            .cache_breakpoints
+            .is_empty()
+            && bundles.literal.cache_breakpoints.is_empty()
+    {
         return warm_entries;
     }
     let upstream_ids: Vec<Uuid> = view
@@ -613,10 +635,12 @@ async fn fetch_prompt_cache_warm_entries(
     }
     let mut prefix_keys: Vec<String> = Vec::new();
     let mut seen_prefix_keys: HashSet<&str> = HashSet::new();
-    for breakpoint in request_breakpoints {
-        for prefix in &breakpoint.lookback_prefixes {
-            if seen_prefix_keys.insert(prefix.prefix_hash.as_str()) {
-                prefix_keys.push(prefix.prefix_hash.clone());
+    for bundle in [&bundles.official, &bundles.literal] {
+        for breakpoint in &bundle.cache_breakpoints {
+            for prefix in &breakpoint.lookback_prefixes {
+                if seen_prefix_keys.insert(prefix.prefix_hash.as_str()) {
+                    prefix_keys.push(prefix.prefix_hash.clone());
+                }
             }
         }
     }
@@ -688,12 +712,13 @@ pub fn build_candidates(
     warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
     clock: &dyn Clock,
 ) -> Vec<UpstreamCandidate> {
-    build_candidates_with_matches(
+    build_candidates_with_matches_for_bundles(
         view,
         principal_id,
         request_kind,
         request_breakpoints,
         warm_entries,
+        None,
         clock,
     )
     .0
@@ -705,6 +730,26 @@ pub(crate) fn build_candidates_with_matches(
     request_kind: RequestKind,
     request_breakpoints: &[CacheBreakpoint],
     warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
+    clock: &dyn Clock,
+) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
+    build_candidates_with_matches_for_bundles(
+        view,
+        principal_id,
+        request_kind,
+        request_breakpoints,
+        warm_entries,
+        None,
+        clock,
+    )
+}
+
+pub(crate) fn build_candidates_with_matches_for_bundles(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    request_breakpoints: &[CacheBreakpoint],
+    warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
+    bundles: Option<&PromptCacheBundles>,
     clock: &dyn Clock,
 ) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
@@ -737,10 +782,13 @@ pub(crate) fn build_candidates_with_matches(
             } else {
                 0
             };
+            let bundle_breakpoints = bundles
+                .and_then(|bundles| Some(bundles.for_upstream(upstream).cache_breakpoints.as_slice()))
+                .unwrap_or(request_breakpoints);
             let cache_score = warm_entries.get(&upstream.id).and_then(|entries| {
                 let matched =
-                    resolve_longest_warm_match(entries, request_breakpoints, now_unix_secs);
-                let score = build_cache_score_from_match(request_breakpoints, matched.as_ref());
+                    resolve_longest_warm_match(entries, bundle_breakpoints, now_unix_secs);
+                let score = build_cache_score_from_match(bundle_breakpoints, matched.as_ref());
                 if score.is_some()
                     && let Some(matched) = matched.as_ref()
                 {
@@ -2675,23 +2723,25 @@ impl Lifecycle {
             kind: PrincipalKind::InternalKey,
         };
 
-        let warm_entries = fetch_prompt_cache_warm_entries(
+        let warm_entries = fetch_prompt_cache_warm_entries_for_bundles(
             &view,
             &principal.id,
             RequestKind::AnthropicMessages,
             &ctx.canonical_model_id,
-            &ctx.cache_breakpoints,
+            &cache_metadata.bundles,
             &*self.clock,
         )
         .await;
-        let candidates = build_candidates(
+        let candidates = build_candidates_with_matches_for_bundles(
             &view,
             &principal.id,
             RequestKind::AnthropicMessages,
             &ctx.cache_breakpoints,
             &warm_entries,
+            Some(&cache_metadata.bundles),
             &*self.clock,
-        );
+        )
+        .0;
         let pipeline_result = execute_filter_pipeline(
             &resolved_pipeline.user_filters,
             &ctx,
@@ -3026,6 +3076,7 @@ impl Lifecycle {
                 &pipeline_result,
                 terminal,
                 None,
+                PromptCacheBundle::default(),
                 duration_to_ms(route_started.elapsed()),
             );
             let model = body
@@ -3848,7 +3899,8 @@ impl Lifecycle {
         };
         let track_keepalive_response = self.cache_keepalive_enqueuer.is_some()
             && cached.cache_keepalive().is_some()
-            && !cache_metadata.cache_breakpoints.is_empty();
+            && (!cache_metadata.bundles.official.cache_breakpoints.is_empty()
+                || !cache_metadata.bundles.literal.cache_breakpoints.is_empty());
         if track_keepalive_response {
             cache_metadata.request_json = body_view.value().cloned();
         }
@@ -3886,12 +3938,12 @@ impl Lifecycle {
         // request's candidate upstreams and prefix keys, awaited before the
         // synchronous routing region. A failure is reported and degrades to
         // neutral (no cache affinity) — it never fails the request.
-        let warm_entries = fetch_prompt_cache_warm_entries(
+        let warm_entries = fetch_prompt_cache_warm_entries_for_bundles(
             &view,
             &principal.id,
             request_kind,
             &ctx.canonical_model_id,
-            &ctx.cache_breakpoints,
+            &cache_metadata.bundles,
             &*self.clock,
         )
         .await;
@@ -3905,14 +3957,16 @@ impl Lifecycle {
             error.type = tracing::field::Empty,
         );
         let route_guard = route_span.enter();
-        let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
-            &view,
-            &principal.id,
-            request_kind,
-            &ctx.cache_breakpoints,
-            &warm_entries,
-            &*self.clock,
-        );
+        let (mut candidates, mut selected_cache_matches) =
+            build_candidates_with_matches_for_bundles(
+                &view,
+                &principal.id,
+                request_kind,
+                &ctx.cache_breakpoints,
+                &warm_entries,
+                Some(&cache_metadata.bundles),
+                &*self.clock,
+            );
         if let Some(affinity) = request_affinity.as_ref() {
             candidates.retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
             selected_cache_matches
@@ -4084,6 +4138,10 @@ impl Lifecycle {
             &pipeline_result,
             terminal_decision,
             selected_cache_matches.remove(&resolved_upstream_id),
+            cache_metadata
+                .bundles
+                .for_upstream(resolved_record)
+                .clone(),
             route_ms,
         );
         emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
@@ -4168,7 +4226,7 @@ impl Lifecycle {
             router_pipeline: &router_pipeline,
             ctx: &ctx,
             principal: &principal,
-            warm_entries: &warm_entries,
+            cache_bundles: &cache_metadata.bundles,
             request_kind,
             observer: observer.as_ref(),
             handle_span: &handle_span,
@@ -4376,10 +4434,22 @@ impl Lifecycle {
             &view,
             resolved_upstream_id,
             &ctx.canonical_model_id,
-            &ctx.cache_breakpoints,
-            &cache_metadata.cacheable_breakpoint_prefix_keys,
+            &routed.cache_bundle.cache_breakpoints,
+            &routed.cache_bundle.cacheable_breakpoint_prefix_keys,
             routed.selected_cache_match.take(),
         );
+        cache_metadata.cache_breakpoints = routed.cache_bundle.request_breakpoints.clone();
+        cache_metadata.cache_prefix_hash = routed.cache_bundle.cache_prefix_hash.clone();
+        cache_metadata.cache_control_block_count =
+            Some(routed.cache_bundle.request_breakpoints.len() as u64);
+        cache_metadata.cache_control_message_indices = routed
+            .cache_bundle
+            .request_breakpoints
+            .iter()
+            .filter_map(|breakpoint| breakpoint.message_index)
+            .collect();
+        cache_metadata.cache_control_message_indices.sort_unstable();
+        cache_metadata.cache_control_message_indices.dedup();
         let status = response.status();
         let keepalive_shaped_body = if track_keepalive_response {
             keepalive_shaped_body
@@ -8120,6 +8190,207 @@ pub(crate) use crate::response_transform::{
     unwrap_gemini_code_assist_body,
 };
 
+
+#[derive(Clone, Default)]
+pub(crate) struct PromptCacheBundle {
+    pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
+    pub(crate) cacheable_breakpoint_prefix_keys: HashSet<String>,
+    pub(crate) request_breakpoints: Vec<RequestCacheBreakpoint>,
+    pub(crate) cache_prefix_hash: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct PromptCacheBundles {
+    pub(crate) official: PromptCacheBundle,
+    pub(crate) literal: PromptCacheBundle,
+}
+
+impl PromptCacheBundles {
+    fn single(cache_breakpoints: &[CacheBreakpoint]) -> Self {
+        let request_breakpoints = cache_breakpoints
+            .iter()
+            .map(request_cache_breakpoint_from_plugin)
+            .collect::<Vec<_>>();
+        let cache_prefix_hash = cache_breakpoints
+            .last()
+            .map(|breakpoint| breakpoint.prefix_hash.clone());
+        let cacheable_breakpoint_prefix_keys = cache_breakpoints
+            .iter()
+            .map(|breakpoint| breakpoint.prefix_hash.clone())
+            .collect();
+        let bundle = PromptCacheBundle {
+            cache_breakpoints: cache_breakpoints.to_vec(),
+            cacheable_breakpoint_prefix_keys,
+            request_breakpoints,
+            cache_prefix_hash,
+        };
+        Self {
+            official: bundle.clone(),
+            literal: bundle,
+        }
+    }
+
+    fn for_upstream(&self, upstream: &UpstreamRecord) -> &PromptCacheBundle {
+        match prompt_cache_policy_for_upstream(upstream) {
+            PromptCachePolicy::AnthropicOfficial => &self.official,
+            PromptCachePolicy::Literal => &self.literal,
+        }
+    }
+}
+
+fn request_cache_breakpoint_from_plugin(
+    breakpoint: &CacheBreakpoint,
+) -> RequestCacheBreakpoint {
+    RequestCacheBreakpoint {
+        block_index: u64::from(breakpoint.block_index),
+        source: request_breakpoint_source_from_plugin(breakpoint.source),
+        path: breakpoint.path.clone(),
+        message_index: breakpoint.message_index.map(u64::from),
+        ttl: Some(match breakpoint.requested_ttl {
+            TtlClass::Ephemeral1h => "1h".to_owned(),
+            TtlClass::Ephemeral5m => "5m".to_owned(),
+        }),
+        prefix_hash: breakpoint.prefix_hash.clone(),
+        prefix_token_count: breakpoint.prefix_bytes.get(),
+        lookback_prefixes: breakpoint
+            .lookback_prefixes
+            .iter()
+            .map(|prefix| RequestCacheLookbackPrefix {
+                prefix_hash: prefix.prefix_hash.clone(),
+                content_block_index: u64::from(prefix.content_block_index),
+                lookback_distance: u64::from(prefix.lookback_distance),
+            })
+            .collect(),
+        token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+    }
+}
+
+fn request_breakpoint_source_from_plugin(
+    source: CacheBreakpointSource,
+) -> RequestCacheBreakpointSource {
+    match source {
+        CacheBreakpointSource::Tools => RequestCacheBreakpointSource::Tools,
+        CacheBreakpointSource::System => RequestCacheBreakpointSource::System,
+        CacheBreakpointSource::Message => RequestCacheBreakpointSource::Message,
+    }
+}
+
+fn prompt_cache_policy_for_upstream(upstream: &UpstreamRecord) -> PromptCachePolicy {
+    let official_kind = matches!(
+        upstream.kind,
+        StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth
+    );
+    let official_url = upstream
+        .base_url
+        .as_ref()
+        .is_none_or(is_official_anthropic_base_url);
+    (official_kind && official_url)
+        .then_some(PromptCachePolicy::AnthropicOfficial)
+        .unwrap_or(PromptCachePolicy::Literal)
+}
+
+fn is_official_anthropic_base_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("api.anthropic.com")
+        && url.port().is_none_or(|port| port == 443)
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+
+#[cfg(test)]
+mod prompt_cache_policy_tests {
+    use super::is_official_anthropic_base_url;
+
+    #[test]
+    fn official_url_policy_accepts_only_default_anthropic_authority() {
+        for (url, expected) in [
+            ("https://api.anthropic.com", true),
+            ("https://api.anthropic.com/v1/messages?x=1#fragment", true),
+            ("https://api.anthropic.com:443/proxy", true),
+            ("http://api.anthropic.com", false),
+            ("https://api.anthropic.com:8443", false),
+            ("https://user:pass@api.anthropic.com", false),
+            ("https://proxy.example.com", false),
+        ] {
+            let url = url.parse().expect("test URL parses");
+            assert_eq!(is_official_anthropic_base_url(&url), expected, "{url}");
+        }
+    }
+}
+
+fn prompt_cache_bundle_from_analysis(
+    analysis: &V3PromptCacheAnalysis,
+    cacheable_prefix_keys: HashSet<String>,
+) -> PromptCacheBundle {
+    let cache_breakpoints = plugin_cache_breakpoints_from_analysis(analysis);
+    PromptCacheBundle {
+        request_breakpoints: analysis
+            .breakpoints
+            .iter()
+            .map(request_cache_breakpoint_from_v3)
+            .collect(),
+        cache_prefix_hash: analysis
+            .breakpoints
+            .last()
+            .map(|breakpoint| breakpoint.prefix_key.clone()),
+        cacheable_breakpoint_prefix_keys: cacheable_prefix_keys,
+        cache_breakpoints,
+    }
+}
+
+fn request_cache_breakpoint_from_v3(
+    breakpoint: &crate::prompt_cache_simulator::V3PromptCacheBreakpoint,
+) -> RequestCacheBreakpoint {
+    RequestCacheBreakpoint {
+        block_index: breakpoint.block_index,
+        source: request_breakpoint_source_from_v3(breakpoint.source),
+        path: breakpoint.path.clone(),
+        message_index: breakpoint.message_index,
+        ttl: breakpoint.ttl.clone(),
+        prefix_hash: breakpoint.prefix_key.clone(),
+        prefix_token_count: breakpoint.prefix_bytes.get(),
+        lookback_prefixes: breakpoint
+            .lookback_prefixes
+            .iter()
+            .map(|prefix| RequestCacheLookbackPrefix {
+                prefix_hash: prefix.prefix_key.clone(),
+                content_block_index: prefix.content_block_index,
+                lookback_distance: prefix.lookback_distance,
+            })
+            .collect(),
+        token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+    }
+}
+
+fn plugin_cache_breakpoints_from_analysis(
+    analysis: &V3PromptCacheAnalysis,
+) -> Vec<CacheBreakpoint> {
+    analysis
+        .breakpoints
+        .iter()
+        .map(|breakpoint| CacheBreakpoint {
+            block_index: saturating_u64_to_u32(breakpoint.block_index),
+            source: plugin_cache_breakpoint_source(breakpoint.source),
+            path: breakpoint.path.clone(),
+            message_index: breakpoint.message_index.map(saturating_u64_to_u32),
+            prefix_hash: breakpoint.prefix_key.clone(),
+            prefix_bytes: breakpoint.prefix_bytes,
+            requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
+            lookback_prefixes: breakpoint
+                .lookback_prefixes
+                .iter()
+                .map(|prefix| CacheLookbackPrefix {
+                    prefix_hash: prefix.prefix_key.clone(),
+                    content_block_index: saturating_u64_to_u32(prefix.content_block_index),
+                    lookback_distance: saturating_u64_to_u32(prefix.lookback_distance),
+                })
+                .collect(),
+            token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+        })
+        .collect()
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct RequestCacheMetadata {
     pub(crate) request_json: Option<Value>,
@@ -8142,6 +8413,7 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
     cacheable_breakpoint_prefix_keys: HashSet<String>,
     pub(crate) cache_prefix_hash: Option<String>,
+    pub(crate) bundles: PromptCacheBundles,
     canonical_model_id: String,
 }
 
@@ -8481,32 +8753,24 @@ fn request_cache_metadata_from_value_with_analysis(
     });
     let cacheable_breakpoint_prefix_keys = output
         .cacheable_breakpoint_prefix_keys
-        .into_iter()
-        .collect();
-    let analysis = output.analysis;
-    let cache_breakpoints = analysis
-        .breakpoints
         .iter()
-        .map(|breakpoint| RequestCacheBreakpoint {
-            block_index: breakpoint.block_index,
-            source: request_breakpoint_source_from_v3(breakpoint.source),
-            path: breakpoint.path.clone(),
-            message_index: breakpoint.message_index,
-            ttl: breakpoint.ttl.clone(),
-            prefix_hash: breakpoint.prefix_key.clone(),
-            prefix_token_count: breakpoint.prefix_bytes.get(),
-            lookback_prefixes: breakpoint
-                .lookback_prefixes
-                .iter()
-                .map(|prefix| RequestCacheLookbackPrefix {
-                    prefix_hash: prefix.prefix_key.clone(),
-                    content_block_index: prefix.content_block_index,
-                    lookback_distance: prefix.lookback_distance,
-                })
-                .collect(),
-            token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
-        })
-        .collect::<Vec<_>>();
+        .cloned()
+        .collect::<HashSet<_>>();
+    let analysis = output.analysis;
+    let official_bundle = prompt_cache_bundle_from_analysis(
+        &analysis,
+        cacheable_breakpoint_prefix_keys,
+    );
+    let literal_analysis = analyze_v3_prompt_cache_literal(value, &canonical_model_id);
+    let literal_keys = cacheable_breakpoint_prefix_keys(
+        &literal_analysis,
+        &canonical_model_id,
+        cache_threshold_tokens(&canonical_model_id),
+    )
+    .into_iter()
+    .collect();
+    let literal_bundle = prompt_cache_bundle_from_analysis(&literal_analysis, literal_keys);
+    let cache_breakpoints = official_bundle.request_breakpoints.clone();
     let mut cache_control_message_indices = cache_breakpoints
         .iter()
         .filter_map(|breakpoint| breakpoint.message_index)
@@ -8550,8 +8814,14 @@ fn request_cache_metadata_from_value_with_analysis(
         reasoning_effort,
         cache_control_message_indices,
         cache_breakpoints,
-        cacheable_breakpoint_prefix_keys,
+        cacheable_breakpoint_prefix_keys: official_bundle
+            .cacheable_breakpoint_prefix_keys
+            .clone(),
         cache_prefix_hash,
+        bundles: PromptCacheBundles {
+            official: official_bundle,
+            literal: literal_bundle,
+        },
         canonical_model_id,
     }
 }
@@ -9066,6 +9336,7 @@ struct RoutedUpstream<'v> {
     routing_trace: RoutingTrace,
     selected_cache_score: Option<CacheScore>,
     selected_cache_match: Option<SelectedCacheMatch>,
+    cache_bundle: PromptCacheBundle,
     route_ms: u64,
 }
 
@@ -9077,6 +9348,7 @@ impl<'v> RoutedUpstream<'v> {
         pipeline_result: &FilterPipelineResult,
         terminal_decision: TerminalDecision,
         selected_cache_match: Option<SelectedCacheMatch>,
+        cache_bundle: PromptCacheBundle,
         route_ms: u64,
     ) -> Self {
         let selected_cache_score = pipeline_result
@@ -9091,7 +9363,7 @@ impl<'v> RoutedUpstream<'v> {
             routing_trace: pipeline_result.routing_trace(terminal_decision),
             selected_cache_score,
             selected_cache_match,
-            route_ms,
+            cache_bundle,
         }
     }
 }
@@ -9154,7 +9426,6 @@ fn route_info_for_routed(
         model: model.map(ToOwned::to_owned),
         upstream_kind: Some(storage_upstream_kind_label(routed.record.kind).to_owned()),
         route_ms: Some(routed.route_ms),
-        routing_trace: Some(routed.routing_trace.clone()),
         predicted_cache_read_tokens: Some(
             selected_cache_score.map_or(0, |score| score.predicted_cache_read_tokens),
         ),
@@ -9171,6 +9442,8 @@ fn route_info_for_routed(
             .map(|score| score.predicted_cache_creation_tokens_1h),
         token_estimate_source: selected_cache_score
             .and_then(|score| score.token_estimate_source.clone()),
+        cache_breakpoints: Some(routed.cache_bundle.request_breakpoints.clone()),
+        cache_prefix_hash: routed.cache_bundle.cache_prefix_hash.clone(),
         cache_value_micros: subscription_trace.and_then(|trace| {
             trace
                 .candidates
@@ -9201,6 +9474,7 @@ struct FailoverRouter<'a> {
     ctx: &'a RequestContext,
     principal: &'a Principal,
     warm_entries: &'a HashMap<Uuid, Vec<WarmCacheEntry>>,
+    cache_bundles: &'a PromptCacheBundles,
     request_kind: RequestKind,
     observer: Option<&'a LifecycleContext>,
     handle_span: &'a tracing::Span,
@@ -9228,14 +9502,16 @@ impl<'a> FailoverRouter<'a> {
             self.excluded.push(failed_id);
         }
         let route_start = Instant::now();
-        let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
-            self.view,
-            &self.principal.id,
-            self.request_kind,
-            &self.ctx.cache_breakpoints,
-            self.warm_entries,
-            &*lifecycle.clock,
-        );
+        let (mut candidates, mut selected_cache_matches) =
+            build_candidates_with_matches_for_bundles(
+                self.view,
+                &self.principal.id,
+                self.request_kind,
+                &self.ctx.cache_breakpoints,
+                self.warm_entries,
+                Some(self.cache_bundles),
+                &*lifecycle.clock,
+            );
         candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
         // The last allowed attempt goes to an API key when one remains, so
         // the attempt cap never strands a request on exhausted OAuth accounts.
@@ -9311,6 +9587,7 @@ impl<'a> FailoverRouter<'a> {
             &pipeline_result,
             terminal_decision,
             selected_cache_matches.remove(&upstream_id),
+            self.cache_bundles.for_upstream(record).clone(),
             duration_to_ms(route_start.elapsed()),
         );
         tracing::warn!(
