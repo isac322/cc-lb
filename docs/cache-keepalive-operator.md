@@ -130,6 +130,9 @@ Prometheus surface:
   - `snapshot_too_large` — shaped body exceeded `snapshot_max_bytes`.
   - `cached_prefix_too_small` — the completed response reported fewer than
     `min_cache_tokens` cached input tokens.
+  - `zero_token_renewal_unsupported` — the latest request uses enabled
+    thinking, `output_config.format`, or a forced `tool_choice`, which a
+    `max_tokens: 0` renewal cannot send.
 - `cc_lb_cache_keepalive_classifier_decisions_total{decision, source}` —
   every classifier verdict. `decision` is `"user_turn"`, `"agent_in_turn"`,
   or `"ambiguous"`. `source` is always `"heuristic"`. Not labelled by
@@ -241,6 +244,10 @@ Checks, in order:
 4. Does the response report at least `.min_cache_tokens` cached input tokens?
    A completed `AgentInTurn` response below that threshold is cancelled with
    `reason="cached_prefix_too_small"` and is not scheduled.
+   A request (after any shape plugin) that uses enabled thinking,
+   `output_config.format`, or a forced `tool_choice` is not tracked, and an
+   active session is cancelled with `reason="zero_token_renewal_unsupported"`:
+   Anthropic rejects those fields on a `max_tokens: 0` renewal.
 5. `cc_lb_cache_keepalive_active_sessions{principal_id=<id>}` shows the
    session? If zero, either the classifier is deciding `user_turn` on
    every response (check
