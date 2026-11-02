@@ -678,6 +678,34 @@ async fn oauth_429_fails_over_to_api_key_same_request() -> Result<(), Box<dyn st
     Ok(())
 }
 
+#[tokio::test]
+async fn failover_final_row_uses_serving_custom_literal_bundle() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = sqlite_storage(&dir).await?;
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut update_rx = test_bus.bus.subscribe();
+    let mut official = oauth(1, "official")
+        .replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]);
+    official.record.base_url = None;
+    let fixture = Fixture::new(vec![official, api_key(2, "custom")])
+        .with_lifecycle(|lifecycle| lifecycle.with_event_bus(test_bus.bus_arc()));
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":16,"system":[{"type":"text","text":"x-anthropic-billing-header: cron","cache_control":{"type":"ephemeral"}}],"messages":[]}"#,
+    ));
+
+    let (status, _body) = fixture.send_request(request).await;
+    wait_for_final_request_event(&mut update_rx).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let events = stored_request_events(storage.as_ref()).await?;
+    assert_eq!(events.len(), 1);
+    let breakpoints = &events[0].cache_breakpoints;
+    assert_eq!(breakpoints.len(), 1);
+    assert_eq!(breakpoints[0].path, "system[0]");
+    assert_eq!(events[0].upstream_name.as_deref(), Some("custom"));
+    Ok(())
+}
+
 /// SEC-FAILOVER-DOS-03: a failed-over 429 body is never read. A stalled or
 /// never-ending body cannot hold the fallback dispatch, and no byte of it is
 /// buffered. Time is paused: without the fix the idle runtime auto-advances
