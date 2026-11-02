@@ -319,12 +319,18 @@ async fn assert_unpredicted_case(
     let second_event = support::wait_for_settled_event(&server, MODEL, first_event.id).await;
     assert_eq!(
         second_event.upstream_id, first_event.upstream_id,
-        "{label}: the warm upstream must win over the cold peer"
+        "{label}: the matched follow-up must use the upstream owning the observation"
     );
     assert_eq!(
         second_event.matched_cache_key(),
         Some(UNPREDICTED_EXPLICIT_KEY),
         "{label}: the next request must match the persisted deepest breakpoint"
+    );
+    assert!(
+        second_event
+            .predicted_read_tokens()
+            .is_some_and(|tokens| tokens > 0),
+        "{label}: the persisted key must produce a positive selected routing score"
     );
 }
 
@@ -337,7 +343,7 @@ async fn unpredicted_read_only_hit_persists_and_routes_next_request() {
         "system": [{
             "type": "text",
             "text": "system ".repeat(1024),
-            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
         }],
         "messages": [{
             "role": "user",
@@ -345,7 +351,7 @@ async fn unpredicted_read_only_hit_persists_and_routes_next_request() {
                 {
                     "type": "text",
                     "text": "alpha ".repeat(1024),
-                    "cache_control": {"type": "ephemeral", "ttl": "5m"}
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"}
                 },
                 {
                     "type": "text",
