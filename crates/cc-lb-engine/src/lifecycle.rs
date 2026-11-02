@@ -12309,6 +12309,83 @@ mod tests {
         view
     }
 
+    #[test]
+    fn mixed_official_and_custom_candidates_score_only_their_own_bundle() {
+        let official_id = Uuid::from_u128(1004);
+        let custom_id = Uuid::from_u128(1005);
+        let mut custom = upstream_record(custom_id);
+        custom.base_url = Some("https://proxy.example.com/v1".parse().expect("custom URL"));
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(
+                &[principal_record("principal")],
+                HashMap::new(),
+            )))
+            .upstream_records(vec![upstream_record(official_id), custom])
+            .build();
+        let official_breakpoints = vec![cache_breakpoint(
+            1,
+            "official-prefix",
+            100,
+            TtlClass::Ephemeral5m,
+        )];
+        let custom_breakpoints = vec![cache_breakpoint(
+            1,
+            "custom-prefix",
+            200,
+            TtlClass::Ephemeral5m,
+        )];
+        let bundles = PromptCacheBundles {
+            official: PromptCacheBundle {
+                cache_breakpoints: official_breakpoints.clone(),
+                cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["official-prefix"]),
+                request_breakpoints: Vec::new(),
+                cache_prefix_hash: Some("official-prefix".to_owned()),
+            },
+            literal: PromptCacheBundle {
+                cache_breakpoints: custom_breakpoints,
+                cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["custom-prefix"]),
+                request_breakpoints: Vec::new(),
+                cache_prefix_hash: Some("custom-prefix".to_owned()),
+            },
+        };
+        let now = 1_800_000_000;
+        let warm_entries = HashMap::from([
+            (
+                official_id,
+                vec![warm_entry("official-prefix", TtlClass::Ephemeral5m, now + 600, 0)],
+            ),
+            (
+                custom_id,
+                vec![warm_entry("custom-prefix", TtlClass::Ephemeral5m, now + 600, 0)],
+            ),
+        ]);
+        let candidates = build_candidates_with_matches_for_bundles(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            &official_breakpoints,
+            &warm_entries,
+            Some(&bundles),
+            &cc_lb_clock::TestClock::new_at_secs(now),
+        )
+        .0;
+        let official = candidates
+            .iter()
+            .find(|candidate| candidate.upstream_id == official_id)
+            .and_then(|candidate| candidate.cache_score.as_ref())
+            .expect("official score");
+        let custom = candidates
+            .iter()
+            .find(|candidate| candidate.upstream_id == custom_id)
+            .and_then(|candidate| candidate.cache_score.as_ref())
+            .expect("custom score");
+        assert_eq!(official.matched_v3_cache_key.as_deref(), Some("official-prefix"));
+        assert_eq!(official.predicted_cache_read_tokens, 100);
+        assert_eq!(custom.matched_v3_cache_key.as_deref(), Some("custom-prefix"));
+        assert_eq!(custom.predicted_cache_read_tokens, 200);
+    }
+
     #[tokio::test]
     async fn warm_entry_snapshot_is_request_scoped_and_expires_at_selection_time() {
         let upstream_id = Uuid::from_u128(826);
