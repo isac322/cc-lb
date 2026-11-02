@@ -76,6 +76,7 @@ use crate::prompt_cache_simulator::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
     PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
     analyze_v3_prompt_cache, analyze_v3_prompt_cache_literal_from_official,
+    cacheable_breakpoint_prefix_keys,
 };
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
