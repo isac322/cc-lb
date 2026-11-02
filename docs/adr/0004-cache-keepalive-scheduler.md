@@ -79,6 +79,8 @@ Unchanged by the Section 1' amendment.
 - **Trim uncached history.** When top-level automatic `cache_control` is absent, retain messages and content blocks only through the last explicit breakpoint. Preserve the matching user `tool_result` after an assistant `tool_use`; otherwise end with a minimal user continuation. If only `system` or `tools` has a breakpoint, replace the message history with a minimal user turn.
 - **Reject non-Anthropic upstreams.** OpenRouter's schema requires `max_tokens >= 1`; Bedrock and Vertex have not been verified. v1 hard-gates on the upstream `kind` in the dispatcher.
 
+The eligibility gate inspects the upstream-shaped body, not merely the original downstream input. Shape plugins can introduce incompatible fields. Compare original and shaped bytes in the detached completion task: reuse the existing downstream parsed value when identical, and parse changed shaped bytes with `sonic-rs` before making the decision.
+
 Alternatives rejected:
 
 - **1-token dummy generation.** Costs at least one output token per fire (currently ~$0.0000005 for Haiku but not $0). Also has a nonzero risk of "generating a real answer" that pollutes any downstream logging.

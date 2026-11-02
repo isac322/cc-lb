@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -105,6 +106,7 @@ pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) cache_metadata: RequestCacheMetadata,
     pub(crate) upstream_id: Uuid,
     pub(crate) shaped_body: Bytes,
+    pub(crate) original_body: Bytes,
     pub(crate) downstream_headers: HeaderMap,
 }
 
@@ -226,6 +228,7 @@ impl LifecycleKeepalive {
         cache_metadata: &RequestCacheMetadata,
         upstream_id: uuid::Uuid,
         shaped_body: Bytes,
+        original_body: Bytes,
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
         cached_tokens: u64,
@@ -264,6 +267,7 @@ impl LifecycleKeepalive {
                 &cache_metadata,
                 upstream_id,
                 shaped_body,
+                original_body,
                 &downstream_headers,
                 cache_anchor_age,
                 cached_tokens,
@@ -282,6 +286,7 @@ impl LifecycleKeepalive {
         cache_metadata: &RequestCacheMetadata,
         upstream_id: uuid::Uuid,
         shaped_body: Bytes,
+        original_body: Bytes,
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
         cached_tokens: u64,
@@ -326,7 +331,20 @@ impl LifecycleKeepalive {
                 return;
             }
         };
-        if let Some(reason) = zero_token_renewal_unsupported_reason(request_json) {
+        let renewal_request_json =
+            match keepalive_eligibility_request_json(request_json, &original_body, &shaped_body) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        %error,
+                        "skipping cache keep-alive eligibility: shaped body is not valid JSON"
+                    );
+                    return;
+                }
+            };
+        if let Some(reason) = zero_token_renewal_unsupported_reason(&renewal_request_json) {
             self.record_not_tracked(
                 &session_key,
                 principal,
@@ -661,6 +679,18 @@ fn keepalive_forward_headers(headers: &HeaderMap) -> HeaderMap {
     out
 }
 
+fn keepalive_eligibility_request_json<'a>(
+    request_json: &'a Value,
+    original_body: &Bytes,
+    shaped_body: &Bytes,
+) -> Result<Cow<'a, Value>, sonic_rs::Error> {
+    if shaped_body == original_body {
+        Ok(Cow::Borrowed(request_json))
+    } else {
+        sonic_rs::from_slice(shaped_body).map(Cow::Owned)
+    }
+}
+
 /// Fields Anthropic rejects with `max_tokens: 0` cannot be rewritten without
 /// changing the live request's cache prefix. Inspect the already-parsed body
 /// before capturing a snapshot or classifying the response.
@@ -743,6 +773,42 @@ const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
 mod tests {
     use super::*;
     use http::HeaderValue;
+
+    #[test]
+    fn keepalive_eligibility_reuses_cached_json_for_unchanged_bytes() {
+        let cached = serde_json::json!({"tool_choice": {"type": "auto"}});
+        // Invalid bytes prove the unchanged path never parses them again.
+        let original = Bytes::from_static(b"already parsed at the request boundary");
+        for shaped in [original.clone(), Bytes::copy_from_slice(&original)] {
+            let value = keepalive_eligibility_request_json(&cached, &original, &shaped)
+                .expect("cached JSON");
+            assert!(matches!(value, Cow::Borrowed(value) if std::ptr::eq(value, &cached)));
+        }
+    }
+
+    #[test]
+    fn keepalive_eligibility_parses_changed_shape_instead_of_original_fields() {
+        let cached = serde_json::json!({"tool_choice": {"type": "auto"}});
+        let original = Bytes::from_static(br#"{"tool_choice":{"type":"auto"}}"#);
+        let shaped = Bytes::from_static(br#"{"tool_choice":{"type":"any"}}"#);
+        let value =
+            keepalive_eligibility_request_json(&cached, &original, &shaped).expect("shaped JSON");
+        assert!(matches!(&value, Cow::Owned(_)));
+        assert_eq!(
+            zero_token_renewal_unsupported_reason(&value).map(|reason| reason.to_string()),
+            Some("zero-token renewal unsupported: forced tool_choice".to_owned()),
+        );
+        assert!(
+            keepalive_eligibility_request_json(
+                &cached,
+                &original,
+                &Bytes::from_static(b"invalid shaped JSON"),
+            )
+            .is_err(),
+            "invalid changed bytes must not fall back to original eligibility"
+        );
+    }
+
     #[test]
     fn keepalive_zero_token_eligibility_has_stable_reasons_and_preserves_controls() {
         for (request, expected) in [

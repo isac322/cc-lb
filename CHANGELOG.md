@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Prompt-cache keep-alive now skips live requests with enabled thinking, structured output (`output_config.format`), or forced tool choice (`tool` / `any`), recording a `not_tracked` reason instead of sending a renewal Anthropic rejects at `max_tokens: 0`. An incompatible turn cancels any existing active session. Adaptive thinking with automatic tool choice continues renewing unchanged.
+  Eligibility checks the actual upstream-shaped body, so shape plugins cannot introduce an incompatible renewal unnoticed; unchanged bodies reuse the existing JSON parse.
 
 - Prompt-cache keep-alive renewals now preserve request `thinking`, `output_config`, and `tool_choice` fields unchanged instead of rewriting `thinking` to `disabled`, include `beta=true` on Anthropic OAuth renewal URLs, and persist terminal failure messages in `cache_keepalive_sessions.error` while resetting `enqueue_state` to `pending`.
 
