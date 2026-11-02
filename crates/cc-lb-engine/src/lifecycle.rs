@@ -12510,10 +12510,16 @@ mod tests {
             },
         };
         let now = 1_800_000_000;
-        let mut official_warm =
-            warm_entry("official-prefix", TtlClass::Ephemeral5m, now + 600, 0);
+        let mut official_warm = warm_entry_priced(
+            "official-prefix",
+            TtlClass::Ephemeral5m,
+            now + 600,
+            0,
+            100,
+        );
         official_warm.content_block_index = 1;
-        let mut custom_warm = warm_entry("custom-prefix", TtlClass::Ephemeral5m, now + 600, 0);
+        let mut custom_warm =
+            warm_entry_priced("custom-prefix", TtlClass::Ephemeral5m, now + 600, 0, 200);
         custom_warm.content_block_index = 1;
         let warm_entries = HashMap::from([
             (official_id, vec![official_warm]),
