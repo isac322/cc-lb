@@ -36,7 +36,7 @@ concurrency:
 jobs:
   preflight:
     name: preflight publish-check
-    runs-on: cc-lb-4
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     env:
@@ -52,16 +52,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Preflight and both release jobs share the S3 sccache. The release jobs
-      # keep the default (real) commit metadata: setup-rust-cache only pins
-      # SOURCE_DATE_EPOCH/GIT_SHA when stable-build-metadata is "true", and
-      # crates.io receives source tarballs, never these compiled artifacts.
+      # Hosted runners do not provide runner-pod S3 cache environment.
+      # setup-rust-cache therefore uses its local/uncached fallback while
+      # preserving the release metadata behavior.
       - uses: ./.github/actions/check-published-crates
 
   release:
     name: release-plz release
     needs: preflight
-    runs-on: cc-lb-2
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       pull-requests: write
@@ -105,7 +104,7 @@ jobs:
 
   release-pr:
     name: release-plz release-pr
-    runs-on: cc-lb-2
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       pull-requests: write

@@ -26,11 +26,35 @@ concurrency:
 
 jobs:
   build:
-    # The self-hosted pool may schedule either an x86_64 or arm64 runner.
-    # Dockerfile isolates host-only Cargo linker configuration, cross-compiles
-    # the static musl binary with both storage backends, builds the SPA, and
-    # runs a smoke test using the configured compiler cache.
-    runs-on: cc-lb-500m
+    name: build (${{ matrix.key }})
+    # Distribute the four release architectures across native hosted runners so
+    # each BuildKit worker compiles a single target with persisted cache mounts.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: amd64
+            platform: linux/amd64
+            runner: ubuntu-26.04
+            host: amd64
+            smoke: true
+          - key: arm64
+            platform: linux/arm64
+            runner: ubuntu-26.04-arm
+            host: arm64
+            smoke: true
+          - key: armv7
+            platform: linux/arm/v7
+            runner: ubuntu-26.04-arm
+            host: arm64
+            smoke: false
+          - key: ppc64le
+            platform: linux/ppc64le
+            runner: ubuntu-26.04-arm
+            host: arm64
+            smoke: false
     env:
       # docker/build-push-action uploads a per-step build record artifact
       # (docker-build-*); bound its retention so records do not outlive the
@@ -38,88 +62,121 @@ jobs:
       DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/export-sccache-env
       - name: Resolve source revision
         id: source
         run: |
           set -euo pipefail
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+          echo "CACHE_KEY=docker-mounts-thin-${{ matrix.key }}-$sha" >> "$GITHUB_ENV"
 
-      # Use the remote BuildKit endpoint configured for this repository.
-      - uses: docker/setup-buildx-action@v4
+      - name: Restore BuildKit cache mounts
+        id: cache-restore
+        uses: actions/cache/restore@v6
         with:
-          driver: remote
+          path: ${{ runner.temp }}/docker-mounts.tar
+          key: ${{ env.CACHE_KEY }}
+          restore-keys: |
+            docker-mounts-thin-${{ matrix.key }}-
 
-      # Trim unused records to leave disk headroom for target directories.
-      # BuildKit keeps records leased by builds that are still running.
-      - name: Prune stale BuildKit build cache
-        run: docker buildx prune --force --all --max-used-space 20GB || true
+      - uses: docker/setup-buildx-action@v4
+        id: buildx
+        with:
+          driver: docker-container
 
-      # Limit each solve to two concurrent target directories; four exhausted
-      # the BuildKit worker before arm/v7 and ppc64le could finish.
-      - name: Build primary release targets
+      - name: Inject restored BuildKit cache mounts
+        if: steps.cache-restore.outputs.cache-matched-key != ''
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+          HOST_ARCH: ${{ matrix.host }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/buildkit-cache-inject"
+          rm -rf "$ctx"
+          mkdir -p "$ctx"
+          mv "$RUNNER_TEMP/docker-mounts.tar" "$ctx/docker-mounts.tar"
+          cat > "$ctx/Dockerfile" <<EOF
+          # syntax=docker/dockerfile:1
+          FROM alpine:3.24 AS inject
+          COPY docker-mounts.tar /docker-mounts.tar
+          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+              --mount=type=cache,id=bun-linux-${HOST_ARCH},target=/bun \
+              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+              tar -C / -xf /docker-mounts.tar && \
+              mkdir -p /out && \
+              du -sk /cargo-home /bun /sccache > /out/restored.txt
+          FROM scratch
+          COPY --from=inject /out/ /
+          EOF
+          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
+          cat "$ctx/out/restored.txt"
+          rm -rf "$ctx"
+
+      - name: Build release target
         uses: docker/build-push-action@v7
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           target: builder
           outputs: type=cacheonly
           build-args: |
-            CARGO_BUILD_JOBS=6
+            CARGO_BUILD_JOBS=4
             CARGO_PROFILE_RELEASE_LTO=thin
+            SCCACHE_LOCAL_MOUNT=1
+            REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
-            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
-            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
-            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
-            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
-          secret-envs: |
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
 
-      - name: Build image and smoke-test binary
+      - name: Smoke-test native binary
+        if: matrix.smoke
         uses: docker/build-push-action@v7
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
-          platforms: linux/arm64
+          platforms: ${{ matrix.platform }}
           target: smoke
           outputs: type=cacheonly
           build-args: |
-            CARGO_BUILD_JOBS=6
+            CARGO_BUILD_JOBS=4
             CARGO_PROFILE_RELEASE_LTO=thin
+            SCCACHE_LOCAL_MOUNT=1
+            REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
-            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
-            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
-            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
-            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
-          secret-envs: |
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
 
-      - name: Prune intermediate BuildKit build cache
-        run: docker buildx prune --force --all --max-used-space 20GB || true
+      - name: Extract populated BuildKit cache mounts
+        if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+          HOST_ARCH: ${{ matrix.host }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/buildkit-cache-extract"
+          rm -rf "$ctx" "$RUNNER_TEMP/docker-mounts.tar"
+          mkdir -p "$ctx"
+          cat > "$ctx/Dockerfile" <<EOF
+          # syntax=docker/dockerfile:1
+          FROM alpine:3.24 AS extract
+          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+              --mount=type=cache,id=bun-linux-${HOST_ARCH},target=/bun \
+              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+              mkdir -p /out && \
+              du -sk /cargo-home /bun /sccache > /out/extracted.txt && \
+              tar -C / -cf /out/docker-mounts.tar cargo-home bun sccache
+          FROM scratch
+          COPY --from=extract /out/ /
+          EOF
+          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
+          cat "$ctx/out/extracted.txt"
+          mv "$ctx/out/docker-mounts.tar" "$RUNNER_TEMP/docker-mounts.tar"
+          test -s "$RUNNER_TEMP/docker-mounts.tar"
+          rm -rf "$ctx"
 
-      - name: Build remaining release targets
-        uses: docker/build-push-action@v7
+      - name: Save BuildKit cache mounts
+        if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
         with:
-          context: .
-          platforms: linux/arm/v7,linux/ppc64le
-          target: builder
-          outputs: type=cacheonly
-          build-args: |
-            CARGO_BUILD_JOBS=6
-            CARGO_PROFILE_RELEASE_LTO=thin
-            GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
-            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
-            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
-            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
-            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
-          secret-envs: |
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+          path: ${{ runner.temp }}/docker-mounts.tar
+          key: ${{ env.CACHE_KEY }}

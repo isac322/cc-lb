@@ -269,7 +269,6 @@ Treat this as a hint, not a contract. Re-discover every run per Phase 1.
 ### CI / Docker
 - `.github/workflows/*.yml` — `uses: <action>@v<major>`, `image:`, `bun-version`, `node-version`, `RUSTUP_TOOLCHAIN`, and any version-shaped string in comments
 - `.github/actions/setup-rust-cache/action.yml` — composite action's own `uses:` pins
-- `.github/runner-image/Dockerfile` — `ARG BASE_IMAGE`, `ARG BASE_TAG`
 - `compose.yaml` — `image: postgres:NN-alpine`
 
 ### External CLI pins (npm via shell)

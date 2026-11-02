@@ -1,8 +1,7 @@
 name: scorecard
 
 # OpenSSF Scorecard supply-chain analysis. Runs only on trusted default-branch
-# pushes and a weekly schedule, on GitHub-hosted runners, so it never touches
-# the self-hosted pool or private build infrastructure. Results go to code
+# pushes and a weekly schedule, on GitHub-hosted runners. Results go to code
 # scanning (SARIF) and the public Scorecard API (publish_results).
 
 on:

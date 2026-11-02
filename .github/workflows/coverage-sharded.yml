@@ -7,54 +7,47 @@
 #   archive out to N shard runners that each run a slice of the ~1700 tests in
 #   parallel, then merges every shard's profile data and enforces the coverage
 #   gates in one place. Uses the taiki-e/cargo-llvm-cov archive recipe:
-#     nextest-archive               -> build + archive instrumented binaries once
-#     nextest --archive-file
-#             --partition slice:i/N  -> run one shard from the archive (no rebuild)
-#     report  --nextest-archive-file -> merge all shards' profraw + gate
+#     nextest-archive -> build + archive instrumented binaries once
+#     nextest --archive-file --partition slice:i/N -> run one shard from the archive (no rebuild)
+#     report --nextest-archive-file -> merge all shards' profraw + gate
 #
 # WHY IT IS INACTIVE (workflow_dispatch only — never runs on push/PR)
-#   Sharding only helps when the shard runners land on DIFFERENT physical nodes.
-#   The current runner pool is not yet sized for multi-node sharding, so N shard
-#   jobs would compete for the same capacity. This stays manual-dispatch-only
-#   until the runner pool has multiple nodes and dedicated Postgres services.
+#   `ci.yml`'s single-runner `nextest-cov` job is the active required gate.
+#   Do not run both on push/PR — they enforce the same coverage gate.
 #
-# HOW TO ENABLE (after adding nodes to the ARC pool)
-#   1. Scale the runner pool to at least SHARD_TOTAL plus headroom for the
-#      other CI jobs (clippy/e2e/fmt still share the pool).
-#   2. Pick the shard count in ONE place: set `SHARD_TOTAL` below AND make the
+# HOW TO ENABLE
+#   1. Pick the shard count in ONE place: set `SHARD_TOTAL` below AND make the
 #      `shard:` matrix list exactly 1..SHARD_TOTAL. They MUST match.
-#   3. Flip the trigger: replace the `on: workflow_dispatch` block with the same
+#   2. Flip the trigger: replace the `on: workflow_dispatch` block with the same
 #      pull_request/push triggers ci.yml uses (a commented copy sits below it).
-#   4. Retire the single-runner path: delete the `nextest-cov` job from ci.yml
+#   3. Retire the single-runner path: delete the `nextest-cov` job from ci.yml
 #      and from its `CI gate` needs. Do NOT run both — they duplicate the same
 #      gate. Require the merged result directly (the pull_request trigger has
 #      no path filter, so it reports on every PR) or move these jobs into
 #      ci.yml behind its `changes` job and `CI gate`.
-#   5. Keep the Rust toolchain pin and the coverage env (CARGO_PROFILE_*_DEBUG,
+#   4. Keep the Rust toolchain pin and the coverage env (CARGO_PROFILE_*_DEBUG,
 #      SQLX_OFFLINE, DATABASE_URL*, etc.) in sync with ci.yml's nextest-cov job.
 #
 # VERIFY BEFORE YOU TRUST IT (cross-machine coverage has sharp edges)
 #   Dispatch this manually first (Actions -> coverage-sharded -> Run workflow),
-#   even on one node, and confirm the merged total line coverage matches a
-#   single-runner `nextest-cov` run. The parts most likely to need a tweak:
+#   and confirm the merged total line coverage matches a single-runner
+#   `nextest-cov` run. The parts most likely to need a tweak:
 #     - profraw filenames must not collide when the merge job flattens every
 #       shard's artifact (handled here via a shard-unique LLVM_PROFILE_FILE_NAME
 #       prefix — verify the files actually land in target/llvm-cov-target/).
-#     - LCOV SF records must retain /crates/<package-name>/ paths so the shared
+#     - LCOV SF records must retain `crates/<package-name>/` paths so the shared
 #       gate can attribute every package; compare all 11 totals and verdicts.
 #     - workspace paths embedded in the archive's coverage map must match the
 #       merge runner's checkout path (use the same runner image and checkout
 #       layout, and confirm the ignore-filename-regex still filters correctly).
-#     - confirm the runner action mirror carries the pinned download-artifact
-#       version (needs the v4+ pattern / merge-multiple
-#       inputs used by the merge job).
 # =============================================================================
+
 name: coverage-sharded
 
 on:
-  # INACTIVE: manual-only. Nothing runs this on push/PR today (single node).
+  # INACTIVE: manual-only. Nothing runs this on push/PR today.
   workflow_dispatch: {}
-  # ENABLE: replace the line above with ci.yml's triggers once you have nodes:
+  # ENABLE: replace the line above with ci.yml's triggers once ready:
   # pull_request:
   # push:
   #   branches: [master]
@@ -71,12 +64,12 @@ env:
   SHARD_TOTAL: "4"
 
 jobs:
-  # ---- 1) Build the instrumented test binaries ONCE, then archive them ------
+  # ---- 1) Build the instrumented test binaries ONCE, then archive them -----
   # This is the single expensive compile. Every shard reuses this archive
   # instead of recompiling the workspace, which is what makes sharding a net
   # win (fan-out of run time, not N-times-duplicated build time).
   coverage-build:
-    runs-on: cc-lb-4
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -92,8 +85,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
+
       - name: Clean coverage artifacts
         run: cargo llvm-cov clean --workspace
+
       - name: Build and archive instrumented test binaries
         run: |
           cargo llvm-cov nextest-archive \
@@ -102,6 +97,7 @@ jobs:
             --exclude cc-lb-stress-suite \
             --all-features \
             --archive-file nextest-archive.tar.zst
+
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-nextest-archive
@@ -116,9 +112,7 @@ jobs:
   # archive (no rebuild) and keeps its raw profiles (--no-report) for the merge.
   coverage-shard:
     needs: coverage-build
-    runs-on: cc-lb-4
-    container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.338.0-cclb-a65132b3c9d7@sha256:d319c98e776daac3a8fb00c19780dd896c3e828675b1c8a77273a22373f57b55
+    runs-on: ubuntu-26.04
 
     strategy:
       # Let every shard finish even if one fails, so the merge sees full data
@@ -127,6 +121,7 @@ jobs:
       matrix:
         # MUST be exactly 1..SHARD_TOTAL. Rescale together with SHARD_TOTAL.
         shard: [1, 2, 3, 4]
+
     services:
       # Every shard needs its own Postgres: slice:i/N can place the Postgres
       # integration tests in any shard.
@@ -135,19 +130,20 @@ jobs:
         env:
           POSTGRES_PASSWORD: testpw
           POSTGRES_DB: cc_lb_test
-        # No `ports`: the k8s container hook turns them into hostPorts, which
-        # collide when two jobs land on one node. The job reaches the service
-        # on localhost through the shared pod network.
+        ports:
+          - 5432:5432
+        # Hosted service jobs reach Postgres through the mapped localhost port.
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+
     env:
       # Keep this coverage env in sync with ci.yml's nextest-cov job.
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
-      CC_LB_TEST_READY_TIMEOUT_SECS: "120"
+      CC_LB_TEST_READY_TIMEOUT_SECS: "240"
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
       DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
       DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
@@ -156,44 +152,17 @@ jobs:
       # artifact into one dir without filename collisions. %p (pid) + %m keep
       # per-process files distinct within a shard.
       LLVM_PROFILE_FILE_NAME: shard-${{ matrix.shard }}-%p-%m.profraw
+
     steps:
       - uses: actions/checkout@v7
-      - name: Export isolated Rustup home
-        run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
-      - name: Verify baked Rustup bootstrap
-        working-directory: ${{ runner.temp }}
-        run: |
-          command -v rustup
-          rustup --version
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
           components: llvm-tools-preview
-      - name: Setup Rust cache
-        run: |
-          {
-            echo "CARGO_INCREMENTAL=0"
-            echo "GIT_SHA=0000000"
-            echo "SOURCE_DATE_EPOCH=0"
-          } >> "$GITHUB_ENV"
-          export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
-          sccache_path="$(command -v sccache || true)"
-          rustc_path="$(command -v rustc || true)"
-          if [ -n "$sccache_path" ] && [ -n "$rustc_path" ]; then
-            "$sccache_path" --stop-server >/dev/null 2>&1 || true
-            if "$sccache_path" "$rustc_path" -vV >/dev/null 2>&1; then
-              {
-                echo "SCCACHE_PATH=$sccache_path"
-                echo "RUSTC_WRAPPER=sccache"
-                echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE"
-              } >> "$GITHUB_ENV"
-            else
-              "$sccache_path" --stop-server >/dev/null 2>&1 || true
-              echo "::warning::sccache compiler-wrapper probe failed; continuing with uncached rustc"
-            fi
-          else
-            echo "::warning::sccache is unavailable; continuing without compiler caching"
-          fi
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
@@ -204,19 +173,24 @@ jobs:
         run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
       - name: Verify test tools
         run: command -v cargo-llvm-cov cargo-nextest sqlx
+
       - uses: actions/download-artifact@v8
         with:
           name: coverage-nextest-archive
+
       - name: Run Postgres migrations
         run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
         env:
           DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
+
       - name: Run test shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
         run: |
           cargo llvm-cov nextest \
             --archive-file nextest-archive.tar.zst \
             --partition slice:${{ matrix.shard }}/${{ env.SHARD_TOTAL }} \
+            --test-threads=4 \
             --no-report
+
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-profraw-${{ matrix.shard }}
@@ -229,7 +203,7 @@ jobs:
   # shard's profraw into one target dir, then a single report pass merges them.
   coverage-merge:
     needs: coverage-shard
-    runs-on: cc-lb-4
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -240,15 +214,18 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+
       - uses: actions/download-artifact@v8
         with:
           name: coverage-nextest-archive
+
       - name: Collect every shard's raw profiles
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-profraw-*
           path: target/llvm-cov-target
           merge-multiple: true
+
       - name: Generate workspace lcov report
         run: |
           cargo llvm-cov report \
@@ -256,13 +233,16 @@ jobs:
             --lcov \
             --output-path target/coverage.lcov \
             --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+
       # The lcov file is the gate and upload input. Raw profiles are no longer
       # needed after it is generated, so remove them without changing the
       # published artifact (only target/coverage.lcov is uploaded below).
       - name: Drop raw profiles after generating lcov
         run: cargo llvm-cov clean --profraw-only
+
       - name: Check per-package coverage gates
         run: scripts/coverage-gate.sh target/coverage.lcov
+
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov-sharded

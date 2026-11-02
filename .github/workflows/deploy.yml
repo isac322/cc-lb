@@ -22,16 +22,28 @@ concurrency:
 
 jobs:
   hadolint:
-    runs-on: cc-lb-500m
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
+      - name: Install hadolint 2.15.1
+        env:
+          HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl --fail --silent --show-error --location \
+            https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64 \
+            --output "$RUNNER_TEMP/bin/hadolint"
+          printf '%s  %s\n' "$HADOLINT_SHA256" "$RUNNER_TEMP/bin/hadolint" | sha256sum --check -
+          chmod 0755 "$RUNNER_TEMP/bin/hadolint"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Lint Dockerfiles
         run: |
           set -euo pipefail
           hadolint --version
           hadolint Dockerfile
   helm:
-    runs-on: cc-lb-500m
+    runs-on: ubuntu-26.04
     env:
       CHART: deploy/helm/cc-lb
       # helm lint/template never runs the binary, so non-empty placeholders
