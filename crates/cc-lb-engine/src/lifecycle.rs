@@ -8360,7 +8360,44 @@ mod prompt_cache_policy_tests {
                 "shared raw boundary was tokenized again, billing_header={include_billing_header}"
             );
         }
+
         Ok(())
+    }
+
+    #[test]
+    fn preview_route_candidate_policy_selects_official_or_literal_bundle() {
+        let official = UpstreamRecord {
+            kind: StorageUpstreamKind::AnthropicApiKey,
+            base_url: None,
+            ..UpstreamRecord::default()
+        };
+        let mut custom = official.clone();
+        custom.base_url = Some("https://proxy.example.com".parse().expect("custom URL"));
+        let mut bundles = PromptCacheBundles::single(&[cache_breakpoint(
+            0,
+            "official",
+            100,
+            TtlClass::Ephemeral5m,
+        )]);
+        bundles.literal = PromptCacheBundle {
+            cache_breakpoints: vec![cache_breakpoint(
+                0,
+                "literal",
+                200,
+                TtlClass::Ephemeral5m,
+            )],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            request_breakpoints: Vec::new(),
+            cache_prefix_hash: Some("literal".to_owned()),
+        };
+        assert_eq!(
+            bundles.for_upstream(&official).cache_breakpoints[0].prefix_hash,
+            "official"
+        );
+        assert_eq!(
+            bundles.for_upstream(&custom).cache_breakpoints[0].prefix_hash,
+            "literal"
+        );
     }
 
     #[test]
