@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 27] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 28] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -68,6 +68,12 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 27] = [
         kind: MetricKind::Counter,
         description: "Total cache miss responses by upstream and model.",
         labels: &["upstream", "model"],
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_prediction_total",
+        kind: MetricKind::Counter,
+        description: "Total request-level prompt-cache prediction outcomes by outcome.",
+        labels: &["outcome"],
     },
     MetricDefinition {
         name: "cc_lb_cache_observation_dropped_total",
@@ -224,6 +230,11 @@ pub(crate) fn register_prometheus14_metrics() {
         "Total cache miss responses by upstream and model."
     );
     metrics::describe_counter!(
+        "cc_lb_cache_prediction_total",
+        Unit::Count,
+        "Total request-level prompt-cache prediction outcomes by outcome."
+    );
+    metrics::describe_counter!(
         "cc_lb_cache_observation_dropped_total",
         Unit::Count,
         "Total prompt-cache observations dropped by fixed reason."
@@ -359,6 +370,11 @@ pub fn touch_prometheus14_metrics() {
     )
     .increment(1);
     metrics::counter!(
+        "cc_lb_cache_prediction_total",
+        "outcome" => "predicted_hit_actual_hit"
+    )
+    .increment(1);
+    metrics::counter!(
         "cc_lb_cache_observation_dropped_total",
         "reason" => "queue_full"
     )
@@ -408,6 +424,13 @@ pub fn touch_prometheus14_metrics() {
 /// documented fixed vocabulary; see `touch_metrics` for the rationale.
 pub(crate) fn touch_prometheus14_metric_handles() {
     metrics::counter!("cclb_audit_writer_dropped_total").increment(0);
+    for outcome in CACHE_PREDICTION_OUTCOMES {
+        metrics::counter!(
+            "cc_lb_cache_prediction_total",
+            "outcome" => outcome
+        )
+        .increment(0);
+    }
     for reason in [
         crate::cache_observation_dropped_reason::QUEUE_FULL,
         crate::cache_observation_dropped_reason::CHANNEL_CLOSED,
@@ -446,6 +469,15 @@ pub(crate) fn touch_prometheus14_metric_handles() {
     metrics::gauge!("cc_lb_compiled_module_cache_entries").set(0.0);
     metrics::gauge!("cc_lb_compiled_module_cache_bytes").set(0.0);
 }
+
+/// Fixed `outcome` vocabulary of `cc_lb_cache_prediction_total`; must match
+/// the prompt-cache prediction lifecycle metric contract.
+const CACHE_PREDICTION_OUTCOMES: [&str; 4] = [
+    "predicted_hit_actual_hit",
+    "unpredicted_hit",
+    "predicted_miss_actual_miss",
+    "predicted_hit_actual_miss",
+];
 
 /// Fixed `outcome` vocabulary of `cc_lb_request_diagnostics_lines_total`; must match
 /// `cc_lb_engine::request_diagnostics_sink`.

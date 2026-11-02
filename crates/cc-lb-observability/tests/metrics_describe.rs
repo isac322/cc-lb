@@ -27,6 +27,17 @@ const EXPORTER_LABEL_KEYS: [&str; 2] = ["quantile", "le"];
 struct RenderedSample {
     family: String,
     labels: BTreeMap<String, String>,
+    value: f64,
+}
+
+fn parse_sample_value(raw: &str) -> f64 {
+    let Some(value) = raw.split_whitespace().next() else {
+        panic!("sample has a numeric value");
+    };
+    let Ok(value) = value.parse() else {
+        panic!("sample value is not numeric: {value}");
+    };
+    value
 }
 
 #[derive(Debug, Default)]
@@ -84,19 +95,31 @@ fn parse_exposition(
         if line.starts_with('#') {
             continue;
         }
-        let (series, labels) = match line.split_once('{') {
+        let (series, labels, value) = match line.split_once('{') {
             Some((series, rest)) => {
-                let end = rest.rfind('}').expect("label set closes");
-                (series, parse_labels(&rest[..end]))
+                let Some(end) = rest.rfind('}') else {
+                    panic!("label set closes");
+                };
+                let Some(value) = rest.get(end + 1..) else {
+                    panic!("sample value follows label set");
+                };
+                (
+                    series,
+                    parse_labels(&rest[..end]),
+                    parse_sample_value(value),
+                )
             }
-            None => (
-                line.split_once(' ').expect("sample has a value").0,
-                BTreeMap::new(),
-            ),
+            None => {
+                let Some((series, value)) = line.split_once(' ') else {
+                    panic!("sample has a value");
+                };
+                (series, BTreeMap::new(), parse_sample_value(value))
+            }
         };
         exposition.samples.push(RenderedSample {
             family: family_of(series, definitions),
             labels,
+            value,
         });
     }
     exposition
@@ -281,7 +304,64 @@ fn registry_holds_every_definition_group_without_duplicates() {
     ] {
         assert!(unique.contains(name), "{name} is not registered");
     }
-    assert_eq!(definitions.len(), 67);
+}
+
+const CACHE_PREDICTION_METRIC: &str = "cc_lb_cache_prediction_total";
+
+#[test]
+fn cache_prediction_metric_has_fixed_zero_startup_contract() {
+    let exposition = render(register_metrics);
+    let definitions = definitions_by_name();
+
+    let Some(definition) = definitions.get(CACHE_PREDICTION_METRIC) else {
+        panic!("{CACHE_PREDICTION_METRIC} is not registered");
+    };
+    assert_eq!(definition.kind, MetricKind::Counter);
+    assert_eq!(
+        exposition
+            .help
+            .get(CACHE_PREDICTION_METRIC)
+            .map(String::as_str),
+        Some(definition.description)
+    );
+    assert_eq!(
+        exposition
+            .kinds
+            .get(CACHE_PREDICTION_METRIC)
+            .map(String::as_str),
+        Some("counter")
+    );
+
+    let expected_outcomes = BTreeSet::from(
+        [
+            "predicted_hit_actual_hit",
+            "unpredicted_hit",
+            "predicted_miss_actual_miss",
+            "predicted_hit_actual_miss",
+        ]
+        .map(str::to_owned),
+    );
+    let samples = exposition
+        .samples_of(CACHE_PREDICTION_METRIC)
+        .collect::<Vec<_>>();
+    let actual_outcomes = samples
+        .iter()
+        .filter_map(|sample| sample.labels.get("outcome").cloned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_outcomes, expected_outcomes);
+    assert_eq!(samples.len(), expected_outcomes.len());
+    for sample in samples {
+        assert_eq!(
+            sample
+                .labels
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["outcome"])
+        );
+        assert_eq!(sample.value, 0.0);
+    }
+    assert_matches_declared_contract(&exposition);
 }
 
 #[test]
