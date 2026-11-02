@@ -694,14 +694,26 @@ async fn failover_final_row_uses_serving_custom_literal_bundle() -> Result<(), B
     ));
 
     let (status, _body) = fixture.send_request(request).await;
-    wait_for_final_request_event(&mut update_rx).await;
+    let mut serving_breakpoints = None;
+    loop {
+        match update_rx.recv().await.expect("lifecycle bus stays open") {
+            LifecycleEvent::RouteCompleted {
+                result: Ok(info), ..
+            } if info.upstream_name == "custom" => {
+                serving_breakpoints = info.cache_breakpoints;
+            }
+            LifecycleEvent::RequestTerminated { .. } => break,
+            _ => {}
+        }
+    }
 
     assert_eq!(status, StatusCode::OK);
     let events = stored_request_events(storage.as_ref()).await?;
     assert_eq!(events.len(), 1);
-    let breakpoints = &events[0].cache_breakpoints;
-    assert_eq!(breakpoints.len(), 1);
-    assert_eq!(breakpoints[0].path, "system[0]");
+    assert!(events[0].cache_breakpoints.is_empty());
+    let serving_breakpoints = serving_breakpoints.ok_or("custom serving route missing")?;
+    assert_eq!(serving_breakpoints.len(), 1);
+    assert_eq!(serving_breakpoints[0].path, "system[0]");
     assert_eq!(events[0].upstream_name.as_deref(), Some("custom"));
     Ok(())
 }
