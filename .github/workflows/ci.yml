@@ -71,8 +71,6 @@ jobs:
         with:
           toolchain: 1.99.1
           components: rustfmt
-      - name: Ensure ripgrep is available
-        run: rg --version
       - run: cargo fmt --check
       - name: Audit-redaction lint
         run: bash scripts/lint-audit-redaction.sh
