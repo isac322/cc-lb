@@ -97,7 +97,7 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
     .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
 
     let mut request = messages_request(Bytes::from_static(
-        br#"{"model":"claude-test","max_tokens":32,"tool_choice":{"type":"any"},"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}"#,
+        br#"{"model":"claude-test","max_tokens":32,"tool_choice":{"type":"auto"},"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}"#,
     ));
     request.headers_mut().insert(
         "anthropic-beta",

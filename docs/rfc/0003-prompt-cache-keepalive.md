@@ -155,7 +155,9 @@ breakpoint. An assistant breakpoint preserves the following user
 user continuation. If the only explicit breakpoint is in `system` or `tools`,
 uncached multi-turn history is replaced with a minimal user turn.
 
-`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`, removes `stream`, and trims uncached trailing messages after the last explicit `cache_control` breakpoint. It preserves `thinking`, `output_config`, and `tool_choice` unchanged from the captured request so renewals hit the same prompt-cache entry as follow-up requests; if an upstream rejects a zero-output combination, the session terminates with `terminal_reason = dispatch_error` and persists the upstream error in `cache_keepalive_sessions.error`.
+`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`, removes `stream`, and trims uncached trailing messages after the last explicit `cache_control` breakpoint. It preserves `thinking`, `output_config`, and `tool_choice` unchanged from the captured request so renewals hit the same prompt-cache entry as follow-up requests.
+
+Before snapshot capture or response classification, live requests with `thinking.type == "enabled"`, any `output_config.format` field, or `tool_choice.type` equal to `"tool"` or `"any"` are excluded: Anthropic [rejects these combinations with `max_tokens: 0`](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#limitations). Each exclusion records a durable `not_tracked` decision with reason `zero-token renewal unsupported: enabled thinking`, `zero-token renewal unsupported: structured output`, or `zero-token renewal unsupported: forced tool_choice`, respectively. No session or renewal job is created. If the latest completed turn switches an active session to an incompatible request, the existing generation-fenced cancellation path terminates it as `cancelled`; previously queued generations become stale no-ops. Adaptive thinking, effort without a format, and automatic tool choice remain eligible. `stream: true` alone is not an exclusion because renewal shaping removes it.
 
 ### Classifier — `HeuristicClassifier`
 
