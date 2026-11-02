@@ -8413,7 +8413,14 @@ mod prompt_cache_policy_tests {
         let original = json!({
             "model": "claude-sonnet-4-5",
             "system": [
-                {"type":"text","text":"x-anthropic-billing-header: cron"},
+                {"type":"text","text":"x-anthropic-billing-header: cron-a"},
+                {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}
+            ]
+        });
+        let changed_attribution = json!({
+            "model": "claude-sonnet-4-5",
+            "system": [
+                {"type":"text","text":"x-anthropic-billing-header: cron-b"},
                 {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}
             ]
         });
@@ -8425,24 +8432,29 @@ mod prompt_cache_policy_tests {
         });
         let canonical = canonical_model_id("claude-sonnet-4-5");
         let official_original = analyze_v3_prompt_cache(&original, canonical);
-        let official_shaped = analyze_v3_prompt_cache(&shaped, canonical);
+        let official_changed = analyze_v3_prompt_cache(&changed_attribution, canonical);
         let literal_original = analyze_v3_prompt_cache_literal_from_official(
             &original,
             canonical,
             &official_original,
         );
-        let literal_shaped = analyze_v3_prompt_cache_literal_from_official(
-            &shaped,
+        let literal_changed = analyze_v3_prompt_cache_literal_from_official(
+            &changed_attribution,
             canonical,
-            &official_shaped,
+            &official_changed,
         );
         assert_eq!(
             official_original.breakpoints[0].prefix_key,
-            official_shaped.breakpoints[0].prefix_key
+            official_changed.breakpoints[0].prefix_key
         );
         assert_ne!(
             literal_original.breakpoints[0].prefix_key,
-            literal_shaped.breakpoints[0].prefix_key
+            literal_changed.breakpoints[0].prefix_key
+        );
+        assert!(
+            shaped["system"][0]["text"]
+                .as_str()
+                .is_some_and(|text| !text.starts_with("x-anthropic-billing-header:"))
         );
     }
 
@@ -12492,15 +12504,14 @@ mod tests {
             },
         };
         let now = 1_800_000_000;
+        let mut official_warm =
+            warm_entry("official-prefix", TtlClass::Ephemeral5m, now + 600, 0);
+        official_warm.content_block_index = 1;
+        let mut custom_warm = warm_entry("custom-prefix", TtlClass::Ephemeral5m, now + 600, 0);
+        custom_warm.content_block_index = 1;
         let warm_entries = HashMap::from([
-            (
-                official_id,
-                vec![warm_entry("official-prefix", TtlClass::Ephemeral5m, now + 600, 0)],
-            ),
-            (
-                custom_id,
-                vec![warm_entry("custom-prefix", TtlClass::Ephemeral5m, now + 600, 0)],
-            ),
+            (official_id, vec![official_warm]),
+            (custom_id, vec![custom_warm]),
         ]);
         let candidates = build_candidates_with_matches_for_bundles(
             &view,
