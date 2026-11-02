@@ -93,7 +93,7 @@
     "prompt_cache_shadow": {
       "$ref": "#/$defs/PromptCacheShadowConfig",
       "default": {
-        "grace_margin_secs": 30
+        "grace_margin_secs": 0
       }
     },
     "request_event_retention_days": {
@@ -643,13 +643,13 @@
       "additionalProperties": false
     },
     "PromptCacheShadowConfig": {
-      "description": "Always-on prompt cache routing configuration.\n\nControls prompt cache observation behavior. Observations decoded from successful\nresponses are persisted to the shared observation store, and `build_candidates`\nreads that store per `(upstream, canonical model)` partition to compute cache\nscores.\n\nConfiguration keys and defaults:\n- `grace_margin_secs` (default: 30) - margin subtracted from the observed TTL when\n  an observation's expiry is recorded, expiring entries slightly early to absorb\n  provider-side TTL jitter",
+      "description": "Always-on prompt cache routing configuration.\n\nControls prompt cache observation behavior. Observations decoded from successful\nresponses are persisted to the shared observation store, and `build_candidates`\nreads that store per `(upstream, canonical model)` partition to compute cache\nscores.\n\nConfiguration keys and defaults:\n- `grace_margin_secs` (default: 0) - optional shortening of the\n  dispatch-anchored provider TTL; zero preserves the full TTL.",
       "type": "object",
       "properties": {
         "grace_margin_secs": {
           "type": "integer",
           "format": "uint64",
-          "default": 30,
+          "default": 0,
           "minimum": 0
         }
       },
