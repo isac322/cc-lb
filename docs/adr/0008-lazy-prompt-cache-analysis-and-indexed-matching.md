@@ -98,6 +98,12 @@ Every prefix key changes because the seed, prefix, and block domain tags are ren
 
 Schema 5 also retires the legacy prefix hashes. `cache_prefix_hash`, `cache_prefix_hash_v2`, and `cache_prefix_hash_and_token_count_v2` had no production callers left — only tests — so they are deleted along with `tests/hash_golden.rs`, which existed solely to pin them. The v3 simulator is now the only prefix-hash path. The request fixtures that file used are retained at `tests/fixtures/hash_golden/` and are consumed by `tests/prompt_cache_byte_oracle/corpus.rs::hash_golden_cases`; the pinned schema-5 prefix keys, including the per-source salt-scope goldens, live in `tests/prompt_cache_structural_properties.rs`. Any reference to `tests/hash_golden.rs` or the deleted functions elsewhere in this ADR is historical.
 
+### 2026-11-03 amendment — official billing-header identity exclusion (schema 6)
+
+Schema 6 changes only effective prompt-cache identity for the official Anthropic API-key/OAuth route: when the effective authority is `https://api.anthropic.com` with the default port and no userinfo, the first `system[0]` object text block beginning exactly with `x-anthropic-billing-header:` is retained in raw request metadata but omitted from the effective chain, breakpoint eligibility, lookback, and observations. HTTP, non-default ports, userinfo, other hosts, non-Anthropic upstreams, and custom endpoints remain literal.
+
+The route chooses an official or literal cache bundle per candidate. Warm lookup keys are the union of both bundles, but scoring, failover, preview, observation, keep-alive, and final diagnostics use only the serving candidate's bundle. Older schema-5 observations are cold through the existing schema filter; no migration is required.
+
 ### 2026-07-27 amendment — invalidator salt scope
 
 Provider invalidators follow the `tools → system → messages` prefix hierarchy: a change invalidates its own tier and every later tier. The simulator assigns each top-level invalidator through a named scope constant:

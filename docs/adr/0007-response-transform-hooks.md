@@ -149,6 +149,10 @@ Adding these hook kinds preserves the existing `ShapeRequest` and `ShapeResponse
 - Original request bodies are not passed to response hooks by default. A future opt-in capability can be added if a response plugin genuinely needs them.
 - Header and status replacement is allowed only through host sanitization. Plugins propose end-to-end fields, while the host keeps proxy-owned fields authoritative.
 
+### Prompt-cache identity contract
+
+For the official Anthropic API-key/OAuth route, the host may omit the exact first `system[0]` billing-header text block from effective cache identity. A shape plugin is not an opt-out: under the plugin contract, shaping is deterministic and cache-semantic-preserving for this attribution block, while the original request body remains the forwarding source of truth. Custom or non-official upstreams continue to use literal identity. The host does not re-analyze the shaped body to decide cache identity.
+
 ## Alternatives considered
 
 | Alternative | Rejection reason |

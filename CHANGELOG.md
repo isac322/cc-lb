@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 
 - PostgreSQL scheduler workers now drive task polling with a dedicated 1-second interval and auto-reconnecting notification strategy, preventing future-scheduled keep-alive and OAuth refresh jobs from stalling across idle intervals or listener disconnects.
 
+- Prompt-cache hash schema is now v6. Official Anthropic API-key/OAuth routes omit only the exact first `system[0]` billing-header block from effective identity; custom routes remain literal. Existing v5 observations cold-start through schema filtering without migration.
 ### Upgrade notes
 
 - Existing stored prompt-cache observations keep their recorded expiry and need no migration. The new default and dispatch anchor apply to newly recorded or refreshed observations; set `prompt_cache_shadow.grace_margin_secs = 30` to retain the previous margin.
