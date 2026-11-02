@@ -8401,6 +8401,44 @@ mod prompt_cache_policy_tests {
     }
 
     #[test]
+    fn deterministic_shape_stripping_preserves_official_identity_but_not_custom_literal() {
+        let original = json!({
+            "model": "claude-sonnet-4-5",
+            "system": [
+                {"type":"text","text":"x-anthropic-billing-header: cron"},
+                {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}
+            ]
+        });
+        let shaped = json!({
+            "model": "claude-sonnet-4-5",
+            "system": [
+                {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}
+            ]
+        });
+        let canonical = canonical_model_id("claude-sonnet-4-5");
+        let official_original = analyze_v3_prompt_cache(&original, canonical);
+        let official_shaped = analyze_v3_prompt_cache(&shaped, canonical);
+        let literal_original = analyze_v3_prompt_cache_literal_from_official(
+            &original,
+            canonical,
+            &official_original,
+        );
+        let literal_shaped = analyze_v3_prompt_cache_literal_from_official(
+            &shaped,
+            canonical,
+            &official_shaped,
+        );
+        assert_eq!(
+            official_original.breakpoints[0].prefix_key,
+            official_shaped.breakpoints[0].prefix_key
+        );
+        assert_ne!(
+            literal_original.breakpoints[0].prefix_key,
+            literal_shaped.breakpoints[0].prefix_key
+        );
+    }
+
+    #[test]
     fn literal_only_billing_breakpoint_records_custom_cache_creation() -> Result<(), Box<dyn std::error::Error>> {
         let request = json!({
             "model": "claude-sonnet-4-5",
