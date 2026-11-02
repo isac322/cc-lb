@@ -8784,14 +8784,15 @@ fn request_cache_metadata_from_value_with_analysis(
         .collect();
     let literal_bundle = prompt_cache_bundle_from_analysis(&literal_analysis, literal_keys);
     let cache_breakpoints = official_bundle.request_breakpoints.clone();
-    let mut cache_control_message_indices = cache_breakpoints
+    let raw_cache_breakpoints = &literal_bundle.request_breakpoints;
+    let mut cache_control_message_indices = raw_cache_breakpoints
         .iter()
         .filter_map(|breakpoint| breakpoint.message_index)
         .collect::<Vec<_>>();
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
 
-    let cache_control_block_count = cache_breakpoints.len() as u64;
+    let cache_control_block_count = raw_cache_breakpoints.len() as u64;
     let thinking_budget_tokens = value
         .get("thinking")
         .filter(|t| t.get("type").and_then(Value::as_str) == Some("enabled"))
