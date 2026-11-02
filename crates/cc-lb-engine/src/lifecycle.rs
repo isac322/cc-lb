@@ -724,7 +724,6 @@ pub fn build_candidates(
     .0
 }
 
-
 pub(crate) fn build_candidates_with_matches_for_bundles(
     view: &DynamicView,
     principal_id: &str,
