@@ -84,7 +84,7 @@ fn breakpoint_prefix_key(request: &Value, source: V3PromptCacheBlockSource) -> S
 }
 
 #[test]
-fn v5_blake3_prefix_key_golden() {
+fn v6_blake3_prefix_key_golden() {
     let request = json!({
         "model": CANONICAL_MODEL,
         "system": [
@@ -95,17 +95,17 @@ fn v5_blake3_prefix_key_golden() {
     });
 
     let analysis = analyze_v3_prompt_cache(&request, canonical_model_id(CANONICAL_MODEL));
-    let breakpoint = analysis.breakpoints.first().expect("v5 breakpoint");
+    let breakpoint = analysis.breakpoints.first().expect("v6 breakpoint");
 
     assert_eq!(breakpoint.block_index, 1);
     assert_eq!(
         breakpoint.prefix_key,
-        "7d44779303f224534f0737cb9d71fb39f3606798b09b7dec4e52d8b56d20e784"
+        "d8df9395daa0a1966c8b04e7f381b518407c97788cc3ee1fbf629d519850c405"
     );
 }
 
 #[test]
-fn v5_tools_scope_salt_golden() {
+fn v6_tools_scope_salt_golden() {
     let request = salt_scope_request();
     let baseline = breakpoint_prefix_key(&request, V3PromptCacheBlockSource::Tools);
     let fully_salted = breakpoint_prefix_key(
@@ -115,7 +115,7 @@ fn v5_tools_scope_salt_golden() {
 
     assert_eq!(
         fully_salted,
-        "ee7065c21fb86d116f207ef7f728a35e3688e32c696aad1ee7abf5a429c34607"
+        "f94dec2f0bd1e79817a81ffd2dd37f0eef613ab9a14e9cee811fa6b3b301e501"
     );
     assert_eq!(fully_salted, baseline);
     for (name, variant) in invalidator_variants(&request) {
@@ -128,7 +128,7 @@ fn v5_tools_scope_salt_golden() {
 }
 
 #[test]
-fn v5_system_scope_salt_golden() {
+fn v6_system_scope_salt_golden() {
     let request = salt_scope_request();
     let baseline = breakpoint_prefix_key(&request, V3PromptCacheBlockSource::System);
     let fully_salted = breakpoint_prefix_key(
@@ -138,7 +138,7 @@ fn v5_system_scope_salt_golden() {
 
     assert_eq!(
         fully_salted,
-        "50b0ebb0432ed4899e7183e5ce50244730dcd026bc0908b798dfe53966c2400b"
+        "ccb51ff9865bec44b844d5cb748a004ec176301925cc4abdd8094c12dc1542d2"
     );
     assert_ne!(fully_salted, baseline);
     for (name, variant) in invalidator_variants(&request) {
@@ -158,7 +158,7 @@ fn v5_system_scope_salt_golden() {
 }
 
 #[test]
-fn v5_messages_scope_salt_golden() {
+fn v6_messages_scope_salt_golden() {
     let request = salt_scope_request();
     let baseline = breakpoint_prefix_key(&request, V3PromptCacheBlockSource::Message);
     let fully_salted = breakpoint_prefix_key(
@@ -168,7 +168,7 @@ fn v5_messages_scope_salt_golden() {
 
     assert_eq!(
         fully_salted,
-        "38495b16fa68cceaa0fa0b804cb629e747327111a623d84c2c7394d3ab10526e"
+        "ebb92b63ee8e9f0caf739513aaf3dc832fbb6c3da528ab674c32cbb4487963ab"
     );
     assert_ne!(fully_salted, baseline);
     for (name, variant) in invalidator_variants(&request) {
