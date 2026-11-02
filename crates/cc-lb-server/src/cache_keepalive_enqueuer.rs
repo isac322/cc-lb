@@ -240,7 +240,8 @@ fn terminal_reason_from_cancel(reason: CancelReason) -> CacheKeepaliveTerminalRe
     match reason {
         CancelReason::UserTurnDetected
         | CancelReason::SnapshotTooLarge
-        | CancelReason::CachedPrefixTooSmall => CacheKeepaliveTerminalReason::Cancelled,
+        | CancelReason::CachedPrefixTooSmall
+        | CancelReason::ZeroTokenRenewalUnsupported => CacheKeepaliveTerminalReason::Cancelled,
     }
 }
 

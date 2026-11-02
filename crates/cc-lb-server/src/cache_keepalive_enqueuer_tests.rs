@@ -230,6 +230,256 @@ async fn not_tracked_writes_a_decision_projection_without_a_renewal_turn() {
     }
 }
 
+#[tokio::test]
+async fn shape_injected_forced_tool_choice_is_durably_not_tracked_without_session_or_job() {
+    use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+    use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+    use cc_lb_control::api_keys::principal_view::{
+        DialectCache, PrincipalView, RouterPipelineCache, ShapePluginCache,
+    };
+    use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+    use cc_lb_storage_api::{
+        PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore,
+    };
+
+    let fixture = Fixture::new().await;
+    let principal = PrincipalStore::create(
+        fixture.storage.as_ref(),
+        PrincipalCreate {
+            name: "shape-keepalive".to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: Some(cc_lb_storage_api::CacheKeepaliveConfig {
+                enabled: true,
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 3,
+                max_total_duration_secs: 600,
+                snapshot_max_bytes: 524_288,
+                min_cache_tokens: 10_000,
+                classifier: Default::default(),
+            }),
+        },
+        1,
+    )
+    .await
+    .expect("create principal");
+    let keys = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_, secret) = keys
+        .create(
+            &principal.name,
+            CreateParams {
+                label: "shape-regression".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("create key");
+    let upstream = UpstreamStore::create(
+        fixture.storage.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "shape-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: Some(Url::parse("http://shape.local/").expect("URL")),
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("create upstream");
+    // Use the same explicit UpstreamDialect seam as response_transform_paths:
+    // the native hook and Wasmtime adapter both return a ShapedRequest body.
+    let principal_view = Arc::new(PrincipalView::from_db(
+        std::slice::from_ref(&principal),
+        std::collections::HashMap::from([(
+            principal.name.clone(),
+            (
+                Some(Arc::new(RouterPipelineCache::empty(
+                    cc_lb_domain::TerminalStrategy::FirstPick,
+                ))),
+                DialectCache::Explicit(ShapePluginCache {
+                    dialect: Arc::new(ForcedToolChoiceShape),
+                }),
+            ),
+        )]),
+    ));
+    let backend = crate::scheduler_factory::open_scheduler_storage(
+        &StorageConfig::Sqlite {
+            path: fixture.sqlite_path.clone(),
+        },
+        &SchedulerConfig::default(),
+        Arc::new(SystemClock),
+    )
+    .await
+    .expect("open scheduler");
+    let lifecycle = cc_lb_engine::Lifecycle::new_with_dynamic_view(
+        Arc::new(BuiltinAuthn::new(keys, Arc::new(SystemClock))),
+        Arc::new(DynamicViewHolder::new(
+            DynamicViewBuilder::new(0)
+                .principal_view(principal_view)
+                .upstream_records(vec![upstream])
+                .signer_factory(Arc::new(ShapeTestSigner))
+                .build(),
+        )),
+        Arc::new(ShapeTestDispatch),
+        cc_lb_engine::LifecycleConfig::default(),
+        Arc::new(SystemClock),
+    )
+    .with_cache_keepalive_enqueuer(Arc::new(ServerCacheKeepaliveEnqueuer::new(
+        ServerCacheKeepaliveEnqueuerDeps {
+            storage: fixture.storage.clone(),
+            pusher: Arc::new(backend.backend.clone()),
+            aead: fixture.aead.clone(),
+            clock: Arc::new(SystemClock),
+        },
+    )));
+    let request = http::Request::builder()
+        .method(Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", secret.expose())
+        .header("x-session-id", "shape-session")
+        .body(Bytes::from_static(br#"{"model":"claude-test","max_tokens":32,"tool_choice":{"type":"auto"},"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}"#))
+        .expect("request");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("authenticate");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("live response");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .expect("response body");
+    let decisions = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let (decisions, sessions) = sqlx::query_as::<_, (i64, i64)>(
+                "SELECT (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE decision = 'not_tracked' AND reason = 'zero-token renewal unsupported: forced tool_choice'), (SELECT COUNT(*) FROM cache_keepalive_sessions)",
+            ).fetch_one(fixture.storage.pool()).await.expect("decision boundary");
+            if decisions > 0 || sessions > 0 {
+                break decisions;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("keepalive decision");
+    assert_eq!(
+        decisions, 1,
+        "shaped tool choice must exclude the live request"
+    );
+    let sessions = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cache_keepalive_sessions")
+        .fetch_one(fixture.storage.pool())
+        .await
+        .expect("sessions");
+    assert_eq!(sessions, 0);
+    let jobs = backend
+        .backend
+        .list_keepalive_tasks(&Filter {
+            status: None,
+            page: 1,
+            page_size: Some(10),
+        })
+        .await
+        .expect("jobs");
+    assert!(jobs.is_empty());
+}
+
+struct ForcedToolChoiceShape;
+
+impl cc_lb_upstream::UpstreamDialect for ForcedToolChoiceShape {
+    fn shape(
+        &self,
+        context: &cc_lb_upstream::DialectShapeContext,
+        _upstream: &cc_lb_domain::Upstream,
+        _principal: &cc_lb_domain::Principal,
+        builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+    ) -> Result<cc_lb_upstream::ShapedRequest, cc_lb_upstream::DialectError> {
+        let mut value: serde_json::Value =
+            sonic_rs::from_slice(&context.body_bytes).expect("live JSON");
+        assert_eq!(value["tool_choice"]["type"], "auto");
+        value["tool_choice"] = serde_json::json!({"type": "any"});
+        Ok(builder.shaped_request(
+            Url::parse("http://shape.local/v1/messages").expect("shape URL"),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            Bytes::from(serde_json::to_vec(&value).expect("shaped JSON")),
+        ))
+    }
+}
+
+struct ShapeTestSigner;
+
+impl cc_lb_engine::ApiKeyAwareSignerFactory for ShapeTestSigner {
+    fn with_router_choice(&self, _name: String) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+        Arc::new(Self)
+    }
+}
+
+#[async_trait]
+impl cc_lb_upstream::SignerFactory for ShapeTestSigner {
+    async fn build(
+        &self,
+        _upstream: &cc_lb_domain::Upstream,
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Ok(Arc::new(Self))
+    }
+}
+
+#[async_trait]
+impl cc_lb_upstream::Signer for ShapeTestSigner {
+    async fn sign(
+        &self,
+        shaped: cc_lb_upstream::ShapedRequest,
+        capability: &mut cc_lb_upstream::SigningCapability,
+    ) -> Result<cc_lb_upstream::SignedRequest, cc_lb_upstream::SignerError> {
+        Ok(cc_lb_upstream::SignedRequest::from_shaped(
+            shaped, capability,
+        ))
+    }
+
+    async fn on_unauthorized(
+        &self,
+        _error: &cc_lb_upstream::UpstreamError,
+    ) -> cc_lb_upstream::RetryDecision {
+        cc_lb_upstream::RetryDecision::Fail
+    }
+}
+
+struct ShapeTestDispatch;
+
+#[async_trait]
+impl cc_lb_engine::UpstreamDispatch for ShapeTestDispatch {
+    async fn dispatch(
+        &self,
+        request: cc_lb_upstream::SignedRequest,
+    ) -> Result<http::Response<axum::body::Body>, cc_lb_engine::DispatchError> {
+        let value: serde_json::Value =
+            sonic_rs::from_slice(request.body()).expect("dispatched JSON");
+        assert_eq!(value["tool_choice"]["type"], "any");
+        Ok(http::Response::builder()
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "type": "message",
+                    "content": [{"type": "tool_use", "id": "tool1", "name": "Bash", "input": {}}],
+                    "stop_reason": "tool_use",
+                    "usage": {"cache_read_input_tokens": 12_000, "output_tokens": 2}
+                })
+                .to_string(),
+            ))
+            .expect("response"))
+    }
+}
+
 struct Fixture {
     _dir: TempDir,
     sqlite_path: std::path::PathBuf,
