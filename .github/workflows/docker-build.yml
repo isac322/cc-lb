@@ -105,7 +105,7 @@ jobs:
               --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
               tar -C / -xf /docker-mounts.tar && \
               mkdir -p /out && \
-              du -sb /cargo-home /bun /sccache > /out/restored.txt
+              du -sk /cargo-home /bun /sccache > /out/restored.txt
           FROM scratch
           COPY --from=inject /out/ /
           EOF
@@ -163,7 +163,7 @@ jobs:
               --mount=type=cache,id=bun-linux-${HOST_ARCH},target=/bun \
               --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
               mkdir -p /out && \
-              du -sb /cargo-home /bun /sccache > /out/extracted.txt && \
+              du -sk /cargo-home /bun /sccache > /out/extracted.txt && \
               tar -C / -cf /out/docker-mounts.tar cargo-home bun sccache
           FROM scratch
           COPY --from=extract /out/ /

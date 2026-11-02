@@ -261,7 +261,7 @@ jobs:
               --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
               tar -C / -xf /docker-mounts.tar && \
               mkdir -p /out && \
-              du -sb /cargo-home /bun /sccache > /out/restored.txt
+              du -sk /cargo-home /bun /sccache > /out/restored.txt
           FROM scratch
           COPY --from=inject /out/ /
           EOF
