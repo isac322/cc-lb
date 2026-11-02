@@ -45,6 +45,8 @@ pub mod lifecycle_routing_tier_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_subscription_quota_subscriber;
 #[cfg(not(loom))]
+mod limit_input_estimate;
+#[cfg(not(loom))]
 pub mod limit_state_writer;
 pub mod metrics_labels;
 #[cfg(not(loom))]

@@ -84,6 +84,33 @@ The existing cache-input subtraction is unchanged: reported cache-read tokens
 are counted separately from uncached input. OpenAI and Anthropic output already
 includes reasoning or thinking tokens, so their output counts are unchanged.
 
+Before dispatch, Anthropic Messages limit admission estimates text and metadata
+string bytes at one token per four bytes, plus 4,784 tokens per recognized native
+`image` block in message content, including images inside `tool_result.content`.
+The allowance replaces only the image's base64 payload, URL, or file-ID reference
+in the string-byte estimate; other metadata still counts. A single 4,000-token
+floor applies to the combined request input, including images. This input estimate
+is used for both input-token and total-token admission.
+
+With resolved local prompt-cache breakpoints, cost reservations price disjoint
+cache-prefix and uncached-tail regions measured on that same admission basis.
+The request floor applies once; any deficit belongs to the uncached tail. The
+tail uses the input rate. The prefix through the deepest requested 1-hour
+breakpoint uses the highest of the input, 5-minute write, cache-read, and twice
+the active input rate; the remaining local prefix uses the highest of the input,
+5-minute write, and cache-read rates. Optional absent catalog rates are ignored,
+but the derived 1-hour rate still applies. Rates follow the active service tier;
+the price band uses the request's input counted once. No warm hit is assumed.
+The existing opaque-cache worst-case allowance applies only when no local
+breakpoint resolves, including the existing fallback for unresolved markers.
+Resolved local breakpoints keep precedence even when an opaque marker is present.
+
+The image allowance is an admission estimate, not a guarantee that it bounds all
+provider-billed tokens. It can over-reserve smaller images, and provider-specific
+overhead can exceed the estimate. Provider-reported usage reconciliation and
+actual accounting are unchanged. Documents and non-Anthropic requests retain
+their existing estimates; routing and forwarded request bodies are unchanged.
+
 The [Admin consistency contract](consistency-contract.md) lists what each admin response guarantees about persistence, audit records, the routing-view rebuild, and convergence across replicas.
 
 ### Local proxy key files

@@ -176,7 +176,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, Pricing, ThresholdBand, ThresholdRate,
+        CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, LocalCacheInputEstimate, Pricing,
+        ThresholdBand, ThresholdRate, TierRate,
     };
 
     #[test]
@@ -405,5 +406,278 @@ mod tests {
             .expect("known model");
         assert_eq!(breakdown.input_micros, 300);
         assert_eq!(breakdown.total_micros, 300);
+    }
+
+    fn install_local_snapshot(
+        model: &str,
+        pricing: Pricing,
+        cache_creation_5m: Option<UsdPerMillion>,
+        cache_read: Option<UsdPerMillion>,
+        above_tokens_rates: BTreeMap<u64, ThresholdBand>,
+    ) {
+        let mut snapshot = CatalogSnapshot {
+            payload_hash: String::new(),
+            fetched_at_ms: 1,
+            models: HashMap::from([(model.to_owned(), pricing)]),
+            raw_json: b"{}".to_vec(),
+            cache_creation_per_million_usd: HashMap::new(),
+            cache_read_per_million_usd: HashMap::new(),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
+            status: CatalogStatus::Ok,
+        };
+        if let Some(price) = cache_creation_5m {
+            snapshot
+                .cache_creation_per_million_usd
+                .insert(model.to_owned(), price);
+        }
+        if let Some(price) = cache_read {
+            snapshot
+                .cache_read_per_million_usd
+                .insert(model.to_owned(), price);
+        }
+        if !above_tokens_rates.is_empty() {
+            snapshot
+                .above_tokens_rates
+                .insert(model.to_owned(), above_tokens_rates);
+        }
+        global_catalog().install_snapshot(snapshot);
+    }
+
+    #[test]
+    fn local_cache_pricing_uses_disjoint_tail_and_five_minute_prefix() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "local-disjoint-regions-test";
+        install_local_snapshot(
+            model,
+            Pricing {
+                model: model.to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                by_tier: BTreeMap::new(),
+            },
+            Some(UsdPerMillion::from_micros_usd(3_750_000)),
+            None,
+            BTreeMap::new(),
+        );
+
+        let estimate = global_catalog().estimate_max_with_local_cache(
+            model,
+            LocalCacheInputEstimate {
+                uncached_input_tokens: 10_001,
+                cache_prefix_5m_tokens: 16_138,
+                cache_prefix_1h_tokens: 0,
+            },
+            0,
+            None,
+        );
+
+        // Independent arithmetic: floor(10_001 * $3/M) + floor(16_138 * $3.75/M)
+        // = 30,003 + 60,517 = 90,520 micros.
+        assert_eq!(estimate, Some(90_520));
+    }
+
+    #[test]
+    fn local_cache_pricing_derives_one_hour_write_from_input_without_five_minute_price() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "local-derived-one-hour-test";
+        install_local_snapshot(
+            model,
+            Pricing {
+                model: model.to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                by_tier: BTreeMap::new(),
+            },
+            None,
+            None,
+            BTreeMap::new(),
+        );
+
+        let estimate = global_catalog().estimate_max_with_local_cache(
+            model,
+            LocalCacheInputEstimate {
+                uncached_input_tokens: 0,
+                cache_prefix_5m_tokens: 0,
+                cache_prefix_1h_tokens: 1_000_000,
+            },
+            0,
+            None,
+        );
+
+        // No catalog cache price exists: the conservative cold-write candidate is
+        // 2 * active input = 2 * $3/M, so one million 1h tokens cost $6.
+        assert_eq!(estimate, Some(6_000_000));
+    }
+
+    #[test]
+    fn local_cache_pricing_uses_nonstandard_rates_for_mixed_one_hour_and_five_minute_regions() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "local-mixed-cache-prices-test";
+        install_local_snapshot(
+            model,
+            Pricing {
+                model: model.to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                by_tier: BTreeMap::new(),
+            },
+            Some(UsdPerMillion::from_micros_usd(4_250_000)),
+            Some(UsdPerMillion::from_micros_usd(5_000_000)),
+            BTreeMap::new(),
+        );
+
+        let estimate = global_catalog().estimate_max_with_local_cache(
+            model,
+            LocalCacheInputEstimate {
+                uncached_input_tokens: 2_000_000,
+                cache_prefix_5m_tokens: 4_000,
+                cache_prefix_1h_tokens: 6_000,
+            },
+            0,
+            None,
+        );
+
+        // Tail uses input ($3/M), P5 uses max($3, $4.25, $5)/M, and
+        // P1 uses max($3, $4.25, $5, $6 derived)/M:
+        // 6,000,000 + 20,000 + 36,000 = 6,056,000 micros.
+        assert_eq!(estimate, Some(6_056_000));
+    }
+
+    #[test]
+    fn local_cache_pricing_resolves_unique_gross_threshold_and_sparse_service_tier_fields() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "local-threshold-tier-test";
+        let mut bands = BTreeMap::new();
+        bands.insert(
+            200_000,
+            ThresholdBand {
+                default: ThresholdRate {
+                    input_per_million_usd: Some(UsdPerMillion::from_whole_usd(99)),
+                    output_per_million_usd: Some(UsdPerMillion::from_whole_usd(18)),
+                    cache_creation_per_million_usd: Some(UsdPerMillion::from_whole_usd(10)),
+                    cache_read_per_million_usd: Some(UsdPerMillion::from_whole_usd(5)),
+                },
+                by_tier: BTreeMap::from([(
+                    "priority".to_owned(),
+                    ThresholdRate {
+                        input_per_million_usd: Some(UsdPerMillion::from_whole_usd(7)),
+                        ..ThresholdRate::default()
+                    },
+                )]),
+            },
+        );
+        install_local_snapshot(
+            model,
+            Pricing {
+                model: model.to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                by_tier: BTreeMap::from([(
+                    "priority".to_owned(),
+                    TierRate {
+                        input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                        output_per_million_usd: UsdPerMillion::from_whole_usd(12),
+                    },
+                )]),
+            },
+            Some(UsdPerMillion::from_whole_usd(4)),
+            Some(UsdPerMillion::from_whole_usd(1)),
+            bands,
+        );
+
+        let at_threshold = global_catalog().estimate_max_with_local_cache(
+            model,
+            LocalCacheInputEstimate {
+                uncached_input_tokens: 100_000,
+                cache_prefix_5m_tokens: 60_000,
+                cache_prefix_1h_tokens: 40_000,
+            },
+            1_000,
+            Some("priority"),
+        );
+        let above_threshold = global_catalog().estimate_max_with_local_cache(
+            model,
+            LocalCacheInputEstimate {
+                uncached_input_tokens: 100_001,
+                cache_prefix_5m_tokens: 60_000,
+                cache_prefix_1h_tokens: 40_000,
+            },
+            1_000,
+            Some("priority"),
+        );
+
+        // Unique gross is exactly 200,000, then 200,001, not whole input
+        // plus the prefixes again. Below the band: 100,000 * $3/M +
+        // 60,000 * $4/M + 40,000 * $6/M + 1,000 * $12/M = 792,000 micros.
+        // Above it: tier input overrides $99/M with $7/M; sparse cache/output
+        // fields inherit $10/$5/$18 per million from the default band.
+        // 100,001 * $7/M + 60,000 * $10/M + 40,000 * $14/M +
+        // 1,000 * $18/M = 1,878,007 micros.
+        assert_eq!(at_threshold, Some(792_000));
+        assert_eq!(above_threshold, Some(1_878_007));
+    }
+
+    #[test]
+    fn local_cache_pricing_returns_none_for_unknown_model() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        global_catalog().install_snapshot(CatalogSnapshot::empty_cost_disabled());
+
+        let estimate = global_catalog().estimate_max_with_local_cache(
+            "missing-local-model",
+            LocalCacheInputEstimate {
+                uncached_input_tokens: 1,
+                cache_prefix_5m_tokens: 2,
+                cache_prefix_1h_tokens: 3,
+            },
+            0,
+            None,
+        );
+
+        assert_eq!(estimate, None);
+    }
+
+    #[test]
+    fn local_cache_pricing_saturates_cost_overflow() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "local-overflow-test";
+        install_local_snapshot(
+            model,
+            Pricing {
+                model: model.to_owned(),
+                input_per_million_usd: UsdPerMillion::from_micros_usd(u64::MAX),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(1),
+                by_tier: BTreeMap::new(),
+            },
+            None,
+            None,
+            BTreeMap::new(),
+        );
+
+        let estimate = global_catalog().estimate_max_with_local_cache(
+            model,
+            LocalCacheInputEstimate {
+                uncached_input_tokens: u64::MAX,
+                cache_prefix_5m_tokens: 0,
+                cache_prefix_1h_tokens: 0,
+            },
+            0,
+            None,
+        );
+
+        assert_eq!(estimate, Some(u64::MAX));
     }
 }

@@ -65,6 +65,16 @@ pub struct RoutingCachePricing {
     pub cache_creation_1h_per_million_usd: Option<UsdPerMillion>,
     pub cache_read_per_million_usd: Option<UsdPerMillion>,
 }
+/// Disjoint local input regions used for prompt-cache reservation pricing.
+///
+/// Each token belongs to exactly one region: the uncached request tail, the
+/// five-minute cache prefix, or the one-hour cache prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalCacheInputEstimate {
+    pub uncached_input_tokens: u64,
+    pub cache_prefix_5m_tokens: u64,
+    pub cache_prefix_1h_tokens: u64,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PricingStatus {
@@ -339,6 +349,89 @@ impl PriceCatalog {
             u128::from(max_output) * u128::from(output_price.as_micros_usd()) / 1_000_000;
         let total = input_cost
             .saturating_add(cache_cost)
+            .saturating_add(output_cost);
+        Some(u64::try_from(total).unwrap_or(u64::MAX))
+    }
+
+    pub fn estimate_max_with_local_cache(
+        &self,
+        model: &str,
+        input: LocalCacheInputEstimate,
+        max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<u64> {
+        let normalized = normalize_model_id(model);
+        let snapshot = self.current();
+        let Some((model_key, base_pricing)) = snapshot
+            .models
+            .get_key_value(model)
+            .or_else(|| snapshot.models.get_key_value(&normalized))
+        else {
+            record_missing_price_field(&normalized, "model");
+            return None;
+        };
+        let tier = canonical_service_tier(service_tier);
+        let resolved = resolve_tier_rate(base_pricing, tier.as_deref());
+        let mut input_price = resolved.input_per_million_usd;
+        let mut output_price = resolved.output_per_million_usd;
+        let mut cache_creation_price = resolve_optional_price(
+            snapshot
+                .cache_creation_per_million_usd
+                .get(model_key)
+                .copied(),
+            snapshot
+                .cache_creation_per_million_usd_by_tier
+                .get(model_key),
+            tier.as_deref(),
+        );
+        let mut cache_read_price = resolve_optional_price(
+            snapshot.cache_read_per_million_usd.get(model_key).copied(),
+            snapshot.cache_read_per_million_usd_by_tier.get(model_key),
+            tier.as_deref(),
+        );
+        let gross_input = input
+            .uncached_input_tokens
+            .saturating_add(input.cache_prefix_5m_tokens)
+            .saturating_add(input.cache_prefix_1h_tokens);
+        crate::tier_resolver::apply_threshold_bands(
+            snapshot.above_tokens_rates.get(model_key),
+            gross_input,
+            tier.as_deref(),
+            &mut input_price,
+            &mut output_price,
+            Some(&mut cache_creation_price),
+            Some(&mut cache_read_price),
+        );
+
+        let mut cache_5m_unit_price = input_price;
+        for candidate in [cache_creation_price, cache_read_price]
+            .into_iter()
+            .flatten()
+        {
+            if candidate.as_micros_usd() > cache_5m_unit_price.as_micros_usd() {
+                cache_5m_unit_price = candidate;
+            }
+        }
+        let mut cache_1h_unit_price = cache_5m_unit_price;
+        let derived_1h_price = resolved_cache_creation_1h_price(input_price);
+        if derived_1h_price.as_micros_usd() > cache_1h_unit_price.as_micros_usd() {
+            cache_1h_unit_price = derived_1h_price;
+        }
+
+        let input_cost = u128::from(input.uncached_input_tokens)
+            * u128::from(input_price.as_micros_usd())
+            / 1_000_000;
+        let cache_5m_cost = u128::from(input.cache_prefix_5m_tokens)
+            * u128::from(cache_5m_unit_price.as_micros_usd())
+            / 1_000_000;
+        let cache_1h_cost = u128::from(input.cache_prefix_1h_tokens)
+            * u128::from(cache_1h_unit_price.as_micros_usd())
+            / 1_000_000;
+        let output_cost =
+            u128::from(max_output) * u128::from(output_price.as_micros_usd()) / 1_000_000;
+        let total = input_cost
+            .saturating_add(cache_5m_cost)
+            .saturating_add(cache_1h_cost)
             .saturating_add(output_cost);
         Some(u64::try_from(total).unwrap_or(u64::MAX))
     }

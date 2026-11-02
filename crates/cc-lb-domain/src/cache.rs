@@ -66,15 +66,17 @@ impl PrefixBytes {
         Self(self.0.saturating_sub(other.0))
     }
 
-    /// Token-denominated estimate of this prefix, used for scoring, pricing,
-    /// request events, and plugin wire `predicted_cache_*_tokens`.
+    /// Token-denominated estimate of this prefix, used for scoring, routing
+    /// pricing, request events, and plugin wire `predicted_cache_*_tokens`.
     ///
     /// Returns the serialized byte length unchanged. A byte-level BPE token
     /// covers at least one byte, so this bounds byte-level BPE tokenization of
-    /// the serialized JSON from above. It is NOT a bound on provider-billed
-    /// tokens: image and document blocks are serialized as source references,
-    /// so their billed tokens can exceed their serialized size. This is the
-    /// only bytes-to-tokens conversion.
+    /// the serialized JSON from above. It is not a bound on provider-billed
+    /// tokens: inline base64 payloads are embedded in the serialized prefix,
+    /// while URL and file-ID sources contribute their references. Neither
+    /// representation measures provider image or document tokens. This is the
+    /// only conversion of `PrefixBytes` to a token estimate; limit admission
+    /// uses a separate estimate.
     pub const fn as_token_estimate(self) -> u64 {
         self.0
     }

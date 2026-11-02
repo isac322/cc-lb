@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
 - Test fixture condition waiters no longer lose broadcasts when their state changes during observation.
 - The notification burst test uses a controlled clock, avoiding false extra-rebuild failures under scheduler contention.
 - Request diagnostics now report `matched_v3_cache_key` and match indices only for an actual selected route match. Routed misses omit those match-only fields while retaining request prefix hashes and cold prediction fields. ([#1006](https://github.com/isac322/cc-lb/issues/1006))

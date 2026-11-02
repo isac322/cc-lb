@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, StatusCode};
@@ -34,15 +34,23 @@ const ADMIN_TOKEN_ENV: &str = "CC_LB_TASK_31_ADMIN_TOKEN";
 const MASTER_KEY_ENV: &str = "CC_LB_TASK_31_MASTER_KEY";
 const MASTER_KEY_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const MODEL: &str = "claude-3-5-sonnet-20241022";
+const QA_TEXT_INPUT_TOKENS: u64 = 4_002;
+const QA_TEXT_COST_MICROS: u64 = 12_021;
+
+static TEST_ENV: Once = Once::new();
+
+fn ensure_test_env() {
+    TEST_ENV.call_once(|| unsafe {
+        std::env::set_var(ADMIN_TOKEN_ENV, ADMIN_TOKEN);
+        std::env::set_var(MASTER_KEY_ENV, MASTER_KEY_HEX);
+    });
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(evidence_dir())?;
     let dir = tempfile::tempdir()?;
-    unsafe {
-        std::env::set_var(ADMIN_TOKEN_ENV, ADMIN_TOKEN);
-        std::env::set_var(MASTER_KEY_ENV, MASTER_KEY_HEX);
-    }
+    ensure_test_env();
 
     let client = TestClient::new(Duration::from_secs(10));
     let litellm = MockServer::start().await;
@@ -58,6 +66,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         .and(path("/v1/messages"))
         .respond_with(UsageResponder {
             output_tokens: usage_tokens.clone(),
+            model: MODEL,
         })
         .mount(&upstream)
         .await;
@@ -168,9 +177,370 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn managed_image_admission_running_proxy_sqlite_regression()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_test_env();
+
+    let client = TestClient::new(Duration::from_secs(10));
+    let litellm = MockServer::start().await;
+    let upstream = MockServer::start().await;
+    let request_journal = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let usage_tokens = Arc::new(AtomicU64::new(0));
+
+    // Use the canonical shared catalog fixture so concurrent integration
+    // suites observe the same model and rates through the global catalog.
+    Mock::given(method("GET"))
+        .and(path("/prices"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(price_catalog_fixture()))
+        .mount(&litellm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(JournalResponder {
+            output_tokens: usage_tokens,
+            model: MODEL,
+            request_journal: Arc::clone(&request_journal),
+        })
+        .mount(&upstream)
+        .await;
+
+    let storage_path = dir.path().join("qa1005-28.sqlite");
+    let keys = seed_qa1005_keys(&storage_path, upstream.uri()).await?;
+    let server = StartedServer::start(base_config(storage_path, litellm.uri())).await?;
+    wait_for_price_catalog().await?;
+    let text_body = qa_text_control_body();
+    let [text_key, image_key, input_key, local_key, rejected_key] = keys.as_slice() else {
+        return Err("QA1005-28 key fixture count changed".into());
+    };
+    let text_response = send_request_body(&client, &server.proxy_url, text_key, &text_body).await?;
+    assert_eq!(
+        text_response.status(),
+        StatusCode::OK,
+        "text control: {}",
+        text_response.text().await?
+    );
+
+    let image_data = synthetic_png_base64(1024, 1024);
+    assert!(
+        image_data.len() > 1_000_000,
+        "the regression fixture must be a large encoded PNG"
+    );
+    let image_body = qa_image_body(&image_data);
+    let image_response =
+        send_request_body(&client, &server.proxy_url, image_key, &image_body).await?;
+    assert_eq!(
+        image_response.status(),
+        StatusCode::OK,
+        "large native image: {}",
+        image_response.text().await?
+    );
+
+    let input_response =
+        send_request_body(&client, &server.proxy_url, input_key, &image_body).await?;
+    assert_eq!(
+        input_response.status(),
+        StatusCode::OK,
+        "image input-token allowance: {}",
+        input_response.text().await?
+    );
+
+    let local_body = qa_local_prefix_body();
+    let local_response =
+        send_request_body(&client, &server.proxy_url, local_key, &local_body).await?;
+    assert_eq!(
+        local_response.status(),
+        StatusCode::OK,
+        "local prefix affordable at target boundary: {}",
+        local_response.text().await?
+    );
+
+    let before_rejected = request_journal
+        .lock()
+        .expect("upstream request journal lock")
+        .len();
+    let rejected_response =
+        send_request_body(&client, &server.proxy_url, rejected_key, &local_body).await?;
+    assert_eq!(
+        rejected_response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "local prefix deterministic target-minus-one rejection: {}",
+        rejected_response.text().await?
+    );
+    let after_rejected = request_journal
+        .lock()
+        .expect("upstream request journal lock")
+        .len();
+    assert_eq!(
+        after_rejected, before_rejected,
+        "a pre-dispatch 429 must not reach the upstream"
+    );
+
+    {
+        let journal = request_journal
+            .lock()
+            .expect("upstream request journal lock");
+        assert!(
+            journal.iter().any(|body| body == &text_body),
+            "the text control body must be forwarded unchanged"
+        );
+        assert!(
+            journal.iter().any(|body| body == &image_body),
+            "the native image body must be forwarded unchanged"
+        );
+        assert!(
+            journal.iter().any(|body| body == &local_body),
+            "the local-prefix body must be forwarded unchanged"
+        );
+        assert_eq!(
+            journal.len(),
+            4,
+            "only admitted requests reach the upstream"
+        );
+    }
+    server.shutdown().await;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct JournalResponder {
+    output_tokens: Arc<AtomicU64>,
+    model: &'static str,
+    request_journal: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl Respond for JournalResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        self.request_journal
+            .lock()
+            .expect("upstream request journal lock")
+            .push(request.body.clone());
+        ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_qa1005_28",
+            "type": "message",
+            "role": "assistant",
+            "model": self.model,
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": self.output_tokens.load(Ordering::SeqCst),
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0
+            }
+        }))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct QaKeySpec {
+    principal: &'static str,
+    limits: &'static [KeyLimit],
+}
+
+// Admitted keys store 10x the target so exact-boundary requests fit in both
+// cold (10%) and warm (100%) durable-usage states. The reject key intentionally
+// stores the raw target-minus-one so it rejects in either state.
+const QA_COST_TEXT: &[KeyLimit] = &[KeyLimit {
+    kind: KeyLimitKind::CostUsd,
+    window_secs: 60,
+    cap_micros: 120_210, // cold target: 12,021; warm budget: 120,210
+}];
+const QA_COST_IMAGE: &[KeyLimit] = &[KeyLimit {
+    kind: KeyLimitKind::CostUsd,
+    window_secs: 60,
+    cap_micros: 143_850, // cold target: 14,385; warm budget: 143,850
+}];
+const QA_INPUT_IMAGE: &[KeyLimit] = &[KeyLimit {
+    kind: KeyLimitKind::InputTokens,
+    window_secs: 60,
+    cap_micros: 47_900, // cold target: 4,790; warm budget: 47,900
+}];
+const QA_COST_LOCAL: &[KeyLimit] = &[KeyLimit {
+    kind: KeyLimitKind::CostUsd,
+    window_secs: 60,
+    cap_micros: 420_300, // cold target: 42,030; warm budget: 420,300
+}];
+const QA_COST_LOCAL_REJECT: &[KeyLimit] = &[KeyLimit {
+    kind: KeyLimitKind::CostUsd,
+    window_secs: 60,
+    cap_micros: 42_029, // raw target-minus-one; rejects in cold and warm states
+}];
+
+const QA_KEY_SPECS: [QaKeySpec; 5] = [
+    QaKeySpec {
+        principal: "qa1005-28-text",
+        limits: QA_COST_TEXT,
+    },
+    QaKeySpec {
+        principal: "qa1005-28-image-cost",
+        limits: QA_COST_IMAGE,
+    },
+    QaKeySpec {
+        principal: "qa1005-28-image-input",
+        limits: QA_INPUT_IMAGE,
+    },
+    QaKeySpec {
+        principal: "qa1005-28-local",
+        limits: QA_COST_LOCAL,
+    },
+    QaKeySpec {
+        principal: "qa1005-28-local-reject",
+        limits: QA_COST_LOCAL_REJECT,
+    },
+];
+
+async fn send_request_body(
+    client: &TestClient,
+    proxy_url: &str,
+    key: &str,
+    body: &[u8],
+) -> Result<TestResponse, Box<dyn std::error::Error>> {
+    client
+        .request(
+            "POST",
+            &format!("{proxy_url}/v1/messages"),
+            &[("content-type", "application/json"), ("x-api-key", key)],
+            body,
+        )
+        .await
+        .map_err(Into::into)
+}
+
+fn qa_text_control_body() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "model": MODEL,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "x".repeat(16_004)}]
+    }))
+    .expect("text control JSON serializes")
+}
+
+fn qa_image_body(data: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "model": MODEL,
+        "max_tokens": 1,
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": data
+                }
+            }]
+        }]
+    }))
+    .expect("image JSON serializes")
+}
+
+fn qa_local_prefix_body() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "model": MODEL,
+        "max_tokens": 1,
+        "system": [{
+            "type": "text",
+            "text": "p".repeat(16_000),
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }],
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": "t".repeat(40_000)}]
+        }]
+    }))
+    .expect("local-prefix JSON serializes")
+}
+
+fn synthetic_png_base64(width: u32, height: u32) -> String {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0_u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+            }
+        }
+        !crc
+    }
+
+    fn append_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        png.extend_from_slice(
+            &u32::try_from(data.len())
+                .expect("test PNG chunk fits in u32")
+                .to_be_bytes(),
+        );
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        let mut crc_input = Vec::with_capacity(kind.len() + data.len());
+        crc_input.extend_from_slice(kind);
+        crc_input.extend_from_slice(data);
+        png.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+    }
+
+    let row_len = usize::try_from(width).expect("test PNG width fits") + 1;
+    let raw_len = row_len
+        .checked_mul(usize::try_from(height).expect("test PNG height fits"))
+        .expect("test PNG raster fits");
+    let raw = vec![0_u8; raw_len];
+    let mut zlib = vec![0x78, 0x01];
+    let mut offset = 0;
+    while offset < raw.len() {
+        let remaining = raw.len() - offset;
+        let block_len = remaining.min(65_535);
+        let final_block = offset + block_len == raw.len();
+        zlib.push(u8::from(final_block));
+        let length = u16::try_from(block_len).expect("stored block fits");
+        zlib.extend_from_slice(&length.to_le_bytes());
+        zlib.extend_from_slice(&(!length).to_le_bytes());
+        zlib.extend_from_slice(&raw[offset..offset + block_len]);
+        offset += block_len;
+    }
+    let mut adler_a = 1_u32;
+    let mut adler_b = 0_u32;
+    for byte in &raw {
+        adler_a = (adler_a + u32::from(*byte)) % 65_521;
+        adler_b = (adler_b + adler_a) % 65_521;
+    }
+    zlib.extend_from_slice(&(adler_b << 16 | adler_a).to_be_bytes());
+
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    append_chunk(&mut png, b"IHDR", &ihdr);
+    append_chunk(&mut png, b"IDAT", &zlib);
+    append_chunk(&mut png, b"IEND", &[]);
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(png.len().div_ceil(3) * 4);
+    for chunk in png.chunks(3) {
+        let first = u32::from(chunk[0]);
+        let second = chunk.get(1).copied().map(u32::from).unwrap_or(0);
+        let third = chunk.get(2).copied().map(u32::from).unwrap_or(0);
+        let value = first << 16 | second << 8 | third;
+        encoded.push(char::from(TABLE[((value >> 18) & 0x3f) as usize]));
+        encoded.push(char::from(TABLE[((value >> 12) & 0x3f) as usize]));
+        encoded.push(if chunk.len() > 1 {
+            char::from(TABLE[((value >> 6) & 0x3f) as usize])
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            char::from(TABLE[(value & 0x3f) as usize])
+        } else {
+            '='
+        });
+    }
+    encoded
+}
+
 #[derive(Clone)]
 struct UsageResponder {
     output_tokens: Arc<AtomicU64>,
+    model: &'static str,
 }
 
 impl Respond for UsageResponder {
@@ -179,7 +549,7 @@ impl Respond for UsageResponder {
             "id": "msg_task31",
             "type": "message",
             "role": "assistant",
-            "model": MODEL,
+            "model": self.model,
             "content": [{"type": "text", "text": "ok"}],
             "stop_reason": "end_turn",
             "stop_sequence": null,
@@ -516,11 +886,22 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
     seed_price_catalog();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if global_catalog().lookup(MODEL, None).is_some() {
+        let ready = global_catalog().lookup(MODEL, None).is_some_and(|pricing| {
+            pricing.input_per_million_usd == UsdPerMillion::from_whole_usd(3)
+                && pricing.output_per_million_usd == UsdPerMillion::from_whole_usd(15)
+        }) && global_catalog().estimate_max_with_cache(
+            MODEL,
+            QA_TEXT_INPUT_TOKENS,
+            1,
+            0,
+            false,
+            None,
+        ) == Some(QA_TEXT_COST_MICROS);
+        if ready {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err("price catalog was not loaded".into());
+            return Err("price catalog was not loaded with expected 3/15 prices".into());
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -662,6 +1043,72 @@ async fn seed_runtime_state(
         .await?;
     let (key_id, _) = cc_lb_control::api_keys::secret::parse(plaintext.expose())?;
     Ok((plaintext.expose().to_owned(), key_id))
+}
+
+async fn seed_qa1005_keys(
+    sqlite_path: &std::path::Path,
+    upstream_url: String,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let storage = sqlite_storage(sqlite_path).await?;
+    let created = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "qa1005-28-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: Some(Url::parse(&upstream_url)?),
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await?;
+    let aead = AeadService::from_master_key([0x11; 32]);
+    let ciphertext = aead.encrypt(b"sk-ant-qa1005-28", created.id.as_bytes())?;
+    UpstreamStore::update_api_key_secret(storage.as_ref(), created.id, Some(ciphertext)).await?;
+    let mut keys = Vec::with_capacity(QA_KEY_SPECS.len());
+    for spec in QA_KEY_SPECS {
+        PrincipalStore::create(
+            storage.as_ref(),
+            PrincipalCreate {
+                name: spec.principal.to_owned(),
+                kind: PrincipalKind::Machine,
+                allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],
+                allowed_upstreams: vec![],
+                default_limits: vec![
+                    PrincipalLimit {
+                        kind: PrincipalLimitKind::Requests,
+                        window_secs: 60,
+                        cap_micros: 10,
+                    },
+                    PrincipalLimit {
+                        kind: PrincipalLimitKind::TotalTokens,
+                        window_secs: 60,
+                        cap_micros: 1_000_000,
+                    },
+                ],
+                cache_keepalive: None,
+            },
+            now_secs(),
+        )
+        .await?;
+        let (_record, plaintext) = KeyStore::new(storage.clone())
+            .create(
+                spec.principal,
+                CreateParams {
+                    label: "qa1005-28".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: spec.limits.to_vec(),
+                },
+            )
+            .await?;
+        keys.push(plaintext.expose().to_owned());
+    }
+    Ok(keys)
 }
 
 fn base_config(sqlite_path: std::path::PathBuf, litellm_url: String) -> ReservedConfig {

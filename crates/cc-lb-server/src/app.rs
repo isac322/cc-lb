@@ -276,6 +276,17 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
             )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+    fn estimate_max_with_local_cache(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache(model, input, max_output, service_tier)
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
 }
 
 pub struct App {
@@ -3979,6 +3990,23 @@ mod tests {
             _service_tier: Option<&str>,
         ) -> Option<i64> {
             Some(200)
+        }
+        fn estimate_max_with_local_cache(
+            &self,
+            model: &str,
+            input: cc_lb_pricing::LocalCacheInputEstimate,
+            max_output: u64,
+            service_tier: Option<&str>,
+        ) -> Option<i64> {
+            self.estimate_max(
+                model,
+                input
+                    .uncached_input_tokens
+                    .saturating_add(input.cache_prefix_5m_tokens)
+                    .saturating_add(input.cache_prefix_1h_tokens),
+                max_output,
+                service_tier,
+            )
         }
     }
 
