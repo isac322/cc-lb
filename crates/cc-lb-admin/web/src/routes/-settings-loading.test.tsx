@@ -332,7 +332,7 @@ const fileConfig = {
   upstream_affinity: { ttl_days: 90 },
   circuit_breaker: { failures_to_open: 5 },
   bulkhead: { max_conns_per_upstream: 50 },
-  prompt_cache_shadow: { grace_margin_secs: 30 },
+  prompt_cache_shadow: { grace_margin_secs: 0 },
   limit_reservation_ttl: { ttl_secs: 300 },
   admin: {
     auth: {

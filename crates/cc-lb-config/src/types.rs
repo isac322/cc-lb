@@ -498,22 +498,13 @@ impl Default for SubscriptionQuotaConfig {
 /// scores.
 ///
 /// Configuration keys and defaults:
-/// - `grace_margin_secs` (default: 30) - margin subtracted from the observed TTL when
-///   an observation's expiry is recorded, expiring entries slightly early to absorb
-///   provider-side TTL jitter
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// - `grace_margin_secs` (default: 0) - optional shortening of the
+///   dispatch-anchored provider TTL; zero preserves the full TTL.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PromptCacheShadowConfig {
     #[serde(default = "default_prompt_cache_shadow_grace_margin_secs")]
     pub grace_margin_secs: u64,
-}
-
-impl Default for PromptCacheShadowConfig {
-    fn default() -> Self {
-        Self {
-            grace_margin_secs: 30,
-        }
-    }
 }
 
 /// Background TTL sweeper for stale limit reservations. The LimitEngine

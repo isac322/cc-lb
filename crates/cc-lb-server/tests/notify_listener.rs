@@ -298,7 +298,7 @@ async fn spawn_listener(
         data_dir: fixture._dir.path().to_path_buf(),
         lazy_refresher: None,
         subscription_quota_cache: fixture.quota_cache.clone(),
-        prompt_cache_grace_margin_secs: 30,
+        prompt_cache_grace_margin_secs: 0,
         prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         subscription_quota_routing_max_staleness_secs: 1800,
         clock: Arc::new(cc_lb_clock::SystemClock),
