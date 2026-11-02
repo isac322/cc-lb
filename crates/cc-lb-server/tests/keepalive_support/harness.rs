@@ -581,6 +581,42 @@ impl Harness {
         .await
         .unwrap_or_else(|_| panic!("no durable enqueue or not-tracked decision for session {hash}"))
     }
+    pub async fn wait_for_not_tracked_reason(
+        &self,
+        hash: &str,
+        timeout: Duration,
+    ) -> Option<String> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let reason = match &self.storage {
+                    StorageBackend::Sqlite(storage) => sqlx::query_scalar::<_, String>(
+                        "SELECT reason FROM cache_keepalive_decisions \
+                         WHERE session_key_hash = ? AND decision = 'not_tracked' LIMIT 1",
+                    )
+                    .bind(hash)
+                    .fetch_optional(storage.pool())
+                    .await
+                    .expect("not-tracked decision reason"),
+                    #[cfg(feature = "postgres")]
+                    StorageBackend::Postgres(storage) => sqlx::query_scalar::<_, String>(
+                        "SELECT reason FROM cache_keepalive_decisions \
+                         WHERE session_key_hash = $1 AND decision = 'not_tracked' LIMIT 1",
+                    )
+                    .bind(hash)
+                    .fetch_optional(storage.pool())
+                    .await
+                    .expect("not-tracked decision reason"),
+                };
+                if reason.is_some() {
+                    return reason;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
     pub async fn wait_for_not_tracked(&self, hash: &str, timeout: Duration) -> bool {
         tokio::time::timeout(timeout, async {
             loop {

@@ -230,7 +230,7 @@ async fn b3_small_haiku_helper_does_not_create_keepalive() {
 }
 
 #[tokio::test]
-async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
+async fn b4_zero_token_incompatible_inputs_persist_skip_without_renewal() {
     let harness = Harness::new(8_388_608).await;
     let cases = [
         (
@@ -241,6 +241,7 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
             json!({"effort": "medium"}),
             json!({"type": "any"}),
             256,
+            "forced tool_choice",
         ),
         (
             "b4-named-tool",
@@ -250,6 +251,7 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
             json!({"effort": "medium"}),
             json!({"type": "tool", "name": "bash"}),
             256,
+            "forced tool_choice",
         ),
         (
             "b4-structured-output",
@@ -259,6 +261,7 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
             json!({"effort": "medium", "format": {"type": "json_schema"}}),
             json!({"type": "auto"}),
             256,
+            "structured output",
         ),
         (
             "b4-enabled-thinking",
@@ -268,11 +271,12 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
             json!({"effort": "medium"}),
             json!({"type": "auto"}),
             4096,
+            "enabled thinking",
         ),
     ];
-    let mut failures = Vec::new();
 
-    for (prefix, session, model, thinking, output_config, tool_choice, max_tokens) in cases {
+    for (prefix, session, model, thinking, output_config, tool_choice, max_tokens, feature) in cases
+    {
         let session_key_hash = harness.session_key_hash(session, None);
         let response = post_with_claude_code_headers(
             &harness,
@@ -294,61 +298,131 @@ async fn b4_zero_token_incompatible_inputs_never_send_rejected_renewals() {
         )
         .await;
         assert_eq!(response["stop_reason"], "tool_use", "{prefix}");
-        let generation = harness
-            .wait_for_enqueued_or_not_tracked(&session_key_hash)
-            .await;
-        if let Some(generation) = generation {
-            harness
-                .advance_and_dispatch_due(
-                    Duration::from_secs(270),
-                    &[DueJob {
-                        session_key_hash: &session_key_hash,
-                        generation,
-                        mock_prefix: None,
-                    }],
-                )
-                .await;
-        } else {
-            harness.advance_clock(Duration::from_secs(270));
-        }
 
-        let events = harness.mock_events();
-        let renewals: Vec<_> = events
-            .iter()
-            .filter(|event| event.kind == "renewal" && event_has_prefix(event, prefix))
-            .collect();
-        let session_row = harness.read_session(&session_key_hash).await;
-        println!(
-            "{prefix}: generation={generation:?} renewals={} statuses={:?} rejections={:?} session={session_row:?}",
-            renewals.len(),
-            renewals
-                .iter()
-                .map(|event| event.status)
-                .collect::<Vec<_>>(),
-            renewals
-                .iter()
-                .map(|event| &event.rejection)
-                .collect::<Vec<_>>(),
+        let reason = harness
+            .wait_for_not_tracked_reason(&session_key_hash, Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|| panic!("{prefix}: missing durable not-tracked decision"));
+        assert!(
+            reason.starts_with("zero-token renewal unsupported: ") && reason.contains(feature),
+            "{prefix}: unexpected decision reason {reason:?}"
         );
-        for renewal in renewals {
-            if !renewal.accepted() {
-                failures.push(format!(
-                    "{prefix}: renewal rejected: {:?}",
-                    renewal.rejection
-                ));
-            }
-        }
-        if session_row
-            .as_ref()
-            .and_then(|row| row.terminal_reason.as_deref())
-            == Some("dispatch_error")
-        {
-            failures.push(format!(
-                "{prefix}: ended with dispatch_error: {session_row:?}"
-            ));
-        }
+        assert!(
+            harness.read_session(&session_key_hash).await.is_none(),
+            "{prefix}: incompatible request must not create a session"
+        );
+        assert_eq!(
+            harness.keepalive_job_count().await,
+            0,
+            "{prefix}: incompatible request must not enqueue a job"
+        );
+        assert!(
+            !harness
+                .mock_events()
+                .iter()
+                .any(|event| event.kind == "renewal" && event_has_prefix(event, prefix)),
+            "{prefix}: incompatible request sent a renewal"
+        );
     }
-    assert!(failures.is_empty(), "B4 failures:\n{}", failures.join("\n"));
+}
+
+#[tokio::test]
+async fn b6_forced_tool_choice_cancels_active_session_and_fences_queued_renewal() {
+    let harness = Harness::new(8_388_608).await;
+    let session = "00000000-0000-7000-8000-000000000107";
+    let session_key_hash = harness.session_key_hash(session, None);
+
+    let first = post_with_claude_code_headers(
+        &harness,
+        strict_body(
+            "claude-opus-4-6",
+            "b6-adaptive",
+            83_900,
+            "5m",
+            "first",
+            json!({"type": "auto"}),
+        ),
+        session,
+        None,
+    )
+    .await;
+    assert_eq!(first["stop_reason"], "tool_use");
+    harness
+        .wait_for_enqueued_generation(&session_key_hash, 1)
+        .await;
+    harness
+        .advance_and_dispatch_due(
+            Duration::from_secs(270),
+            &[DueJob {
+                session_key_hash: &session_key_hash,
+                generation: 1,
+                mock_prefix: Some("b6-adaptive"),
+            }],
+        )
+        .await;
+    let renewal_count = harness
+        .mock_events()
+        .iter()
+        .filter(|event| event.kind == "renewal")
+        .count();
+    assert_eq!(renewal_count, 1);
+    harness
+        .wait_for_enqueued_generation(&session_key_hash, 2)
+        .await;
+
+    let mut forced_tool_body: Value = serde_json::from_slice(&strict_body(
+        "claude-opus-4-6",
+        "b6-forced-tool",
+        83_900,
+        "5m",
+        "forced",
+        json!({"type": "auto"}),
+    ))
+    .expect("forced tool request JSON");
+    forced_tool_body["tool_choice"] = json!({"type": "any"});
+    let second = post_with_claude_code_headers(
+        &harness,
+        serde_json::to_vec(&forced_tool_body).expect("forced tool request body"),
+        session,
+        None,
+    )
+    .await;
+    assert_eq!(second["stop_reason"], "tool_use");
+    let reason = harness
+        .wait_for_not_tracked_reason(&session_key_hash, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("B6 missing durable not-tracked decision"));
+    assert!(
+        reason.starts_with("zero-token renewal unsupported: ")
+            && reason.contains("forced tool_choice"),
+        "B6 unexpected decision reason {reason:?}"
+    );
+    let cancelled = harness
+        .wait_for_session_terminal(&session_key_hash, Duration::from_secs(5))
+        .await
+        .expect("B6 cancelled session");
+    assert_eq!(cancelled.terminal_reason.as_deref(), Some("cancelled"));
+    assert!(cancelled.error.is_none());
+
+    harness
+        .advance_and_dispatch_due(
+            Duration::from_secs(270),
+            &[DueJob {
+                session_key_hash: &session_key_hash,
+                generation: 2,
+                mock_prefix: None,
+            }],
+        )
+        .await;
+    assert_eq!(
+        harness
+            .mock_events()
+            .iter()
+            .filter(|event| event.kind == "renewal")
+            .count(),
+        renewal_count,
+        "cancelled session must not renew its previously queued job"
+    );
 }
 
 #[tokio::test]
