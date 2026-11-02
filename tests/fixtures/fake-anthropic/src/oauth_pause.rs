@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Notify;
 
+use crate::condition::wait_for_condition;
+
 #[derive(Clone)]
 pub struct OAuthRefreshPause {
     inner: Arc<OAuthRefreshPauseInner>,
@@ -45,9 +47,11 @@ impl OAuthRefreshPause {
     }
 
     pub async fn wait_until_entered(&self) {
-        while !self.inner.entered.load(Ordering::SeqCst) {
-            self.inner.entered_notify.notified().await;
-        }
+        wait_for_condition(
+            || self.inner.entered.load(Ordering::SeqCst),
+            &self.inner.entered_notify,
+        )
+        .await;
     }
 
     pub fn release(&self) {
@@ -58,8 +62,10 @@ impl OAuthRefreshPause {
     pub(crate) async fn pause_response(&self) {
         self.inner.entered.store(true, Ordering::SeqCst);
         self.inner.entered_notify.notify_waiters();
-        while !self.inner.released.load(Ordering::SeqCst) {
-            self.inner.released_notify.notified().await;
-        }
+        wait_for_condition(
+            || self.inner.released.load(Ordering::SeqCst),
+            &self.inner.released_notify,
+        )
+        .await;
     }
 }

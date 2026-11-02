@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod condition;
+
 pub mod modes;
 pub mod oauth;
 pub mod oauth_pause;

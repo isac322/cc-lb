@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Test fixture condition waiters no longer lose broadcasts when their state changes during observation.
 - Request diagnostics now report `matched_v3_cache_key` and match indices only for an actual selected route match. Routed misses omit those match-only fields while retaining request prefix hashes and cold prediction fields. ([#1006](https://github.com/isac322/cc-lb/issues/1006))
 - Prompt-cache routing now defaults `prompt_cache_shadow.grace_margin_secs` to `0` (previously `30`), avoiding early expiry of live cache observations. Explicitly configured grace margins remain effective. Buffered and SSE observations now share the upstream request-dispatch expiry anchor, so TTFB and response generation cannot extend the provider TTL. (#1002)
 - Prompt-cache keep-alive now skips live requests with enabled thinking, structured output (`output_config.format`), or forced tool choice (`tool` / `any`), recording a `not_tracked` reason instead of sending a renewal Anthropic rejects at `max_tokens: 0`. An incompatible turn cancels any existing active session. Adaptive thinking with automatic tool choice continues renewing unchanged.

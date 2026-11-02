@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::time::sleep;
 
+use crate::condition::wait_for_condition;
 use crate::oauth_pause::OAuthRefreshPause;
 use crate::weather::WeatherConfig;
 
@@ -119,14 +120,10 @@ impl MessageScript {
     }
 
     pub async fn wait_for_requests(&self, expected: usize, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, async {
-            loop {
-                if self.request_count() >= expected {
-                    return;
-                }
-                self.inner.notify.notified().await;
-            }
-        })
+        tokio::time::timeout(
+            timeout,
+            wait_for_condition(|| self.request_count() >= expected, &self.inner.notify),
+        )
         .await
         .is_ok()
     }
