@@ -8299,7 +8299,8 @@ fn is_official_anthropic_base_url(url: &Url) -> bool {
 
 #[cfg(test)]
 mod prompt_cache_policy_tests {
-    use super::is_official_anthropic_base_url;
+    use super::*;
+    use cc_lb_control::traits::NoopPromptCacheObservationSink;
 
     #[test]
     fn official_url_policy_accepts_only_default_anthropic_authority() {
@@ -8315,6 +8316,47 @@ mod prompt_cache_policy_tests {
             let url = url.parse().expect("test URL parses");
             assert_eq!(is_official_anthropic_base_url(&url), expected, "{url}");
         }
+    }
+
+    #[test]
+    fn literal_only_billing_breakpoint_records_custom_cache_creation() -> Result<(), Box<dyn std::error::Error>> {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "tools": [{
+                "name": "large_tool",
+                "description": "tool schema context ".repeat(2_000),
+                "input_schema": {"type": "object"}
+            }],
+            "system": [{
+                "type": "text",
+                "text": "x-anthropic-billing-header: cron-attribution",
+                "cache_control": {"type": "ephemeral"}
+            }]
+        });
+        let metadata = request_cache_metadata_from_value(&HeaderMap::new(), Some(&request));
+        assert!(metadata.bundles.official.cache_breakpoints.is_empty());
+        assert_eq!(metadata.cache_control_block_count, Some(1));
+        let literal = &metadata.bundles.literal;
+        let breakpoint = literal.cache_breakpoints.first().ok_or("literal breakpoint missing")?;
+        assert!(literal.cacheable_breakpoint_prefix_keys.contains(&breakpoint.prefix_hash));
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1004),
+            canonical_model_id: metadata.canonical_model_id.clone(),
+            cache_breakpoints: literal.cache_breakpoints.clone(),
+            cacheable_breakpoint_prefix_keys: literal.cacheable_breakpoint_prefix_keys.clone(),
+            selected_match: None,
+            sink: Arc::new(NoopPromptCacheObservationSink),
+            grace_margin_secs: 0,
+        };
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage { cache_creation_input_tokens: 8_192, cache_read_input_tokens: 0 },
+            1_800_000_000,
+        );
+        assert_eq!(decoded.observations.len(), 1);
+        assert_eq!(decoded.observations.first().map(|observation| observation.prefix_hash.as_str()), Some(breakpoint.prefix_hash.as_str()));
+        assert_eq!(decoded.dropped_below_threshold, 0);
+        Ok(())
     }
 }
 
@@ -8767,7 +8809,7 @@ fn request_cache_metadata_from_value_with_analysis(
         &canonical_model_id,
         &analysis,
     );
-    let literal_keys = literal_analysis
+    let mut literal_keys = literal_analysis
         .breakpoints
         .iter()
         .filter_map(|literal_breakpoint| {
@@ -8781,7 +8823,15 @@ fn request_cache_metadata_from_value_with_analysis(
                 })
                 .map(|_| literal_breakpoint.prefix_key.clone())
         })
-        .collect();
+        .collect::<HashSet<_>>();
+    literal_keys.extend(
+        cacheable_breakpoint_prefix_keys(
+            &literal_analysis,
+            &canonical_model_id,
+            cache_threshold_tokens(&canonical_model_id),
+        )
+        .into_iter(),
+    );
     let literal_bundle = prompt_cache_bundle_from_analysis(&literal_analysis, literal_keys);
     let cache_breakpoints = official_bundle.request_breakpoints.clone();
     let raw_cache_breakpoints = &literal_bundle.request_breakpoints;

@@ -691,142 +691,38 @@ fn analyze_v3_prompt_cache_structure<'a>(
     policy: PromptCachePolicy,
     serialization_scratch: &mut SerializationScratch,
 ) -> Option<V3StructuralAnalysis<'a>> {
-    analyze_v3_prompt_cache_structures(
-        value,
-        canonical_model,
-        policy,
-        false,
-        serialization_scratch,
-    )
-    .map(|(structural, _)| structural)
-}
-
-fn analyze_v3_prompt_cache_structures<'a>(
-    value: &'a Value,
-    canonical_model: &str,
-    policy: PromptCachePolicy,
-    include_literal: bool,
-    serialization_scratch: &mut SerializationScratch,
-) -> Option<(V3StructuralAnalysis<'a>, Option<Vec<V3StructuralBreakpoint>>)> {
     let blocks = flatten_prefix_blocks(value);
-    let resolved = resolve_breakpoints(value, &blocks, policy);
-    let literal_resolved = include_literal
-        .then(|| resolve_breakpoints(value, &blocks, PromptCachePolicy::Literal).unwrap_or_default());
-    if resolved.is_none() && literal_resolved.is_none() {
-        return None;
-    }
+    let resolved = resolve_breakpoints(value, &blocks, policy)?;
+    let salts = request_invalidator_salts(value, canonical_model);
     let digests = blocks
         .iter()
         .map(|block| Some(block_digest(block, serialization_scratch)))
         .collect::<Vec<_>>();
-    let salts = request_invalidator_salts(value, canonical_model);
-    let mut build = |policy, resolved: Vec<ResolvedBreakpoint<'a>>| {
-        let chain = PromptCachePrefixChain::from_request_blocks(
-            PromptCacheSimulatorKey::seed(canonical_model),
-            &blocks,
-            &salts,
-            &digests,
-            policy,
-            serialization_scratch,
-        );
-        resolved
-            .into_iter()
-            .filter_map(|resolved| {
-                let block = blocks.get(resolved.block_index)?;
-                let prefix_key = chain.prefix_key_hex(resolved.block_index)?;
-                Some(V3StructuralBreakpoint {
-                    block_index: resolved.block_index as u64,
-                    source: block.source,
-                    path: block.path.clone(),
-                    message_index: block.message_index,
-                    ttl: Some(resolved.ttl.to_owned()),
-                    prefix_key,
-                    lookback_prefixes: lookback_prefixes(&chain, resolved.block_index),
-                })
-            })
-            .collect()
-    };
-    let breakpoints = build(policy, resolved.unwrap_or_default());
-    let literal_breakpoints =
-        literal_resolved.map(|resolved| build(PromptCachePolicy::Literal, resolved));
-    Some((V3StructuralAnalysis { blocks, breakpoints }, literal_breakpoints))
-}
-fn finish_alternate_breakpoints(
-    structural: &V3StructuralAnalysis<'_>,
-    alternate: Option<Vec<V3StructuralBreakpoint>>,
-    primary_bytes: &[PrefixBytes],
-    canonical_model: &str,
-    scratch: &mut SerializationScratch,
-) -> Option<Vec<V3PromptCacheBreakpoint>> {
-    alternate.map(|breakpoints| {
-        breakpoints
-            .into_iter()
-            .map(|breakpoint| {
-                let prefix_bytes = structural
-                    .breakpoints
-                    .iter()
-                    .position(|primary| primary.block_index == breakpoint.block_index)
-                    .and_then(|position| primary_bytes.get(position))
-                    .copied()
-                    .unwrap_or_else(|| {
-                        breakpoint_prefix_bytes(
-                            canonical_model,
-                            &structural.blocks,
-                            breakpoint.block_index as usize,
-                            scratch,
-                        )
-                        .0
-                    });
-                V3PromptCacheBreakpoint {
-                    block_index: breakpoint.block_index,
-                    source: breakpoint.source,
-                    path: breakpoint.path,
-                    message_index: breakpoint.message_index,
-                    ttl: breakpoint.ttl,
-                    prefix_key: breakpoint.prefix_key,
-                    prefix_bytes,
-                    lookback_prefixes: breakpoint.lookback_prefixes,
-                }
-            })
-            .collect()
-    })
-}
-
-fn analyze_prompt_cache_variants_reference(
-    value: &Value,
-    canonical_model: &str,
-    policy: PromptCachePolicy,
-    include_literal: bool,
-) -> (V3PromptCacheAnalysis, Option<Vec<V3PromptCacheBreakpoint>>) {
-    let mut scratch = SerializationScratch::default();
-    let Some((structural, alternate)) = analyze_v3_prompt_cache_structures(
-        value,
-        canonical_model,
+    let chain = PromptCachePrefixChain::from_request_blocks(
+        PromptCacheSimulatorKey::seed(canonical_model),
+        &blocks,
+        &salts,
+        &digests,
         policy,
-        include_literal,
-        &mut scratch,
-    ) else {
-        return (unanalyzable_prompt_cache(), include_literal.then(Vec::new));
-    };
-    let bytes = structural
-        .breakpoints
-        .iter()
-        .map(|breakpoint| {
-            breakpoint_prefix_bytes(
-                canonical_model,
-                &structural.blocks,
-                breakpoint.block_index as usize,
-                &mut scratch,
-            )
-            .0
+        serialization_scratch,
+    );
+    let breakpoints = resolved
+        .into_iter()
+        .filter_map(|resolved| {
+            let block = blocks.get(resolved.block_index)?;
+            let prefix_key = chain.prefix_key_hex(resolved.block_index)?;
+            Some(V3StructuralBreakpoint {
+                block_index: resolved.block_index as u64,
+                source: block.source,
+                path: block.path.clone(),
+                message_index: block.message_index,
+                ttl: Some(resolved.ttl.to_owned()),
+                prefix_key,
+                lookback_prefixes: lookback_prefixes(&chain, resolved.block_index),
+            })
         })
-        .collect::<Vec<_>>();
-    let alternate =
-        finish_alternate_breakpoints(&structural, alternate, &bytes, canonical_model, &mut scratch);
-    (
-        finish_structural_analysis(structural, bytes).unwrap_or_else(unanalyzable_prompt_cache),
-        alternate,
-    )
+        .collect();
+    Some(V3StructuralAnalysis { blocks, breakpoints })
 }
 
 fn finish_structural_analysis(
