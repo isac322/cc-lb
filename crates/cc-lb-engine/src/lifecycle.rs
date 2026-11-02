@@ -724,25 +724,6 @@ pub fn build_candidates(
     .0
 }
 
-#[cfg(test)]
-pub(crate) fn build_candidates_with_matches(
-    view: &DynamicView,
-    principal_id: &str,
-    request_kind: RequestKind,
-    request_breakpoints: &[CacheBreakpoint],
-    warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
-    clock: &dyn Clock,
-) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
-    build_candidates_with_matches_for_bundles(
-        view,
-        principal_id,
-        request_kind,
-        request_breakpoints,
-        warm_entries,
-        None,
-        clock,
-    )
-}
 
 pub(crate) fn build_candidates_with_matches_for_bundles(
     view: &DynamicView,
