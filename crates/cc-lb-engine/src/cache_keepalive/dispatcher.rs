@@ -189,17 +189,17 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                     dispatch_started.elapsed(),
                     accounting_guard,
                 );
-                if matches!(&outcome, DispatchOutcome::CacheHit { .. }) {
-                    if let Some(plan) = observation_plan.as_ref() {
-                        publish_keepalive_observation(
-                            &self.dynamic_view,
-                            snapshot.upstream_id,
-                            plan,
-                            &headers,
-                            &body,
-                            dispatch_anchor_unix_secs,
-                        );
-                    }
+                if let DispatchOutcome::CacheHit { .. } = &outcome
+                    && let Some(plan) = observation_plan.as_ref()
+                {
+                    publish_keepalive_observation(
+                        &self.dynamic_view,
+                        snapshot.upstream_id,
+                        plan,
+                        &headers,
+                        &body,
+                        dispatch_anchor_unix_secs,
+                    );
                 }
                 outcome
             }
