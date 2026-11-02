@@ -1790,17 +1790,29 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
             .await
             .expect("apply postgres scheduler migrations");
         let worker_pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_millis(120))
-            .connect_with(options.database(&database_name))
-            .await
-            .expect("connect worker pool");
+            .min_connections(6)
+            .max_connections(6)
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_lazy_with(options.database(&database_name));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut warm = Vec::with_capacity(6);
+            while warm.len() < 6 {
+                if let Ok(conn) = worker_pool.acquire().await {
+                    warm.push(conn);
+                }
+            }
+            drop(warm);
+        })
+        .await
+        .expect("pre-warm worker pool connections");
         let pg_backend =
             SchedulerBackend::Postgres(PostgresSchedulerBackend::new(worker_pool.clone()));
+        let push_backend =
+            SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pg_pool.clone()));
         let mut fixture = Fixture::new().await;
-        fixture.backend.backend = pg_backend.clone();
+        fixture.backend.backend = push_backend.clone();
         fixture.http.return_cache_hit_usage(100, 0, 10);
-        let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(pg_backend.clone());
+        let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(push_backend);
         let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
         let dispatch = fixture.dispatch(pusher);
         let adaptive_dispatch: AdaptiveDispatchFn = Arc::new(move |job| {
@@ -1830,24 +1842,24 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
 
         let listener_pids = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let registered: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (
-                         SELECT 1 FROM apalis.workers WHERE worker_type = 'cache_keepalive'
-                     )",
-                )
-                .fetch_one(&pg_pool)
-                .await
-                .expect("check keepalive worker registration");
+                let worker_types: i64 =
+                    sqlx::query_scalar("SELECT COUNT(DISTINCT worker_type) FROM apalis.workers")
+                        .fetch_one(&pg_pool)
+                        .await
+                        .expect("check worker registration");
                 let listener_pids: Vec<i32> = sqlx::query_scalar(
                     "SELECT pid FROM pg_stat_activity
-                     WHERE datname = current_database() AND query ILIKE 'LISTEN %'",
+                     WHERE datname = current_database()
+                       AND pid <> pg_backend_pid()
+                       AND state = 'idle'
+                       AND query ILIKE 'LISTEN %'",
                 )
                 .fetch_all(&pg_pool)
                 .await
                 .expect("find postgres scheduler listeners");
                 // All three consumers listen on the same channel. Drop every listener
                 // in this isolated database so the keepalive listener is included.
-                if registered && listener_pids.len() >= 3 {
+                if worker_types >= 3 && listener_pids.len() >= 3 {
                     break listener_pids;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1855,17 +1867,28 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
         })
         .await
         .expect("keepalive worker and postgres listeners register");
-        let mut held = vec![worker_pool.acquire().await.expect("acquire free slot")];
+        let (pre_held_tx, pre_held_rx) = tokio::sync::oneshot::channel();
         let grab_pool = worker_pool.clone();
         let grabber = tokio::spawn(async move {
-            while held.len() < 4 {
+            let mut pre_held_tx = Some(pre_held_tx);
+            let mut held = Vec::with_capacity(6);
+            while held.len() < 6 {
                 if let Ok(conn) = grab_pool.acquire().await {
                     held.push(conn);
+                    if held.len() >= 3
+                        && let Some(tx) = pre_held_tx.take()
+                    {
+                        let _ = tx.send(());
+                    }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::time::sleep(Duration::from_millis(350)).await;
             drop(held);
         });
+        tokio::time::timeout(Duration::from_secs(10), pre_held_rx)
+            .await
+            .expect("timed out acquiring non-LISTEN worker_pool slots")
+            .expect("pre_held channel closed");
         let _ = listener_pids;
         let terminated: Vec<bool> = sqlx::query_scalar(
             "SELECT pg_terminate_backend(pid)
@@ -1881,7 +1904,10 @@ async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {
             terminated.len() >= 3 && terminated.iter().all(|t| *t),
             "all three postgres scheduler listeners must terminate"
         );
-        grabber.await.expect("join pool saturation task");
+        tokio::time::timeout(Duration::from_secs(10), grabber)
+            .await
+            .expect("timed out waiting for worker_pool grabber")
+            .expect("join pool saturation task");
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let mut request = fixture.enqueue_request();
