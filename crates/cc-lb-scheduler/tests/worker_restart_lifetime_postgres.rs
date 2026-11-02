@@ -41,11 +41,11 @@ async fn replacement_worker_dispatches_distinct_job_from_same_postgres_backend()
 async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval() -> Result<()> {
     with_isolated_database(|pool| async move {
         let worker_pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_millis(120))
-            .connect_with(pool.connect_options().as_ref().clone())
-            .await?;
+            .max_connections(6)
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy_with(pool.connect_options().as_ref().clone());
         let backend = postgres_backend(&worker_pool);
+        let push_backend = postgres_backend(&pool);
         let (adaptive_tx, mut adaptive_rx) = mpsc::channel(2);
         let ctx = scheduler_ctx(adaptive_tx, mpsc::channel(1).0);
         let cancel = CancellationToken::new();
@@ -54,32 +54,32 @@ async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval()
             backend.spawn(ctx, cancel.clone()).await?,
         );
 
-        wait_for("cache_keepalive worker registration", QA_TIMEOUT, || {
-            let pool = pool.clone();
-            async move {
-                let count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM apalis.workers WHERE worker_type = $1",
-                )
-                .bind(CACHE_KEEPALIVE_QUEUE)
-                .fetch_one(&pool)
-                .await?;
-                Ok((count > 0).then_some(()))
-            }
-        })
-        .await?;
+        wait_for_worker_count(&pool, ADAPTIVE_QUEUE, 1).await?;
+        wait_for_worker_count(&pool, CACHE_KEEPALIVE_QUEUE, 1).await?;
+        wait_for_worker_count(&pool, CRON_QUEUE, 1).await?;
         wait_for_listen(&pool, 3).await?;
 
-        let mut held = vec![worker_pool.acquire().await?];
+        let (pre_held_tx, pre_held_rx) = tokio::sync::oneshot::channel();
         let grab_pool = worker_pool.clone();
         let grabber = tokio::spawn(async move {
-            while held.len() < 4 {
+            let mut pre_held_tx = Some(pre_held_tx);
+            let mut held = Vec::with_capacity(6);
+            while held.len() < 6 {
                 if let Ok(conn) = grab_pool.acquire().await {
                     held.push(conn);
+                    if held.len() >= 3
+                        && let Some(tx) = pre_held_tx.take()
+                    {
+                        let _ = tx.send(());
+                    }
                 }
             }
             sleep(Duration::from_millis(300)).await;
             drop(held);
         });
+        timeout(QA_TIMEOUT, pre_held_rx)
+            .await
+            .context("timed out acquiring non-LISTEN worker_pool slots")??;
         let terminated: Vec<bool> = sqlx::query_scalar(
             "SELECT pg_terminate_backend(pid)
              FROM pg_stat_activity
@@ -93,14 +93,16 @@ async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval()
             terminated.len() >= 3 && terminated.iter().all(|terminated| *terminated),
             "expected to terminate all three LISTEN connections"
         );
-        grabber.await?;
+        timeout(QA_TIMEOUT, grabber)
+            .await
+            .context("timed out waiting for worker_pool grabber")??;
         sleep(Duration::from_millis(300)).await;
         let upstream_id = Uuid::new_v4();
         let now_secs = unix_secs(SystemClock.now());
         let expires_at_unix_secs = now_secs + 6;
         let job = keepalive_job(upstream_id, expires_at_unix_secs);
         let idempotency_key = format!("qa01:keepalive:{upstream_id}");
-        backend
+        push_backend
             .push_keepalive_task(SchedulerPushTask {
                 args: AdaptiveJob::CacheKeepalive(job),
                 idempotency_key: Some(idempotency_key.clone()),
