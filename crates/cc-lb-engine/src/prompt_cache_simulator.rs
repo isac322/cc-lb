@@ -999,12 +999,49 @@ pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
     token_threshold: usize,
     tokenize_ambiguous: bool,
 ) -> (Vec<String>, Duration) {
+    cacheable_breakpoint_prefix_keys_with_filter(
+        analysis,
+        canonical_model,
+        token_threshold,
+        tokenize_ambiguous,
+        None,
+    )
+}
+
+pub(crate) fn cacheable_breakpoint_prefix_keys_for_indices(
+    analysis: &V3PromptCacheAnalysis,
+    canonical_model: &str,
+    token_threshold: usize,
+    indices: &[u64],
+) -> Vec<String> {
+    cacheable_breakpoint_prefix_keys_with_filter(
+        analysis,
+        canonical_model,
+        token_threshold,
+        true,
+        Some(indices),
+    )
+    .0
+}
+
+fn cacheable_breakpoint_prefix_keys_with_filter(
+    analysis: &V3PromptCacheAnalysis,
+    canonical_model: &str,
+    token_threshold: usize,
+    tokenize_ambiguous: bool,
+    indices: Option<&[u64]>,
+) -> (Vec<String>, Duration) {
     let mut scratch = SerializationScratch::default();
     let mut tokenization_duration = Duration::ZERO;
     let keys = analysis
         .breakpoints
         .iter()
         .filter_map(|breakpoint| {
+            if let Some(indices) = indices
+                && !indices.contains(&breakpoint.block_index)
+            {
+                return None;
+            }
             let accepted =
                 match cache_threshold_from_byte_len(breakpoint.prefix_bytes, token_threshold) {
                     Some(decision) => decision,

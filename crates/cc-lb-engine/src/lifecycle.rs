@@ -8320,6 +8320,50 @@ mod prompt_cache_policy_tests {
     }
 
     #[test]
+    fn policy_bundles_tokenize_each_raw_prefix_boundary_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for include_billing_header in [false, true] {
+            let mut system = Vec::new();
+            if include_billing_header {
+                system.push(json!({"type":"text","text":"x-anthropic-billing-header: cron-a"}));
+            }
+            system.push(json!({
+                "type": "text",
+                "text": "a".repeat(2_000),
+                "cache_control": {"type": "ephemeral"}
+            }));
+            let request = json!({"model":"claude-sonnet-4-5","system":system});
+            let canonical_model = canonical_model_id("claude-sonnet-4-5");
+            crate::tokenizer::reset_tokenizer_call_count();
+            let analysis = analyze_v3_prompt_cache(&request, canonical_model);
+            let eligible = cacheable_breakpoint_prefix_keys(
+                &analysis,
+                canonical_model,
+                cache_threshold_tokens(canonical_model),
+            );
+            assert_eq!(crate::tokenizer::tokenizer_call_count(), 1);
+            let output = PromptCacheAnalysisOutput {
+                analysis,
+                cacheable_breakpoint_prefix_keys: eligible,
+                timings: PromptCacheAnalysisTimings::default(),
+            };
+            let metadata = request_cache_metadata_from_value_with_analysis(
+                &HeaderMap::new(),
+                Some(&request),
+                Some(output),
+            );
+            assert_eq!(metadata.bundles.official.cache_breakpoints.len(), 1);
+            assert_eq!(metadata.bundles.literal.cache_breakpoints.len(), 1);
+            assert_eq!(
+                crate::tokenizer::tokenizer_call_count(),
+                1,
+                "shared raw boundary was tokenized again, billing_header={include_billing_header}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn literal_only_billing_breakpoint_records_custom_cache_creation() -> Result<(), Box<dyn std::error::Error>> {
         let request = json!({
             "model": "claude-sonnet-4-5",
@@ -8805,35 +8849,63 @@ fn request_cache_metadata_from_value_with_analysis(
         &analysis,
         official_cacheable_prefix_keys.clone(),
     );
-    let literal_analysis = analyze_v3_prompt_cache_literal_from_official(
-        value,
-        &canonical_model_id,
-        &analysis,
-    );
-    let mut literal_keys = literal_analysis
-        .breakpoints
-        .iter()
-        .filter_map(|literal_breakpoint| {
-            analysis
-                .breakpoints
-                .iter()
-                .find(|official_breakpoint| {
-                    official_breakpoint.block_index == literal_breakpoint.block_index
-                        && official_cacheable_prefix_keys
-                            .contains(&official_breakpoint.prefix_key)
-                })
-                .map(|_| literal_breakpoint.prefix_key.clone())
-        })
-        .collect::<HashSet<_>>();
-    literal_keys.extend(
-        cacheable_breakpoint_prefix_keys(
-            &literal_analysis,
+    let has_billing_header = analysis.blocks.iter().any(|block| {
+        block.source == V3PromptCacheBlockSource::System
+            && block.path == "system[0]"
+            && block.value.get("type").and_then(Value::as_str) == Some("text")
+            && block
+                .value
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
+    });
+    let literal_bundle = if has_billing_header {
+        let literal_analysis = analyze_v3_prompt_cache_literal_from_official(
+            value,
             &canonical_model_id,
-            cache_threshold_tokens(&canonical_model_id),
-        )
-        .into_iter(),
-    );
-    let literal_bundle = prompt_cache_bundle_from_analysis(&literal_analysis, literal_keys);
+            &analysis,
+        );
+        let mut literal_keys = literal_analysis
+            .breakpoints
+            .iter()
+            .filter_map(|literal_breakpoint| {
+                analysis
+                    .breakpoints
+                    .iter()
+                    .find(|official_breakpoint| {
+                        official_breakpoint.block_index == literal_breakpoint.block_index
+                            && official_cacheable_prefix_keys
+                                .contains(&official_breakpoint.prefix_key)
+                    })
+                    .map(|_| literal_breakpoint.prefix_key.clone())
+            })
+            .collect::<HashSet<_>>();
+        let literal_only_indices = literal_analysis
+            .breakpoints
+            .iter()
+            .filter(|literal_breakpoint| {
+                !analysis
+                    .breakpoints
+                    .iter()
+                    .any(|official_breakpoint| {
+                        official_breakpoint.block_index == literal_breakpoint.block_index
+                    })
+            })
+            .map(|breakpoint| breakpoint.block_index)
+            .collect::<Vec<_>>();
+        literal_keys.extend(
+            crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys_for_indices(
+                &literal_analysis,
+                &canonical_model_id,
+                cache_threshold_tokens(&canonical_model_id),
+                &literal_only_indices,
+            )
+            .into_iter(),
+        );
+        prompt_cache_bundle_from_analysis(&literal_analysis, literal_keys)
+    } else {
+        official_bundle.clone()
+    };
     let cache_breakpoints = official_bundle.request_breakpoints.clone();
     let raw_cache_breakpoints = &literal_bundle.request_breakpoints;
     let mut cache_control_message_indices = raw_cache_breakpoints
