@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `cc_lb_cache_prediction_total{outcome}` exposes request-level prompt-cache prediction outcomes across four fixed values, comparing positive predictions with final observed cache reads.
+
 ### Fixed
 
 - Prompt-cache routing now defaults `prompt_cache_shadow.grace_margin_secs` to `0` (previously `30`), avoiding early expiry of live cache observations. Explicitly configured grace margins remain effective. Buffered and SSE observations now share the upstream request-dispatch expiry anchor, so TTFB and response generation cannot extend the provider TTL. (#1002)
