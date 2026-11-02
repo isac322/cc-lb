@@ -431,7 +431,6 @@ fn analyze_v3_prompt_cache_optimized(
     (analysis, stats)
 }
 
-
 fn analyze_v3_prompt_cache_optimized_scoped(
     value: &Value,
     canonical_model: &str,
@@ -1196,7 +1195,7 @@ mod tests {
             PromptCachePolicy::AnthropicOfficial,
             &mut structural_scratch,
         )
-                .expect("fixture remains analyzable");
+        .expect("fixture remains analyzable");
         assert_eq!(structural.blocks.len(), PRODUCTION_FIXTURE_MESSAGE_COUNT);
         assert_eq!(structural.breakpoints.len(), 4);
         let batch = prepare_exact_prefix_batch(MODEL, &structural.blocks, &structural.breakpoints)

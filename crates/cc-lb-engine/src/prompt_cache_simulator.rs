@@ -36,7 +36,6 @@ pub enum PromptCachePolicy {
     Literal,
 }
 
-
 /// Anthropic's shared cap for resolved explicit and automatic breakpoints. Provider-invalid
 /// requests skip analysis before tokenization.
 pub const MAX_EXPLICIT_BREAKPOINTS: usize = 4;
@@ -561,8 +560,12 @@ fn non_default_string_invalidator<'a>(
 /// upstream still serves. `lifecycle::build_cache_score_from_match` applies the ordering rule
 /// where it actually matters, when pricing a matched prefix.
 pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3PromptCacheAnalysis {
-    analyze_v3_prompt_cache_with_policy(value, canonical_model, PromptCachePolicy::AnthropicOfficial)
-        .0
+    analyze_v3_prompt_cache_with_policy(
+        value,
+        canonical_model,
+        PromptCachePolicy::AnthropicOfficial,
+    )
+    .0
 }
 
 pub(crate) fn analyze_v3_prompt_cache_literal(
@@ -578,9 +581,12 @@ pub(super) fn analyze_v3_prompt_cache_with_policy(
     policy: PromptCachePolicy,
 ) -> (V3PromptCacheAnalysis, Duration) {
     let mut serialization_scratch = SerializationScratch::default();
-    let Some(structural) =
-        analyze_v3_prompt_cache_structure(value, canonical_model, policy, &mut serialization_scratch)
-    else {
+    let Some(structural) = analyze_v3_prompt_cache_structure(
+        value,
+        canonical_model,
+        policy,
+        &mut serialization_scratch,
+    ) else {
         return (unanalyzable_prompt_cache(), Duration::ZERO);
     };
     let mut tokenization_duration = Duration::ZERO;
@@ -684,7 +690,6 @@ pub(crate) fn analyze_v3_prompt_cache_literal_from_official(
     }
 }
 
-
 fn analyze_v3_prompt_cache_structure<'a>(
     value: &'a Value,
     canonical_model: &str,
@@ -722,7 +727,10 @@ fn analyze_v3_prompt_cache_structure<'a>(
             })
         })
         .collect();
-    Some(V3StructuralAnalysis { blocks, breakpoints })
+    Some(V3StructuralAnalysis {
+        blocks,
+        breakpoints,
+    })
 }
 
 fn finish_structural_analysis(
@@ -780,15 +788,10 @@ fn resolve_breakpoints<'a>(
     }
 
     if let Some(automatic_ttl) = cache_control_ttl(value) {
-        let automatic_block = blocks
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, block)| {
-                block.is_breakpoint_eligible()
-                    && !(policy == PromptCachePolicy::AnthropicOfficial
-                        && block.is_billing_header())
-            });
+        let automatic_block = blocks.iter().enumerate().rev().find(|(_, block)| {
+            block.is_breakpoint_eligible()
+                && !(policy == PromptCachePolicy::AnthropicOfficial && block.is_billing_header())
+        });
         if let Some((block_index, block)) = automatic_block
             && block.explicit_ttl.is_none()
         {

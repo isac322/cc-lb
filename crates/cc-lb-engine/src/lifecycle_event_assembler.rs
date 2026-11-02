@@ -745,18 +745,17 @@ async fn write_finalized_rows(
                 })
                 .collect();
         }
-        diagnostics.matched_v3_cache_key = if route.cache_breakpoints.is_some()
-            || route.cache_prefix_hash.is_some()
-        {
-            route.matched_v3_cache_key.clone()
-        } else {
-            route.matched_v3_cache_key.clone().or_else(|| {
-                partial
-                    .parse
-                    .as_ref()
-                    .and_then(|parse| parse.matched_v3_cache_key.clone())
-            })
-        };
+        diagnostics.matched_v3_cache_key =
+            if route.cache_breakpoints.is_some() || route.cache_prefix_hash.is_some() {
+                route.matched_v3_cache_key.clone()
+            } else {
+                route.matched_v3_cache_key.clone().or_else(|| {
+                    partial
+                        .parse
+                        .as_ref()
+                        .and_then(|parse| parse.matched_v3_cache_key.clone())
+                })
+            };
         diagnostics.breakpoint_content_block_index =
             route.breakpoint_content_block_index.map(u64::from);
         diagnostics.matched_content_block_index = route.matched_content_block_index.map(u64::from);
@@ -3478,27 +3477,31 @@ mod tests {
         .unwrap();
         tx.send(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
-            result: Ok(RouteInfo { cache_breakpoints: None, cache_prefix_hash: None, upstream_id: Uuid::nil(),
-            upstream_name: "primary".to_owned(),
-            model: Some("claude-3-5-sonnet-20241022".to_owned()),
-            upstream_kind: Some("anthropic_key".to_owned()),
-            route_ms: Some(7),
-            routing_trace: None,
-            predicted_cache_read_tokens: None,
-            matched_v3_cache_key: None,
-            breakpoint_content_block_index: None,
-            matched_content_block_index: None,
-            lookback_distance: None,
-            predicted_cache_creation_tokens_5m: None,
-            predicted_cache_creation_tokens_1h: None,
-            token_estimate_source: None,
-            cache_value_micros: None,
-            formula_winner_upstream_id: None,
-            kept_upstream_id: None,
-            quota_urgency_5h: None,
-            quota_urgency_7d: None,
-            quota_urgency_combined: None,
-            quota_warning_multiplier: None, }),
+            result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
+                upstream_id: Uuid::nil(),
+                upstream_name: "primary".to_owned(),
+                model: Some("claude-3-5-sonnet-20241022".to_owned()),
+                upstream_kind: Some("anthropic_key".to_owned()),
+                route_ms: Some(7),
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                predicted_cache_creation_tokens_5m: None,
+                predicted_cache_creation_tokens_1h: None,
+                token_estimate_source: None,
+                cache_value_micros: None,
+                formula_winner_upstream_id: None,
+                kept_upstream_id: None,
+                quota_urgency_5h: None,
+                quota_urgency_7d: None,
+                quota_urgency_combined: None,
+                quota_warning_multiplier: None,
+            }),
             routing_trace: None,
         })
         .await
@@ -3851,27 +3854,31 @@ mod tests {
         .unwrap();
         tx.send(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
-            result: Ok(RouteInfo { cache_breakpoints: None, cache_prefix_hash: None, upstream_id: Uuid::nil(),
-            upstream_name: "primary".to_owned(),
-            model: Some("claude-3-5-sonnet-20241022".to_owned()),
-            upstream_kind: Some("anthropic_key".to_owned()),
-            route_ms: Some(7),
-            routing_trace: None,
-            predicted_cache_read_tokens: None,
-            matched_v3_cache_key: None,
-            breakpoint_content_block_index: None,
-            matched_content_block_index: None,
-            lookback_distance: None,
-            predicted_cache_creation_tokens_5m: None,
-            predicted_cache_creation_tokens_1h: None,
-            token_estimate_source: None,
-            cache_value_micros: None,
-            formula_winner_upstream_id: None,
-            kept_upstream_id: None,
-            quota_urgency_5h: None,
-            quota_urgency_7d: None,
-            quota_urgency_combined: None,
-            quota_warning_multiplier: None, }),
+            result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
+                upstream_id: Uuid::nil(),
+                upstream_name: "primary".to_owned(),
+                model: Some("claude-3-5-sonnet-20241022".to_owned()),
+                upstream_kind: Some("anthropic_key".to_owned()),
+                route_ms: Some(7),
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                predicted_cache_creation_tokens_5m: None,
+                predicted_cache_creation_tokens_1h: None,
+                token_estimate_source: None,
+                cache_value_micros: None,
+                formula_winner_upstream_id: None,
+                kept_upstream_id: None,
+                quota_urgency_5h: None,
+                quota_urgency_7d: None,
+                quota_urgency_combined: None,
+                quota_warning_multiplier: None,
+            }),
             routing_trace: None,
         })
         .await
@@ -4213,27 +4220,31 @@ mod tests {
         });
         bus.publish_lifecycle(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
-            result: Ok(RouteInfo { cache_breakpoints: None, cache_prefix_hash: None, upstream_id: Uuid::nil(),
-            upstream_name: "primary".to_owned(),
-            model: Some("claude-3-5-sonnet-20241022".to_owned()),
-            upstream_kind: Some("anthropic_key".to_owned()),
-            route_ms: Some(7),
-            routing_trace: None,
-            predicted_cache_read_tokens: None,
-            matched_v3_cache_key: None,
-            breakpoint_content_block_index: None,
-            matched_content_block_index: None,
-            lookback_distance: None,
-            predicted_cache_creation_tokens_5m: None,
-            predicted_cache_creation_tokens_1h: None,
-            token_estimate_source: None,
-            cache_value_micros: None,
-            formula_winner_upstream_id: None,
-            kept_upstream_id: None,
-            quota_urgency_5h: None,
-            quota_urgency_7d: None,
-            quota_urgency_combined: None,
-            quota_warning_multiplier: None, }),
+            result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
+                upstream_id: Uuid::nil(),
+                upstream_name: "primary".to_owned(),
+                model: Some("claude-3-5-sonnet-20241022".to_owned()),
+                upstream_kind: Some("anthropic_key".to_owned()),
+                route_ms: Some(7),
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                predicted_cache_creation_tokens_5m: None,
+                predicted_cache_creation_tokens_1h: None,
+                token_estimate_source: None,
+                cache_value_micros: None,
+                formula_winner_upstream_id: None,
+                kept_upstream_id: None,
+                quota_urgency_5h: None,
+                quota_urgency_7d: None,
+                quota_urgency_combined: None,
+                quota_warning_multiplier: None,
+            }),
             routing_trace: None,
         });
         bus.publish_lifecycle(LifecycleEvent::UsageObserved {
@@ -4514,7 +4525,11 @@ mod tests {
             .first()
             .cloned()
             .ok_or("finalized row missing")?;
-        let line = sink.lines().into_iter().next().ok_or("diagnostics missing")?;
+        let line = sink
+            .lines()
+            .into_iter()
+            .next()
+            .ok_or("diagnostics missing")?;
         Ok((row, line))
     }
 
@@ -4529,7 +4544,12 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .ok_or("diagnostic breakpoints missing")?;
         let breakpoint = breakpoints.first().ok_or("serving breakpoint missing")?;
-        assert_eq!(breakpoint.get("prefix_hash").and_then(serde_json::Value::as_str), Some("serving-deepest-prefix"));
+        assert_eq!(
+            breakpoint
+                .get("prefix_hash")
+                .and_then(serde_json::Value::as_str),
+            Some("serving-deepest-prefix")
+        );
         assert!(breakpoint.get("lookback_prefixes").is_none());
         Ok(())
     }
@@ -4538,7 +4558,10 @@ mod tests {
     async fn serving_cache_diagnostics_cold_does_not_fall_back_to_parse_chain()
     -> Result<(), Box<dyn std::error::Error>> {
         let (_, line) = serving_cache_diagnostics_case(None).await?;
-        assert!(line.get("matched_v3_cache_key").is_none_or(serde_json::Value::is_null));
+        assert!(
+            line.get("matched_v3_cache_key")
+                .is_none_or(serde_json::Value::is_null)
+        );
         Ok(())
     }
 
@@ -4546,7 +4569,11 @@ mod tests {
     async fn serving_cache_diagnostics_warm_reports_matched_not_deepest_key()
     -> Result<(), Box<dyn std::error::Error>> {
         let (_, line) = serving_cache_diagnostics_case(Some("serving-shallow-warm-prefix")).await?;
-        assert_eq!(line.get("matched_v3_cache_key").and_then(serde_json::Value::as_str), Some("serving-shallow-warm-prefix"));
+        assert_eq!(
+            line.get("matched_v3_cache_key")
+                .and_then(serde_json::Value::as_str),
+            Some("serving-shallow-warm-prefix")
+        );
         Ok(())
     }
 

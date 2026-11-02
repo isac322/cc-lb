@@ -679,13 +679,14 @@ async fn oauth_429_fails_over_to_api_key_same_request() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
-async fn failover_final_row_uses_serving_custom_literal_bundle() -> Result<(), Box<dyn std::error::Error>> {
+async fn failover_final_row_uses_serving_custom_literal_bundle()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = sqlite_storage(&dir).await?;
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
-    let mut official = oauth(1, "official")
-        .replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]);
+    let mut official =
+        oauth(1, "official").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]);
     official.record.base_url = None;
     let fixture = Fixture::new(vec![official, api_key(2, "custom")])
         .with_lifecycle(|lifecycle| lifecycle.with_event_bus(test_bus.bus_arc()));
@@ -710,7 +711,10 @@ async fn failover_final_row_uses_serving_custom_literal_bundle() -> Result<(), B
     wait_for_final_request_event(&mut update_rx).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(fixture.hosts(), vec!["api.anthropic.com".to_owned(), host("custom")]);
+    assert_eq!(
+        fixture.hosts(),
+        vec!["api.anthropic.com".to_owned(), host("custom")]
+    );
     let events = stored_request_events(storage.as_ref()).await?;
     assert_eq!(events.len(), 1);
     assert!(events[0].cache_breakpoints.is_empty());

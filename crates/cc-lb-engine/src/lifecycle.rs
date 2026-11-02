@@ -614,10 +614,7 @@ async fn fetch_prompt_cache_warm_entries_for_bundles(
         return warm_entries;
     };
     if canonical_model.is_empty()
-        || bundles
-            .official
-            .cache_breakpoints
-            .is_empty()
+        || bundles.official.cache_breakpoints.is_empty()
             && bundles.literal.cache_breakpoints.is_empty()
     {
         return warm_entries;
@@ -784,7 +781,9 @@ pub(crate) fn build_candidates_with_matches_for_bundles(
                 0
             };
             let bundle_breakpoints = bundles
-                .and_then(|bundles| Some(bundles.for_upstream(upstream).cache_breakpoints.as_slice()))
+                .and_then(|bundles| {
+                    Some(bundles.for_upstream(upstream).cache_breakpoints.as_slice())
+                })
                 .unwrap_or(request_breakpoints);
             let cache_score = warm_entries.get(&upstream.id).and_then(|entries| {
                 let matched =
@@ -4139,10 +4138,7 @@ impl Lifecycle {
             &pipeline_result,
             terminal_decision,
             selected_cache_matches.remove(&resolved_upstream_id),
-            cache_metadata
-                .bundles
-                .for_upstream(resolved_record)
-                .clone(),
+            cache_metadata.bundles.for_upstream(resolved_record).clone(),
             route_ms,
         );
         emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
@@ -8190,7 +8186,6 @@ pub(crate) use crate::response_transform::{
     unwrap_gemini_code_assist_body,
 };
 
-
 #[derive(Clone, Default)]
 pub(crate) struct PromptCacheBundle {
     pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
@@ -8238,9 +8233,7 @@ impl PromptCacheBundles {
     }
 }
 
-fn request_cache_breakpoint_from_plugin(
-    breakpoint: &CacheBreakpoint,
-) -> RequestCacheBreakpoint {
+fn request_cache_breakpoint_from_plugin(breakpoint: &CacheBreakpoint) -> RequestCacheBreakpoint {
     RequestCacheBreakpoint {
         block_index: u64::from(breakpoint.block_index),
         source: request_breakpoint_source_from_plugin(breakpoint.source),
@@ -8296,7 +8289,6 @@ fn is_official_anthropic_base_url(url: &Url) -> bool {
         && url.username().is_empty()
         && url.password().is_none()
 }
-
 
 #[cfg(test)]
 mod prompt_cache_policy_tests {
@@ -8433,11 +8425,8 @@ mod prompt_cache_policy_tests {
         let canonical = canonical_model_id("claude-sonnet-4-5");
         let official_original = analyze_v3_prompt_cache(&original, canonical);
         let official_changed = analyze_v3_prompt_cache(&changed_attribution, canonical);
-        let literal_original = analyze_v3_prompt_cache_literal_from_official(
-            &original,
-            canonical,
-            &official_original,
-        );
+        let literal_original =
+            analyze_v3_prompt_cache_literal_from_official(&original, canonical, &official_original);
         let literal_changed = analyze_v3_prompt_cache_literal_from_official(
             &changed_attribution,
             canonical,
@@ -8459,7 +8448,8 @@ mod prompt_cache_policy_tests {
     }
 
     #[test]
-    fn literal_only_billing_breakpoint_records_custom_cache_creation() -> Result<(), Box<dyn std::error::Error>> {
+    fn literal_only_billing_breakpoint_records_custom_cache_creation()
+    -> Result<(), Box<dyn std::error::Error>> {
         let request = json!({
             "model": "claude-sonnet-4-5",
             "tools": [{
@@ -8477,8 +8467,15 @@ mod prompt_cache_policy_tests {
         assert!(metadata.bundles.official.cache_breakpoints.is_empty());
         assert_eq!(metadata.cache_control_block_count, Some(1));
         let literal = &metadata.bundles.literal;
-        let breakpoint = literal.cache_breakpoints.first().ok_or("literal breakpoint missing")?;
-        assert!(literal.cacheable_breakpoint_prefix_keys.contains(&breakpoint.prefix_hash));
+        let breakpoint = literal
+            .cache_breakpoints
+            .first()
+            .ok_or("literal breakpoint missing")?;
+        assert!(
+            literal
+                .cacheable_breakpoint_prefix_keys
+                .contains(&breakpoint.prefix_hash)
+        );
         let context = PromptCacheObservationContext {
             upstream_id: Uuid::from_u128(1004),
             canonical_model_id: metadata.canonical_model_id.clone(),
@@ -8490,11 +8487,20 @@ mod prompt_cache_policy_tests {
         };
         let decoded = decode_prompt_cache_observations_pure(
             &context,
-            PromptCacheUsage { cache_creation_input_tokens: 8_192, cache_read_input_tokens: 0 },
+            PromptCacheUsage {
+                cache_creation_input_tokens: 8_192,
+                cache_read_input_tokens: 0,
+            },
             1_800_000_000,
         );
         assert_eq!(decoded.observations.len(), 1);
-        assert_eq!(decoded.observations.first().map(|observation| observation.prefix_hash.as_str()), Some(breakpoint.prefix_hash.as_str()));
+        assert_eq!(
+            decoded
+                .observations
+                .first()
+                .map(|observation| observation.prefix_hash.as_str()),
+            Some(breakpoint.prefix_hash.as_str())
+        );
         assert_eq!(decoded.dropped_below_threshold, 0);
         Ok(())
     }
@@ -8940,10 +8946,8 @@ fn request_cache_metadata_from_value_with_analysis(
         .cloned()
         .collect::<HashSet<_>>();
     let analysis = output.analysis;
-    let official_bundle = prompt_cache_bundle_from_analysis(
-        &analysis,
-        official_cacheable_prefix_keys.clone(),
-    );
+    let official_bundle =
+        prompt_cache_bundle_from_analysis(&analysis, official_cacheable_prefix_keys.clone());
     let has_billing_header = analysis.blocks.iter().any(|block| {
         block.source == V3PromptCacheBlockSource::System
             && block.path == "system[0]"
@@ -8955,11 +8959,8 @@ fn request_cache_metadata_from_value_with_analysis(
                 .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
     });
     let literal_bundle = if has_billing_header {
-        let literal_analysis = analyze_v3_prompt_cache_literal_from_official(
-            value,
-            &canonical_model_id,
-            &analysis,
-        );
+        let literal_analysis =
+            analyze_v3_prompt_cache_literal_from_official(value, &canonical_model_id, &analysis);
         let mut literal_keys = literal_analysis
             .breakpoints
             .iter()
@@ -8979,12 +8980,9 @@ fn request_cache_metadata_from_value_with_analysis(
             .breakpoints
             .iter()
             .filter(|literal_breakpoint| {
-                !analysis
-                    .breakpoints
-                    .iter()
-                    .any(|official_breakpoint| {
-                        official_breakpoint.block_index == literal_breakpoint.block_index
-                    })
+                !analysis.breakpoints.iter().any(|official_breakpoint| {
+                    official_breakpoint.block_index == literal_breakpoint.block_index
+                })
             })
             .map(|breakpoint| breakpoint.block_index)
             .collect::<Vec<_>>();
@@ -9046,9 +9044,7 @@ fn request_cache_metadata_from_value_with_analysis(
         reasoning_effort,
         cache_control_message_indices,
         cache_breakpoints,
-        cacheable_breakpoint_prefix_keys: official_bundle
-            .cacheable_breakpoint_prefix_keys
-            .clone(),
+        cacheable_breakpoint_prefix_keys: official_bundle.cacheable_breakpoint_prefix_keys.clone(),
         cache_prefix_hash,
         bundles: PromptCacheBundles {
             official: official_bundle,
@@ -12510,13 +12506,8 @@ mod tests {
             },
         };
         let now = 1_800_000_000;
-        let mut official_warm = warm_entry_priced(
-            "official-prefix",
-            TtlClass::Ephemeral5m,
-            now + 600,
-            0,
-            100,
-        );
+        let mut official_warm =
+            warm_entry_priced("official-prefix", TtlClass::Ephemeral5m, now + 600, 0, 100);
         official_warm.content_block_index = 1;
         let mut custom_warm =
             warm_entry_priced("custom-prefix", TtlClass::Ephemeral5m, now + 600, 0, 200);
@@ -12545,9 +12536,15 @@ mod tests {
             .find(|candidate| candidate.upstream_id == custom_id)
             .and_then(|candidate| candidate.cache_score.as_ref())
             .expect("custom score");
-        assert_eq!(official.matched_v3_cache_key.as_deref(), Some("official-prefix"));
+        assert_eq!(
+            official.matched_v3_cache_key.as_deref(),
+            Some("official-prefix")
+        );
         assert_eq!(official.predicted_cache_read_tokens, 100);
-        assert_eq!(custom.matched_v3_cache_key.as_deref(), Some("custom-prefix"));
+        assert_eq!(
+            custom.matched_v3_cache_key.as_deref(),
+            Some("custom-prefix")
+        );
         assert_eq!(custom.predicted_cache_read_tokens, 200);
     }
 
