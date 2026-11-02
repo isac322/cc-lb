@@ -8,6 +8,7 @@ pub enum CancelReason {
     UserTurnDetected,
     SnapshotTooLarge,
     CachedPrefixTooSmall,
+    ZeroTokenRenewalUnsupported,
 }
 
 impl CancelReason {
@@ -16,6 +17,7 @@ impl CancelReason {
             Self::UserTurnDetected => "user_turn_detected",
             Self::SnapshotTooLarge => "snapshot_too_large",
             Self::CachedPrefixTooSmall => "cached_prefix_too_small",
+            Self::ZeroTokenRenewalUnsupported => "zero_token_renewal_unsupported",
         }
     }
 }
