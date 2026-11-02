@@ -683,6 +683,7 @@ async fn failover_final_row_uses_serving_custom_literal_bundle() -> Result<(), B
     let dir = tempfile::tempdir()?;
     let storage = sqlite_storage(&dir).await?;
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let mut update_rx = test_bus.bus.subscribe();
     let mut official = oauth(1, "official")
         .replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]);
@@ -696,7 +697,7 @@ async fn failover_final_row_uses_serving_custom_literal_bundle() -> Result<(), B
     let (status, _body) = fixture.send_request(request).await;
     let mut serving_breakpoints = None;
     loop {
-        match update_rx.recv().await.expect("lifecycle bus stays open") {
+        match lifecycle_rx.recv().await.expect("lifecycle bus stays open") {
             LifecycleEvent::RouteCompleted {
                 result: Ok(info), ..
             } if info.upstream_name == "custom" => {
@@ -706,6 +707,7 @@ async fn failover_final_row_uses_serving_custom_literal_bundle() -> Result<(), B
             _ => {}
         }
     }
+    wait_for_final_request_event(&mut update_rx).await;
 
     assert_eq!(status, StatusCode::OK);
     let events = stored_request_events(storage.as_ref()).await?;
