@@ -1,3 +1,6 @@
+#[path = "keepalive_support/mod.rs"]
+mod keepalive_support;
+
 #[path = "admin_security_headers.rs"]
 mod admin_security_headers;
 #[path = "admin_separate_listener.rs"]
@@ -14,10 +17,16 @@ mod api_key_secret_hygiene;
 mod bad_postgres_url_fatal;
 #[path = "build_metadata_present.rs"]
 mod build_metadata_present;
+#[path = "cache_keepalive_failure_observability.rs"]
+mod cache_keepalive_failure_observability;
 #[path = "cache_keepalive_real_session_simulation.rs"]
 mod cache_keepalive_real_session_simulation;
 #[path = "cache_keepalive_server_wiring.rs"]
 mod cache_keepalive_server_wiring;
+#[path = "cache_keepalive_strict_scenarios.rs"]
+mod cache_keepalive_strict_scenarios;
+#[path = "cache_keepalive_wall_clock.rs"]
+mod cache_keepalive_wall_clock;
 #[path = "claude_fable_5_proxy_path.rs"]
 mod claude_fable_5_proxy_path;
 #[path = "common.rs"]
