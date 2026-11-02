@@ -56,6 +56,38 @@ This suggests that the cache is not being used effectively.
 sum(rate(cc_lb_cache_miss_total[5m])) > 10 * sum(rate(cc_lb_cache_hit_total[5m]))
 ```
 
+## Metric: cc_lb_cache_prediction_total
+
+- **Type**: Counter
+- **Labels**: `outcome`
+- **Label Cardinality Bounds**: Exactly four fixed series: `predicted_hit_actual_hit`, `unpredicted_hit`, `predicted_miss_actual_miss`, and `predicted_hit_actual_miss`.
+
+### Interpretation
+
+This request-level counter compares the latest successful route prediction with the final observed provider result. It is emitted only when the client status is 200, cache breakpoints are present, and usage is observed.
+
+A positive prediction is `predicted_cache_read_tokens=Some(n)` where `n > 0`. `Some(0)` and `None` are grouped as no positive prediction; `None` means prediction metadata was unavailable, not that the router explicitly predicted a miss. An actual hit has final `cache_read_input_tokens > 0`; cache creation without a cache read is an actual miss.
+
+- `predicted_hit_actual_hit`: positive prediction and actual hit.
+- `unpredicted_hit`: no positive prediction and actual hit.
+- `predicted_miss_actual_miss`: no positive prediction and actual miss.
+- `predicted_hit_actual_miss`: positive prediction and actual miss.
+
+The metric measures binary request-level comparison, not token-estimation accuracy or miss-reason attribution. Dropped lifecycle events or evicted partials can omit samples or leave prediction context incomplete; this is best-effort telemetry, not exact accounting.
+
+### Typical PromQL Query
+
+```promql
+sum(rate(cc_lb_cache_prediction_total{outcome="unpredicted_hit"}[5m]))
+/
+(
+  sum(rate(cc_lb_cache_prediction_total{outcome="predicted_hit_actual_hit"}[5m]))
+  + sum(rate(cc_lb_cache_prediction_total{outcome="unpredicted_hit"}[5m]))
+)
+```
+
+This is the share of actual hits with no positive prediction. It is undefined when there are no actual hits.
+
 ## Metric: cc_lb_cache_observation_dropped_total
 
 - **Type**: Counter
