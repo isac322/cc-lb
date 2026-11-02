@@ -188,14 +188,14 @@ async fn mock_messages(State(mock): State<MockAnthropic>, request: Request) -> R
                 .and_then(Value::as_str),
             Some("tool" | "any")
         );
-        if has_output_format || has_forced_tool_choice {
+        if has_output_format || has_forced_tool_choice || thinking_type == Some("enabled") {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "type": "error",
                     "error": {
                         "type": "invalid_request_error",
-                        "message": "zero-token renewal rejects output_config.format and forced tool_choice"
+                        "message": "zero-token renewal rejects output_config.format, forced tool_choice, and enabled thinking"
                     }
                 })),
             )
@@ -610,6 +610,38 @@ impl Harness {
         panic!("timed out waiting for session {session_key_hash} generation = {generation}");
     }
 
+    async fn wait_for_not_tracked(&self, session_key_hash: &str, reason: &str, cancelled: bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let present = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM cache_keepalive_decisions WHERE session_key_hash = ? AND decision = 'not_tracked' AND reason = ?",
+                )
+                .bind(session_key_hash)
+                .bind(reason)
+                .fetch_one(self.storage.pool())
+                .await
+                .expect("query not-tracked decision");
+                let terminal = if cancelled {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM cache_keepalive_sessions WHERE session_key_hash = ? AND status = 'terminal' AND terminal_reason = 'cancelled'",
+                    )
+                    .bind(session_key_hash)
+                    .fetch_one(self.storage.pool())
+                    .await
+                    .expect("query cancelled session") == 1
+                } else {
+                    true
+                };
+                if present == 1 && terminal {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durable not-tracked decision and cancellation");
+    }
+
     async fn advance_and_dispatch_due(&self, delta: Duration) {
         self.clock.advance(delta);
         let now = i64::try_from(unix_secs(self.clock.now())).expect("now fits i64");
@@ -742,27 +774,112 @@ async fn adaptive_thinking_session_renews_with_preserved_thinking_and_effort() {
         .await;
     assert_eq!(second["stop_reason"], "tool_use");
     harness
-        .wait_for_enqueued_generation(&session_key_hash, 3)
+        .wait_for_not_tracked(
+            &session_key_hash,
+            "zero-token renewal unsupported: forced tool_choice",
+            true,
+        )
         .await;
+    let renewals_before = harness
+        .mock
+        .events()
+        .iter()
+        .filter(|event| event.synthetic)
+        .count();
     harness
         .advance_and_dispatch_due(Duration::from_secs(270))
         .await;
-    let (status, error, enqueue_state) = sqlx::query_as::<_, (String, Option<String>, String)>(
-        "SELECT status, error, enqueue_state FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+    assert_eq!(
+        harness
+            .mock
+            .events()
+            .iter()
+            .filter(|event| event.synthetic)
+            .count(),
+        renewals_before,
+        "cancelled session must not send its previously queued renewal"
+    );
+    let (terminal_reason, error) = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT terminal_reason, error FROM cache_keepalive_sessions WHERE session_key_hash = ?",
     )
     .bind(&session_key_hash)
     .fetch_one(harness.storage.pool())
     .await
-    .expect("load failed adaptive session");
-    assert_eq!(status, "terminal");
-    assert!(
-        error.as_deref().is_some_and(|value| {
-            value.contains("zero-token renewal rejects output_config.format and forced tool_choice")
-        }),
-        "unexpected terminal error: {error:?}"
-    );
-    assert_eq!(enqueue_state, "pending");
+    .expect("load cancelled adaptive session");
+    assert_eq!(terminal_reason, "cancelled");
+    assert!(error.is_none(), "skip is not an upstream dispatch failure");
 }
+#[tokio::test]
+async fn cache_keepalive_incompatible_inputs_persist_skip_without_session_or_job() {
+    let harness = Harness::new(8_388_608).await;
+    for (index, field, value, reason) in [
+        (
+            1,
+            "thinking",
+            json!({"type": "enabled", "budget_tokens": 1024}),
+            "enabled thinking",
+        ),
+        (
+            2,
+            "output_config",
+            json!({"format": {"type": "json_schema", "schema": {"type": "object"}}}),
+            "structured output",
+        ),
+        (
+            3,
+            "tool_choice",
+            json!({"type": "any"}),
+            "forced tool_choice",
+        ),
+        (
+            4,
+            "tool_choice",
+            json!({"type": "tool", "name": "bash"}),
+            "forced tool_choice",
+        ),
+    ] {
+        let session = format!("incompatible-{index}");
+        let mut body: Value = serde_json::from_slice(&request_body(
+            8_192, &session, 83_900, "bash", "tool_use", false,
+        ))
+        .expect("request JSON");
+        body["model"] = json!("claude-opus-4-6");
+        body[field] = value;
+        body["max_tokens"] = json!(2048);
+        let response = harness
+            .post(
+                serde_json::to_vec(&body).expect("request body"),
+                &session,
+                None,
+            )
+            .await;
+        assert_eq!(response["stop_reason"], "tool_use");
+        harness
+            .wait_for_not_tracked(
+                &harness.session_key_hash(&session, None),
+                &format!("zero-token renewal unsupported: {reason}"),
+                false,
+            )
+            .await;
+    }
+    let sessions = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cache_keepalive_sessions")
+        .fetch_one(harness.storage.pool())
+        .await
+        .expect("session count");
+    assert_eq!(sessions, 0);
+    let jobs = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive'",
+    )
+    .fetch_one(&harness.scheduler_pool)
+    .await
+    .expect("job count");
+    assert_eq!(jobs, 0);
+    harness
+        .advance_and_dispatch_due(Duration::from_secs(270))
+        .await;
+    assert!(!harness.mock.events().iter().any(|event| event.synthetic));
+}
+
 async fn settle() {
     for _ in 0..20 {
         sleep(Duration::from_millis(10)).await;
