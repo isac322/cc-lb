@@ -72,11 +72,12 @@ use crate::error_format::{
 };
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
+#[cfg(test)]
+use crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys;
 use crate::prompt_cache_simulator::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
     PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
     analyze_v3_prompt_cache, analyze_v3_prompt_cache_literal_from_official,
-    cacheable_breakpoint_prefix_keys,
 };
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
@@ -579,6 +580,7 @@ struct StructuralCandidate<'a> {
 /// This is the only warmth authority: a single bounded batch read scoped to
 /// the request's candidate keys. A read failure is reported and degrades to
 /// an empty (neutral) observation set — never to a request failure.
+#[cfg(test)]
 async fn fetch_prompt_cache_warm_entries(
     view: &DynamicView,
     principal_id: &str,
@@ -722,6 +724,7 @@ pub fn build_candidates(
     .0
 }
 
+#[cfg(test)]
 pub(crate) fn build_candidates_with_matches(
     view: &DynamicView,
     principal_id: &str,
@@ -781,9 +784,7 @@ pub(crate) fn build_candidates_with_matches_for_bundles(
                 0
             };
             let bundle_breakpoints = bundles
-                .and_then(|bundles| {
-                    Some(bundles.for_upstream(upstream).cache_breakpoints.as_slice())
-                })
+                .map(|bundles| bundles.for_upstream(upstream).cache_breakpoints.as_slice())
                 .unwrap_or(request_breakpoints);
             let cache_score = warm_entries.get(&upstream.id).and_then(|entries| {
                 let matched =
@@ -3076,7 +3077,6 @@ impl Lifecycle {
                 &pipeline_result,
                 terminal,
                 None,
-                PromptCacheBundle::default(),
                 duration_to_ms(route_started.elapsed()),
             );
             let model = body
@@ -4138,9 +4138,9 @@ impl Lifecycle {
             &pipeline_result,
             terminal_decision,
             selected_cache_matches.remove(&resolved_upstream_id),
-            cache_metadata.bundles.for_upstream(resolved_record).clone(),
             route_ms,
-        );
+        )
+        .with_cache_bundle(cache_metadata.bundles.for_upstream(resolved_record).clone());
         emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
 
         let limit_reserve_start = Instant::now();
@@ -8201,6 +8201,7 @@ pub(crate) struct PromptCacheBundles {
 }
 
 impl PromptCacheBundles {
+    #[cfg(test)]
     fn single(cache_breakpoints: &[CacheBreakpoint]) -> Self {
         let request_breakpoints = cache_breakpoints
             .iter()
@@ -8233,6 +8234,7 @@ impl PromptCacheBundles {
     }
 }
 
+#[cfg(test)]
 fn request_cache_breakpoint_from_plugin(breakpoint: &CacheBreakpoint) -> RequestCacheBreakpoint {
     RequestCacheBreakpoint {
         block_index: u64::from(breakpoint.block_index),
@@ -8258,6 +8260,7 @@ fn request_cache_breakpoint_from_plugin(breakpoint: &CacheBreakpoint) -> Request
     }
 }
 
+#[cfg(test)]
 fn request_breakpoint_source_from_plugin(
     source: CacheBreakpointSource,
 ) -> RequestCacheBreakpointSource {
@@ -8277,9 +8280,11 @@ fn prompt_cache_policy_for_upstream(upstream: &UpstreamRecord) -> PromptCachePol
         .base_url
         .as_ref()
         .is_none_or(is_official_anthropic_base_url);
-    (official_kind && official_url)
-        .then_some(PromptCachePolicy::AnthropicOfficial)
-        .unwrap_or(PromptCachePolicy::Literal)
+    if official_kind && official_url {
+        PromptCachePolicy::AnthropicOfficial
+    } else {
+        PromptCachePolicy::Literal
+    }
 }
 
 fn is_official_anthropic_base_url(url: &Url) -> bool {
@@ -8600,7 +8605,6 @@ pub(crate) struct RequestCacheMetadata {
     reasoning_effort: Option<String>,
     cache_control_message_indices: Vec<u64>,
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
-    cacheable_breakpoint_prefix_keys: HashSet<String>,
     pub(crate) cache_prefix_hash: Option<String>,
     pub(crate) bundles: PromptCacheBundles,
     canonical_model_id: String,
@@ -8992,8 +8996,7 @@ fn request_cache_metadata_from_value_with_analysis(
                 &canonical_model_id,
                 cache_threshold_tokens(&canonical_model_id),
                 &literal_only_indices,
-            )
-            .into_iter(),
+            ),
         );
         prompt_cache_bundle_from_analysis(&literal_analysis, literal_keys)
     } else {
@@ -9044,7 +9047,6 @@ fn request_cache_metadata_from_value_with_analysis(
         reasoning_effort,
         cache_control_message_indices,
         cache_breakpoints,
-        cacheable_breakpoint_prefix_keys: official_bundle.cacheable_breakpoint_prefix_keys.clone(),
         cache_prefix_hash,
         bundles: PromptCacheBundles {
             official: official_bundle,
@@ -9576,7 +9578,6 @@ impl<'v> RoutedUpstream<'v> {
         pipeline_result: &FilterPipelineResult,
         terminal_decision: TerminalDecision,
         selected_cache_match: Option<SelectedCacheMatch>,
-        cache_bundle: PromptCacheBundle,
         route_ms: u64,
     ) -> Self {
         let selected_cache_score = pipeline_result
@@ -9591,9 +9592,14 @@ impl<'v> RoutedUpstream<'v> {
             routing_trace: pipeline_result.routing_trace(terminal_decision),
             selected_cache_score,
             selected_cache_match,
-            cache_bundle,
+            cache_bundle: PromptCacheBundle::default(),
             route_ms,
         }
+    }
+
+    fn with_cache_bundle(mut self, cache_bundle: PromptCacheBundle) -> Self {
+        self.cache_bundle = cache_bundle;
+        self
     }
 }
 
@@ -9817,9 +9823,9 @@ impl<'a> FailoverRouter<'a> {
             &pipeline_result,
             terminal_decision,
             selected_cache_matches.remove(&upstream_id),
-            self.cache_bundles.for_upstream(record).clone(),
             duration_to_ms(route_start.elapsed()),
-        );
+        )
+        .with_cache_bundle(self.cache_bundles.for_upstream(record).clone());
         tracing::warn!(
             from_upstream = %failed.record.name,
             from_upstream_id = %failed_id,

@@ -567,7 +567,7 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
     )
     .0
 }
-
+#[cfg(test)]
 pub(crate) fn analyze_v3_prompt_cache_literal(
     value: &Value,
     canonical_model: &str,
@@ -981,7 +981,7 @@ fn serialized_prefix<'a>(
         blocks,
     })
 }
-
+#[cfg(test)]
 pub(crate) fn cacheable_breakpoint_prefix_keys(
     analysis: &V3PromptCacheAnalysis,
     canonical_model: &str,
