@@ -17,9 +17,7 @@ concurrency:
 jobs:
   postgres-storage-stress:
     name: Postgres storage stress
-    runs-on: cc-lb-2
-    container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.338.0-cclb-a65132b3c9d7@sha256:d319c98e776daac3a8fb00c19780dd896c3e828675b1c8a77273a22373f57b55
+    runs-on: ubuntu-26.04
 
     services:
       postgres:
@@ -27,9 +25,9 @@ jobs:
         env:
           POSTGRES_PASSWORD: testpw
           POSTGRES_DB: cc_lb_test
-        # No `ports`: the k8s container hook turns them into hostPorts, which
-        # collide when two jobs land on one node. The job reaches the service
-        # on localhost through the shared pod network.
+        ports:
+          - 5432:5432
+        # Hosted service jobs reach Postgres through the mapped localhost port.
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -41,44 +39,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - name: Export isolated Rustup home
-        run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
-      - name: Verify baked Rustup bootstrap
-        working-directory: ${{ runner.temp }}
-        run: |
-          command -v rustup
-          rustup --version
+      - uses: ./.github/actions/setup-rustup-home
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
 
-      - name: Setup Rust cache
-        run: |
-          {
-            echo "CARGO_INCREMENTAL=0"
-            echo "GIT_SHA=0000000"
-            echo "SOURCE_DATE_EPOCH=0"
-          } >> "$GITHUB_ENV"
-          export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
-          sccache_path="$(command -v sccache || true)"
-          rustc_path="$(command -v rustc || true)"
-          if [ -n "$sccache_path" ] && [ -n "$rustc_path" ]; then
-            "$sccache_path" --stop-server >/dev/null 2>&1 || true
-            if "$sccache_path" "$rustc_path" -vV >/dev/null 2>&1; then
-              {
-                echo "SCCACHE_PATH=$sccache_path"
-                echo "RUSTC_WRAPPER=sccache"
-                echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE"
-              } >> "$GITHUB_ENV"
-            else
-              "$sccache_path" --stop-server >/dev/null 2>&1 || true
-              echo "::warning::sccache compiler-wrapper probe failed; continuing with uncached rustc"
-            fi
-          else
-            echo "::warning::sccache is unavailable; continuing without compiler caching"
-          fi
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
 
       - name: Run Postgres storage stress tests
         run: |
@@ -97,9 +67,7 @@ jobs:
 
   postgres-e2e:
     name: Postgres E2E and chaos
-    runs-on: cc-lb-2
-    container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.338.0-cclb-a65132b3c9d7@sha256:d319c98e776daac3a8fb00c19780dd896c3e828675b1c8a77273a22373f57b55
+    runs-on: ubuntu-26.04
 
     services:
       postgres:
@@ -107,9 +75,9 @@ jobs:
         env:
           POSTGRES_PASSWORD: testpw
           POSTGRES_DB: cc_lb_test
-        # No `ports`: the k8s container hook turns them into hostPorts, which
-        # collide when two jobs land on one node. The job reaches the service
-        # on localhost through the shared pod network.
+        ports:
+          - 5432:5432
+        # Hosted service jobs reach Postgres through the mapped localhost port.
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -121,44 +89,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - name: Export isolated Rustup home
-        run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
-      - name: Verify baked Rustup bootstrap
-        working-directory: ${{ runner.temp }}
-        run: |
-          command -v rustup
-          rustup --version
+      - uses: ./.github/actions/setup-rustup-home
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
 
-      - name: Setup Rust cache
-        run: |
-          {
-            echo "CARGO_INCREMENTAL=0"
-            echo "GIT_SHA=0000000"
-            echo "SOURCE_DATE_EPOCH=0"
-          } >> "$GITHUB_ENV"
-          export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
-          sccache_path="$(command -v sccache || true)"
-          rustc_path="$(command -v rustc || true)"
-          if [ -n "$sccache_path" ] && [ -n "$rustc_path" ]; then
-            "$sccache_path" --stop-server >/dev/null 2>&1 || true
-            if "$sccache_path" "$rustc_path" -vV >/dev/null 2>&1; then
-              {
-                echo "SCCACHE_PATH=$sccache_path"
-                echo "RUSTC_WRAPPER=sccache"
-                echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE"
-              } >> "$GITHUB_ENV"
-            else
-              "$sccache_path" --stop-server >/dev/null 2>&1 || true
-              echo "::warning::sccache compiler-wrapper probe failed; continuing with uncached rustc"
-            fi
-          else
-            echo "::warning::sccache is unavailable; continuing without compiler caching"
-          fi
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
 
       - name: Install sqlx-cli
         uses: taiki-e/install-action@v2
@@ -174,14 +114,14 @@ jobs:
         env:
           DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
 
-      # db_unreachable_503 stops Postgres via docker CLI; kubernetes service
-      # containers are not stoppable from the job, so this chaos case stays skipped.
+      # db_unreachable_503 stops Postgres via docker CLI; the hosted service
+      # container is not stopped by this job, so this chaos case stays skipped.
 
       - name: Ensure psql is available
         run: |
           set -euo pipefail
           if ! command -v psql >/dev/null 2>&1; then
-            echo "::error::psql is required on the runner image"
+            echo "::error::psql is required on the hosted runner"
             exit 1
           fi
           psql --version

@@ -33,21 +33,17 @@ concurrency:
 permissions: {}
 
 jobs:
-  publish:
-    name: build & push image
-    # Reuse the configured compiler cache across Docker builds.
-    # The runner pool may schedule either x86_64 or arm64;
-    # the source Dockerfile isolates host-only Cargo configuration and xx
-    # cross-compiles all four target architectures with no QEMU.
-    runs-on: cc-lb-500m
+  prepare:
+    name: validate & inspect release image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
-    env:
-      # docker/build-push-action uploads a per-step build record artifact
-      # (docker-build-*); bound its retention so records do not outlive the
-      # debugging window they exist for.
-      DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
+      packages: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      source_date_epoch: ${{ steps.source.outputs.source_date_epoch }}
+      already_published: ${{ steps.existing.outputs.already_published }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -108,6 +104,25 @@ jobs:
 
             refs=()
             if jq -e 'has("manifests")' "$raw_file" > /dev/null; then
+              platforms=$(
+                jq -r '
+                  [
+                    .manifests[]
+                    | select(.platform.os != "unknown")
+                    | .platform
+                    | if .variant and ((.os + "/" + .architecture) != "linux/arm64" or .variant != "v8")
+                      then .os + "/" + .architecture + "/" + .variant
+                      else .os + "/" + .architecture
+                      end
+                  ]
+                  | sort
+                  | join(" ")
+                ' "$raw_file"
+              )
+              if [ "$platforms" != "linux/amd64 linux/arm/v7 linux/arm64 linux/ppc64le" ]; then
+                echo "::error::image $image has runnable platforms '$platforms', expected 'linux/amd64 linux/arm/v7 linux/arm64 linux/ppc64le'" >&2
+                exit 1
+              fi
               digests=()
               while IFS= read -r digest; do
                 if [ -n "$digest" ]; then
@@ -120,10 +135,6 @@ jobs:
                   | .digest
                 ' "$raw_file"
               )
-              if [ "${#digests[@]}" -eq 0 ]; then
-                echo "::error::image $image contains no runnable platform manifests" >&2
-                exit 1
-              fi
               for digest in "${digests[@]}"; do
                 refs+=("$repository@$digest")
               done
@@ -143,14 +154,12 @@ jobs:
           VERIFY_IMAGE_REVISION
           chmod 0755 "$RUNNER_TEMP/verify-image-revision.sh"
 
-      - uses: ./.github/actions/export-sccache-env
-
       - name: Resolve source revision
         id: source
         run: |
           set -euo pipefail
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
 
       - name: Validate version and source ref
         env:
@@ -176,8 +185,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v4
-        with:
-          driver: remote
 
       - name: Inspect existing exact image
         id: existing
@@ -199,65 +206,356 @@ jobs:
             exit 1
           fi
 
-      - name: Derive exact tag and labels
+  build:
+    name: build & push digest (${{ matrix.key }})
+    needs: prepare
+    if: needs.prepare.outputs.already_published != 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: amd64
+            platform: linux/amd64
+            runner: ubuntu-26.04
+            host: amd64
+            smoke: true
+          - key: arm64
+            platform: linux/arm64
+            runner: ubuntu-26.04-arm
+            host: arm64
+            smoke: true
+          - key: armv7
+            platform: linux/arm/v7
+            runner: ubuntu-26.04-arm
+            host: arm64
+            smoke: false
+          - key: ppc64le
+            platform: linux/ppc64le
+            runner: ubuntu-26.04-arm
+            host: arm64
+            smoke: false
+    env:
+      # docker/build-push-action uploads a per-step build record artifact
+      # (docker-build-*); bound its retention so records do not outlive the
+      # debugging window they exist for.
+      DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
+      CACHE_KEY: docker-mounts-fat-${{ matrix.key }}-${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - name: Restore BuildKit cache mounts
+        id: cache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/docker-mounts.tar
+          key: ${{ env.CACHE_KEY }}
+          restore-keys: |
+            docker-mounts-fat-${{ matrix.key }}-
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+        id: buildx
+        with:
+          driver: docker-container
+
+      - name: Inject restored BuildKit cache mounts
+        if: steps.cache-restore.outputs.cache-matched-key != ''
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+          HOST_ARCH: ${{ matrix.host }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/buildkit-cache-inject"
+          rm -rf "$ctx"
+          mkdir -p "$ctx"
+          mv "$RUNNER_TEMP/docker-mounts.tar" "$ctx/docker-mounts.tar"
+          cat > "$ctx/Dockerfile" <<EOF
+          # syntax=docker/dockerfile:1
+          FROM alpine:3.24 AS inject
+          COPY docker-mounts.tar /docker-mounts.tar
+          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+              --mount=type=cache,id=bun-linux-${HOST_ARCH},target=/bun \
+              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+              tar -C / -xf /docker-mounts.tar && \
+              mkdir -p /out && \
+              du -sb /cargo-home /bun /sccache > /out/restored.txt
+          FROM scratch
+          COPY --from=inject /out/ /
+          EOF
+          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
+          cat "$ctx/out/restored.txt"
+          rm -rf "$ctx"
+
+      - name: Derive exact labels
         id: meta
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/isac322/cc-lb
           flavor: latest=false
-          tags: |
-            type=semver,pattern={{version}},value=${{ inputs.version }}
           labels: |
-            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
 
-
-      - name: Build and push exact image
-        if: steps.existing.outputs.already_published != 'true'
+      - name: Build and push platform digest
+        id: build_push
         uses: docker/build-push-action@v7
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
           target: distroless
-          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
-          push: true
+          platforms: ${{ matrix.platform }}
           provenance: true
           sbom: true
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=image,name=ghcr.io/isac322/cc-lb,push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            CARGO_BUILD_JOBS=6
-            GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
-            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
-            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
-            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
-            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
-          secret-envs: |
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+            CARGO_BUILD_JOBS=4
+            SCCACHE_LOCAL_MOUNT=1
+            REQUIRE_SCCACHE=1
+            GIT_SHA=${{ needs.prepare.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ needs.prepare.outputs.source_date_epoch }}
 
-      - name: Smoke-test binary version
-        if: steps.existing.outputs.already_published != 'true'
+      - name: Smoke-test native binary version
+        if: matrix.smoke
         uses: docker/build-push-action@v7
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
           target: smoke
           outputs: type=cacheonly
-          platforms: linux/arm64
+          platforms: ${{ matrix.platform }}
           provenance: false
           build-args: |
-            CARGO_BUILD_JOBS=6
-            GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
-            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
-            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
-            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
-            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
+            CARGO_BUILD_JOBS=4
+            SCCACHE_LOCAL_MOUNT=1
+            REQUIRE_SCCACHE=1
+            GIT_SHA=${{ needs.prepare.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ needs.prepare.outputs.source_date_epoch }}
             EXPECTED_VERSION=${{ inputs.version }}
-          secret-envs: |
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Write pushed platform digest
+        env:
+          DIGEST: ${{ steps.build_push.outputs.digest }}
+          KEY: ${{ matrix.key }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::invalid digest for $KEY: '$DIGEST'" >&2
+            exit 1
+          fi
+          printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digest-$KEY.txt"
+
+      - name: Upload platform digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-digest-${{ matrix.key }}
+          path: ${{ runner.temp }}/digest-${{ matrix.key }}.txt
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Extract populated BuildKit cache mounts
+        if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+          HOST_ARCH: ${{ matrix.host }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/buildkit-cache-extract"
+          rm -rf "$ctx" "$RUNNER_TEMP/docker-mounts.tar"
+          mkdir -p "$ctx"
+          cat > "$ctx/Dockerfile" <<EOF
+          # syntax=docker/dockerfile:1
+          FROM alpine:3.24 AS extract
+          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+              --mount=type=cache,id=bun-linux-${HOST_ARCH},target=/bun \
+              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+              mkdir -p /out && \
+              du -sb /cargo-home /bun /sccache > /out/extracted.txt && \
+              tar -C / -cf /out/docker-mounts.tar cargo-home bun sccache
+          FROM scratch
+          COPY --from=extract /out/ /
+          EOF
+          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
+          cat "$ctx/out/extracted.txt"
+          mv "$ctx/out/docker-mounts.tar" "$RUNNER_TEMP/docker-mounts.tar"
+          test -s "$RUNNER_TEMP/docker-mounts.tar"
+          rm -rf "$ctx"
+
+      - name: Save BuildKit cache mounts
+        if: github.ref == 'refs/heads/master' && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/docker-mounts.tar
+          key: ${{ env.CACHE_KEY }}
+
+  publish:
+    name: assemble & verify image
+    needs: [prepare, build]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.prepare.outputs.already_published == 'true' || needs.build.result == 'success') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - name: Prepare image revision verifier
+        run: |
+          cat > "$RUNNER_TEMP/verify-image-revision.sh" <<'VERIFY_IMAGE_REVISION'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          if [ "$#" -lt 2 ]; then
+            echo "::error::usage: $0 EXPECTED_REVISION IMAGE [IMAGE...]" >&2
+            exit 2
+          fi
+
+          expected_revision=$1
+          shift
+
+          declare -A verified_revisions=()
+          temp_dir=$(mktemp -d)
+          trap 'rm -rf "$temp_dir"' EXIT
+          raw_file="$temp_dir/manifest.json"
+
+          verify_revision() {
+            local ref=$1
+            local labels revision
+
+            if [[ -v 'verified_revisions[$ref]' ]]; then
+              return
+            fi
+
+            if ! labels=$(docker buildx imagetools inspect "$ref" \
+                --format '{{json .Image.Config.Labels}}'); then
+              echo "::error::could not inspect image config for $ref" >&2
+              exit 1
+            fi
+            revision=$(jq -r '."org.opencontainers.image.revision" // empty' <<<"$labels")
+            if [ "$revision" != "$expected_revision" ]; then
+              echo "::error::image $ref revision '$revision' does not match '$expected_revision'" >&2
+              exit 1
+            fi
+
+            verified_revisions["$ref"]=$revision
+          }
+
+          for image in "$@"; do
+            if ! docker buildx imagetools inspect "$image" --raw > "$raw_file"; then
+              echo "::error::could not inspect image $image" >&2
+              exit 1
+            fi
+
+            repository=${image%%@*}
+            last_component=${repository##*/}
+            if [[ "$last_component" == *:* ]]; then
+              repository=${repository%:*}
+            fi
+
+            refs=()
+            if jq -e 'has("manifests")' "$raw_file" > /dev/null; then
+              platforms=$(
+                jq -r '
+                  [
+                    .manifests[]
+                    | select(.platform.os != "unknown")
+                    | .platform
+                    | if .variant and ((.os + "/" + .architecture) != "linux/arm64" or .variant != "v8")
+                      then .os + "/" + .architecture + "/" + .variant
+                      else .os + "/" + .architecture
+                      end
+                  ]
+                  | sort
+                  | join(" ")
+                ' "$raw_file"
+              )
+              if [ "$platforms" != "linux/amd64 linux/arm/v7 linux/arm64 linux/ppc64le" ]; then
+                echo "::error::image $image has runnable platforms '$platforms', expected 'linux/amd64 linux/arm/v7 linux/arm64 linux/ppc64le'" >&2
+                exit 1
+              fi
+              digests=()
+              while IFS= read -r digest; do
+                if [ -n "$digest" ]; then
+                  digests+=("$digest")
+                fi
+              done < <(
+                jq -r '
+                  .manifests[]
+                  | select(.platform.os != "unknown")
+                  | .digest
+                ' "$raw_file"
+              )
+              for digest in "${digests[@]}"; do
+                refs+=("$repository@$digest")
+              done
+            else
+              manifest_digest=$(sha256sum "$raw_file")
+              manifest_digest=${manifest_digest%% *}
+              refs+=("$repository@sha256:$manifest_digest")
+            fi
+
+            for ref in "${refs[@]}"; do
+              verify_revision "$ref"
+            done
+
+            printf 'verified %s platform manifest(s) for %s at revision %s\n' \
+              "${#refs[@]}" "$image" "$expected_revision"
+          done
+          VERIFY_IMAGE_REVISION
+          chmod 0755 "$RUNNER_TEMP/verify-image-revision.sh"
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Download platform digests
+        if: needs.prepare.outputs.already_published != 'true'
+        uses: actions/download-artifact@v7
+        with:
+          pattern: docker-digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Assemble and push exact multi-arch image
+        if: needs.prepare.outputs.already_published != 'true'
+        env:
+          IMAGE: ghcr.io/isac322/cc-lb
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          refs=()
+          for key in amd64 arm64 armv7 ppc64le; do
+            digest_file="$RUNNER_TEMP/digests/digest-$key.txt"
+            digest=$(tr -d '[:space:]' < "$digest_file")
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::invalid digest for $key: '$digest'" >&2
+              exit 1
+            fi
+            refs+=("$IMAGE@$digest")
+          done
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "${refs[@]}"
 
       - name: Select moving aliases
         id: aliases
@@ -308,7 +606,7 @@ jobs:
           ALIASES: ${{ steps.aliases.outputs.aliases }}
           IMAGE: ghcr.io/isac322/cc-lb
           VERSION: ${{ inputs.version }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
           aliases=()

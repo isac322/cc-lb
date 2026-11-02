@@ -39,7 +39,7 @@ jobs:
   changes:
     name: Detect code changes
     if: github.event_name == 'pull_request'
-    runs-on: cc-lb-500m
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       pull-requests: read
@@ -63,7 +63,7 @@ jobs:
   fmt:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: cc-lb-500m
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -90,7 +90,7 @@ jobs:
       (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') &&
       github.event_name == 'pull_request' &&
       !startsWith(github.head_ref, 'release-plz-')
-    runs-on: cc-lb-500m
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -138,7 +138,8 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       startsWith(github.event.pull_request.title, 'chore: release cc-lb v')
-    runs-on: cc-lb-500m
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
     permissions:
       contents: read
       pull-requests: read
@@ -147,7 +148,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - uses: ./.github/actions/export-sccache-env
       - uses: ./.github/actions/setup-rustup-home
       - name: Attach release-plz validation branch
         run: |
@@ -158,9 +158,9 @@ jobs:
 
 
       - uses: docker/setup-buildx-action@v4
+        id: buildx
         with:
-          driver: remote
-
+          driver: docker-container
       - uses: ./.github/actions/setup-actionlint
 
       - uses: azure/setup-helm@v5
@@ -235,28 +235,58 @@ jobs:
           git diff --exit-code -- crates/cc-lb-server/Cargo.toml
 
 
+      - name: Restore BuildKit cache mounts
+        id: cache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/docker-mounts.tar
+          key: docker-mounts-fat-amd64-${{ steps.release.outputs.target_sha }}
+          restore-keys: |
+            docker-mounts-fat-amd64-
+
+      - name: Inject restored BuildKit cache mounts
+        if: steps.cache-restore.outputs.cache-matched-key != ''
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/buildkit-cache-inject"
+          rm -rf "$ctx"
+          mkdir -p "$ctx"
+          mv "$RUNNER_TEMP/docker-mounts.tar" "$ctx/docker-mounts.tar"
+          cat > "$ctx/Dockerfile" <<'EOF'
+          # syntax=docker/dockerfile:1
+          FROM alpine:3.24 AS inject
+          COPY docker-mounts.tar /docker-mounts.tar
+          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+              --mount=type=cache,id=bun-linux-amd64,target=/bun \
+              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+              tar -C / -xf /docker-mounts.tar && \
+              mkdir -p /out && \
+              du -sb /cargo-home /bun /sccache > /out/restored.txt
+          FROM scratch
+          COPY --from=inject /out/ /
+          EOF
+          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
+          cat "$ctx/out/restored.txt"
+          rm -rf "$ctx"
+
       - name: Build and smoke-test production image
         uses: docker/build-push-action@v7
         env:
           DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
           target: smoke
           outputs: type=cacheonly
           build-args: |
-            CARGO_BUILD_JOBS=6
+            CARGO_BUILD_JOBS=4
+            SCCACHE_LOCAL_MOUNT=1
+            REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.release.outputs.target_sha }}
             SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
-            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
-            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
-            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
-            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
-            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
             EXPECTED_VERSION=${{ steps.release.outputs.version }}
-          secret-envs: |
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
-
       - name: Lint and verify release chart
         env:
           SOURCE_SHA: ${{ steps.release.outputs.target_sha }}
@@ -290,6 +320,7 @@ jobs:
           actionlint
           .github/workflows/ci.yml
           .github/workflows/cd.yml
+          .github/workflows/docker-build.yml
           .github/workflows/publish-chart.yml
           .github/workflows/release-server.yml
           .github/workflows/release-plz.yml
@@ -297,7 +328,7 @@ jobs:
   clippy:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: cc-lb-4
+    runs-on: ubuntu-26.04
     strategy:
       matrix:
         features: [sqlite, postgres]
@@ -329,7 +360,7 @@ jobs:
   cargo-deny:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: cc-lb-1
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -337,43 +368,35 @@ jobs:
         with:
           toolchain: 1.99.1
       - name: Install cargo-deny
-        run: |
-          set -euo pipefail
-          ver=0.20.2
-          archive="cargo-deny-${ver}-aarch64-unknown-linux-musl.tar.gz"
-          # GitHub's release CDN intermittently answers 504. A bare --fail
-          # turns that into a red gate that looks like a dependency failure,
-          # and AGENTS.md forbids re-running the job to paper over it.
-          curl --fail --silent --show-error --location \
-            --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 \
-            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/${archive}" \
-            --output "/tmp/${archive}"
-          echo "995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d  /tmp/${archive}" | sha256sum --check
-          tar -tzf "/tmp/${archive}"
-          tar -xzf "/tmp/${archive}" -C /tmp
-          bin=$(find /tmp -type f -name cargo-deny -print -quit)
-          test -n "$bin"
-          sudo install -m 0755 "$bin" /usr/local/bin/cargo-deny
-          cargo deny --version
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
       - run: cargo deny check
 
   promtool:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: cc-lb-500m
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - name: Ensure promtool is available
+      - name: Install and run promtool
         run: |
           set -euo pipefail
-          if command -v promtool >/dev/null 2>&1; then
-            promtool --version
-            exit 0
-          fi
-          curl -sSL -o /tmp/prometheus.tar.gz \
-            https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.linux-arm64.tar.gz
-          tar -xzf /tmp/prometheus.tar.gz -C /tmp/
-          sudo mv /tmp/prometheus-3.15.0.linux-arm64/promtool /usr/local/bin/promtool
+          case "$RUNNER_ARCH" in
+            X64) asset=linux-amd64 ;;
+            ARM64) asset=linux-arm64 ;;
+            *) echo "unsupported architecture $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          archive="prometheus-3.15.0.${asset}.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/prometheus/prometheus/releases/download/v3.15.0/${archive}" \
+            --output "$RUNNER_TEMP/prometheus.tar.gz"
+          tar -xzf "$RUNNER_TEMP/prometheus.tar.gz" -C "$RUNNER_TEMP"
+          promtool="$RUNNER_TEMP/prometheus-3.15.0.${asset}/promtool"
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$promtool" "$RUNNER_TEMP/bin/promtool"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
           promtool --version
       - name: Check alert rule syntax
         run: promtool check rules deploy/alerts/*.yml
@@ -381,15 +404,11 @@ jobs:
         run: scripts/validate-grafana-dashboard.sh
 
   # A sharded, multi-node version of this job is prepared (inactive) in
-  # coverage-sharded.yml — enable it once the ARC pool has more than one node.
-  # See that file's header for the exact steps. Do not run both: they enforce
-  # the same coverage gate.
+  # coverage-sharded.yml. Do not run both: they enforce the same coverage gate.
   nextest-cov:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: cc-lb-4
-    container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.338.0-cclb-a65132b3c9d7@sha256:d319c98e776daac3a8fb00c19780dd896c3e828675b1c8a77273a22373f57b55
+    runs-on: ubuntu-26.04
 
     services:
       postgres:
@@ -397,9 +416,9 @@ jobs:
         env:
           POSTGRES_PASSWORD: testpw
           POSTGRES_DB: cc_lb_test
-        # No `ports`: the k8s container hook turns them into hostPorts, which
-        # collide when two jobs land on one node. The job reaches the service
-        # on localhost through the shared pod network.
+        ports:
+          - 5432:5432
+        # Hosted service jobs reach Postgres through the mapped localhost port.
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -407,9 +426,9 @@ jobs:
           --health-retries 10
 
     env:
-      # nextest-cov is the remaining 4-core job (clippy/e2e moved to cc-lb-2).
-      # CARGO_BUILD_JOBS=4 matches the cc-lb-4 request. Dial back toward 2 if
-      # postgres visibility tests start timing out under llvm-cov.
+      # Keep coverage build and test concurrency aligned with the hosted runner.
+      # Dial back toward 2 if Postgres visibility tests start timing out under
+      # llvm-cov.
       CARGO_BUILD_JOBS: "4"
       # Coverage maps counters via embedded __llvm_covmap sections, not DWARF,
       # so debuginfo only bloats object size and slows linking here. Drop it
@@ -419,7 +438,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       # Raised 120 -> 240: nextest-cov runs the full --all-features workspace
       # suite under llvm-cov instrumentation on this 4-core, CARGO_BUILD_JOBS=4
-      # self-hosted node. Contention there stalls Postgres's xmin snapshot
+      # Runner contention can stall Postgres's xmin snapshot
       # advancement (multi_instance_storage_tail's pg_snapshot_xmin visibility
       # check, runtime_change_notifier's LISTEN/NOTIFY round-trip), so tests
       # already scaled by this var still occasionally exceed 120s at full
@@ -448,13 +467,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - name: Export isolated Rustup home
-        run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
-      - name: Verify baked Rustup bootstrap
-        working-directory: ${{ runner.temp }}
-        run: |
-          command -v rustup
-          rustup --version
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
@@ -463,31 +476,9 @@ jobs:
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       # Unlike clippy, coverage executes fixture-backed WASM tests, so retain
       # both targets installed above.
-      - name: Setup Rust cache
-        run: |
-          {
-            echo "CARGO_INCREMENTAL=0"
-            echo "GIT_SHA=0000000"
-            echo "SOURCE_DATE_EPOCH=0"
-          } >> "$GITHUB_ENV"
-          export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
-          sccache_path="$(command -v sccache || true)"
-          rustc_path="$(command -v rustc || true)"
-          if [ -n "$sccache_path" ] && [ -n "$rustc_path" ]; then
-            "$sccache_path" --stop-server >/dev/null 2>&1 || true
-            if "$sccache_path" "$rustc_path" -vV >/dev/null 2>&1; then
-              {
-                echo "SCCACHE_PATH=$sccache_path"
-                echo "RUSTC_WRAPPER=sccache"
-                echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE"
-              } >> "$GITHUB_ENV"
-            else
-              "$sccache_path" --stop-server >/dev/null 2>&1 || true
-              echo "::warning::sccache compiler-wrapper probe failed; continuing with uncached rustc"
-            fi
-          else
-            echo "::warning::sccache is unavailable; continuing without compiler caching"
-          fi
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
@@ -502,7 +493,7 @@ jobs:
       - name: Preflight - CI_POSTGRES_URL must be set
         run: |
           if [ -z "${CI_POSTGRES_URL:-}" ]; then
-            echo "CI_POSTGRES_URL is empty; postgres service container did not configure the env." >&2
+            echo "CI_POSTGRES_URL is empty; postgres service did not configure the env." >&2
             exit 1
           fi
 
@@ -516,9 +507,8 @@ jobs:
 
       - name: Run tests with coverage instrumentation
         run: |
-          # The ARC pod shares a 32-core node but requests 4 cores and is limited to 14 GiB.
-          # Pin test concurrency to the pod request so coverage-instrumented processes cannot
-          # multiply to node-level parallelism and terminate the runner.
+          # Pin test concurrency to the hosted runner's four-core request so
+          # coverage-instrumented processes cannot multiply unnecessarily.
           cargo llvm-cov nextest \
             --workspace \
             --exclude cc-lb-loadgen \
@@ -549,7 +539,7 @@ jobs:
   e2e:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: cc-lb-4
+    runs-on: ubuntu-26.04
     env:
       # Real-client E2E builds the server but does not run the fixture-backed
       # Wasmtime integration suite.
@@ -603,7 +593,7 @@ jobs:
       - nextest-cov
       - e2e
     if: always()
-    runs-on: cc-lb-500m
+    runs-on: ubuntu-26.04
     permissions: {}
     timeout-minutes: 5
     steps:

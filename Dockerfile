@@ -95,14 +95,11 @@ ARG CARGO_BUILD_JOBS
 ARG FEATURES="sqlite,postgres"
 # Set to 1 to embed the existing placeholder page instead of the built dashboard.
 ARG SKIP_SPA="0"
-# sccache S3 backend. Self-hosted CI and release builds require it so cache
-# failures are visible; local builds retain an explicit uncached fallback.
-ARG SCCACHE_BUCKET=""
-ARG SCCACHE_ENDPOINT=""
-ARG SCCACHE_REGION=""
-ARG SCCACHE_S3_USE_SSL=""
+# sccache BuildKit cache mount backend. Hosted CI and release builds pass
+# SCCACHE_LOCAL_MOUNT=1 and REQUIRE_SCCACHE=1 so cache failures are visible;
+# standalone builds retain an explicit uncached fallback.
+ARG SCCACHE_LOCAL_MOUNT="0"
 ARG REQUIRE_SCCACHE="0"
-ARG SCCACHE_S3_KEY_PREFIX=""
 ARG CARGO_PROFILE_RELEASE_LTO=""
 
 COPY . .
@@ -134,8 +131,7 @@ RUN config=.cargo/config.toml; \
 # into the fresh source tree before each compile, avoiding stale build-script
 # fingerprints that could omit its embedded assets.
 RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
-    --mount=type=secret,id=AWS_ACCESS_KEY_ID,required=false \
-    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,required=false <<'EOF'
+    --mount=type=cache,id=sccache,sharing=shared,target=/sccache <<'EOF'
 # An empty SOURCE_DATE_EPOCH makes ring's cc/clang C build abort; drop it unless
 # a real value was passed.
 if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
@@ -177,29 +173,19 @@ export RUSTC
 # CFLAGS_<triple> after its own flags, so re-stating the real triple there wins.
 # No-op on targets whose Rust and LLVM triples already agree.
 export "CFLAGS_$(echo "$target" | tr '-' '_')=--target=$target"
-# Read + export the creds with the shell -x trace OFF so it never prints them.
-set +x
-AWS_ACCESS_KEY_ID="$(cat /run/secrets/AWS_ACCESS_KEY_ID 2>/dev/null || true)"
-AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/AWS_SECRET_ACCESS_KEY 2>/dev/null || true)"
-if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "${SCCACHE_BUCKET}" ]; then
-  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-  export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION
-  if [ -n "${SCCACHE_S3_USE_SSL}" ]; then export SCCACHE_S3_USE_SSL; fi
-  cache_prefix="${SCCACHE_S3_KEY_PREFIX:-cc-lb}"
-  export SCCACHE_S3_KEY_PREFIX="${cache_prefix%/}/${target}"
+if [ "${SCCACHE_LOCAL_MOUNT:-0}" = "1" ]; then
+  export SCCACHE_DIR=/sccache
+  export SCCACHE_CACHE_SIZE="1G"
   export RUSTC_WRAPPER=sccache SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
-  # Docker's host network shares 127.0.0.1 across concurrent target containers.
-  # A filesystem socket is isolated by each container's mount namespace, keeping
-  # its sccache server bound to the matching Rust sysroot and installed target.
+  # Keep the daemon isolated from every other target container and its sysroot.
   export SCCACHE_SERVER_UDS=/tmp/sccache.sock
   export SCCACHE_LOG=warn SCCACHE_ERROR_LOG=/tmp/sccache-error.log
+  mkdir -p "${SCCACHE_DIR}"
   sccache --start-server
   test -S "${SCCACHE_SERVER_UDS}"
-  set -x
-  echo "sccache: S3 backend enabled (bucket=${SCCACHE_BUCKET})"
+  echo "sccache: local BuildKit mount backend enabled (dir=${SCCACHE_DIR})"
 else
-  set -x
-  echo "sccache: disabled (no creds/bucket) - compiling uncached"
+  echo "sccache: disabled - compiling uncached"
   if [ "${REQUIRE_SCCACHE}" = "1" ]; then
     echo "sccache is required for this build" >&2
     exit 1

@@ -445,14 +445,6 @@ field({
     return { found: true, actual: bad.length ? `off-canonical: ${bad.join(', ')}` : `${urls.length} links`, ok: bad.length === 0 };
   },
 });
-field({
-  file: '.github/workflows/runner-image.yml', name: 'oci.source-label', label: 'runner image OCI source label (repository URL)',
-  extract: every(/org\.opencontainers\.image\.source=(\S+)/), expectOf: (V) => V.repoUrl,
-});
-field({
-  file: '.github/runner-image/Dockerfile', name: 'oci.source-label-dockerfile', label: 'runner image Dockerfile OCI source label (repository URL)',
-  extract: every(/org\.opencontainers\.image\.source="([^"]+)"/), expectOf: (V) => V.repoUrl,
-});
 
 // ---- workspace + published crate manifests (check-only; crates keep their
 // own technical descriptions — only declared registry overrides are compared) ----

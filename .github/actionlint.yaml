@@ -1,6 +1,5 @@
 self-hosted-runner:
   labels:
-    - cc-lb-500m
-    - cc-lb-1
-    - cc-lb-2
-    - cc-lb-4
+    # Official hosted labels not yet recognized by the pinned actionlint.
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
