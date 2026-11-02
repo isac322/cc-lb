@@ -740,16 +740,12 @@ async fn write_finalized_rows(
             row.cache_breakpoints = cache_breakpoints.clone();
             diagnostics.cache_breakpoints = cache_breakpoints;
         }
-        diagnostics.matched_v3_cache_key = route
-            .cache_prefix_hash
-            .clone()
-            .or_else(|| route.matched_v3_cache_key.clone())
-            .or_else(|| {
-                partial
-                    .parse
-                    .as_ref()
-                    .and_then(|parse| parse.matched_v3_cache_key.clone())
-            });
+        diagnostics.matched_v3_cache_key = route.matched_v3_cache_key.clone().or_else(|| {
+            partial
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.matched_v3_cache_key.clone())
+        });
         diagnostics.breakpoint_content_block_index =
             route.breakpoint_content_block_index.map(u64::from);
         diagnostics.matched_content_block_index = route.matched_content_block_index.map(u64::from);

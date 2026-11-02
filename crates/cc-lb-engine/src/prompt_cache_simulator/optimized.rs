@@ -1189,6 +1189,7 @@ mod tests {
         assert_eq!(reference.blocks.len(), PRODUCTION_FIXTURE_MESSAGE_COUNT);
         assert_eq!(reference.breakpoints.len(), 4);
 
+        let mut structural_scratch = SerializationScratch::default();
         let structural = analyze_v3_prompt_cache_structure(
             &request,
             MODEL,

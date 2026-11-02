@@ -75,7 +75,7 @@ use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
     PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
-    analyze_v3_prompt_cache, analyze_v3_prompt_cache_literal, cacheable_breakpoint_prefix_keys,
+    analyze_v3_prompt_cache, analyze_v3_prompt_cache_literal_from_official,
 };
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
@@ -4226,6 +4226,7 @@ impl Lifecycle {
             router_pipeline: &router_pipeline,
             ctx: &ctx,
             principal: &principal,
+            warm_entries: &warm_entries,
             cache_bundles: &cache_metadata.bundles,
             request_kind,
             observer: observer.as_ref(),
@@ -4440,8 +4441,6 @@ impl Lifecycle {
         );
         cache_metadata.cache_breakpoints = routed.cache_bundle.request_breakpoints.clone();
         cache_metadata.cache_prefix_hash = routed.cache_bundle.cache_prefix_hash.clone();
-        cache_metadata.cache_control_block_count =
-            Some(routed.cache_bundle.request_breakpoints.len() as u64);
         cache_metadata.cache_control_message_indices = routed
             .cache_bundle
             .request_breakpoints
@@ -8371,7 +8370,9 @@ fn plugin_cache_breakpoints_from_analysis(
         .iter()
         .map(|breakpoint| CacheBreakpoint {
             block_index: saturating_u64_to_u32(breakpoint.block_index),
-            source: plugin_cache_breakpoint_source(breakpoint.source),
+            source: plugin_cache_breakpoint_source(request_breakpoint_source_from_v3(
+                breakpoint.source,
+            )),
             path: breakpoint.path.clone(),
             message_index: breakpoint.message_index.map(saturating_u64_to_u32),
             prefix_hash: breakpoint.prefix_key.clone(),
@@ -8751,7 +8752,7 @@ fn request_cache_metadata_from_value_with_analysis(
         cacheable_breakpoint_prefix_keys: Vec::new(),
         timings: PromptCacheAnalysisTimings::default(),
     });
-    let cacheable_breakpoint_prefix_keys = output
+    let official_cacheable_prefix_keys = output
         .cacheable_breakpoint_prefix_keys
         .iter()
         .cloned()
@@ -8759,16 +8760,28 @@ fn request_cache_metadata_from_value_with_analysis(
     let analysis = output.analysis;
     let official_bundle = prompt_cache_bundle_from_analysis(
         &analysis,
-        cacheable_breakpoint_prefix_keys,
+        official_cacheable_prefix_keys.clone(),
     );
-    let literal_analysis = analyze_v3_prompt_cache_literal(value, &canonical_model_id);
-    let literal_keys = cacheable_breakpoint_prefix_keys(
-        &literal_analysis,
+    let literal_analysis = analyze_v3_prompt_cache_literal_from_official(
+        value,
         &canonical_model_id,
-        cache_threshold_tokens(&canonical_model_id),
-    )
-    .into_iter()
-    .collect();
+        &analysis,
+    );
+    let literal_keys = literal_analysis
+        .breakpoints
+        .iter()
+        .filter_map(|literal_breakpoint| {
+            analysis
+                .breakpoints
+                .iter()
+                .find(|official_breakpoint| {
+                    official_breakpoint.block_index == literal_breakpoint.block_index
+                        && official_cacheable_prefix_keys
+                            .contains(&official_breakpoint.prefix_key)
+                })
+                .map(|_| literal_breakpoint.prefix_key.clone())
+        })
+        .collect();
     let literal_bundle = prompt_cache_bundle_from_analysis(&literal_analysis, literal_keys);
     let cache_breakpoints = official_bundle.request_breakpoints.clone();
     let mut cache_control_message_indices = cache_breakpoints
@@ -9364,6 +9377,7 @@ impl<'v> RoutedUpstream<'v> {
             selected_cache_score,
             selected_cache_match,
             cache_bundle,
+            route_ms,
         }
     }
 }
@@ -9426,6 +9440,7 @@ fn route_info_for_routed(
         model: model.map(ToOwned::to_owned),
         upstream_kind: Some(storage_upstream_kind_label(routed.record.kind).to_owned()),
         route_ms: Some(routed.route_ms),
+        routing_trace: Some(routed.routing_trace.clone()),
         predicted_cache_read_tokens: Some(
             selected_cache_score.map_or(0, |score| score.predicted_cache_read_tokens),
         ),
