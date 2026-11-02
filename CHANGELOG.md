@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Request diagnostics now report `matched_v3_cache_key` and match indices only for an actual selected route match. Routed misses omit those match-only fields while retaining request prefix hashes and cold prediction fields. ([#1006](https://github.com/isac322/cc-lb/issues/1006))
 - Prompt-cache keep-alive renewals now preserve request `thinking`, `output_config`, and `tool_choice` fields unchanged instead of rewriting `thinking` to `disabled`, include `beta=true` on Anthropic OAuth renewal URLs, and persist terminal failure messages in `cache_keepalive_sessions.error` while resetting `enqueue_state` to `pending`.
 
 - PostgreSQL scheduler workers now drive task polling with a dedicated 1-second interval and auto-reconnecting notification strategy, preventing future-scheduled keep-alive and OAuth refresh jobs from stalling across idle intervals or listener disconnects.

@@ -736,12 +736,7 @@ async fn write_finalized_rows(
     // Diagnostic fields exist only in the log; every DB and bus reader sees the same row.
     let mut diagnostics = RequestDiagnostics::take_from(&mut row);
     if let Some(route) = partial.route.as_ref() {
-        diagnostics.matched_v3_cache_key = route.matched_v3_cache_key.clone().or_else(|| {
-            partial
-                .parse
-                .as_ref()
-                .and_then(|parse| parse.matched_v3_cache_key.clone())
-        });
+        diagnostics.matched_v3_cache_key = route.matched_v3_cache_key.clone();
         diagnostics.breakpoint_content_block_index =
             route.breakpoint_content_block_index.map(u64::from);
         diagnostics.matched_content_block_index = route.matched_content_block_index.map(u64::from);
@@ -4404,6 +4399,190 @@ mod tests {
             ..InternalError::default()
         }];
         partial
+    }
+
+    fn diagnostic_match_partial(event_id: &EventId) -> Result<Partial, serde_json::Error> {
+        let mut partial = partial_with_diagnostics(event_id);
+        // Preserve the historical parse JSON field for compatibility coverage.
+        partial.parse = Some(serde_json::from_value(serde_json::json!({
+            "path": "/v1/messages",
+            "method": "POST",
+            "model": "claude-sonnet-4-5",
+            "stream": false,
+            "body_bytes": 128,
+            "cache_prefix_hash": "prefix-hash",
+            "matched_v3_cache_key": "prefix-hash",
+            "cache_control_message_indices": [1, 4]
+        }))?);
+        Ok(partial)
+    }
+
+    fn diagnostic_match_cold_route() -> Result<RouteInfo, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({
+            "upstream_id": Uuid::nil(),
+            "upstream_name": "primary",
+            "model": "claude-sonnet-4-5",
+            "predicted_cache_read_tokens": 0,
+            "predicted_cache_creation_tokens_5m": 512,
+            "predicted_cache_creation_tokens_1h": 0
+        }))
+    }
+
+    async fn diagnostic_match_line(
+        partial: &Partial,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let store = CapturingStore::default();
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let metrics = noop_metrics();
+        write_finalized_rows(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut diagnostics_writer(&sink),
+            &partial.event_id,
+            partial,
+            &TerminationReason::Success,
+            200,
+            42,
+            false,
+        )
+        .await;
+        let lines = sink.lines();
+        assert_eq!(lines.len(), 1);
+        lines
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing diagnostics line".into())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn diagnostic_match_routed_miss_omits_request_key_but_keeps_cold_predictions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut partial = diagnostic_match_partial(&eid("diag-match-cold"))?;
+        partial.route = Some(diagnostic_match_cold_route()?);
+
+        let line = diagnostic_match_line(&partial).await?;
+        assert_eq!(
+            line.pointer("/cache_breakpoints/0/prefix_hash"),
+            Some(&serde_json::json!("prefix-hash"))
+        );
+        assert_eq!(
+            line.get("predicted_cache_read_tokens"),
+            Some(&serde_json::json!(0))
+        );
+        assert_eq!(
+            line.get("predicted_cache_creation_tokens_5m"),
+            Some(&serde_json::json!(512))
+        );
+        assert_eq!(
+            line.get("predicted_cache_creation_tokens_1h"),
+            Some(&serde_json::json!(0))
+        );
+        for key in [
+            "matched_v3_cache_key",
+            "breakpoint_content_block_index",
+            "matched_content_block_index",
+            "lookback_distance",
+        ] {
+            assert!(line.get(key).is_none(), "cold miss must omit {key}: {line}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn diagnostic_match_warm_route_keeps_selected_shallow_key_and_indices()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut partial = diagnostic_match_partial(&eid("diag-match-warm"))?;
+        let mut route = diagnostic_match_cold_route()?;
+        route.matched_v3_cache_key = Some("lookback-hash".to_owned());
+        route.breakpoint_content_block_index = Some(2);
+        route.matched_content_block_index = Some(1);
+        route.lookback_distance = Some(1);
+        route.predicted_cache_read_tokens = Some(256);
+        route.predicted_cache_creation_tokens_5m = Some(256);
+        partial.route = Some(route);
+
+        let line = diagnostic_match_line(&partial).await?;
+        for (key, value) in [
+            ("matched_v3_cache_key", serde_json::json!("lookback-hash")),
+            ("breakpoint_content_block_index", serde_json::json!(2)),
+            ("matched_content_block_index", serde_json::json!(1)),
+            ("lookback_distance", serde_json::json!(1)),
+            ("predicted_cache_read_tokens", serde_json::json!(256)),
+        ] {
+            assert_eq!(line.get(key), Some(&value), "{key}");
+        }
+        assert_eq!(
+            line.pointer("/cache_breakpoints/0/prefix_hash"),
+            Some(&serde_json::json!("prefix-hash"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn diagnostic_match_without_route_omits_parse_request_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let partial = diagnostic_match_partial(&eid("diag-match-no-route"))?;
+        let line = diagnostic_match_line(&partial).await?;
+        assert!(line.get("matched_v3_cache_key").is_none());
+        assert_eq!(
+            line.pointer("/cache_breakpoints/0/prefix_hash"),
+            Some(&serde_json::json!("prefix-hash"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn diagnostic_match_latest_route_miss_does_not_reuse_previous_match()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let event_id = eid("diag-match-latest-route");
+        let partial = diagnostic_match_partial(&event_id)?;
+        let mut partials = HashMap::from([(event_id.clone(), partial)]);
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+        let mut writer = RowWriter::default();
+        let mut warm = diagnostic_match_cold_route()?;
+        warm.matched_v3_cache_key = Some("lookback-hash".to_owned());
+        warm.breakpoint_content_block_index = Some(2);
+        warm.matched_content_block_index = Some(1);
+        warm.lookback_distance = Some(1);
+        warm.predicted_cache_read_tokens = Some(256);
+
+        for route in [warm, diagnostic_match_cold_route()?] {
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+                16,
+                LifecycleEvent::RouteCompleted {
+                    event_id: event_id.clone(),
+                    result: Ok(route),
+                    routing_trace: None,
+                },
+            )
+            .await;
+        }
+
+        let partial = partials.get(&event_id).ok_or("missing routed partial")?;
+        let line = diagnostic_match_line(partial).await?;
+        assert!(line.get("matched_v3_cache_key").is_none());
+        assert_eq!(
+            line.get("predicted_cache_read_tokens"),
+            Some(&serde_json::json!(0))
+        );
+        for key in [
+            "breakpoint_content_block_index",
+            "matched_content_block_index",
+            "lookback_distance",
+        ] {
+            assert!(
+                line.get(key).is_none(),
+                "latest miss must omit {key}: {line}"
+            );
+        }
+        Ok(())
     }
 
     fn diagnostic_values(row: &RequestEvent) -> [serde_json::Value; 5] {

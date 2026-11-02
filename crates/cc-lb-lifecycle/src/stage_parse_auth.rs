@@ -27,8 +27,6 @@ pub struct ParseInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_v3_cache_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_session_id: Option<String>,
