@@ -8364,6 +8364,24 @@ mod prompt_cache_policy_tests {
         Ok(())
     }
 
+    fn test_cache_breakpoint(key: &str, bytes: u64) -> CacheBreakpoint {
+        CacheBreakpoint {
+            block_index: 0,
+            source: CacheBreakpointSource::System,
+            path: "system[0]".to_owned(),
+            message_index: None,
+            prefix_hash: key.to_owned(),
+            prefix_bytes: PrefixBytes::new(bytes),
+            requested_ttl: TtlClass::Ephemeral5m,
+            lookback_prefixes: vec![CacheLookbackPrefix {
+                prefix_hash: key.to_owned(),
+                content_block_index: 0,
+                lookback_distance: 0,
+            }],
+            token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+        }
+    }
+
     #[test]
     fn preview_route_candidate_policy_selects_official_or_literal_bundle() {
         let official = UpstreamRecord {
@@ -8373,19 +8391,9 @@ mod prompt_cache_policy_tests {
         };
         let mut custom = official.clone();
         custom.base_url = Some("https://proxy.example.com".parse().expect("custom URL"));
-        let mut bundles = PromptCacheBundles::single(&[cache_breakpoint(
-            0,
-            "official",
-            100,
-            TtlClass::Ephemeral5m,
-        )]);
+        let mut bundles = PromptCacheBundles::single(&[test_cache_breakpoint("official", 100)]);
         bundles.literal = PromptCacheBundle {
-            cache_breakpoints: vec![cache_breakpoint(
-                0,
-                "literal",
-                200,
-                TtlClass::Ephemeral5m,
-            )],
+            cache_breakpoints: vec![test_cache_breakpoint("literal", 200)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             request_breakpoints: Vec::new(),
             cache_prefix_hash: Some("literal".to_owned()),
