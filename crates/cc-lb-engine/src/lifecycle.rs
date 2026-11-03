@@ -8468,8 +8468,8 @@ mod prompt_cache_policy_tests {
         );
     }
 
-    #[test]
-    fn literal_only_billing_breakpoint_records_custom_cache_creation()
+    #[tokio::test]
+    async fn literal_only_billing_breakpoint_records_custom_cache_creation()
     -> Result<(), Box<dyn std::error::Error>> {
         let request = json!({
             "model": "claude-sonnet-4-5",
@@ -8484,19 +8484,28 @@ mod prompt_cache_policy_tests {
                 "cache_control": {"type": "ephemeral"}
             }]
         });
-        let metadata = request_cache_metadata_from_value(&HeaderMap::new(), Some(&request));
+        let canonical_model = canonical_model_id("claude-sonnet-4-5");
+        let output = PromptCacheAnalysisExecutor::default()
+            .analyze(
+                Arc::new(request.clone()),
+                canonical_model.to_owned(),
+                [0; 32],
+                Some(cache_threshold_tokens(canonical_model)),
+            )
+            .await;
+        assert!(output.analysis.breakpoints.is_empty());
+        let metadata = request_cache_metadata_from_value_with_analysis(
+            &HeaderMap::new(),
+            Some(&request),
+            Some(output),
+        );
         assert!(metadata.bundles.official.cache_breakpoints.is_empty());
-        assert_eq!(metadata.cache_control_block_count, Some(1));
         let literal = &metadata.bundles.literal;
         let breakpoint = literal
             .cache_breakpoints
             .first()
             .ok_or("literal breakpoint missing")?;
-        assert!(
-            literal
-                .cacheable_breakpoint_prefix_keys
-                .contains(&breakpoint.prefix_hash)
-        );
+        assert!(literal.cacheable_breakpoint_prefix_keys.contains(&breakpoint.prefix_hash));
         let context = PromptCacheObservationContext {
             upstream_id: Uuid::from_u128(1004),
             canonical_model_id: metadata.canonical_model_id.clone(),

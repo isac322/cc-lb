@@ -9,10 +9,10 @@
 //! enters at `system` (or the first message when no system block exists), while thinking, effort,
 //! and tool choice enter at `messages`. Earlier prefix tiers remain stable.
 
+use std::time::{Duration, Instant};
+
 #[cfg(test)]
 use std::cell::Cell;
-
-use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
@@ -1081,6 +1081,7 @@ pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
 ) -> (Vec<String>, Duration) {
     cacheable_breakpoint_prefix_keys_with_filter(
         analysis,
+        &analysis.breakpoints,
         canonical_model,
         token_threshold,
         tokenize_ambiguous,
@@ -1224,7 +1225,7 @@ pub(crate) fn block_digest_call_count() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::{
         model_resolution::canonical_model_id,
