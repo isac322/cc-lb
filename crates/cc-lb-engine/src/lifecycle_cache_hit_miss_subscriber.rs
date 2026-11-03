@@ -164,6 +164,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             if let Some(m) = info.model {
                 partial.model = Some(m);
             }
+            if let Some(cache_breakpoints) = info.cache_breakpoints {
+                partial.has_cache_breakpoints = !cache_breakpoints.is_empty();
+            }
             partial.upstream_name = Some(info.upstream_name);
             partial.predicted_cache_read_tokens = info.predicted_cache_read_tokens;
         }
