@@ -8,6 +8,12 @@ slug: docs/reference/source/runtime-management
 
 This system transitions cc-lb from static TOML configuration files to a dynamic, database-backed runtime management model. You no longer define upstreams, principals, or plugin chains in `cc-lb.toml`. Instead, all runtime configurations are stored in the database and managed dynamically. This change allows you to add, update, or delete resources on the fly without restarting the proxy. You can perform these operations through the web dashboard or directly via the admin v1 REST API.
 
+Local HTTP limit admission checks whether a single request can fit within each configured cap before checking temporary exhaustion. Requests reserves one request; Input uses estimated input; Total uses the saturating sum of estimated input and requested maximum output; Cost uses the estimated cost reservation. A reservation that strictly exceeds a configured Requests, Input, Total, or Cost cap returns `429` with `x-should-retry: false`, no `Retry-After` header, and no `error.retry_after_seconds` body field. Equality alone does not trigger this rejection.
+
+Temporary window exhaustion returns `429` with `x-should-retry: true`, `Retry-After: 60`, and `error.retry_after_seconds: 60`. Concurrency exhaustion returns `429` with `x-should-retry: true`, `Retry-After: 1`, and `error.retry_after_seconds: 1`. An output-cap violation remains `400 invalid_request_error` without `x-should-retry`, `Retry-After`, or a body delay. Per-request feasibility violations take precedence over temporary exhaustion.
+
+A reduced cold allowance below a positive configured cap remains temporary and retryable if the request fits the configured cap. A configured Requests cap of zero cannot admit a request requiring one. These rules require no database migration.
+
 ## Architecture
 
 The runtime architecture relies on a lock-free `DynamicView` snapshot managed via an `ArcSwap` primitive. When configuration changes occur in the database, the server builds a new immutable `DynamicView` snapshot and swaps it atomically. This design ensures that active request-handling threads never block on configuration updates.
@@ -111,6 +117,8 @@ provider-billed tokens. It can over-reserve smaller images, and provider-specifi
 overhead can exceed the estimate. Provider-reported usage reconciliation and
 actual accounting are unchanged. Documents and non-Anthropic requests retain
 their existing estimates; routing and forwarded request bodies are unchanged.
+
+See [Overview](#overview) for local HTTP limit rejection and retry behavior.
 
 The [Admin consistency contract](https://github.com/isac322/cc-lb/blob/master/docs/consistency-contract.md) lists what each admin response guarantees about persistence, audit records, the routing-view rebuild, and convergence across replicas.
 
