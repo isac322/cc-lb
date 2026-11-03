@@ -73,10 +73,16 @@ impl<'a> HeuristicClassifier<'a> {
         decision
     }
 
+    pub(crate) fn is_compaction_boundary(response_body: &Value) -> bool {
+        let stop_reason = response_body.get("stop_reason").and_then(Value::as_str);
+        let content = response_body.get("content").and_then(Value::as_array);
+        stop_reason == Some("compaction") || has_compaction_block(content)
+    }
+
     fn classify_inner(&self, request_body: &Value, response_body: &Value) -> TurnDecision {
         let stop_reason = response_body.get("stop_reason").and_then(Value::as_str);
         let content = response_body.get("content").and_then(Value::as_array);
-        if stop_reason == Some("compaction") || has_compaction_block(content) {
+        if Self::is_compaction_boundary(response_body) {
             return TurnDecision::UserTurn;
         }
         match stop_reason {

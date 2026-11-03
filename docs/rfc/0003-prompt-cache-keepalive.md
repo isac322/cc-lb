@@ -171,8 +171,12 @@ mapping table. Key rules:
   `content` block of type `compaction` is a **UserTurn** boundary. The
   pre-response request snapshot is obsolete, so the existing generation-fenced
   cancellation path retires it without scheduling a renewal. This applies
-  regardless of the final stop reason, including a continuation with `tool_use`.
-- `stop_reason == "pause_turn"` without a compaction block → **AgentInTurn**.
+  even when the current request has no cache breakpoint, and regardless of the
+  final stop reason, including a continuation with `tool_use`.
+- Ordinary responses without a cache breakpoint remain outside keep-alive
+  completion sequencing; they do not enqueue, cancel, or supersede a pending
+  cache-bearing completion. The compaction boundary is the deliberate
+  response-derived exception.
 - `stop_reason == "refusal"` or `"model_context_window_exceeded"` →
   **UserTurn**.
 - `tool_use` with only wait-for-user tools

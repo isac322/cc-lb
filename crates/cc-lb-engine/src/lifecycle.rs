@@ -3951,8 +3951,9 @@ impl Lifecycle {
                 return Ok(failure.response(request_capability));
             }
         };
-        let track_keepalive_response = self.cache_keepalive_enqueuer.is_some()
-            && cached.cache_keepalive().is_some()
+        let keepalive_response_enabled =
+            self.cache_keepalive_enqueuer.is_some() && cached.cache_keepalive().is_some();
+        let track_keepalive_response = keepalive_response_enabled
             && (!cache_metadata.bundles.official.cache_breakpoints.is_empty()
                 || !cache_metadata.bundles.literal.cache_breakpoints.is_empty());
         if track_keepalive_response {
@@ -4523,6 +4524,8 @@ impl Lifecycle {
         let status = response.status();
         let keepalive_shaped_body = if track_keepalive_response {
             keepalive_shaped_body
+        } else if keepalive_response_enabled {
+            Some(ctx.body_bytes.clone())
         } else {
             None
         };

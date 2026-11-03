@@ -250,6 +250,12 @@ impl LifecycleKeepalive {
         else {
             return;
         };
+        let compaction_boundary = super::classifier::HeuristicClassifier::is_compaction_boundary(
+            response_body_json,
+        );
+        if cache_metadata.cache_breakpoints.is_empty() && !compaction_boundary {
+            return;
+        }
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
             return;
         };
@@ -301,13 +307,42 @@ impl LifecycleKeepalive {
         {
             return;
         }
-        let view = self.dynamic_view.load();
-        let Some(cached) = view.principal_view.get(&principal.id) else {
+        let compaction_boundary =
+            HeuristicClassifier::is_compaction_boundary(response_body_json);
+        if compaction_boundary {
+            let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
+                return;
+            };
+            let principal_name: Arc<str> = Arc::from(principal.id.as_str());
+            let session_key_hash = session_key.to_string();
+            let mut shard = self.session_shard(&session_key).lock().await;
+            let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
+            let expected_generation =
+                match enqueuer.observe_session_generation(&session_key_hash).await {
+                    Ok(expected) => expected,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "cache_keepalive",
+                            principal_id = principal.id.as_str(),
+                            %error,
+                            "skipping cache keep-alive compaction fence: failed to observe session generation"
+                        );
+                        return;
+                    }
+                };
+            if is_latest {
+                self.cancel_session(
+                    &session_key,
+                    principal,
+                    CancelReason::UserTurnDetected,
+                    expected_generation,
+                    cache_anchor_age,
+                )
+                .await;
+                super::record_cancelled(&principal_name, CancelReason::UserTurnDetected);
+            }
             return;
-        };
-        let Some(config) = cached.cache_keepalive().filter(|config| config.enabled) else {
-            return;
-        };
+        }
         let Some(request_json) = cache_metadata.request_json.as_ref() else {
             return;
         };

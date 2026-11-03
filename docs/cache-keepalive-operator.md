@@ -22,7 +22,10 @@ are skipped at fire time and the session is cancelled with `reason=upstream_gone
 
 Nothing runs - no snapshot, no schedule - for principals whose
 `cache_keepalive.enabled` is `false` or unset, or for requests that carry
-no `cache_control` breakpoint.
+no `cache_control` breakpoint, except that a response-derived compaction
+boundary may retire an already-active matching generation without creating a
+new snapshot or schedule. Ordinary no-breakpoint responses remain outside
+keep-alive completion sequencing.
 
 ## Response compaction boundaries
 
