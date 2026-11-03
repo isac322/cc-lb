@@ -1307,7 +1307,10 @@ mod tests {
                 60_000,
             )
             .await;
-        assert_eq!(journal.not_tracked.lock().expect("not-tracked lock").len(), 1);
+        assert_eq!(
+            journal.not_tracked.lock().expect("not-tracked lock").len(),
+            1
+        );
         assert_eq!(journal.cancelled.lock().expect("cancelled lock").len(), 1);
         assert!(journal.enqueued.lock().expect("enqueued lock").is_empty());
     }
