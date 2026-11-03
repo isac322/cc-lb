@@ -69,6 +69,20 @@ and the generation fence are visible to every replica. Redis is a no-go for this
 feature until a separate design proves a safe SQL fence / signing / retention
 boundary.
 
+## Renewal usage accounting
+
+Successful renewals use the same cache-creation TTL split as regular Anthropic
+usage accounting. When either nested
+`usage.cache_creation.ephemeral_5m_input_tokens` or
+`ephemeral_1h_input_tokens` is positive, those counters determine the total
+and both TTL buckets, even if the flat total disagrees. A positive flat total
+with an absent, empty, or all-zero nested breakdown falls back to the 5-minute
+bucket; it does not imply a 1-hour write.
+
+Request events and keep-alive turns retain that split for local cost accounting.
+The change applies to future renewals and does not rewrite historical rows.
+These are cc-lb usage records and cost estimates; the provider determines its invoice.
+
 ## Payload format upgrades
 
 The framed payload format stores the captured body as raw bytes before optional

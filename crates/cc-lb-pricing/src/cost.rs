@@ -408,6 +408,62 @@ mod tests {
         assert_eq!(breakdown.total_micros, 300);
     }
 
+    #[test]
+    fn keepalive_misclassified_one_hour_write_uses_five_minute_price() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "keepalive-nested-1h-accounting-test";
+        global_catalog().install_snapshot(CatalogSnapshot {
+            payload_hash: String::new(),
+            fetched_at_ms: 1,
+            models: HashMap::from([(
+                model.to_owned(),
+                Pricing {
+                    model: model.to_owned(),
+                    input_per_million_usd: UsdPerMillion::from_micros_usd(3_000_000),
+                    output_per_million_usd: UsdPerMillion::from_micros_usd(15_000_000),
+                    by_tier: BTreeMap::new(),
+                },
+            )]),
+            raw_json: b"{}".to_vec(),
+            cache_creation_per_million_usd: HashMap::from([(
+                model.to_owned(),
+                UsdPerMillion::from_micros_usd(3_750_000),
+            )]),
+            cache_read_per_million_usd: HashMap::new(),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
+            status: CatalogStatus::Ok,
+        });
+
+        let one_hour_tokens = 42;
+        let misclassified =
+            virtual_cost_micros_full_with_context(model, 0, 0, one_hour_tokens, 0, 0, 0, None)
+                .expect("controlled pricing catalog has the test model");
+        let correctly_split = virtual_cost_micros_full_with_context(
+            model,
+            0,
+            0,
+            one_hour_tokens,
+            0,
+            one_hour_tokens,
+            0,
+            None,
+        )
+        .expect("controlled pricing catalog has the test model");
+
+        assert_eq!(misclassified.input_micros, 157);
+        assert_eq!(misclassified.cache_creation_5m_micros, 0);
+        assert_eq!(misclassified.cache_creation_1h_micros, 0);
+        assert_eq!(misclassified.total_micros, 157);
+        assert_eq!(correctly_split.input_micros, 0);
+        assert_eq!(correctly_split.cache_creation_5m_micros, 0);
+        assert_eq!(correctly_split.cache_creation_1h_micros, 252);
+        assert_eq!(correctly_split.total_micros, 252);
+    }
+
     fn install_local_snapshot(
         model: &str,
         pricing: Pricing,
