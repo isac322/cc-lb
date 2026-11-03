@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use apalis::prelude::Data;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_clock::SystemClock;
+use cc_lb_config::{AnthropicOAuthConfig, SchedulerConfig};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
@@ -17,7 +18,9 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
     RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{
+    AdaptiveJob, AdaptiveWorker, SchedulerBackend, SchedulerCtx, build_adaptive_worker,
+};
 use cc_lb_storage_api::UpstreamRecord;
 use url::Url;
 use uuid::Uuid;
@@ -113,6 +116,21 @@ where
             )
             .await
     })
+}
+pub fn build_oauth_adaptive_worker<Upstreams>(
+    backend: &SchedulerBackend,
+    state: OAuthWorkerState<Upstreams>,
+) -> std::result::Result<AdaptiveWorker, SchedulerError>
+where
+    Upstreams: Clone + OAuthRefreshUpstreams + Send + Sync + 'static,
+{
+    let ctx = SchedulerCtx::new(
+        SchedulerConfig::default(),
+        Arc::new(move |job| entity_job_handler(job, Data::new(state.clone()))),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(SystemClock),
+    );
+    build_adaptive_worker(backend, ctx)
 }
 
 async fn enqueue_metadata(backend: SchedulerBackend, job: MetadataRefreshJob) -> Result<()> {
