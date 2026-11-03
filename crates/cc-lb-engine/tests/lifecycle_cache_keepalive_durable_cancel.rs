@@ -11,7 +11,7 @@ use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason,
 };
-use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
+use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 use cc_lb_upstream::SignedRequest;
@@ -64,24 +64,30 @@ async fn cache_keepalive_response_compaction_boundary_is_not_scheduled_json_and_
             true,
         ),
     ] {
+        let response_body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "type": "message",
+                "id": "msg_compaction",
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": content,
+                "stop_reason": stop_reason,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 4,
+                    "cache_read_input_tokens": 60_000
+                }
+            }))
+            .expect("response JSON"),
+        );
+        let expected_body = if streaming {
+            streaming_body_from_message(&response_body)
+        } else {
+            response_body.clone()
+        };
         let enqueuer = Arc::new(RecordingEnqueuer::default());
         let response = handle_keepalive_response_with(
-            Bytes::from(
-                serde_json::to_vec(&json!({
-                    "type": "message",
-                    "id": "msg_compaction",
-                    "role": "assistant",
-                    "model": "claude-opus-4-6",
-                    "content": content,
-                    "stop_reason": stop_reason,
-                    "usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 4,
-                        "cache_read_input_tokens": 60_000
-                    }
-                }))
-                .expect("response JSON"),
-            ),
+            response_body,
             Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
             principal_with_keepalive(),
             request.clone(),
@@ -92,9 +98,10 @@ async fn cache_keepalive_response_compaction_boundary_is_not_scheduled_json_and_
             streaming,
         )
         .await;
-        let (status, _headers, _body) = collect_body(response).await;
+        let (status, _headers, body) = collect_body(response).await;
         settle().await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected_body, "streaming={streaming}");
         assert!(
             enqueuer.enqueued().is_empty(),
             "stop_reason={stop_reason}, streaming={streaming}"
@@ -105,22 +112,28 @@ async fn cache_keepalive_response_compaction_boundary_is_not_scheduled_json_and_
 #[tokio::test]
 async fn compaction_block_precedes_tool_use_without_enqueue_json_and_sse() {
     for streaming in [false, true] {
+        let response_body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "type": "message",
+                "id": "msg_compaction_tool",
+                "role": "assistant",
+                "content": [
+                    {"type": "compaction", "content": "summary"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 0, "output_tokens": 4, "cache_read_input_tokens": 60_000}
+            }))
+            .expect("response JSON"),
+        );
+        let expected_body = if streaming {
+            streaming_body_from_message(&response_body)
+        } else {
+            response_body.clone()
+        };
         let enqueuer = Arc::new(RecordingEnqueuer::default());
         let response = handle_keepalive_response_with(
-            Bytes::from(
-                serde_json::to_vec(&json!({
-                    "type": "message",
-                    "id": "msg_compaction_tool",
-                    "role": "assistant",
-                    "content": [
-                        {"type": "compaction", "content": "summary"},
-                        {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}
-                    ],
-                    "stop_reason": "tool_use",
-                    "usage": {"input_tokens": 0, "output_tokens": 4, "cache_read_input_tokens": 60_000}
-                }))
-                .expect("response JSON"),
-            ),
+            response_body,
             Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
             principal_with_keepalive(),
             standard_keepalive_request(),
@@ -128,9 +141,10 @@ async fn compaction_block_precedes_tool_use_without_enqueue_json_and_sse() {
             streaming,
         )
         .await;
-        let (status, _headers, _body) = collect_body(response).await;
+        let (status, _headers, body) = collect_body(response).await;
         settle().await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected_body, "streaming={streaming}");
         assert!(enqueuer.enqueued().is_empty(), "streaming={streaming}");
     }
 }
@@ -226,6 +240,31 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
     assert_eq!(enqueued.len(), 2);
     assert_eq!(enqueued[0].expected_generation, Some(42));
     assert_eq!(enqueued[1].expected_generation, Some(42));
+    drop(enqueued);
+
+    let subagent = handle_keepalive_response_with(
+        end_turn_body("msg_subagent_after_compaction"),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal_with_keepalive(),
+        standard_keepalive_request(),
+        &[
+            ("x-claude-code-session-id", "compaction-fence"),
+            ("x-claude-code-agent-id", "child-agent"),
+        ],
+        false,
+    )
+    .await;
+    assert_eq!(collect_body(subagent).await.0, StatusCode::OK);
+    settle().await;
+
+    let cancelled = enqueuer.cancelled.lock().expect("cancelled lock");
+    assert_eq!(cancelled.len(), 2);
+    assert!(cancelled[0]
+        .session_key_hash
+        .ends_with("/thread:compaction-fence"));
+    assert!(cancelled[1]
+        .session_key_hash
+        .ends_with("/thread:compaction-fence/agent:child-agent"));
 }
 
 #[tokio::test]
