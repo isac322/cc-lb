@@ -8,6 +8,12 @@ All notable changes to this project will be documented in this file.
 
 - `cc_lb_cache_prediction_total{outcome}` exposes request-level prompt-cache prediction outcomes across four fixed values, comparing positive predictions with final observed cache reads.
 
+### Changed
+
+- Prompt-cache attribution now infers one deepest eligible explicit or automatic breakpoint for ordinary responses that predicted no match when usage shows numeric positive `cache_read_input_tokens` and explicit zero cache creation. Flat `cache_creation_input_tokens: 0`, complete nested 5m/1h zero counters, or the complete zero suffix pair `cache_creation_input_tokens_5m` and `cache_creation_input_tokens_1h` qualify. All supplied representations must be complete, valid unsigned counters with consistent totals. Suffix fields are evidence-only; numeric accounting remains unchanged. Missing, null, partial, invalid, contradictory, or positive-creation evidence does not establish this inferred hit. For SSE, omitted or null fields preserve the corresponding prior evidence components; complete numeric flat, nested, or suffix snapshots replace the prior representation and may change evidence state. Partial, malformed, or contradictory snapshots invalidate evidence; partial snapshots cannot be combined into zero evidence. Predicted-match attribution remains unchanged.
+
+- Eligible successful read-only prompt-cache keep-alive renewals now publish observations from the exact transformed dispatched body through a bounded, nonblocking best-effort sink, including final capped renewals. Misses, errors, unsupported providers, and ambiguous usage publish nothing. Publication does not guarantee a synchronous commit, provider acceptance, or cache hit; sink or storage failures do not fail the renewal. Existing keep-alive scheduling and shared-store decisions remain unchanged.
+
 ### Fixed
 
 - Official Anthropic prompt-cache identity now uses schema 6 and excludes only the first exact `x-anthropic-billing-header:` system text block for eligible Anthropic API-key/OAuth upstreams. Custom upstreams remain literal, and serving-candidate cache metadata is used for routing, limit admission, failover, hit/miss metrics, observations, keep-alive, and final diagnostics. Existing v5 observations cold-start through schema filtering without migration.

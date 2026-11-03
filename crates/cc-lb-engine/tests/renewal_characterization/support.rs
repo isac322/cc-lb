@@ -80,7 +80,8 @@ impl RenewalFixture {
         ));
         let http = Arc::new(RecordingRenewalHttp::new(cache_read_input_tokens));
         let upstream_store: Arc<dyn UpstreamStore> = storage.clone();
-        let dispatcher = AnthropicKeepaliveDispatcher::new(view, upstream_store, http.clone());
+        let dispatcher =
+            AnthropicKeepaliveDispatcher::new(view, upstream_store, http.clone(), clock.clone());
         let mut headers = HeaderMap::new();
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         headers.insert("x-api-key", HeaderValue::from_static("sk-downstream"));

@@ -1,9 +1,6 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use apalis::prelude::Data;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_clock::SystemClock;
 use cc_lb_config::{AnthropicOAuthConfig, SchedulerConfig};
@@ -19,16 +16,16 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
-    AdaptiveJob, AdaptiveWorker, SchedulerBackend, SchedulerCtx, build_adaptive_worker,
+    AdaptiveDispatchFn, AdaptiveJob, CronDispatchFn, SchedulerBackend, SchedulerCtx,
+    build_adaptive_worker,
 };
 use cc_lb_storage_api::UpstreamRecord;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
 use super::common::now_secs;
 use super::fake::raw_http;
-
-pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<JobOutcome>> + Send>>;
 
 #[derive(Clone)]
 pub struct OAuthWorkerState<Upstreams> {
@@ -91,46 +88,45 @@ impl<Upstreams> OAuthWorkerState<Upstreams> {
     }
 }
 
-pub fn entity_job_handler<Upstreams>(
-    job: AdaptiveJob,
-    ctx: Data<OAuthWorkerState<Upstreams>>,
-) -> HandlerFuture
-where
-    Upstreams: Clone + OAuthRefreshUpstreams + Send + Sync + 'static,
-{
-    Box::pin(async move {
-        let AdaptiveJob::OAuthRefresh(job) = job else {
-            return Ok(JobOutcome::Done);
-        };
-        ctx.probe.mark_started();
-        let aead = ctx.aead.clone();
-        let oauth_cfg = ctx.oauth_cfg.clone();
-        let backend = ctx.backend.clone();
-        ctx.handler
-            .handle(
-                job,
-                now_secs(),
-                move |upstream| refresh_tokens(aead, oauth_cfg, upstream),
-                move |metadata| enqueue_metadata(backend, metadata),
-                |_upstream_id, _expires_at_unix_secs| async { Ok(()) },
-            )
-            .await
-    })
-}
-pub fn build_oauth_adaptive_worker<Upstreams>(
+pub(super) fn spawn_oauth_worker<Upstreams>(
     backend: &SchedulerBackend,
     state: OAuthWorkerState<Upstreams>,
-) -> std::result::Result<AdaptiveWorker, SchedulerError>
+    cancel: CancellationToken,
+) -> Result<tokio::task::JoinHandle<std::result::Result<(), apalis::prelude::WorkerError>>>
 where
     Upstreams: Clone + OAuthRefreshUpstreams + Send + Sync + 'static,
 {
+    let adaptive_dispatch: AdaptiveDispatchFn = Arc::new(move |job| {
+        let state = state.clone();
+        Box::pin(async move {
+            let AdaptiveJob::OAuthRefresh(job) = job else {
+                return Ok(JobOutcome::Done);
+            };
+            state.probe.mark_started();
+            let aead = state.aead.clone();
+            let oauth_cfg = state.oauth_cfg.clone();
+            let backend = state.backend.clone();
+            state
+                .handler
+                .handle(
+                    job,
+                    now_secs(),
+                    move |upstream| refresh_tokens(aead, oauth_cfg, upstream),
+                    move |metadata| enqueue_metadata(backend, metadata),
+                    |_upstream_id, _expires_at_unix_secs| async { Ok(()) },
+                )
+                .await
+        })
+    });
+    let cron_done: CronDispatchFn = Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) }));
     let ctx = SchedulerCtx::new(
         SchedulerConfig::default(),
-        Arc::new(move |job| entity_job_handler(job, Data::new(state.clone()))),
-        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        adaptive_dispatch,
+        cron_done,
         Arc::new(SystemClock),
     );
-    build_adaptive_worker(backend, ctx)
+    let worker = build_adaptive_worker(backend, ctx)?;
+    Ok(tokio::spawn(worker.run_until_cancelled(cancel)))
 }
 
 async fn enqueue_metadata(backend: SchedulerBackend, job: MetadataRefreshJob) -> Result<()> {

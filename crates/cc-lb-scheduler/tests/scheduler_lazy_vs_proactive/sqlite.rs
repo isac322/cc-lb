@@ -18,7 +18,7 @@ use super::common::{
 };
 use super::fake::FakeAnthropic;
 use super::scenario::run_race_scenario;
-use super::worker::{OAuthWorkerProbe, OAuthWorkerState, build_oauth_adaptive_worker};
+use super::worker::{OAuthWorkerProbe, OAuthWorkerState, spawn_oauth_worker};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {
@@ -66,8 +66,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
         probe.clone(),
     );
     let cancel = CancellationToken::new();
-    let worker = build_oauth_adaptive_worker(&backend, state)?;
-    let worker_handle = tokio::spawn(worker.run_until_cancelled(cancel.clone()));
+    let worker = spawn_oauth_worker(&backend, state, cancel.clone())?;
     let lazy = LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
             stores: stores_from_storage(storage.clone()),
@@ -101,7 +100,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     )
     .await;
     cancel.cancel();
-    worker_handle.await??;
+    worker.await??;
     result
 }
 

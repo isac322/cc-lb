@@ -100,9 +100,9 @@ Schema 5 also retires the legacy prefix hashes. `cache_prefix_hash`, `cache_pref
 
 ### 2026-11-03 amendment — official billing-header identity exclusion (schema 6)
 
-Schema 6 changes only effective prompt-cache identity for the official Anthropic API-key/OAuth route: when the effective authority is `https://api.anthropic.com` with the default port and no userinfo, the first `system[0]` object text block beginning exactly with `x-anthropic-billing-header:` is retained in raw request metadata but omitted from the effective chain, breakpoint eligibility, lookback, and observations. HTTP, non-default ports, userinfo, other hosts, non-Anthropic upstreams, and custom endpoints remain literal.
+Schema 6 changes only effective prompt-cache identity for the official Anthropic API-key/OAuth route: when the effective authority is `https://api.anthropic.com` with the default port and no userinfo, the first `system[0]` object text block beginning exactly with `x-anthropic-billing-header:` is retained in raw request metadata but omitted from the effective chain, breakpoint eligibility, lookback, and observations. Anthropic upstreams using HTTP, non-default ports, userinfo, other hosts, or custom endpoints retain literal identity. Non-Anthropic requests remain neutral.
 
-The route chooses an official or literal cache bundle per candidate. Warm lookup keys are the union of both bundles, but scoring, failover, preview, observation, keep-alive, and final diagnostics use only the serving candidate's bundle. Older schema-5 observations are cold through the existing schema filter; no migration is required.
+The route chooses an official or literal cache bundle per candidate. Warm lookup keys are the union of both bundles, but scoring, admission, failover, preview, cache-outcome metrics, observation, keep-alive, and final diagnostics use only the serving candidate's bundle. Older schema-5 observations are cold through the existing schema filter; no migration is required.
 
 ### 2026-07-27 amendment — invalidator salt scope
 
@@ -133,7 +133,7 @@ Copy the **immutable routing-time match snapshot** consumed by response handling
 Response attribution is **inferential**, because Anthropic reports only aggregate `cache_read`/`cache_creation` usage and cannot say which local key hit:
 
 - provider read `> 0` with a predicted match → refresh that predicted matched key as the **best guess** (this is the intended improvement over today, where a non-breakpoint `N-k` hit refreshes nothing). The observation path already extended inferred expiry on every verified hit by upserting the observation with a fresh expiry; this amendment changes which key is supplied for a non-breakpoint hit, not the pre-existing TTL-refresh behavior. Emit a confidence/agreement signal; make no correctness claim. A wrong guess self-heals within TTL. Do **not** refresh all candidates.
-- provider read `> 0` with no predicted match → record an unknown/local-state-missing hit; do not fabricate a key.
+- provider read `> 0` with no predicted match → apply the no-match affirmative usage inference in the 2026-11-02 amendment. Infer one deepest eligible resolved explicit or automatic breakpoint only for affirmative numeric read-positive/create-zero evidence, with zero creation established by a flat total, complete nested counters, or a complete suffix pair; otherwise record an unknown/local-state-missing hit and do not fabricate a key.
 - provider read `= 0` with a predicted match → do not refresh; record the prediction disagreement (feeds the drift metric).
 - provider creation `> 0` → persist only the requested explicit or automatic breakpoints that the structural fold marked as needing a write (per `(breakpoint, TTL)`). Aggregate usage cannot prove per-breakpoint attribution (ADR 0007), and server-tool results may add their own 5-minute breakpoint, so this too stays explicitly inferential.
 
@@ -215,3 +215,21 @@ Two consequences for the "reuse is unconditional" argument above:
 Persisted column names, JSON keys, and plugin wire v1 field names are unchanged; the unit lives in `token_estimate_source`, not in the schema. Changing what producers measure requires changing `PrefixBytes::ESTIMATE_SOURCE`, at which point old-source rows become inert exactly as the deferred estimator-swap case above anticipated. (#766, #827, #890)
 
 Limit admission uses a separate estimate: native Anthropic images receive a 4,784-token allowance, with one 4,000-token request floor. Local cache-prefix and uncached-tail regions are measured on that common basis and priced without overlap, including the applicable 1-hour write rate. The [runtime-management reference](../runtime-management.md#generation-usage-accounting) describes this admission policy and its limitations. It does not change serialized prefix bytes, hashes, routing scores, estimator provenance, or actual usage accounting.
+
+## 2026-11-02 amendment — affirmative no-match attribution and keepalive observations
+
+When structural matching predicts no cache match, attribution may infer one local breakpoint only from affirmative read-only usage evidence:
+
+- `cache_read_input_tokens` is present, an unsigned integer, and greater than zero.
+- Creation is explicitly numeric zero: flat `cache_creation_input_tokens: 0`, a complete `cache_creation` object with both `ephemeral_5m_input_tokens: 0` and `ephemeral_1h_input_tokens: 0`, or the complete suffix pair `cache_creation_input_tokens_5m: 0` and `cache_creation_input_tokens_1h: 0`.
+- Every supplied creation representation must contain complete, valid unsigned counters, and all supplied totals must agree. Partial, null-containing, invalid, or contradictory representations make creation evidence unknown. Suffix fields are evidence-only; numeric accounting remains unchanged, and its defaults are not evidence.
+
+Select exactly one deepest eligible resolved explicit or automatic breakpoint by content-block position. This inference applies only when no match was predicted. Missing or null counters cannot establish new evidence. For SSE, omitted or null fields preserve the corresponding prior evidence components; complete numeric flat, nested, or suffix snapshots replace the prior representation and may change evidence state. Partial, malformed, or contradictory snapshots invalidate evidence; partial nested or suffix SSE snapshots cannot be combined into zero evidence.
+
+A zero read disables the new inferred-hit branch. Positive creation also disables only that branch: existing creation/write observations remain unchanged. Predicted-match attribution remains unchanged, including same-key TTL handling carried by the selected predicted entry. A predicted match is never replaced by a deeper inferred breakpoint. All such attribution remains inferential because aggregate provider usage does not identify the local prefix that hit.
+
+An eligible successful read-only keepalive renewal attempts best-effort observation publication through the existing bounded, nonblocking sink. The shared decoder analyzes the exact transformed body dispatched to the provider, its canonical model, and its resolved explicit or automatic breakpoints with the actual eligibility set. The deepest breakpoint's identity and TTL come from that analysis, not the snapshot's scheduling TTL. Misses, errors, unsupported providers, and ambiguous usage produce no new keepalive observations.
+
+The dispatcher captures an immutable absolute expiry anchor immediately before the actual signed HTTP dispatch. Publication uses that anchor, never finalizer time or a scheduler reconstruction of `now - cache_anchor_age`. It is attempted before finalization, rescheduling, or cap handling, so an otherwise eligible final successful renewal still attempts publication when a session cap prevents another renewal. Existing accounting, status, authorization, generation fencing, caps, scheduling, and failure behavior remain unchanged.
+
+Publication and durable commit remain asynchronous and best effort; a full or closed sink or a storage failure must not turn a successful renewal into a failure. The existing observation store and shared-store decisions remain unchanged, with no storage-schema/API DTO migration, retry, outbox, or flush added. Publication does not establish synchronous commit or verify live provider cache state, provider acceptance, or a provider cache hit. Ordinary response observations retain their existing dispatch-based expiry anchor, and keepalive scheduling remains unchanged.
