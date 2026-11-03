@@ -1,19 +1,32 @@
 use crate::common;
 
+#[path = "prompt_cache_routing_support/mod.rs"]
+mod prompt_cache_routing_support;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use cc_lb_clock::TestClock;
 use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_control::{
-    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry, UpstreamStatusSnapshot,
+    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
 };
-use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
+use cc_lb_domain::{Principal, TerminalStrategy, TtlClass, UpstreamCandidate, WarmCacheEntry};
+use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
+use cc_lb_engine::prompt_cache_simulator::{
+    analyze_v3_prompt_cache, V3PromptCacheBreakpoint,
+};
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::HeaderMap;
+use prompt_cache_routing_support::{
+    known_base_quota_snapshots, TestPromptCacheObservationCache, TestSubscriptionQuotaCache,
+};
+use serde_json::Value;
 use url::Url;
 use uuid::Uuid;
 
@@ -204,6 +217,144 @@ async fn preview_route_skips_apply_error_upstreams() {
     );
 }
 
+#[tokio::test]
+async fn preview_route_uses_endpoint_specific_billing_first_cache_keys() {
+    const NOW_SECS: u64 = 1_700_000_000;
+    let official_id = Uuid::from_u128(1);
+    let custom_id = Uuid::from_u128(2);
+    let normal_body = billing_first_body("normal");
+    let cron_body = billing_first_body("cron");
+    let normal_keys = payload_cache_keys(&normal_body);
+    let cron_keys = payload_cache_keys(&cron_body);
+
+    // The official endpoint ignores only the billing attribution block, while
+    // a literal endpoint includes it in the prefix identity.
+    assert_eq!(normal_keys.official, cron_keys.official);
+    assert_ne!(normal_keys.literal, cron_keys.literal);
+
+    let warm_entries = HashMap::from([
+        (
+            official_id,
+            vec![warm_entry(&normal_keys.official_breakpoint, NOW_SECS)],
+        ),
+        (
+            custom_id,
+            vec![
+                warm_entry(&normal_keys.literal_breakpoint, NOW_SECS),
+                // Negative control: a custom endpoint must not accept the
+                // official key even when that observation exists for it.
+                warm_entry(&normal_keys.official_breakpoint, NOW_SECS),
+            ],
+        ),
+    ]);
+    let upstream_records = vec![
+        preview_upstream(
+            official_id,
+            "official",
+            Some(parse_url("https://api.anthropic.com")),
+        ),
+        preview_upstream(
+            custom_id,
+            "custom",
+            Some(parse_url("https://proxy.example.com")),
+        ),
+    ];
+    let lifecycle = build_prompt_cache_lifecycle(
+        upstream_records.clone(),
+        warm_entries,
+        official_id,
+        custom_id,
+    );
+
+    let normal = lifecycle
+        .preview_route(preview_input(normal_body.clone(), "preview-billing-normal"))
+        .await
+        .expect("normal preview succeeds");
+    let normal_trace = subscription_trace(&normal);
+    let normal_official = trace_candidate(normal_trace, official_id);
+    let normal_custom = trace_candidate(normal_trace, custom_id);
+    assert_eq!(normal.winner_upstream_id, Some(official_id));
+    assert_eq!(terminal_upstream(&normal), Some(official_id));
+    assert_eq!(
+        normal_official.matched_v3_cache_key.as_deref(),
+        Some(normal_keys.official.as_str())
+    );
+    assert_eq!(
+        normal_custom.matched_v3_cache_key.as_deref(),
+        Some(normal_keys.literal.as_str())
+    );
+    assert!(normal_official.predicted_cache_read_tokens > 0);
+    assert!(normal_custom.predicted_cache_read_tokens > 0);
+    assert_eq!(normal_trace.formula_winner_upstream_id, Some(official_id));
+
+    // Mutating only the billing attribution must preserve the official warm
+    // owner, but the custom endpoint must miss rather than inherit that key.
+    let cron = lifecycle
+        .preview_route(preview_input(cron_body, "preview-billing-cron"))
+        .await
+        .expect("cron preview succeeds");
+    let cron_trace = subscription_trace(&cron);
+    let cron_official = trace_candidate(cron_trace, official_id);
+    let cron_custom = trace_candidate(cron_trace, custom_id);
+    assert_eq!(cron.winner_upstream_id, Some(official_id));
+    assert_eq!(terminal_upstream(&cron), Some(official_id));
+    assert_eq!(
+        cron_official.matched_v3_cache_key.as_deref(),
+        Some(cron_keys.official.as_str())
+    );
+    assert_eq!(cron_keys.official, normal_keys.official);
+    assert_eq!(cron_custom.matched_v3_cache_key, None);
+    assert_eq!(cron_custom.predicted_cache_read_tokens, 0);
+    assert_eq!(cron_trace.formula_winner_upstream_id, Some(official_id));
+    assert_eq!(
+        cron_trace.bucket_v3_cache_key.as_deref(),
+        Some(cron_keys.official.as_str())
+    );
+
+    // The explicit official authority follows the same policy as no base URL.
+    let no_base_url = build_prompt_cache_lifecycle(
+        upstream_records
+            .into_iter()
+            .map(|mut record| {
+                if record.id == official_id {
+                    record.base_url = None;
+                }
+                record
+            })
+            .collect(),
+        HashMap::from([
+            (
+                official_id,
+                vec![warm_entry(&normal_keys.official_breakpoint, NOW_SECS)],
+            ),
+            (
+                custom_id,
+                vec![
+                    warm_entry(&normal_keys.literal_breakpoint, NOW_SECS),
+                    warm_entry(&normal_keys.official_breakpoint, NOW_SECS),
+                ],
+            ),
+        ]),
+        official_id,
+        custom_id,
+    );
+    let without_base_url = no_base_url
+        .preview_route(preview_input(normal_body, "preview-billing-no-base-url"))
+        .await
+        .expect("no-base-url preview succeeds");
+    let without_base_url_trace = subscription_trace(&without_base_url);
+    assert_eq!(
+        without_base_url.winner_upstream_id,
+        normal.winner_upstream_id
+    );
+    assert_eq!(
+        trace_candidate(without_base_url_trace, official_id)
+            .matched_v3_cache_key
+            .as_deref(),
+        Some(normal_keys.official.as_str())
+    );
+}
+
 fn input(principal_id: &str, request_id: Option<&str>) -> PreviewRouteInput {
     PreviewRouteInput {
         principal_id: principal_id.to_owned(),
@@ -211,6 +362,177 @@ fn input(principal_id: &str, request_id: Option<&str>) -> PreviewRouteInput {
         headers: HeaderMap::new(),
         body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
     }
+}
+
+struct PayloadCacheKeys {
+    official: String,
+    literal: String,
+    official_breakpoint: V3PromptCacheBreakpoint,
+    literal_breakpoint: V3PromptCacheBreakpoint,
+}
+
+fn billing_first_body(attribution: &str) -> Bytes {
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "system": [
+            {
+                "type": "text",
+                "text": format!("x-anthropic-billing-header: {attribution}")
+            },
+            {
+                "type": "text",
+                "text": "stable system context ".repeat(400),
+                "cache_control": {"type": "ephemeral"}
+            }
+        ],
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 16
+    });
+    let bytes = match serde_json::to_vec(&body) {
+        Ok(bytes) => bytes,
+        Err(error) => panic!("billing-first body serializes: {error}"),
+    };
+    Bytes::from(bytes)
+}
+
+fn payload_cache_keys(body: &Bytes) -> PayloadCacheKeys {
+    let value: Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(error) => panic!("billing-first body parses: {error}"),
+    };
+    let analysis = analyze_v3_prompt_cache(&value, "claude-sonnet-4-5");
+    let Some(official_breakpoint) = analysis.breakpoints.first().cloned() else {
+        panic!("official payload breakpoint present");
+    };
+    let Some(literal_breakpoint) = analysis.literal_breakpoints.first().cloned() else {
+        panic!("literal payload breakpoint present");
+    };
+    let Some(official_prefix) = official_breakpoint.lookback_prefixes.first() else {
+        panic!("official lookback key present");
+    };
+    let Some(literal_prefix) = literal_breakpoint.lookback_prefixes.first() else {
+        panic!("literal lookback key present");
+    };
+    PayloadCacheKeys {
+        official: official_prefix.prefix_key.clone(),
+        literal: literal_prefix.prefix_key.clone(),
+        official_breakpoint,
+        literal_breakpoint,
+    }
+}
+
+fn warm_entry(breakpoint: &V3PromptCacheBreakpoint, now_secs: u64) -> WarmCacheEntry {
+    let Some(prefix) = breakpoint.lookback_prefixes.first() else {
+        panic!("warm breakpoint has a lookback key");
+    };
+    let ttl_class = match breakpoint.ttl.as_deref() {
+        Some("1h") => TtlClass::Ephemeral1h,
+        _ => TtlClass::Ephemeral5m,
+    };
+    WarmCacheEntry {
+        prefix_hash: prefix.prefix_key.clone(),
+        expires_at_unix_secs: now_secs + 300,
+        ttl_class,
+        last_observed_at_unix_secs: now_secs,
+        content_block_index: prefix.content_block_index as u32,
+        estimated_prefix_bytes: breakpoint.prefix_bytes,
+        hash_schema_version: cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION,
+    }
+}
+
+fn preview_input(body_bytes: Bytes, request_id: &str) -> PreviewRouteInput {
+    PreviewRouteInput {
+        principal_id: PRINCIPAL.to_owned(),
+        request_id: Some(request_id.to_owned()),
+        headers: HeaderMap::new(),
+        body_bytes,
+    }
+}
+
+fn preview_upstream(id: Uuid, name: &str, base_url: Option<Url>) -> UpstreamRecord {
+    UpstreamRecord {
+        id,
+        name: name.to_owned(),
+        kind: StorageUpstreamKind::AnthropicOauth,
+        base_url,
+        enabled: true,
+        revision: 1,
+        ..UpstreamRecord::default()
+    }
+}
+
+fn parse_url(value: &str) -> Url {
+    match Url::parse(value) {
+        Ok(url) => url,
+        Err(error) => panic!("test URL parses: {error}"),
+    }
+}
+
+fn build_prompt_cache_lifecycle(
+    upstream_records: Vec<UpstreamRecord>,
+    warm_entries: HashMap<Uuid, Vec<WarmCacheEntry>>,
+    official_id: Uuid,
+    custom_id: Uuid,
+) -> Lifecycle {
+    let principal_view =
+        principal_view_with_pipeline(vec![Arc::new(SubscriptionPreferenceFilter::new())]);
+    let state = TestState::default();
+    let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
+    let dispatcher: Arc<dyn cc_lb_engine::UpstreamDispatch> = Arc::new(MockDispatch {
+        state,
+        mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![http::StatusCode::OK].into()))),
+    });
+    let prompt_cache =
+        TestPromptCacheObservationCache::new(warm_entries);
+    let quota_cache = TestSubscriptionQuotaCache::new(HashMap::from([
+        (official_id, known_base_quota_snapshots(0.25)),
+        (custom_id, known_base_quota_snapshots(0.0)),
+    ]));
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(principal_view)
+        .upstream_records(upstream_records)
+        .prompt_cache_observation_store(Arc::new(prompt_cache))
+        .subscription_quota_cache(Arc::new(quota_cache))
+        .subscription_quota_routing_max_staleness_secs(60)
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(1_700_000_000)),
+    )
+}
+
+fn subscription_trace(
+    outcome: &cc_lb_engine::lifecycle::PreviewRouteOutcome,
+) -> &cc_lb_domain::SubscriptionPreferenceTrace {
+    outcome
+        .trace
+        .stages
+        .iter()
+        .find_map(|stage| stage.subscription_preference.as_ref())
+        .unwrap_or_else(|| panic!("subscription preference trace present"))
+}
+
+fn trace_candidate(
+    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
+    upstream_id: Uuid,
+) -> &cc_lb_domain::CandidateUrgency {
+    trace
+        .candidates
+        .iter()
+        .find(|candidate| candidate.upstream_id == upstream_id)
+        .unwrap_or_else(|| panic!("candidate {upstream_id} appears in trace"))
+}
+
+fn terminal_upstream(outcome: &cc_lb_engine::lifecycle::PreviewRouteOutcome) -> Option<Uuid> {
+    outcome
+        .trace
+        .terminal_decision
+        .as_ref()
+        .and_then(|decision| decision.upstream_id)
 }
 
 fn kept_filter(name: &'static str, kept_indices: Vec<usize>) -> Arc<dyn FilterPlugin> {
