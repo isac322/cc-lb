@@ -589,6 +589,687 @@ async fn cache_keepalive_shared_lifecycle_serializes_buffered_and_streaming_comp
     assert_eq!(events.last().copied(), Some("cancel"));
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum KeepaliveOperation {
+    Observe(String, Option<u64>),
+    Enqueue(String, Option<u64>),
+    Cancel(String, Option<u64>, CancelReason),
+    NotTracked(String, String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ScopedKeepaliveState {
+    generations: std::collections::BTreeMap<String, u64>,
+    operations: Vec<KeepaliveOperation>,
+    next_generation: u64,
+}
+
+#[derive(Default)]
+struct ScopedKeepaliveEnqueuer {
+    state: Mutex<ScopedKeepaliveState>,
+    completed: tokio::sync::Notify,
+}
+
+impl ScopedKeepaliveEnqueuer {
+    fn snapshot(&self) -> ScopedKeepaliveState {
+        self.state.lock().expect("scoped keepalive state").clone()
+    }
+
+    async fn wait_for_completion(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.completed.notified())
+            .await
+            .expect("scoped keepalive completion");
+    }
+}
+
+#[async_trait]
+impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
+    async fn observe_session_generation(
+        &self,
+        key: &str,
+    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("scoped keepalive state");
+        let generation = state.generations.get(key).copied();
+        state
+            .operations
+            .push(KeepaliveOperation::Observe(key.to_owned(), generation));
+        Ok(generation)
+    }
+
+    async fn enqueue_cache_keepalive(
+        &self,
+        request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("scoped keepalive state");
+        let key = request.session_key_hash;
+        assert_eq!(
+            request.expected_generation,
+            state.generations.get(&key).copied()
+        );
+        state.operations.push(KeepaliveOperation::Enqueue(
+            key.clone(),
+            request.expected_generation,
+        ));
+        state.next_generation += 1;
+        let generation = state.next_generation;
+        state.generations.insert(key, generation);
+        self.completed.notify_one();
+        Ok(())
+    }
+
+    async fn cancel_cache_keepalive(
+        &self,
+        request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        let mut state = self.state.lock().expect("scoped keepalive state");
+        let key = request.session_key_hash;
+        assert_eq!(
+            request.expected_generation,
+            state.generations.get(&key).copied()
+        );
+        state.operations.push(KeepaliveOperation::Cancel(
+            key.clone(),
+            request.expected_generation,
+            request.reason,
+        ));
+        state.generations.remove(&key);
+        self.completed.notify_one();
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.state
+            .lock()
+            .expect("scoped keepalive state")
+            .operations
+            .push(KeepaliveOperation::NotTracked(
+                request.session_key_hash,
+                request.reason,
+            ));
+        Ok(())
+    }
+}
+
+async fn observed_keepalive_response(
+    upstream_body: Bytes,
+    enqueuer: Arc<dyn CacheKeepaliveEnqueuer>,
+    principal: PrincipalRecord,
+    request_body: Bytes,
+    request_headers: &[(&str, &str)],
+    streaming: bool,
+) -> (Response<Body>, Option<String>) {
+    let principal_name = principal.name.clone();
+    let principal_view = Arc::new(PrincipalView::from_db(
+        &[principal],
+        std::collections::HashMap::new(),
+    ));
+    let mut authn = TestAuthn::with_principal_view(TestState::default(), principal_view);
+    authn.authn = common::managed_authn(&principal_name);
+    let dispatch: Arc<dyn UpstreamDispatch> = if streaming {
+        Arc::new(FixedStreamingDispatch {
+            body: streaming_body_from_message(&upstream_body),
+        })
+    } else {
+        Arc::new(FixedSuccessDispatch {
+            body: upstream_body,
+        })
+    };
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.attach_lifecycle_assembler(128);
+    let lifecycle = lifecycle_with_parts(authn, dispatch, LifecycleConfig::default())
+        .with_cache_keepalive_enqueuer(enqueuer)
+        .with_event_bus(bus);
+    let mut request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("anthropic-version", "2023-06-01");
+    for (name, value) in request_headers {
+        request = request.header(*name, *value);
+    }
+    let request = request
+        .body(request_body)
+        .expect("observed keepalive request");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("request handles");
+    let mut reported_kind = None;
+    let mut parsed = false;
+    while let Ok(event) = events.try_recv() {
+        if let cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
+            result: Ok(info), ..
+        } = event
+        {
+            reported_kind = info.request_kind;
+            parsed = true;
+        }
+    }
+    assert!(parsed, "real lifecycle must report parsed request identity");
+    (response, reported_kind)
+}
+
+async fn assert_keepalive_response_fidelity(
+    response: Response<Body>,
+    expected: &Bytes,
+    streaming: bool,
+) {
+    let (status, headers, body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK);
+    if streaming {
+        assert!(
+            headers[http::header::CONTENT_TYPE]
+                .to_str()
+                .expect("content type")
+                .starts_with("text/event-stream")
+        );
+        assert_eq!(
+            body.as_ref(),
+            streaming_body_from_message(expected).as_ref()
+        );
+        assert!(body.ends_with(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+    } else {
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).expect("downstream JSON"),
+            serde_json::from_slice::<serde_json::Value>(expected).expect("fixture JSON")
+        );
+    }
+}
+
+async fn establish_scoped_keepalive(
+    enqueuer: &Arc<ScopedKeepaliveEnqueuer>,
+    principal: PrincipalRecord,
+    headers: &[(&str, &str)],
+) {
+    let body = agent_turn_body("msg_legitimate_setup", "Bash", 12_000);
+    let (response, _) = observed_keepalive_response(
+        body.clone(),
+        Arc::clone(enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal,
+        standard_keepalive_request(),
+        headers,
+        false,
+    )
+    .await;
+    assert_keepalive_response_fidelity(response, &body, false).await;
+    enqueuer.wait_for_completion().await;
+}
+
+#[tokio::test]
+async fn auxiliary_unknown_kind_must_not_cancel_main_session_scope() {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    establish_scoped_keepalive(
+        &enqueuer,
+        principal.clone(),
+        &[
+            ("x-claude-code-session-id", "auxiliary-repro"),
+            ("x-claude-code-request-class", "main"),
+        ],
+    )
+    .await;
+    let before = enqueuer.snapshot();
+    assert_eq!(before.generations.len(), 1);
+    let key = before.generations.keys().next().expect("main session key");
+    assert!(key.ends_with("/thread:auxiliary-repro"));
+    assert_eq!(
+        before.operations,
+        vec![
+            KeepaliveOperation::Observe(key.clone(), None),
+            KeepaliveOperation::Enqueue(key.clone(), None),
+        ]
+    );
+
+    let body = end_turn_body("msg_auxiliary_repro");
+    let (response, kind) = observed_keepalive_response(
+        body.clone(),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal,
+        standard_keepalive_request(),
+        &[
+            ("x-claude-code-session-id", "auxiliary-repro"),
+            ("x-claude-code-request-class", "auxiliary"),
+        ],
+        false,
+    )
+    .await;
+    assert_eq!(kind.as_deref(), Some("unknown"));
+    assert_keepalive_response_fidelity(response, &body, false).await;
+    settle().await;
+    assert_eq!(
+        enqueuer.snapshot(),
+        before,
+        "auxiliary must preserve the main generation and full operation journal"
+    );
+}
+
+#[tokio::test]
+async fn explicit_auxiliary_completions_do_not_mutate_keepalive_json_and_sse() {
+    for streaming in [false, true] {
+        for agent in [None, Some("auxiliary-agent")] {
+            for tool_use in [false, true] {
+                for active in [false, true] {
+                    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+                    let principal = principal_with_keepalive();
+                    let mut headers = vec![("x-claude-code-session-id", "auxiliary-matrix")];
+                    if let Some(agent) = agent {
+                        headers.push(("x-claude-code-agent-id", agent));
+                    }
+                    if active {
+                        establish_scoped_keepalive(&enqueuer, principal.clone(), &headers).await;
+                    }
+                    let before = enqueuer.snapshot();
+                    headers.push(("x-claude-code-request-class", " AuXiLiArY "));
+                    let body = if tool_use {
+                        agent_turn_body("msg_auxiliary_tool", "Bash", 12_000)
+                    } else {
+                        end_turn_body("msg_auxiliary_end")
+                    };
+                    let (response, kind) = observed_keepalive_response(
+                        body.clone(),
+                        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                        principal,
+                        standard_keepalive_request(),
+                        &headers,
+                        streaming,
+                    )
+                    .await;
+                    assert_eq!(
+                        kind.as_deref(),
+                        Some(if agent.is_some() {
+                            "subagent"
+                        } else {
+                            "unknown"
+                        })
+                    );
+                    assert_keepalive_response_fidelity(response, &body, streaming).await;
+                    settle().await;
+                    assert_eq!(
+                        enqueuer.snapshot(),
+                        before,
+                        "streaming={streaming}, agent={agent:?}, tool_use={tool_use}, active={active}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_auxiliary_preserves_all_generation_scopes() {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    for (session, agent) in [
+        ("scope-session", None),
+        ("scope-session", Some("own-agent")),
+        ("scope-session", Some("other-agent")),
+        ("other-session", None),
+    ] {
+        let mut headers = vec![("x-claude-code-session-id", session)];
+        if let Some(agent) = agent {
+            headers.push(("x-claude-code-agent-id", agent));
+        }
+        establish_scoped_keepalive(&enqueuer, principal.clone(), &headers).await;
+    }
+    let mut other_principal = principal_with_keepalive();
+    other_principal.name = "other-principal".to_owned();
+    establish_scoped_keepalive(
+        &enqueuer,
+        other_principal,
+        &[("x-claude-code-session-id", "scope-session")],
+    )
+    .await;
+    let before = enqueuer.snapshot();
+    assert_eq!(before.generations.len(), 5);
+    assert_eq!(
+        before
+            .generations
+            .values()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        5
+    );
+    assert_eq!(
+        before
+            .generations
+            .keys()
+            .filter(|key| key.ends_with("/thread:scope-session"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        before
+            .generations
+            .keys()
+            .filter(|key| key.ends_with("/thread:scope-session/agent:own-agent"))
+            .count(),
+        1
+    );
+    for agent in [None, Some("own-agent"), Some(" main ")] {
+        for tool_use in [false, true] {
+            let mut headers = vec![
+                ("x-claude-code-session-id", "scope-session"),
+                ("x-claude-code-request-class", "auxiliary"),
+            ];
+            if let Some(agent) = agent {
+                headers.push(("x-claude-code-agent-id", agent));
+            }
+            let body = if tool_use {
+                agent_turn_body("msg_scoped_tool", "Bash", 12_000)
+            } else {
+                end_turn_body("msg_scoped_end")
+            };
+            let (response, _) = observed_keepalive_response(
+                body.clone(),
+                Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                principal.clone(),
+                standard_keepalive_request(),
+                &headers,
+                false,
+            )
+            .await;
+            assert_keepalive_response_fidelity(response, &body, false).await;
+            settle().await;
+            assert_eq!(
+                enqueuer.snapshot(),
+                before,
+                "agent={agent:?}, tool_use={tool_use}"
+            );
+        }
+    }
+}
+
+fn refined_keepalive_request(kind: &str) -> Bytes {
+    let mut request: serde_json::Value =
+        serde_json::from_slice(&standard_keepalive_request()).expect("request fixture");
+    request["system"][0]["text"] = json!(match kind {
+        "main" => "You are an interactive agent that helps users with software engineering tasks.",
+        "advisor" =>
+            "<system-conventions>rules</system-conventions>\nYou shadow the main agent as a peer programmer:",
+        _ => panic!("unsupported refinement"),
+    });
+    Bytes::from(serde_json::to_vec(&request).expect("refined request fixture"))
+}
+
+#[tokio::test]
+async fn explicit_auxiliary_exclusion_survives_main_and_advisor_refinement() {
+    for kind in ["main", "advisor"] {
+        for streaming in [false, true] {
+            for tool_use in [false, true] {
+                let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+                let principal = principal_with_keepalive();
+                establish_scoped_keepalive(
+                    &enqueuer,
+                    principal.clone(),
+                    &[("x-claude-code-session-id", "refined-auxiliary")],
+                )
+                .await;
+                let before = enqueuer.snapshot();
+                let body = if tool_use {
+                    agent_turn_body("msg_refined_tool", "Bash", 12_000)
+                } else {
+                    end_turn_body("msg_refined_end")
+                };
+                let (response, reported_kind) = observed_keepalive_response(
+                    body.clone(),
+                    Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                    principal,
+                    refined_keepalive_request(kind),
+                    &[
+                        ("x-claude-code-session-id", "refined-auxiliary"),
+                        ("x-claude-code-request-class", "auxiliary"),
+                    ],
+                    streaming,
+                )
+                .await;
+                assert_eq!(
+                    reported_kind.as_deref(),
+                    Some(kind),
+                    "refined reporting must be preserved"
+                );
+                assert_keepalive_response_fidelity(response, &body, streaming).await;
+                settle().await;
+                assert_eq!(
+                    enqueuer.snapshot(),
+                    before,
+                    "kind={kind}, streaming={streaming}, tool_use={tool_use}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn non_auxiliary_turns_preserve_keepalive_lifecycle() {
+    for (class, agent, refinement, expected_kind, expected_scope_suffix) in [
+        (
+            None,
+            None,
+            None,
+            Some("unknown"),
+            Some("/thread:legitimate-control"),
+        ),
+        (None, None, None, None, None),
+        (
+            Some("unrecognized"),
+            None,
+            None,
+            Some("unknown"),
+            Some("/thread:legitimate-control"),
+        ),
+        (
+            None,
+            Some("legitimate-agent"),
+            None,
+            Some("subagent"),
+            Some("/thread:legitimate-control/agent:legitimate-agent"),
+        ),
+        (
+            Some("main"),
+            Some("main"),
+            None,
+            Some("main"),
+            Some("/thread:legitimate-control"),
+        ),
+        (
+            Some("subagent"),
+            None,
+            None,
+            Some("subagent"),
+            Some("/thread:legitimate-control/agent:subagent"),
+        ),
+        (
+            None,
+            None,
+            Some("advisor"),
+            Some("advisor"),
+            Some("/thread:legitimate-control"),
+        ),
+        (
+            Some(""),
+            None,
+            None,
+            Some("unknown"),
+            Some("/thread:legitimate-control"),
+        ),
+    ] {
+        for streaming in [false, true] {
+            let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+            let principal = principal_with_keepalive();
+            let mut headers = Vec::new();
+            if expected_kind.is_some() {
+                headers.push(("x-claude-code-session-id", "legitimate-control"));
+            }
+            if let Some(class) = class {
+                headers.push(("x-claude-code-request-class", class));
+            }
+            if let Some(agent) = agent {
+                headers.push(("x-claude-code-agent-id", agent));
+            }
+            let request = refinement
+                .map(refined_keepalive_request)
+                .unwrap_or_else(standard_keepalive_request);
+            let body = agent_turn_body("msg_control_agent", "Bash", 12_000);
+            let (response, kind) = observed_keepalive_response(
+                body.clone(),
+                Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                principal.clone(),
+                request.clone(),
+                &headers,
+                streaming,
+            )
+            .await;
+            assert_eq!(kind.as_deref(), expected_kind);
+            assert_keepalive_response_fidelity(response, &body, streaming).await;
+            enqueuer.wait_for_completion().await;
+            let active = enqueuer.snapshot();
+            assert_eq!(active.generations.len(), 1);
+            let (key, generation) = active
+                .generations
+                .iter()
+                .next()
+                .expect("active control generation");
+            if let Some(expected_scope_suffix) = expected_scope_suffix {
+                assert!(
+                    key.ends_with(expected_scope_suffix),
+                    "expected scope {expected_scope_suffix}, got {key}"
+                );
+            } else {
+                let (_, prefix_hash) = key
+                    .split_once("/prefix:")
+                    .expect("headerless control must use a cache-prefix scope");
+                assert!(!prefix_hash.is_empty());
+                assert!(
+                    !key.contains("/agent:"),
+                    "headerless control must not invent an agent scope"
+                );
+            }
+            assert_eq!(
+                active.operations,
+                vec![
+                    KeepaliveOperation::Observe(key.clone(), None),
+                    KeepaliveOperation::Enqueue(key.clone(), None),
+                ]
+            );
+            let body = end_turn_body("msg_control_user");
+            let (response, kind) = observed_keepalive_response(
+                body.clone(),
+                Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                principal,
+                request,
+                &headers,
+                streaming,
+            )
+            .await;
+            assert_eq!(kind.as_deref(), expected_kind);
+            assert_keepalive_response_fidelity(response, &body, streaming).await;
+            enqueuer.wait_for_completion().await;
+            let completed = enqueuer.snapshot();
+            assert!(completed.generations.is_empty());
+            assert_eq!(
+                &completed.operations[2..],
+                &[
+                    KeepaliveOperation::Observe(key.clone(), Some(*generation)),
+                    KeepaliveOperation::NotTracked(
+                        key.clone(),
+                        "user turn (stop_reason=end_turn)".to_owned()
+                    ),
+                    KeepaliveOperation::Cancel(
+                        key.clone(),
+                        Some(*generation),
+                        CancelReason::UserTurnDetected
+                    ),
+                ]
+            );
+        }
+    }
+}
+
+struct BlockingGenerationEnqueuer {
+    inner: ScopedKeepaliveEnqueuer,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl CacheKeepaliveEnqueuer for BlockingGenerationEnqueuer {
+    async fn observe_session_generation(
+        &self,
+        key: &str,
+    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.observe_session_generation(key).await
+    }
+
+    async fn enqueue_cache_keepalive(
+        &self,
+        request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.inner.enqueue_cache_keepalive(request).await
+    }
+
+    async fn cancel_cache_keepalive(
+        &self,
+        request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.inner.cancel_cache_keepalive(request).await
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.inner.record_cache_keepalive_not_tracked(request).await
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_response_completion_does_not_await_generation_persistence() {
+    for streaming in [false, true] {
+        let enqueuer = Arc::new(BlockingGenerationEnqueuer {
+            inner: ScopedKeepaliveEnqueuer::default(),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let body = agent_turn_body("msg_detached_persistence", "Bash", 12_000);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let (response, kind) = observed_keepalive_response(
+                        body.clone(),
+                        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                        principal_with_keepalive(),
+                        standard_keepalive_request(),
+                        &[
+                            ("x-claude-code-session-id", "detached-persistence"),
+                            ("x-claude-code-request-class", "main"),
+                        ],
+                        streaming,
+                    )
+                    .await;
+                    assert_eq!(kind.as_deref(), Some("main"));
+                    assert_keepalive_response_fidelity(response, &body, streaming).await;
+                },
+                enqueuer.entered.notified(),
+            );
+        })
+        .await
+        .expect("the complete downstream response must arrive while persistence is blocked");
+        enqueuer.release.notify_one();
+        enqueuer.inner.wait_for_completion().await;
+        assert_eq!(enqueuer.inner.snapshot().generations.len(), 1);
+    }
+}
+
 #[derive(Default)]
 struct RecordingEnqueuer {
     enqueued: Mutex<Vec<CacheKeepaliveEnqueueRequest>>,

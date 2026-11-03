@@ -8299,6 +8299,7 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) thread_id: Option<String>,
     pub(crate) observed_session_id: Option<String>,
     pub(crate) request_kind: Option<String>,
+    pub(crate) explicit_auxiliary: bool,
     pub(crate) claude_agent_id: Option<String>,
     pub(crate) claude_parent_agent_id: Option<String>,
     pub(crate) parent_session_id: Option<String>,
@@ -8608,6 +8609,7 @@ fn request_cache_metadata_from_value_with_analysis(
     let thread_id = identity.thread_id.clone();
     let observed_session_id = identity.observed_session_id.clone();
     let request_kind = identity.request_kind.clone();
+    let explicit_auxiliary = identity.explicit_auxiliary;
     let claude_agent_id = identity.claude_agent_id.clone();
     let claude_parent_agent_id = identity.claude_parent_agent_id.clone();
     let parent_session_id = identity.parent_session_id.clone();
@@ -8619,6 +8621,7 @@ fn request_cache_metadata_from_value_with_analysis(
             thread_id,
             observed_session_id,
             request_kind,
+            explicit_auxiliary,
             claude_agent_id,
             claude_parent_agent_id,
             parent_session_id,
@@ -8709,6 +8712,7 @@ fn request_cache_metadata_from_value_with_analysis(
         thread_id,
         observed_session_id,
         request_kind,
+        explicit_auxiliary,
         claude_agent_id,
         claude_parent_agent_id,
         parent_session_id,
@@ -8744,6 +8748,7 @@ struct RequestIdentityMetadata {
     thread_id: Option<String>,
     observed_session_id: Option<String>,
     request_kind: Option<String>,
+    explicit_auxiliary: bool,
     claude_agent_id: Option<String>,
     claude_parent_agent_id: Option<String>,
     parent_session_id: Option<String>,
@@ -8904,6 +8909,9 @@ fn request_identity_metadata(
         })
         .filter(|parent| observed_session_id.as_deref() != Some(parent.as_str()));
     let claude_request_class = header_identity(headers, "x-claude-code-request-class");
+    let explicit_auxiliary = claude_request_class
+        .as_deref()
+        .is_some_and(|class| class.trim().eq_ignore_ascii_case("auxiliary"));
     let request_kind = classify_client_request_kind_with_class(
         value,
         observed_session_id.as_deref(),
@@ -8917,6 +8925,7 @@ fn request_identity_metadata(
         thread_id: observed_session_id.clone(),
         observed_session_id,
         request_kind,
+        explicit_auxiliary,
         claude_agent_id,
         claude_parent_agent_id,
         parent_session_id,
@@ -11969,6 +11978,69 @@ mod tests {
                 Some(request_kind),
                 "{case}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_auxiliary_cannot_supersede_pending_legitimate_completion() {
+        assert_explicit_auxiliary_completion_ordering(false).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_auxiliary_detached_completion_does_not_mutate_keepalive() {
+        assert_explicit_auxiliary_completion_ordering(true).await;
+    }
+
+    async fn assert_explicit_auxiliary_completion_ordering(detached_gate: bool) {
+        let body = Bytes::from_static(
+            br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-claude-code-session-id",
+            HeaderValue::from_static("ordered-auxiliary"),
+        );
+        headers.insert(
+            "x-claude-code-request-class",
+            HeaderValue::from_static("main"),
+        );
+        let request_json: Value = serde_json::from_slice(&body).expect("ordered request fixture");
+        let mut legitimate = request_cache_metadata(&headers, &body);
+        legitimate.request_json = Some(request_json.clone());
+        assert_eq!(legitimate.request_kind.as_deref(), Some("main"));
+        headers.insert(
+            "x-claude-code-request-class",
+            HeaderValue::from_static("auxiliary"),
+        );
+        let mut auxiliary = request_cache_metadata(&headers, &body);
+        auxiliary.request_json = Some(request_json);
+        assert_eq!(auxiliary.request_kind.as_deref(), Some("unknown"));
+
+        let mut record = principal_record("principal-test");
+        record.cache_keepalive = Some(cc_lb_storage_api::CacheKeepaliveConfig {
+            enabled: true,
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
+            classifier: cc_lb_storage_api::ClassifierConfig::default(),
+        });
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(&[record], HashMap::new())))
+            .build();
+        for cancellation in [false, true] {
+            crate::cache_keepalive::LifecycleKeepalive::assert_auxiliary_cannot_supersede_pending_completion(
+                Arc::new(DynamicViewHolder::new(Arc::clone(&view))),
+                Principal { id: "principal-test".to_owned(), kind: cc_lb_domain::PrincipalKind::InternalKey },
+                legitimate.clone(),
+                auxiliary.clone(),
+                body.clone(),
+                cancellation,
+                detached_gate,
+            ).await;
         }
     }
 
