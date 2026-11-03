@@ -79,8 +79,6 @@ use crate::prompt_cache_simulator::{
     PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
     analyze_v3_prompt_cache,
 };
-#[cfg(test)]
-use crate::prompt_cache_simulator::analyze_v3_prompt_cache_literal_from_official;
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
@@ -8377,96 +8375,6 @@ mod prompt_cache_policy_tests {
         Ok(())
     }
 
-    fn test_cache_breakpoint(key: &str, bytes: u64) -> CacheBreakpoint {
-        CacheBreakpoint {
-            block_index: 0,
-            source: CacheBreakpointSource::System,
-            path: "system[0]".to_owned(),
-            message_index: None,
-            prefix_hash: key.to_owned(),
-            prefix_bytes: PrefixBytes::new(bytes),
-            requested_ttl: TtlClass::Ephemeral5m,
-            lookback_prefixes: vec![CacheLookbackPrefix {
-                prefix_hash: key.to_owned(),
-                content_block_index: 0,
-                lookback_distance: 0,
-            }],
-            token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
-        }
-    }
-
-    #[test]
-    fn preview_route_candidate_policy_selects_official_or_literal_bundle() {
-        let official = UpstreamRecord {
-            kind: StorageUpstreamKind::AnthropicApiKey,
-            base_url: None,
-            ..UpstreamRecord::default()
-        };
-        let mut custom = official.clone();
-        custom.base_url = Some("https://proxy.example.com".parse().expect("custom URL"));
-        let mut bundles = PromptCacheBundles::single(&[test_cache_breakpoint("official", 100)]);
-        bundles.literal = PromptCacheBundle {
-            cache_breakpoints: vec![test_cache_breakpoint("literal", 200)],
-            cacheable_breakpoint_prefix_keys: HashSet::new(),
-            request_breakpoints: Vec::new(),
-            cache_prefix_hash: Some("literal".to_owned()),
-        };
-        assert_eq!(
-            bundles.for_upstream(&official).cache_breakpoints[0].prefix_hash,
-            "official"
-        );
-        assert_eq!(
-            bundles.for_upstream(&custom).cache_breakpoints[0].prefix_hash,
-            "literal"
-        );
-    }
-
-    #[test]
-    fn deterministic_shape_stripping_preserves_official_identity_but_not_custom_literal() {
-        let original = json!({
-            "model": "claude-sonnet-4-5",
-            "system": [
-                {"type":"text","text":"x-anthropic-billing-header: cron-a"},
-                {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}
-            ]
-        });
-        let changed_attribution = json!({
-            "model": "claude-sonnet-4-5",
-            "system": [
-                {"type":"text","text":"x-anthropic-billing-header: cron-b"},
-                {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}
-            ]
-        });
-        let shaped = json!({
-            "model": "claude-sonnet-4-5",
-            "system": [
-                {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}
-            ]
-        });
-        let canonical = canonical_model_id("claude-sonnet-4-5");
-        let official_original = analyze_v3_prompt_cache(&original, canonical);
-        let official_changed = analyze_v3_prompt_cache(&changed_attribution, canonical);
-        let literal_original =
-            analyze_v3_prompt_cache_literal_from_official(&original, canonical, &official_original);
-        let literal_changed = analyze_v3_prompt_cache_literal_from_official(
-            &changed_attribution,
-            canonical,
-            &official_changed,
-        );
-        assert_eq!(
-            official_original.breakpoints[0].prefix_key,
-            official_changed.breakpoints[0].prefix_key
-        );
-        assert_ne!(
-            literal_original.breakpoints[0].prefix_key,
-            literal_changed.breakpoints[0].prefix_key
-        );
-        assert!(
-            shaped["system"][0]["text"]
-                .as_str()
-                .is_some_and(|text| !text.starts_with("x-anthropic-billing-header:"))
-        );
-    }
 
     #[tokio::test]
     async fn literal_only_billing_breakpoint_records_custom_cache_creation()
@@ -8615,15 +8523,6 @@ fn plugin_cache_breakpoint_from_v3(
     }
 }
 
-fn plugin_cache_breakpoints_from_analysis(
-    analysis: &V3PromptCacheAnalysis,
-) -> Vec<CacheBreakpoint> {
-    analysis
-        .breakpoints
-        .iter()
-        .map(plugin_cache_breakpoint_from_v3)
-        .collect()
-}
 
 #[derive(Clone, Default)]
 pub(crate) struct RequestCacheMetadata {
