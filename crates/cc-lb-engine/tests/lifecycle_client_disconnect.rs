@@ -144,8 +144,12 @@ async fn stream_body_drop_while_awaiting_upstream_is_client_closed() {
 async fn normal_stream_eof_remains_success() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let mut complete_body = normal_sse_frame().to_vec();
+    complete_body.extend_from_slice(
+        b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
     let lifecycle = lifecycle(
-        sse_dispatch(StatusCode::OK, Body::from(normal_sse_frame())),
+        sse_dispatch(StatusCode::OK, Body::from(complete_body)),
         &test_bus,
     );
 
@@ -245,7 +249,10 @@ async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observa
         .expect("request terminates");
 
     assert_eq!(client_status, StatusCode::OK.as_u16());
-    assert!(matches!(reason, TerminationReason::Success));
+    assert_eq!(
+        reason,
+        TerminationReason::ErrorCode("upstream_stream_error".to_owned())
+    );
     let prefix_token_counts = prefix_token_counts.expect("request exposes cache breakpoints");
     assert_eq!(prefix_token_counts.len(), 2);
     assert!(

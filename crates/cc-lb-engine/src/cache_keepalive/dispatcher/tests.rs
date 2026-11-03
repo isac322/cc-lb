@@ -1,6 +1,7 @@
 use super::*;
 use crate::attempt_rail::AttemptIntent;
 use crate::cache_keepalive::request_snapshot::RequestSnapshot;
+use crate::prompt_cache_simulator::analyze_v3_prompt_cache;
 use bytes::Bytes;
 use http::{HeaderMap, Method, Response, StatusCode};
 use serde_json::{Value, json};
@@ -13,9 +14,9 @@ use cc_lb_control::PromptCacheObservationSinkLike;
 use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::PromptCacheObservationRecord;
 
-// Fixed v5 identity and byte length for the three-block fixture below.
+// Schema-6 identity independently derived from the three-block golden body below.
 const KEEPALIVE_IDENTITY_KEY: &str =
-    "5941e0168a65b3e6aa9b3921ee75015614419bbaa1a2f4c3a4c5d002bce58739";
+    "a9dbee437076709a34484806d86886bf7c0d944be8ef721bad98659895c52036";
 
 fn accounting_guard() -> ResponseAccountingGuard {
     AttemptIntent::observe_only()
@@ -296,6 +297,284 @@ fn classifies_zero_cache_read_as_miss() {
 }
 
 #[test]
+fn nested_anthropic_cache_creation_preserves_one_hour_accounting() {
+    let body = br#"{
+        "content": [],
+        "stop_reason": "max_tokens",
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 42,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 42
+            }
+        }
+    }"#;
+
+    let outcome = classify_success_body(
+        body,
+        Duration::ZERO,
+        Duration::from_millis(1),
+        accounting_guard(),
+    );
+    let finalization = match outcome {
+        DispatchOutcome::CacheMiss { finalization } => finalization,
+        DispatchOutcome::CacheHit { .. }
+        | DispatchOutcome::UnsupportedProvider(_)
+        | DispatchOutcome::Error(_) => panic!("nested cache creation should be a miss"),
+    };
+    let canonical = crate::usage_parser::observe_non_stream_json_body(body);
+    println!(
+        "keepalive classifier split: total={} 5m={} 1h={}; canonical: total={} 5m={} 1h={}",
+        finalization.usage.cache_creation_input_tokens,
+        finalization.usage.cache_creation_input_tokens_5m,
+        finalization.usage.cache_creation_input_tokens_1h,
+        canonical.usage.cache_creation_input_tokens,
+        canonical.usage.cache_creation_input_tokens_5m,
+        canonical.usage.cache_creation_input_tokens_1h
+    );
+
+    assert_eq!(canonical.usage.cache_creation_input_tokens, 42);
+    assert_eq!(canonical.usage.cache_creation_input_tokens_5m, 0);
+    assert_eq!(canonical.usage.cache_creation_input_tokens_1h, 42);
+    assert_eq!(finalization.usage.cache_creation_input_tokens, 42);
+    assert_eq!(finalization.usage.cache_creation_input_tokens_5m, 0);
+    assert_eq!(finalization.usage.cache_creation_input_tokens_1h, 42);
+}
+
+#[test]
+fn classifies_cache_creation_with_canonical_ttl_split() {
+    let cases = [
+        (
+            "mixed TTLs",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":49,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#,
+            (49, 7, 42),
+        ),
+        (
+            "nested only",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#,
+            (49, 7, 42),
+        ),
+        (
+            "nested overrides conflicting flat total",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":999,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#,
+            (49, 7, 42),
+        ),
+        (
+            "flat only",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "empty nested falls back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":{}}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "zero nested falls back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "all zero",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}"#,
+            (0, 0, 0),
+        ),
+        (
+            "nested sum saturates",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":18446744073709551615,"ephemeral_1h_input_tokens":42}}}"#,
+            (u64::MAX, u64::MAX, 42),
+        ),
+        (
+            "null nested falls back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":null}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "nonobject nested falls back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":[]}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "invalid nested counters fall back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":{"ephemeral_5m_input_tokens":"7","ephemeral_1h_input_tokens":-42}}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "invalid nested counters without flat stay zero",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":1.5,"ephemeral_1h_input_tokens":null}}}"#,
+            (0, 0, 0),
+        ),
+        (
+            "valid one-hour counter overrides invalid five-minute counter",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":999,"cache_creation":{"ephemeral_5m_input_tokens":{},"ephemeral_1h_input_tokens":42}}}"#,
+            (42, 0, 42),
+        ),
+        (
+            "valid five-minute counter overrides invalid one-hour counter",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":999,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":true}}}"#,
+            (7, 7, 0),
+        ),
+    ];
+
+    for (name, body, expected) in cases {
+        let outcome = classify_success_body(
+            body.as_bytes(),
+            Duration::ZERO,
+            Duration::from_millis(25),
+            accounting_guard(),
+        );
+        let finalization = match outcome {
+            DispatchOutcome::CacheMiss { finalization } => finalization,
+            DispatchOutcome::CacheHit { .. }
+            | DispatchOutcome::UnsupportedProvider(_)
+            | DispatchOutcome::Error(_) => panic!("{name}: expected cache miss"),
+        };
+        let usage = &finalization.usage;
+        assert_eq!(
+            (
+                usage.cache_creation_input_tokens,
+                usage.cache_creation_input_tokens_5m,
+                usage.cache_creation_input_tokens_1h,
+            ),
+            expected,
+            "{name}"
+        );
+        let canonical = crate::usage_parser::observe_non_stream_json_body(body.as_bytes());
+        assert_eq!(
+            (
+                canonical.usage.cache_creation_input_tokens,
+                canonical.usage.cache_creation_input_tokens_5m,
+                canonical.usage.cache_creation_input_tokens_1h,
+            ),
+            expected,
+            "{name}: canonical contract"
+        );
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens
+            ),
+            (11, 3, 0),
+            "{name}"
+        );
+        assert_eq!(finalization.status, StatusCode::OK.as_u16(), "{name}");
+        assert_eq!(finalization.duration, Duration::from_millis(25), "{name}");
+    }
+}
+
+#[test]
+fn classifies_null_usage_as_zero_usage_miss() {
+    let outcome = classify_success_body(
+        br#"{"content":[],"stop_reason":"max_tokens","usage":null}"#,
+        Duration::ZERO,
+        Duration::from_millis(10),
+        accounting_guard(),
+    );
+    let finalization = match outcome {
+        DispatchOutcome::CacheMiss { finalization } => finalization,
+        DispatchOutcome::CacheHit { .. }
+        | DispatchOutcome::UnsupportedProvider(_)
+        | DispatchOutcome::Error(_) => panic!("null usage should be a miss"),
+    };
+    let usage = &finalization.usage;
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_creation_input_tokens_5m,
+            usage.cache_creation_input_tokens_1h,
+            usage.cache_read_input_tokens,
+        ),
+        (0, 0, 0, 0, 0, 0)
+    );
+    assert_eq!(finalization.status, StatusCode::OK.as_u16());
+    assert_eq!(finalization.duration, Duration::from_millis(10));
+}
+
+#[test]
+fn classifies_mixed_cache_read_and_creation_as_hit() {
+    let body = br#"{"content":[],"stop_reason":"max_tokens","usage":{"input_tokens":11,"output_tokens":3,"cache_read_input_tokens":1234,"cache_creation_input_tokens":49,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#;
+    let outcome = classify_success_body(
+        body,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+        accounting_guard(),
+    );
+    let finalization = match outcome {
+        DispatchOutcome::CacheHit {
+            cache_anchor_age,
+            finalization,
+        } => {
+            assert_eq!(cache_anchor_age, Duration::from_secs(2));
+            finalization
+        }
+        DispatchOutcome::CacheMiss { .. }
+        | DispatchOutcome::UnsupportedProvider(_)
+        | DispatchOutcome::Error(_) => panic!("positive cache read should remain a hit"),
+    };
+    let usage = &finalization.usage;
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_creation_input_tokens_5m,
+            usage.cache_creation_input_tokens_1h,
+            usage.cache_read_input_tokens,
+        ),
+        (11, 3, 49, 7, 42, 1234)
+    );
+    assert_eq!(finalization.status, StatusCode::OK.as_u16());
+    assert_eq!(finalization.duration, Duration::from_millis(50));
+    assert_eq!(finalization.accounting_guard.reservation_id(), None);
+}
+
+#[test]
+fn rejects_malformed_success_usage_without_relaxing_flat_counters() {
+    let cases = [
+        ("invalid JSON", r#"{"usage":"#),
+        ("nonobject usage", r#"{"usage":true}"#),
+        ("string input", r#"{"usage":{"input_tokens":"11"}}"#),
+        ("null input", r#"{"usage":{"input_tokens":null}}"#),
+        ("negative output", r#"{"usage":{"output_tokens":-3}}"#),
+        (
+            "fractional read",
+            r#"{"usage":{"cache_read_input_tokens":1.5}}"#,
+        ),
+        (
+            "string flat creation",
+            r#"{"usage":{"cache_creation_input_tokens":"42"}}"#,
+        ),
+        (
+            "out-of-range flat creation",
+            r#"{"usage":{"cache_creation_input_tokens":18446744073709551616}}"#,
+        ),
+        (
+            "null flat five-minute",
+            r#"{"usage":{"cache_creation_input_tokens_5m":null}}"#,
+        ),
+        (
+            "string flat one-hour",
+            r#"{"usage":{"cache_creation_input_tokens_1h":"42"}}"#,
+        ),
+    ];
+    for (name, body) in cases {
+        let outcome = classify_success_body(
+            body.as_bytes(),
+            Duration::ZERO,
+            Duration::from_millis(1),
+            accounting_guard(),
+        );
+        assert!(matches!(outcome, DispatchOutcome::Error(_)), "{name}");
+    }
+}
+
+#[test]
 fn classifies_missing_usage_as_miss() {
     let body = br#"{"content":[],"stop_reason":"max_tokens"}"#;
 
@@ -308,7 +587,18 @@ fn classifies_missing_usage_as_miss() {
 
     match outcome {
         DispatchOutcome::CacheMiss { finalization } => {
-            assert_eq!(finalization.usage.cache_read_input_tokens, 0);
+            let usage = &finalization.usage;
+            assert_eq!(
+                (
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_creation_input_tokens_5m,
+                    usage.cache_creation_input_tokens_1h,
+                    usage.cache_read_input_tokens,
+                ),
+                (0, 0, 0, 0, 0, 0)
+            );
             assert_eq!(finalization.status, StatusCode::OK.as_u16());
             assert_eq!(finalization.duration, Duration::from_millis(10));
         }
@@ -695,6 +985,222 @@ fn expected_keepalive_identity_body() -> Value {
     })
 }
 
+fn billing_keepalive_observation_fixture(
+    kind: UpstreamKind,
+    base_url: Option<&str>,
+    header_only: bool,
+) -> Result<KeepaliveObservationFixture, Box<dyn std::error::Error>> {
+    let mut fixture = keepalive_observation_fixture(
+        StatusCode::OK,
+        br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"input_tokens":7,"output_tokens":0}}"#,
+    )?;
+    let upstream = UpstreamRecord {
+        id: fixture.snapshot.upstream_id,
+        name: "keepalive-observation-oauth".to_owned(),
+        kind,
+        base_url: base_url.map(str::parse).transpose()?,
+        enabled: true,
+        ..UpstreamRecord::default()
+    };
+    fixture.dispatcher.upstream_store = Arc::new(TestUpstreamStore::new(upstream));
+    fixture.dispatcher.clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+    let mut system = vec![json!({
+        "type": "text",
+        "text": format!("x-anthropic-billing-header: {}", "attribution ".repeat(2_000)),
+        "cache_control": {"type":"ephemeral","ttl":"5m"}
+    })];
+    if !header_only {
+        system.push(json!({
+            "type":"text",
+            "text":"stable renewal context ".repeat(1_024),
+            "cache_control":{"type":"ephemeral","ttl":"1h"}
+        }));
+    }
+    fixture.snapshot = RequestSnapshot::capture(
+        "https://api.anthropic.com/v1/messages".parse()?,
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::from(serde_json::to_vec(&json!({
+            "model":"claude-sonnet-4-5",
+            "max_tokens":1,
+            "system":system,
+            "messages":[{"role":"user","content":"uncached tail"}]
+        }))?),
+        fixture.snapshot.upstream_id,
+        cc_lb_storage_api::CacheTtl::Ttl5m,
+        usize::MAX,
+    )?;
+    Ok(fixture)
+}
+
+async fn assert_billing_keepalive_observation(
+    fixture: KeepaliveObservationFixture,
+    literal: bool,
+    expected_ttl: TtlClass,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dispatched_body = fixture.snapshot.build_keepalive_body()?;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "billing-policy-renewal".to_owned()),
+        )
+        .await;
+    assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
+    let requests = fixture
+        .http
+        .requests
+        .lock()
+        .map_err(|_| "HTTP requests poisoned")?;
+    let [request] = requests.as_slice() else {
+        panic!("renewal must dispatch exactly once");
+    };
+    assert_eq!(request.body(), &dispatched_body);
+    let request_value: Value = serde_json::from_slice(request.body())?;
+    let analysis = analyze_v3_prompt_cache(&request_value, canonical_model_id("claude-sonnet-4-5"));
+    let expected = if literal {
+        analysis.literal_breakpoints.last()
+    } else {
+        analysis.breakpoints.last()
+    }
+    .ok_or("expected dispatched-body prefix missing")?;
+    if let Some(official) = analysis.breakpoints.last()
+        && let Some(custom) = analysis.literal_breakpoints.last()
+    {
+        assert_ne!(
+            official.prefix_key, custom.prefix_key,
+            "policy discriminator"
+        );
+        assert_eq!(
+            official.prefix_bytes, custom.prefix_bytes,
+            "raw prefix bytes"
+        );
+    }
+    let records = fixture.observations.records.lock();
+    let [record] = records.as_slice() else {
+        panic!("read-only renewal must publish exactly one eligible owner prefix");
+    };
+    assert_eq!(record.upstream_id, fixture.snapshot.upstream_id);
+    assert_eq!(record.v3_prefix_key, expected.prefix_key);
+    assert_eq!(
+        record.prefix_content_block_index,
+        u32::try_from(expected.block_index)?
+    );
+    assert_eq!(record.estimated_prefix_tokens, expected.prefix_bytes.get());
+    assert_eq!(record.ttl_class, expected_ttl);
+    assert_eq!(
+        record.hash_schema_version,
+        crate::lifecycle::HASH_SCHEMA_VERSION
+    );
+    assert_eq!(record.last_observed_at_unix_secs, 1_800_000_000);
+    let ttl_secs = match expected_ttl {
+        TtlClass::Ephemeral5m => 300,
+        TtlClass::Ephemeral1h => 3_600,
+    };
+    assert_eq!(record.expires_at_unix_secs, 1_800_000_000 + ttl_secs - 30);
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_keepalive_custom_oauth_refreshes_literal_owner_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_billing_keepalive_observation(
+        billing_keepalive_observation_fixture(
+            UpstreamKind::AnthropicOauth,
+            Some("https://proxy.example.com/anthropic"),
+            false,
+        )?,
+        true,
+        TtlClass::Ephemeral1h,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn read_only_keepalive_official_oauth_refreshes_excluded_header_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    for base_url in [
+        None,
+        Some("https://api.anthropic.com/proxy?tenant=one#fragment"),
+    ] {
+        assert_billing_keepalive_observation(
+            billing_keepalive_observation_fixture(UpstreamKind::AnthropicOauth, base_url, false)?,
+            false,
+            TtlClass::Ephemeral1h,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_keepalive_custom_header_only_refreshes_literal_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_billing_keepalive_observation(
+        billing_keepalive_observation_fixture(
+            UpstreamKind::AnthropicOauth,
+            Some("https://proxy.example.com"),
+            true,
+        )?,
+        true,
+        TtlClass::Ephemeral5m,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn read_only_keepalive_official_header_only_has_no_eligible_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = billing_keepalive_observation_fixture(UpstreamKind::AnthropicOauth, None, true)?;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "official-header-only".to_owned()),
+        )
+        .await;
+    assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
+    assert_eq!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .map_err(|_| "HTTP requests poisoned")?
+            .len(),
+        1
+    );
+    assert!(fixture.observations.records.lock().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_keepalive_non_anthropic_rejects_without_dispatch_or_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = billing_keepalive_observation_fixture(
+        UpstreamKind::OpenaiOauth,
+        Some("https://api.openai.com"),
+        false,
+    )?;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "non-anthropic-owner".to_owned()),
+        )
+        .await;
+    assert!(matches!(outcome, DispatchOutcome::UnsupportedProvider(_)));
+    assert!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .map_err(|_| "HTTP requests poisoned")?
+            .is_empty()
+    );
+    assert!(fixture.observations.records.lock().is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn oauth_keepalive_publishes_exact_dispatched_prefix_before_finalization()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -755,7 +1261,7 @@ async fn oauth_keepalive_publishes_exact_dispatched_prefix_before_finalization()
     assert_eq!(record.prefix_content_block_index, 2);
     assert_eq!(record.estimated_prefix_tokens, 19_821);
     assert_eq!(record.token_estimate_source, "serialized_prefix_bytes_v1");
-    assert_eq!(record.hash_schema_version, 5);
+    assert_eq!(record.hash_schema_version, 6);
     assert!(record.last_observed_at_unix_secs >= before_dispatch);
     assert!(record.last_observed_at_unix_secs <= after_dispatch);
     assert_eq!(
@@ -848,6 +1354,67 @@ async fn oauth_keepalive_suffix_cache_creation_evidence_controls_publication()
         assert!(
             fixture.observations.records.lock().is_empty(),
             "{name} must not publish cache observations"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_keepalive_nested_ttl_accounting_preserves_publication_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    type Case = (&'static str, &'static [u8], (u64, u64, u64), usize);
+    let cases: &[Case] = &[
+        (
+            "complete nested zero",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}"#,
+            (0, 0, 0),
+            1,
+        ),
+        (
+            "nested one-hour creation",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":42,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":42}}}"#,
+            (42, 0, 42),
+            0,
+        ),
+        (
+            "nested creation overrides zero flat total",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#,
+            (49, 7, 42),
+            0,
+        ),
+        (
+            "incomplete nested zero is not affirmative evidence",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0}}}"#,
+            (0, 0, 0),
+            0,
+        ),
+    ];
+    for &(name, body, expected_split, expected_observations) in cases {
+        let fixture = keepalive_observation_fixture(StatusCode::OK, body)?;
+        let outcome = fixture
+            .dispatcher
+            .dispatch(
+                &fixture.snapshot,
+                KeepaliveDispatchContext::new(None, name.to_owned()),
+            )
+            .await;
+        let DispatchOutcome::CacheHit { finalization, .. } = outcome else {
+            panic!("{name}: positive reads must remain cache hits");
+        };
+        assert_eq!(finalization.usage.cache_read_input_tokens, 1234, "{name}");
+        assert_eq!(
+            (
+                finalization.usage.cache_creation_input_tokens,
+                finalization.usage.cache_creation_input_tokens_5m,
+                finalization.usage.cache_creation_input_tokens_1h,
+            ),
+            expected_split,
+            "{name}"
+        );
+        assert_eq!(
+            fixture.observations.records.lock().len(),
+            expected_observations,
+            "{name}: publication must use complete evidence, not accounting defaults"
         );
     }
     Ok(())

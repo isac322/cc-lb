@@ -231,6 +231,8 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
         EventOp::Route => LifecycleEvent::RouteCompleted {
             event_id,
             result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
                 upstream_id: profile.upstream_id(),
                 upstream_name: profile.upstream_name().to_owned(),
                 model: Some("claude-3-5-sonnet-20241022".to_owned()),

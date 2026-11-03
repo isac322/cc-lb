@@ -87,7 +87,14 @@ fn cost_usd_cap_rejects_when_estimate_exceeds_cap() {
 
     let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, Some(2_000));
 
-    assert_eq!(result.err(), Some(RejectReason::CostRateLimit));
+    assert_eq!(
+        result.err(),
+        Some(RejectReason::Unsatisfiable {
+            kind: StoredLimitKind::CostUsd,
+            cap: 1_000,
+            requested: 2_000,
+        })
+    );
 }
 
 #[test]
@@ -123,4 +130,65 @@ fn reconcile_refund_leaves_actual_output_usage() {
         .map(|(_, value)| value.as_str());
 
     assert_eq!(remaining, Some("150"));
+}
+
+#[test]
+fn local_limit_retryability_impossible_reservation_has_no_partial_admission() {
+    // QA-14: an impossible later limit must neither leak an earlier acquired
+    // concurrency slot nor charge earlier request/window reservations.
+    for (kind, requested, max_output, max_input, cost) in [
+        (StoredLimitKind::Requests, 1, 0, 0, None),
+        (StoredLimitKind::InputTokens, 4_000, 0, 4_000, None),
+        (StoredLimitKind::TotalTokens, 6_000, 2_000, 4_000, None),
+        (StoredLimitKind::CostUsd, 24_000, 2_000, 4_000, Some(24_000)),
+    ] {
+        let (engine, view) = engine(true);
+        let mut limits = vec![limit(StoredLimitKind::Concurrent, 0, 1)];
+        if kind != StoredLimitKind::Requests {
+            limits.push(limit(StoredLimitKind::Requests, 60, 1));
+        }
+        limits.push(limit(kind, 60, requested - 1));
+        let mut record = record(KeyStatus::Active, limits);
+        let reason = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-1",
+                "claude",
+                max_output,
+                max_input,
+                cost,
+            )
+            .err()
+            .expect("request cannot fit configured cap");
+
+        record
+            .limit_overrides
+            .last_mut()
+            .expect("offending limit")
+            .cap_micros = requested;
+        let admitted = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-1",
+                "claude",
+                max_output,
+                max_input,
+                cost,
+            )
+            .expect("failed reserve left concurrency and request budgets untouched");
+        drop(admitted);
+
+        assert!(
+            !matches!(
+                reason,
+                RejectReason::RequestsRateLimit
+                    | RejectReason::TokenRateLimit { .. }
+                    | RejectReason::CostRateLimit
+                    | RejectReason::ConcurrentRateLimit
+            ),
+            "configured capacity failure must not use a temporary reason: {reason:?}",
+        );
+    }
 }

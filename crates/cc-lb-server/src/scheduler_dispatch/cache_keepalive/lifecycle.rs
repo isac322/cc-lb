@@ -189,6 +189,8 @@ fn usage_snapshot(usage: &RenewalUsage) -> UsageSnapshot {
 
 fn route_info(upstream: &UpstreamRecord, model: &str) -> RouteInfo {
     RouteInfo {
+        cache_breakpoints: None,
+        cache_prefix_hash: None,
         upstream_id: upstream.id,
         upstream_name: upstream.name.clone(),
         model: Some(model.to_owned()),

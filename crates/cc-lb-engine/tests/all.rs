@@ -1,4 +1,5 @@
 mod common;
+mod prompt_cache_routing_support;
 mod router_lifecycle_support;
 
 #[path = "assembler_partial_property.rs"]

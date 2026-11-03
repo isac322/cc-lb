@@ -736,6 +736,15 @@ async fn write_finalized_rows(
     // Diagnostic fields exist only in the log; every DB and bus reader sees the same row.
     let mut diagnostics = RequestDiagnostics::take_from(&mut row);
     if let Some(route) = partial.route.as_ref() {
+        if let Some(cache_breakpoints) = route.cache_breakpoints.clone() {
+            diagnostics.cache_breakpoints = cache_breakpoints
+                .into_iter()
+                .map(|mut breakpoint| {
+                    breakpoint.lookback_prefixes.clear();
+                    breakpoint
+                })
+                .collect();
+        }
         diagnostics.matched_v3_cache_key = route.matched_v3_cache_key.clone();
         diagnostics.breakpoint_content_block_index =
             route.breakpoint_content_block_index.map(u64::from);
@@ -3459,6 +3468,8 @@ mod tests {
         tx.send(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
             result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
                 upstream_id: Uuid::nil(),
                 upstream_name: "primary".to_owned(),
                 model: Some("claude-3-5-sonnet-20241022".to_owned()),
@@ -3834,6 +3845,8 @@ mod tests {
         tx.send(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
             result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
                 upstream_id: Uuid::nil(),
                 upstream_name: "primary".to_owned(),
                 model: Some("claude-3-5-sonnet-20241022".to_owned()),
@@ -4198,6 +4211,8 @@ mod tests {
         bus.publish_lifecycle(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
             result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
                 upstream_id: Uuid::nil(),
                 upstream_name: "primary".to_owned(),
                 model: Some("claude-3-5-sonnet-20241022".to_owned()),
@@ -4639,6 +4654,99 @@ mod tests {
             expects_priced: false,
             expects_cache: true,
         }
+    }
+
+    async fn serving_cache_diagnostics_case(
+        matched_key: Option<&str>,
+    ) -> Result<(RequestEvent, serde_json::Value), Box<dyn std::error::Error>> {
+        let store = CapturingStore::default();
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let metrics = noop_metrics();
+        let event_id = eid("serving-cache-diagnostics");
+        let mut partial = diagnostic_match_partial(&event_id)?;
+        let mut serving_breakpoints = partial.cache_breakpoints.clone();
+        for breakpoint in &mut serving_breakpoints {
+            breakpoint.prefix_hash = "serving-deepest-prefix".to_owned();
+        }
+        let mut route: RouteInfo = serde_json::from_value(serde_json::json!({
+            "upstream_id": Uuid::from_u128(1004),
+            "upstream_name": "serving-official",
+            "model": "claude-sonnet-4-5",
+            "matched_v3_cache_key": matched_key
+        }))?;
+        route.cache_breakpoints = Some(serving_breakpoints);
+        route.cache_prefix_hash = Some("serving-deepest-prefix".to_owned());
+        partial.route = Some(route);
+        write_finalized_rows(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut diagnostics_writer(&sink),
+            &event_id,
+            &partial,
+            &TerminationReason::Success,
+            200,
+            42,
+            false,
+        )
+        .await;
+        let row = store
+            .rows
+            .lock()
+            .map_err(|_| "capturing store poisoned")?
+            .first()
+            .cloned()
+            .ok_or("finalized row missing")?;
+        let line = sink
+            .lines()
+            .into_iter()
+            .next()
+            .ok_or("diagnostics missing")?;
+        Ok((row, line))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn serving_cache_diagnostics_remain_off_row_and_strip_lookbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (row, line) = serving_cache_diagnostics_case(None).await?;
+        assert!(row.cache_breakpoints.is_empty());
+        assert!(row.cache_control_message_indices.is_empty());
+        let breakpoints = line
+            .get("cache_breakpoints")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("diagnostic breakpoints missing")?;
+        let breakpoint = breakpoints.first().ok_or("serving breakpoint missing")?;
+        assert_eq!(
+            breakpoint
+                .get("prefix_hash")
+                .and_then(serde_json::Value::as_str),
+            Some("serving-deepest-prefix")
+        );
+        assert!(breakpoint.get("lookback_prefixes").is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn serving_cache_diagnostics_cold_does_not_fall_back_to_parse_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_, line) = serving_cache_diagnostics_case(None).await?;
+        assert!(
+            line.get("matched_v3_cache_key")
+                .is_none_or(serde_json::Value::is_null)
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn serving_cache_diagnostics_warm_reports_matched_not_deepest_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_, line) = serving_cache_diagnostics_case(Some("serving-shallow-warm-prefix")).await?;
+        assert_eq!(
+            line.get("matched_v3_cache_key")
+                .and_then(serde_json::Value::as_str),
+            Some("serving-shallow-warm-prefix")
+        );
+        Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]

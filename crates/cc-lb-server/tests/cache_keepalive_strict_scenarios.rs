@@ -489,6 +489,116 @@ async fn b5_one_hour_ttl_uses_one_hour_lead_and_renews() {
     assert_eq!(renewal.cache_key, live.cache_key);
 }
 
+#[tokio::test]
+async fn nested_one_hour_renewal_persists_ttl_split_and_cost() {
+    let mut options = HarnessOptions::default();
+    options.keepalive.max_total_duration_secs = 7_200;
+    let harness = Harness::with_options(options)
+        .await
+        .expect("SQLite harness setup");
+    let session = "00000000-0000-7000-8000-000000001020";
+    let session_key_hash = harness.session_key_hash(session, None);
+    let model = "claude-sonnet-4-6";
+    let prefix = "nested-one-hour-accounting";
+
+    // The server's built-in Sonnet catalog has $3/M input and $3.75/M 5m writes.
+    // Read that catalog through the real finalizer; do not mutate the shared catalog.
+    let response = post_with_claude_code_headers(
+        &harness,
+        strict_body(
+            model,
+            prefix,
+            83_900,
+            "1h",
+            "first",
+            json!({"type": "auto"}),
+        ),
+        session,
+        None,
+    )
+    .await;
+    assert_eq!(response["stop_reason"], "tool_use");
+    harness
+        .wait_for_enqueued_generation(&session_key_hash, 1)
+        .await;
+    harness.mock.respond_to_next_renewal(json!({
+        "id": "msg-nested-one-hour",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [],
+        "stop_reason": "max_tokens",
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 42,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 42
+            }
+        }
+    }));
+
+    harness
+        .advance_and_dispatch_due(
+            Duration::from_secs(3_300),
+            &[DueJob {
+                session_key_hash: &session_key_hash,
+                generation: 1,
+                mock_prefix: Some(prefix),
+            }],
+        )
+        .await;
+    let events = harness.mock_events();
+    let renewal = event_for_prefix(&events, "renewal", prefix).expect("nested renewal attempt");
+    assert!(
+        renewal.accepted(),
+        "renewal rejected: {:?}",
+        renewal.rejection
+    );
+    assert!(renewal.synthetic);
+    assert_eq!(renewal.model, model);
+
+    // Exact scheduler completion awaits finalization, including both durable rows.
+    let (event, turn) = harness.read_renewal_accounting(&session_key_hash, 1).await;
+    println!(
+        "persisted renewal: tuple=({:?}, {:?}, {:?}) cost_input={:?} cost_1h={:?} total={:?}",
+        event.cache_creation_input_tokens,
+        event.cache_creation_input_tokens_5m,
+        event.cache_creation_input_tokens_1h,
+        event.cost_input_micros,
+        event.cost_cache_creation_1h_micros,
+        event.cost_usd_micros,
+    );
+    assert_eq!(event.source_kind.as_deref(), Some("renewal"));
+    assert_eq!(event.cache_creation_input_tokens, Some(42));
+    assert_eq!(event.cache_creation_input_tokens_5m, Some(0));
+    assert_eq!(event.cache_creation_input_tokens_1h, Some(42));
+    assert_eq!(event.input_tokens, Some(0));
+    assert_eq!(event.output_tokens, Some(0));
+    assert_eq!(event.cache_read_input_tokens, Some(0));
+    assert_eq!(event.cost_input_micros, Some(0));
+    assert_eq!(event.cost_output_micros, Some(0));
+    assert_eq!(event.cost_cache_creation_5m_micros, Some(0));
+    assert_eq!(event.cost_cache_creation_1h_micros, Some(252));
+    assert_eq!(event.cost_cache_read_micros, Some(0));
+    assert_eq!(event.cost_usd_micros, Some(252));
+    assert_eq!(turn.cache_creation_input_tokens, 42);
+    assert_eq!(turn.cache_creation_input_tokens_5m, 0);
+    assert_eq!(turn.cache_creation_input_tokens_1h, 42);
+    assert_eq!(turn.input_tokens, 0);
+    assert_eq!(turn.output_tokens, 0);
+    assert_eq!(turn.cache_read_input_tokens, 0);
+    assert_eq!(turn.cost_micros, 252);
+    assert_eq!(turn.hit_miss, "miss");
+    assert_eq!(
+        event.source_ref_id.as_deref(),
+        Some(turn.source_ref_id.as_str())
+    );
+    assert_eq!(harness.count_renewal_rows().await, (1, 1));
+}
+
 async fn post_with_claude_code_headers(
     harness: &Harness,
     body: Vec<u8>,

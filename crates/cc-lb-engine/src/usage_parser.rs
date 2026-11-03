@@ -870,6 +870,14 @@ fn bounded_upstream_error(
     )
 }
 
+fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
+    let flat = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    cache_creation_split(flat, usage.get("cache_creation"))
+}
+
 /// Unlike the accounting split, inference requires complete numeric evidence.
 /// Never fill missing split buckets with zero or prefer a contradictory total.
 fn cache_creation_evidence(usage: &Value) -> CacheTokenEvidence {
@@ -944,8 +952,8 @@ fn cache_creation_evidence(usage: &Value) -> CacheTokenEvidence {
 /// arrives present-but-empty. That path has to guess a bucket and picks 5m, the provider default
 /// and the TTL Anthropic uses for its own server-tool breakpoints. If a 1h write ever reached us
 /// this way it would be priced at 1.25x base input instead of 2.0x.
-fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
-    if let Some(cc) = usage.get("cache_creation").and_then(Value::as_object) {
+pub(crate) fn cache_creation_split(flat: u64, nested: Option<&Value>) -> (u64, u64, u64) {
+    if let Some(cc) = nested.and_then(Value::as_object) {
         let m5 = cc
             .get("ephemeral_5m_input_tokens")
             .and_then(Value::as_u64)
@@ -954,21 +962,11 @@ fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
             .get("ephemeral_1h_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if m5 == 0 && m1 == 0 {
-            let flat = usage
-                .get("cache_creation_input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if flat > 0 {
-                return (flat, flat, 0);
-            }
+        if m5 == 0 && m1 == 0 && flat > 0 {
+            return (flat, flat, 0);
         }
         return (m5.saturating_add(m1), m5, m1);
     }
-    let flat = usage
-        .get("cache_creation_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
     (flat, flat, 0)
 }
 

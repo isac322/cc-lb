@@ -217,12 +217,24 @@ pub enum RejectReason {
     Expired,
     ModelNotAllowed,
     RequestsRateLimit,
-    TokenRateLimit { kind: LimitKind },
+    TokenRateLimit {
+        kind: LimitKind,
+    },
     CostRateLimit,
     ConcurrentRateLimit,
     CostUnavailable,
-    UnsupportedLimitWindow { window_secs: u64 },
-    OutputCapExceeded { cap: i64, requested: i64 },
+    UnsupportedLimitWindow {
+        window_secs: u64,
+    },
+    OutputCapExceeded {
+        cap: i64,
+        requested: i64,
+    },
+    Unsatisfiable {
+        kind: LimitKind,
+        cap: i64,
+        requested: i64,
+    },
 }
 
 pub struct RingCounter {
@@ -460,6 +472,34 @@ impl LimitEngine {
             durable_bucket_widths.dedup();
             state.record_key_limits(key_id.clone(), effective_limits.clone());
         }
+        // Check configured capacity before transient usage or concurrency can
+        // mask a request that cannot fit even an empty window.
+        for limit in &effective_limits {
+            let requested = match limit.kind {
+                LimitKind::Requests => 1,
+                LimitKind::OutputTokens => max_tokens,
+                LimitKind::InputTokens => max_input_estimate,
+                LimitKind::TotalTokens => max_input_estimate.saturating_add(max_tokens),
+                LimitKind::CostUsd => match cost_estimate_micros {
+                    Some(amount) => amount,
+                    None => continue,
+                },
+                LimitKind::Concurrent => continue,
+            };
+            if requested > limit.cap_micros {
+                return Err(match limit.kind {
+                    LimitKind::OutputTokens => RejectReason::OutputCapExceeded {
+                        cap: limit.cap_micros,
+                        requested,
+                    },
+                    kind => RejectReason::Unsatisfiable {
+                        kind,
+                        cap: limit.cap_micros,
+                        requested,
+                    },
+                });
+            }
+        }
         let mut reserved = Vec::new();
         let mut concurrent_guards = Vec::new();
 
@@ -481,12 +521,6 @@ impl LimitEngine {
                     });
                 }
                 LimitKind::OutputTokens => {
-                    if max_tokens > limit.cap_micros {
-                        return Err(RejectReason::OutputCapExceeded {
-                            cap: limit.cap_micros,
-                            requested: max_tokens,
-                        });
-                    }
                     if self.current_total(&key_id, limit.kind, window_sec, now_sec) + max_tokens
                         > admission_cap
                     {
@@ -1932,6 +1966,143 @@ mod tests {
         let id = reservation.id().to_owned();
         reservation.forget();
         assert!(engine.reconcile_by_id(&id, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn local_limit_retryability_cold_durable_allowance_is_temporary_but_zero_cap_is_impossible()
+     {
+        // QA-05/09/13: stop the refresh task before registering any keys, so
+        // every reserve deterministically uses the cold durable allowance.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory
+                .path()
+                .join("cold-limit-retryability.sqlite")
+                .display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock);
+        engine
+            .start_durable_usage_sync(Arc::new(storage_impl))
+            .await
+            .expect("start durable usage")
+            .shutdown()
+            .await;
+        let view = PrincipalView::for_tests(
+            "principal-a",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        for (index, (kind, max_output, max_input, cost)) in [
+            (LimitKind::Requests, 0, 0, None),
+            (LimitKind::InputTokens, 0, 11, None),
+            (LimitKind::OutputTokens, 11, 0, None),
+            (LimitKind::TotalTokens, 6, 5, None),
+            (LimitKind::CostUsd, 0, 0, Some(11)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let record = StoredApiKeyRecord {
+                index_hash: [u8::try_from(index + 1).expect("small case index"); 32],
+                limit_overrides: vec![Limit {
+                    kind,
+                    window_secs: 60,
+                    cap_micros: 100,
+                }],
+                ..StoredApiKeyRecord::default()
+            };
+            // A request reserves one unit; fill its ten-unit cold allowance.
+            let held: Vec<_> = if kind == LimitKind::Requests {
+                (0..10)
+                    .map(|_| {
+                        engine
+                            .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                            .expect("positive cold request allowance")
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let reason = engine
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    max_output,
+                    max_input,
+                    cost,
+                )
+                .err()
+                .expect("cold allowance is exhausted");
+            match kind {
+                LimitKind::Requests => assert!(matches!(reason, RejectReason::RequestsRateLimit)),
+                LimitKind::CostUsd => assert!(matches!(reason, RejectReason::CostRateLimit)),
+                _ => assert!(
+                    matches!(reason, RejectReason::TokenRateLimit { kind: rejected } if rejected == kind)
+                ),
+            }
+            drop(held);
+        }
+
+        let record = StoredApiKeyRecord {
+            index_hash: [21; 32],
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 0,
+            }],
+            ..StoredApiKeyRecord::default()
+        };
+
+        let unsupported_record = StoredApiKeyRecord {
+            limit_overrides: vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 0,
+                },
+                Limit {
+                    kind: LimitKind::InputTokens,
+                    window_secs: 604_801,
+                    cap_micros: 100,
+                },
+            ],
+            ..record.clone()
+        };
+        assert!(matches!(
+            engine
+                .reserve(
+                    &view,
+                    &unsupported_record,
+                    "principal-a",
+                    "claude-3-opus",
+                    0,
+                    0,
+                    None,
+                )
+                .err(),
+            Some(RejectReason::UnsupportedLimitWindow {
+                window_secs: 604_801
+            }),
+        ));
+        let reason = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+            .err()
+            .expect("configured zero cannot admit even the cold minimum of one");
+        assert!(
+            !matches!(reason, RejectReason::RequestsRateLimit),
+            "{reason:?}"
+        );
     }
 
     #[tokio::test]

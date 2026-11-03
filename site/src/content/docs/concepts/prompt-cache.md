@@ -26,6 +26,11 @@ completion built from the adopted summary can establish a fresh generation;
 ordinary `pause_turn` and tool-use responses without a compaction block retain
 their existing behavior. Explicit compaction-class requests remain excluded
 from keepalive state changes.
+## Renewal accounting
+
+Keepalive renewals use Anthropic's nested 5-minute and 1-hour cache-creation counts for usage records and the local cost breakdown. A positive flat creation total with an absent, empty, or all-zero nested breakdown uses the same 5-minute fallback as regular usage accounting. It does not imply a 1-hour write.
+
+This applies to future renewals. Historical usage rows are not rewritten.
 
 ## Request eligibility
 

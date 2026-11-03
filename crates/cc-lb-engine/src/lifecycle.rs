@@ -73,9 +73,11 @@ use crate::error_format::{
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::limit_input_estimate::estimate_anthropic_input;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
+#[cfg(test)]
+use crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys;
 use crate::prompt_cache_simulator::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
-    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
+    PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
     analyze_v3_prompt_cache,
 };
 use crate::provider_capability::{
@@ -122,13 +124,10 @@ pub type Body = AxumBody;
 
 /// Prefix-hash schema persisted with prompt-cache observations.
 ///
-/// Version 5 adds `thinking`, `redacted_thinking`, and `tool_reference` content blocks
-/// to the prefix chain, changing keys for requests that replay them. It also renames
-/// the unconditional hash domain tag from `cc-lb-cache-v4:*` to `cc-lb-cache-v5:*`,
-/// forcing a clean generational split for every prefix key. Hydration rejects
-/// mismatched versions, cold-starting warm state without a storage migration because
-/// the persisted schema-version column is an integer.
-pub const HASH_SCHEMA_VERSION: u8 = 5;
+/// Version 6 excludes the official Anthropic billing-header system block from
+/// effective cache identity while preserving literal custom-upstream identity.
+/// The version filter cold-starts older persisted observations.
+pub const HASH_SCHEMA_VERSION: u8 = 6;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
@@ -148,6 +147,7 @@ const SSE_BUFFER_SMALL_EVENT_CAPACITY_FRACTION: usize = 8;
 const UPSTREAM_RESPONSE_BODY_ERROR_TYPE: &str = "upstream_response_body_error";
 const UPSTREAM_RESPONSE_DECODE_ERROR_TYPE: &str = "upstream_response_decode_error";
 const UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE: &str = "upstream_response_framing_error";
+const UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE: &str = "upstream_response_incomplete";
 const UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE: &str = "api_error";
 const UPSTREAM_AFFINITY_ERROR_TYPE: &str = "upstream_affinity_error";
 const UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE: &str =
@@ -582,12 +582,32 @@ struct StructuralCandidate<'a> {
 /// This is the only warmth authority: a single bounded batch read scoped to
 /// the request's candidate keys. A read failure is reported and degrades to
 /// an empty (neutral) observation set — never to a request failure.
+#[cfg(test)]
 async fn fetch_prompt_cache_warm_entries(
     view: &DynamicView,
     principal_id: &str,
     request_kind: RequestKind,
     canonical_model: &str,
     request_breakpoints: &[CacheBreakpoint],
+    clock: &dyn Clock,
+) -> HashMap<Uuid, Vec<WarmCacheEntry>> {
+    fetch_prompt_cache_warm_entries_for_bundles(
+        view,
+        principal_id,
+        request_kind,
+        canonical_model,
+        &PromptCacheBundles::single(request_breakpoints),
+        clock,
+    )
+    .await
+}
+
+async fn fetch_prompt_cache_warm_entries_for_bundles(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    canonical_model: &str,
+    bundles: &PromptCacheBundles,
     clock: &dyn Clock,
 ) -> HashMap<Uuid, Vec<WarmCacheEntry>> {
     let mut warm_entries: HashMap<Uuid, Vec<WarmCacheEntry>> = HashMap::new();
@@ -597,7 +617,10 @@ async fn fetch_prompt_cache_warm_entries(
     ) else {
         return warm_entries;
     };
-    if canonical_model.is_empty() || request_breakpoints.is_empty() {
+    if canonical_model.is_empty()
+        || bundles.official.cache_breakpoints.is_empty()
+            && bundles.literal.cache_breakpoints.is_empty()
+    {
         return warm_entries;
     }
     let upstream_ids: Vec<Uuid> = view
@@ -614,10 +637,12 @@ async fn fetch_prompt_cache_warm_entries(
     }
     let mut prefix_keys: Vec<String> = Vec::new();
     let mut seen_prefix_keys: HashSet<&str> = HashSet::new();
-    for breakpoint in request_breakpoints {
-        for prefix in &breakpoint.lookback_prefixes {
-            if seen_prefix_keys.insert(prefix.prefix_hash.as_str()) {
-                prefix_keys.push(prefix.prefix_hash.clone());
+    for bundle in [&bundles.official, &bundles.literal] {
+        for breakpoint in &bundle.cache_breakpoints {
+            for prefix in &breakpoint.lookback_prefixes {
+                if seen_prefix_keys.insert(prefix.prefix_hash.as_str()) {
+                    prefix_keys.push(prefix.prefix_hash.clone());
+                }
             }
         }
     }
@@ -689,23 +714,25 @@ pub fn build_candidates(
     warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
     clock: &dyn Clock,
 ) -> Vec<UpstreamCandidate> {
-    build_candidates_with_matches(
+    build_candidates_with_matches_for_bundles(
         view,
         principal_id,
         request_kind,
         request_breakpoints,
         warm_entries,
+        None,
         clock,
     )
     .0
 }
 
-pub(crate) fn build_candidates_with_matches(
+pub(crate) fn build_candidates_with_matches_for_bundles(
     view: &DynamicView,
     principal_id: &str,
     request_kind: RequestKind,
     request_breakpoints: &[CacheBreakpoint],
     warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
+    bundles: Option<&PromptCacheBundles>,
     clock: &dyn Clock,
 ) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
@@ -738,10 +765,13 @@ pub(crate) fn build_candidates_with_matches(
             } else {
                 0
             };
+            let bundle_breakpoints = bundles
+                .map(|bundles| bundles.for_upstream(upstream).cache_breakpoints.as_slice())
+                .unwrap_or(request_breakpoints);
             let cache_score = warm_entries.get(&upstream.id).and_then(|entries| {
                 let matched =
-                    resolve_longest_warm_match(entries, request_breakpoints, now_unix_secs);
-                let score = build_cache_score_from_match(request_breakpoints, matched.as_ref());
+                    resolve_longest_warm_match(entries, bundle_breakpoints, now_unix_secs);
+                let score = build_cache_score_from_match(bundle_breakpoints, matched.as_ref());
                 if score.is_some()
                     && let Some(matched) = matched.as_ref()
                 {
@@ -2438,6 +2468,30 @@ const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<
     }
 }
 
+fn observe_sse_terminal_event(
+    capability: ProviderCapability,
+    event: &usage_parser::ParsedSseEvent<'_>,
+    usage_message_stop: bool,
+    semantic_message_stop_seen: &mut bool,
+    message_stop_at: &mut Option<Instant>,
+    now: impl FnOnce() -> Instant,
+) {
+    // Event-name fallback must not enable semantic completion or #663 warnings.
+    let semantic_event_type = event
+        .value()
+        .ok()
+        .flatten()
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str);
+    *semantic_message_stop_seen |= semantic_terminal_event_type(capability)
+        .is_some_and(|terminal| semantic_event_type == Some(terminal));
+    if event.event_name() == Some(b"message_stop")
+        || (usage_message_stop && message_stop_at.is_none())
+    {
+        *message_stop_at = Some(now());
+    }
+}
+
 struct StaticLimitSubjectProvider {
     subject: AuthLimitSubject,
 }
@@ -2718,23 +2772,25 @@ impl Lifecycle {
             kind: PrincipalKind::InternalKey,
         };
 
-        let warm_entries = fetch_prompt_cache_warm_entries(
+        let warm_entries = fetch_prompt_cache_warm_entries_for_bundles(
             &view,
             &principal.id,
             RequestKind::AnthropicMessages,
             &ctx.canonical_model_id,
-            &ctx.cache_breakpoints,
+            &cache_metadata.bundles,
             &*self.clock,
         )
         .await;
-        let candidates = build_candidates(
+        let candidates = build_candidates_with_matches_for_bundles(
             &view,
             &principal.id,
             RequestKind::AnthropicMessages,
             &ctx.cache_breakpoints,
             &warm_entries,
+            Some(&cache_metadata.bundles),
             &*self.clock,
-        );
+        )
+        .0;
         let pipeline_result = execute_filter_pipeline(
             &resolved_pipeline.user_filters,
             &ctx,
@@ -3101,7 +3157,13 @@ impl Lifecycle {
                     &principal,
                     record,
                     auth.success(),
-                    &body_view,
+                    || {
+                        body_view.limit_request(
+                            &ctx.canonical_model_id,
+                            classify_provider_capability(&ctx.method, &ctx.path),
+                            &routed.cache_bundle.cache_breakpoints,
+                        )
+                    },
                 )
                 .await
             {
@@ -3756,8 +3818,10 @@ impl Lifecycle {
                     analysis: V3PromptCacheAnalysis {
                         blocks: Vec::new(),
                         breakpoints: Vec::new(),
+                        literal_breakpoints: Vec::new(),
                     },
                     cacheable_breakpoint_prefix_keys: Vec::new(),
+                    literal_cacheable_breakpoint_prefix_keys: Vec::new(),
                     timings: PromptCacheAnalysisTimings::default(),
                 })
             }
@@ -3889,7 +3953,8 @@ impl Lifecycle {
         };
         let track_keepalive_response = self.cache_keepalive_enqueuer.is_some()
             && cached.cache_keepalive().is_some()
-            && !cache_metadata.cache_breakpoints.is_empty();
+            && (!cache_metadata.bundles.official.cache_breakpoints.is_empty()
+                || !cache_metadata.bundles.literal.cache_breakpoints.is_empty());
         if track_keepalive_response {
             cache_metadata.request_json = body_view.value().cloned();
         }
@@ -3927,12 +3992,12 @@ impl Lifecycle {
         // request's candidate upstreams and prefix keys, awaited before the
         // synchronous routing region. A failure is reported and degrades to
         // neutral (no cache affinity) — it never fails the request.
-        let warm_entries = fetch_prompt_cache_warm_entries(
+        let warm_entries = fetch_prompt_cache_warm_entries_for_bundles(
             &view,
             &principal.id,
             request_kind,
             &ctx.canonical_model_id,
-            &ctx.cache_breakpoints,
+            &cache_metadata.bundles,
             &*self.clock,
         )
         .await;
@@ -3946,14 +4011,16 @@ impl Lifecycle {
             error.type = tracing::field::Empty,
         );
         let route_guard = route_span.enter();
-        let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
-            &view,
-            &principal.id,
-            request_kind,
-            &ctx.cache_breakpoints,
-            &warm_entries,
-            &*self.clock,
-        );
+        let (mut candidates, mut selected_cache_matches) =
+            build_candidates_with_matches_for_bundles(
+                &view,
+                &principal.id,
+                request_kind,
+                &ctx.cache_breakpoints,
+                &warm_entries,
+                Some(&cache_metadata.bundles),
+                &*self.clock,
+            );
         if let Some(affinity) = request_affinity.as_ref() {
             candidates.retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
             selected_cache_matches
@@ -4126,83 +4193,18 @@ impl Lifecycle {
             terminal_decision,
             selected_cache_matches.remove(&resolved_upstream_id),
             route_ms,
-        );
+        )
+        .with_cache_bundle(cache_metadata.bundles.for_upstream(resolved_record).clone());
         emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
 
-        let limit_reserve_start = Instant::now();
-        let mut active_limit = match self
-            .reserve_limit(
-                &principal_view,
-                &ctx,
-                &principal,
-                routed.record,
-                success,
-                &body_view,
-            )
-            .await
-        {
-            Ok(active_limit) => active_limit,
-            Err(LimitRejectionErr { response, info }) => {
-                let status = response.status();
-                if let Some(o) = observer.as_ref() {
-                    let proxy_setup_ms = duration_to_ms(started.elapsed());
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                        event_id: o.event_id().to_owned(),
-                        decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
-                            reason: info.reason_label.clone(),
-                            subject: info.subject,
-                            request_summary: info.request_summary,
-                            route_summary: info.route_summary,
-                            limit_violation: info.limit_violation,
-                        },
-                    });
-                    o.set_termination_timings(Some(proxy_setup_ms), None, None);
-                    o.terminate_failure(InternalFailure {
-                        status,
-                        error_code: error_codes::LIMIT_REJECTED,
-                        error: InternalError {
-                            stage: InternalErrorStage::Router,
-                            kind: InternalErrorKind::Unavailable,
-                            message: Some(info.reason_label),
-                        },
-                    });
-                }
-                return Ok(response);
-            }
-        };
-        let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
-        if let Some(o) = observer.as_ref() {
-            let decision = if let Some(limit) = active_limit.as_ref() {
-                cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                    reservation_id: limit
-                        .reservation
-                        .as_ref()
-                        .map(|r| r.id().to_owned())
-                        .unwrap_or_default(),
-                    amount: limit.request.max_tokens as u64,
-                    limit_reserve_ms: Some(limit_reserve_ms),
-                }
-            } else {
-                cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                    reservation_id: String::new(),
-                    amount: 0,
-                    limit_reserve_ms: Some(limit_reserve_ms),
-                }
-            };
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                event_id: o.event_id().to_owned(),
-                decision,
-            });
-        }
-        let reserved = active_limit
-            .as_mut()
-            .and_then(|active_limit| active_limit.reservation.take())
-            .map(|reservation| AttemptIntent::from_reservation(reservation).into_reserved());
+        let mut active_limit: Option<ActiveLimit> = None;
+        let mut reserved: Option<Reserved> = None;
 
         // Bounded cross-upstream failover. Only failures that happen before
         // the upstream processed the request (credential preparation, signing,
         // 401, 429) move to another upstream; nothing has reached the client
-        // yet, and the reservation above covers every attempt.
+        // yet. Keep an unchanged estimate's hold, or refund it before reserving
+        // the next serving bundle's estimate.
         let mut failover = FailoverRouter {
             view: &view,
             cached,
@@ -4210,6 +4212,7 @@ impl Lifecycle {
             ctx: &ctx,
             principal: &principal,
             warm_entries: &warm_entries,
+            cache_bundles: &cache_metadata.bundles,
             request_kind,
             observer: observer.as_ref(),
             handle_span: &handle_span,
@@ -4235,6 +4238,92 @@ impl Lifecycle {
                     first_dispatch.map(|(dispatch_started, _)| dispatch_started),
                 );
                 emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
+            }
+            let replacement_request = active_limit.as_ref().and_then(|limit| {
+                let request = body_view.limit_request(
+                    &ctx.canonical_model_id,
+                    classify_provider_capability(&ctx.method, &ctx.path),
+                    &routed.cache_bundle.cache_breakpoints,
+                );
+                (request != limit.request).then_some(request)
+            });
+            if !failover_entry || replacement_request.is_some() {
+                // Every prior attempt scope has ended. Its pre-processing
+                // failure is unbilled, so RAII refunds that hold in full before
+                // the replacement is checked; never hold both estimates.
+                drop(reserved.take());
+                let limit_reserve_start = Instant::now();
+                active_limit = match self
+                    .reserve_limit(
+                        &principal_view,
+                        &ctx,
+                        &principal,
+                        routed.record,
+                        success,
+                        || {
+                            replacement_request.unwrap_or_else(|| {
+                                body_view.limit_request(
+                                    &ctx.canonical_model_id,
+                                    classify_provider_capability(&ctx.method, &ctx.path),
+                                    &routed.cache_bundle.cache_breakpoints,
+                                )
+                            })
+                        },
+                    )
+                    .await
+                {
+                    Ok(active_limit) => active_limit,
+                    Err(LimitRejectionErr { response, info }) => {
+                        let status = response.status();
+                        if let Some(o) = observer.as_ref() {
+                            let proxy_setup_ms = duration_to_ms(started.elapsed());
+                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                                event_id: o.event_id().to_owned(),
+                                decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                                    reason: info.reason_label.clone(),
+                                    subject: info.subject,
+                                    request_summary: info.request_summary,
+                                    route_summary: info.route_summary,
+                                    limit_violation: info.limit_violation,
+                                },
+                            });
+                            o.set_termination_timings(Some(proxy_setup_ms), None, None);
+                            o.terminate_failure(InternalFailure {
+                                status,
+                                error_code: error_codes::LIMIT_REJECTED,
+                                error: InternalError {
+                                    stage: InternalErrorStage::Router,
+                                    kind: InternalErrorKind::Unavailable,
+                                    message: Some(info.reason_label),
+                                },
+                            });
+                        }
+                        return Ok(response);
+                    }
+                };
+                let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
+                if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                        event_id: o.event_id().to_owned(),
+                        decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
+                            reservation_id: active_limit
+                                .as_ref()
+                                .and_then(|limit| limit.reservation.as_ref())
+                                .map(|reservation| reservation.id().to_owned())
+                                .unwrap_or_default(),
+                            amount: active_limit
+                                .as_ref()
+                                .map_or(0, |limit| limit.request.max_tokens as u64),
+                            limit_reserve_ms: Some(limit_reserve_ms),
+                        },
+                    });
+                }
+                reserved = active_limit
+                    .as_mut()
+                    .and_then(|limit| limit.reservation.take())
+                    .map(|reservation| {
+                        AttemptIntent::from_reservation(reservation).into_reserved()
+                    });
             }
             let signer_factory = view
                 .signer_factory
@@ -4417,10 +4506,20 @@ impl Lifecycle {
             &view,
             resolved_upstream_id,
             &ctx.canonical_model_id,
-            &ctx.cache_breakpoints,
-            &cache_metadata.cacheable_breakpoint_prefix_keys,
+            &routed.cache_bundle.cache_breakpoints,
+            &routed.cache_bundle.cacheable_breakpoint_prefix_keys,
             routed.selected_cache_match.take(),
         );
+        cache_metadata.cache_breakpoints = routed.cache_bundle.request_breakpoints.clone();
+        cache_metadata.cache_prefix_hash = routed.cache_bundle.cache_prefix_hash.clone();
+        cache_metadata.cache_control_message_indices = routed
+            .cache_bundle
+            .request_breakpoints
+            .iter()
+            .filter_map(|breakpoint| breakpoint.message_index)
+            .collect();
+        cache_metadata.cache_control_message_indices.sort_unstable();
+        cache_metadata.cache_control_message_indices.dedup();
         let status = response.status();
         let keepalive_shaped_body = if track_keepalive_response {
             keepalive_shaped_body
@@ -4504,7 +4603,7 @@ impl Lifecycle {
         principal: &Principal,
         upstream_record: &UpstreamRecord,
         authn_success: &AuthnSuccess,
-        body_view: &RequestBodyView,
+        make_limit_request: impl FnOnce() -> LimitRequest,
     ) -> Result<Option<ActiveLimit>, LimitRejectionErr> {
         let (Some(limit_engine), Some(subject_provider)) = (
             self.limit_engine.as_ref(),
@@ -4520,11 +4619,7 @@ impl Lifecycle {
             tracing::Span::current().record("cc_lb.limit.decision", "not_applicable");
             return Ok(None);
         };
-        let limit_request = body_view.limit_request(
-            &ctx.canonical_model_id,
-            classify_provider_capability(&ctx.method, &ctx.path),
-            &ctx.cache_breakpoints,
-        );
+        let limit_request = make_limit_request();
         let max_input_estimate = limit_request.input_tokens_estimate;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
             if let Some(input) = limit_request.local_cache_input {
@@ -4535,14 +4630,8 @@ impl Lifecycle {
                     limit_request.service_tier.as_deref(),
                 )
             } else {
-                let estimated_cache_tokens = ctx
-                    .cache_breakpoints
-                    .iter()
-                    .map(|bp| bp.prefix_bytes.as_token_estimate())
-                    .max()
-                    .unwrap_or(0);
-                let can_cross_cache_cliff =
-                    ctx.cache_breakpoints.is_empty() && limit_request.can_cross_cache_cliff;
+                let estimated_cache_tokens = limit_request.estimated_cache_tokens;
+                let can_cross_cache_cliff = limit_request.can_cross_cache_cliff;
                 estimator.estimate_max_with_cache(
                     &limit_request.model,
                     max_input_estimate as u64,
@@ -5700,8 +5789,8 @@ impl Lifecycle {
             let mut first_content_delta_at: Option<Instant> = None;
             let mut last_content_delta_at: Option<Instant> = None;
             let mut message_stop_at: Option<Instant> = None;
-            // #663: semantic stop only — the SSE `event:` name alone does not
-            // count; `usage_update.message_stop` requires the JSON `type`.
+            // #663: semantic stop uses the JSON `type`; legacy message-stop
+            // timing still follows the event name or usage parser fallback.
             let mut semantic_message_stop_seen = false;
             let mut prompt_cache_observations_published = false;
             let mut keepalive_response = crate::cache_keepalive::StreamingKeepaliveResponse::default();
@@ -6185,9 +6274,6 @@ impl Lifecycle {
                                         last_content_delta_at = Some(now);
                                         content_delta_count = content_delta_count.saturating_add(1);
                                     }
-                                    Some(b"message_stop") => {
-                                        message_stop_at = Some(now);
-                                    }
                                     Some(b"ping") => {
                                         ping_count = ping_count.saturating_add(1);
                                     }
@@ -6223,24 +6309,14 @@ impl Lifecycle {
                                         prompt_cache_observations_published = true;
                                     }
                                 }
-                                if usage_update.message_stop
-                                    && message_stop_at.is_none()
-                                {
-                                    message_stop_at = Some(now);
-                                }
-                                // Strictly JSON-typed: the usage parser's
-                                // event-name fallback must not enable #663
-                                // accept-with-warning for name-only stops.
-                                let semantic_event_type = parsed_event
-                                    .value()
-                                    .ok()
-                                    .flatten()
-                                    .and_then(|value| value.get("type"))
-                                    .and_then(serde_json::Value::as_str);
-                                semantic_message_stop_seen |= semantic_terminal_event_type(
+                                observe_sse_terminal_event(
                                     response_affinity_context.capability,
-                                )
-                                .is_some_and(|terminal| semantic_event_type == Some(terminal));
+                                    &parsed_event,
+                                    usage_update.message_stop,
+                                    &mut semantic_message_stop_seen,
+                                    &mut message_stop_at,
+                                    || now,
+                                );
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);
@@ -6825,6 +6901,14 @@ impl Lifecycle {
                                 // provider/proxy error wins the terminal classification.
                                 stream_abnormal_stop = Some(stop);
                             }
+                            observe_sse_terminal_event(
+                                response_affinity_context.capability,
+                                &parsed_event,
+                                usage_update.message_stop,
+                                &mut semantic_message_stop_seen,
+                                &mut message_stop_at,
+                                Instant::now,
+                            );
                             sse_event_count = sse_event_count.saturating_add(1);
                             if success_sse_affinity_gate || unsolicited_hold_pending {
                                 let outgoing = if sse_transform_active {
@@ -7149,6 +7233,37 @@ impl Lifecycle {
                     yield Ok::<Bytes, Infallible>(frame);
                 }
                 buffer.clear();
+            }
+            if upstream_is_sse
+                && status.is_success()
+                && parse_sse_events_active
+                && transform_decode_supported
+                && semantic_terminal_event_type(response_affinity_context.capability)
+                    == Some("message_stop")
+                && !semantic_message_stop_seen
+                && sse_buffer_is_blank(&buffer)
+                && stream_abnormal_stop.is_none()
+                && !stream_provider_error_seen
+                && stream_upstream_error.is_none()
+                && stream_transform_error.is_none()
+                && stream_affinity_error.is_none()
+            {
+                if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                        event_id: o.event_id().to_owned(),
+                        usage: to_usage_snapshot(&usage),
+                        source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                    });
+                }
+                stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                    error_type: UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE.to_owned(),
+                    error_message:
+                        "upstream SSE response ended before message_stop".to_owned(),
+                });
+                downstream_drop_guard.mark_upstream_error(
+                    StreamTerminationCause::Unknown,
+                    None,
+                );
             }
             if stream_affinity_error.is_none()
                 && stream_upstream_error.is_none()
@@ -7996,12 +8111,13 @@ impl RequestBodyView {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct LimitRequest {
     model: String,
     max_tokens: i64,
     input_tokens_estimate: i64,
     local_cache_input: Option<cc_lb_pricing::LocalCacheInputEstimate>,
+    estimated_cache_tokens: u64,
     can_cross_cache_cliff: bool,
     stream: bool,
     service_tier: Option<String>,
@@ -8049,7 +8165,13 @@ impl LimitRequest {
                 .or_else(|| value.map(estimate_input_tokens))
                 .unwrap_or(DEFAULT_MAX_INPUT_ESTIMATE),
             local_cache_input: anthropic_input.filter(|_| !breakpoints.is_empty()),
-            can_cross_cache_cliff: value.is_some_and(request_can_cross_cache_cliff),
+            estimated_cache_tokens: breakpoints
+                .iter()
+                .map(|bp| bp.prefix_bytes.as_token_estimate())
+                .max()
+                .unwrap_or(0),
+            can_cross_cache_cliff: breakpoints.is_empty()
+                && value.is_some_and(request_can_cross_cache_cliff),
             stream: value
                 .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
@@ -8243,6 +8365,376 @@ pub(crate) use crate::response_transform::{
 };
 
 #[derive(Clone, Default)]
+pub(crate) struct PromptCacheBundle {
+    pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
+    pub(crate) cacheable_breakpoint_prefix_keys: HashSet<String>,
+    pub(crate) request_breakpoints: Vec<RequestCacheBreakpoint>,
+    pub(crate) cache_prefix_hash: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct PromptCacheBundles {
+    pub(crate) official: PromptCacheBundle,
+    pub(crate) literal: PromptCacheBundle,
+}
+
+impl PromptCacheBundles {
+    #[cfg(test)]
+    fn single(cache_breakpoints: &[CacheBreakpoint]) -> Self {
+        let request_breakpoints = cache_breakpoints
+            .iter()
+            .map(request_cache_breakpoint_from_plugin)
+            .collect::<Vec<_>>();
+        let cache_prefix_hash = cache_breakpoints
+            .last()
+            .map(|breakpoint| breakpoint.prefix_hash.clone());
+        let cacheable_breakpoint_prefix_keys = cache_breakpoints
+            .iter()
+            .map(|breakpoint| breakpoint.prefix_hash.clone())
+            .collect();
+        let bundle = PromptCacheBundle {
+            cache_breakpoints: cache_breakpoints.to_vec(),
+            cacheable_breakpoint_prefix_keys,
+            request_breakpoints,
+            cache_prefix_hash,
+        };
+        Self {
+            official: bundle.clone(),
+            literal: bundle,
+        }
+    }
+
+    fn for_upstream(&self, upstream: &UpstreamRecord) -> &PromptCacheBundle {
+        match prompt_cache_policy_for_upstream(upstream) {
+            PromptCachePolicy::AnthropicOfficial => &self.official,
+            PromptCachePolicy::Literal => &self.literal,
+        }
+    }
+}
+
+#[cfg(test)]
+fn request_cache_breakpoint_from_plugin(breakpoint: &CacheBreakpoint) -> RequestCacheBreakpoint {
+    RequestCacheBreakpoint {
+        block_index: u64::from(breakpoint.block_index),
+        source: request_breakpoint_source_from_plugin(breakpoint.source),
+        path: breakpoint.path.clone(),
+        message_index: breakpoint.message_index.map(u64::from),
+        ttl: Some(match breakpoint.requested_ttl {
+            TtlClass::Ephemeral1h => "1h".to_owned(),
+            TtlClass::Ephemeral5m => "5m".to_owned(),
+        }),
+        prefix_hash: breakpoint.prefix_hash.clone(),
+        prefix_token_count: breakpoint.prefix_bytes.get(),
+        lookback_prefixes: breakpoint
+            .lookback_prefixes
+            .iter()
+            .map(|prefix| RequestCacheLookbackPrefix {
+                prefix_hash: prefix.prefix_hash.clone(),
+                content_block_index: u64::from(prefix.content_block_index),
+                lookback_distance: u64::from(prefix.lookback_distance),
+            })
+            .collect(),
+        token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+    }
+}
+
+#[cfg(test)]
+fn request_breakpoint_source_from_plugin(
+    source: CacheBreakpointSource,
+) -> RequestCacheBreakpointSource {
+    match source {
+        CacheBreakpointSource::Tools => RequestCacheBreakpointSource::Tools,
+        CacheBreakpointSource::System => RequestCacheBreakpointSource::System,
+        CacheBreakpointSource::Message => RequestCacheBreakpointSource::Message,
+    }
+}
+
+pub(crate) fn prompt_cache_policy_for_upstream(upstream: &UpstreamRecord) -> PromptCachePolicy {
+    let official_kind = matches!(
+        upstream.kind,
+        StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth
+    );
+    let official_url = upstream
+        .base_url
+        .as_ref()
+        .is_none_or(is_official_anthropic_base_url);
+    if official_kind && official_url {
+        PromptCachePolicy::AnthropicOfficial
+    } else {
+        PromptCachePolicy::Literal
+    }
+}
+
+fn is_official_anthropic_base_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("api.anthropic.com")
+        && url.port().is_none_or(|port| port == 443)
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+#[cfg(test)]
+mod prompt_cache_policy_tests {
+    use super::*;
+    use crate::prompt_cache_simulator::{block_digest_call_count, reset_block_digest_call_count};
+    use cc_lb_control::traits::NoopPromptCacheObservationSink;
+    #[test]
+    fn official_url_policy_accepts_only_default_anthropic_authority() {
+        for (url, expected) in [
+            ("https://api.anthropic.com", true),
+            ("https://@api.anthropic.com", true),
+            ("https://api.anthropic.com/v1/messages?x=1#fragment", true),
+            ("https://api.anthropic.com:443/proxy", true),
+            ("http://api.anthropic.com", false),
+            ("https://api.anthropic.com:8443", false),
+            ("https://user:pass@api.anthropic.com", false),
+            ("https://proxy.example.com", false),
+        ] {
+            let url = url.parse().expect("test URL parses");
+            assert_eq!(is_official_anthropic_base_url(&url), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn empty_userinfo_is_canonicalized_to_the_official_url() {
+        let empty_userinfo: Url = "https://@api.anthropic.com"
+            .parse()
+            .expect("empty-userinfo URL parses");
+        let official: Url = "https://api.anthropic.com"
+            .parse()
+            .expect("official URL parses");
+        assert_eq!(empty_userinfo, official);
+        assert_eq!(empty_userinfo.as_str(), "https://api.anthropic.com/");
+        assert!(empty_userinfo.username().is_empty());
+        assert!(empty_userinfo.password().is_none());
+        assert!(is_official_anthropic_base_url(&empty_userinfo));
+    }
+
+    #[test]
+    fn policy_bundles_digest_each_raw_block_once_per_request() {
+        for include_billing_header in [false, true] {
+            let mut system = Vec::new();
+            if include_billing_header {
+                system.push(json!({"type":"text","text":"x-anthropic-billing-header: cron-a"}));
+            }
+            system.push(json!({
+                "type":"text",
+                "text":"stable",
+                "cache_control":{"type":"ephemeral"}
+            }));
+            let request = serde_json::to_vec(&json!({
+                "model":"claude-sonnet-4-5",
+                "system":system,
+            }))
+            .expect("request serializes");
+            reset_block_digest_call_count();
+            let _ = request_cache_metadata(&HeaderMap::new(), &Bytes::from(request));
+            assert_eq!(
+                block_digest_call_count(),
+                if include_billing_header { 2 } else { 1 },
+                "billing_header={include_billing_header}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_bundles_tokenize_each_raw_prefix_boundary_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for include_billing_header in [false, true] {
+            let mut system = Vec::new();
+            if include_billing_header {
+                system.push(json!({"type":"text","text":"x-anthropic-billing-header: cron-a"}));
+            }
+            system.push(json!({
+                "type": "text",
+                "text": "a".repeat(2_000),
+                "cache_control": {"type": "ephemeral"}
+            }));
+            let request = json!({"model":"claude-sonnet-4-5","system":system});
+            let canonical_model = canonical_model_id("claude-sonnet-4-5");
+            crate::tokenizer::reset_tokenizer_call_count();
+            let analysis = analyze_v3_prompt_cache(&request, canonical_model);
+            let eligible = cacheable_breakpoint_prefix_keys(
+                &analysis,
+                canonical_model,
+                cache_threshold_tokens(canonical_model),
+            );
+            assert_eq!(crate::tokenizer::tokenizer_call_count(), 1);
+            let output = PromptCacheAnalysisOutput {
+                analysis,
+                cacheable_breakpoint_prefix_keys: eligible,
+                literal_cacheable_breakpoint_prefix_keys: Vec::new(),
+                timings: PromptCacheAnalysisTimings::default(),
+            };
+            let metadata = request_cache_metadata_from_value_with_analysis(
+                &HeaderMap::new(),
+                Some(&request),
+                Some(output),
+            );
+            assert_eq!(metadata.bundles.official.cache_breakpoints.len(), 1);
+            assert_eq!(metadata.bundles.literal.cache_breakpoints.len(), 1);
+            assert_eq!(
+                crate::tokenizer::tokenizer_call_count(),
+                1,
+                "shared raw boundary was tokenized again, billing_header={include_billing_header}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn literal_only_billing_breakpoint_records_custom_cache_creation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "tools": [{
+                "name": "large_tool",
+                "description": "tool schema context ".repeat(2_000),
+                "input_schema": {"type": "object"}
+            }],
+            "system": [{
+                "type": "text",
+                "text": "x-anthropic-billing-header: cron-attribution",
+                "cache_control": {"type": "ephemeral"}
+            }]
+        });
+        let canonical_model = canonical_model_id("claude-sonnet-4-5");
+        let output = PromptCacheAnalysisExecutor::default()
+            .analyze(
+                Arc::new(request.clone()),
+                canonical_model.to_owned(),
+                [0; 32],
+                Some(cache_threshold_tokens(canonical_model)),
+            )
+            .await;
+        assert!(output.analysis.breakpoints.is_empty());
+        let metadata = request_cache_metadata_from_value_with_analysis(
+            &HeaderMap::new(),
+            Some(&request),
+            Some(output),
+        );
+        assert!(metadata.bundles.official.cache_breakpoints.is_empty());
+        let literal = &metadata.bundles.literal;
+        let breakpoint = literal
+            .cache_breakpoints
+            .first()
+            .ok_or("literal breakpoint missing")?;
+        assert!(
+            literal
+                .cacheable_breakpoint_prefix_keys
+                .contains(&breakpoint.prefix_hash)
+        );
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1004),
+            canonical_model_id: metadata.canonical_model_id.clone(),
+            cache_breakpoints: literal.cache_breakpoints.clone(),
+            cacheable_breakpoint_prefix_keys: literal.cacheable_breakpoint_prefix_keys.clone(),
+            selected_match: None,
+            sink: Arc::new(NoopPromptCacheObservationSink),
+            grace_margin_secs: 0,
+        };
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 8_192,
+                cache_read_input_tokens: 0,
+                read_only_evidence: false,
+            },
+            1_800_000_000,
+        );
+        assert_eq!(decoded.observations.len(), 1);
+        assert_eq!(
+            decoded
+                .observations
+                .first()
+                .map(|observation| observation.prefix_hash.as_str()),
+            Some(breakpoint.prefix_hash.as_str())
+        );
+        assert_eq!(decoded.dropped_below_threshold, 0);
+        Ok(())
+    }
+}
+
+fn prompt_cache_bundle_from_analysis(
+    analysis: &V3PromptCacheAnalysis,
+    cacheable_prefix_keys: HashSet<String>,
+) -> PromptCacheBundle {
+    prompt_cache_bundle_from_breakpoints(&analysis.breakpoints, cacheable_prefix_keys)
+}
+
+fn prompt_cache_bundle_from_breakpoints(
+    breakpoints: &[crate::prompt_cache_simulator::V3PromptCacheBreakpoint],
+    cacheable_prefix_keys: HashSet<String>,
+) -> PromptCacheBundle {
+    let cache_breakpoints = breakpoints
+        .iter()
+        .map(plugin_cache_breakpoint_from_v3)
+        .collect();
+    PromptCacheBundle {
+        request_breakpoints: breakpoints
+            .iter()
+            .map(request_cache_breakpoint_from_v3)
+            .collect(),
+        cache_prefix_hash: breakpoints
+            .last()
+            .map(|breakpoint| breakpoint.prefix_key.clone()),
+        cacheable_breakpoint_prefix_keys: cacheable_prefix_keys,
+        cache_breakpoints,
+    }
+}
+
+fn request_cache_breakpoint_from_v3(
+    breakpoint: &crate::prompt_cache_simulator::V3PromptCacheBreakpoint,
+) -> RequestCacheBreakpoint {
+    RequestCacheBreakpoint {
+        block_index: breakpoint.block_index,
+        source: request_breakpoint_source_from_v3(breakpoint.source),
+        path: breakpoint.path.clone(),
+        message_index: breakpoint.message_index,
+        ttl: breakpoint.ttl.clone(),
+        prefix_hash: breakpoint.prefix_key.clone(),
+        prefix_token_count: breakpoint.prefix_bytes.get(),
+        lookback_prefixes: breakpoint
+            .lookback_prefixes
+            .iter()
+            .map(|prefix| RequestCacheLookbackPrefix {
+                prefix_hash: prefix.prefix_key.clone(),
+                content_block_index: prefix.content_block_index,
+                lookback_distance: prefix.lookback_distance,
+            })
+            .collect(),
+        token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+    }
+}
+
+fn plugin_cache_breakpoint_from_v3(
+    breakpoint: &crate::prompt_cache_simulator::V3PromptCacheBreakpoint,
+) -> CacheBreakpoint {
+    CacheBreakpoint {
+        block_index: saturating_u64_to_u32(breakpoint.block_index),
+        source: plugin_cache_breakpoint_source(request_breakpoint_source_from_v3(
+            breakpoint.source,
+        )),
+        path: breakpoint.path.clone(),
+        message_index: breakpoint.message_index.map(saturating_u64_to_u32),
+        prefix_hash: breakpoint.prefix_key.clone(),
+        prefix_bytes: breakpoint.prefix_bytes,
+        requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
+        lookback_prefixes: breakpoint
+            .lookback_prefixes
+            .iter()
+            .map(|prefix| CacheLookbackPrefix {
+                prefix_hash: prefix.prefix_key.clone(),
+                content_block_index: saturating_u64_to_u32(prefix.content_block_index),
+                lookback_distance: saturating_u64_to_u32(prefix.lookback_distance),
+            })
+            .collect(),
+        token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+    }
+}
+
+#[derive(Clone, Default)]
 pub(crate) struct RequestCacheMetadata {
     pub(crate) request_json: Option<Value>,
     pub(crate) thread_id: Option<String>,
@@ -8263,8 +8755,8 @@ pub(crate) struct RequestCacheMetadata {
     reasoning_effort: Option<String>,
     cache_control_message_indices: Vec<u64>,
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
-    cacheable_breakpoint_prefix_keys: HashSet<String>,
     pub(crate) cache_prefix_hash: Option<String>,
+    pub(crate) bundles: PromptCacheBundles,
     canonical_model_id: String,
 }
 
@@ -8543,6 +9035,7 @@ fn request_cache_metadata_from_value(
         PromptCacheAnalysisOutput {
             analysis: analyze_v3_prompt_cache(value, canonical_model),
             cacheable_breakpoint_prefix_keys: Vec::new(),
+            literal_cacheable_breakpoint_prefix_keys: Vec::new(),
             timings: PromptCacheAnalysisTimings::default(),
         }
     });
@@ -8602,44 +9095,49 @@ fn request_cache_metadata_from_value_with_analysis(
     let output = analysis.unwrap_or_else(|| PromptCacheAnalysisOutput {
         analysis: analyze_v3_prompt_cache(value, &canonical_model_id),
         cacheable_breakpoint_prefix_keys: Vec::new(),
+        literal_cacheable_breakpoint_prefix_keys: Vec::new(),
         timings: PromptCacheAnalysisTimings::default(),
     });
-    let cacheable_breakpoint_prefix_keys = output
-        .cacheable_breakpoint_prefix_keys
+    let literal_cacheable_prefix_keys = output
+        .literal_cacheable_breakpoint_prefix_keys
         .into_iter()
-        .collect();
-    let analysis = output.analysis;
-    let cache_breakpoints = analysis
-        .breakpoints
+        .collect::<HashSet<_>>();
+    let official_cacheable_prefix_keys = output
+        .cacheable_breakpoint_prefix_keys
         .iter()
-        .map(|breakpoint| RequestCacheBreakpoint {
-            block_index: breakpoint.block_index,
-            source: request_breakpoint_source_from_v3(breakpoint.source),
-            path: breakpoint.path.clone(),
-            message_index: breakpoint.message_index,
-            ttl: breakpoint.ttl.clone(),
-            prefix_hash: breakpoint.prefix_key.clone(),
-            prefix_token_count: breakpoint.prefix_bytes.get(),
-            lookback_prefixes: breakpoint
-                .lookback_prefixes
-                .iter()
-                .map(|prefix| RequestCacheLookbackPrefix {
-                    prefix_hash: prefix.prefix_key.clone(),
-                    content_block_index: prefix.content_block_index,
-                    lookback_distance: prefix.lookback_distance,
-                })
-                .collect(),
-            token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
-        })
-        .collect::<Vec<_>>();
-    let mut cache_control_message_indices = cache_breakpoints
+        .cloned()
+        .collect::<HashSet<_>>();
+    let analysis = output.analysis;
+    let official_bundle =
+        prompt_cache_bundle_from_analysis(&analysis, official_cacheable_prefix_keys.clone());
+    let has_billing_header = analysis.blocks.iter().any(|block| {
+        block.source == V3PromptCacheBlockSource::System
+            && block.path == "system[0]"
+            && block.value.get("type").and_then(Value::as_str) == Some("text")
+            && block
+                .value
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
+    });
+    let literal_bundle = if has_billing_header {
+        prompt_cache_bundle_from_breakpoints(
+            &analysis.literal_breakpoints,
+            literal_cacheable_prefix_keys,
+        )
+    } else {
+        official_bundle.clone()
+    };
+    let cache_breakpoints = official_bundle.request_breakpoints.clone();
+    let raw_cache_breakpoints = &literal_bundle.request_breakpoints;
+    let mut cache_control_message_indices = raw_cache_breakpoints
         .iter()
         .filter_map(|breakpoint| breakpoint.message_index)
         .collect::<Vec<_>>();
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
 
-    let cache_control_block_count = cache_breakpoints.len() as u64;
+    let cache_control_block_count = raw_cache_breakpoints.len() as u64;
     let thinking_budget_tokens = value
         .get("thinking")
         .filter(|t| t.get("type").and_then(Value::as_str) == Some("enabled"))
@@ -8676,8 +9174,11 @@ fn request_cache_metadata_from_value_with_analysis(
         reasoning_effort,
         cache_control_message_indices,
         cache_breakpoints,
-        cacheable_breakpoint_prefix_keys,
         cache_prefix_hash,
+        bundles: PromptCacheBundles {
+            official: official_bundle,
+            literal: literal_bundle,
+        },
         canonical_model_id,
     }
 }
@@ -8963,6 +9464,14 @@ fn limit_rejection_response(
     principal_id: &str,
     retry_after_seconds: Option<u64>,
 ) -> Response<Body> {
+    let should_retry = match &reason {
+        RejectReason::Unsatisfiable { .. } => Some("false"),
+        RejectReason::RequestsRateLimit
+        | RejectReason::TokenRateLimit { .. }
+        | RejectReason::CostRateLimit
+        | RejectReason::ConcurrentRateLimit => Some("true"),
+        _ => None,
+    };
     let (status, error_type, message, limit_kind) = match reason {
         RejectReason::ModelNotAllowed => (
             StatusCode::FORBIDDEN,
@@ -9018,6 +9527,19 @@ fn limit_rejection_response(
             "concurrent request cap exceeded".to_owned(),
             Some("concurrent"),
         ),
+        RejectReason::Unsatisfiable {
+            kind,
+            cap,
+            requested,
+        } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_error",
+            format!(
+                "requested {} reservation {requested} cannot fit configured cap {cap}",
+                limit_kind_name(kind)
+            ),
+            Some(limit_kind_name(kind)),
+        ),
         RejectReason::CostUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "server_error",
@@ -9051,6 +9573,11 @@ fn limit_rejection_response(
         CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
+    if let Some(value) = should_retry {
+        response
+            .headers_mut()
+            .insert("x-should-retry", HeaderValue::from_static(value));
+    }
     if status == StatusCode::TOO_MANY_REQUESTS
         && let Some(value) =
             retry_after_seconds.and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
@@ -9066,14 +9593,24 @@ fn limit_retry_after_secs(reason: RejectReason) -> Option<u64> {
         RejectReason::RequestsRateLimit
         | RejectReason::TokenRateLimit { .. }
         | RejectReason::CostRateLimit => Some(60),
-        _ => None,
+        RejectReason::PrincipalMissing
+        | RejectReason::PrincipalDisabled
+        | RejectReason::KeyRevoked
+        | RejectReason::Expired
+        | RejectReason::ModelNotAllowed
+        | RejectReason::CostUnavailable
+        | RejectReason::UnsupportedLimitWindow { .. }
+        | RejectReason::OutputCapExceeded { .. }
+        | RejectReason::Unsatisfiable { .. } => None,
     }
 }
 
 fn limit_violation_name(reason: &RejectReason) -> Option<&'static str> {
     match reason {
         RejectReason::RequestsRateLimit => Some("Requests"),
-        RejectReason::TokenRateLimit { kind } => Some(audit_limit_kind_name(*kind)),
+        RejectReason::TokenRateLimit { kind } | RejectReason::Unsatisfiable { kind, .. } => {
+            Some(audit_limit_kind_name(*kind))
+        }
         RejectReason::CostRateLimit => Some("CostUsd"),
         RejectReason::ConcurrentRateLimit => Some("Concurrent"),
         RejectReason::PrincipalMissing
@@ -9197,6 +9734,7 @@ struct RoutedUpstream<'v> {
     routing_trace: RoutingTrace,
     selected_cache_score: Option<CacheScore>,
     selected_cache_match: Option<SelectedCacheMatch>,
+    cache_bundle: PromptCacheBundle,
     route_ms: u64,
 }
 
@@ -9222,8 +9760,14 @@ impl<'v> RoutedUpstream<'v> {
             routing_trace: pipeline_result.routing_trace(terminal_decision),
             selected_cache_score,
             selected_cache_match,
+            cache_bundle: PromptCacheBundle::default(),
             route_ms,
         }
+    }
+
+    fn with_cache_bundle(mut self, cache_bundle: PromptCacheBundle) -> Self {
+        self.cache_bundle = cache_bundle;
+        self
     }
 }
 
@@ -9302,6 +9846,8 @@ fn route_info_for_routed(
             .map(|score| score.predicted_cache_creation_tokens_1h),
         token_estimate_source: selected_cache_score
             .and_then(|score| score.token_estimate_source.clone()),
+        cache_breakpoints: Some(routed.cache_bundle.request_breakpoints.clone()),
+        cache_prefix_hash: routed.cache_bundle.cache_prefix_hash.clone(),
         cache_value_micros: subscription_trace.and_then(|trace| {
             trace
                 .candidates
@@ -9332,6 +9878,7 @@ struct FailoverRouter<'a> {
     ctx: &'a RequestContext,
     principal: &'a Principal,
     warm_entries: &'a HashMap<Uuid, Vec<WarmCacheEntry>>,
+    cache_bundles: &'a PromptCacheBundles,
     request_kind: RequestKind,
     observer: Option<&'a LifecycleContext>,
     handle_span: &'a tracing::Span,
@@ -9359,14 +9906,16 @@ impl<'a> FailoverRouter<'a> {
             self.excluded.push(failed_id);
         }
         let route_start = Instant::now();
-        let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
-            self.view,
-            &self.principal.id,
-            self.request_kind,
-            &self.ctx.cache_breakpoints,
-            self.warm_entries,
-            &*lifecycle.clock,
-        );
+        let (mut candidates, mut selected_cache_matches) =
+            build_candidates_with_matches_for_bundles(
+                self.view,
+                &self.principal.id,
+                self.request_kind,
+                &self.ctx.cache_breakpoints,
+                self.warm_entries,
+                Some(self.cache_bundles),
+                &*lifecycle.clock,
+            );
         candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
         // The last allowed attempt goes to an API key when one remains, so
         // the attempt cap never strands a request on exhausted OAuth accounts.
@@ -9443,7 +9992,8 @@ impl<'a> FailoverRouter<'a> {
             terminal_decision,
             selected_cache_matches.remove(&upstream_id),
             duration_to_ms(route_start.elapsed()),
-        );
+        )
+        .with_cache_bundle(self.cache_bundles.for_upstream(record).clone());
         tracing::warn!(
             from_upstream = %failed.record.name,
             from_upstream_id = %failed_id,
@@ -10807,7 +11357,7 @@ mod tests {
             request["cache_control"] = json!({"type":"ephemeral","ttl":"5m"});
         }
         let mut seed = blake3::Hasher::new();
-        seed.update(b"cc-lb-cache-v5:seed");
+        seed.update(b"cc-lb-cache-v6:seed");
         seed.update(b"claude-sonnet-4-5-20250929");
         let mut previous = seed.finalize();
         for (index, block_text) in [(0, text.as_str()), (1, "tail")] {
@@ -10817,10 +11367,10 @@ mod tests {
                 "value":{"text":block_text,"type":"text"},
             });
             let mut block = blake3::Hasher::new();
-            block.update(b"cc-lb-cache-v5:block");
+            block.update(b"cc-lb-cache-v6:block");
             block.update(&serde_json::to_vec(&digest_value).expect("reference block JSON"));
             let mut prefix = blake3::Hasher::new();
-            prefix.update(b"cc-lb-cache-v5:prefix");
+            prefix.update(b"cc-lb-cache-v6:prefix");
             prefix.update(previous.as_bytes());
             prefix.update(block.finalize().as_bytes());
             previous = prefix.finalize();
@@ -10861,7 +11411,10 @@ mod tests {
                 upstream_id: Uuid::from_u128(1_003),
                 canonical_model_id: TEST_MODEL.to_owned(),
                 cache_breakpoints: metadata.plugin_cache_breakpoints(),
-                cacheable_breakpoint_prefix_keys: metadata.cacheable_breakpoint_prefix_keys,
+                cacheable_breakpoint_prefix_keys: metadata
+                    .bundles
+                    .official
+                    .cacheable_breakpoint_prefix_keys,
                 selected_match: None,
                 sink: cache.clone(),
                 grace_margin_secs: 30,
@@ -10922,7 +11475,10 @@ mod tests {
                 upstream_id: Uuid::from_u128(1_003),
                 canonical_model_id: TEST_MODEL.to_owned(),
                 cache_breakpoints: metadata.plugin_cache_breakpoints(),
-                cacheable_breakpoint_prefix_keys: metadata.cacheable_breakpoint_prefix_keys,
+                cacheable_breakpoint_prefix_keys: metadata
+                    .bundles
+                    .official
+                    .cacheable_breakpoint_prefix_keys,
                 selected_match: None,
                 sink: cache.clone(),
                 grace_margin_secs: 30,
@@ -12644,16 +13200,24 @@ mod tests {
     struct FakePromptCacheStore {
         records: Mutex<Vec<PromptCacheObservationRecord>>,
         lookups: AtomicUsize,
+        requested_keys: Mutex<Vec<String>>,
     }
     impl FakePromptCacheStore {
         fn new(records: Vec<PromptCacheObservationRecord>) -> Self {
             Self {
                 records: Mutex::new(records),
                 lookups: AtomicUsize::new(0),
+                requested_keys: Mutex::new(Vec::new()),
             }
         }
         fn lookup_count(&self) -> usize {
             self.lookups.load(Ordering::Relaxed)
+        }
+        fn requested_keys(&self) -> Vec<String> {
+            self.requested_keys
+                .lock()
+                .expect("requested keys lock")
+                .clone()
         }
     }
     #[async_trait]
@@ -12666,6 +13230,10 @@ mod tests {
             not_expired_at_unix_secs: u64,
         ) -> cc_lb_storage_api::StorageResult<Vec<PromptCacheObservationRecord>> {
             self.lookups.fetch_add(1, Ordering::Relaxed);
+            self.requested_keys
+                .lock()
+                .expect("requested keys lock")
+                .extend(v3_prefix_keys.iter().cloned());
             Ok(self
                 .records
                 .lock()
@@ -12700,6 +13268,53 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn shared_warm_lookup_unions_official_and_literal_bundle_keys() {
+        let official_id = Uuid::from_u128(1010);
+        let custom_id = Uuid::from_u128(1011);
+        let mut custom = upstream_record(custom_id);
+        custom.base_url = Some("https://proxy.example.com".parse().expect("custom URL"));
+        let store = Arc::new(FakePromptCacheStore::new(Vec::new()));
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(
+                &[principal_record("principal")],
+                HashMap::new(),
+            )))
+            .upstream_records(vec![upstream_record(official_id), custom])
+            .prompt_cache_observation_store(store.clone())
+            .build();
+        let official = cache_breakpoint(1, "official-union-key", 100, TtlClass::Ephemeral5m);
+        let literal = cache_breakpoint(1, "literal-union-key", 200, TtlClass::Ephemeral5m);
+        let bundles = PromptCacheBundles {
+            official: PromptCacheBundle {
+                cache_breakpoints: vec![official],
+                cacheable_breakpoint_prefix_keys: HashSet::new(),
+                request_breakpoints: Vec::new(),
+                cache_prefix_hash: None,
+            },
+            literal: PromptCacheBundle {
+                cache_breakpoints: vec![literal],
+                cacheable_breakpoint_prefix_keys: HashSet::new(),
+                request_breakpoints: Vec::new(),
+                cache_prefix_hash: None,
+            },
+        };
+        let snapshot = fetch_prompt_cache_warm_entries_for_bundles(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &bundles,
+            &cc_lb_clock::TestClock::new_at_secs(1_800_000_000),
+        )
+        .await;
+        assert_eq!(snapshot.len(), 2);
+        let keys = store.requested_keys();
+        assert!(keys.contains(&"official-union-key".to_owned()));
+        assert!(keys.contains(&"literal-union-key".to_owned()));
+    }
+
     fn cache_score_view_with_store(
         upstream_id: Uuid,
         store: Arc<dyn cc_lb_storage_api::PromptCacheObservationStore>,
@@ -12709,6 +13324,95 @@ mod tests {
             .expect("new test view is exclusively owned")
             .prompt_cache_observation_store = Some(store);
         view
+    }
+
+    #[test]
+    fn mixed_official_and_custom_candidates_score_only_their_own_bundle() {
+        let official_id = Uuid::from_u128(1004);
+        let custom_id = Uuid::from_u128(1005);
+        let mut custom = upstream_record(custom_id);
+        custom.base_url = Some("https://proxy.example.com/v1".parse().expect("custom URL"));
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(
+                &[principal_record("principal")],
+                HashMap::new(),
+            )))
+            .upstream_records(vec![upstream_record(official_id), custom])
+            .build();
+        let official_breakpoints = vec![cache_breakpoint(
+            1,
+            "official-prefix",
+            100,
+            TtlClass::Ephemeral5m,
+        )];
+        let custom_breakpoints = vec![cache_breakpoint(
+            1,
+            "custom-prefix",
+            200,
+            TtlClass::Ephemeral5m,
+        )];
+        let bundles = PromptCacheBundles {
+            official: PromptCacheBundle {
+                cache_breakpoints: official_breakpoints.clone(),
+                cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["official-prefix"]),
+                request_breakpoints: official_breakpoints
+                    .iter()
+                    .map(request_cache_breakpoint_from_plugin)
+                    .collect(),
+                cache_prefix_hash: Some("official-prefix".to_owned()),
+            },
+            literal: PromptCacheBundle {
+                cache_breakpoints: custom_breakpoints.clone(),
+                cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["custom-prefix"]),
+                request_breakpoints: custom_breakpoints
+                    .iter()
+                    .map(request_cache_breakpoint_from_plugin)
+                    .collect(),
+                cache_prefix_hash: Some("custom-prefix".to_owned()),
+            },
+        };
+        let now = 1_800_000_000;
+        let mut official_warm =
+            warm_entry_priced("official-prefix", TtlClass::Ephemeral5m, now + 600, 0, 100);
+        official_warm.content_block_index = 1;
+        let mut custom_warm =
+            warm_entry_priced("custom-prefix", TtlClass::Ephemeral5m, now + 600, 0, 200);
+        custom_warm.content_block_index = 1;
+        let warm_entries = HashMap::from([
+            (official_id, vec![official_warm]),
+            (custom_id, vec![custom_warm]),
+        ]);
+        let candidates = build_candidates_with_matches_for_bundles(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            &official_breakpoints,
+            &warm_entries,
+            Some(&bundles),
+            &cc_lb_clock::TestClock::new_at_secs(now),
+        )
+        .0;
+        let official = candidates
+            .iter()
+            .find(|candidate| candidate.upstream_id == official_id)
+            .and_then(|candidate| candidate.cache_score.as_ref())
+            .expect("official score");
+        let custom = candidates
+            .iter()
+            .find(|candidate| candidate.upstream_id == custom_id)
+            .and_then(|candidate| candidate.cache_score.as_ref())
+            .expect("custom score");
+        assert_eq!(
+            official.matched_v3_cache_key.as_deref(),
+            Some("official-prefix")
+        );
+        assert_eq!(official.predicted_cache_read_tokens, 100);
+        assert_eq!(
+            custom.matched_v3_cache_key.as_deref(),
+            Some("custom-prefix")
+        );
+        assert_eq!(custom.predicted_cache_read_tokens, 200);
     }
 
     #[tokio::test]

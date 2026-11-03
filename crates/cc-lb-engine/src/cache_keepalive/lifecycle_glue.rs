@@ -1179,6 +1179,35 @@ mod tests {
     }
 
     #[test]
+    fn serving_bundle_prefix_is_threadless_keepalive_fallback_but_thread_wins() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.cache_prefix_hash = Some("serving-custom-prefix".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .expect("threadless serving request has a session key")
+                .to_string(),
+            format!(
+                "{}/prefix:serving-custom-prefix",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+        metadata.thread_id = Some("thread-serving".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .expect("threaded serving request has a session key")
+                .to_string(),
+            format!(
+                "{}/thread:thread-serving",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+    }
+
+    #[test]
     fn advance_session_seq_rejects_stale_or_duplicate_completions() {
         let mut shard = HashMap::new();
         let key = SessionKey::from_thread_id(Uuid::from_u128(1), "thread-1");

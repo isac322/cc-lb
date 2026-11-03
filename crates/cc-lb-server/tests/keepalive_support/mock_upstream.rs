@@ -63,6 +63,7 @@ struct MockState {
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
     events: Arc<Mutex<Vec<MockEvent>>>,
     failures: Arc<Mutex<VecDeque<RenewalFailure>>>,
+    next_renewal_response: Arc<Mutex<Option<Value>>>,
     notify: Arc<Notify>,
 }
 
@@ -81,6 +82,7 @@ impl MockAnthropic {
             cache: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(Vec::new())),
             failures: Arc::new(Mutex::new(VecDeque::new())),
+            next_renewal_response: Arc::new(Mutex::new(None)),
             notify: Arc::new(Notify::new()),
         };
         let router = Router::new()
@@ -116,6 +118,9 @@ impl MockAnthropic {
         for _ in 0..count {
             failures.push_back(RenewalFailure::Hang);
         }
+    }
+    pub fn respond_to_next_renewal(&self, body: Value) {
+        *lock(&self.state.next_renewal_response) = Some(body);
     }
     pub fn events(&self) -> Vec<MockEvent> {
         lock(&self.state.events).clone()
@@ -292,6 +297,12 @@ async fn messages(State(state): State<MockState>, request: Request<Body>) -> Res
         rejection: None,
     };
     record(&state, event);
+    if synthetic {
+        let body = lock(&state.next_renewal_response).take();
+        if let Some(body) = body {
+            return (StatusCode::OK, Json(body)).into_response();
+        }
+    }
     response(&value, &model, now, hit, cached_tokens)
 }
 

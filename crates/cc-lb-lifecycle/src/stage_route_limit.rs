@@ -36,6 +36,10 @@ pub struct RouteInfo {
     pub predicted_cache_creation_tokens_1h: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_estimate_source: Option<String>,
+    #[serde(skip)]
+    pub cache_breakpoints: Option<Vec<cc_lb_request_log::RequestCacheBreakpoint>>,
+    #[serde(skip)]
+    pub cache_prefix_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_value_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

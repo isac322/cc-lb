@@ -23,15 +23,16 @@ use url::Url;
 use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Signed};
 use crate::lifecycle::{
     PromptCacheUsage, UpstreamDispatch, decode_prompt_cache_observations_pure,
-    prompt_cache_observation_context, publish_prompt_cache_observations,
+    prompt_cache_observation_context, prompt_cache_policy_for_upstream,
+    publish_prompt_cache_observations,
 };
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
-    V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+    V3PromptCacheBlockSource, analyze_v3_prompt_cache_with_policy,
     cacheable_breakpoint_prefix_keys_with_tokenize_duration,
 };
 use crate::usage_decoder::decode_full_body;
-use crate::usage_parser::observe_non_stream_json_value;
+use crate::usage_parser::{cache_creation_split, observe_non_stream_json_value};
 
 use super::request_snapshot::RequestSnapshot;
 use super::scheduler::{
@@ -147,7 +148,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Ok(input) => input,
             Err(error) => return DispatchOutcome::Error(error),
         };
-        let observation_plan = keepalive_observation_plan(&keepalive_body);
+        let observation_plan = keepalive_observation_plan(&keepalive_body, &upstream);
 
         let dispatch_started = Instant::now();
         let (dispatch_result, accounting_guard, dispatch_anchor_unix_secs) = match context
@@ -316,14 +317,21 @@ struct KeepaliveObservationPlan {
     cacheable_breakpoint_prefix_keys: HashSet<String>,
 }
 
-fn keepalive_observation_plan(body: &[u8]) -> Option<KeepaliveObservationPlan> {
+fn keepalive_observation_plan(
+    body: &[u8],
+    upstream: &UpstreamRecord,
+) -> Option<KeepaliveObservationPlan> {
     let value = sonic_rs::from_slice::<Value>(body).ok()?;
     let canonical_model = value
         .get("model")
         .and_then(Value::as_str)
         .map(canonical_model_id)?
         .to_owned();
-    let analysis = analyze_v3_prompt_cache(&value, &canonical_model);
+    let (analysis, _) = analyze_v3_prompt_cache_with_policy(
+        &value,
+        &canonical_model,
+        prompt_cache_policy_for_upstream(upstream),
+    );
     if analysis.breakpoints.is_empty() {
         return None;
     }
@@ -429,10 +437,13 @@ struct KeepaliveResponseUsage {
     output_tokens: u64,
     #[serde(default)]
     cache_creation_input_tokens: u64,
+    // Preserve validation of legacy flat TTL counters without using them as buckets.
+    #[serde(default, rename = "cache_creation_input_tokens_5m")]
+    _cache_creation_input_tokens_5m: u64,
+    #[serde(default, rename = "cache_creation_input_tokens_1h")]
+    _cache_creation_input_tokens_1h: u64,
     #[serde(default)]
-    cache_creation_input_tokens_5m: u64,
-    #[serde(default)]
-    cache_creation_input_tokens_1h: u64,
+    cache_creation: serde_json::Value,
     #[serde(default)]
     cache_read_input_tokens: u64,
 }
@@ -451,13 +462,17 @@ fn classify_success_body(
     match sonic_rs::from_slice::<KeepaliveResponseBody>(body) {
         Ok(parsed) => {
             let usage = parsed.usage.unwrap_or_default();
+            let (cache_creation_total, cache_creation_5m, cache_creation_1h) = cache_creation_split(
+                usage.cache_creation_input_tokens,
+                Some(&usage.cache_creation),
+            );
             let finalization = RenewalFinalization {
                 usage: RenewalUsage {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
-                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                    cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
-                    cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
+                    cache_creation_input_tokens: cache_creation_total,
+                    cache_creation_input_tokens_5m: cache_creation_5m,
+                    cache_creation_input_tokens_1h: cache_creation_1h,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                 },
                 status: StatusCode::OK.as_u16(),
