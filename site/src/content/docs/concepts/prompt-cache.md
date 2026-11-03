@@ -22,6 +22,14 @@ Keepalive renewals use Anthropic's nested 5-minute and 1-hour cache-creation cou
 
 This applies to future renewals. Historical usage rows are not rewritten.
 
+## Request eligibility
+
+An explicit `x-claude-code-request-class: auxiliary` excludes a request from keep-alive completion sequencing, generation observation or mutation, enqueueing, cancellation, and detached bookkeeping. The exclusion follows the explicit header even when body classification reports `unknown`, `subagent`, `main`, or `advisor`. Existing named side-request exclusions remain in place. Headerless `unknown` and `subagent` requests retain their existing eligibility, and real subagent turns remain isolated under their agent-scoped session key.
+
+Claude Code gateway hints are optional client metadata. The [official gateway hint contract](https://code.claude.com/docs/en/llm-gateway-protocol#gateway-hint-headers) documents `x-claude-code-request-class` for Claude Code v2.1.273 and later. With a custom `ANTHROPIC_BASE_URL`, clients must opt in with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`; the hints are otherwise off by default. cc-lb does not promise to consume every hint, and this behavior does not identify side requests that omit the explicit class.
+
+Keep-alive firing currently supports direct Anthropic OAuth upstreams. API-key and other upstream kinds are skipped at fire time.
+
 ## Attribution and observations
 
 For ordinary responses where routing predicted no match, cc-lb can infer one deepest eligible resolved explicit or automatic breakpoint when usage reports numeric positive `cache_read_input_tokens` and explicit zero cache creation. Zero creation can be a flat `cache_creation_input_tokens: 0`, complete nested `cache_creation` counters with zero `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, or the complete zero suffix pair `cache_creation_input_tokens_5m` and `cache_creation_input_tokens_1h`. Every supplied representation must contain complete, valid unsigned counters with matching totals. Suffix fields are evidence-only; numeric accounting remains unchanged. Missing, null, partial, invalid, contradictory, or positive-creation usage does not establish evidence for this inferred branch. For SSE, omitted or null fields preserve the corresponding prior evidence components; complete numeric flat, nested, or suffix snapshots replace the prior representation and may change evidence state. Partial, malformed, or contradictory snapshots invalidate evidence; partial snapshots cannot be combined into zero evidence. Predicted-match attribution remains unchanged.
