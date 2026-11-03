@@ -292,25 +292,44 @@ mod tests {
         "predicted_hit_actual_miss",
     ];
 
-    fn parse_completed(event_id: &str) -> LifecycleEvent {
+    fn parse_completed_with_breakpoints(
+        event_id: &str,
+        cache_breakpoints: Vec<RequestCacheBreakpoint>,
+    ) -> LifecycleEvent {
         LifecycleEvent::ParseCompleted {
             event_id: eid(event_id),
             result: Ok(ParseInfo {
                 model: Some("claude-sonnet-4".into()),
-                cache_breakpoints: vec![cache_breakpoint()],
+                cache_breakpoints,
                 ..Default::default()
             }),
         }
+    }
+
+    fn parse_completed(event_id: &str) -> LifecycleEvent {
+        parse_completed_with_breakpoints(event_id, vec![cache_breakpoint()])
+    }
+
+    fn parse_completed_without_breakpoints(event_id: &str) -> LifecycleEvent {
+        parse_completed_with_breakpoints(event_id, Vec::new())
     }
 
     fn route_completed(
         event_id: &str,
         prediction: Result<Option<u32>, RouteFailure>,
     ) -> LifecycleEvent {
+        route_completed_with_breakpoints(event_id, prediction, None)
+    }
+
+    fn route_completed_with_breakpoints(
+        event_id: &str,
+        prediction: Result<Option<u32>, RouteFailure>,
+        cache_breakpoints: Option<Vec<RequestCacheBreakpoint>>,
+    ) -> LifecycleEvent {
         LifecycleEvent::RouteCompleted {
             event_id: eid(event_id),
             result: prediction.map(|predicted_cache_read_tokens| RouteInfo {
-                cache_breakpoints: None,
+                cache_breakpoints,
                 cache_prefix_hash: None,
                 upstream_id: Uuid::from_u128(3),
                 upstream_name: "upstream-a".into(),
@@ -337,6 +356,7 @@ mod tests {
             routing_trace: None,
         }
     }
+
 
     fn terminated(event_id: &str, client_status: u16, reason: TerminationReason) -> LifecycleEvent {
         LifecycleEvent::RequestTerminated {
@@ -898,4 +918,83 @@ mod tests {
             1,
         )
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn cache_prediction_uses_literal_route_breakpoints_when_parse_is_empty() -> TestResult {
+        for (name, read, outcome, hits, misses) in [
+            (
+                "literal route hit",
+                32,
+                "predicted_hit_actual_hit",
+                1,
+                0,
+            ),
+            (
+                "literal route miss",
+                0,
+                "predicted_hit_actual_miss",
+                0,
+                1,
+            ),
+        ] {
+            let rendered = render_events(vec![
+                parse_completed_without_breakpoints(name),
+                route_completed_with_breakpoints(
+                    name,
+                    Ok(Some(100)),
+                    Some(vec![cache_breakpoint()]),
+                ),
+                usage(name, read, 0),
+                terminated(name, 200, TerminationReason::Success),
+            ])
+            .await?;
+            assert_counts(name, &rendered, &[(outcome, 1)], hits, misses)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cache_prediction_uses_latest_route_breakpoint_state() -> TestResult {
+        let rendered = render_events(vec![
+            parse_completed("latest-route-empty"),
+            route_completed_with_breakpoints(
+                "latest-route-empty",
+                Ok(Some(100)),
+                Some(vec![cache_breakpoint()]),
+            ),
+            route_completed_with_breakpoints(
+                "latest-route-empty",
+                Ok(Some(100)),
+                Some(Vec::new()),
+            ),
+            usage("latest-route-empty", 32, 0),
+            terminated(
+                "latest-route-empty",
+                200,
+                TerminationReason::Success,
+            ),
+        ])
+        .await?;
+        assert_counts("latest route empty", &rendered, &[], 0, 0)?;
+
+        let rendered = render_events(vec![
+            parse_completed("route-none-fallback"),
+            route_completed_with_breakpoints("route-none-fallback", Ok(Some(100)), None),
+            usage("route-none-fallback", 32, 0),
+            terminated(
+                "route-none-fallback",
+                200,
+                TerminationReason::Success,
+            ),
+        ])
+        .await?;
+        assert_counts(
+            "route none parse fallback",
+            &rendered,
+            &[("predicted_hit_actual_hit", 1)],
+            1,
+            0,
+        )?;
+        Ok(())
+    }
+
 }
