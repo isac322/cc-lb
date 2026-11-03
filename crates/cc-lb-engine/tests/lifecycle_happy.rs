@@ -163,36 +163,31 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
             "official-api-key",
             StorageUpstreamKind::AnthropicApiKey,
             None,
-            "https://api.anthropic.com/",
         ),
         (
             "official-oauth",
             StorageUpstreamKind::AnthropicOauth,
             Some("https://api.anthropic.com:443/proxy?tenant=one#fragment"),
-            "https://api.anthropic.com:443/proxy?tenant=one#fragment",
         ),
         (
             "custom-api-key",
             StorageUpstreamKind::AnthropicApiKey,
             Some("https://proxy.example.com/anthropic"),
-            "https://proxy.example.com/anthropic",
         ),
         (
             "custom-oauth",
             StorageUpstreamKind::AnthropicOauth,
             Some("https://user:pass@api.anthropic.com"),
-            "https://user:pass@api.anthropic.com",
         ),
     ];
 
-    for (index, (name, kind, record_base_url, dialect_base_url)) in cases.into_iter().enumerate() {
+    for (index, (name, kind, record_base_url)) in cases.into_iter().enumerate() {
         let state = TestState::default();
         let dispatcher = CapturingSignedDispatch::default();
         let lifecycle = explicit_native_lifecycle(
             &state,
             kind,
             record_base_url.map(|url| url.parse()).transpose()?,
-            dialect_base_url.parse()?,
             Arc::new(dispatcher.clone()),
             test_bus.bus_arc(),
             index as u128 + 100,
@@ -1516,12 +1511,14 @@ fn explicit_native_lifecycle(
     state: &TestState,
     kind: StorageUpstreamKind,
     record_base_url: Option<url::Url>,
-    dialect_base_url: url::Url,
     dispatcher: Arc<dyn UpstreamDispatch>,
     event_bus: Arc<dyn cc_lb_control::RequestEventBus>,
     id_suffix: u128,
     name: &str,
 ) -> Lifecycle {
+    let dialect_base_url = record_base_url
+        .clone()
+        .unwrap_or_else(|| "https://api.anthropic.com/".parse().expect("official URL parses"));
     let upstream_id = uuid::Uuid::from_u128(id_suffix);
     let principal = PrincipalRecord {
         id: uuid::Uuid::from_u128(id_suffix + 10_000),
@@ -1545,7 +1542,7 @@ fn explicit_native_lifecycle(
         base_url: record_base_url,
         enabled: true,
         api_key_ciphertext: matches!(kind, StorageUpstreamKind::AnthropicApiKey)
-            .then(|| Vec::new()),
+            .then(Vec::new),
         ..UpstreamRecord::default()
     };
     let dialect = Arc::new(AttributionRemovingDialect {

@@ -14,7 +14,7 @@ use http::{HeaderMap, Method};
 use uuid::Uuid;
 
 use crate::common;
-mod prompt_cache_routing_support;
+use crate::prompt_cache_routing_support;
 
 use common::{TestAuthn, TestState};
 use prompt_cache_routing_support::{

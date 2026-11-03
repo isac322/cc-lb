@@ -1,7 +1,5 @@
 use crate::common;
-
-#[path = "prompt_cache_routing_support/mod.rs"]
-mod prompt_cache_routing_support;
+use crate::prompt_cache_routing_support;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
