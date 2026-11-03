@@ -14,10 +14,16 @@ use std::time::{Duration, Instant};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
+#[cfg(test)]
+use std::cell::Cell;
 
 use cc_lb_domain::PrefixBytes;
 
 use crate::tokenizer::{PrefixTokenizer, cache_threshold_from_byte_len, prefix_bytes_of};
+#[cfg(test)]
+thread_local! {
+    static BLOCK_DIGEST_CALLS: Cell<u64> = const { Cell::new(0) };
+}
 
 mod optimized;
 
@@ -26,6 +32,15 @@ pub(crate) use optimized::{
 };
 /// Estimator identity of every [`PrefixBytes`] value this simulator produces.
 pub const V3_TOKEN_ESTIMATE_SOURCE: &str = PrefixBytes::ESTIMATE_SOURCE;
+/// Cache identity policy selected by the routed upstream.
+///
+/// The official Anthropic endpoint ignores the first system billing-header block
+/// for cache identity. Custom endpoints keep every block literal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptCachePolicy {
+    AnthropicOfficial,
+    Literal,
+}
 
 /// Anthropic's shared cap for resolved explicit and automatic breakpoints. Provider-invalid
 /// requests skip analysis before tokenization.
@@ -46,8 +61,8 @@ enum SaltScope {
 impl SaltScope {
     fn domain_tag(self) -> &'static [u8] {
         match self {
-            Self::System => b"cc-lb-cache-v5:salt-system",
-            Self::Messages => b"cc-lb-cache-v5:salt-message",
+            Self::System => b"cc-lb-cache-v6:salt-system",
+            Self::Messages => b"cc-lb-cache-v6:salt-message",
         }
     }
 }
@@ -85,7 +100,7 @@ pub struct PromptCacheSimulatorKey([u8; 32]);
 impl PromptCacheSimulatorKey {
     pub fn seed(canonical_model: &str) -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"cc-lb-cache-v5:seed");
+        hasher.update(b"cc-lb-cache-v6:seed");
         hasher.update(canonical_model.as_bytes());
         Self(*hasher.finalize().as_bytes())
     }
@@ -154,10 +169,12 @@ pub struct V3StructuralBreakpoint {
 pub struct V3PromptCacheAnalysis {
     pub blocks: Vec<V3PromptCacheBlock>,
     pub breakpoints: Vec<V3PromptCacheBreakpoint>,
+    pub literal_breakpoints: Vec<V3PromptCacheBreakpoint>,
 }
 struct V3StructuralAnalysis<'a> {
     blocks: Vec<CacheBlockRef<'a>>,
     breakpoints: Vec<V3StructuralBreakpoint>,
+    literal_breakpoints: Vec<V3StructuralBreakpoint>,
 }
 
 #[derive(Clone, Copy)]
@@ -166,6 +183,7 @@ enum CacheBlockValueRef<'a> {
     SyntheticText(&'a str),
 }
 
+#[derive(Clone)]
 struct CacheBlockRef<'a> {
     source: V3PromptCacheBlockSource,
     path: String,
@@ -200,6 +218,17 @@ impl CacheBlockRef<'_> {
             (_, CacheBlockValueRef::SyntheticText(text)) => !text.is_empty(),
             (_, CacheBlockValueRef::Json(value)) => is_breakpoint_eligible(value),
         }
+    }
+
+    fn is_billing_header(&self) -> bool {
+        self.source == V3PromptCacheBlockSource::System
+            && self.path == "system[0]"
+            && matches!(self.value, CacheBlockValueRef::Json(value)
+                if value.get("type").and_then(Value::as_str) == Some("text")
+                    && value
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.starts_with("x-anthropic-billing-header:")))
     }
 }
 
@@ -361,7 +390,7 @@ impl Serialize for OwnedPrefixBlockSerializer<'_> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromptCachePrefixChain {
-    keys: Vec<PromptCacheSimulatorKey>,
+    keys: Vec<Option<PromptCacheSimulatorKey>>,
 }
 
 impl PromptCachePrefixChain {
@@ -369,6 +398,8 @@ impl PromptCachePrefixChain {
         seed: PromptCacheSimulatorKey,
         blocks: &[CacheBlockRef<'_>],
         salts: &[InvalidatorSalt<'_>; INVALIDATOR_SALT_COUNT],
+        digests: &[Option<[u8; 32]>],
+        policy: PromptCachePolicy,
         scratch: &mut SerializationScratch,
     ) -> Self {
         let mut previous = seed;
@@ -397,15 +428,23 @@ impl PromptCachePrefixChain {
                 }
             }
 
-            previous = extend_prefix(previous, block_digest(block, scratch));
-            keys.push(previous);
+            if policy == PromptCachePolicy::AnthropicOfficial && block.is_billing_header() {
+                keys.push(None);
+                continue;
+            }
+            let Some(digest) = digests.get(keys.len()).copied().flatten() else {
+                keys.push(None);
+                continue;
+            };
+            previous = extend_prefix(previous, digest);
+            keys.push(Some(previous));
         }
 
         Self { keys }
     }
 
     pub fn prefix_key(&self, block_index: usize) -> Option<PromptCacheSimulatorKey> {
-        self.keys.get(block_index).copied()
+        self.keys.get(block_index).copied().flatten()
     }
 
     fn prefix_key_hex(&self, block_index: usize) -> Option<String> {
@@ -419,7 +458,7 @@ fn extend_prefix(
     block_digest: [u8; 32],
 ) -> PromptCacheSimulatorKey {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"cc-lb-cache-v5:prefix");
+    hasher.update(b"cc-lb-cache-v6:prefix");
     hasher.update(&previous.0);
     hasher.update(&block_digest);
     PromptCacheSimulatorKey(*hasher.finalize().as_bytes())
@@ -530,17 +569,33 @@ fn non_default_string_invalidator<'a>(
 /// upstream still serves. `lifecycle::build_cache_score_from_match` applies the ordering rule
 /// where it actually matters, when pricing a matched prefix.
 pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3PromptCacheAnalysis {
-    analyze_v3_prompt_cache_with_tokenize_duration(value, canonical_model).0
+    analyze_v3_prompt_cache_with_policy(
+        value,
+        canonical_model,
+        PromptCachePolicy::AnthropicOfficial,
+    )
+    .0
 }
-
-pub(super) fn analyze_v3_prompt_cache_with_tokenize_duration(
+#[cfg(test)]
+pub(crate) fn analyze_v3_prompt_cache_literal(
     value: &Value,
     canonical_model: &str,
+) -> V3PromptCacheAnalysis {
+    analyze_v3_prompt_cache_with_policy(value, canonical_model, PromptCachePolicy::Literal).0
+}
+
+pub(super) fn analyze_v3_prompt_cache_with_policy(
+    value: &Value,
+    canonical_model: &str,
+    policy: PromptCachePolicy,
 ) -> (V3PromptCacheAnalysis, Duration) {
     let mut serialization_scratch = SerializationScratch::default();
-    let Some(structural) =
-        analyze_v3_prompt_cache_structure(value, canonical_model, &mut serialization_scratch)
-    else {
+    let Some(structural) = analyze_v3_prompt_cache_structure(
+        value,
+        canonical_model,
+        policy,
+        &mut serialization_scratch,
+    ) else {
         return (unanalyzable_prompt_cache(), Duration::ZERO);
     };
     let mut tokenization_duration = Duration::ZERO;
@@ -559,27 +614,75 @@ pub(super) fn analyze_v3_prompt_cache_with_tokenize_duration(
         })
         .collect();
     (
-        finish_structural_analysis(structural, prefix_bytes)
+        finish_structural_analysis(structural, prefix_bytes, canonical_model)
             .unwrap_or_else(unanalyzable_prompt_cache),
         tokenization_duration,
+    )
+}
+
+pub(super) fn analyze_v3_prompt_cache_with_tokenize_duration(
+    value: &Value,
+    canonical_model: &str,
+) -> (V3PromptCacheAnalysis, Duration) {
+    analyze_v3_prompt_cache_with_policy(
+        value,
+        canonical_model,
+        PromptCachePolicy::AnthropicOfficial,
     )
 }
 
 fn analyze_v3_prompt_cache_structure<'a>(
     value: &'a Value,
     canonical_model: &str,
+    policy: PromptCachePolicy,
     serialization_scratch: &mut SerializationScratch,
 ) -> Option<V3StructuralAnalysis<'a>> {
     let blocks = flatten_prefix_blocks(value);
-    let resolved_breakpoints = resolve_breakpoints(value, &blocks)?;
+    let resolved = resolve_breakpoints(value, &blocks, policy)?;
     let salts = request_invalidator_salts(value, canonical_model);
+    let digests = blocks
+        .iter()
+        .map(|block| Some(block_digest(block, serialization_scratch)))
+        .collect::<Vec<_>>();
     let chain = PromptCachePrefixChain::from_request_blocks(
         PromptCacheSimulatorKey::seed(canonical_model),
         &blocks,
         &salts,
+        &digests,
+        policy,
         serialization_scratch,
     );
-    let breakpoints = resolved_breakpoints
+    let breakpoints = structural_breakpoints(&blocks, resolved, &chain);
+    let literal_breakpoints = if policy == PromptCachePolicy::AnthropicOfficial
+        && blocks.iter().any(CacheBlockRef::is_billing_header)
+    {
+        let literal_resolved =
+            resolve_breakpoints(value, &blocks, PromptCachePolicy::Literal).unwrap_or_default();
+        let literal_chain = PromptCachePrefixChain::from_request_blocks(
+            PromptCacheSimulatorKey::seed(canonical_model),
+            &blocks,
+            &salts,
+            &digests,
+            PromptCachePolicy::Literal,
+            serialization_scratch,
+        );
+        structural_breakpoints(&blocks, literal_resolved, &literal_chain)
+    } else {
+        Vec::new()
+    };
+    Some(V3StructuralAnalysis {
+        blocks,
+        breakpoints,
+        literal_breakpoints,
+    })
+}
+
+fn structural_breakpoints<'a>(
+    blocks: &[CacheBlockRef<'a>],
+    resolved: Vec<ResolvedBreakpoint<'a>>,
+    chain: &PromptCachePrefixChain,
+) -> Vec<V3StructuralBreakpoint> {
+    resolved
         .into_iter()
         .filter_map(|resolved| {
             let block = blocks.get(resolved.block_index)?;
@@ -591,25 +694,44 @@ fn analyze_v3_prompt_cache_structure<'a>(
                 message_index: block.message_index,
                 ttl: Some(resolved.ttl.to_owned()),
                 prefix_key,
-                lookback_prefixes: lookback_prefixes(&chain, resolved.block_index),
+                lookback_prefixes: lookback_prefixes(chain, resolved.block_index),
             })
         })
-        .collect();
-    Some(V3StructuralAnalysis {
-        blocks,
-        breakpoints,
-    })
+        .collect()
 }
 
 fn finish_structural_analysis(
     structural: V3StructuralAnalysis<'_>,
     prefix_bytes: Vec<PrefixBytes>,
+    canonical_model: &str,
 ) -> Option<V3PromptCacheAnalysis> {
-    if structural.breakpoints.len() != prefix_bytes.len() {
+    let V3StructuralAnalysis {
+        blocks,
+        breakpoints,
+        literal_breakpoints,
+    } = structural;
+    if breakpoints.len() != prefix_bytes.len() {
         return None;
     }
-    let breakpoints = structural
-        .breakpoints
+    let mut scratch = SerializationScratch::default();
+    let literal_prefix_bytes = literal_breakpoints
+        .iter()
+        .map(|breakpoint| {
+            breakpoints
+                .iter()
+                .position(|primary| primary.block_index == breakpoint.block_index)
+                .and_then(|position| prefix_bytes.get(position).copied())
+                .unwrap_or_else(|| {
+                    let index = breakpoint.block_index as usize;
+                    prefix_bytes_of(serialized_prefix(
+                        canonical_model,
+                        blocks.get(..=index).unwrap_or(&[]),
+                        &mut scratch,
+                    ))
+                })
+        })
+        .collect::<Vec<_>>();
+    let breakpoints = breakpoints
         .into_iter()
         .zip(prefix_bytes)
         .map(|(breakpoint, prefix_bytes)| V3PromptCacheBreakpoint {
@@ -622,14 +744,25 @@ fn finish_structural_analysis(
             prefix_bytes,
             lookback_prefixes: breakpoint.lookback_prefixes,
         })
+        .collect::<Vec<_>>();
+    let literal_breakpoints = literal_breakpoints
+        .into_iter()
+        .zip(literal_prefix_bytes)
+        .map(|(breakpoint, prefix_bytes)| V3PromptCacheBreakpoint {
+            block_index: breakpoint.block_index,
+            source: breakpoint.source,
+            path: breakpoint.path,
+            message_index: breakpoint.message_index,
+            ttl: breakpoint.ttl,
+            prefix_key: breakpoint.prefix_key,
+            prefix_bytes,
+            lookback_prefixes: breakpoint.lookback_prefixes,
+        })
         .collect();
     Some(V3PromptCacheAnalysis {
-        blocks: structural
-            .blocks
-            .into_iter()
-            .map(CacheBlockRef::into_owned)
-            .collect(),
+        blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
         breakpoints,
+        literal_breakpoints,
     })
 }
 
@@ -637,26 +770,30 @@ fn unanalyzable_prompt_cache() -> V3PromptCacheAnalysis {
     V3PromptCacheAnalysis {
         blocks: Vec::new(),
         breakpoints: Vec::new(),
+        literal_breakpoints: Vec::new(),
     }
 }
 
 fn resolve_breakpoints<'a>(
     value: &'a Value,
     blocks: &[CacheBlockRef<'a>],
+    policy: PromptCachePolicy,
 ) -> Option<Vec<ResolvedBreakpoint<'a>>> {
     let mut breakpoints = Vec::with_capacity(MAX_EXPLICIT_BREAKPOINTS);
     for (block_index, block) in blocks.iter().enumerate() {
+        if policy == PromptCachePolicy::AnthropicOfficial && block.is_billing_header() {
+            continue;
+        }
         if let Some(ttl) = block.explicit_ttl {
             breakpoints.push(ResolvedBreakpoint { block_index, ttl });
         }
     }
 
     if let Some(automatic_ttl) = cache_control_ttl(value) {
-        let automatic_block = blocks
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, block)| block.is_breakpoint_eligible());
+        let automatic_block = blocks.iter().enumerate().rev().find(|(_, block)| {
+            block.is_breakpoint_eligible()
+                && !(policy == PromptCachePolicy::AnthropicOfficial && block.is_billing_header())
+        });
         if let Some((block_index, block)) = automatic_block
             && block.explicit_ttl.is_none()
         {
@@ -815,9 +952,11 @@ fn cache_control_ttl(value: &Value) -> Option<&str> {
 }
 
 fn block_digest(block: &CacheBlockRef<'_>, scratch: &mut SerializationScratch) -> [u8; 32] {
+    #[cfg(test)]
+    BLOCK_DIGEST_CALLS.with(|calls| calls.set(calls.get() + 1));
     let bytes = scratch.serialize(&DigestBlockSerializer(block));
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"cc-lb-cache-v5:block");
+    hasher.update(b"cc-lb-cache-v6:block");
     hasher.update(bytes);
     let digest = *hasher.finalize().as_bytes();
     scratch.clear_for_reuse();
@@ -846,9 +985,8 @@ fn serialized_prefix<'a>(
         blocks,
     })
 }
-
 #[cfg(test)]
-fn cacheable_breakpoint_prefix_keys(
+pub(crate) fn cacheable_breakpoint_prefix_keys(
     analysis: &V3PromptCacheAnalysis,
     canonical_model: &str,
     token_threshold: usize,
@@ -868,12 +1006,51 @@ pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
     token_threshold: usize,
     tokenize_ambiguous: bool,
 ) -> (Vec<String>, Duration) {
+    cacheable_breakpoint_prefix_keys_with_filter(
+        analysis,
+        &analysis.breakpoints,
+        canonical_model,
+        token_threshold,
+        tokenize_ambiguous,
+        None,
+    )
+}
+
+pub(crate) fn cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
+    analysis: &V3PromptCacheAnalysis,
+    breakpoints: &[V3PromptCacheBreakpoint],
+    canonical_model: &str,
+    token_threshold: usize,
+    tokenize_ambiguous: bool,
+) -> (Vec<String>, Duration) {
+    cacheable_breakpoint_prefix_keys_with_filter(
+        analysis,
+        breakpoints,
+        canonical_model,
+        token_threshold,
+        tokenize_ambiguous,
+        None,
+    )
+}
+
+fn cacheable_breakpoint_prefix_keys_with_filter(
+    analysis: &V3PromptCacheAnalysis,
+    breakpoints: &[V3PromptCacheBreakpoint],
+    canonical_model: &str,
+    token_threshold: usize,
+    tokenize_ambiguous: bool,
+    indices: Option<&[u64]>,
+) -> (Vec<String>, Duration) {
     let mut scratch = SerializationScratch::default();
     let mut tokenization_duration = Duration::ZERO;
-    let keys = analysis
-        .breakpoints
+    let keys = breakpoints
         .iter()
         .filter_map(|breakpoint| {
+            if let Some(indices) = indices
+                && !indices.contains(&breakpoint.block_index)
+            {
+                return None;
+            }
             let accepted =
                 match cache_threshold_from_byte_len(breakpoint.prefix_bytes, token_threshold) {
                     Some(decision) => decision,
@@ -929,8 +1106,18 @@ fn source_name(source: V3PromptCacheBlockSource) -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) fn reset_block_digest_call_count() {
+    BLOCK_DIGEST_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn block_digest_call_count() -> u64 {
+    BLOCK_DIGEST_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::{
         model_resolution::canonical_model_id,
@@ -1684,6 +1871,224 @@ mod tests {
         assert_eq!(
             previous_breakpoint.prefix_key,
             current_prior_prefix.prefix_key
+        );
+    }
+
+    #[test]
+    fn billing_header_predicate_negative_controls_preserve_literal_identity() {
+        let billing = json!({"type":"text","text":"x-anthropic-billing-header: cron"});
+        let cases = [
+            ("string-system", json!("x-anthropic-billing-header: cron")),
+            ("empty-array", json!([{"type":"text","text":""}])),
+            ("null-array", json!([Value::Null])),
+            (
+                "non-text-array",
+                json!([{"type":"image","source":{"type":"base64"}}]),
+            ),
+            (
+                "leading-space",
+                json!([{"type":"text","text":" x-anthropic-billing-header: cron"}]),
+            ),
+            (
+                "case",
+                json!([{"type":"text","text":"X-anthropic-billing-header: cron"}]),
+            ),
+            (
+                "different-prefix",
+                json!([{"type":"text","text":"x-anthropic-billing-headers: cron"}]),
+            ),
+            (
+                "index-one",
+                json!([{"type":"text","text":"ordinary first"}, billing.clone()]),
+            ),
+            (
+                "index-one-after-empty",
+                json!([{"type":"text","text":""}, billing.clone()]),
+            ),
+            ("index-one-after-null", json!([Value::Null, billing])),
+        ];
+        for (name, system) in cases {
+            let request = json!({
+                "model":"claude-sonnet-4-5",
+                "system":system,
+                "messages":[{"role":"user","content":[{
+                    "type":"text",
+                    "text":"cached message tail",
+                    "cache_control":{"type":"ephemeral"}
+                }]}]
+            });
+            let official = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
+            let literal = super::analyze_v3_prompt_cache_literal(&request, "claude-sonnet-4-5");
+            assert!(
+                !official.breakpoints.is_empty(),
+                "{name}: valid cached message tail"
+            );
+            assert_eq!(official.blocks, literal.blocks, "{name}: raw blocks");
+            assert_eq!(
+                official.breakpoints, literal.breakpoints,
+                "{name}: prefix identity and bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn billing_header_breakpoint_cap_is_independent_per_policy() {
+        for (prefix, tail_count, official_count, literal_count) in [
+            ("x-anthropic-billing-header:", 4, 4, 0),
+            ("x-anthropic-billing-headers:", 4, 0, 0),
+            ("x-anthropic-billing-header:", 3, 3, 4),
+        ] {
+            let mut system = vec![json!({
+                "type":"text",
+                "text":format!("{prefix} cron"),
+                "cache_control":{"type":"ephemeral"}
+            })];
+            system.extend((0..tail_count).map(|index| {
+                json!({
+                    "type":"text",
+                    "text":format!("cached tail {index}"),
+                    "cache_control":{"type":"ephemeral"}
+                })
+            }));
+            let request = json!({"model":"claude-sonnet-4-5","system":system});
+            let official = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
+            let literal = super::analyze_v3_prompt_cache_literal(&request, "claude-sonnet-4-5");
+            assert_eq!(
+                official.breakpoints.len(),
+                official_count,
+                "{prefix}, tails={tail_count}"
+            );
+            assert_eq!(
+                literal.breakpoints.len(),
+                literal_count,
+                "{prefix}, tails={tail_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn skipped_billing_header_is_none_and_has_no_backfilled_lookback() {
+        let content = (0..21)
+            .map(|index| {
+                if index == 0 {
+                    json!({"type":"text","text":"x-anthropic-billing-header: cron"})
+                } else if index == 20 {
+                    json!({"type":"text","text":"target","cache_control":{"type":"ephemeral"}})
+                } else {
+                    json!({"type":"text","text":format!("block-{index}")})
+                }
+            })
+            .collect::<Vec<_>>();
+        let request = json!({
+            "model":"claude-sonnet-4-5",
+            "messages":[{"role":"user","content":content}],
+            "system":[{"type":"text","text":"x-anthropic-billing-header: cron","cache_control":{"type":"ephemeral"}}]
+        });
+        let analysis = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
+        assert!(
+            analysis
+                .breakpoints
+                .iter()
+                .all(|breakpoint| breakpoint.path != "system[0]")
+        );
+        let target = analysis
+            .breakpoints
+            .iter()
+            .find(|breakpoint| breakpoint.path == "messages[0].content[20]")
+            .expect("target breakpoint");
+        assert_eq!(target.lookback_prefixes.len(), 20);
+        assert!(
+            target
+                .lookback_prefixes
+                .iter()
+                .all(|prefix| prefix.content_block_index >= 2)
+        );
+        assert!(
+            !target
+                .lookback_prefixes
+                .iter()
+                .any(|prefix| prefix.content_block_index == 1)
+        );
+    }
+
+    #[test]
+    fn anthropic_billing_header_system_block_does_not_churn_later_prefixes() {
+        let request_with_first_suffix = |suffix: &str| {
+            json!({
+                "model": "claude-sonnet-4-5",
+                "system": [
+                    {"type":"text","text":format!("x-anthropic-billing-header: {suffix}")},
+                    {"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}
+                ],
+                "messages": [{"role":"user","content":[{
+                    "type":"text",
+                    "text":"stable message",
+                    "cache_control":{"type":"ephemeral"}
+                }]}]
+            })
+        };
+
+        let first = analyze_v3_prompt_cache(
+            &request_with_first_suffix("cron-a"),
+            canonical_model_id("claude-sonnet-4-5"),
+        );
+        let second = analyze_v3_prompt_cache(
+            &request_with_first_suffix("cron-b"),
+            canonical_model_id("claude-sonnet-4-5"),
+        );
+
+        assert_eq!(first.blocks.len(), 3);
+        assert_eq!(first.blocks[0].path, "system[0]");
+        assert_eq!(first.blocks[1].path, "system[1]");
+        assert_eq!(first.blocks[2].path, "messages[0].content[0]");
+        assert_eq!(
+            first
+                .breakpoints
+                .first()
+                .map(|breakpoint| breakpoint.block_index),
+            Some(1)
+        );
+        assert_eq!(
+            first
+                .breakpoints
+                .first()
+                .map(|breakpoint| breakpoint.prefix_key.as_str()),
+            second
+                .breakpoints
+                .first()
+                .map(|breakpoint| breakpoint.prefix_key.as_str())
+        );
+        assert!(
+            first
+                .breakpoints
+                .iter()
+                .flat_map(|breakpoint| breakpoint.lookback_prefixes.iter())
+                .all(|prefix| prefix.content_block_index != 0)
+        );
+    }
+
+    #[test]
+    fn literal_policy_keeps_billing_header_in_effective_identity() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "system": [
+                {"type":"text","text":"x-anthropic-billing-header: cron-a"},
+                {"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}
+            ]
+        });
+
+        let analysis = super::analyze_v3_prompt_cache_literal(
+            &request,
+            canonical_model_id("claude-sonnet-4-5"),
+        );
+
+        assert_eq!(analysis.breakpoints.len(), 1);
+        assert_eq!(analysis.breakpoints[0].block_index, 1);
+        assert!(
+            analysis.breakpoints[0]
+                .lookback_prefixes
+                .iter()
+                .any(|prefix| prefix.content_block_index == 0)
         );
     }
 

@@ -135,9 +135,9 @@ remain.
   `prompt_cache_byte_oracle_key_reordering_is_byte_stable` test explicitly
   verifies key-order stability. An accidental serializer swap would fail
   these comparisons.
-- `v5_blake3_prefix_key_golden` in
+- `v6_blake3_prefix_key_golden` in
   `crates/cc-lb-engine/tests/prompt_cache_structural_properties.rs` pins a
-  schema-5 prefix key.
+  schema-6 prefix key.
 - The byte-oracle corpus includes `base_request_trailing_space.json`, but no
   current assertion compares it with `base_request.json` to prove whitespace
   sensitivity directly. Add that explicit comparison before relying on the

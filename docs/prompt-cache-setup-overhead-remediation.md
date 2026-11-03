@@ -4,6 +4,7 @@
 - Written: 2026-09-07
 - Scope: `cc-lb-engine` proxy hot path and admin-web latency timeline
 - Related ADRs: ADR 0007, ADR 0008
+- Runtime update (2026-11-03): cache identity now uses schema 6; see the schema-6 amendment in [ADR 0008](adr/0008-lazy-prompt-cache-analysis-and-indexed-matching.md). The schema-5 invariants below describe the earlier performance-only change, not a promise to freeze later cache semantics.
 
 ## 1. Purpose
 
@@ -24,9 +25,9 @@ Omitting breakpoints, approximating tokens, degrading the cache score, or droppi
 
 Repeated prompt-cache analysis can dominate setup work before upstream dispatch. Operational measurements and deployment details are omitted from this public design note; the implementation must preserve exact results while reducing repeated serialization and tokenization.
 
-## 3. Current execution point
+## 3. Pre-remediation analysis segment
 
-The proxy hot path executes in `Lifecycle::handle` in the following order.
+Authentication must complete before any request-body work. The optimization targeted this already-authenticated body-to-routing segment in `Lifecycle::handle`:
 
 1. Parse the request body as JSON.
 2. Call `request_cache_metadata_from_value`.
@@ -34,7 +35,7 @@ The proxy hot path executes in `Lifecycle::handle` in the following order.
 4. Build the structural BLAKE3 prefix chain and lookback candidates.
 5. Re-run `PrefixSerializer(blocks[..=index])` for each breakpoint.
 6. Run `o200k_base::encode_ordinary(...).len()` on each serialized prefix.
-7. After this work finishes, proceed to auth, routing, limit reservation, signer, and dispatch.
+7. After this work finishes, proceed to routing, limit reservation, signing, and dispatch.
 
 The structural hash chain is already linear over the whole request. The repeated cost is the cumulative JSON serialization and BPE tokenization performed per breakpoint.
 
@@ -53,7 +54,7 @@ Therefore the existing `prefix_hash` cannot be used as the token-count cache key
 
 ### 5.1 Keep the proxy-local structural hash
 
-Do not change the existing schema-5 BLAKE3 chain. This key continues to be used for cache affinity, lookback matching, and persisted warm observations. The hash schema version is also unchanged.
+The performance-only remediation kept the then-current schema-5 BLAKE3 chain and hash version unchanged. That identity remained the key for cache affinity, lookback matching, and persisted warm observations during this optimization. The later schema-6 identity correction is documented in ADR 0008 and does not change the independent token-prefix cache described below.
 
 ### 5.2 Separate exact token-prefix identity
 
@@ -123,7 +124,7 @@ Do not run `Lifecycle::handle`'s prompt-cache analysis directly on a Tokio worke
 - Limit concurrent CPU jobs with `tokio::sync::Semaphore`.
 - Default concurrency is `available_parallelism - 1`, minimum 1.
 - The queue has no timeout or approximation. Waiting is async and functionality is preserved.
-- The sync APIs `preview_route` and `parse_request_cache_breakpoints` keep the existing exact sync analyzer.
+- `preview_route` and `parse_request_cache_breakpoints` are official-Anthropic convenience APIs. They use the exact official policy by default and are not candidate-aware projections; mixed-provider routing must use the serving candidate bundles produced by lifecycle routing.
 
 Do not change the public signatures of `Lifecycle::new` and `new_with_dynamic_view`. The executor and cache are created as internal private fields. Do not add a production public API just for tests.
 

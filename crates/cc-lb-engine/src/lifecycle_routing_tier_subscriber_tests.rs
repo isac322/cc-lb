@@ -46,6 +46,8 @@ fn route_completed(event_id: &str, tier: Option<SubscriptionTier>) -> LifecycleE
     LifecycleEvent::RouteCompleted {
         event_id: eid(event_id),
         result: Ok(RouteInfo {
+            cache_breakpoints: None,
+            cache_prefix_hash: None,
             upstream_id: Uuid::from_u128(3),
             upstream_name: "upstream-a".into(),
             model: Some("claude-sonnet-4".into()),

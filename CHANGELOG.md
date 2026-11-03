@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Inspected Anthropic Messages SSE streams that end cleanly before a parsed JSON `message_stop` are now recorded as `upstream_stream_error` / `upstream_response_incomplete` while preserving delivered bytes and emitting no synthetic client error frame. ([#1027](https://github.com/isac322/cc-lb/issues/1027))
+- Official Anthropic prompt-cache identity now uses schema 6 and excludes only the first exact `x-anthropic-billing-header:` system text block for eligible Anthropic API-key/OAuth upstreams. Custom upstreams remain literal, and serving-candidate cache metadata is used for routing, limit admission, failover, hit/miss metrics, observations, keep-alive, and final diagnostics. Existing v5 observations cold-start through schema filtering without migration.
 - Response transforms now preserve upstream `anthropic-ratelimit-unified-*` values for clients after hop-by-hop and framing sanitization, without synthesizing absent values or restoring connection-listed names; plugin input still redacts the full `anthropic-ratelimit-*` family. ([#1026](https://github.com/isac322/cc-lb/issues/1026))
 - Prompt-cache keep-alive renewal accounting now preserves Anthropic's nested cache-creation TTL buckets and uses the canonical flat-total fallback semantics. ([#1020](https://github.com/isac322/cc-lb/issues/1020))
 - Prompt-cache keep-alive snapshots now materialize the renewal body and model once for reuse during dispatch and accounting. New encrypted payloads store captured body bytes in explicit raw/zstd frame codecs instead of JSON byte arrays; legacy and v2 JSON payloads remain readable and migrate on their next successful cache-hit reschedule. ([#1013](https://github.com/isac322/cc-lb/issues/1013))
@@ -24,6 +25,8 @@ All notable changes to this project will be documented in this file.
 - Explicit Claude Code auxiliary requests now stay out of prompt-cache keep-alive completion sequencing and generation bookkeeping across classifier fallback, while preserving `unknown`, `subagent`, `main`, and `advisor` reporting and legitimate headerless-turn eligibility. ([#1022](https://github.com/isac322/cc-lb/issues/1022))
 - Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
 - Test fixture condition waiters no longer lose broadcasts when their state changes during observation.
+- Scheduler OAuth refresh race tests now use the production worker factory for both storage backends, so idle-queue polling exercises the server's wakeup handling instead of a separate fixture-only interval.
+- PostgreSQL retained-event roundtrip tests now wait for the existing stable export horizon before paging, preserving full scalar checks when sibling transactions hold the snapshot boundary.
 - The notification burst test uses a controlled clock, avoiding false extra-rebuild failures under scheduler contention.
 - Request diagnostics now report `matched_v3_cache_key` and match indices only for an actual selected route match. Routed misses omit those match-only fields while retaining request prefix hashes and cold prediction fields. ([#1006](https://github.com/isac322/cc-lb/issues/1006))
 - Prompt-cache routing now defaults `prompt_cache_shadow.grace_margin_secs` to `0` (previously `30`), avoiding early expiry of live cache observations. Explicitly configured grace margins remain effective. Buffered and SSE observations now share the upstream request-dispatch expiry anchor, so TTFB and response generation cannot extend the provider TTL. (#1002)
@@ -35,7 +38,7 @@ All notable changes to this project will be documented in this file.
 
 ### Upgrade notes
 
-- Existing stored prompt-cache observations keep their recorded expiry and need no migration. The new default and dispatch anchor apply to newly recorded or refreshed observations; set `prompt_cache_shadow.grace_margin_secs = 30` to retain the previous margin.
+- Existing stored prompt-cache observations keep their recorded expiry and need no migration. Schema-5 observations are cold-started by the v6 hash filter; the new default and dispatch anchor apply to newly recorded or refreshed observations. Set `prompt_cache_shadow.grace_margin_secs = 30` to retain the previous margin.
 - Coordinate the keep-alive payload upgrade: drain and stop all old workers before starting any new writer. Old binaries cannot read the new v2 frame codecs `2` and `3`; mixed-version operation is unsupported. Do not downgrade while active sessions contain these codecs.
 
 ## [2.1.0] - 2026-10-31

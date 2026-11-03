@@ -96,7 +96,13 @@ The BLAKE3 decision above remains in force, but schema 4 no longer describes the
 
 Every prefix key changes because the seed, prefix, and block domain tags are renamed unconditionally. The conditional invalidator salts do not by themselves guarantee a key change: a request carrying none of those fields would otherwise hash identically. Requests containing thinking, redacted_thinking, or tool_reference blocks also change because those blocks now join the prefix chain. Existing schema-4 observations become inert because hydration already rejects rows whose `hash_schema_version` differs from the current version. The deployment therefore cold-starts the schema-4 warm state; no row rewrite, dual-read path, or data migration is required. Golden hash and storage fixtures move from schema 4 to schema 5 with the code.
 
-Schema 5 also retires the legacy prefix hashes. `cache_prefix_hash`, `cache_prefix_hash_v2`, and `cache_prefix_hash_and_token_count_v2` had no production callers left — only tests — so they are deleted along with `tests/hash_golden.rs`, which existed solely to pin them. The v3 simulator is now the only prefix-hash path. The request fixtures that file used are retained at `tests/fixtures/hash_golden/` and are consumed by `tests/prompt_cache_byte_oracle/corpus.rs::hash_golden_cases`; the pinned schema-5 prefix keys, including the per-source salt-scope goldens, live in `tests/prompt_cache_structural_properties.rs`. Any reference to `tests/hash_golden.rs` or the deleted functions elsewhere in this ADR is historical.
+Schema 5 also retires the legacy prefix hashes. `cache_prefix_hash`, `cache_prefix_hash_v2`, and `cache_prefix_hash_and_token_count_v2` had no production callers left — only tests — so they are deleted along with `tests/hash_golden.rs`, which existed solely to pin them. The v3 simulator is now the only prefix-hash path. The request fixtures that file used are retained at `tests/fixtures/hash_golden/` and are consumed by `tests/prompt_cache_byte_oracle/corpus.rs::hash_golden_cases`; the pinned schema-6 prefix keys, including the per-source salt-scope goldens, live in `tests/prompt_cache_structural_properties.rs`. Any reference to `tests/hash_golden.rs` or the deleted functions elsewhere in this ADR is historical.
+
+### 2026-11-03 amendment — official billing-header identity exclusion (schema 6)
+
+Schema 6 changes only effective prompt-cache identity for the official Anthropic API-key/OAuth route: when the effective authority is `https://api.anthropic.com` with the default port and no userinfo, the first `system[0]` object text block beginning exactly with `x-anthropic-billing-header:` is retained in raw request metadata but omitted from the effective chain, breakpoint eligibility, lookback, and observations. Anthropic upstreams using HTTP, non-default ports, userinfo, other hosts, or custom endpoints retain literal identity. Non-Anthropic requests remain neutral.
+
+The route chooses an official or literal cache bundle per candidate. Warm lookup keys are the union of both bundles, but scoring, admission, failover, preview, cache-outcome metrics, observation, keep-alive, and final diagnostics use only the serving candidate's bundle. Older schema-5 observations are cold through the existing schema filter; no migration is required.
 
 ### 2026-07-27 amendment — invalidator salt scope
 
@@ -135,19 +141,19 @@ Response attribution is **inferential**, because Anthropic reports only aggregat
 
 ### ABI / schema / migration
 
-The release has not shipped, so **no backward compatibility is required**: remove fields outright and delete compat shims/fixtures rather than bridging them. No `Option<u64>` transition field, no dual-read path. No wire-version bump is needed for this change — see the "No plugin wire change" bullet below.
+The original pre-release lookback-DTO cutover removed fields outright instead of retaining compatibility shims or transitional `Option<u64>` fields. The schema-6 identity update keeps the existing database schema and version filter; it adds no dual-read path or plugin wire-version change.
 
 - **Remove `prefix_token_count` from the lookback DTOs outright** (`cc_lb_plugin_api::types::CacheLookbackPrefix`, `cc_lb_contract::RequestCacheLookbackPrefix`); lookback carries key/index/distance/TTL-membership only. Retain `prefix_token_count` on requested breakpoints, on the matched score/trace, and on persisted observations (`estimated_prefix_tokens`).
 - **No plugin wire change.** The filter wire struct `FilterRequest` (`crates/cc-lb-plugin-wire/src/v1/mod.rs:191-203`) carries only `cache_pricing` (`CachePricingSummary`) and `candidates` (`UpstreamCandidate`); it does **not** carry the lookback breakpoint DTOs, and neither `CachePricingSummary` nor `UpstreamCandidate` embeds `prefix_token_count`. The one in-tree router plugin (`plugins/router/cache-aware-wasmtime`) reads only `candidate.predicted_cache_read_tokens` (a `CacheScore` field we keep). Removing `prefix_token_count` from the lookback DTOs is therefore a pure in-process Rust type change: **no `WireVersion` bump, no rkyv/schema fingerprint regeneration, no plugin rebuild.** `WireVersion` exposes only `V1` (`crates/cc-lb-plugin-wire/src/schema.rs`) and stays `V1`.
 - **No `request_events` migration is needed for this removal.** `request_events_v1` persists the *matched result* (`matched_v3_cache_key`, `matched_content_block_index`, `lookback_distance`, `predicted_cache_read_tokens`, `predicted_cache_creation_tokens_{5m,1h}`, `cache_value_micros`, …) in its payload JSON and `token_estimate_source` as a column, all of which we keep. The per-lookback token count is never stored as a column; if the breakpoint list is persisted as JSON anywhere, its serialized shape simply changes with the DTO (no schema migration). The `prompt_cache_observations` store schema is unaffected.
 - Update DTO round-trip fixtures, request-event compatibility tests, and simulator conversions to the new shapes; **delete** (do not preserve) any test that only existed to tolerate the old lookback-token-count shape.
-- `HASH_SCHEMA_VERSION 4→5` (the 2026-07-27 amendment above) needs no data migration — cold start via the existing version filter.
+- The current `HASH_SCHEMA_VERSION 5→6` transition needs no data migration: the existing version filter cold-starts older observations. The historical `4→5` transition in the 2026-07-27 amendment used the same filtering policy.
 
 ## Consequences
 
 ### Positive
 
-- Setup CPU drops from unconditional `O(N²)` cumulative tokenization to `O(total_bytes)` hashing plus tokenization only of `requested breakpoints ∪ unique matched indices`; reusing persisted `estimated_prefix_tokens` for matched keys collapses the steady state to near-linear once schema-5 warm state exists.
+- Setup CPU drops from unconditional `O(N²)` cumulative tokenization to `O(total_bytes)` hashing plus tokenization only of `requested breakpoints ∪ unique matched indices`; reusing persisted `estimated_prefix_tokens` for matched keys collapses the steady state to near-linear once schema-6 warm state exists.
 - Matching becomes ordered `O(1)` point lookups with early stop instead of full per-upstream entry scans, sorts, and truncation.
 - Match selection follows ADR 0007's structural rule (longest content-block prefix), removing the token-max discrepancy in the current `build_cache_score`.
 - The selected match is carried immutably into observation, and a non-breakpoint `N-k` hit now refreshes a best-guess entry (inferential) instead of refreshing nothing — warm prefixes stop silently expiring under continuous reads.
@@ -155,7 +161,7 @@ The release has not shipped, so **no backward compatibility is required**: remov
 
 ### Negative
 
-- BLAKE3 + `HASH_SCHEMA_VERSION=5` cold-starts schema-4 warm state on deploy; schema-4 entries are ignored by the existing version filter.
+- Schema 6 cold-starts schema-5 and earlier warm observations on deploy; mismatched entries are ignored by the existing version filter. Provider caches are not cleared.
 - The lookback DTO changes shape, but it does not cross the filter wire (`FilterRequest` carries only pricing + candidates), so there is no wire-version bump, no fingerprint regeneration, and no plugin rebuild.
 - Removing the read-time cap makes the live matching set unbounded by count; memory now depends on real expiry eviction plus a bounded overload fallback, which must be verified under load.
 - Response refresh remains inferential (aggregate provider usage cannot prove which local key hit); it is a best guess with drift telemetry, not a correctness guarantee.
@@ -190,7 +196,7 @@ A final sweep of the `started → dispatch_started` window (`lifecycle.rs:1195-1
 ## Verification requirements
 
 - **Differential oracle.** A deliberately slow reference that enumerates every breakpoint window, scans every entry, selects by highest structural index with full TTL membership, tokenizes all prefixes, and computes the structural breakpoint fold (index-ordered, per-`(breakpoint, TTL)`); property-based comparison of every optimized upstream match, score, trace, and observation action against it. Do not differential-test against current token-max behavior.
-- **Structural properties.** Flatten order; deterministic chain extension; `cache_control` excluded from ordinary block digests; schema-5 automatic mode; tool-choice, thinking, effort, and speed salt scopes; thinking, redacted_thinking, and tool_reference inclusion; `N` and `N-19` hit, `N-20` miss; overlapping windows; duplicate-prefix memberships; at most four total breakpoints with automatic caching consuming one slot; valid and invalid mixed-TTL order; write persistence only at requested breakpoints.
+- **Structural properties.** Flatten order; deterministic chain extension; `cache_control` excluded from ordinary block digests; schema-6 automatic mode and official billing-header exclusion; tool-choice, thinking, effort, and speed salt scopes; thinking, redacted_thinking, and tool_reference inclusion; `N` and `N-19` hit, `N-20` miss; overlapping windows; duplicate-prefix memberships; at most four total breakpoints with automatic caching consuming one slot; valid and invalid mixed-TTL order; write persistence only at requested breakpoints.
 - **Adversarial scoring.** Force token estimates that are equal or decrease with block position and prove the later structural hit still wins; verify the index-ordered per-`(breakpoint, TTL)` write-class fold for all-5m, all-1h, and 1h-then-5m requests (including decreasing-token and same-index-TTL-upgrade cases).
 - **Cap regression.** More than 32 live matching entries with the structurally longest match outside the 32 most recent; prove it still wins and that `warm_set_cap` no longer changes routing.
 - **Multi-upstream + observation.** Distinct matches per upstream; the selected match carried unchanged into response handling; a non-breakpoint `N-k` hit refreshed; non-selected upstreams untouched; provider read/prediction disagreement handled without fabricated state; buffered and SSE paths equivalent.
