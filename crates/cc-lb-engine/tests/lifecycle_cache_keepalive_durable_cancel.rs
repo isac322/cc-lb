@@ -110,6 +110,26 @@ async fn cache_keepalive_response_compaction_boundary_is_not_scheduled_json_and_
 }
 
 #[tokio::test]
+async fn explicit_compaction_request_class_is_excluded_from_keepalive() {
+    let enqueuer = Arc::new(RecordingEnqueuer::default());
+    let response = handle_keepalive_response_with(
+        agent_turn_body("msg_explicit_compaction", "Bash", 12_000),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal_with_keepalive(),
+        standard_keepalive_request(),
+        &[("x-claude-code-request-class", "compaction")],
+        false,
+    )
+    .await;
+    let (status, _headers, _body) = collect_body(response).await;
+    settle().await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(enqueuer.enqueued().is_empty());
+    assert!(enqueuer.cancelled().is_empty());
+    assert!(enqueuer.not_tracked().is_empty());
+}
+
+#[tokio::test]
 async fn compaction_block_precedes_tool_use_without_enqueue_json_and_sse() {
     for streaming in [false, true] {
         let response_body = Bytes::from(

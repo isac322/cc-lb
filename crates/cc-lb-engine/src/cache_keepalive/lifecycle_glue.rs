@@ -771,7 +771,8 @@ const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
 
 #[cfg(test)]
 mod tests {
-    use cc_lb_control::api_keys::principal_view::PrincipalView;
+    use super::*;
+    use http::HeaderValue;
     use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
     use cc_lb_storage_api::principal::{
         Limit, PrincipalKind as StoragePrincipalKind, PrincipalRecord as StoragePrincipalRecord,
