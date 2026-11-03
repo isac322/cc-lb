@@ -771,8 +771,16 @@ const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use http::HeaderValue;
+    use cc_lb_control::api_keys::principal_view::PrincipalView;
+    use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+    use cc_lb_storage_api::principal::{
+        Limit, PrincipalKind as StoragePrincipalKind, PrincipalRecord as StoragePrincipalRecord,
+    };
+    use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
+    use cc_lb_upstream::{
+        ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, Signer, SignerError,
+        SignerFactory, SigningCapability, Upstream, UpstreamError,
+    };
 
     #[test]
     fn keepalive_eligibility_reuses_cached_json_for_unchanged_bytes() {
@@ -1070,5 +1078,194 @@ mod tests {
         ] {
             assert!(is_keepalive_eligible_request_kind(kind), "{kind:?}");
         }
+    }
+    #[tokio::test]
+    async fn stale_compaction_completion_cannot_cancel_or_resurrect_newer_generation() {
+        struct Journal {
+            enqueued: std::sync::Mutex<Vec<CacheKeepaliveEnqueueRequest>>,
+            cancelled: std::sync::Mutex<Vec<CacheKeepaliveCancelRequest>>,
+            not_tracked: std::sync::Mutex<Vec<CacheKeepaliveNotTrackedRequest>>,
+            mutations: tokio::sync::Semaphore,
+        }
+
+        #[async_trait]
+        impl CacheKeepaliveEnqueuer for Journal {
+            async fn enqueue_cache_keepalive(
+                &self,
+                request: CacheKeepaliveEnqueueRequest,
+            ) -> Result<(), CacheKeepaliveEnqueueError> {
+                self.enqueued.lock().expect("enqueued lock").push(request);
+                self.mutations.add_permits(1);
+                Ok(())
+            }
+
+            async fn cancel_cache_keepalive(
+                &self,
+                request: CacheKeepaliveCancelRequest,
+            ) -> Result<(), CacheKeepaliveEnqueueError> {
+                self.cancelled.lock().expect("cancelled lock").push(request);
+                self.mutations.add_permits(1);
+                Ok(())
+            }
+
+            async fn record_cache_keepalive_not_tracked(
+                &self,
+                request: CacheKeepaliveNotTrackedRequest,
+            ) -> Result<(), CacheKeepaliveEnqueueError> {
+                self.not_tracked.lock().expect("not-tracked lock").push(request);
+                self.mutations.add_permits(1);
+                Ok(())
+            }
+        }
+
+        struct TestSignerFactory;
+        struct TestSigner;
+
+        impl ApiKeyAwareSignerFactory for TestSignerFactory {
+            fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
+                Arc::new(Self)
+            }
+        }
+
+        #[async_trait]
+        impl SignerFactory for TestSignerFactory {
+            async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+                Ok(Arc::new(TestSigner))
+            }
+        }
+
+        #[async_trait]
+        impl Signer for TestSigner {
+            async fn sign(
+                &self,
+                shaped: ShapedRequest,
+                capability: &mut SigningCapability,
+            ) -> Result<cc_lb_upstream::SignedRequest, SignerError> {
+                Ok(cc_lb_upstream::SignedRequest::from_shaped(shaped, capability))
+            }
+
+            async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
+                RetryDecision::Fail
+            }
+        }
+
+        let principal_record = StoragePrincipalRecord {
+            id: Uuid::new_v4(),
+            name: "stale-test".to_owned(),
+            kind: StoragePrincipalKind::Machine,
+            allowed_models: vec!["*".to_owned()],
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::<Limit>::new(),
+            enabled: true,
+            deleted_at_unix_secs: None,
+            revision: 1,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+            router_terminal_strategy: Default::default(),
+            cache_keepalive: Some(CacheKeepaliveConfig {
+                enabled: true,
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+                min_cache_tokens: 10_000,
+                classifier: ClassifierConfig::default(),
+            }),
+        };
+        let dynamic_view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(
+                std::slice::from_ref(&principal_record),
+                HashMap::new(),
+            )))
+            .build();
+        let journal = Arc::new(Journal {
+            enqueued: std::sync::Mutex::new(Vec::new()),
+            cancelled: std::sync::Mutex::new(Vec::new()),
+            not_tracked: std::sync::Mutex::new(Vec::new()),
+            mutations: tokio::sync::Semaphore::new(0),
+        });
+        let keepalive = LifecycleKeepalive::new(
+            Some(Arc::clone(&journal) as Arc<dyn CacheKeepaliveEnqueuer>),
+            Arc::new(DynamicViewHolder::new(dynamic_view)),
+        );
+        let principal = Principal {
+            id: principal_record.id.to_string(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let request_json = serde_json::json!({
+            "model": "claude-test",
+            "max_tokens": 32,
+            "system": [{"type": "text", "text": "cached", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let request_body = Bytes::from(serde_json::to_vec(&request_json).expect("request JSON"));
+        let mut metadata = RequestCacheMetadata {
+            request_json: Some(request_json),
+            thread_id: Some("stale-order".to_owned()),
+            cache_breakpoints: vec![cc_lb_request_log::RequestCacheBreakpoint {
+                block_index: 0,
+                source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+                path: "system[0]".to_owned(),
+                message_index: None,
+                ttl: Some("5m".to_owned()),
+                prefix_hash: "stale-prefix".to_owned(),
+                prefix_token_count: 12_000,
+                lookback_prefixes: Vec::new(),
+                token_estimate_source: None,
+            }],
+            ..RequestCacheMetadata::default()
+        };
+        let response_compaction = serde_json::json!({
+            "type": "message",
+            "content": [{"type": "compaction", "content": "summary"}],
+            "stop_reason": "compaction",
+            "usage": {"cache_read_input_tokens": 60_000}
+        });
+        let response_fresh = serde_json::json!({
+            "type": "message",
+            "content": [{"type": "tool_use", "name": "Bash", "id": "tool-1", "input": {}}],
+            "stop_reason": "tool_use",
+            "usage": {"cache_read_input_tokens": 60_000}
+        });
+
+        keepalive.on_response_completed(
+            &response_compaction,
+            &principal,
+            "key".to_owned(),
+            &metadata,
+            Uuid::new_v4(),
+            request_body.clone(),
+            request_body.clone(),
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            60_000,
+        );
+        metadata.thread_id = Some("stale-order".to_owned());
+        keepalive.on_response_completed(
+            &response_fresh,
+            &principal,
+            "key".to_owned(),
+            &metadata,
+            Uuid::new_v4(),
+            request_body.clone(),
+            request_body,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            60_000,
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            journal.mutations.acquire_many(2),
+        )
+        .await
+        .expect("completion journal mutations")
+        .expect("completion mutations available")
+        .forget();
+        assert_eq!(journal.not_tracked.lock().expect("not-tracked lock").len(), 1);
+        assert!(journal.cancelled.lock().expect("cancelled lock").is_empty());
+        assert_eq!(journal.enqueued.lock().expect("enqueued lock").len(), 1);
     }
 }

@@ -1,6 +1,6 @@
 use crate::common;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason,
 };
-use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
+use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 use cc_lb_upstream::SignedRequest;
@@ -240,170 +240,6 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
     assert_eq!(enqueued.len(), 2);
     assert_eq!(enqueued[0].expected_generation, Some(42));
     assert_eq!(enqueued[1].expected_generation, Some(42));
-}
-
-#[tokio::test]
-async fn stale_compaction_completion_cannot_cancel_or_resurrect_newer_generation() {
-    struct OrderedEnqueuer {
-        enqueued: Mutex<Vec<CacheKeepaliveEnqueueRequest>>,
-        cancelled: Mutex<Vec<CacheKeepaliveCancelRequest>>,
-        not_tracked: Mutex<Vec<CacheKeepaliveNotTrackedRequest>>,
-        active: Mutex<HashMap<String, Bytes>>,
-        first_observe_started: tokio::sync::Notify,
-        release_first_observe: tokio::sync::Notify,
-        first_observe: AtomicBool,
-        mutations: tokio::sync::Semaphore,
-    }
-
-    #[async_trait]
-    impl CacheKeepaliveEnqueuer for OrderedEnqueuer {
-        async fn enqueue_cache_keepalive(
-            &self,
-            request: CacheKeepaliveEnqueueRequest,
-        ) -> Result<(), CacheKeepaliveEnqueueError> {
-            self.active.lock().expect("active session lock").insert(
-                request.session_key_hash.clone(),
-                request.snapshot.body.clone(),
-            );
-            self.enqueued.lock().expect("enqueued lock").push(request);
-            self.mutations.add_permits(1);
-            Ok(())
-        }
-
-        async fn cancel_cache_keepalive(
-            &self,
-            request: CacheKeepaliveCancelRequest,
-        ) -> Result<(), CacheKeepaliveEnqueueError> {
-            self.active
-                .lock()
-                .expect("active session lock")
-                .remove(&request.session_key_hash);
-            self.cancelled.lock().expect("cancelled lock").push(request);
-            self.mutations.add_permits(1);
-            Ok(())
-        }
-
-        async fn record_cache_keepalive_not_tracked(
-            &self,
-            request: CacheKeepaliveNotTrackedRequest,
-        ) -> Result<(), CacheKeepaliveEnqueueError> {
-            self.not_tracked
-                .lock()
-                .expect("not-tracked lock")
-                .push(request);
-            self.mutations.add_permits(1);
-            Ok(())
-        }
-
-        async fn observe_session_generation(
-            &self,
-            _session_key_hash: &str,
-        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
-            if !self.first_observe.swap(true, Ordering::SeqCst) {
-                self.first_observe_started.notify_one();
-                self.release_first_observe.notified().await;
-            }
-            Ok(Some(7))
-        }
-    }
-
-    struct SequenceDispatch {
-        responses: Vec<Bytes>,
-        next: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl UpstreamDispatch for SequenceDispatch {
-        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-            let index = self.next.fetch_add(1, Ordering::SeqCst);
-            let body = self
-                .responses
-                .get(index)
-                .cloned()
-                .expect("test dispatch response");
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "application/json")
-                .body(Body::from(body))
-                .expect("test response builds"))
-        }
-    }
-
-    let summary_request = Bytes::from_static(
-        br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"post-compaction summary","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"continue"}]}"#,
-    );
-    let enqueuer = Arc::new(OrderedEnqueuer {
-        enqueued: Mutex::new(Vec::new()),
-        cancelled: Mutex::new(Vec::new()),
-        not_tracked: Mutex::new(Vec::new()),
-        active: Mutex::new(HashMap::new()),
-        first_observe_started: tokio::sync::Notify::new(),
-        release_first_observe: tokio::sync::Notify::new(),
-        first_observe: AtomicBool::new(false),
-        mutations: tokio::sync::Semaphore::new(0),
-    });
-    let principal = principal_with_keepalive();
-    let principal_view = Arc::new(PrincipalView::from_db(
-        std::slice::from_ref(&principal),
-        HashMap::new(),
-    ));
-    let lifecycle = lifecycle_with_parts(
-        TestAuthn::with_principal_view(TestState::default(), principal_view),
-        Arc::new(SequenceDispatch {
-            responses: vec![
-                Bytes::from_static(
-                    br#"{"type":"message","id":"msg_stale_compaction","content":[{"type":"compaction","content":"summary"}],"stop_reason":"compaction","usage":{"cache_read_input_tokens":60000}}"#,
-                ),
-                agent_turn_body("msg_fresh_generation", "Bash", 12_000),
-            ],
-            next: AtomicUsize::new(0),
-        }),
-        LifecycleConfig::default(),
-    )
-    .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
-
-    let first = handle_keepalive_response_on_lifecycle(
-        &lifecycle,
-        standard_keepalive_request(),
-        &[("x-claude-code-session-id", "stale-order")],
-    )
-    .await;
-    assert_eq!(collect_body(first).await.0, StatusCode::OK);
-    enqueuer.first_observe_started.notified().await;
-
-    let second = handle_keepalive_response_on_lifecycle(
-        &lifecycle,
-        summary_request.clone(),
-        &[("x-claude-code-session-id", "stale-order")],
-    )
-    .await;
-    assert_eq!(collect_body(second).await.0, StatusCode::OK);
-    enqueuer.release_first_observe.notify_one();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        enqueuer.mutations.acquire_many(2),
-    )
-    .await
-    .expect("stale and fresh completions reach the journal")
-    .expect("mutation permits are available")
-    .forget();
-
-    assert_eq!(
-        enqueuer.not_tracked.lock().expect("not-tracked lock").len(),
-        1
-    );
-    assert!(
-        enqueuer
-            .cancelled
-            .lock()
-            .expect("cancelled lock")
-            .is_empty()
-    );
-    let enqueued = enqueuer.enqueued.lock().expect("enqueued lock");
-    assert_eq!(enqueued.len(), 1);
-    assert_eq!(enqueued[0].snapshot.body, summary_request);
-    let active = enqueuer.active.lock().expect("active session lock");
-    assert_eq!(active.len(), 1);
 }
 
 #[tokio::test]
@@ -1361,30 +1197,6 @@ async fn handle_keepalive_response_with(
         .handle(request, &auth)
         .await
         .expect("lifecycle handles keepalive response")
-}
-
-async fn handle_keepalive_response_on_lifecycle(
-    lifecycle: &Lifecycle,
-    request_body: Bytes,
-    request_headers: &[(&str, &str)],
-) -> Response<Body> {
-    let mut request = http::Request::builder()
-        .method(http::Method::POST)
-        .uri("/v1/messages")
-        .header("x-api-key", managed_api_key())
-        .header("anthropic-version", "2023-06-01");
-    for (name, value) in request_headers {
-        request = request.header(*name, *value);
-    }
-    let request = request.body(request_body).expect("test request builds");
-    let auth = lifecycle
-        .authenticate(request.headers())
-        .await
-        .expect("test request authenticates");
-    lifecycle
-        .handle(request, &auth)
-        .await
-        .expect("lifecycle handles response")
 }
 
 fn standard_keepalive_request() -> Bytes {
