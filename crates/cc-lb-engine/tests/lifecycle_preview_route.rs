@@ -397,7 +397,12 @@ fn payload_cache_keys(body: &Bytes) -> PayloadCacheKeys {
         Ok(value) => value,
         Err(error) => panic!("billing-first body parses: {error}"),
     };
-    let analysis = analyze_v3_prompt_cache(&value, "claude-sonnet-4-5");
+    let analysis = analyze_v3_prompt_cache(
+        &value,
+        cc_lb_engine::model_resolution::canonical_model_id(
+            value.get("model").and_then(Value::as_str).unwrap_or(""),
+        ),
+    );
     let Some(official_breakpoint) = analysis.breakpoints.first().cloned() else {
         panic!("official payload breakpoint present");
     };
