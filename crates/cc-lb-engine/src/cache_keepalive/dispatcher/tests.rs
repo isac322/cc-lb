@@ -1,6 +1,7 @@
 use super::*;
 use crate::attempt_rail::AttemptIntent;
 use crate::cache_keepalive::request_snapshot::RequestSnapshot;
+use crate::prompt_cache_simulator::analyze_v3_prompt_cache;
 use bytes::Bytes;
 use http::{HeaderMap, Method, Response, StatusCode};
 use serde_json::{Value, json};
@@ -13,9 +14,9 @@ use cc_lb_control::PromptCacheObservationSinkLike;
 use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::PromptCacheObservationRecord;
 
-// Fixed v5 identity and byte length for the three-block fixture below.
+// Schema-6 identity independently derived from the three-block golden body below.
 const KEEPALIVE_IDENTITY_KEY: &str =
-    "5941e0168a65b3e6aa9b3921ee75015614419bbaa1a2f4c3a4c5d002bce58739";
+    "a9dbee437076709a34484806d86886bf7c0d944be8ef721bad98659895c52036";
 
 fn accounting_guard() -> ResponseAccountingGuard {
     AttemptIntent::observe_only()
@@ -971,7 +972,7 @@ async fn oauth_keepalive_publishes_exact_dispatched_prefix_before_finalization()
     assert_eq!(record.prefix_content_block_index, 2);
     assert_eq!(record.estimated_prefix_tokens, 19_821);
     assert_eq!(record.token_estimate_source, "serialized_prefix_bytes_v1");
-    assert_eq!(record.hash_schema_version, 5);
+    assert_eq!(record.hash_schema_version, 6);
     assert!(record.last_observed_at_unix_secs >= before_dispatch);
     assert!(record.last_observed_at_unix_secs <= after_dispatch);
     assert_eq!(

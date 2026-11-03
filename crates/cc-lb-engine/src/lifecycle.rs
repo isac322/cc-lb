@@ -8398,7 +8398,7 @@ fn request_breakpoint_source_from_plugin(
     }
 }
 
-fn prompt_cache_policy_for_upstream(upstream: &UpstreamRecord) -> PromptCachePolicy {
+pub(crate) fn prompt_cache_policy_for_upstream(upstream: &UpstreamRecord) -> PromptCachePolicy {
     let official_kind = matches!(
         upstream.kind,
         StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth
