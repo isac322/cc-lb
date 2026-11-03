@@ -36,6 +36,10 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_creation_input_tokens_5m: u64,
     pub(crate) cache_creation_input_tokens_1h: u64,
     pub(crate) cache_read_input_tokens: u64,
+    /// Attribution evidence is separate from numeric accounting, which defaults
+    /// absent or malformed cache counters to zero in some provider shapes.
+    pub(crate) cache_creation_evidence: CacheTokenEvidence,
+    pub(crate) cache_read_evidence: CacheTokenEvidence,
     pub(crate) thinking_tokens: u64,
     /// Last Gemini candidates snapshot, kept separately from billable output
     /// so partial updates can retain it without adding cumulative counts.
@@ -56,6 +60,42 @@ pub(crate) struct UsageCounts {
     /// flip `present=true` early enough for the dashboard to see motion before
     /// the final `message_delta` arrives.
     pub(crate) estimated_thinking_progress: u64,
+}
+
+/// Evidence from a complete cumulative cache-counter representation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CacheTokenEvidence {
+    #[default]
+    Unreported,
+    Zero,
+    Positive,
+    Invalid,
+}
+
+impl CacheTokenEvidence {
+    fn from_value(value: &Value) -> Self {
+        match value.as_u64() {
+            Some(0) => Self::Zero,
+            Some(_) => Self::Positive,
+            None => Self::Invalid,
+        }
+    }
+
+    fn merge(&mut self, reported: Self) {
+        // Missing/null SSE fields preserve earlier affirmative evidence.
+        // A present malformed representation instead makes attribution unknown
+        // until a later complete numeric snapshot replaces it.
+        if reported != Self::Unreported {
+            *self = reported;
+        }
+    }
+}
+
+impl UsageCounts {
+    pub(crate) fn has_affirmative_read_only_cache_usage(&self) -> bool {
+        self.cache_read_evidence == CacheTokenEvidence::Positive
+            && self.cache_creation_evidence == CacheTokenEvidence::Zero
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -463,6 +503,18 @@ fn service_tier_from_envelope(value: &Value) -> Option<&str> {
 }
 
 fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
+    usage
+        .cache_creation_evidence
+        .merge(cache_creation_evidence(reported));
+    usage.cache_read_evidence.merge(
+        reported
+            .get("cache_read_input_tokens")
+            .filter(|value| !value.is_null())
+            .map_or(
+                CacheTokenEvidence::Unreported,
+                CacheTokenEvidence::from_value,
+            ),
+    );
     let prompt_token_count = reported.get("promptTokenCount").and_then(Value::as_u64);
     if prompt_token_count.is_some() {
         usage.input_includes_cached = true;
@@ -826,6 +878,72 @@ fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
     cache_creation_split(flat, usage.get("cache_creation"))
 }
 
+/// Unlike the accounting split, inference requires complete numeric evidence.
+/// Never fill missing split buckets with zero or prefer a contradictory total.
+fn cache_creation_evidence(usage: &Value) -> CacheTokenEvidence {
+    let flat = usage.get("cache_creation_input_tokens");
+    let nested = usage.get("cache_creation");
+    let suffix_5m = usage.get("cache_creation_input_tokens_5m");
+    let suffix_1h = usage.get("cache_creation_input_tokens_1h");
+    if flat.is_none_or(Value::is_null)
+        && nested.is_none_or(Value::is_null)
+        && suffix_5m.is_none()
+        && suffix_1h.is_none()
+    {
+        return CacheTokenEvidence::Unreported;
+    }
+    let flat_total = match flat {
+        Some(value) => match value.as_u64() {
+            Some(total) => Some(total),
+            None => return CacheTokenEvidence::Invalid,
+        },
+        None => None,
+    };
+    let nested_total = match nested {
+        Some(value) => {
+            let Some(total) = value
+                .get("ephemeral_5m_input_tokens")
+                .and_then(Value::as_u64)
+                .zip(
+                    value
+                        .get("ephemeral_1h_input_tokens")
+                        .and_then(Value::as_u64),
+                )
+                .and_then(|(five_minute, one_hour)| five_minute.checked_add(one_hour))
+            else {
+                return CacheTokenEvidence::Invalid;
+            };
+            Some(total)
+        }
+        None => None,
+    };
+    let suffix_total = match (suffix_5m, suffix_1h) {
+        (None, None) => None,
+        (Some(five_minute), Some(one_hour)) => {
+            let Some(total) = five_minute
+                .as_u64()
+                .zip(one_hour.as_u64())
+                .and_then(|(five_minute, one_hour)| five_minute.checked_add(one_hour))
+            else {
+                return CacheTokenEvidence::Invalid;
+            };
+            Some(total)
+        }
+        _ => return CacheTokenEvidence::Invalid,
+    };
+    let total = flat_total.or(nested_total).or(suffix_total);
+    if nested_total.is_some_and(|nested| Some(nested) != total)
+        || suffix_total.is_some_and(|suffix| Some(suffix) != total)
+    {
+        return CacheTokenEvidence::Invalid;
+    }
+    match total {
+        Some(0) => CacheTokenEvidence::Zero,
+        Some(_) => CacheTokenEvidence::Positive,
+        None => CacheTokenEvidence::Unreported,
+    }
+}
+
 /// Splits `cache_creation` into `(total, 5m, 1h)`.
 ///
 /// The nested `cache_creation` object is authoritative when it carries numbers. The
@@ -872,6 +990,362 @@ mod tests {
     fn detect_raw_mid_stream_error(raw: &[u8]) -> Option<UpstreamStreamError> {
         let event = parse_sse_event(raw);
         detect_mid_stream_error_with(&event, None)
+    }
+
+    #[test]
+    fn cache_creation_evidence_requires_complete_numeric_zero() {
+        for (reported, expected_evidence, expected_counts) in [
+            (r#"{}"#, CacheTokenEvidence::Unreported, (0, 0, 0)),
+            (
+                r#"{"cache_creation_input_tokens":null}"#,
+                CacheTokenEvidence::Unreported,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":null}"#,
+                CacheTokenEvidence::Unreported,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0}"#,
+                CacheTokenEvidence::Zero,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+                CacheTokenEvidence::Zero,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+                CacheTokenEvidence::Zero,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":7}"#,
+                CacheTokenEvidence::Positive,
+                (7, 7, 0),
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3}}"#,
+                CacheTokenEvidence::Positive,
+                (5, 2, 3),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":null,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0,"cache_creation":null}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":{}}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":0}}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_1h_input_tokens":0}}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":null}}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0,"cache_creation":{}}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0}}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3}}"#,
+                CacheTokenEvidence::Invalid,
+                (5, 2, 3),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+                CacheTokenEvidence::Invalid,
+                (7, 7, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":9,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3}}"#,
+                CacheTokenEvidence::Invalid,
+                (5, 2, 3),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":"0"}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":false}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":-1}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0.5}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":[]}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":18446744073709551615,"ephemeral_1h_input_tokens":1}}"#,
+                CacheTokenEvidence::Invalid,
+                (u64::MAX, u64::MAX, 1),
+            ),
+        ] {
+            let body = format!(r#"{{"usage":{reported}}}"#);
+            let observation = observe_non_stream_json_body(body.as_bytes());
+            let usage = observation.usage;
+            assert_eq!(
+                usage.cache_creation_evidence, expected_evidence,
+                "{reported}"
+            );
+            assert_eq!(
+                (
+                    usage.cache_creation_input_tokens,
+                    usage.cache_creation_input_tokens_5m,
+                    usage.cache_creation_input_tokens_1h,
+                ),
+                expected_counts,
+                "numeric accounting must remain unchanged: {reported}",
+            );
+        }
+    }
+
+    #[test]
+    fn cache_creation_suffix_evidence_requires_complete_consistent_numeric_pair() {
+        for (reported, expected_evidence, expected_counts) in [
+            (
+                r#"{"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Zero,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Zero,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":2,"cache_creation_input_tokens_1h":3}"#,
+                CacheTokenEvidence::Positive,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3},"cache_creation_input_tokens_5m":2,"cache_creation_input_tokens_1h":3}"#,
+                CacheTokenEvidence::Positive,
+                (5, 2, 3),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":0}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":null,"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":null}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":"0","cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":"0"}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":-1,"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":0.5}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":false,"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens_5m":18446744073709551615,"cache_creation_input_tokens_1h":1}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0,"cache_creation_input_tokens_5m":1,"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":1,"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Invalid,
+                (1, 1, 0),
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":1}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3},"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":0}"#,
+                CacheTokenEvidence::Invalid,
+                (5, 2, 3),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":5,"cache_creation_input_tokens_5m":2,"cache_creation_input_tokens_1h":4}"#,
+                CacheTokenEvidence::Invalid,
+                (5, 5, 0),
+            ),
+            (
+                r#"{"cache_creation_input_tokens":0,"cache_creation_input_tokens_5m":0}"#,
+                CacheTokenEvidence::Invalid,
+                (0, 0, 0),
+            ),
+        ] {
+            let body = format!(r#"{{"usage":{reported}}}"#);
+            let mut usage = observe_non_stream_json_body(body.as_bytes()).usage;
+            merge_usage_value(
+                &mut usage,
+                &serde_json::json!({"cache_read_input_tokens": 2400}),
+            );
+            assert_eq!(
+                usage.cache_creation_evidence, expected_evidence,
+                "{reported}"
+            );
+            assert_eq!(
+                usage.has_affirmative_read_only_cache_usage(),
+                expected_evidence == CacheTokenEvidence::Zero,
+                "{reported}"
+            );
+            assert_eq!(
+                (
+                    usage.cache_creation_input_tokens,
+                    usage.cache_creation_input_tokens_5m,
+                    usage.cache_creation_input_tokens_1h,
+                ),
+                expected_counts,
+                "numeric accounting must remain unchanged: {reported}",
+            );
+        }
+    }
+
+    #[test]
+    fn cache_creation_evidence_survives_missing_and_null_sse_updates() {
+        for initial in [
+            r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0}"#,
+            r#"{"cache_read_input_tokens":2400,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+        ] {
+            let mut usage = UsageCounts::default();
+            let start = format!(
+                "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"usage\":{initial}}}}}\n\n"
+            );
+            assert!(accumulate_raw_sse_usage(start.as_bytes(), &mut usage).message_start_usage);
+            assert!(usage.has_affirmative_read_only_cache_usage());
+            for reported in [
+                r#"{"output_tokens":17}"#,
+                r#"{"cache_creation_input_tokens":null,"cache_read_input_tokens":null}"#,
+                r#"{"cache_creation":null}"#,
+            ] {
+                let frame = raw_event(&format!(r#"{{"type":"message_delta","usage":{reported}}}"#));
+                accumulate_raw_sse_usage(&frame, &mut usage);
+                assert!(usage.has_affirmative_read_only_cache_usage(), "{reported}");
+                assert_eq!(usage.cache_read_input_tokens, 2_400);
+                assert_eq!(usage.cache_creation_input_tokens, 0);
+                assert_eq!(usage.output_tokens, 17);
+            }
+        }
+    }
+
+    #[test]
+    fn partial_nested_sse_snapshots_do_not_combine_into_zero_evidence() {
+        let mut usage = UsageCounts::default();
+        for reported in [
+            r#"{"cache_read_input_tokens":2400,"cache_creation":{"ephemeral_5m_input_tokens":0}}"#,
+            r#"{"cache_creation":{"ephemeral_1h_input_tokens":0}}"#,
+            r#"{"cache_creation_input_tokens":null}"#,
+        ] {
+            let frame = raw_event(&format!(r#"{{"type":"message_delta","usage":{reported}}}"#));
+            accumulate_raw_sse_usage(&frame, &mut usage);
+            assert_eq!(usage.cache_creation_input_tokens, 0);
+            assert_eq!(usage.cache_creation_evidence, CacheTokenEvidence::Invalid);
+            assert!(!usage.has_affirmative_read_only_cache_usage());
+        }
+    }
+
+    #[test]
+    fn complete_sse_cache_evidence_replaces_previous_cumulative_snapshot() {
+        let mut usage = UsageCounts::default();
+        for (reported, expected_creation, read_only) in [
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":9}"#,
+                9,
+                false,
+            ),
+            (r#"{"cache_creation_input_tokens":0}"#, 0, true),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":0}}"#,
+                0,
+                false,
+            ),
+            (
+                r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+                0,
+                true,
+            ),
+            (r#"{"cache_read_input_tokens":"2400"}"#, 0, false),
+            (r#"{"cache_read_input_tokens":2400}"#, 0, true),
+            (r#"{"cache_read_input_tokens":0}"#, 0, false),
+        ] {
+            let frame = raw_event(&format!(r#"{{"type":"message_delta","usage":{reported}}}"#));
+            accumulate_raw_sse_usage(&frame, &mut usage);
+            assert_eq!(
+                usage.cache_creation_input_tokens, expected_creation,
+                "{reported}"
+            );
+            assert_eq!(
+                usage.has_affirmative_read_only_cache_usage(),
+                read_only,
+                "{reported}"
+            );
+        }
     }
 
     #[test]

@@ -1,9 +1,12 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_control::dynamic_view::DynamicViewHolder;
+use cc_lb_domain::{CacheBreakpoint, CacheBreakpointSource, PrefixBytes, TtlClass};
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -14,11 +17,21 @@ use cc_lb_upstream::{
 use http::StatusCode;
 use http_body_util::BodyExt;
 use serde::Deserialize;
+use serde_json::Value;
 use url::Url;
 
 use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Signed};
-use crate::lifecycle::UpstreamDispatch;
-use crate::usage_parser::cache_creation_split;
+use crate::lifecycle::{
+    PromptCacheUsage, UpstreamDispatch, decode_prompt_cache_observations_pure,
+    prompt_cache_observation_context, publish_prompt_cache_observations,
+};
+use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
+use crate::prompt_cache_simulator::{
+    V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+    cacheable_breakpoint_prefix_keys_with_tokenize_duration,
+};
+use crate::usage_decoder::decode_full_body;
+use crate::usage_parser::{cache_creation_split, observe_non_stream_json_value};
 
 use super::request_snapshot::RequestSnapshot;
 use super::scheduler::{
@@ -33,6 +46,7 @@ pub struct AnthropicKeepaliveDispatcher {
     dynamic_view: Arc<DynamicViewHolder>,
     upstream_store: Arc<dyn UpstreamStore>,
     http_client: Arc<dyn UpstreamDispatch>,
+    clock: ClockHandle,
     timeout: Duration,
 }
 
@@ -41,11 +55,13 @@ impl AnthropicKeepaliveDispatcher {
         dynamic_view: Arc<DynamicViewHolder>,
         upstream_store: Arc<dyn UpstreamStore>,
         http_client: Arc<dyn UpstreamDispatch>,
+        clock: ClockHandle,
     ) -> Self {
         Self {
             dynamic_view,
             upstream_store,
             http_client,
+            clock,
             timeout: DISPATCH_TIMEOUT,
         }
     }
@@ -60,7 +76,7 @@ impl AnthropicKeepaliveDispatcher {
         snapshot: &RequestSnapshot,
         upstream: &UpstreamRecord,
         source_ref_id: &str,
-    ) -> Result<(Arc<dyn Signer>, ShapedRequest), String> {
+    ) -> Result<(Arc<dyn Signer>, ShapedRequest, Bytes), String> {
         let upstream_api = direct_anthropic_upstream(upstream)?;
         let signer_factory = self
             .dynamic_view
@@ -77,31 +93,32 @@ impl AnthropicKeepaliveDispatcher {
         let target_url = resolve_keepalive_url(snapshot, upstream)?;
         let shaped = shaped_request_from_snapshot(
             snapshot,
-            keepalive_body,
+            keepalive_body.clone(),
             &upstream_api,
             target_url,
             source_ref_id,
         )?;
-        Ok((signer, shaped))
+        Ok((signer, shaped, keepalive_body))
     }
 
     async fn dispatch_signed(
         &self,
         signed: Signed<'_>,
-    ) -> Result<(StatusCode, Bytes, Duration), String> {
+    ) -> Result<(StatusCode, http::HeaderMap, Bytes, Duration), String> {
         let response = signed
             .dispatch(self.http_client.as_ref())
             .await
             .map_err(|source| source.to_string())?;
         let cache_anchor_at = Instant::now();
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response
             .into_body()
             .collect()
             .await
             .map_err(|source| source.to_string())?
             .to_bytes();
-        Ok((status, body, cache_anchor_at.elapsed()))
+        Ok((status, headers, body, cache_anchor_at.elapsed()))
     }
 }
 
@@ -123,25 +140,30 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             return DispatchOutcome::UnsupportedProvider(error);
         }
 
-        let (signer, shaped) = match self
+        let (signer, shaped, keepalive_body) = match self
             .keepalive_signing_input(snapshot, &upstream, context.source_ref_id())
             .await
         {
             Ok(input) => input,
             Err(error) => return DispatchOutcome::Error(error),
         };
+        let observation_plan = keepalive_observation_plan(&keepalive_body);
 
         let dispatch_started = Instant::now();
-        let (dispatch_result, accounting_guard) = match context.into_reservation() {
+        let (dispatch_result, accounting_guard, dispatch_anchor_unix_secs) = match context
+            .into_reservation()
+        {
             Some(reservation) => {
                 let reserved = AttemptIntent::from_reservation(reservation).into_reserved();
                 let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
                     Ok(signed) => signed,
                     Err(error) => return DispatchOutcome::Error(error.to_string()),
                 };
+                let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
                 (
                     tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
                     reserved.into_response_accounting_guard(),
+                    dispatch_anchor_unix_secs,
                 )
             }
             None => {
@@ -150,21 +172,38 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                     Ok(signed) => signed,
                     Err(error) => return DispatchOutcome::Error(error.to_string()),
                 };
+                let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
                 (
                     tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
                     reserved.into_response_accounting_guard(),
+                    dispatch_anchor_unix_secs,
                 )
             }
         };
 
         match dispatch_result {
-            Ok(Ok((StatusCode::OK, body, cache_anchor_age))) => classify_success_body(
-                &body,
-                cache_anchor_age,
-                dispatch_started.elapsed(),
-                accounting_guard,
-            ),
-            Ok(Ok((status, body, _))) => {
+            Ok(Ok((StatusCode::OK, headers, body, cache_anchor_age))) => {
+                let outcome = classify_success_body(
+                    &body,
+                    cache_anchor_age,
+                    dispatch_started.elapsed(),
+                    accounting_guard,
+                );
+                if let DispatchOutcome::CacheHit { .. } = &outcome
+                    && let Some(plan) = observation_plan.as_ref()
+                {
+                    publish_keepalive_observation(
+                        &self.dynamic_view,
+                        snapshot.upstream_id,
+                        plan,
+                        &headers,
+                        &body,
+                        dispatch_anchor_unix_secs,
+                    );
+                }
+                outcome
+            }
+            Ok(Ok((status, _headers, body, _))) => {
                 DispatchOutcome::Error(format!("status={} body={}", status, body_prefix(&body)))
             }
             Ok(Err(source)) => DispatchOutcome::Error(source),
@@ -269,6 +308,117 @@ impl UpstreamDialect for SnapshotDialect {
             context.body_bytes.clone(),
         ))
     }
+}
+
+struct KeepaliveObservationPlan {
+    canonical_model_id: String,
+    cache_breakpoints: Vec<CacheBreakpoint>,
+    cacheable_breakpoint_prefix_keys: HashSet<String>,
+}
+
+fn keepalive_observation_plan(body: &[u8]) -> Option<KeepaliveObservationPlan> {
+    let value = sonic_rs::from_slice::<Value>(body).ok()?;
+    let canonical_model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(canonical_model_id)?
+        .to_owned();
+    let analysis = analyze_v3_prompt_cache(&value, &canonical_model);
+    if analysis.breakpoints.is_empty() {
+        return None;
+    }
+    let threshold = cache_threshold_tokens(&canonical_model);
+    let (cacheable_keys, _) = cacheable_breakpoint_prefix_keys_with_tokenize_duration(
+        &analysis,
+        &canonical_model,
+        threshold,
+        true,
+    );
+    let cacheable_breakpoint_prefix_keys = cacheable_keys.into_iter().collect();
+    let cache_breakpoints = analysis
+        .breakpoints
+        .into_iter()
+        .filter_map(|breakpoint| {
+            let block_index = u32::try_from(breakpoint.block_index).ok()?;
+            let source = match breakpoint.source {
+                V3PromptCacheBlockSource::Tools => CacheBreakpointSource::Tools,
+                V3PromptCacheBlockSource::System => CacheBreakpointSource::System,
+                V3PromptCacheBlockSource::Message => CacheBreakpointSource::Message,
+            };
+            let requested_ttl = match breakpoint.ttl.as_deref() {
+                Some(ttl) if ttl.eq_ignore_ascii_case("1h") => TtlClass::Ephemeral1h,
+                _ => TtlClass::Ephemeral5m,
+            };
+            let lookback_prefixes = breakpoint
+                .lookback_prefixes
+                .into_iter()
+                .filter_map(|lookback| {
+                    Some(cc_lb_domain::CacheLookbackPrefix {
+                        prefix_hash: lookback.prefix_key,
+                        content_block_index: u32::try_from(lookback.content_block_index).ok()?,
+                        lookback_distance: u32::try_from(lookback.lookback_distance).ok()?,
+                    })
+                })
+                .collect();
+            Some(CacheBreakpoint {
+                block_index,
+                source,
+                path: breakpoint.path,
+                message_index: breakpoint
+                    .message_index
+                    .and_then(|index| u32::try_from(index).ok()),
+                prefix_hash: breakpoint.prefix_key,
+                prefix_bytes: breakpoint.prefix_bytes,
+                requested_ttl,
+                lookback_prefixes,
+                token_estimate_source: Some(PrefixBytes::ESTIMATE_SOURCE.to_owned()),
+            })
+        })
+        .collect::<Vec<_>>();
+    (!cache_breakpoints.is_empty()).then_some(KeepaliveObservationPlan {
+        canonical_model_id: canonical_model,
+        cache_breakpoints,
+        cacheable_breakpoint_prefix_keys,
+    })
+}
+
+fn publish_keepalive_observation(
+    dynamic_view: &DynamicViewHolder,
+    upstream_id: uuid::Uuid,
+    plan: &KeepaliveObservationPlan,
+    response_headers: &http::HeaderMap,
+    response_body: &[u8],
+    dispatch_anchor_unix_secs: u64,
+) {
+    let output_budget = response_body.len().saturating_mul(4).max(1024 * 1024);
+    let Ok(Some(decoded_body)) = decode_full_body(response_headers, response_body, output_budget)
+    else {
+        return;
+    };
+    let Ok(value) = sonic_rs::from_slice::<Value>(decoded_body.as_ref()) else {
+        return;
+    };
+    let usage = observe_non_stream_json_value(&value).usage;
+    if !usage.has_affirmative_read_only_cache_usage() {
+        return;
+    }
+    let view = dynamic_view.load();
+    let Some(context) = prompt_cache_observation_context(
+        &view,
+        upstream_id,
+        &plan.canonical_model_id,
+        &plan.cache_breakpoints,
+        &plan.cacheable_breakpoint_prefix_keys,
+        None,
+    ) else {
+        return;
+    };
+    let decoded = decode_prompt_cache_observations_pure(
+        &context,
+        PromptCacheUsage::from(&usage),
+        dispatch_anchor_unix_secs,
+    );
+    publish_prompt_cache_observations(&context, &decoded, dispatch_anchor_unix_secs);
 }
 
 #[derive(Deserialize, Default)]
