@@ -626,11 +626,11 @@ fn keepalive_observation_fixture(
         http.clone(),
         Arc::new(cc_lb_clock::SystemClock),
     );
-    let snapshot = RequestSnapshot {
-        url: "https://api.anthropic.com/v1/messages".parse()?,
-        method: Method::POST,
-        headers: HeaderMap::new(),
-        body: Bytes::from(serde_json::to_vec(&json!({
+    let snapshot = RequestSnapshot::capture(
+        "https://api.anthropic.com/v1/messages".parse()?,
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::from(serde_json::to_vec(&json!({
             "model": "claude-sonnet-4-5",
             "max_tokens": 8193,
             "stream": true,
@@ -656,10 +656,11 @@ fn keepalive_observation_fixture(
                 {"role": "assistant", "content": "uncached trailing message"}
             ]
         }))?),
-        upstream_id: upstream.id,
+        upstream.id,
         // The resolved deepest breakpoint, not this scheduling TTL, owns the observation.
-        ttl: cc_lb_storage_api::CacheTtl::Ttl5m,
-    };
+        cc_lb_storage_api::CacheTtl::Ttl5m,
+        usize::MAX,
+    )?;
     Ok(KeepaliveObservationFixture {
         dispatcher,
         snapshot,
