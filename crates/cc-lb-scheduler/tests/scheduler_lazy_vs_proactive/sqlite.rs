@@ -1,20 +1,13 @@
 use std::str::FromStr as _;
 use std::sync::Arc;
-use std::time::Duration;
 
-use apalis::layers::catch_panic::CatchPanicLayer;
-use apalis::prelude::{WorkerBuilder, WorkerError};
-use apalis_core::backend::ext::BackendExt as _;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::SystemClock;
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_scheduler::middleware::TraceparentLayer;
-use cc_lb_scheduler::retry::RetryClass;
-use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend, SqliteSchedulerBackend};
+use cc_lb_scheduler::worker::{SchedulerBackend, SqliteSchedulerBackend};
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_storage_api::MetaStore;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -25,7 +18,7 @@ use super::common::{
 };
 use super::fake::FakeAnthropic;
 use super::scenario::run_race_scenario;
-use super::worker::{OAuthWorkerProbe, OAuthWorkerState, entity_job_handler};
+use super::worker::{OAuthWorkerProbe, OAuthWorkerState, spawn_oauth_worker};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {
@@ -45,7 +38,6 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     apalis_sqlite::SqliteStorage::setup(&scheduler_pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&scheduler_pool).await?;
 
-    let config = sqlite_queue_config();
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
         scheduler_pool.clone(),
         Arc::new(SystemClock),
@@ -74,15 +66,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
         probe.clone(),
     );
     let cancel = CancellationToken::new();
-    let strategy = apalis_core::backend::ext::poll_strategy::Strategy::new()
-        .interval(Duration::from_millis(1));
-    let worker = spawn_sqlite_worker(
-        apalis_sqlite::SqliteStorage::new(&scheduler_pool)
-            .with_config(config)
-            .poll_with_strategy(strategy),
-        state,
-        cancel.clone(),
-    );
+    let worker = spawn_oauth_worker(&backend, state, cancel.clone())?;
     let lazy = LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
             stores: stores_from_storage(storage.clone()),
@@ -118,48 +102,6 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     cancel.cancel();
     worker.await??;
     result
-}
-
-fn spawn_sqlite_worker(
-    storage: cc_lb_scheduler::worker::SqliteApalisStorage,
-    state: OAuthWorkerState<cc_lb_storage_sqlite::SqliteStorage>,
-    cancel: CancellationToken,
-) -> JoinHandle<Result<(), WorkerError>> {
-    tokio::spawn(async move {
-        WorkerBuilder::new(ADAPTIVE_QUEUE)
-            .backend(storage)
-            .data(state)
-            .layer(TraceparentLayer::new().with_scheduler_metrics())
-            .layer(RetryClass::Probe.layer())
-            .layer(test_catch_panic_layer())
-            .build(entity_job_handler::<cc_lb_storage_sqlite::SqliteStorage>)
-            .run_until(async move {
-                cancel.cancelled_owned().await;
-                Ok::<(), WorkerError>(())
-            })
-            .await
-    })
-}
-
-fn test_catch_panic_layer() -> CatchPanicLayer<
-    impl FnMut(&Box<dyn std::any::Any + Send>) -> apalis_core::error::AbortError
-    + Clone
-    + Send
-    + Sync
-    + 'static,
-    apalis_core::error::AbortError,
-> {
-    CatchPanicLayer::with_panic_handler(|_: &Box<dyn std::any::Any + Send>| {
-        apalis_core::error::AbortError::new(apalis::layers::catch_panic::PanicError(
-            "worker panicked".to_owned(),
-        ))
-    })
-}
-
-fn sqlite_queue_config() -> apalis_sqlite::Config {
-    apalis_sqlite::Config::default()
-        .queue(ADAPTIVE_QUEUE)
-        .batch_size(8)
 }
 
 async fn sqlite_metadata_count(pool: &sqlx::SqlitePool, upstream_id: Uuid) -> TestResult<i64> {

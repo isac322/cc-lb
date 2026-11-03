@@ -6,7 +6,16 @@ use http::{HeaderMap, Method, Response, StatusCode};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+use cc_lb_control::PromptCacheObservationSinkLike;
+use cc_lb_domain::TtlClass;
+use cc_lb_storage_api::PromptCacheObservationRecord;
+
+// Fixed v5 identity and byte length for the three-block fixture below.
+const KEEPALIVE_IDENTITY_KEY: &str =
+    "5941e0168a65b3e6aa9b3921ee75015614419bbaa1a2f4c3a4c5d002bce58739";
 
 fn accounting_guard() -> ResponseAccountingGuard {
     AttemptIntent::observe_only()
@@ -164,6 +173,16 @@ impl cc_lb_storage_api::UpstreamStore for TestUpstreamStore {
 #[derive(Default)]
 struct RecordingUpstreamDispatch {
     requests: Mutex<Vec<cc_lb_upstream::SignedRequest>>,
+    response: Option<(StatusCode, &'static [u8])>,
+}
+
+impl RecordingUpstreamDispatch {
+    fn with_response(status: StatusCode, body: &'static [u8]) -> Self {
+        Self {
+            response: Some((status, body)),
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -173,11 +192,13 @@ impl UpstreamDispatch for RecordingUpstreamDispatch {
         request: cc_lb_upstream::SignedRequest,
     ) -> Result<Response<crate::lifecycle::Body>, crate::lifecycle::DispatchError> {
         self.requests.lock().unwrap().push(request);
-        Ok(Response::new(crate::lifecycle::Body::from(
-            Bytes::from_static(
-                br#"{"usage":{"cache_read_input_tokens":1,"input_tokens":1,"output_tokens":0}}"#,
-            ),
-        )))
+        let (status, body) = self.response.unwrap_or((
+            StatusCode::OK,
+            br#"{"usage":{"cache_read_input_tokens":1,"input_tokens":1,"output_tokens":0}}"#,
+        ));
+        let mut response = Response::new(crate::lifecycle::Body::from(Bytes::from_static(body)));
+        *response.status_mut() = status;
+        Ok(response)
     }
 }
 
@@ -461,6 +482,7 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_preserves_thinking() {
         Arc::new(DynamicViewHolder::new(view)),
         store,
         http.clone(),
+        Arc::new(cc_lb_clock::SystemClock),
     );
     let snapshot = RequestSnapshot::capture(
         "https://api.anthropic.com/v1/messages".parse().unwrap(),
@@ -534,6 +556,7 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_preserves_thinking() {
         )),
         Arc::new(TestUpstreamStore::new(api_key_record)),
         http.clone(),
+        Arc::new(cc_lb_clock::SystemClock),
     );
     let before = requests.len();
     let outcome = api_key_dispatcher
@@ -544,4 +567,475 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_preserves_thinking() {
         .await;
     assert!(matches!(outcome, DispatchOutcome::UnsupportedProvider(_)));
     assert_eq!(http.requests.lock().unwrap().len(), before);
+}
+
+#[derive(Default)]
+struct RecordingKeepaliveObservationSink {
+    records: parking_lot::Mutex<Vec<PromptCacheObservationRecord>>,
+}
+
+impl PromptCacheObservationSinkLike for RecordingKeepaliveObservationSink {
+    fn enqueue(
+        &self,
+        record: PromptCacheObservationRecord,
+    ) -> Result<(), cc_lb_control::PromptCacheObservationEnqueueError> {
+        self.records.lock().push(record);
+        Ok(())
+    }
+}
+
+struct KeepaliveObservationFixture {
+    dispatcher: AnthropicKeepaliveDispatcher,
+    snapshot: RequestSnapshot,
+    http: Arc<RecordingUpstreamDispatch>,
+    observations: Arc<RecordingKeepaliveObservationSink>,
+}
+
+fn keepalive_observation_fixture(
+    status: StatusCode,
+    body: &'static [u8],
+) -> Result<KeepaliveObservationFixture, Box<dyn std::error::Error>> {
+    use cc_lb_control::api_keys::principal_view::PrincipalView;
+    use cc_lb_control::dynamic_view::DynamicViewBuilder;
+
+    let upstream = UpstreamRecord {
+        id: Uuid::from_u128(1_003),
+        name: "keepalive-observation-oauth".to_owned(),
+        kind: UpstreamKind::AnthropicOauth,
+        enabled: true,
+        ..UpstreamRecord::default()
+    };
+    let observations = Arc::new(RecordingKeepaliveObservationSink::default());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(TestSignerFactory))
+        .principal_view(Arc::new(PrincipalView::for_tests(
+            "test",
+            true,
+            vec!["*".to_owned()],
+            Vec::new(),
+            HashMap::new(),
+        )))
+        .upstream_records(vec![upstream.clone()])
+        .prompt_cache_observation_sink(observations.clone())
+        .prompt_cache_grace_margin_secs(30)
+        .build();
+    let http = Arc::new(RecordingUpstreamDispatch::with_response(status, body));
+    let dispatcher = AnthropicKeepaliveDispatcher::new(
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(TestUpstreamStore::new(upstream.clone())),
+        http.clone(),
+        Arc::new(cc_lb_clock::SystemClock),
+    );
+    let snapshot = RequestSnapshot::capture(
+        "https://api.anthropic.com/v1/messages".parse()?,
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::from(serde_json::to_vec(&json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 8193,
+            "stream": true,
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "system": [{
+                "type": "text",
+                "text": "system ".repeat(1024),
+                "cache_control": {"type": "ephemeral", "ttl": "5m"}
+            }],
+            "messages": [
+                {"role": "user", "content": [
+                    {
+                        "type": "text",
+                        "text": "alpha ".repeat(1024),
+                        "cache_control": {"type": "ephemeral", "ttl": "5m"}
+                    },
+                    {
+                        "type": "text",
+                        "text": "omega ".repeat(1024),
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                    }
+                ]},
+                {"role": "assistant", "content": "uncached trailing message"}
+            ]
+        }))?),
+        upstream.id,
+        // The resolved deepest breakpoint, not this scheduling TTL, owns the observation.
+        cc_lb_storage_api::CacheTtl::Ttl5m,
+        usize::MAX,
+    )?;
+    Ok(KeepaliveObservationFixture {
+        dispatcher,
+        snapshot,
+        http,
+        observations,
+    })
+}
+
+fn expected_keepalive_identity_body() -> Value {
+    // This oracle does not call build_keepalive_body or the prompt-cache analyzer.
+    json!({
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 0,
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "system": [{
+            "type": "text",
+            "text": "system ".repeat(1024),
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }],
+        "messages": [{"role": "user", "content": [
+            {
+                "type": "text",
+                "text": "alpha ".repeat(1024),
+                "cache_control": {"type": "ephemeral", "ttl": "5m"}
+            },
+            {
+                "type": "text",
+                "text": "omega ".repeat(1024),
+                "cache_control": {"type": "ephemeral", "ttl": "1h"}
+            }
+        ]}]
+    })
+}
+
+#[tokio::test]
+async fn oauth_keepalive_publishes_exact_dispatched_prefix_before_finalization()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = keepalive_observation_fixture(
+        StatusCode::OK,
+        br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"input_tokens":7,"output_tokens":0}}"#,
+    )?;
+    let before_dispatch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "observation-identity".to_owned()),
+        )
+        .await;
+    let after_dispatch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+    let DispatchOutcome::CacheHit { finalization, .. } = &outcome else {
+        panic!("affirmative read-only usage must remain a cache hit");
+    };
+    assert_eq!(finalization.usage.cache_read_input_tokens, 1234);
+    assert_eq!(finalization.usage.cache_creation_input_tokens, 0);
+    assert_eq!(finalization.usage.input_tokens, 7);
+    assert_eq!(finalization.usage.output_tokens, 0);
+    assert_eq!(finalization.status, 200);
+
+    let requests = fixture
+        .http
+        .requests
+        .lock()
+        .map_err(|_| "recording HTTP requests lock poisoned")?
+        .clone();
+    let [request] = requests.as_slice() else {
+        panic!("keepalive must dispatch exactly once");
+    };
+    assert_eq!(request.method(), &Method::POST);
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.anthropic.com/v1/messages?beta=true"
+    );
+    assert_eq!(
+        request.body().as_ref(),
+        serde_json::to_vec(&expected_keepalive_identity_body())?.as_slice()
+    );
+
+    // No finalizer or scheduler runs in this fixture; publication belongs to dispatch.
+    let records = fixture.observations.records.lock();
+    let [record] = records.as_slice() else {
+        panic!(
+            "read-only keepalive must publish exactly one resolved breakpoint before finalization; got {}",
+            records.len()
+        );
+    };
+    assert_eq!(record.upstream_id, Uuid::from_u128(1_003));
+    assert_eq!(record.canonical_model_id, "claude-sonnet-4-5-20250929");
+    assert_eq!(record.v3_prefix_key, KEEPALIVE_IDENTITY_KEY);
+    assert_eq!(record.ttl_class, TtlClass::Ephemeral1h);
+    assert_eq!(record.prefix_content_block_index, 2);
+    assert_eq!(record.estimated_prefix_tokens, 19_821);
+    assert_eq!(record.token_estimate_source, "serialized_prefix_bytes_v1");
+    assert_eq!(record.hash_schema_version, 5);
+    assert!(record.last_observed_at_unix_secs >= before_dispatch);
+    assert!(record.last_observed_at_unix_secs <= after_dispatch);
+    assert_eq!(
+        record.expires_at_unix_secs,
+        record.last_observed_at_unix_secs + 3600 - 30
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_keepalive_malformed_unrelated_usage_never_publishes_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = keepalive_observation_fixture(
+        StatusCode::OK,
+        br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"input_tokens":null,"output_tokens":0}}"#,
+    )?;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "malformed-unrelated-usage".to_owned()),
+        )
+        .await;
+
+    assert!(
+        matches!(outcome, DispatchOutcome::Error(_)),
+        "malformed unrelated usage must remain an error"
+    );
+    assert_eq!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .map_err(|_| "recording HTTP requests lock poisoned")?
+            .len(),
+        1,
+        "malformed success must dispatch exactly once"
+    );
+    assert!(
+        fixture.observations.records.lock().is_empty(),
+        "malformed unrelated usage must not publish a cache observation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_keepalive_suffix_cache_creation_evidence_controls_publication()
+-> Result<(), Box<dyn std::error::Error>> {
+    let zero_suffix = keepalive_observation_fixture(
+        StatusCode::OK,
+        br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens_5m":0,"cache_creation_input_tokens_1h":0}}"#,
+    )?;
+    let outcome = zero_suffix
+        .dispatcher
+        .dispatch(
+            &zero_suffix.snapshot,
+            KeepaliveDispatchContext::new(None, "suffix-zero".to_owned()),
+        )
+        .await;
+    assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
+    assert_eq!(zero_suffix.observations.records.lock().len(), 1);
+
+    let suffix_cases: [(&str, &[u8]); 3] = [
+        (
+            "suffix-positive",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens_5m":2,"cache_creation_input_tokens_1h":3}}"#,
+        ),
+        (
+            "suffix-partial",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens_5m":0}}"#,
+        ),
+        (
+            "suffix-contradictory-flat",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"cache_creation_input_tokens_5m":1,"cache_creation_input_tokens_1h":0}}"#,
+        ),
+    ];
+    for (name, body) in suffix_cases {
+        let fixture = keepalive_observation_fixture(StatusCode::OK, body)?;
+        let outcome = fixture
+            .dispatcher
+            .dispatch(
+                &fixture.snapshot,
+                KeepaliveDispatchContext::new(None, name.to_owned()),
+            )
+            .await;
+        assert!(
+            matches!(outcome, DispatchOutcome::CacheHit { .. }),
+            "{name}"
+        );
+        assert!(
+            fixture.observations.records.lock().is_empty(),
+            "{name} must not publish cache observations"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_keepalive_ambiguous_usage_preserves_classification_without_publication()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cases: &[(&str, &'static [u8], &str, u64, u64)] = &[
+        (
+            "mixed read and creation",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":48}}"#,
+            "hit",
+            1234,
+            48,
+        ),
+        (
+            "read without explicit creation",
+            br#"{"usage":{"cache_read_input_tokens":1234}}"#,
+            "hit",
+            1234,
+            0,
+        ),
+        (
+            "zero read",
+            br#"{"usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+            "miss",
+            0,
+            0,
+        ),
+        ("missing usage", br#"{}"#, "miss", 0, 0),
+        ("null usage", br#"{"usage":null}"#, "miss", 0, 0),
+        ("empty usage", br#"{"usage":{}}"#, "miss", 0, 0),
+        (
+            "missing read",
+            br#"{"usage":{"cache_creation_input_tokens":0}}"#,
+            "miss",
+            0,
+            0,
+        ),
+        (
+            "null creation",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":null}}"#,
+            "error",
+            0,
+            0,
+        ),
+        (
+            "string creation",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":"0"}}"#,
+            "error",
+            0,
+            0,
+        ),
+        (
+            "negative creation",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":-1}}"#,
+            "error",
+            0,
+            0,
+        ),
+        (
+            "null read",
+            br#"{"usage":{"cache_read_input_tokens":null,"cache_creation_input_tokens":0}}"#,
+            "error",
+            0,
+            0,
+        ),
+        (
+            "string read",
+            br#"{"usage":{"cache_read_input_tokens":"1234","cache_creation_input_tokens":0}}"#,
+            "error",
+            0,
+            0,
+        ),
+        (
+            "negative read",
+            br#"{"usage":{"cache_read_input_tokens":-1,"cache_creation_input_tokens":0}}"#,
+            "error",
+            0,
+            0,
+        ),
+        (
+            "fractional read",
+            br#"{"usage":{"cache_read_input_tokens":1.5,"cache_creation_input_tokens":0}}"#,
+            "error",
+            0,
+            0,
+        ),
+        ("invalid usage shape", br#"{"usage":true}"#, "error", 0, 0),
+        ("invalid response JSON", b"{", "error", 0, 0),
+    ];
+
+    for &(name, body, expected, expected_read, expected_creation) in cases {
+        let fixture = keepalive_observation_fixture(StatusCode::OK, body)?;
+        let outcome = fixture
+            .dispatcher
+            .dispatch(
+                &fixture.snapshot,
+                KeepaliveDispatchContext::new(None, name.to_owned()),
+            )
+            .await;
+        let classification = match &outcome {
+            DispatchOutcome::CacheHit { finalization, .. } => {
+                assert_eq!(
+                    finalization.usage.cache_read_input_tokens, expected_read,
+                    "{name}"
+                );
+                assert_eq!(
+                    finalization.usage.cache_creation_input_tokens, expected_creation,
+                    "{name}"
+                );
+                assert_eq!(finalization.status, 200, "{name}");
+                "hit"
+            }
+            DispatchOutcome::CacheMiss { finalization } => {
+                assert_eq!(
+                    finalization.usage.cache_read_input_tokens, expected_read,
+                    "{name}"
+                );
+                assert_eq!(
+                    finalization.usage.cache_creation_input_tokens, expected_creation,
+                    "{name}"
+                );
+                assert_eq!(finalization.status, 200, "{name}");
+                "miss"
+            }
+            DispatchOutcome::Error(_) => "error",
+            DispatchOutcome::UnsupportedProvider(_) => "unsupported",
+        };
+        assert_eq!(classification, expected, "{name}");
+        assert!(
+            fixture.observations.records.lock().is_empty(),
+            "{name} must not invent a cache observation"
+        );
+        assert_eq!(
+            fixture
+                .http
+                .requests
+                .lock()
+                .map_err(|_| "recording HTTP requests lock poisoned")?
+                .len(),
+            1,
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_keepalive_provider_errors_never_publish_success_shaped_usage()
+-> Result<(), Box<dyn std::error::Error>> {
+    for status in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        let fixture = keepalive_observation_fixture(
+            status,
+            br#"{"error":{"type":"api_error","message":"provider failure"},"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0}}"#,
+        )?;
+        let outcome = fixture
+            .dispatcher
+            .dispatch(
+                &fixture.snapshot,
+                KeepaliveDispatchContext::new(None, "provider-error".to_owned()),
+            )
+            .await;
+        let DispatchOutcome::Error(reason) = outcome else {
+            panic!("non-200 provider response must remain an error");
+        };
+        assert!(reason.contains(&format!("status={}", status.as_u16())));
+        assert!(reason.contains("provider failure"));
+        assert!(
+            fixture.observations.records.lock().is_empty(),
+            "{status} must not publish even when its body contains affirmative usage"
+        );
+        assert_eq!(
+            fixture
+                .http
+                .requests
+                .lock()
+                .map_err(|_| "recording HTTP requests lock poisoned")?
+                .len(),
+            1,
+            "provider errors must not introduce an authorization retry"
+        );
+    }
+    Ok(())
 }
