@@ -338,10 +338,8 @@ async fn native_openai_opaque_cache_extensions_remain_neutral_and_unchanged()
     }))?);
     // Positive control: a generic Anthropic analysis would produce cache
     // metadata from this payload. These extensions stay opaque on Responses.
-    let hypothetical_anthropic = cc_lb_engine::parse_request_cache_breakpoints(
-        &http::HeaderMap::new(),
-        &body,
-    );
+    let hypothetical_anthropic =
+        cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &body);
     assert!(!hypothetical_anthropic.is_empty());
 
     let state = TestState::default();
