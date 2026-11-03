@@ -50,9 +50,7 @@ storm during idle nights.
    metrics labels, per-principal budget caps.
 3. **Cheap when idle.** Session state is in-memory, per-replica, sized by
    active sessions only. No DB persistence, no cross-replica coordination.
-4. **Bounded cost.** Every session has a `max_refreshes` cap and a
-   `max_total_duration` wall-clock cap. New real requests always cancel
-   pending keep-alives.
+4. **Bounded cost.** Every session has `max_refreshes` and `max_total_duration` bounds. New real requests always cancel pending keep-alives.
 5. **Never break the request path.** Snapshot capture and scheduling MUST
    be side-effect-free with respect to the response the client sees.
    Errors log and drop the session, never propagate.
@@ -145,17 +143,11 @@ credentials). Content:
   larger than `snapshot_max_bytes`, default 8 MiB),
 - `upstream_id: Uuid` — so the scheduler can re-fetch a fresh signer at
   fire time,
-- `ttl: CacheTtl` — `Ttl5m` or `Ttl1h`, extracted from the request's
-  `cache_control` breakpoint.
+- `ttl: CacheTtl` — `Ttl5m` or `Ttl1h`, selected from the final retained `cache_control` breakpoint.
 
-When top-level automatic `cache_control` is absent, snapshot shaping trims
-uncached trailing messages and content blocks after the last explicit
-breakpoint. An assistant breakpoint preserves the following user
-`tool_result` message when present; otherwise the snapshot ends with a minimal
-user continuation. If the only explicit breakpoint is in `system` or `tools`,
-uncached multi-turn history is replaced with a minimal user turn.
+When top-level automatic `cache_control` is absent, snapshot shaping retains the complete eligible prefix through the final explicit breakpoint, including every cache-control marker in that prefix. A valid mixed `1h` then `5m` request keeps both markers and selects the final `5m` TTL, with the default schedule at 270 seconds. Homogeneous `1h` and `5m` requests remain 3300 and 270 seconds. Snapshot shaping trims only uncached trailing messages and content blocks after the final breakpoint. An assistant breakpoint preserves the following user `tool_result` message when present; otherwise the snapshot ends with a minimal user continuation. If the only explicit breakpoint is in `system` or `tools`, uncached multi-turn history is replaced with a minimal user turn.
 
-`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`, removes `stream`, and trims uncached trailing messages after the last explicit `cache_control` breakpoint. It preserves `thinking`, `output_config`, and `tool_choice` unchanged from the captured request so renewals hit the same prompt-cache entry as follow-up requests.
+`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`, removes `stream`, and keeps the retained prefix and its markers while trimming uncached trailing messages after the final explicit `cache_control` breakpoint. It preserves `thinking`, `output_config`, and `tool_choice` unchanged from the captured request so renewals hit the same prompt-cache entry as follow-up requests.
 
 Before snapshot capture or response classification, live requests with `thinking.type == "enabled"`, any `output_config.format` field, or `tool_choice.type` equal to `"tool"` or `"any"` are excluded: Anthropic [rejects these combinations with `max_tokens: 0`](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#limitations). Each exclusion records a durable `not_tracked` decision with reason `zero-token renewal unsupported: enabled thinking`, `zero-token renewal unsupported: structured output`, or `zero-token renewal unsupported: forced tool_choice`, respectively. No session or renewal job is created. If the latest completed turn switches an active session to an incompatible request, the existing generation-fenced cancellation path terminates it as `cancelled`; previously queued generations become stale no-ops. Adaptive thinking, effort without a format, and automatic tool choice remain eligible. `stream: true` alone is not an exclusion because renewal shaping removes it.
 
@@ -214,6 +206,10 @@ Existing timing behavior anchors each refresh window to response start.
 `ScheduleParams::from_cache_anchor_age`, which subtracts that age from the
 configured refresh delay rather than starting a full new window after body
 collection.
+
+The selected TTL follows the final retained breakpoint, not the first breakpoint. The default count of 12 renewals and duration bound of 14,400 seconds remain unchanged, with both checks applied after successful dispatch. Twelve ideal 270-second renewals span about 54 minutes as a count-bound, not four-hour retention or an exact deadline. A durable job captured under the previous policy keeps its stored TTL and delay until the next real completion; no data or schema migration or hit-time re-parsing is introduced.
+
+For a fully warm mixed prefix, let `P` be the provider-token count through the `1h` breakpoint, `S` the additional provider-token count through the final `5m` breakpoint, and `r` the model-specific cache-read price multiplier relative to normal input. The modeled cached-prefix read component is `r(P+S)` in normal-input token-price units. Any required uncached continuation, such as a preserved `tool_result` or minimal user turn after the final breakpoint, adds normal input cost. Cache writes on a miss are outside this expression; it is neither total renewal cost nor a provider-billing or cost guarantee.
 
 `cancel(key, reason)` removes the entry, closes the channel, records the
 cancellation reason, and updates the `active_sessions` gauge.
@@ -276,9 +272,8 @@ config surface is JSON persisted through the admin API):
   circuits — no snapshot, no schedule, no classify).
 - `refresh_lead_time_5m_secs: u32` (default `30`) — fire at TTL − lead.
 - `refresh_lead_time_1h_secs: u32` (default `300`).
-- `max_refreshes_per_session: u32` (default `12`) — hard cap; then the
-  session self-cancels with `reason=MaxRefreshes`.
-- `max_total_duration_secs: u64` (default `14400` = 4 h) — wall-clock cap.
+- `max_refreshes_per_session: u32` (default `12`) — maximum keep-alive renewals per session; the count is checked after successful dispatch.
+- `max_total_duration_secs: u64` (default `14400` = 4 h) — duration bound checked after successful dispatch; it is not an exact retention deadline.
 - `snapshot_max_bytes: u32` (default `8388608` = 8 MiB) — snapshot rejected
   if the shaped and trimmed body exceeds this.
 - `min_cache_tokens: u64` (default `10000`) — an `AgentInTurn` response must

@@ -6,13 +6,15 @@ use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_engine::cache_keepalive::SessionKey;
 use cc_lb_storage_api::upstream::{OAuthTokensCreate, UpstreamCreate, UpstreamKind};
-use cc_lb_storage_api::{PrincipalStore, UpstreamStore};
+use cc_lb_storage_api::{
+    CacheKeepaliveConfig, PrincipalStore, UpstreamStore, cache_keepalive_job_key,
+};
 use serde_json::{Value, json};
 use sqlx::Row;
 use uuid::Uuid;
 
 use super::keepalive_support::harness::{
-    DueJob, Harness, HarnessOptions, KeepaliveOptions, NOW, request_body,
+    ClockMode, DueJob, Harness, HarnessOptions, KeepaliveOptions, NOW, request_body,
 };
 
 #[tokio::test]
@@ -360,6 +362,155 @@ async fn successful_keepalive_publishes_observation_before_reschedule_cap() {
         .expect("follow-up live routing event");
         assert_eq!(routed_event["upstream_id"], upstream_id);
     }
+}
+
+#[tokio::test]
+async fn sim_mixed_ttl_full_prefix_renews_until_refresh_cap() {
+    let defaults: CacheKeepaliveConfig = serde_json::from_value(json!({"enabled": true}))
+        .expect("deserialize product keepalive defaults");
+    let max_refreshes = u64::from(defaults.max_refreshes_per_session);
+    let interval = Duration::from_secs(270);
+    let refresh_horizon = interval.as_secs() * max_refreshes;
+    assert!(max_refreshes > 0);
+    assert!(
+        refresh_horizon < defaults.max_total_duration_secs,
+        "the refresh-count cap must precede the duration cap in this scenario"
+    );
+    let harness = Harness::with_options(HarnessOptions {
+        clock: ClockMode::Test { now_secs: NOW },
+        keepalive: KeepaliveOptions {
+            refresh_lead_time_5m_secs: u64::from(defaults.refresh_lead_time_5m_secs),
+            refresh_lead_time_1h_secs: u64::from(defaults.refresh_lead_time_1h_secs),
+            max_refreshes_per_session: defaults.max_refreshes_per_session,
+            max_total_duration_secs: defaults.max_total_duration_secs,
+            snapshot_max_bytes: defaults.snapshot_max_bytes,
+            min_cache_tokens: defaults.min_cache_tokens,
+        },
+        ..Default::default()
+    })
+    .await
+    .expect("SQLite harness setup");
+    let session = "00000000-0000-7000-8000-000000001019";
+    let session_key_hash = harness.session_key_hash(session, None);
+    let prefix_label = "mixed-ttl-full-prefix";
+    let suffix = "s".repeat(6_144);
+    let mut request: Value = serde_json::from_slice(&request_body(
+        8_192,
+        prefix_label,
+        defaults.min_cache_tokens + 1,
+        "bash",
+        "tool_use",
+        false,
+    ))
+    .expect("native request fixture");
+    request["system"][0]["cache_control"]["ttl"] = json!("1h");
+    request["messages"][0]["content"][0]["text"] = json!(suffix);
+    let first = harness
+        .post(
+            serde_json::to_vec(&request).expect("mixed-TTL request JSON"),
+            session,
+            None,
+        )
+        .await;
+    assert_eq!(first["stop_reason"], "tool_use");
+    harness
+        .wait_for_enqueued_generation(&session_key_hash, 1)
+        .await;
+    let live = harness
+        .mock
+        .last("proxy")
+        .expect("initial upstream request");
+    assert!(live.accepted() && !live.synthetic && !live.hit);
+
+    // The mock's HIT covers the deepest full prefix only. This does not model
+    // provider billing or the remaining 1h partial prefix after a 5m expiry.
+    for generation in 1..=max_refreshes {
+        harness
+            .advance_and_dispatch_due(
+                interval,
+                &[DueJob {
+                    session_key_hash: &session_key_hash,
+                    generation,
+                    mock_prefix: Some(prefix_label),
+                }],
+            )
+            .await;
+        let events = harness.mock_events();
+        let renewals = events
+            .iter()
+            .filter(|event| event.kind == "renewal")
+            .collect::<Vec<_>>();
+        assert_eq!(renewals.len() as u64, generation);
+        let renewal = renewals.last().expect("this generation's upstream request");
+        assert!(
+            renewal.accepted() && renewal.synthetic && renewal.hit,
+            "generation {generation}: {renewal:?}"
+        );
+        assert_eq!(renewal.cache_key, live.cache_key);
+        assert_eq!(renewal.body["max_tokens"], 0);
+        assert_eq!(renewal.body["tools"], live.body["tools"]);
+        assert_eq!(renewal.body["system"], live.body["system"]);
+        assert_eq!(renewal.body["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(
+            renewal.body["messages"][0]["content"][0],
+            request["messages"][0]["content"][0]
+        );
+        assert_eq!(
+            renewal.body["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "5m"
+        );
+        assert_eq!(
+            renewal.body["messages"][0]["content"][0]["text"]
+                .as_str()
+                .expect("retained suffix text")
+                .as_bytes(),
+            suffix.as_bytes()
+        );
+        assert_eq!(
+            harness.renewal_hit_count().await,
+            i64::try_from(generation).expect("refresh count fits i64")
+        );
+        let state = harness
+            .read_session(&session_key_hash)
+            .await
+            .expect("persisted mixed-TTL session");
+        assert!(state.error.is_none(), "generation {generation}: {state:?}");
+        if generation < max_refreshes {
+            assert_eq!(state.status, "active");
+            assert_eq!(state.enqueue_state, "enqueued");
+            assert!(state.terminal_reason.is_none());
+        } else {
+            assert_eq!(state.status, "terminal");
+            assert_eq!(state.terminal_reason.as_deref(), Some("max_refreshes"));
+        }
+    }
+
+    let now = unix_secs(harness.clock.as_ref().expect("test clock").now());
+    assert_eq!(now - NOW, refresh_horizon);
+    assert!(now - NOW < defaults.max_total_duration_secs);
+    let next_job_key = cache_keepalive_job_key(&session_key_hash, max_refreshes + 1);
+    assert!(
+        harness.read_job_timing(&next_job_key).await.is_none(),
+        "the terminal session must not enqueue renewal N+1"
+    );
+    harness.advance_clock(interval);
+    assert!(harness.read_job_timing(&next_job_key).await.is_none());
+    let events = harness.mock_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "renewal")
+            .count() as u64,
+        max_refreshes,
+        "no renewal N+1 may be dispatched"
+    );
+    assert_eq!(events.len() as u64, max_refreshes + 1);
+    let terminal = harness
+        .read_session(&session_key_hash)
+        .await
+        .expect("terminal session remains persisted");
+    assert_eq!(terminal.status, "terminal");
+    assert_eq!(terminal.terminal_reason.as_deref(), Some("max_refreshes"));
 }
 
 #[tokio::test]

@@ -19,6 +19,7 @@ use uuid::Uuid;
 use cc_lb_storage_api::{CacheKeepaliveConfigSnapshot, CacheTtl};
 
 use crate::lifecycle::RequestCacheMetadata;
+use crate::prompt_cache_simulator::final_prompt_cache_breakpoint_ttl;
 use crate::usage_parser::ParsedSseEvent;
 
 use super::display_reason::CacheKeepaliveDisplayReason;
@@ -307,10 +308,9 @@ impl LifecycleKeepalive {
         let Some(request_json) = cache_metadata.request_json.as_ref() else {
             return;
         };
-        let Some(first_breakpoint) = cache_metadata.cache_breakpoints.first() else {
+        let Some(last_breakpoint) = cache_metadata.cache_breakpoints.last() else {
             return;
         };
-        let ttl = CacheTtl::from_ttl_str(first_breakpoint.ttl.as_deref());
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
             return;
         };
@@ -344,6 +344,15 @@ impl LifecycleKeepalive {
                     return;
                 }
             };
+        let ttl = match &renewal_request_json {
+            Cow::Borrowed(_) => CacheTtl::from_ttl_str(last_breakpoint.ttl.as_deref()),
+            Cow::Owned(value) => {
+                let Some(ttl) = final_prompt_cache_breakpoint_ttl(value) else {
+                    return;
+                };
+                CacheTtl::from_ttl_str(Some(ttl))
+            }
+        };
         if let Some(reason) = zero_token_renewal_unsupported_reason(&renewal_request_json) {
             self.record_not_tracked(
                 &session_key,

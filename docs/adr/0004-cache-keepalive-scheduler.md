@@ -1,10 +1,10 @@
 # ADR 0004 — Cache-keepalive scheduler, keep-alive request shape, and turn classifier
 
-- Status: Accepted; Section 1 amended on 2026-07-08
+- Status: Accepted; Section 1 amended on 2026-07-08; Section 2 amended and Section 4 clarified on 2026-11-03
 - Date: 2026-07-06
 - Ships with: (to be filled)
 - Related RFC: [RFC-0003 — Principal-scoped prompt-cache keep-alive](../rfc/0003-prompt-cache-keepalive.md)
-- Amendment: Section 1 supersedes the v1 in-memory scheduler for GA/Kubernetes deployments. Sections 2 and 3 remain unchanged.
+- Amendment: Section 1 supersedes the v1 in-memory scheduler for GA/Kubernetes deployments. Section 2 selects the final retained breakpoint TTL and preserves the full eligible prefix. Section 4 describes the existing response-start scheduling anchor without changing it; Section 3 remains unchanged.
 
 ## Context
 
@@ -42,6 +42,7 @@ The amended scheduling invariants are:
 
 - **Generation-keyed jobs.** Every scheduled keepalive job uses an idempotency key shaped like `cache_keepalive:<session_key_hash>:<generation>`. Session identity lives in the fence row and non-secret metadata; the idempotency key is per scheduled generation, not per session forever.
 - **Replace by generation bump + enqueue.** A new real request resets `refresh_count` and `first_scheduled_at`, bumps the durable generation, stores the new encrypted payload/state, and enqueues a new delayed Apalis job with `run_at_timestamp(cache_anchor_at + ttl - lead)`. A successful keepalive hit preserves the session duration anchor, increments `refresh_count`, records a new hit/cache anchor from the synthetic dispatch response begin, bumps generation, and schedules the next job from that new anchor.
+- **Legacy durable jobs retain their captured policy.** A job already stored under the previous policy keeps its stored TTL and delay until the next real completion. No data or schema migration, and no hit-time re-parsing, changes that behavior.
 - **Cancel/cleanup is narrow.** The enqueue path may delete only the exact old `Pending` job as cleanup. It must never delete `Queued` or `Running` rows, because a worker may already own them and deletion cannot abort an in-flight handler safely.
 - **Stale jobs no-op.** Every worker performs a pre-dispatch generation check and an atomic post-dispatch conditional transition against `cache_keepalive_sessions`. Terminal mark, purge, and self-reschedule operations must be compare-and-set style updates such as `WHERE session_key_hash = ? AND generation = ? AND status IN (...)`; `0 rows affected` means the job is stale and must no-op. The worker must not do a separate check-then-act that can overwrite a newer real request.
 - **No Apalis retry loop.** Keepalive jobs use `max_attempts = 1` (the existing maintenance/fail-fast class). Cache miss, dispatch error, decrypt failure, stale generation, unsupported provider, and expired session are terminal/noop business outcomes recorded through keepalive metrics, not scheduler retries or exponential backoff.
@@ -68,7 +69,7 @@ Effective provider support remains direct Anthropic OAuth. `AnthropicApiKey` rem
 
 ### 2. Keep-alive request shape: `max_tokens: 0` on the direct Anthropic Messages API
 
-Unchanged by the Section 1' amendment.
+Amended by the final-retained-breakpoint policy below; the other Section 2 request-shape rules remain unchanged.
 
 **Chosen** based on the officially documented behavior in the Messages API reference: "Set to `0` to populate the prompt cache without generating a response." Cache reads reset the TTL to the full 5 m / 1 h duration (Anthropic prompt-caching docs). The eligibility gate in `LifecycleKeepalive` and request shaping in `RequestSnapshot::build_keepalive_body` apply these rules:
 
@@ -76,12 +77,16 @@ Unchanged by the Section 1' amendment.
 - **Strip `stream`.** A streaming live request remains eligible; the renewal is always non-streaming.
 - **Skip zero-token-incompatible live requests.** Anthropic's [prompt-caching limitations](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#limitations) exclude `thinking.type == "enabled"`, any `output_config.format`, and forced `tool_choice.type` (`"tool"` or `"any"`). Before snapshot capture or response classification, record a durable `not_tracked` decision with reason `zero-token renewal unsupported: enabled thinking`, `zero-token renewal unsupported: structured output`, or `zero-token renewal unsupported: forced tool_choice`. Do not create a session or enqueue a renewal. A latest completed incompatible turn cancels an existing active session through the same completion-order and generation fence used by other not-tracked turns, making its queued jobs stale.
 - **Preserve compatible `thinking`, `output_config`, and `tool_choice` unchanged.** Adaptive thinking, effort without a format, and automatic tool choice remain eligible. Rewriting these fields could invalidate message-tier cache keys and create a cache entry follow-up requests never read.
-- **Trim uncached history.** When top-level automatic `cache_control` is absent, retain messages and content blocks only through the last explicit breakpoint. Preserve the matching user `tool_result` after an assistant `tool_use`; otherwise end with a minimal user continuation. If only `system` or `tools` has a breakpoint, replace the message history with a minimal user turn.
+- **Retain the full eligible prefix through the final breakpoint.** When top-level automatic `cache_control` is absent, retain messages and content blocks through the final explicit breakpoint, including every cache-control marker in that prefix. Continue trimming only uncached trailing history after that breakpoint. Preserve the matching user `tool_result` after an assistant `tool_use`; otherwise end with a minimal user continuation. If only `system` or `tools` has a breakpoint, replace the message history with a minimal user turn.
 - **Reject non-Anthropic upstreams.** OpenRouter's schema requires `max_tokens >= 1`; Bedrock and Vertex have not been verified. v1 hard-gates on the upstream `kind` in the dispatcher.
 
 The eligibility gate inspects the upstream-shaped body, not merely the original downstream input. Shape plugins can introduce incompatible fields. Compare original and shaped bytes in the detached completion task: reuse the existing downstream parsed value when identical, and parse changed shaped bytes with `sonic-rs` before making the decision.
 
 `RequestSnapshot::capture` retains the raw captured upstream-shaped body bytes after any history trim in `body`. This remains the persisted body, including the live `max_tokens` and `stream` fields. Capture also materializes a separate shaped keep-alive body with the transformations above and caches its model. `from_persisted` rebuilds this cached representation once. Signing reuses the cached body bytes; reservation and finalization reuse the cached model without reparsing or serializing the body.
+
+The selected TTL is the final retained breakpoint's TTL. A valid mixed `1h` then `5m` request keeps the full eligible prefix and both cache-control markers, and uses `Ttl5m` with the default 270-second delay. Homogeneous `1h` and `5m` requests remain 3300 and 270 seconds. The default `max_refreshes_per_session = 12` and `max_total_duration_secs = 14400` are unchanged; cap and duration checks occur after a successful dispatch. Twelve ideal 270-second renewals span about 54 minutes as a count-bound, not four-hour retention and not an exact deadline.
+
+For a fully warm mixed prefix, let `P` be the provider-token count through the `1h` breakpoint, `S` the additional provider-token count through the final `5m` breakpoint, and `r` the model-specific cache-read price multiplier relative to normal input. The modeled cached-prefix read component is `r(P+S)` in normal-input token-price units. Any required uncached continuation, such as a preserved `tool_result` or minimal user turn after the final breakpoint, adds normal input cost. Cache writes on a miss are outside this expression; it is neither total renewal cost nor a provider-billing or cost guarantee.
 
 Alternatives rejected:
 
@@ -114,25 +119,25 @@ default 10,000-token threshold cancel the session with
 `reason=cached_prefix_too_small`; `UserTurn` and `Ambiguous` decisions still
 cancel regardless of usage.
 
-### 4. Refresh timing anchor: cache creation / response begin, not response completion
+### 4. Refresh timing anchor: response begin, not response completion
 
-Prompt-cache TTL starts when Anthropic creates the cache prefix, which official wording describes as once the response begins. In streaming responses, the observable anchor is the `message_start` event and its `usage` cache fields. It is not officially specified as the first thinking delta; thinking/content deltas happen after `message_start` and should not be treated as the authoritative anchor.
+cc-lb's existing scheduling anchor is upstream response begin, using the streaming `message_start` event rather than a later thinking or content delta. This is a cc-lb scheduling convention, not a claim that the provider's cache lifetime starts at response begin: Anthropic documents cache lifetime from request start.
 
-The first keepalive must schedule by absolute cache anchor:
+The first keepalive uses this absolute scheduling formula:
 
 ```text
 run_at = cache_anchor_at + ttl - lead
 ```
 
-It must not schedule by response completion:
+Scheduling must not restart the full delay at response completion:
 
 ```text
 wrong_run_at = response_completed_at + ttl - lead
 ```
 
-Worked example: for a 5 minute cache, 30 second lead, and a 2 minute model response, the cache should refresh at request/cache-anchor + 270 seconds. That is final response completion + 150 seconds. Scheduling final response completion + 270 seconds fires at anchor + 390 seconds, after the 5 minute cache has expired.
+Worked example of cc-lb's formula: a 5-minute TTL with a 30-second lead is due at response-begin anchor + 270 seconds. If response collection takes 120 seconds from that anchor, 150 seconds remain at completion. Restarting a 270-second delay at completion instead gives anchor + 390 seconds. These figures explain the scheduling calculation; they do not guarantee a provider cache deadline or hit.
 
-The implementation should capture `cache_anchor_at` from streaming `message_start`. For non-streaming requests, use the earliest reliable upstream response-begin timestamp, falling back to request dispatch time when response-begin is unavailable. `StreamingKeepaliveResponse::observe` already parses `message_start` and cache usage fields; the missing work is to timestamp that event and propagate it into scheduling.
+The implementation captures `cache_anchor_at` from streaming `message_start`. Non-streaming requests use the earliest available upstream response/body event, falling back to request dispatch time. At completion, the elapsed anchor age is passed as `cache_anchor_age` into `ScheduleParams::from_cache_anchor_age`, which subtracts it from the configured refresh delay. This preserves the existing response-start anchor.
 
 Every successful synthetic keepalive read creates a new sliding-window anchor. Therefore the next self-reschedule must use the keepalive dispatch's own response-begin / cache-hit anchor, not the original real-response anchor.
 
@@ -161,7 +166,7 @@ Apalis job rows should stay lightweight: job type, session key hash, generation,
 ## Consequences
 
 - **Positive:** Durable keepalive becomes restart- and replica-safe for GA/Kubernetes. The feature reuses the existing distributed scheduler infrastructure, pool isolation, job metrics, idempotency key discipline, and worker claim semantics instead of maintaining a parallel production timer subsystem. Stale `Queued`/`Running` work becomes harmless through durable generation fences.
-- **Positive:** The TTL anchor fix makes keepalive useful for long streaming responses: the first refresh is scheduled from `message_start` / cache creation, not from final response completion.
+- **Positive:** The TTL anchor fix makes keepalive useful for long streaming responses: the first refresh is scheduled from cc-lb's response-start anchor (`message_start` for streaming), not from final response completion.
 - **Neutral:** The request body shape and turn classifier decisions remain unchanged. Keepalive remains direct-Anthropic-only in v1, effectively `AnthropicOauth` until storage-backed signing for `AnthropicApiKey` is implemented.
 - **Negative:** The feature now owns durable state: `cache_keepalive_sessions`, optional encrypted payload rows, migrations for SQLite/Postgres, purge/retention logic, AEAD key availability, and stricter no-plaintext observability rules. SQLite remains a local/CI/single-node backend; production multi-replica keepalive should use Postgres.
 - **Negative:** The scheduler worker must treat cache miss, stale generation, decrypt failure, unsupported provider, and dispatch error as terminal/noop business outcomes with metrics, not as retryable Apalis failures. This differs from retryable entity jobs and must be tested explicitly.

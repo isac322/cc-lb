@@ -640,6 +640,14 @@ fn unanalyzable_prompt_cache() -> V3PromptCacheAnalysis {
     }
 }
 
+/// Resolves the final cache TTL without hashing or tokenizing the prefix.
+pub(crate) fn final_prompt_cache_breakpoint_ttl(value: &Value) -> Option<&str> {
+    let blocks = flatten_prefix_blocks(value);
+    resolve_breakpoints(value, &blocks)?
+        .last()
+        .map(|breakpoint| breakpoint.ttl)
+}
+
 fn resolve_breakpoints<'a>(
     value: &'a Value,
     blocks: &[CacheBlockRef<'a>],

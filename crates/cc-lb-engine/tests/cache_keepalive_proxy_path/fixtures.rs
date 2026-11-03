@@ -1,21 +1,34 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_domain::Upstream;
-use cc_lb_engine::{ApiKeyAwareSignerFactory, DispatchError, UpstreamDispatch};
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, ShapePluginCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{Principal, Upstream};
+use cc_lb_engine::cache_keepalive::{
+    CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
+};
+use cc_lb_engine::{
+    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
+};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 use cc_lb_upstream::{
-    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
-    SigningCapability,
+    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
 };
 use http::{HeaderValue, Response, StatusCode};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use url::Url;
 use uuid::Uuid;
+
+use super::common::{TestAuthn, TestState, collect_body, messages_request};
 
 #[derive(Clone)]
 pub(crate) struct SignerCall {
@@ -154,5 +167,120 @@ fn json_response(body: Value) -> Response<Body> {
 pub(crate) async fn settle() {
     for _ in 0..8 {
         tokio::task::yield_now().await;
+    }
+}
+
+struct ChannelEnqueuer {
+    sender: mpsc::UnboundedSender<CacheKeepaliveEnqueueRequest>,
+}
+
+#[async_trait]
+impl CacheKeepaliveEnqueuer for ChannelEnqueuer {
+    async fn enqueue_cache_keepalive(
+        &self,
+        request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.sender
+            .send(request)
+            .map_err(|error| CacheKeepaliveEnqueueError(error.to_string()))
+    }
+
+    async fn cancel_cache_keepalive(
+        &self,
+        _request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        _request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
+    }
+}
+
+pub(crate) async fn enqueue_through_lifecycle(
+    body: &Value,
+    dialect: Option<Arc<dyn UpstreamDialect>>,
+) -> CacheKeepaliveEnqueueRequest {
+    let upstream_id = Uuid::from_u128(0xaa);
+    let upstream = upstream_record(upstream_id, "primary", "http://keepalive.local/");
+    let mut principal = principal_with_keepalive();
+    let config = principal
+        .cache_keepalive
+        .as_mut()
+        .expect("keepalive config");
+    config.refresh_lead_time_5m_secs = 30;
+    config.refresh_lead_time_1h_secs = 300;
+    let chains = dialect.map_or_else(HashMap::new, |dialect| {
+        HashMap::from([(
+            principal.name.clone(),
+            (None, DialectCache::Explicit(ShapePluginCache { dialect })),
+        )])
+    });
+    let principal_view = Arc::new(PrincipalView::from_db(&[principal], chains));
+    let authn = TestAuthn::with_principal_view(TestState::default(), Arc::clone(&principal_view));
+    let holder = Arc::new(DynamicViewHolder::new(
+        DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(RecordingSignerFactory {
+                label: "initial",
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }))
+            .principal_view(principal_view)
+            .upstream_records(vec![upstream])
+            .build(),
+    ));
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        holder,
+        Arc::new(AgentTurnDispatch),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_cache_keepalive_enqueuer(Arc::new(ChannelEnqueuer { sender }));
+    let request = messages_request(Bytes::from(
+        serde_json::to_vec(body).expect("request serializes"),
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("request succeeds");
+    let (status, _, _) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK);
+
+    tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("completed agent turn enqueues keepalive before the deadline")
+        .expect("enqueue observer stays open")
+}
+
+pub(crate) struct FiveMinuteFinalBreakpointDialect;
+
+impl UpstreamDialect for FiveMinuteFinalBreakpointDialect {
+    fn shape(
+        &self,
+        context: &DialectShapeContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        let mut body: Value =
+            serde_json::from_slice(&context.body_bytes).expect("fixture request is JSON");
+        body["messages"][0]["content"][0]["cache_control"]["ttl"] = json!("5m");
+        let mut url = Url::parse("http://keepalive.local/").expect("test URL parses");
+        url.set_path(context.path.trim_start_matches('/'));
+        url.set_query(context.query.as_deref());
+        Ok(builder.shaped_request(
+            url,
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            Bytes::from(serde_json::to_vec(&body).expect("shaped body serializes")),
+        ))
     }
 }

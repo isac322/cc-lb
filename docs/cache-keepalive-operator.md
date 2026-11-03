@@ -39,9 +39,7 @@ Scheduling is anchored to cache creation / response begin:
 - Streaming responses use the Anthropic `message_start` event timestamp.
 - Non-streaming responses use the first upstream response/body event when
   available, with request dispatch time as the fallback.
-- `run_at = cache_anchor_at + ttl - lead_time`; with the default 5-minute TTL
-  and 30-second lead, the job fires 270 seconds after `message_start`, not 270
-  seconds after final response completion.
+- `run_at = cache_anchor_at + ttl - lead_time`; a valid mixed `1h` then `5m` request selects the final retained `5m` breakpoint, keeps the full prefix and both markers, and uses the default 270-second schedule. Homogeneous `1h` and `5m` requests remain 3300 and 270 seconds. This is anchored at `message_start` / response begin, not 270 seconds after final response completion.
 
 Successful keepalive processing preserves the original duration anchor. When
 session caps permit another renewal, rescheduling increments `refresh_count`
@@ -49,11 +47,14 @@ and enqueues the next generation using the existing synthetic
 response-begin/cache anchor. A final capped renewal does not increment
 `refresh_count`. New real requests reset `refresh_count` and `first_scheduled_at`.
 
+The count and duration checks remain post-dispatch. The defaults are 12 renewals and 14,400 seconds; twelve ideal 270-second renewals span about 54 minutes as a count-bound, not four-hour retention or an exact deadline. A durable job captured under the previous policy keeps its stored TTL and delay until the next real completion; no data or schema migration or hit-time re-parsing changes that behavior.
+
+For a fully warm mixed prefix, let `P` be the provider-token count through the `1h` breakpoint, `S` the additional provider-token count through the final `5m` breakpoint, and `r` the model-specific cache-read price multiplier relative to normal input. The modeled cached-prefix read component is `r(P+S)` in normal-input token-price units. Any required uncached continuation, such as a preserved `tool_result` or minimal user turn after the final breakpoint, adds normal input cost. Cache writes on a miss are outside this expression; it is neither total renewal cost nor a provider-billing or cost guarantee.
+
 An eligible successful read-only renewal attempts observation publication
 through the existing bounded, nonblocking best-effort sink. The shared decoder
 uses the exact transformed body sent to the provider, its canonical model, and
-its eligible resolved explicit or automatic breakpoints. The snapshot's
-scheduling TTL does not identify the deepest observed breakpoint. Publication
+its eligible resolved explicit or automatic breakpoints. The snapshot's scheduling TTL is the final retained breakpoint's TTL. For valid mixed `1h` then `5m`, that is `5m` at the default 270-second schedule while both markers and the full prefix remain in the body. Publication
 is attempted before finalization, rescheduling, or cap handling, including the
 final successful renewal when a session cap prevents another fire. Misses,
 errors, unsupported providers, and ambiguous usage produce no new keepalive
@@ -97,13 +98,7 @@ so ciphertext cannot be replayed across sessions or generations. Downstream
 `Authorization` and `x-api-key` headers are never persisted; the worker signs at
 fire time from storage-backed upstream credentials.
 
-The keep-alive snapshot is trimmed to the last explicit `cache_control`
-breakpoint when top-level automatic caching is not present. This removes
-uncached trailing messages while preserving the matching user `tool_result`
-message after an assistant `tool_use`, and keeps a minimal user continuation
-when the breakpoint ends on an assistant turn. If only `system` or `tools`
-contains an explicit breakpoint, the request history is reduced to a minimal
-user turn.
+The keep-alive snapshot retains the full eligible prefix through the last explicit `cache_control` breakpoint, including all markers in that prefix. For a valid mixed `1h` then `5m` request, both markers remain and the final `5m` breakpoint supplies the scheduling TTL. Snapshot shaping trims only uncached trailing messages and content blocks after that breakpoint while preserving the matching user `tool_result` message after an assistant `tool_use` and keeping a minimal user continuation when the breakpoint ends on an assistant turn. If only `system` or `tools` contains an explicit breakpoint, the request history is reduced to a minimal user turn.
 
 SQLite is supported for local development, CI, and bounded single-node use.
 Production multi-replica / HA deployments should use Postgres so Apalis claims
@@ -133,8 +128,8 @@ defaults; every field is optional except `enabled`.
 | `enabled` | required | Master switch on this principal. |
 | `refresh_lead_time_5m_secs` | `30` | Fire 30 s before the 5-minute TTL expires. Schedule = 4m30s after `message_start` / response begin. |
 | `refresh_lead_time_1h_secs` | `300` | Fire 5 minutes before the 1-hour TTL expires. Schedule = 55m after `message_start` / response begin. |
-| `max_refreshes_per_session` | `12` | Hard cap on keep-alive fires per session. |
-| `max_total_duration_secs` | `14400` (4 h) | Wall-clock cap from first schedule. |
+| `max_refreshes_per_session` | `12` | Maximum keep-alive renewals per session; the count is checked after successful dispatch. |
+| `max_total_duration_secs` | `14400` (4 h) | Duration bound checked after successful dispatch; it is not an exact retention deadline. |
 | `snapshot_max_bytes` | `8388608` (8 MiB) | Shaped and trimmed body larger than this is not tracked. |
 | `min_cache_tokens` | `10000` (10,000 tokens) | Minimum cached input tokens (`cache_read_input_tokens + cache_creation_input_tokens`) required before an `AgentInTurn` response schedules renewals. |
 | `classifier.extra_wait_for_user_tools` | `[]` | Extra tool names to treat as "wait for user" on top of the built-in list. |
@@ -257,9 +252,7 @@ the clear will still fire until they naturally exit via
 upstream/miss error, or a subsequent real request classified as
 `UserTurn`. The
 `cc_lb_cache_keepalive_active_sessions{principal_id=...}` gauge drains
-proportionally as sessions exit; expect it to reach zero within
-`max_total_duration_secs` in the worst case, and much faster in
-practice.
+as sessions exit. The duration bound is evaluated after successful dispatch, so it does not guarantee that this gauge reaches zero by an exact `max_total_duration_secs` deadline.
 
 Cleanup removes expired sessions, terminal keepalive Apalis rows, and stale
 old `Pending` keepalive rows. It never deletes `Queued` or `Running` rows;
