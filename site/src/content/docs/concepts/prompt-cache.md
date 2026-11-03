@@ -16,6 +16,14 @@ Prompt-cache keepalive is a principal-scoped feature. When enabled, cc-lb observ
 
 The feature is best effort. A keepalive can miss because the cache changed, credentials failed, the session expired, or the provider rejected the request. Those are terminal business outcomes for that scheduled generation rather than a retry promise.
 
+## Request eligibility
+
+An explicit `x-claude-code-request-class: auxiliary` excludes a request from keep-alive completion sequencing, generation observation or mutation, enqueueing, cancellation, and detached bookkeeping. The exclusion follows the explicit header even when body classification reports `unknown`, `subagent`, `main`, or `advisor`. Existing named side-request exclusions remain in place. Headerless `unknown` and `subagent` requests retain their existing eligibility, and real subagent turns remain isolated under their agent-scoped session key.
+
+Claude Code gateway hints are optional client metadata. The [official gateway hint contract](https://code.claude.com/docs/en/llm-gateway-protocol#gateway-hint-headers) documents `x-claude-code-request-class` for Claude Code v2.1.273 and later. With a custom `ANTHROPIC_BASE_URL`, clients must opt in with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`; the hints are otherwise off by default. cc-lb does not promise to consume every hint, and this behavior does not identify side requests that omit the explicit class.
+
+Keep-alive firing currently supports direct Anthropic OAuth upstreams. API-key and other upstream kinds are skipped at fire time.
+
 ## Configuration shape
 
 ```json

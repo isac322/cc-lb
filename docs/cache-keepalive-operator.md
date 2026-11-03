@@ -252,6 +252,23 @@ Checks, in order:
    one-shot auxiliary requests (`recap`, `compaction`, `session_title`,
    `auto_thinking`, `notification`, `side`, `look_at`) do not mutate
    keep-alive state.
+
+   Claude Code can label side requests with
+   `x-claude-code-request-class: auxiliary`. cc-lb excludes these requests
+   before issuing or claiming keep-alive completion state, observing or
+   changing a generation, enqueueing, cancellation, or recording completion
+   and `not_tracked` bookkeeping. The exclusion applies even when the
+   reported kind remains `unknown`, `subagent`, `main`, or `advisor`.
+   Legitimate `unknown` and `subagent` turns without the explicit auxiliary
+   class retain their existing eligibility and agent-scope isolation.
+
+   The [Claude Code gateway hint contract](https://code.claude.com/docs/en/llm-gateway-protocol#gateway-hint-headers)
+   describes these hints as optional per-request metadata. Claude Code
+   v2.1.273 and later can send them; for a custom `ANTHROPIC_BASE_URL`,
+   clients enable them with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` because
+   they are off by default. cc-lb does not promise to consume every hint.
+   Clients that omit the request-class hint retain the existing body
+   classification behavior.
 4. Does the response report at least `.min_cache_tokens` cached input tokens?
    A completed `AgentInTurn` response below that threshold is cancelled with
    `reason="cached_prefix_too_small"` and is not scheduled.
