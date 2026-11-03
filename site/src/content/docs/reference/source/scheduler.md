@@ -98,6 +98,7 @@ The scheduler emits a comprehensive set of Prometheus metrics to monitor health 
 Cache keepalive-specific operator notes:
 
 - `CacheKeepaliveJob` payloads are lightweight metadata only. Prompt snapshots are AEAD-encrypted in `cache_keepalive_sessions.encrypted_payload` with AAD bound to principal, session hash, upstream id, generation, and job type/version.
+- New keepalive snapshots store the captured body in framed raw/zstd payload codecs. Before upgrading from the JSON payload format, drain and stop all old workers and request-serving replicas before starting a new writer. The new version reads old snapshots and migrates them on their next successful renewal; old versions cannot read the new format. Do not downgrade while active sessions contain new-format payloads.
 - The first schedule uses the response-begin cache anchor (`message_start` for streaming, first upstream response event for non-stream, request dispatch time fallback), not response completion. Run time is `cache_anchor_at + ttl - lead`.
 - Cleanup may delete expired keepalive sessions, terminal keepalive Apalis rows, and old `Pending` keepalive Apalis rows. It must not delete `Queued` or `Running` rows; generation checks make those stale rows no-op when they eventually run.
 - `cclb_scheduler_init_failure` (Gauge): Tracks scheduler initialization failure state (0 or 1).
