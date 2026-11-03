@@ -185,11 +185,12 @@ A plugin registered to the `shape` slot must implement all three wire hook funct
 
 Prompt-cache identity is computed before shaping. For a deterministic shape plugin,
 the shaped request must preserve the provider-effective cached prefix for the
-modeled upstream. On the official Anthropic API-key/OAuth route, the first exact
-`system[0]` billing-header attribution block is intentionally ignored for cache
-identity even when a shape plugin is configured. Do not copy that ignored
-attribution into other cached content or redirect an official route to a literal
-custom-provider identity; configure and model the actual provider upstream.
+modeled upstream. For Anthropic API-key/OAuth upstreams on
+`https://api.anthropic.com` with the default port and no userinfo, the first exact
+`system[0]` billing-header attribution block is ignored for cache identity even
+when a shape plugin is configured. Do not copy that ignored attribution into
+other cached content or redirect the route to a custom provider; configure and
+model the actual provider upstream.
 
 Here is an example of a complete shape plugin that shapes requests and provides explicit no-op handlers for response transformation:
 
