@@ -16,14 +16,19 @@ use cc_lb_control::api_keys::principal_view::{
 };
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream};
-use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator, UpstreamDispatch};
+use cc_lb_engine::{
+    DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator, UpstreamDispatch,
+};
 use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind, RouteInfo};
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{KeyStatus, MetaStore, Storage as StorageTrait, StoredApiKeyRecord};
 use cc_lb_storage_sqlite::SqliteStorage;
-use cc_lb_upstream::{DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest, UpstreamDialect};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
+    UpstreamDialect,
+};
 use http::StatusCode;
 use http_body_util::BodyExt;
 use tokio::time::{Duration, timeout};
@@ -145,7 +150,8 @@ async fn happy_non_streaming_relays_response() {
 }
 
 #[tokio::test]
-async fn explicit_native_shape_removes_attribution_and_preserves_serving_identity() -> Result<(), Box<dyn std::error::Error>> {
+async fn explicit_native_shape_removes_attribution_and_preserves_serving_identity()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage_for_lifecycle_happy(&dir).await?);
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
@@ -179,9 +185,7 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
         ),
     ];
 
-    for (index, (name, kind, record_base_url, dialect_base_url)) in
-        cases.into_iter().enumerate()
-    {
+    for (index, (name, kind, record_base_url, dialect_base_url)) in cases.into_iter().enumerate() {
         let state = TestState::default();
         let dispatcher = CapturingSignedDispatch::default();
         let lifecycle = explicit_native_lifecycle(
@@ -221,15 +225,16 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
         let cron_dispatched = serde_json::from_slice::<serde_json::Value>(&dispatched[1])?;
         let normal_original = serde_json::from_slice::<serde_json::Value>(&normal_body)?;
         let cron_original = serde_json::from_slice::<serde_json::Value>(&cron_body)?;
-        assert_eq!(normal_original["model"], cron_original["model"], "{name} model");
         assert_eq!(
-            normal_original["system"][1],
-            cron_original["system"][1],
+            normal_original["model"], cron_original["model"],
+            "{name} model"
+        );
+        assert_eq!(
+            normal_original["system"][1], cron_original["system"][1],
             "{name} system tail"
         );
         assert_eq!(
-            normal_original["tools"],
-            cron_original["tools"],
+            normal_original["tools"], cron_original["tools"],
             "{name} tools"
         );
         assert!(
@@ -245,19 +250,24 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
             "{name} cron request lacks attribution control"
         );
         assert_ne!(
-            normal_original["system"][0]["text"],
-            cron_original["system"][0]["text"],
+            normal_original["system"][0]["text"], cron_original["system"][0]["text"],
             "{name} attribution differs"
         );
-        assert_eq!(normal_dispatched["model"], cron_dispatched["model"], "{name} dispatched model");
         assert_eq!(
-            normal_dispatched["system"].as_array().and_then(|system| system.last()),
-            cron_dispatched["system"].as_array().and_then(|system| system.last()),
+            normal_dispatched["model"], cron_dispatched["model"],
+            "{name} dispatched model"
+        );
+        assert_eq!(
+            normal_dispatched["system"]
+                .as_array()
+                .and_then(|system| system.last()),
+            cron_dispatched["system"]
+                .as_array()
+                .and_then(|system| system.last()),
             "{name} dispatched system tail"
         );
         assert_eq!(
-            normal_dispatched["tools"],
-            cron_dispatched["tools"],
+            normal_dispatched["tools"], cron_dispatched["tools"],
             "{name} dispatched tools"
         );
 
@@ -266,13 +276,11 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
             "{name} shaped normal/cron bodies"
         );
         assert_eq!(
-            normal_dispatched["system"][0]["text"],
-            "stable system tail",
+            normal_dispatched["system"][0]["text"], "stable system tail",
             "{name} first billing block removed by actual shape"
         );
         assert!(
-            !String::from_utf8_lossy(&dispatched[0])
-                .contains("x-anthropic-billing-header:"),
+            !String::from_utf8_lossy(&dispatched[0]).contains("x-anthropic-billing-header:"),
             "{name} shaped body contains attribution header"
         );
 
@@ -1477,12 +1485,15 @@ fn remove_original_billing_block(body: &Bytes) -> Result<Bytes, DialectError> {
             reason: format!("test dialect received invalid JSON: {error}"),
         }
     })?;
-    let Some(system) = value.get_mut("system").and_then(serde_json::Value::as_array_mut) else {
-        return Ok(Bytes::from(
-            serde_json::to_vec(&value).map_err(|error| DialectError::UnsupportedRequest {
+    let Some(system) = value
+        .get_mut("system")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(Bytes::from(serde_json::to_vec(&value).map_err(
+            |error| DialectError::UnsupportedRequest {
                 reason: format!("test dialect failed to serialize JSON: {error}"),
-            })?,
-        ));
+            },
+        )?));
     };
     let remove_first = system.first().is_some_and(|block| {
         block.get("type").and_then(serde_json::Value::as_str) == Some("text")
@@ -1569,7 +1580,6 @@ fn explicit_native_lifecycle(
     .with_event_bus(event_bus)
 }
 
-
 fn shaped_prompt_request(attribution: &str) -> http::Request<Bytes> {
     let body = serde_json::to_vec(&serde_json::json!({
         "model": "claude-sonnet-4-5",
@@ -1619,7 +1629,10 @@ async fn wait_for_final_update(
     timeout(Duration::from_secs(3), async {
         loop {
             if matches!(
-                updates.recv().await.expect("request update stream remains open"),
+                updates
+                    .recv()
+                    .await
+                    .expect("request update stream remains open"),
                 cc_lb_request_log::RequestEventUpdate::Final(_)
             ) {
                 return;
@@ -1963,7 +1976,10 @@ struct CapturingSignedDispatch {
 
 #[async_trait]
 impl UpstreamDispatch for CapturingSignedDispatch {
-    async fn dispatch(&self, request: SignedRequest) -> Result<http::Response<Body>, DispatchError> {
+    async fn dispatch(
+        &self,
+        request: SignedRequest,
+    ) -> Result<http::Response<Body>, DispatchError> {
         self.bodies
             .lock()
             .expect("captured bodies lock")

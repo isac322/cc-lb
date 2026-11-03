@@ -11,11 +11,11 @@
 
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-use std::cell::Cell;
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
+#[cfg(test)]
+use std::cell::Cell;
 
 use cc_lb_domain::PrefixBytes;
 
@@ -631,7 +631,6 @@ pub(super) fn analyze_v3_prompt_cache_with_tokenize_duration(
     )
 }
 
-
 fn analyze_v3_prompt_cache_structure<'a>(
     value: &'a Value,
     canonical_model: &str,
@@ -1016,7 +1015,6 @@ pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
         None,
     )
 }
-
 
 pub(crate) fn cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
     analysis: &V3PromptCacheAnalysis,
@@ -1882,9 +1880,18 @@ mod tests {
             ("string-system", json!("x-anthropic-billing-header: cron")),
             ("empty", json!({"type":"text","text":""})),
             ("null", Value::Null),
-            ("non-text", json!({"type":"image","source":{"type":"base64"}})),
-            ("leading-space", json!({"type":"text","text":" x-anthropic-billing-header: cron"})),
-            ("case", json!({"type":"text","text":"X-anthropic-billing-header: cron"})),
+            (
+                "non-text",
+                json!({"type":"image","source":{"type":"base64"}}),
+            ),
+            (
+                "leading-space",
+                json!({"type":"text","text":" x-anthropic-billing-header: cron"}),
+            ),
+            (
+                "case",
+                json!({"type":"text","text":"X-anthropic-billing-header: cron"}),
+            ),
         ];
         for (name, first) in cases {
             let request = json!({
@@ -1923,15 +1930,30 @@ mod tests {
             "system":[{"type":"text","text":"x-anthropic-billing-header: cron","cache_control":{"type":"ephemeral"}}]
         });
         let analysis = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
-        assert!(analysis.breakpoints.iter().all(|breakpoint| breakpoint.path != "system[0]"));
+        assert!(
+            analysis
+                .breakpoints
+                .iter()
+                .all(|breakpoint| breakpoint.path != "system[0]")
+        );
         let target = analysis
             .breakpoints
             .iter()
             .find(|breakpoint| breakpoint.path == "messages[0].content[20]")
             .expect("target breakpoint");
         assert_eq!(target.lookback_prefixes.len(), 20);
-        assert!(target.lookback_prefixes.iter().all(|prefix| prefix.content_block_index >= 2));
-        assert!(!target.lookback_prefixes.iter().any(|prefix| prefix.content_block_index == 1));
+        assert!(
+            target
+                .lookback_prefixes
+                .iter()
+                .all(|prefix| prefix.content_block_index >= 2)
+        );
+        assert!(
+            !target
+                .lookback_prefixes
+                .iter()
+                .any(|prefix| prefix.content_block_index == 1)
+        );
     }
 
     #[test]

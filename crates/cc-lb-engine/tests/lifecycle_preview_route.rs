@@ -10,21 +10,18 @@ use bytes::Bytes;
 use cc_lb_clock::TestClock;
 use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_control::{
-    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry,
-    UpstreamStatusSnapshot,
+    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 use cc_lb_domain::{Principal, TerminalStrategy, TtlClass, UpstreamCandidate, WarmCacheEntry};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
-use cc_lb_engine::prompt_cache_simulator::{
-    analyze_v3_prompt_cache, V3PromptCacheBreakpoint,
-};
+use cc_lb_engine::prompt_cache_simulator::{V3PromptCacheBreakpoint, analyze_v3_prompt_cache};
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::HeaderMap;
 use prompt_cache_routing_support::{
-    known_base_quota_snapshots, TestPromptCacheObservationCache, TestSubscriptionQuotaCache,
+    TestPromptCacheObservationCache, TestSubscriptionQuotaCache, known_base_quota_snapshots,
 };
 use serde_json::Value;
 use url::Url;
@@ -482,8 +479,7 @@ fn build_prompt_cache_lifecycle(
         state,
         mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![http::StatusCode::OK].into()))),
     });
-    let prompt_cache =
-        TestPromptCacheObservationCache::new(warm_entries);
+    let prompt_cache = TestPromptCacheObservationCache::new(warm_entries);
     let quota_cache = TestSubscriptionQuotaCache::new(HashMap::from([
         (official_id, known_base_quota_snapshots(0.25)),
         (custom_id, known_base_quota_snapshots(0.0)),

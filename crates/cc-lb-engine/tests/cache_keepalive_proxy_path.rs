@@ -13,8 +13,8 @@ use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
 };
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
-use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::CacheTtl;
+use cc_lb_storage_api::upstream::UpstreamRecord;
 use http::{HeaderValue, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
@@ -97,8 +97,7 @@ fn lifecycle_for(
 }
 
 fn upstream_for_route(id: Uuid, name: &str, base_url: Option<&str>) -> UpstreamRecord {
-    let mut upstream =
-        upstream_record(id, name, base_url.unwrap_or("https://api.anthropic.com/"));
+    let mut upstream = upstream_record(id, name, base_url.unwrap_or("https://api.anthropic.com/"));
     if base_url.is_none() {
         upstream.base_url = None;
     }
@@ -247,17 +246,12 @@ async fn threadless_keepalive_identity_uses_the_serving_cache_bundle() {
         "cc_version=2.1.312; cc_entrypoint=sdk-cli;",
         "cc_version=2.1.312; cc_entrypoint=sdk-cli; cc_workload=cron;",
     ] {
-        complete_proxy_request(
-            &official,
-            request_with_billing_header(suffix, None, true),
-        )
-        .await;
+        complete_proxy_request(&official, request_with_billing_header(suffix, None, true)).await;
     }
     let official_enqueued = official_enqueuer.enqueued();
     assert_eq!(official_enqueued.len(), 2);
     assert_eq!(
-        official_enqueued[0].session_key_hash,
-        official_enqueued[1].session_key_hash,
+        official_enqueued[0].session_key_hash, official_enqueued[1].session_key_hash,
         "official threadless identity must ignore billing-header churn"
     );
     assert!(
@@ -280,17 +274,12 @@ async fn threadless_keepalive_identity_uses_the_serving_cache_bundle() {
         "cc_version=2.1.312; cc_entrypoint=sdk-cli;",
         "cc_version=2.1.312; cc_entrypoint=sdk-cli; cc_workload=cron;",
     ] {
-        complete_proxy_request(
-            &custom,
-            request_with_billing_header(suffix, None, true),
-        )
-        .await;
+        complete_proxy_request(&custom, request_with_billing_header(suffix, None, true)).await;
     }
     let custom_enqueued = custom_enqueuer.enqueued();
     assert_eq!(custom_enqueued.len(), 2);
     assert_ne!(
-        custom_enqueued[0].session_key_hash,
-        custom_enqueued[1].session_key_hash,
+        custom_enqueued[0].session_key_hash, custom_enqueued[1].session_key_hash,
         "custom threadless identity must retain billing-header churn"
     );
     assert!(
@@ -313,11 +302,7 @@ async fn official_header_only_completion_is_not_tracked_but_custom_literal_is() 
     let official_enqueuer = Arc::new(RecordingEnqueuer::default());
     let official = lifecycle_for(
         principal.clone(),
-        upstream_for_route(
-            Uuid::from_u128(0x1006),
-            "official-header-only",
-            None,
-        ),
+        upstream_for_route(Uuid::from_u128(0x1006), "official-header-only", None),
         Arc::clone(&official_enqueuer),
     );
     complete_proxy_request(

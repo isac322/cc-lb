@@ -8369,10 +8369,8 @@ fn is_official_anthropic_base_url(url: &Url) -> bool {
 #[cfg(test)]
 mod prompt_cache_policy_tests {
     use super::*;
+    use crate::prompt_cache_simulator::{block_digest_call_count, reset_block_digest_call_count};
     use cc_lb_control::traits::NoopPromptCacheObservationSink;
-    use crate::prompt_cache_simulator::{
-        block_digest_call_count, reset_block_digest_call_count,
-    };
     #[test]
     fn official_url_policy_accepts_only_default_anthropic_authority() {
         for (url, expected) in [
@@ -8403,12 +8401,10 @@ mod prompt_cache_policy_tests {
             let request = serde_json::to_vec(&json!({
                 "model":"claude-sonnet-4-5",
                 "system":system,
-            })).expect("request serializes");
+            }))
+            .expect("request serializes");
             reset_block_digest_call_count();
-            let _ = request_cache_metadata(
-                &HeaderMap::new(),
-                &Bytes::from(request),
-            );
+            let _ = request_cache_metadata(&HeaderMap::new(), &Bytes::from(request));
             assert_eq!(
                 block_digest_call_count(),
                 if include_billing_header { 2 } else { 1 },
@@ -8416,7 +8412,6 @@ mod prompt_cache_policy_tests {
             );
         }
     }
-
 
     #[test]
     fn policy_bundles_tokenize_each_raw_prefix_boundary_once()
@@ -8464,7 +8459,6 @@ mod prompt_cache_policy_tests {
         Ok(())
     }
 
-
     #[tokio::test]
     async fn literal_only_billing_breakpoint_records_custom_cache_creation()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8502,7 +8496,11 @@ mod prompt_cache_policy_tests {
             .cache_breakpoints
             .first()
             .ok_or("literal breakpoint missing")?;
-        assert!(literal.cacheable_breakpoint_prefix_keys.contains(&breakpoint.prefix_hash));
+        assert!(
+            literal
+                .cacheable_breakpoint_prefix_keys
+                .contains(&breakpoint.prefix_hash)
+        );
         let context = PromptCacheObservationContext {
             upstream_id: Uuid::from_u128(1004),
             canonical_model_id: metadata.canonical_model_id.clone(),
@@ -8537,10 +8535,7 @@ fn prompt_cache_bundle_from_analysis(
     analysis: &V3PromptCacheAnalysis,
     cacheable_prefix_keys: HashSet<String>,
 ) -> PromptCacheBundle {
-    prompt_cache_bundle_from_breakpoints(
-        &analysis.breakpoints,
-        cacheable_prefix_keys,
-    )
+    prompt_cache_bundle_from_breakpoints(&analysis.breakpoints, cacheable_prefix_keys)
 }
 
 fn prompt_cache_bundle_from_breakpoints(
@@ -8556,7 +8551,9 @@ fn prompt_cache_bundle_from_breakpoints(
             .iter()
             .map(request_cache_breakpoint_from_v3)
             .collect(),
-        cache_prefix_hash: breakpoints.last().map(|breakpoint| breakpoint.prefix_key.clone()),
+        cache_prefix_hash: breakpoints
+            .last()
+            .map(|breakpoint| breakpoint.prefix_key.clone()),
         cacheable_breakpoint_prefix_keys: cacheable_prefix_keys,
         cache_breakpoints,
     }
@@ -8611,7 +8608,6 @@ fn plugin_cache_breakpoint_from_v3(
         token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
     }
 }
-
 
 #[derive(Clone, Default)]
 pub(crate) struct RequestCacheMetadata {

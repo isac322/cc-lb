@@ -15,9 +15,9 @@ use super::{
     CacheBlockRef, PrefixBlockSerializer, PromptCachePolicy, SerializationScratch,
     V3PromptCacheAnalysis, V3StructuralBreakpoint, analyze_v3_prompt_cache_structure,
     analyze_v3_prompt_cache_with_tokenize_duration,
-    cacheable_breakpoint_prefix_keys_with_tokenize_duration,
     cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration,
-    finish_structural_analysis, unanalyzable_prompt_cache,
+    cacheable_breakpoint_prefix_keys_with_tokenize_duration, finish_structural_analysis,
+    unanalyzable_prompt_cache,
 };
 
 const TOKEN_PREFIX_KEY_DOMAIN: &[u8] = b"cc-lb-token-prefix-v1\0";
@@ -1029,22 +1029,12 @@ mod tests {
                 ]
             });
             let cache = super::PromptTokenCountCache::new(32);
-            let (analysis, _, durations) = super::analyze_v3_prompt_cache_optimized_scoped(
-                &request,
-                MODEL,
-                &[0; 32],
-                &cache,
-            );
+            let (analysis, _, durations) =
+                super::analyze_v3_prompt_cache_optimized_scoped(&request, MODEL, &[0; 32], &cache);
             assert_eq!(analysis.breakpoints.len(), 1);
             assert_eq!(analysis.literal_breakpoints.len(), 2);
             crate::tokenizer::reset_tokenizer_call_count();
-            let output = super::analysis_output(
-                analysis,
-                MODEL,
-                Some(1_024),
-                durations,
-                true,
-            );
+            let output = super::analysis_output(analysis, MODEL, Some(1_024), durations, true);
             assert_eq!(crate::tokenizer::tokenizer_call_count(), 1);
             assert_eq!(output.cacheable_breakpoint_prefix_keys.len(), expected_keys);
             assert_eq!(
