@@ -141,13 +141,13 @@ Response attribution is **inferential**, because Anthropic reports only aggregat
 
 ### ABI / schema / migration
 
-The release has not shipped, so **no backward compatibility is required**: remove fields outright and delete compat shims/fixtures rather than bridging them. No `Option<u64>` transition field, no dual-read path. No wire-version bump is needed for this change — see the "No plugin wire change" bullet below.
+The original pre-release lookback-DTO cutover removed fields outright instead of retaining compatibility shims or transitional `Option<u64>` fields. The schema-6 identity update keeps the existing database schema and version filter; it adds no dual-read path or plugin wire-version change.
 
 - **Remove `prefix_token_count` from the lookback DTOs outright** (`cc_lb_plugin_api::types::CacheLookbackPrefix`, `cc_lb_contract::RequestCacheLookbackPrefix`); lookback carries key/index/distance/TTL-membership only. Retain `prefix_token_count` on requested breakpoints, on the matched score/trace, and on persisted observations (`estimated_prefix_tokens`).
 - **No plugin wire change.** The filter wire struct `FilterRequest` (`crates/cc-lb-plugin-wire/src/v1/mod.rs:191-203`) carries only `cache_pricing` (`CachePricingSummary`) and `candidates` (`UpstreamCandidate`); it does **not** carry the lookback breakpoint DTOs, and neither `CachePricingSummary` nor `UpstreamCandidate` embeds `prefix_token_count`. The one in-tree router plugin (`plugins/router/cache-aware-wasmtime`) reads only `candidate.predicted_cache_read_tokens` (a `CacheScore` field we keep). Removing `prefix_token_count` from the lookback DTOs is therefore a pure in-process Rust type change: **no `WireVersion` bump, no rkyv/schema fingerprint regeneration, no plugin rebuild.** `WireVersion` exposes only `V1` (`crates/cc-lb-plugin-wire/src/schema.rs`) and stays `V1`.
 - **No `request_events` migration is needed for this removal.** `request_events_v1` persists the *matched result* (`matched_v3_cache_key`, `matched_content_block_index`, `lookback_distance`, `predicted_cache_read_tokens`, `predicted_cache_creation_tokens_{5m,1h}`, `cache_value_micros`, …) in its payload JSON and `token_estimate_source` as a column, all of which we keep. The per-lookback token count is never stored as a column; if the breakpoint list is persisted as JSON anywhere, its serialized shape simply changes with the DTO (no schema migration). The `prompt_cache_observations` store schema is unaffected.
 - Update DTO round-trip fixtures, request-event compatibility tests, and simulator conversions to the new shapes; **delete** (do not preserve) any test that only existed to tolerate the old lookback-token-count shape.
-- `HASH_SCHEMA_VERSION 4→5` (the 2026-07-27 amendment above) needs no data migration — cold start via the existing version filter.
+- The current `HASH_SCHEMA_VERSION 5→6` transition needs no data migration: the existing version filter cold-starts older observations. The historical `4→5` transition in the 2026-07-27 amendment used the same filtering policy.
 
 ## Consequences
 
@@ -161,7 +161,7 @@ The release has not shipped, so **no backward compatibility is required**: remov
 
 ### Negative
 
-- BLAKE3 + `HASH_SCHEMA_VERSION=5` cold-starts schema-4 warm state on deploy; schema-4 entries are ignored by the existing version filter.
+- Schema 6 cold-starts schema-5 and earlier warm observations on deploy; mismatched entries are ignored by the existing version filter. Provider caches are not cleared.
 - The lookback DTO changes shape, but it does not cross the filter wire (`FilterRequest` carries only pricing + candidates), so there is no wire-version bump, no fingerprint regeneration, and no plugin rebuild.
 - Removing the read-time cap makes the live matching set unbounded by count; memory now depends on real expiry eviction plus a bounded overload fallback, which must be verified under load.
 - Response refresh remains inferential (aggregate provider usage cannot prove which local key hit); it is a best guess with drift telemetry, not a correctness guarantee.
