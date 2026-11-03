@@ -725,7 +725,8 @@ fn analyze_v3_prompt_cache_structure<'a>(
     let literal_breakpoints = if policy == PromptCachePolicy::AnthropicOfficial
         && blocks.iter().any(CacheBlockRef::is_billing_header)
     {
-        let literal_resolved = resolve_breakpoints(value, &blocks, PromptCachePolicy::Literal)?;
+        let literal_resolved =
+            resolve_breakpoints(value, &blocks, PromptCachePolicy::Literal).unwrap_or_default();
         let literal_chain = PromptCachePrefixChain::from_request_blocks(
             PromptCacheSimulatorKey::seed(canonical_model),
             &blocks,
@@ -776,10 +777,25 @@ fn finish_structural_analysis(
     if structural.breakpoints.len() != prefix_bytes.len() {
         return None;
     }
-    let owned_blocks = structural
-        .blocks
+    let mut scratch = SerializationScratch::default();
+    let literal_prefix_bytes = structural
+        .literal_breakpoints
         .iter()
-        .map(|block| block.clone().into_owned())
+        .map(|breakpoint| {
+            structural
+                .breakpoints
+                .iter()
+                .position(|primary| primary.block_index == breakpoint.block_index)
+                .and_then(|position| prefix_bytes.get(position).copied())
+                .unwrap_or_else(|| {
+                    let index = breakpoint.block_index as usize;
+                    prefix_bytes_of(serialized_prefix(
+                        canonical_model,
+                        structural.blocks.get(..=index).unwrap_or(&[]),
+                        &mut scratch,
+                    ))
+                })
+        })
         .collect::<Vec<_>>();
     let breakpoints = structural
         .breakpoints
@@ -796,46 +812,25 @@ fn finish_structural_analysis(
             lookback_prefixes: breakpoint.lookback_prefixes.clone(),
         })
         .collect::<Vec<_>>();
-    let mut scratch = SerializationScratch::default();
     let literal_breakpoints = structural
         .literal_breakpoints
         .iter()
-        .map(|breakpoint| {
-            let prefix_bytes = structural
-                .breakpoints
-                .iter()
-                .position(|primary| primary.block_index == breakpoint.block_index)
-                .and_then(|position| prefix_bytes.get(position).copied())
-                .unwrap_or_else(|| {
-                    let index = breakpoint.block_index as usize;
-                    let refs = owned_blocks
-                        .iter()
-                        .take(index.saturating_add(1))
-                        .map(|block| CacheBlockRef {
-                            source: block.source,
-                            path: block.path.clone(),
-                            message_index: block.message_index,
-                            value: CacheBlockValueRef::Json(&block.value),
-                            explicit_ttl: block.explicit_ttl.as_deref(),
-                        })
-                        .collect::<Vec<_>>();
-                    prefix_bytes_of(serialized_prefix(
-                        canonical_model,
-                        &refs,
-                        &mut scratch,
-                    ))
-                });
-            V3PromptCacheBreakpoint {
-                block_index: breakpoint.block_index,
-                source: breakpoint.source,
-                path: breakpoint.path.clone(),
-                message_index: breakpoint.message_index,
-                ttl: breakpoint.ttl.clone(),
-                prefix_key: breakpoint.prefix_key.clone(),
-                prefix_bytes,
-                lookback_prefixes: breakpoint.lookback_prefixes.clone(),
-            }
+        .zip(literal_prefix_bytes)
+        .map(|(breakpoint, prefix_bytes)| V3PromptCacheBreakpoint {
+            block_index: breakpoint.block_index,
+            source: breakpoint.source,
+            path: breakpoint.path.clone(),
+            message_index: breakpoint.message_index,
+            ttl: breakpoint.ttl.clone(),
+            prefix_key: breakpoint.prefix_key.clone(),
+            prefix_bytes,
+            lookback_prefixes: breakpoint.lookback_prefixes.clone(),
         })
+        .collect();
+    let owned_blocks = structural
+        .blocks
+        .into_iter()
+        .map(CacheBlockRef::into_owned)
         .collect();
     Some(V3PromptCacheAnalysis {
         blocks: owned_blocks,
@@ -1126,6 +1121,23 @@ pub(crate) fn cacheable_breakpoint_prefix_keys_for_breakpoints(
         Some(indices),
     )
     .0
+}
+
+pub(crate) fn cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
+    analysis: &V3PromptCacheAnalysis,
+    breakpoints: &[V3PromptCacheBreakpoint],
+    canonical_model: &str,
+    token_threshold: usize,
+    tokenize_ambiguous: bool,
+) -> (Vec<String>, Duration) {
+    cacheable_breakpoint_prefix_keys_with_filter(
+        analysis,
+        breakpoints,
+        canonical_model,
+        token_threshold,
+        tokenize_ambiguous,
+        None,
+    )
 }
 
 fn cacheable_breakpoint_prefix_keys_with_filter(

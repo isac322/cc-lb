@@ -15,8 +15,9 @@ use super::{
     CacheBlockRef, PrefixBlockSerializer, PromptCachePolicy, SerializationScratch,
     V3PromptCacheAnalysis, V3StructuralBreakpoint, analyze_v3_prompt_cache_structure,
     analyze_v3_prompt_cache_with_tokenize_duration,
-    cacheable_breakpoint_prefix_keys_with_tokenize_duration, finish_structural_analysis,
-    unanalyzable_prompt_cache,
+    cacheable_breakpoint_prefix_keys_with_tokenize_duration,
+    cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration,
+    finish_structural_analysis, unanalyzable_prompt_cache,
 };
 
 const TOKEN_PREFIX_KEY_DOMAIN: &[u8] = b"cc-lb-token-prefix-v1\0";
@@ -206,6 +207,7 @@ pub(crate) struct PromptCacheAnalysisTimings {
 pub(crate) struct PromptCacheAnalysisOutput {
     pub(crate) analysis: V3PromptCacheAnalysis,
     pub(crate) cacheable_breakpoint_prefix_keys: Vec<String>,
+    pub(crate) literal_cacheable_breakpoint_prefix_keys: Vec<String>,
     pub(crate) timings: PromptCacheAnalysisTimings,
 }
 
@@ -686,17 +688,30 @@ fn analysis_output(
             )
         })
         .unwrap_or_default();
+    let (literal_cacheable_breakpoint_prefix_keys, literal_duration) = token_threshold
+        .map(|threshold| {
+            cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
+                &analysis,
+                &analysis.literal_breakpoints,
+                canonical_model,
+                threshold,
+                tokenize_ambiguous,
+            )
+        })
+        .unwrap_or_default();
     if token_threshold.is_some() {
         durations.tokenize = Some(
             durations
                 .tokenize
                 .unwrap_or_default()
-                .saturating_add(threshold_tokenization_duration),
+                .saturating_add(threshold_tokenization_duration)
+                .saturating_add(literal_duration),
         );
     }
     PromptCacheAnalysisOutput {
         analysis,
         cacheable_breakpoint_prefix_keys,
+        literal_cacheable_breakpoint_prefix_keys,
         timings: durations.into_timings(),
     }
 }

@@ -3750,6 +3750,7 @@ impl Lifecycle {
                         literal_breakpoints: Vec::new(),
                     },
                     cacheable_breakpoint_prefix_keys: Vec::new(),
+                    literal_cacheable_breakpoint_prefix_keys: Vec::new(),
                     timings: PromptCacheAnalysisTimings::default(),
                 })
             }
@@ -8356,6 +8357,7 @@ mod prompt_cache_policy_tests {
             let output = PromptCacheAnalysisOutput {
                 analysis,
                 cacheable_breakpoint_prefix_keys: eligible,
+                literal_cacheable_breakpoint_prefix_keys: Vec::new(),
                 timings: PromptCacheAnalysisTimings::default(),
             };
             let metadata = request_cache_metadata_from_value_with_analysis(
@@ -8914,6 +8916,7 @@ fn request_cache_metadata_from_value(
         PromptCacheAnalysisOutput {
             analysis: analyze_v3_prompt_cache(value, canonical_model),
             cacheable_breakpoint_prefix_keys: Vec::new(),
+            literal_cacheable_breakpoint_prefix_keys: Vec::new(),
             timings: PromptCacheAnalysisTimings::default(),
         }
     });
@@ -8971,8 +8974,13 @@ fn request_cache_metadata_from_value_with_analysis(
     let output = analysis.unwrap_or_else(|| PromptCacheAnalysisOutput {
         analysis: analyze_v3_prompt_cache(value, &canonical_model_id),
         cacheable_breakpoint_prefix_keys: Vec::new(),
+        literal_cacheable_breakpoint_prefix_keys: Vec::new(),
         timings: PromptCacheAnalysisTimings::default(),
     });
+    let literal_cacheable_prefix_keys = output
+        .literal_cacheable_breakpoint_prefix_keys
+        .into_iter()
+        .collect::<HashSet<_>>();
     let official_cacheable_prefix_keys = output
         .cacheable_breakpoint_prefix_keys
         .iter()
@@ -8992,40 +9000,10 @@ fn request_cache_metadata_from_value_with_analysis(
                 .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
     });
     let literal_bundle = if has_billing_header {
-        let literal_breakpoints = &analysis.literal_breakpoints;
-        let mut literal_keys = literal_breakpoints
-            .iter()
-            .filter_map(|literal_breakpoint| {
-                analysis
-                    .breakpoints
-                    .iter()
-                    .find(|official_breakpoint| {
-                        official_breakpoint.block_index == literal_breakpoint.block_index
-                            && official_cacheable_prefix_keys
-                                .contains(&official_breakpoint.prefix_key)
-                    })
-                    .map(|_| literal_breakpoint.prefix_key.clone())
-            })
-            .collect::<HashSet<_>>();
-        let literal_only_indices = literal_breakpoints
-            .iter()
-            .filter(|literal_breakpoint| {
-                !analysis.breakpoints.iter().any(|official_breakpoint| {
-                    official_breakpoint.block_index == literal_breakpoint.block_index
-                })
-            })
-            .map(|breakpoint| breakpoint.block_index)
-            .collect::<Vec<_>>();
-        literal_keys.extend(
-            crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys_for_breakpoints(
-                &analysis,
-                literal_breakpoints,
-                &canonical_model_id,
-                cache_threshold_tokens(&canonical_model_id),
-                &literal_only_indices,
-            ),
-        );
-        prompt_cache_bundle_from_breakpoints(literal_breakpoints, literal_keys)
+        prompt_cache_bundle_from_breakpoints(
+            &analysis.literal_breakpoints,
+            literal_cacheable_prefix_keys,
+        )
     } else {
         official_bundle.clone()
     };
