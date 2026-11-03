@@ -16,6 +16,7 @@ pub(crate) fn run(test_name: &'static str, body: impl FnOnce()) {
         let lock_path = target_dir().join("trybuild.lock");
         let lock_file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(lock_path)
@@ -44,9 +45,24 @@ pub(crate) fn run(test_name: &'static str, body: impl FnOnce()) {
 }
 
 fn target_dir() -> PathBuf {
-    env::var_os("CARGO_TARGET_DIR")
-        .as_deref()
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new("target"))
-        .to_path_buf()
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        manifest_dir.is_absolute(),
+        "CARGO_MANIFEST_DIR must be absolute"
+    );
+    let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) else {
+        panic!("CARGO_MANIFEST_DIR must have a workspace root two levels above");
+    };
+
+    match env::var_os("CARGO_TARGET_DIR") {
+        Some(value) => {
+            let target_dir = Path::new(&value);
+            if target_dir.is_absolute() {
+                target_dir.to_path_buf()
+            } else {
+                workspace_root.join(target_dir)
+            }
+        }
+        None => workspace_root.join("target"),
+    }
 }
