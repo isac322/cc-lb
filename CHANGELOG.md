@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- Official Anthropic prompt-cache identity now uses schema 6 and excludes only the first exact `x-anthropic-billing-header:` system text block for eligible Anthropic API-key/OAuth upstreams. Custom upstreams remain literal, and serving-candidate cache metadata is used for routing, failover, observations, keep-alive, and final diagnostics. Existing v5 observations cold-start through schema filtering without migration.
+- Official Anthropic prompt-cache identity now uses schema 6 and excludes only the first exact `x-anthropic-billing-header:` system text block for eligible Anthropic API-key/OAuth upstreams. Custom upstreams remain literal, and serving-candidate cache metadata is used for routing, limit admission, failover, hit/miss metrics, observations, keep-alive, and final diagnostics. Existing v5 observations cold-start through schema filtering without migration.
 - Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
 - Test fixture condition waiters no longer lose broadcasts when their state changes during observation.
 - The notification burst test uses a controlled clock, avoiding false extra-rebuild failures under scheduler contention.

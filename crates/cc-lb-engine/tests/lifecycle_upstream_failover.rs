@@ -1325,16 +1325,20 @@ fn policy_limit_request() -> Request<Bytes> {
     ))
 }
 
-async fn assert_selected_bundle_failover_cost_boundary(cap_micros: i64, expected_status: StatusCode) {
+async fn assert_selected_bundle_failover_cost_boundary(
+    cap_micros: i64,
+    expected_status: StatusCode,
+) {
     let mut official =
         oauth(1, "official").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]);
     official.record.base_url = None;
     let custom = api_key(2, "custom");
     let test_bus = TestLifecycleBus::new();
-    let limit_engine = LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(cc_lb_clock::SystemClock),
-    );
+    let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(64);
+    let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let limit_engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let reconcile = spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, limit_engine.clone());
     let fixture = Fixture::with_limits(
         vec![official, custom],
         vec![
@@ -1351,12 +1355,32 @@ async fn assert_selected_bundle_failover_cost_boundary(cap_micros: i64, expected
                 window_secs: 60,
                 cap_micros: 1,
             },
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            },
+            Limit {
+                kind: LimitKind::InputTokens,
+                window_secs: 60,
+                cap_micros: 16_019,
+            },
+            Limit {
+                kind: LimitKind::OutputTokens,
+                window_secs: 60,
+                cap_micros: 1,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 16_020,
+            },
         ],
     )
     .with_lifecycle(|lifecycle| {
         lifecycle
             .with_static_limit_subject(
-                limit_engine,
+                limit_engine.clone(),
                 PRINCIPAL.to_owned(),
                 LIMIT_KEY.to_owned(),
                 StoredApiKeyRecord {
@@ -1399,6 +1423,64 @@ async fn assert_selected_bundle_failover_cost_boundary(cap_micros: i64, expected
         assert_eq!(error["error"]["type"], "rate_limit_error");
         assert_eq!(error["error"]["limit_kind"], "cost_usd");
     }
+    let mut reservation_ids = Vec::new();
+    let mut terminated = false;
+    while let Ok(event) = lifecycle_events.try_recv() {
+        match event {
+            LifecycleEvent::LimitDecision {
+                decision: LimitDecisionKind::Reserved { reservation_id, .. },
+                ..
+            } => reservation_ids.push(reservation_id),
+            LifecycleEvent::RequestTerminated { .. } => terminated = true,
+            _ => {}
+        }
+    }
+    assert!(
+        terminated,
+        "the consumed response reaches its terminal event"
+    );
+    assert_eq!(
+        reservation_ids.len(),
+        if expected_status == StatusCode::OK {
+            2
+        } else {
+            1
+        },
+        "publish the replacement ID only after its admission"
+    );
+    if let Some((first, rest)) = reservation_ids.split_first() {
+        assert!(
+            rest.iter().all(|id| id != first),
+            "the subscriber must receive the new reservation ID"
+        );
+    }
+    reconcile.shutdown().await;
+    for id in reservation_ids {
+        assert!(
+            !limit_engine.refund_by_id(&id),
+            "old and final reservations must already be settled"
+        );
+    }
+    let headers = limit_engine.headers_for(LIMIT_KEY, PRINCIPAL);
+    assert_eq!(
+        remaining(&headers, "anthropic-ratelimit-requests-remaining"),
+        if expected_status == StatusCode::OK {
+            0
+        } else {
+            1
+        },
+        "successful usage counts once; rejected failover refunds the request"
+    );
+    assert_eq!(
+        remaining(&headers, "anthropic-ratelimit-tokens-remaining"),
+        if expected_status == StatusCode::OK {
+            16_018
+        } else {
+            16_020
+        },
+        "reconcile only the final usage, or refund every unbilled attempt"
+    );
+    assert_eq!(concurrency.current(LIMIT_KEY), 0);
 }
 
 #[tokio::test]

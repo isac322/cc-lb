@@ -3099,7 +3099,13 @@ impl Lifecycle {
                     &principal,
                     record,
                     auth.success(),
-                    &body_view,
+                    || {
+                        body_view.limit_request(
+                            &ctx.canonical_model_id,
+                            classify_provider_capability(&ctx.method, &ctx.path),
+                            &routed.cache_bundle.cache_breakpoints,
+                        )
+                    },
                 )
                 .await
             {
@@ -4133,80 +4139,14 @@ impl Lifecycle {
         .with_cache_bundle(cache_metadata.bundles.for_upstream(resolved_record).clone());
         emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
 
-        let limit_reserve_start = Instant::now();
-        let mut active_limit = match self
-            .reserve_limit(
-                &principal_view,
-                &ctx,
-                &principal,
-                routed.record,
-                success,
-                &body_view,
-            )
-            .await
-        {
-            Ok(active_limit) => active_limit,
-            Err(LimitRejectionErr { response, info }) => {
-                let status = response.status();
-                if let Some(o) = observer.as_ref() {
-                    let proxy_setup_ms = duration_to_ms(started.elapsed());
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                        event_id: o.event_id().to_owned(),
-                        decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
-                            reason: info.reason_label.clone(),
-                            subject: info.subject,
-                            request_summary: info.request_summary,
-                            route_summary: info.route_summary,
-                            limit_violation: info.limit_violation,
-                        },
-                    });
-                    o.set_termination_timings(Some(proxy_setup_ms), None, None);
-                    o.terminate_failure(InternalFailure {
-                        status,
-                        error_code: error_codes::LIMIT_REJECTED,
-                        error: InternalError {
-                            stage: InternalErrorStage::Router,
-                            kind: InternalErrorKind::Unavailable,
-                            message: Some(info.reason_label),
-                        },
-                    });
-                }
-                return Ok(response);
-            }
-        };
-        let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
-        if let Some(o) = observer.as_ref() {
-            let decision = if let Some(limit) = active_limit.as_ref() {
-                cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                    reservation_id: limit
-                        .reservation
-                        .as_ref()
-                        .map(|r| r.id().to_owned())
-                        .unwrap_or_default(),
-                    amount: limit.request.max_tokens as u64,
-                    limit_reserve_ms: Some(limit_reserve_ms),
-                }
-            } else {
-                cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                    reservation_id: String::new(),
-                    amount: 0,
-                    limit_reserve_ms: Some(limit_reserve_ms),
-                }
-            };
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
-                event_id: o.event_id().to_owned(),
-                decision,
-            });
-        }
-        let reserved = active_limit
-            .as_mut()
-            .and_then(|active_limit| active_limit.reservation.take())
-            .map(|reservation| AttemptIntent::from_reservation(reservation).into_reserved());
+        let mut active_limit: Option<ActiveLimit> = None;
+        let mut reserved: Option<Reserved> = None;
 
         // Bounded cross-upstream failover. Only failures that happen before
         // the upstream processed the request (credential preparation, signing,
         // 401, 429) move to another upstream; nothing has reached the client
-        // yet, and the reservation above covers every attempt.
+        // yet. Keep an unchanged estimate's hold, or refund it before reserving
+        // the next serving bundle's estimate.
         let mut failover = FailoverRouter {
             view: &view,
             cached,
@@ -4240,6 +4180,92 @@ impl Lifecycle {
                     first_dispatch.map(|(dispatch_started, _)| dispatch_started),
                 );
                 emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
+            }
+            let replacement_request = active_limit.as_ref().and_then(|limit| {
+                let request = body_view.limit_request(
+                    &ctx.canonical_model_id,
+                    classify_provider_capability(&ctx.method, &ctx.path),
+                    &routed.cache_bundle.cache_breakpoints,
+                );
+                (request != limit.request).then_some(request)
+            });
+            if !failover_entry || replacement_request.is_some() {
+                // Every prior attempt scope has ended. Its pre-processing
+                // failure is unbilled, so RAII refunds that hold in full before
+                // the replacement is checked; never hold both estimates.
+                drop(reserved.take());
+                let limit_reserve_start = Instant::now();
+                active_limit = match self
+                    .reserve_limit(
+                        &principal_view,
+                        &ctx,
+                        &principal,
+                        routed.record,
+                        success,
+                        || {
+                            replacement_request.unwrap_or_else(|| {
+                                body_view.limit_request(
+                                    &ctx.canonical_model_id,
+                                    classify_provider_capability(&ctx.method, &ctx.path),
+                                    &routed.cache_bundle.cache_breakpoints,
+                                )
+                            })
+                        },
+                    )
+                    .await
+                {
+                    Ok(active_limit) => active_limit,
+                    Err(LimitRejectionErr { response, info }) => {
+                        let status = response.status();
+                        if let Some(o) = observer.as_ref() {
+                            let proxy_setup_ms = duration_to_ms(started.elapsed());
+                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                                event_id: o.event_id().to_owned(),
+                                decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                                    reason: info.reason_label.clone(),
+                                    subject: info.subject,
+                                    request_summary: info.request_summary,
+                                    route_summary: info.route_summary,
+                                    limit_violation: info.limit_violation,
+                                },
+                            });
+                            o.set_termination_timings(Some(proxy_setup_ms), None, None);
+                            o.terminate_failure(InternalFailure {
+                                status,
+                                error_code: error_codes::LIMIT_REJECTED,
+                                error: InternalError {
+                                    stage: InternalErrorStage::Router,
+                                    kind: InternalErrorKind::Unavailable,
+                                    message: Some(info.reason_label),
+                                },
+                            });
+                        }
+                        return Ok(response);
+                    }
+                };
+                let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
+                if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                        event_id: o.event_id().to_owned(),
+                        decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
+                            reservation_id: active_limit
+                                .as_ref()
+                                .and_then(|limit| limit.reservation.as_ref())
+                                .map(|reservation| reservation.id().to_owned())
+                                .unwrap_or_default(),
+                            amount: active_limit
+                                .as_ref()
+                                .map_or(0, |limit| limit.request.max_tokens as u64),
+                            limit_reserve_ms: Some(limit_reserve_ms),
+                        },
+                    });
+                }
+                reserved = active_limit
+                    .as_mut()
+                    .and_then(|limit| limit.reservation.take())
+                    .map(|reservation| {
+                        AttemptIntent::from_reservation(reservation).into_reserved()
+                    });
             }
             let signer_factory = view
                 .signer_factory
@@ -4519,7 +4545,7 @@ impl Lifecycle {
         principal: &Principal,
         upstream_record: &UpstreamRecord,
         authn_success: &AuthnSuccess,
-        body_view: &RequestBodyView,
+        make_limit_request: impl FnOnce() -> LimitRequest,
     ) -> Result<Option<ActiveLimit>, LimitRejectionErr> {
         let (Some(limit_engine), Some(subject_provider)) = (
             self.limit_engine.as_ref(),
@@ -4535,11 +4561,7 @@ impl Lifecycle {
             tracing::Span::current().record("cc_lb.limit.decision", "not_applicable");
             return Ok(None);
         };
-        let limit_request = body_view.limit_request(
-            &ctx.canonical_model_id,
-            classify_provider_capability(&ctx.method, &ctx.path),
-            &ctx.cache_breakpoints,
-        );
+        let limit_request = make_limit_request();
         let max_input_estimate = limit_request.input_tokens_estimate;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
             if let Some(input) = limit_request.local_cache_input {
@@ -4550,14 +4572,8 @@ impl Lifecycle {
                     limit_request.service_tier.as_deref(),
                 )
             } else {
-                let estimated_cache_tokens = ctx
-                    .cache_breakpoints
-                    .iter()
-                    .map(|bp| bp.prefix_bytes.as_token_estimate())
-                    .max()
-                    .unwrap_or(0);
-                let can_cross_cache_cliff =
-                    ctx.cache_breakpoints.is_empty() && limit_request.can_cross_cache_cliff;
+                let estimated_cache_tokens = limit_request.estimated_cache_tokens;
+                let can_cross_cache_cliff = limit_request.can_cross_cache_cliff;
                 estimator.estimate_max_with_cache(
                     &limit_request.model,
                     max_input_estimate as u64,
@@ -8011,12 +8027,13 @@ impl RequestBodyView {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct LimitRequest {
     model: String,
     max_tokens: i64,
     input_tokens_estimate: i64,
     local_cache_input: Option<cc_lb_pricing::LocalCacheInputEstimate>,
+    estimated_cache_tokens: u64,
     can_cross_cache_cliff: bool,
     stream: bool,
     service_tier: Option<String>,
@@ -8064,7 +8081,13 @@ impl LimitRequest {
                 .or_else(|| value.map(estimate_input_tokens))
                 .unwrap_or(DEFAULT_MAX_INPUT_ESTIMATE),
             local_cache_input: anthropic_input.filter(|_| !breakpoints.is_empty()),
-            can_cross_cache_cliff: value.is_some_and(request_can_cross_cache_cliff),
+            estimated_cache_tokens: breakpoints
+                .iter()
+                .map(|bp| bp.prefix_bytes.as_token_estimate())
+                .max()
+                .unwrap_or(0),
+            can_cross_cache_cliff: breakpoints.is_empty()
+                && value.is_some_and(request_can_cross_cache_cliff),
             stream: value
                 .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
@@ -8375,6 +8398,7 @@ mod prompt_cache_policy_tests {
     fn official_url_policy_accepts_only_default_anthropic_authority() {
         for (url, expected) in [
             ("https://api.anthropic.com", true),
+            ("https://@api.anthropic.com", true),
             ("https://api.anthropic.com/v1/messages?x=1#fragment", true),
             ("https://api.anthropic.com:443/proxy", true),
             ("http://api.anthropic.com", false),
@@ -8386,6 +8410,22 @@ mod prompt_cache_policy_tests {
             assert_eq!(is_official_anthropic_base_url(&url), expected, "{url}");
         }
     }
+
+    #[test]
+    fn empty_userinfo_is_canonicalized_to_the_official_url() {
+        let empty_userinfo: Url = "https://@api.anthropic.com"
+            .parse()
+            .expect("empty-userinfo URL parses");
+        let official: Url = "https://api.anthropic.com"
+            .parse()
+            .expect("official URL parses");
+        assert_eq!(empty_userinfo, official);
+        assert_eq!(empty_userinfo.as_str(), "https://api.anthropic.com/");
+        assert!(empty_userinfo.username().is_empty());
+        assert!(empty_userinfo.password().is_none());
+        assert!(is_official_anthropic_base_url(&empty_userinfo));
+    }
+
     #[test]
     fn policy_bundles_digest_each_raw_block_once_per_request() {
         for include_billing_header in [false, true] {
