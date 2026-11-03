@@ -147,6 +147,7 @@ const SSE_BUFFER_SMALL_EVENT_CAPACITY_FRACTION: usize = 8;
 const UPSTREAM_RESPONSE_BODY_ERROR_TYPE: &str = "upstream_response_body_error";
 const UPSTREAM_RESPONSE_DECODE_ERROR_TYPE: &str = "upstream_response_decode_error";
 const UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE: &str = "upstream_response_framing_error";
+const UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE: &str = "upstream_response_incomplete";
 const UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE: &str = "api_error";
 const UPSTREAM_AFFINITY_ERROR_TYPE: &str = "upstream_affinity_error";
 const UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE: &str =
@@ -2464,6 +2465,30 @@ const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<
         ProviderCapability::AnthropicMessages => Some("message_stop"),
         ProviderCapability::OpenaiResponses => Some("response.completed"),
         ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => None,
+    }
+}
+
+fn observe_sse_terminal_event(
+    capability: ProviderCapability,
+    event: &usage_parser::ParsedSseEvent<'_>,
+    usage_message_stop: bool,
+    semantic_message_stop_seen: &mut bool,
+    message_stop_at: &mut Option<Instant>,
+    now: impl FnOnce() -> Instant,
+) {
+    // Event-name fallback must not enable semantic completion or #663 warnings.
+    let semantic_event_type = event
+        .value()
+        .ok()
+        .flatten()
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str);
+    *semantic_message_stop_seen |= semantic_terminal_event_type(capability)
+        .is_some_and(|terminal| semantic_event_type == Some(terminal));
+    if event.event_name() == Some(b"message_stop")
+        || (usage_message_stop && message_stop_at.is_none())
+    {
+        *message_stop_at = Some(now());
     }
 }
 
@@ -5764,8 +5789,8 @@ impl Lifecycle {
             let mut first_content_delta_at: Option<Instant> = None;
             let mut last_content_delta_at: Option<Instant> = None;
             let mut message_stop_at: Option<Instant> = None;
-            // #663: semantic stop only — the SSE `event:` name alone does not
-            // count; `usage_update.message_stop` requires the JSON `type`.
+            // #663: semantic stop uses the JSON `type`; legacy message-stop
+            // timing still follows the event name or usage parser fallback.
             let mut semantic_message_stop_seen = false;
             let mut prompt_cache_observations_published = false;
             let mut keepalive_response = crate::cache_keepalive::StreamingKeepaliveResponse::default();
@@ -6249,9 +6274,6 @@ impl Lifecycle {
                                         last_content_delta_at = Some(now);
                                         content_delta_count = content_delta_count.saturating_add(1);
                                     }
-                                    Some(b"message_stop") => {
-                                        message_stop_at = Some(now);
-                                    }
                                     Some(b"ping") => {
                                         ping_count = ping_count.saturating_add(1);
                                     }
@@ -6287,24 +6309,14 @@ impl Lifecycle {
                                         prompt_cache_observations_published = true;
                                     }
                                 }
-                                if usage_update.message_stop
-                                    && message_stop_at.is_none()
-                                {
-                                    message_stop_at = Some(now);
-                                }
-                                // Strictly JSON-typed: the usage parser's
-                                // event-name fallback must not enable #663
-                                // accept-with-warning for name-only stops.
-                                let semantic_event_type = parsed_event
-                                    .value()
-                                    .ok()
-                                    .flatten()
-                                    .and_then(|value| value.get("type"))
-                                    .and_then(serde_json::Value::as_str);
-                                semantic_message_stop_seen |= semantic_terminal_event_type(
+                                observe_sse_terminal_event(
                                     response_affinity_context.capability,
-                                )
-                                .is_some_and(|terminal| semantic_event_type == Some(terminal));
+                                    &parsed_event,
+                                    usage_update.message_stop,
+                                    &mut semantic_message_stop_seen,
+                                    &mut message_stop_at,
+                                    || now,
+                                );
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);
@@ -6889,6 +6901,14 @@ impl Lifecycle {
                                 // provider/proxy error wins the terminal classification.
                                 stream_abnormal_stop = Some(stop);
                             }
+                            observe_sse_terminal_event(
+                                response_affinity_context.capability,
+                                &parsed_event,
+                                usage_update.message_stop,
+                                &mut semantic_message_stop_seen,
+                                &mut message_stop_at,
+                                Instant::now,
+                            );
                             sse_event_count = sse_event_count.saturating_add(1);
                             if success_sse_affinity_gate || unsolicited_hold_pending {
                                 let outgoing = if sse_transform_active {
@@ -7213,6 +7233,37 @@ impl Lifecycle {
                     yield Ok::<Bytes, Infallible>(frame);
                 }
                 buffer.clear();
+            }
+            if upstream_is_sse
+                && status.is_success()
+                && parse_sse_events_active
+                && transform_decode_supported
+                && semantic_terminal_event_type(response_affinity_context.capability)
+                    == Some("message_stop")
+                && !semantic_message_stop_seen
+                && sse_buffer_is_blank(&buffer)
+                && stream_abnormal_stop.is_none()
+                && !stream_provider_error_seen
+                && stream_upstream_error.is_none()
+                && stream_transform_error.is_none()
+                && stream_affinity_error.is_none()
+            {
+                if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                        event_id: o.event_id().to_owned(),
+                        usage: to_usage_snapshot(&usage),
+                        source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                    });
+                }
+                stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                    error_type: UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE.to_owned(),
+                    error_message:
+                        "upstream SSE response ended before message_stop".to_owned(),
+                });
+                downstream_drop_guard.mark_upstream_error(
+                    StreamTerminationCause::Unknown,
+                    None,
+                );
             }
             if stream_affinity_error.is_none()
                 && stream_upstream_error.is_none()
