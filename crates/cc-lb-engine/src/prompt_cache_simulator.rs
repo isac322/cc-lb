@@ -1875,39 +1875,62 @@ mod tests {
     }
 
     #[test]
-    fn billing_header_predicate_controls_skip_and_breakpoint_cap() {
+    fn billing_header_predicate_negative_controls_preserve_literal_identity() {
+        let billing = json!({"type":"text","text":"x-anthropic-billing-header: cron"});
         let cases = [
             ("string-system", json!("x-anthropic-billing-header: cron")),
-            ("empty", json!({"type":"text","text":""})),
-            ("null", Value::Null),
-            (
-                "non-text",
-                json!({"type":"image","source":{"type":"base64"}}),
-            ),
-            (
-                "leading-space",
-                json!({"type":"text","text":" x-anthropic-billing-header: cron"}),
-            ),
-            (
-                "case",
-                json!({"type":"text","text":"X-anthropic-billing-header: cron"}),
-            ),
+            ("empty-array", json!([{"type":"text","text":""}])),
+            ("null-array", json!([Value::Null])),
+            ("non-text-array", json!([{"type":"image","source":{"type":"base64"}}])),
+            ("leading-space", json!([{"type":"text","text":" x-anthropic-billing-header: cron"}])),
+            ("case", json!([{"type":"text","text":"X-anthropic-billing-header: cron"}])),
+            ("different-prefix", json!([{"type":"text","text":"x-anthropic-billing-headers: cron"}])),
+            ("index-one", json!([{"type":"text","text":"ordinary first"}, billing.clone()])),
+            ("index-one-after-empty", json!([{"type":"text","text":""}, billing.clone()])),
+            ("index-one-after-null", json!([Value::Null, billing])),
         ];
-        for (name, first) in cases {
+        for (name, system) in cases {
             let request = json!({
                 "model":"claude-sonnet-4-5",
-                "system":[first, {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}]
+                "system":system,
+                "messages":[{"role":"user","content":[{
+                    "type":"text",
+                    "text":"cached message tail",
+                    "cache_control":{"type":"ephemeral"}
+                }]}]
             });
-            let analysis = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
-            assert_eq!(analysis.breakpoints.len(), 1, "{name}");
-            assert_eq!(analysis.breakpoints[0].block_index, 1, "{name}");
-            assert!(
-                analysis.breakpoints[0]
-                    .lookback_prefixes
-                    .iter()
-                    .any(|prefix| prefix.content_block_index == 0),
-                "{name}"
-            );
+            let official = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
+            let literal =
+                super::analyze_v3_prompt_cache_literal(&request, "claude-sonnet-4-5");
+            assert!(!official.breakpoints.is_empty(), "{name}: valid cached message tail");
+            assert_eq!(official.blocks, literal.blocks, "{name}: raw blocks");
+            assert_eq!(official.breakpoints, literal.breakpoints, "{name}: prefix identity and bytes");
+        }
+    }
+
+    #[test]
+    fn billing_header_breakpoint_cap_is_independent_per_policy() {
+        for (prefix, tail_count, official_count, literal_count) in [
+            ("x-anthropic-billing-header:", 4, 4, 0),
+            ("x-anthropic-billing-headers:", 4, 0, 0),
+            ("x-anthropic-billing-header:", 3, 3, 4),
+        ] {
+            let mut system = vec![json!({
+                "type":"text",
+                "text":format!("{prefix} cron"),
+                "cache_control":{"type":"ephemeral"}
+            })];
+            system.extend((0..tail_count).map(|index| json!({
+                "type":"text",
+                "text":format!("cached tail {index}"),
+                "cache_control":{"type":"ephemeral"}
+            })));
+            let request = json!({"model":"claude-sonnet-4-5","system":system});
+            let official = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
+            let literal =
+                super::analyze_v3_prompt_cache_literal(&request, "claude-sonnet-4-5");
+            assert_eq!(official.breakpoints.len(), official_count, "{prefix}, tails={tail_count}");
+            assert_eq!(literal.breakpoints.len(), literal_count, "{prefix}, tails={tail_count}");
         }
     }
 
