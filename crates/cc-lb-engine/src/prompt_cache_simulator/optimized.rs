@@ -690,13 +690,35 @@ fn analysis_output(
         .unwrap_or_default();
     let (literal_cacheable_breakpoint_prefix_keys, literal_duration) = token_threshold
         .map(|threshold| {
-            cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
-                &analysis,
-                &analysis.literal_breakpoints,
-                canonical_model,
-                threshold,
-                tokenize_ambiguous,
-            )
+            let mut keys = Vec::new();
+            let mut duration = Duration::ZERO;
+            for literal_breakpoint in &analysis.literal_breakpoints {
+                let shared_official_key = analysis
+                    .breakpoints
+                    .iter()
+                    .find(|official| {
+                        official.block_index == literal_breakpoint.block_index
+                            && cacheable_breakpoint_prefix_keys
+                                .iter()
+                                .any(|key| key == &official.prefix_key)
+                    })
+                    .map(|_| literal_breakpoint.prefix_key.clone());
+                if let Some(key) = shared_official_key {
+                    keys.push(key);
+                    continue;
+                }
+                let (extra_keys, extra_duration) =
+                    cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
+                        &analysis,
+                        std::slice::from_ref(literal_breakpoint),
+                        canonical_model,
+                        threshold,
+                        tokenize_ambiguous,
+                    );
+                keys.extend(extra_keys);
+                duration = duration.saturating_add(extra_duration);
+            }
+            (keys, duration)
         })
         .unwrap_or_default();
     if token_threshold.is_some() {

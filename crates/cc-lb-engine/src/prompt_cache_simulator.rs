@@ -775,16 +775,19 @@ fn finish_structural_analysis(
     prefix_bytes: Vec<PrefixBytes>,
     canonical_model: &str,
 ) -> Option<V3PromptCacheAnalysis> {
-    if structural.breakpoints.len() != prefix_bytes.len() {
+    let V3StructuralAnalysis {
+        blocks,
+        breakpoints,
+        literal_breakpoints,
+    } = structural;
+    if breakpoints.len() != prefix_bytes.len() {
         return None;
     }
     let mut scratch = SerializationScratch::default();
-    let literal_prefix_bytes = structural
-        .literal_breakpoints
+    let literal_prefix_bytes = literal_breakpoints
         .iter()
         .map(|breakpoint| {
-            structural
-                .breakpoints
+            breakpoints
                 .iter()
                 .position(|primary| primary.block_index == breakpoint.block_index)
                 .and_then(|position| prefix_bytes.get(position).copied())
@@ -792,49 +795,42 @@ fn finish_structural_analysis(
                     let index = breakpoint.block_index as usize;
                     prefix_bytes_of(serialized_prefix(
                         canonical_model,
-                        structural.blocks.get(..=index).unwrap_or(&[]),
+                        blocks.get(..=index).unwrap_or(&[]),
                         &mut scratch,
                     ))
                 })
         })
         .collect::<Vec<_>>();
-    let breakpoints = structural
-        .breakpoints
-        .iter()
-        .zip(prefix_bytes.iter().copied())
+    let breakpoints = breakpoints
+        .into_iter()
+        .zip(prefix_bytes)
         .map(|(breakpoint, prefix_bytes)| V3PromptCacheBreakpoint {
             block_index: breakpoint.block_index,
             source: breakpoint.source,
-            path: breakpoint.path.clone(),
+            path: breakpoint.path,
             message_index: breakpoint.message_index,
-            ttl: breakpoint.ttl.clone(),
-            prefix_key: breakpoint.prefix_key.clone(),
+            ttl: breakpoint.ttl,
+            prefix_key: breakpoint.prefix_key,
             prefix_bytes,
-            lookback_prefixes: breakpoint.lookback_prefixes.clone(),
+            lookback_prefixes: breakpoint.lookback_prefixes,
         })
         .collect::<Vec<_>>();
-    let literal_breakpoints = structural
-        .literal_breakpoints
-        .iter()
+    let literal_breakpoints = literal_breakpoints
+        .into_iter()
         .zip(literal_prefix_bytes)
         .map(|(breakpoint, prefix_bytes)| V3PromptCacheBreakpoint {
             block_index: breakpoint.block_index,
             source: breakpoint.source,
-            path: breakpoint.path.clone(),
+            path: breakpoint.path,
             message_index: breakpoint.message_index,
-            ttl: breakpoint.ttl.clone(),
-            prefix_key: breakpoint.prefix_key.clone(),
+            ttl: breakpoint.ttl,
+            prefix_key: breakpoint.prefix_key,
             prefix_bytes,
-            lookback_prefixes: breakpoint.lookback_prefixes.clone(),
+            lookback_prefixes: breakpoint.lookback_prefixes,
         })
         .collect();
-    let owned_blocks = structural
-        .blocks
-        .into_iter()
-        .map(CacheBlockRef::into_owned)
-        .collect();
     Some(V3PromptCacheAnalysis {
-        blocks: owned_blocks,
+        blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
         breakpoints,
         literal_breakpoints,
     })
@@ -1090,40 +1086,6 @@ pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
     )
 }
 
-pub(crate) fn cacheable_breakpoint_prefix_keys_for_indices(
-    analysis: &V3PromptCacheAnalysis,
-    canonical_model: &str,
-    token_threshold: usize,
-    indices: &[u64],
-) -> Vec<String> {
-    cacheable_breakpoint_prefix_keys_with_filter(
-        analysis,
-        &analysis.breakpoints,
-        canonical_model,
-        token_threshold,
-        true,
-        Some(indices),
-    )
-    .0
-}
-
-pub(crate) fn cacheable_breakpoint_prefix_keys_for_breakpoints(
-    analysis: &V3PromptCacheAnalysis,
-    breakpoints: &[V3PromptCacheBreakpoint],
-    canonical_model: &str,
-    token_threshold: usize,
-    indices: &[u64],
-) -> Vec<String> {
-    cacheable_breakpoint_prefix_keys_with_filter(
-        analysis,
-        breakpoints,
-        canonical_model,
-        token_threshold,
-        true,
-        Some(indices),
-    )
-    .0
-}
 
 pub(crate) fn cacheable_breakpoint_prefix_keys_for_breakpoints_with_duration(
     analysis: &V3PromptCacheAnalysis,
