@@ -772,7 +772,6 @@ const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::HeaderValue;
     use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
     use cc_lb_storage_api::principal::{
         Limit, PrincipalKind as StoragePrincipalKind, PrincipalRecord as StoragePrincipalRecord,
@@ -782,6 +781,7 @@ mod tests {
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, Signer, SignerError, SignerFactory,
         SigningCapability, Upstream, UpstreamError,
     };
+    use http::HeaderValue;
 
     #[test]
     fn keepalive_eligibility_reuses_cached_json_for_unchanged_bytes() {
