@@ -69,6 +69,17 @@ and the generation fence are visible to every replica. Redis is a no-go for this
 feature until a separate design proves a safe SQL fence / signing / retention
 boundary.
 
+## Payload format upgrades
+
+The framed payload format stores the captured body as raw bytes before optional
+compression. Existing legacy and v2 JSON payloads remain readable and migrate
+once on their next successful renewal. Later renewals reuse the migrated
+ciphertext.
+
+Drain and stop all old workers and request-serving replicas before starting any
+new writer. Old binaries cannot read the new format. Mixed-version operation is
+unsupported; do not downgrade while active sessions contain new-format payloads.
+
 ## Configuration
 
 Attached to each principal via the admin API (see

@@ -1032,6 +1032,164 @@ async fn legacy_cache_keepalive_payload_migrates_on_first_cache_hit() {
 }
 
 #[tokio::test]
+async fn raw_v2_json_cache_keepalive_payload_migrates_once_after_refresh()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_v2_json_cache_keepalive_payload_migrates_once_after_refresh(0).await
+}
+
+#[tokio::test]
+async fn zstd_v2_json_cache_keepalive_payload_migrates_once_after_refresh()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_v2_json_cache_keepalive_payload_migrates_once_after_refresh(1).await
+}
+
+async fn assert_v2_json_cache_keepalive_payload_migrates_once_after_refresh(
+    codec: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    let mut request = fixture.enqueue_request();
+    request.params.max_refreshes = 4;
+    request.config_snapshot.max_refreshes_per_session = 4;
+    let expected_snapshot = request.snapshot.to_persisted();
+    let mut expected_wire_body: Value = serde_json::from_slice(&expected_snapshot.body)?;
+    let object = expected_wire_body
+        .as_object_mut()
+        .ok_or("fixture body is not an object")?;
+    object.insert("max_tokens".to_owned(), Value::from(0));
+    object.remove("stream");
+    let expected_wire_body = serde_json::to_vec(&expected_wire_body)?;
+    enqueuer.enqueue_cache_keepalive(request).await?;
+    let dispatch = fixture.dispatch(Arc::clone(&pusher));
+
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(fixture.pending_keepalive_job(1).await)
+            .await?,
+        JobOutcome::Done
+    ));
+    let before_migration = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await?
+        .ok_or("session is missing before migration")?;
+    assert_eq!(before_migration.generation, 2);
+    assert_eq!(before_migration.refresh_count, 1);
+    let payload_generation = before_migration
+        .generation
+        .checked_sub(u64::from(before_migration.refresh_count))
+        .ok_or("fixture payload generation underflow")?;
+    assert_eq!(payload_generation, 1);
+
+    let encoded = serde_json::to_vec(&expected_snapshot)?;
+    let encoded_len = u64::try_from(encoded.len())?;
+    let plaintext = match codec {
+        0 => encoded,
+        1 => zstd::bulk::compress(&encoded, 1)?,
+        _ => return Err("fixture requires a pre-fix v2 JSON codec".into()),
+    };
+    // Fixture's AEAD field is private to support; reproduce its fixed test key
+    // locally instead of adding a production or fixture visibility seam.
+    let aead = cc_lb_aead::AeadService::from_master_key([9; 32]);
+    let aad = format!(
+        "cache_keepalive_snapshot:v2:principal:session-hash:{}:{payload_generation}:{codec}:{encoded_len}",
+        fixture.upstream_id
+    );
+    let ciphertext = aead.encrypt(&plaintext, aad.as_bytes())?;
+    let mut old_payload = b"CCLBCKA2".to_vec();
+    old_payload.push(codec);
+    old_payload.extend_from_slice(&payload_generation.to_be_bytes());
+    old_payload.extend_from_slice(&encoded_len.to_be_bytes());
+    old_payload.extend_from_slice(&ciphertext);
+    fixture.replace_encrypted_payload(old_payload.clone()).await;
+
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(
+                fixture
+                    .pending_keepalive_job(before_migration.generation)
+                    .await,
+            )
+            .await?,
+        JobOutcome::Done
+    ));
+    let migrated = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await?
+        .ok_or("migrated session is missing")?;
+    assert_eq!(migrated.generation, 3);
+    assert_eq!(migrated.refresh_count, 2);
+    assert_eq!(migrated.status, CacheKeepaliveSessionStatus::Active);
+    assert_ne!(migrated.encrypted_payload, old_payload);
+    assert_eq!(
+        migrated.encrypted_payload.get(..8),
+        Some(b"CCLBCKA2".as_slice())
+    );
+    assert!(matches!(
+        migrated.encrypted_payload.get(8),
+        Some(&2) | Some(&3)
+    ));
+    let decoded = crate::cache_keepalive_payload::decrypt_cache_keepalive_payload(
+        &aead,
+        "principal",
+        "session-hash",
+        fixture.upstream_id,
+        migrated.generation,
+        migrated.refresh_count,
+        &migrated.encrypted_payload,
+    )?;
+    assert_eq!(decoded.snapshot, expected_snapshot);
+    assert!(!decoded.needs_rewrite);
+
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(fixture.pending_keepalive_job(migrated.generation).await)
+            .await?,
+        JobOutcome::Done
+    ));
+    let rescheduled = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await?
+        .ok_or("rescheduled migrated session is missing")?;
+    assert_eq!(rescheduled.generation, 4);
+    assert_eq!(rescheduled.refresh_count, 3);
+    assert_eq!(rescheduled.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(rescheduled.encrypted_payload, migrated.encrypted_payload);
+    fixture.pending_keepalive_job(rescheduled.generation).await;
+
+    let requests = fixture
+        .http
+        .requests
+        .lock()
+        .map_err(|_| "requests lock is poisoned")?
+        .clone();
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        assert_eq!(
+            request.url,
+            "http://fake-upstream.local/v1/messages?beta=true"
+        );
+        assert_eq!(
+            request.headers.get("anthropic-version"),
+            Some(&::http::HeaderValue::from_static("2023-06-01"))
+        );
+        assert_eq!(
+            request.headers.get("x-api-key"),
+            Some(&::http::HeaderValue::from_static("sk-ant-rotated"))
+        );
+        assert_eq!(request.body.as_ref(), expected_wire_body.as_slice());
+    }
+    let first = requests.first().ok_or("initial renewal was not captured")?;
+    for request in requests.iter().skip(1) {
+        assert_eq!(request.headers, first.headers);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn cache_keepalive_missing_accounting_key_terminalizes_without_dispatch() {
     let fixture = Fixture::new().await;
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
