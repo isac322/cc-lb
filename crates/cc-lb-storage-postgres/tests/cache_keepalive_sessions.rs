@@ -48,6 +48,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     ticketed_cancel_retires_generation_after_synthetic_refresh(&storage).await?;
     newer_ticket_replaces_terminal_generation_before_terminal_write_timestamp(&storage).await?;
     completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(&storage).await?;
+    ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_responses(&storage).await?;
 
     fixture.drop_schema().await
 }
@@ -588,6 +589,117 @@ async fn concurrent_claim_allows_exactly_one_enqueued_generation_winner(
     Ok(())
 }
 
+async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_responses(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "ticketed-stable-logical-anchor";
+    let original = storage
+        .replace_from_real_request(&replace_request(key, b"original-prefix", 100))
+        .await?;
+    let replacement_ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    let refreshed = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: key.to_owned(),
+            generation: original.generation,
+            cache_anchor_at_unix_secs: 371,
+            run_at_unix_secs: 641,
+            expires_at_unix_secs: 671,
+            encrypted_payload: None,
+            now_unix_secs: 371,
+        })
+        .await?
+        .expect("refreshed generation");
+    assert_eq!(refreshed.first_scheduled_at_unix_secs, 100);
+    let active = storage
+        .replace_from_real_request_fenced(
+            &replace_request(key, b"new-real-prefix", 370),
+            Some(replacement_ticket),
+        )
+        .await?
+        .expect("real logical anchor is newer despite older sliding anchor");
+    assert_eq!(active.first_scheduled_at_unix_secs, 370);
+    assert_eq!(active.cache_anchor_at_unix_secs, 370);
+    assert_eq!(active.generation, refreshed.generation + 1);
+
+    let cancel_ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    assert!(
+        !storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                Some(cancel_ticket),
+                369,
+                CacheKeepaliveTerminalReason::Cancelled,
+                400,
+            )
+            .await?
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("2:1".to_owned())
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("protected real generation exists"),
+        active
+    );
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                Some(cancel_ticket),
+                372,
+                CacheKeepaliveTerminalReason::Cancelled,
+                400,
+            )
+            .await?
+    );
+    let terminal = storage
+        .get_cache_keepalive_session(key)
+        .await?
+        .expect("logical cancellation fence exists");
+    assert_eq!(terminal.first_scheduled_at_unix_secs, 372);
+    assert_eq!(terminal.cache_anchor_at_unix_secs, 370);
+
+    let newer_ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    assert!(
+        storage
+            .replace_from_real_request_fenced(
+                &replace_request(key, b"slow-old-prefix", 371),
+                Some(newer_ticket),
+            )
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("3:2".to_owned())
+    );
+    let replacement = storage
+        .replace_from_real_request_fenced(
+            &replace_request(key, b"new-post-compaction-prefix", 373),
+            Some(newer_ticket),
+        )
+        .await?
+        .expect("newer logical anchor reactivates terminal state");
+    assert_eq!(replacement.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(replacement.first_scheduled_at_unix_secs, 373);
+    assert_eq!(replacement.generation, terminal.generation + 1);
+    assert_eq!(replacement.encrypted_payload, b"new-post-compaction-prefix");
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("3:3".to_owned())
+    );
+    Ok(())
+}
+
 async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
     storage: &PostgresStorage,
 ) -> Result<()> {
@@ -628,6 +740,7 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
     assert_eq!(terminal.generation, refreshed.generation);
     assert_eq!(terminal.status, CacheKeepaliveSessionStatus::Terminal);
     assert_eq!(terminal.cache_anchor_at_unix_secs, 371);
+    assert_eq!(terminal.first_scheduled_at_unix_secs, 370);
     assert_eq!(terminal.updated_at_unix_secs, 400);
     assert!(terminal.encrypted_payload.is_empty());
     assert_eq!(
@@ -770,13 +883,22 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(
             .await?
             .is_none()
     );
+    assert!(
+        storage
+            .replace_from_real_request_fenced(
+                &replace_request(key, b"older-logical-prefix", 370),
+                Some(ticket),
+            )
+            .await?
+            .is_none()
+    );
     let replacement = storage
         .replace_from_real_request_fenced(
-            &replace_request(key, b"logically-newer-prefix", 370),
+            &replace_request(key, b"logically-newer-prefix", 371),
             Some(ticket),
         )
         .await?
-        .expect("terminal timestamps cannot reject a newer real ticket");
+        .expect("same ticket can replace at the logical boundary");
     assert_eq!(replacement.generation, original.generation + 1);
     assert_eq!(replacement.status, CacheKeepaliveSessionStatus::Active);
     assert_eq!(replacement.encrypted_payload, b"logically-newer-prefix");
