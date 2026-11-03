@@ -76,6 +76,176 @@ async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
     assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
 }
 #[tokio::test]
+async fn buffered_transform_preserves_only_original_upstream_unified_headers() {
+    for (upstream_has_unified, upstream_status) in [
+        (true, StatusCode::OK),
+        (false, StatusCode::OK),
+        (true, StatusCode::TOO_MANY_REQUESTS),
+    ] {
+        for replacement in [
+            None,
+            Some(HeaderMap::new()),
+            Some(spoofed_plugin_headers(1)),
+        ] {
+            let upstream_body = buffered_upstream_body();
+            let mut headers = json_headers(upstream_body.len(), false);
+            add_rate_limit_header_fixture(&mut headers, upstream_has_unified);
+            let mut replacement = replacement;
+            if let Some(headers) = replacement.as_mut() {
+                headers.insert("x-plugin-header", HeaderValue::from_static("kept"));
+            }
+            let replaces_headers = replacement.is_some();
+            let transform = Arc::new(BufferedHeaderPolicyTransform {
+                headers: replacement,
+                seen_headers: Mutex::new(Vec::new()),
+            });
+            let lifecycle = lifecycle_with_transforms(
+                Some(transform.clone()),
+                None,
+                Arc::new(FixedDispatch {
+                    status: upstream_status,
+                    headers,
+                    body: upstream_body.clone(),
+                }),
+            );
+            let response = handle_authenticated(
+                &lifecycle,
+                messages_request(Bytes::from_static(
+                    br#"{"model":"claude-test","messages":[],"stream":false}"#,
+                )),
+            )
+            .await
+            .expect("lifecycle handles buffered replacement");
+            let (status, headers, body) = collect_body(response).await;
+
+            assert_eq!(status, upstream_status);
+            assert_eq!(
+                body,
+                replace_bytes(&upstream_body, br#""name":"Bash""#, br#""name":"bash""#)
+            );
+            assert_eq!(
+                headers.get(CONTENT_LENGTH).expect("replacement length"),
+                &HeaderValue::from_str(&body.len().to_string()).expect("body length header")
+            );
+            assert!(headers.get(CONTENT_ENCODING).is_none());
+            assert_client_rate_limit_headers(&headers, upstream_has_unified);
+            if replaces_headers {
+                assert_eq!(
+                    headers.get("x-plugin-header"),
+                    Some(&HeaderValue::from_static("kept"))
+                );
+                assert!(headers.get("x-safe-header").is_none());
+            } else {
+                assert_eq!(
+                    headers.get("x-safe-header"),
+                    Some(&HeaderValue::from_static("keep-me"))
+                );
+            }
+            let seen = transform.seen_headers.lock().expect("seen headers lock");
+            assert_eq!(seen.len(), 1);
+            assert_plugin_headers_redacted(&seen[0]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn compressed_sse_affinity_preserves_original_upstream_unified_headers() {
+    let plaintext = complete_message_sse_body();
+    for (encoding, body) in [
+        ("gzip", gzip_bytes(&plaintext)),
+        ("br", brotli_bytes(&plaintext)),
+    ] {
+        let mut headers = sse_headers();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding));
+        headers.insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&body.len().to_string()).expect("content length"),
+        );
+        add_rate_limit_header_fixture(&mut headers, true);
+        let lifecycle = lifecycle_with_transforms(
+            None,
+            None,
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers,
+                body,
+            }),
+        );
+        let request = messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
+        ));
+        let response = handle_authenticated(&lifecycle, request)
+            .await
+            .expect("lifecycle handles compressed SSE affinity");
+        let (status, headers, body) = collect_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, plaintext);
+        assert!(headers.get(CONTENT_ENCODING).is_none());
+        assert!(headers.get(CONTENT_LENGTH).is_none());
+        assert_client_rate_limit_headers(&headers, true);
+    }
+}
+
+#[tokio::test]
+async fn sse_transform_preserves_upstream_unified_headers_without_exposing_them_to_plugin() {
+    for compressed in [false, true] {
+        for upstream_status in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+            for upstream_has_unified in [true, false] {
+                let plaintext = sse_upstream_body(false);
+                let body = if compressed {
+                    gzip_bytes(&plaintext)
+                } else {
+                    plaintext.clone()
+                };
+                let mut headers = sse_headers();
+                headers.insert(
+                    CONTENT_LENGTH,
+                    HeaderValue::from_str(&body.len().to_string()).expect("content length"),
+                );
+                if compressed {
+                    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                }
+                add_rate_limit_header_fixture(&mut headers, upstream_has_unified);
+                let transform = Arc::new(HeaderCapturingSseTransform::default());
+                let lifecycle = lifecycle_with_transforms(
+                    None,
+                    Some(transform.clone()),
+                    Arc::new(FixedDispatch {
+                        status: upstream_status,
+                        headers,
+                        body,
+                    }),
+                );
+                let response = handle_authenticated(
+                    &lifecycle,
+                    messages_request(Bytes::from_static(
+                        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+                    )),
+                )
+                .await
+                .expect("lifecycle handles transformed SSE");
+                let (status, headers, body) = collect_body(response).await;
+
+                assert_eq!(status, upstream_status);
+                assert_eq!(
+                    body,
+                    replace_bytes(&plaintext, br#""name":"Bash""#, br#""name":"bash""#)
+                );
+                assert!(headers.get(CONTENT_ENCODING).is_none());
+                assert!(headers.get(CONTENT_LENGTH).is_none());
+                assert_client_rate_limit_headers(&headers, upstream_has_unified);
+                let seen = transform.seen_headers();
+                assert_eq!(seen.len(), 2);
+                for headers in seen {
+                    assert_plugin_headers_redacted(&headers);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn buffered_gemini_oauth_code_assist_response_is_unwrapped() {
     let wrapped = Bytes::from_static(
         br#"{"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48}},"traceId":"trace"}"#,
@@ -225,7 +395,7 @@ async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
         None,
         Arc::new(FixedDispatch {
             status: StatusCode::OK,
-            headers: json_headers(compressed.len(), true),
+            headers: with_upstream_unified_headers(json_headers(compressed.len(), true)),
             body: compressed.clone(),
         }),
     );
@@ -239,6 +409,7 @@ async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
     let (_status, headers, body) = collect_body(response).await;
 
     assert_eq!(body, compressed);
+    assert_client_rate_limit_headers(&headers, true);
     assert_eq!(
         headers.get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("gzip"))
@@ -261,7 +432,7 @@ async fn buffered_header_only_transform_preserves_compressed_upstream_bytes() {
         None,
         Arc::new(FixedDispatch {
             status: StatusCode::OK,
-            headers: json_headers(compressed.len(), true),
+            headers: with_upstream_unified_headers(json_headers(compressed.len(), true)),
             body: compressed.clone(),
         }),
     );
@@ -275,6 +446,7 @@ async fn buffered_header_only_transform_preserves_compressed_upstream_bytes() {
     let (_status, headers, body) = collect_body(response).await;
 
     assert_eq!(body, compressed);
+    assert_client_rate_limit_headers(&headers, true);
     assert_eq!(
         headers.get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("gzip"))
@@ -338,6 +510,7 @@ async fn buffered_transform_failure_fails_open_to_original_response() {
     let (_status, headers, body) = collect_body(response).await;
 
     assert_eq!(body, buffered_upstream_body());
+    assert_client_rate_limit_headers(&headers, true);
     assert_eq!(
         headers
             .get(CONTENT_LENGTH)
@@ -634,6 +807,7 @@ async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() 
         CONTENT_LENGTH,
         HeaderValue::from_str(&compressed.len().to_string()).expect("content length header"),
     );
+    let headers = with_upstream_unified_headers(headers);
     let lifecycle = lifecycle_with_transforms(
         None,
         None,
@@ -663,6 +837,7 @@ async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() 
         Some(compressed.len().to_string().as_str())
     );
     assert_eq!(output, compressed);
+    assert_client_rate_limit_headers(&headers, true);
 }
 #[tokio::test]
 async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_drop() {
@@ -2669,7 +2844,7 @@ impl UpstreamDialect for ShapeTransformDialect {
 fn buffered_dispatch() -> Arc<dyn UpstreamDispatch> {
     Arc::new(FixedDispatch {
         status: StatusCode::OK,
-        headers: json_headers(buffered_upstream_body().len(), false),
+        headers: with_upstream_unified_headers(json_headers(buffered_upstream_body().len(), false)),
         body: buffered_upstream_body(),
     })
 }
@@ -2766,6 +2941,32 @@ impl ResponseTransformHook for BufferedToolNameTransform {
             status: None,
             headers: Some(spoofed_plugin_headers(body.len())),
             body: Some(body),
+        })
+    }
+}
+
+struct BufferedHeaderPolicyTransform {
+    headers: Option<HeaderMap>,
+    seen_headers: Mutex<Vec<HeaderMap>>,
+}
+
+impl ResponseTransformHook for BufferedHeaderPolicyTransform {
+    fn transform_response(
+        &self,
+        request: TransformResponseRequest,
+    ) -> Result<TransformResponseResult, ResponseTransformError> {
+        self.seen_headers
+            .lock()
+            .expect("seen headers lock")
+            .push(request.response_headers);
+        Ok(TransformResponseResult::Replace {
+            status: None,
+            headers: self.headers.clone(),
+            body: Some(replace_bytes(
+                &request.body,
+                br#""name":"Bash""#,
+                br#""name":"bash""#,
+            )),
         })
     }
 }
@@ -2964,6 +3165,18 @@ impl SseEventTransformHook for HeaderCapturingSseTransform {
             .lock()
             .expect("seen headers lock")
             .push(request.response_headers);
+        if request.event.event == "content_block_start" {
+            return Ok(TransformSseEventResult::Replace {
+                events: vec![SseEvent {
+                    event: request.event.event,
+                    data: replace_bytes(
+                        &request.event.data,
+                        br#""name":"Bash""#,
+                        br#""name":"bash""#,
+                    ),
+                }],
+            });
+        }
         Ok(TransformSseEventResult::Unchanged)
     }
 }
@@ -3106,7 +3319,151 @@ fn spoofed_plugin_headers(content_len: usize) -> HeaderMap {
         "anthropic-ratelimit-requests-limit",
         HeaderValue::from_static("1"),
     );
+    headers.insert("x-plugin-header", HeaderValue::from_static("kept"));
+    headers.insert(
+        "anthropic-ratelimit-unified-status",
+        HeaderValue::from_static("plugin-override"),
+    );
+    headers.insert(
+        "anthropic-ratelimit-unified-plugin-injected",
+        HeaderValue::from_static("plugin-injection"),
+    );
+    headers.insert(
+        "anthropic-ratelimit-unified-hop",
+        HeaderValue::from_static("plugin-hop-injection"),
+    );
     headers
+}
+
+fn with_upstream_unified_headers(mut headers: HeaderMap) -> HeaderMap {
+    for (name, value) in &upstream_unified_header_fixture() {
+        headers.append(name.clone(), value.clone());
+    }
+    headers
+}
+
+fn upstream_unified_header_fixture() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "anthropic-ratelimit-unified-status",
+        HeaderValue::from_static("allowed"),
+    );
+    headers.append(
+        "anthropic-ratelimit-unified-future-bucket-remaining",
+        HeaderValue::from_bytes(b"first\t\x80opaque").expect("legal opaque header bytes"),
+    );
+    headers.append(
+        "anthropic-ratelimit-unified-future-bucket-remaining",
+        HeaderValue::from_static(" second value "),
+    );
+    headers.append(
+        "anthropic-ratelimit-unified-future-bucket-remaining",
+        HeaderValue::from_bytes(b"first\t\x80opaque").expect("legal duplicate opaque value"),
+    );
+    headers
+}
+
+fn add_rate_limit_header_fixture(headers: &mut HeaderMap, include_unified: bool) {
+    if include_unified {
+        for (name, value) in &upstream_unified_header_fixture() {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+    for name in [
+        "anthropic-ratelimit-requests-limit",
+        "anthropic-ratelimit-unified",
+        "anthropic-ratelimit-unifiedish-status",
+        "x-ratelimit-limit",
+        "x-cc-lb-secret",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+    ] {
+        headers.insert(name, HeaderValue::from_static("remove-me"));
+    }
+    headers.insert(
+        "connection",
+        HeaderValue::from_static("AnThRoPiC-RaTeLiMiT-UnIfIeD-HoP, x-hop"),
+    );
+    headers.insert(
+        "anthropic-ratelimit-unified-hop",
+        HeaderValue::from_static("do-not-restore"),
+    );
+    headers.insert("x-hop", HeaderValue::from_static("remove-me"));
+    headers.insert("x-safe-header", HeaderValue::from_static("keep-me"));
+}
+
+fn assert_client_rate_limit_headers(headers: &HeaderMap, include_unified: bool) {
+    let expected = if include_unified {
+        upstream_unified_header_fixture()
+    } else {
+        HeaderMap::new()
+    };
+    for name in expected.keys() {
+        assert_eq!(
+            headers
+                .get_all(name)
+                .iter()
+                .map(HeaderValue::as_bytes)
+                .collect::<Vec<_>>(),
+            expected
+                .get_all(name)
+                .iter()
+                .map(HeaderValue::as_bytes)
+                .collect::<Vec<_>>(),
+            "original raw values and per-name order for {name}"
+        );
+    }
+    assert_eq!(
+        headers
+            .keys()
+            .filter(|name| name.as_str().starts_with("anthropic-ratelimit-unified-"))
+            .count(),
+        expected.keys().count(),
+        "no missing or synthesized unified header names"
+    );
+    for name in [
+        "anthropic-ratelimit-requests-limit",
+        "anthropic-ratelimit-unified",
+        "anthropic-ratelimit-unifiedish-status",
+        "anthropic-ratelimit-unified-hop",
+        "x-ratelimit-limit",
+        "x-cc-lb-secret",
+        "x-cc-lb-spoof",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "connection",
+        "x-hop",
+        "x-sneaky",
+    ] {
+        assert!(headers.get(name).is_none(), "{name} remains removed");
+    }
+}
+
+fn assert_plugin_headers_redacted(headers: &HeaderMap) {
+    assert!(
+        headers
+            .keys()
+            .all(|name| !name.as_str().starts_with("anthropic-ratelimit-"))
+    );
+    for name in [
+        CONTENT_ENCODING.as_str(),
+        CONTENT_LENGTH.as_str(),
+        "x-ratelimit-limit",
+        "x-cc-lb-secret",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "connection",
+        "x-hop",
+    ] {
+        assert!(headers.get(name).is_none(), "plugin must not see {name}");
+    }
+    assert_eq!(
+        headers.get("x-safe-header"),
+        Some(&HeaderValue::from_static("keep-me"))
+    );
 }
 
 fn gzip_bytes(body: &Bytes) -> Bytes {
