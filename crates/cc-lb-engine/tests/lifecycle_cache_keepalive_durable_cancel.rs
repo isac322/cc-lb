@@ -287,7 +287,10 @@ async fn stale_compaction_completion_cannot_cancel_or_resurrect_newer_generation
             &self,
             request: CacheKeepaliveNotTrackedRequest,
         ) -> Result<(), CacheKeepaliveEnqueueError> {
-            self.not_tracked.lock().expect("not-tracked lock").push(request);
+            self.not_tracked
+                .lock()
+                .expect("not-tracked lock")
+                .push(request);
             self.mutations.add_permits(1);
             Ok(())
         }
@@ -311,10 +314,7 @@ async fn stale_compaction_completion_cannot_cancel_or_resurrect_newer_generation
 
     #[async_trait]
     impl UpstreamDispatch for SequenceDispatch {
-        async fn dispatch(
-            &self,
-            _request: SignedRequest,
-        ) -> Result<Response<Body>, DispatchError> {
+        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
             let index = self.next.fetch_add(1, Ordering::SeqCst);
             let body = self
                 .responses
@@ -388,8 +388,17 @@ async fn stale_compaction_completion_cannot_cancel_or_resurrect_newer_generation
     .expect("mutation permits are available")
     .forget();
 
-    assert_eq!(enqueuer.not_tracked.lock().expect("not-tracked lock").len(), 1);
-    assert!(enqueuer.cancelled.lock().expect("cancelled lock").is_empty());
+    assert_eq!(
+        enqueuer.not_tracked.lock().expect("not-tracked lock").len(),
+        1
+    );
+    assert!(
+        enqueuer
+            .cancelled
+            .lock()
+            .expect("cancelled lock")
+            .is_empty()
+    );
     let enqueued = enqueuer.enqueued.lock().expect("enqueued lock");
     assert_eq!(enqueued.len(), 1);
     assert_eq!(enqueued[0].snapshot.body, summary_request);
@@ -410,10 +419,10 @@ async fn compaction_fence_retains_unrelated_agent_scope_state() {
             &self,
             request: CacheKeepaliveEnqueueRequest,
         ) -> Result<(), CacheKeepaliveEnqueueError> {
-            self.active
-                .lock()
-                .expect("active sessions lock")
-                .insert(request.session_key_hash, request.expected_generation.unwrap_or(1));
+            self.active.lock().expect("active sessions lock").insert(
+                request.session_key_hash,
+                request.expected_generation.unwrap_or(1),
+            );
             Ok(())
         }
 
@@ -490,10 +499,16 @@ async fn compaction_fence_retains_unrelated_agent_scope_state() {
     }
 
     let active = enqueuer.active.lock().expect("active sessions lock");
-    assert!(!active.keys().any(|key| key.ends_with("/thread:scope-session")));
-    assert!(active
-        .keys()
-        .any(|key| key.ends_with("/thread:scope-session/agent:child-agent")));
+    assert!(
+        !active
+            .keys()
+            .any(|key| key.ends_with("/thread:scope-session"))
+    );
+    assert!(
+        active
+            .keys()
+            .any(|key| key.ends_with("/thread:scope-session/agent:child-agent"))
+    );
     drop(active);
     let cancelled = enqueuer.cancelled.lock().expect("cancelled keys lock");
     assert_eq!(cancelled.len(), 1);
