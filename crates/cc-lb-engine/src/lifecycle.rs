@@ -8279,7 +8279,9 @@ fn is_official_anthropic_base_url(url: &Url) -> bool {
 mod prompt_cache_policy_tests {
     use super::*;
     use cc_lb_control::traits::NoopPromptCacheObservationSink;
-
+    use crate::prompt_cache_simulator::{
+        block_digest_call_count, reset_block_digest_call_count,
+    };
     #[test]
     fn official_url_policy_accepts_only_default_anthropic_authority() {
         for (url, expected) in [
@@ -8295,6 +8297,35 @@ mod prompt_cache_policy_tests {
             assert_eq!(is_official_anthropic_base_url(&url), expected, "{url}");
         }
     }
+    #[test]
+    fn policy_bundles_digest_each_raw_block_once_per_request() {
+        for include_billing_header in [false, true] {
+            let mut system = Vec::new();
+            if include_billing_header {
+                system.push(json!({"type":"text","text":"x-anthropic-billing-header: cron-a"}));
+            }
+            system.push(json!({
+                "type":"text",
+                "text":"stable",
+                "cache_control":{"type":"ephemeral"}
+            }));
+            let request = serde_json::to_vec(&json!({
+                "model":"claude-sonnet-4-5",
+                "system":system,
+            })).expect("request serializes");
+            reset_block_digest_call_count();
+            let _ = request_cache_metadata(
+                &HeaderMap::new(),
+                &Bytes::from(request),
+            );
+            assert_eq!(
+                block_digest_call_count(),
+                if include_billing_header { 2 } else { 1 },
+                "billing_header={include_billing_header}"
+            );
+        }
+    }
+
 
     #[test]
     fn policy_bundles_tokenize_each_raw_prefix_boundary_once()

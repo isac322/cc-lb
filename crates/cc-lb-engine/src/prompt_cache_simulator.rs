@@ -9,7 +9,8 @@
 //! enters at `system` (or the first message when no system block exists), while thinking, effort,
 //! and tool choice enter at `messages`. Earlier prefix tiers remain stable.
 
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::cell::Cell;
 
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
@@ -18,6 +19,10 @@ use serde_json::Value;
 use cc_lb_domain::PrefixBytes;
 
 use crate::tokenizer::{PrefixTokenizer, cache_threshold_from_byte_len, prefix_bytes_of};
+#[cfg(test)]
+thread_local! {
+    static BLOCK_DIGEST_CALLS: Cell<u64> = const { Cell::new(0) };
+}
 
 mod optimized;
 
@@ -950,6 +955,8 @@ fn cache_control_ttl(value: &Value) -> Option<&str> {
 }
 
 fn block_digest(block: &CacheBlockRef<'_>, scratch: &mut SerializationScratch) -> [u8; 32] {
+    #[cfg(test)]
+    BLOCK_DIGEST_CALLS.with(|calls| calls.set(calls.get() + 1));
     let bytes = scratch.serialize(&DigestBlockSerializer(block));
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"cc-lb-cache-v6:block");
@@ -1097,6 +1104,16 @@ fn source_name(source: V3PromptCacheBlockSource) -> &'static str {
         V3PromptCacheBlockSource::System => "system",
         V3PromptCacheBlockSource::Message => "message",
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_block_digest_call_count() {
+    BLOCK_DIGEST_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn block_digest_call_count() -> u64 {
+    BLOCK_DIGEST_CALLS.with(Cell::get)
 }
 
 #[cfg(test)]
