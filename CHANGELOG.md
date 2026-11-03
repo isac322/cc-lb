@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Response transforms now preserve upstream `anthropic-ratelimit-unified-*` values for clients after hop-by-hop and framing sanitization, without synthesizing absent values or restoring connection-listed names; plugin input still redacts the full `anthropic-ratelimit-*` family. ([#1026](https://github.com/isac322/cc-lb/issues/1026))
 - Prompt-cache keep-alive snapshots now materialize the renewal body and model once for reuse during dispatch and accounting. New encrypted payloads store captured body bytes in explicit raw/zstd frame codecs instead of JSON byte arrays; legacy and v2 JSON payloads remain readable and migrate on their next successful cache-hit reschedule. ([#1013](https://github.com/isac322/cc-lb/issues/1013))
 - Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
 - Test fixture condition waiters no longer lose broadcasts when their state changes during observation.
