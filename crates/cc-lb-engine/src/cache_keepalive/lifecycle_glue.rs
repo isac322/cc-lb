@@ -1001,13 +1001,14 @@ mod tests {
             &key,
             2,
         ));
+        let stale_is_latest =
+            LifecycleKeepalive::advance_session_seq(&mut completion_order, &key, 1);
         assert!(
-            !LifecycleKeepalive::advance_session_seq(&mut completion_order, &key, 1),
+            !stale_is_latest,
             "delayed older persistence must not become the latest completion"
         );
         assert_eq!(completion_order.get(&key), Some(&2));
 
-        let stale_is_latest = false;
         let mut fenced_actions = Vec::new();
         if stale_is_latest {
             fenced_actions.push("cancel");
