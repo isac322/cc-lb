@@ -1008,14 +1008,6 @@ async fn cache_bearing_request_below_body_cliff_reserves_cliff_cost_and_cache_to
     }
 }
 
-#[derive(Clone, Default)]
-struct CapturingSignedDispatch {
-    bodies: Arc<Mutex<Vec<Bytes>>>,
-}
-
-#[async_trait]
-impl UpstreamDispatch for CapturingSignedDispatch {
-    async fn dispatch(&self, request: SignedRequest) -> Result<http::Response<Body>, DispatchError> {
 // Real grayscale PNGs: filter-0 scanlines, zlib IDAT, and CRC-checked chunks.
 // Compression changes encoded length, not the approved admission allowance.
 fn synthetic_png_base64(side: u32, compression: flate2::Compression) -> String {
@@ -1449,9 +1441,7 @@ impl UpstreamDispatch for CapturingAdmissionDispatch {
             .lock()
             .expect("captured bodies lock")
             .push(request.body().clone());
-        Ok(http::Response::new(Body::from(Bytes::from_static(
-            br#"{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}"#,
-        ))))
+        self.inner.dispatch(request).await
     }
 }
 
@@ -1652,8 +1642,6 @@ async fn sqlite_storage_for_lifecycle_happy(
             .await?;
     storage.initialize().await?;
     Ok(storage)
-        self.inner.dispatch(request).await
-    }
 }
 
 #[tokio::test]
@@ -1965,5 +1953,23 @@ async fn admission_missing_and_unsupported_image_sources_keep_generic_estimate()
             whole,
         )
         .await;
+    }
+}
+
+#[derive(Clone, Default)]
+struct CapturingSignedDispatch {
+    bodies: Arc<Mutex<Vec<Bytes>>>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for CapturingSignedDispatch {
+    async fn dispatch(&self, request: SignedRequest) -> Result<http::Response<Body>, DispatchError> {
+        self.bodies
+            .lock()
+            .expect("captured bodies lock")
+            .push(request.body().clone());
+        Ok(http::Response::new(Body::from(Bytes::from_static(
+            br#"{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ))))
     }
 }

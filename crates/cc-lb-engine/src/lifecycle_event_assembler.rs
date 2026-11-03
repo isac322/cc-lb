@@ -4663,9 +4663,7 @@ mod tests {
         let sink = Arc::new(CapturingDiagnosticsSink::default());
         let metrics = noop_metrics();
         let event_id = eid("serving-cache-diagnostics");
-        let mut partial = partial_with_diagnostics(&event_id);
-        let parse = partial.parse.as_mut().ok_or("parse fixture missing")?;
-        parse.matched_v3_cache_key = Some("pre-route-literal-prefix".to_owned());
+        let mut partial = diagnostic_match_partial(&event_id)?;
         let mut serving_breakpoints = partial.cache_breakpoints.clone();
         for breakpoint in &mut serving_breakpoints {
             breakpoint.prefix_hash = "serving-deepest-prefix".to_owned();
