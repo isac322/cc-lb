@@ -696,10 +696,13 @@ async fn unpriced_gemini_url_model_fails_closed_naming_the_requested_model() {
     .await;
 
     // Then admission fails closed with the real model name and no dispatch.
-    let (status, _headers, body) = collect_body(response).await;
+    let (status, headers, body) = collect_body(response).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!headers.contains_key("x-should-retry"));
+    assert!(!headers.contains_key(http::header::RETRY_AFTER));
     let body: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON");
     assert_eq!(body["error"]["type"], "server_error");
+    assert!(body["error"].get("retry_after_seconds").is_none());
     assert_eq!(
         body["error"]["message"],
         format!("cost limits unavailable for model {UNPRICED_GEMINI_MODEL}")
@@ -1083,6 +1086,447 @@ async fn assert_cost_rate_limited(response: http::Response<axum::body::Body>) {
     let body: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON");
     assert_eq!(body["error"]["type"], "rate_limit_error");
     assert_eq!(body["error"]["limit_kind"], "cost_usd");
+}
+
+async fn assert_local_limit_retryability(
+    response: http::Response<axum::body::Body>,
+    status: StatusCode,
+    kind: Option<&str>,
+    should_retry: Option<&str>,
+    delay: Option<u64>,
+) -> serde_json::Value {
+    let (actual_status, headers, body) = collect_body(response).await;
+    assert_eq!(actual_status, status, "body: {body:?}");
+    assert_eq!(
+        headers
+            .get("x-should-retry")
+            .map(|value| value.to_str().expect("ASCII retry hint")),
+        should_retry,
+        "body: {body:?}",
+    );
+    assert_eq!(
+        headers.get(http::header::RETRY_AFTER).map(|value| value
+            .to_str()
+            .expect("ASCII retry delay")
+            .parse::<u64>()
+            .expect("numeric retry delay")),
+        delay,
+    );
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("limit error JSON");
+    let error = &body["error"];
+    assert_eq!(
+        error["type"],
+        if status == StatusCode::BAD_REQUEST {
+            "invalid_request_error"
+        } else {
+            "rate_limit_error"
+        },
+    );
+    assert_eq!(error["limit_kind"].as_str(), kind);
+    assert_eq!(error["retry_after_seconds"].as_u64(), delay);
+    if delay.is_none() {
+        assert!(error.get("retry_after_seconds").is_none());
+    }
+    if should_retry == Some("false") {
+        let message = error["message"].as_str().expect("limit message");
+        assert!(message.contains("cannot fit"), "{message}");
+    }
+    body
+}
+
+#[tokio::test]
+async fn local_limit_retryability_unsatisfiable_cost_and_exact_cap_control() {
+    // QA-01/02: the same authenticated request fits exactly, but cannot fit
+    // an empty window whose configured cap is one micro smaller.
+    for cap in [24_000, 23_999] {
+        let state = TestState::default();
+        let lifecycle = usd_limited_lifecycle(StorageUpstreamKind::AnthropicApiKey, cap, &state);
+        let response = handle(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-5","max_tokens":2000,"messages":[]}"#,
+            )),
+        )
+        .await;
+        if cap == 24_000 {
+            let (status, _, body) = collect_body(response).await;
+            assert_eq!(status, StatusCode::OK, "{body:?}");
+            assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+        } else {
+            assert_local_limit_retryability(
+                response,
+                StatusCode::TOO_MANY_REQUESTS,
+                Some("cost_usd"),
+                Some("false"),
+                None,
+            )
+            .await;
+            assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_limit_retryability_unsatisfiable_token_and_request_boundaries() {
+    // QA-03/04/05: configured capacity, not current usage, makes these
+    // requests impossible. Equality remains a healthy admission control.
+    for (kind, name, requested) in [
+        (LimitKind::InputTokens, "input_tokens", 4_000),
+        (LimitKind::TotalTokens, "total_tokens", 6_000),
+        (LimitKind::Requests, "requests", 1),
+    ] {
+        for cap in [requested, requested - 1] {
+            let state = TestState::default();
+            let lifecycle = limited_lifecycle(
+                StorageUpstreamKind::AnthropicApiKey,
+                vec![Limit {
+                    kind,
+                    window_secs: 60,
+                    cap_micros: cap,
+                }],
+                &state,
+                None,
+            );
+            let response = handle(
+                &lifecycle,
+                messages_request(Bytes::from_static(
+                    br#"{"model":"claude-sonnet-4-5","max_tokens":2000,"messages":[]}"#,
+                )),
+            )
+            .await;
+            if cap == requested {
+                let (status, _, body) = collect_body(response).await;
+                assert_eq!(status, StatusCode::OK, "{name}: {body:?}");
+                assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1, "{name}");
+            } else {
+                assert_local_limit_retryability(
+                    response,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Some(name),
+                    Some("false"),
+                    None,
+                )
+                .await;
+                assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0, "{name}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_limit_retryability_held_windows_and_concurrent_slot_release() {
+    // QA-06/07/14: hold a real admitted reservation before dispatch completes.
+    // No sleep or settlement timing is involved in exhausting the next request.
+    for (kind, name, cap, delay) in [
+        (LimitKind::Requests, "requests", 1, 60),
+        (LimitKind::InputTokens, "input_tokens", 4_000, 60),
+        (LimitKind::OutputTokens, "output_tokens", 2_000, 60),
+        (LimitKind::TotalTokens, "total_tokens", 6_000, 60),
+        (LimitKind::CostUsd, "cost_usd", 24_000, 60),
+        (LimitKind::Concurrent, "concurrent", 1, 1),
+    ] {
+        let state = TestState::default();
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let test_bus = TestLifecycleBus::new();
+        let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(128);
+        let limit_engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::SystemClock),
+        );
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::AnthropicApiKey,
+            vec![Limit {
+                kind,
+                window_secs: if kind == LimitKind::Concurrent { 0 } else { 60 },
+                cap_micros: cap,
+            }],
+            &state,
+            Some(Arc::new(GatedAdmissionDispatch {
+                inner: MockDispatch {
+                    state: state.clone(),
+                    mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+                },
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            })),
+        )
+        .with_static_limit_subject(
+            limit_engine.clone(),
+            "principal-test".to_owned(),
+            "key-test".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "key-test".to_owned(),
+                status: KeyStatus::Active,
+                ..StoredApiKeyRecord::default()
+            },
+        )
+        .with_event_bus(test_bus.bus_arc());
+        let bytes =
+            Bytes::from_static(br#"{"model":"claude-sonnet-4-5","max_tokens":2000,"messages":[]}"#);
+        let first = handle(&lifecycle, messages_request(bytes.clone()));
+        tokio::pin!(first);
+        tokio::select! {
+            permit = entered.acquire() => permit.expect("first dispatch entered").forget(),
+            response = &mut first => panic!("first request did not reach held dispatch: {}", response.status()),
+        }
+        let second = handle(&lifecycle, messages_request(bytes.clone()));
+        tokio::pin!(second);
+        let response = tokio::select! {
+            permit = entered.acquire() => {
+                permit.expect("unexpected second dispatch").forget();
+                panic!("{name}: exhausted limit allowed another dispatch");
+            },
+            response = &mut second => response,
+        };
+        assert_local_limit_retryability(
+            response,
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(name),
+            Some("true"),
+            Some(delay),
+        )
+        .await;
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            0,
+            "first dispatch is still held"
+        );
+        release.add_permits(1);
+        let (status, _, body) = collect_body(first.await).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body:?}");
+        assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+        // Buffered completion emits RequestTerminated before returning. Drain
+        // the real subscriber so its settlement, not a timer, releases the slot.
+        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(
+            reconcile_rx,
+            limit_engine.clone(),
+        )
+        .shutdown()
+        .await;
+        if kind == LimitKind::Concurrent {
+            let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(128);
+            release.add_permits(1);
+            let (status, _, body) =
+                collect_body(handle(&lifecycle, messages_request(bytes)).await).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "released concurrency slot: {body:?}"
+            );
+            assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 2);
+            cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, limit_engine)
+                .shutdown()
+                .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_limit_retryability_output_shape_and_zero_concurrency() {
+    // QA-08/12: neither existing output-shape nor concurrent-zero semantics
+    // may become the new unsatisfiable-window response.
+    for (kind, cap, status, name, retry, delay) in [
+        (
+            LimitKind::OutputTokens,
+            1_999,
+            StatusCode::BAD_REQUEST,
+            None,
+            None,
+            None,
+        ),
+        (
+            LimitKind::Concurrent,
+            0,
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("concurrent"),
+            Some("true"),
+            Some(1),
+        ),
+    ] {
+        let state = TestState::default();
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::AnthropicApiKey,
+            vec![Limit {
+                kind,
+                window_secs: if kind == LimitKind::Concurrent { 0 } else { 60 },
+                cap_micros: cap,
+            }],
+            &state,
+            None,
+        );
+        let response = handle(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-5","max_tokens":2000,"messages":[]}"#,
+            )),
+        )
+        .await;
+        assert_local_limit_retryability(response, status, name, retry, delay).await;
+        assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[tokio::test]
+async fn local_limit_retryability_temporary_limits_cannot_mask_permanent_failures() {
+    // QA-10/11: the first request fits both limits. Its held reservation
+    // exhausts the temporary limit; the larger second request cannot ever fit
+    // the other configured cap. Exercise both declaration orders.
+    for temporary_kind in [LimitKind::Requests, LimitKind::Concurrent] {
+        for hard_kind in [LimitKind::TotalTokens, LimitKind::OutputTokens] {
+            for temporary_first in [true, false] {
+                let state = TestState::default();
+                let entered = Arc::new(tokio::sync::Semaphore::new(0));
+                let release = Arc::new(tokio::sync::Semaphore::new(0));
+                let temporary = Limit {
+                    kind: temporary_kind,
+                    window_secs: if temporary_kind == LimitKind::Concurrent {
+                        0
+                    } else {
+                        60
+                    },
+                    cap_micros: 1,
+                };
+                let hard = Limit {
+                    kind: hard_kind,
+                    window_secs: 60,
+                    cap_micros: if hard_kind == LimitKind::TotalTokens {
+                        5_999
+                    } else {
+                        1_999
+                    },
+                };
+                let limits = if temporary_first {
+                    vec![temporary, hard]
+                } else {
+                    vec![hard, temporary]
+                };
+                let lifecycle = limited_lifecycle(
+                    StorageUpstreamKind::AnthropicApiKey,
+                    limits,
+                    &state,
+                    Some(Arc::new(GatedAdmissionDispatch {
+                        inner: MockDispatch {
+                            state: state.clone(),
+                            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+                        },
+                        entered: Arc::clone(&entered),
+                        release: Arc::clone(&release),
+                    })),
+                );
+                let first = handle(
+                    &lifecycle,
+                    messages_request(Bytes::from_static(
+                        br#"{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[]}"#,
+                    )),
+                );
+                tokio::pin!(first);
+                tokio::select! {
+                    permit = entered.acquire() => permit.expect("first dispatch entered").forget(),
+                    response = &mut first => panic!("first request did not reach held dispatch: {}", response.status()),
+                }
+                let second = handle(
+                    &lifecycle,
+                    messages_request(Bytes::from_static(
+                        br#"{"model":"claude-sonnet-4-5","max_tokens":2000,"messages":[]}"#,
+                    )),
+                );
+                tokio::pin!(second);
+                let response = tokio::select! {
+                    permit = entered.acquire() => {
+                        permit.expect("unexpected second dispatch").forget();
+                        panic!("impossible second request reached dispatch");
+                    },
+                    response = &mut second => response,
+                };
+                if hard_kind == LimitKind::OutputTokens {
+                    assert_local_limit_retryability(
+                        response,
+                        StatusCode::BAD_REQUEST,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                } else {
+                    assert_local_limit_retryability(
+                        response,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Some("total_tokens"),
+                        Some("false"),
+                        None,
+                    )
+                    .await;
+                }
+                assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+                release.add_permits(1);
+                let (status, _, body) = collect_body(first.await).await;
+                assert_eq!(status, StatusCode::OK, "{body:?}");
+                assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_limit_retryability_permanent_failures_preserve_declaration_order() {
+    // QA-11: preflight must not make output-shape errors universally win, or
+    // reorder two impossible reservations by kind rather than declaration.
+    for (left, right, expected_kind) in [
+        (
+            LimitKind::TotalTokens,
+            LimitKind::OutputTokens,
+            Some("total_tokens"),
+        ),
+        (LimitKind::OutputTokens, LimitKind::TotalTokens, None),
+        (
+            LimitKind::InputTokens,
+            LimitKind::CostUsd,
+            Some("input_tokens"),
+        ),
+        (LimitKind::CostUsd, LimitKind::InputTokens, Some("cost_usd")),
+    ] {
+        let state = TestState::default();
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::AnthropicApiKey,
+            [left, right]
+                .into_iter()
+                .map(|kind| Limit {
+                    kind,
+                    window_secs: 60,
+                    cap_micros: match kind {
+                        LimitKind::InputTokens => 3_999,
+                        LimitKind::TotalTokens => 5_999,
+                        LimitKind::OutputTokens => 1_999,
+                        LimitKind::CostUsd => 23_999,
+                        _ => unreachable!("only permanent failures in this table"),
+                    },
+                })
+                .collect(),
+            &state,
+            None,
+        );
+        let response = handle(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-5","max_tokens":2000,"messages":[]}"#,
+            )),
+        )
+        .await;
+        assert_local_limit_retryability(
+            response,
+            if expected_kind.is_some() {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            expected_kind,
+            expected_kind.map(|_| "false"),
+            None,
+        )
+        .await;
+        assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+    }
 }
 
 #[tokio::test]
