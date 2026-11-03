@@ -360,7 +360,6 @@ mod tests {
         }
     }
 
-
     fn terminated(event_id: &str, client_status: u16, reason: TerminationReason) -> LifecycleEvent {
         LifecycleEvent::RequestTerminated {
             event_id: eid(event_id),
@@ -924,20 +923,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cache_prediction_uses_literal_route_breakpoints_when_parse_is_empty() -> TestResult {
         for (name, read, outcome, hits, misses) in [
-            (
-                "literal route hit",
-                32,
-                "predicted_hit_actual_hit",
-                1,
-                0,
-            ),
-            (
-                "literal route miss",
-                0,
-                "predicted_hit_actual_miss",
-                0,
-                1,
-            ),
+            ("literal route hit", 32, "predicted_hit_actual_hit", 1, 0),
+            ("literal route miss", 0, "predicted_hit_actual_miss", 0, 1),
         ] {
             let rendered = render_events(vec![
                 parse_completed_without_breakpoints(name),
@@ -964,17 +951,9 @@ mod tests {
                 Ok(Some(100)),
                 Some(vec![cache_breakpoint()]),
             ),
-            route_completed_with_breakpoints(
-                "latest-route-empty",
-                Ok(Some(100)),
-                Some(Vec::new()),
-            ),
+            route_completed_with_breakpoints("latest-route-empty", Ok(Some(100)), Some(Vec::new())),
             usage("latest-route-empty", 32, 0),
-            terminated(
-                "latest-route-empty",
-                200,
-                TerminationReason::Success,
-            ),
+            terminated("latest-route-empty", 200, TerminationReason::Success),
         ])
         .await?;
         assert_counts("latest route empty", &rendered, &[], 0, 0)?;
@@ -983,11 +962,7 @@ mod tests {
             parse_completed("route-none-fallback"),
             route_completed_with_breakpoints("route-none-fallback", Ok(Some(100)), None),
             usage("route-none-fallback", 32, 0),
-            terminated(
-                "route-none-fallback",
-                200,
-                TerminationReason::Success,
-            ),
+            terminated("route-none-fallback", 200, TerminationReason::Success),
         ])
         .await?;
         assert_counts(
@@ -999,5 +974,4 @@ mod tests {
         )?;
         Ok(())
     }
-
 }
