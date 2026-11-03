@@ -8921,6 +8921,14 @@ fn limit_rejection_response(
     principal_id: &str,
     retry_after_seconds: Option<u64>,
 ) -> Response<Body> {
+    let should_retry = match &reason {
+        RejectReason::Unsatisfiable { .. } => Some("false"),
+        RejectReason::RequestsRateLimit
+        | RejectReason::TokenRateLimit { .. }
+        | RejectReason::CostRateLimit
+        | RejectReason::ConcurrentRateLimit => Some("true"),
+        _ => None,
+    };
     let (status, error_type, message, limit_kind) = match reason {
         RejectReason::ModelNotAllowed => (
             StatusCode::FORBIDDEN,
@@ -8976,6 +8984,19 @@ fn limit_rejection_response(
             "concurrent request cap exceeded".to_owned(),
             Some("concurrent"),
         ),
+        RejectReason::Unsatisfiable {
+            kind,
+            cap,
+            requested,
+        } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_error",
+            format!(
+                "requested {} reservation {requested} cannot fit configured cap {cap}",
+                limit_kind_name(kind)
+            ),
+            Some(limit_kind_name(kind)),
+        ),
         RejectReason::CostUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "server_error",
@@ -9009,6 +9030,11 @@ fn limit_rejection_response(
         CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
+    if let Some(value) = should_retry {
+        response
+            .headers_mut()
+            .insert("x-should-retry", HeaderValue::from_static(value));
+    }
     if status == StatusCode::TOO_MANY_REQUESTS
         && let Some(value) =
             retry_after_seconds.and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
@@ -9024,14 +9050,24 @@ fn limit_retry_after_secs(reason: RejectReason) -> Option<u64> {
         RejectReason::RequestsRateLimit
         | RejectReason::TokenRateLimit { .. }
         | RejectReason::CostRateLimit => Some(60),
-        _ => None,
+        RejectReason::PrincipalMissing
+        | RejectReason::PrincipalDisabled
+        | RejectReason::KeyRevoked
+        | RejectReason::Expired
+        | RejectReason::ModelNotAllowed
+        | RejectReason::CostUnavailable
+        | RejectReason::UnsupportedLimitWindow { .. }
+        | RejectReason::OutputCapExceeded { .. }
+        | RejectReason::Unsatisfiable { .. } => None,
     }
 }
 
 fn limit_violation_name(reason: &RejectReason) -> Option<&'static str> {
     match reason {
         RejectReason::RequestsRateLimit => Some("Requests"),
-        RejectReason::TokenRateLimit { kind } => Some(audit_limit_kind_name(*kind)),
+        RejectReason::TokenRateLimit { kind } | RejectReason::Unsatisfiable { kind, .. } => {
+            Some(audit_limit_kind_name(*kind))
+        }
         RejectReason::CostRateLimit => Some("CostUsd"),
         RejectReason::ConcurrentRateLimit => Some("Concurrent"),
         RejectReason::PrincipalMissing
