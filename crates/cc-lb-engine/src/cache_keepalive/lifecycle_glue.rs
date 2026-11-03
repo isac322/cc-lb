@@ -307,6 +307,13 @@ impl LifecycleKeepalive {
         {
             return;
         }
+        let view = self.dynamic_view.load();
+        let Some(cached) = view.principal_view.get(&principal.id) else {
+            return;
+        };
+        let Some(config) = cached.cache_keepalive().filter(|config| config.enabled) else {
+            return;
+        };
         let compaction_boundary =
             HeuristicClassifier::is_compaction_boundary(response_body_json);
         if compaction_boundary {
