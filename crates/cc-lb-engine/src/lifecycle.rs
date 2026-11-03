@@ -11261,7 +11261,7 @@ mod tests {
             request["cache_control"] = json!({"type":"ephemeral","ttl":"5m"});
         }
         let mut seed = blake3::Hasher::new();
-        seed.update(b"cc-lb-cache-v5:seed");
+        seed.update(b"cc-lb-cache-v6:seed");
         seed.update(b"claude-sonnet-4-5-20250929");
         let mut previous = seed.finalize();
         for (index, block_text) in [(0, text.as_str()), (1, "tail")] {
@@ -11271,10 +11271,10 @@ mod tests {
                 "value":{"text":block_text,"type":"text"},
             });
             let mut block = blake3::Hasher::new();
-            block.update(b"cc-lb-cache-v5:block");
+            block.update(b"cc-lb-cache-v6:block");
             block.update(&serde_json::to_vec(&digest_value).expect("reference block JSON"));
             let mut prefix = blake3::Hasher::new();
-            prefix.update(b"cc-lb-cache-v5:prefix");
+            prefix.update(b"cc-lb-cache-v6:prefix");
             prefix.update(previous.as_bytes());
             prefix.update(block.finalize().as_bytes());
             previous = prefix.finalize();
