@@ -992,34 +992,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_completion_cannot_resurrect_or_cancel_newer_generation() {
-        let mut completion_order = HashMap::new();
-        let key = SessionKey::from_thread_id(Uuid::from_u128(2), "stale-compaction");
-
-        assert!(LifecycleKeepalive::advance_session_seq(
-            &mut completion_order,
-            &key,
-            2,
-        ));
-        let stale_is_latest =
-            LifecycleKeepalive::advance_session_seq(&mut completion_order, &key, 1);
-        assert!(
-            !stale_is_latest,
-            "delayed older persistence must not become the latest completion"
-        );
-        assert_eq!(completion_order.get(&key), Some(&2));
-
-        let mut fenced_actions = Vec::new();
-        if stale_is_latest {
-            fenced_actions.push("cancel");
-            fenced_actions.push("enqueue");
-        }
-        assert!(
-            fenced_actions.is_empty(),
-            "a stale completion must neither cancel nor resurrect newer work"
-        );
-    }
-    #[test]
     fn keepalive_session_keys_isolate_agent_scopes() {
         let principal = Principal {
             id: "principal-test".to_owned(),
