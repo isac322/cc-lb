@@ -170,6 +170,115 @@ async fn compaction_block_precedes_tool_use_without_enqueue_json_and_sse() {
 }
 
 #[tokio::test]
+async fn compaction_response_without_current_breakpoint_fences_generation_json_and_sse() {
+    for (stop_reason, content) in [
+        (
+            "compaction",
+            json!([{"type": "compaction", "content": "summary"}]),
+        ),
+        (
+            "tool_use",
+            json!([
+                {"type": "compaction", "content": "summary"},
+                {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {}}
+            ]),
+        ),
+    ] {
+        for streaming in [false, true] {
+            let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+            let principal = principal_with_keepalive();
+            let main_headers = [("x-claude-code-session-id", "no-breakpoint")];
+            let child_headers = [
+                ("x-claude-code-session-id", "no-breakpoint"),
+                ("x-claude-code-agent-id", "child-agent"),
+            ];
+            establish_scoped_keepalive(&enqueuer, principal.clone(), &main_headers).await;
+            establish_scoped_keepalive(&enqueuer, principal.clone(), &child_headers).await;
+
+            let response_body = Bytes::from(
+                serde_json::to_vec(&json!({
+                    "type": "message",
+                    "id": "msg_no_breakpoint_compaction",
+                    "content": content.clone(),
+                    "stop_reason": stop_reason,
+                    "usage": {}
+                }))
+                .expect("response JSON"),
+            );
+            let expected_body = response_body.clone();
+            let (response, _) = observed_keepalive_response(
+                response_body,
+                Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                principal,
+                no_breakpoint_request(),
+                &main_headers,
+                streaming,
+            )
+            .await;
+            assert_keepalive_response_fidelity(response, &expected_body, streaming).await;
+            enqueuer.wait_for_completion().await;
+
+            let state = enqueuer.snapshot();
+            assert_eq!(
+                state.generations.len(),
+                1,
+                "only unrelated child generation remains: {stop_reason}, streaming={streaming}"
+            );
+            assert!(state
+                .generations
+                .keys()
+                .any(|key| key.ends_with("/thread:no-breakpoint/agent:child-agent")));
+            assert_eq!(
+                state
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(operation, KeepaliveOperation::Enqueue(_, _)))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                state
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(operation, KeepaliveOperation::Cancel(key, _, _) if key.ends_with("/thread:no-breakpoint")))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                state
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(operation, KeepaliveOperation::NotTracked(_, _)))
+                    .count(),
+                0
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_response_without_cache_breakpoint_does_not_mutate_keepalive() {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    let headers = [("x-claude-code-session-id", "ordinary-no-breakpoint")];
+    establish_scoped_keepalive(&enqueuer, principal.clone(), &headers).await;
+    let before = enqueuer.snapshot();
+
+    let response_body = agent_turn_body("msg_ordinary_no_breakpoint", "Bash", 12_000);
+    let (response, _) = observed_keepalive_response(
+        response_body.clone(),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal,
+        no_breakpoint_request(),
+        &headers,
+        false,
+    )
+    .await;
+    assert_keepalive_response_fidelity(response, &response_body, false).await;
+    assert_eq!(enqueuer.snapshot(), before);
+}
+
+#[tokio::test]
 async fn compaction_response_fences_matching_generation_and_allows_fresh_completion() {
     #[derive(Default)]
     struct GenerationRecordingEnqueuer {
@@ -1905,6 +2014,12 @@ async fn handle_keepalive_response_with(
 fn standard_keepalive_request() -> Bytes {
     Bytes::from_static(
         br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
+    )
+}
+
+fn no_breakpoint_request() -> Bytes {
+    Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}"#,
     )
 }
 
