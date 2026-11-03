@@ -771,15 +771,16 @@ const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use cc_lb_control::api_keys::principal_view::PrincipalView;
     use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
     use cc_lb_storage_api::principal::{
         Limit, PrincipalKind as StoragePrincipalKind, PrincipalRecord as StoragePrincipalRecord,
     };
     use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
+    use cc_lb_domain::Upstream;
     use cc_lb_upstream::{
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, Signer, SignerError, SignerFactory,
-        SigningCapability, Upstream, UpstreamError,
+        SigningCapability, UpstreamError,
     };
     use http::HeaderValue;
 
