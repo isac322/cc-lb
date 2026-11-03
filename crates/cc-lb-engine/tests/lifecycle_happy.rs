@@ -1516,9 +1516,11 @@ fn explicit_native_lifecycle(
     id_suffix: u128,
     name: &str,
 ) -> Lifecycle {
-    let dialect_base_url = record_base_url
-        .clone()
-        .unwrap_or_else(|| "https://api.anthropic.com/".parse().expect("official URL parses"));
+    let dialect_base_url = record_base_url.clone().unwrap_or_else(|| {
+        "https://api.anthropic.com/"
+            .parse()
+            .expect("official URL parses")
+    });
     let upstream_id = uuid::Uuid::from_u128(id_suffix);
     let principal = PrincipalRecord {
         id: uuid::Uuid::from_u128(id_suffix + 10_000),
@@ -1541,8 +1543,7 @@ fn explicit_native_lifecycle(
         kind,
         base_url: record_base_url,
         enabled: true,
-        api_key_ciphertext: matches!(kind, StorageUpstreamKind::AnthropicApiKey)
-            .then(Vec::new),
+        api_key_ciphertext: matches!(kind, StorageUpstreamKind::AnthropicApiKey).then(Vec::new),
         ..UpstreamRecord::default()
     };
     let dialect = Arc::new(AttributionRemovingDialect {
