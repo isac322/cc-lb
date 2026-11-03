@@ -224,10 +224,12 @@ async fn compaction_response_without_current_breakpoint_fences_generation_json_a
                 1,
                 "only unrelated child generation remains: {stop_reason}, streaming={streaming}"
             );
-            assert!(state
-                .generations
-                .keys()
-                .any(|key| key.ends_with("/thread:no-breakpoint/agent:child-agent")));
+            assert!(
+                state
+                    .generations
+                    .keys()
+                    .any(|key| key.ends_with("/thread:no-breakpoint/agent:child-agent"))
+            );
             assert_eq!(
                 state
                     .operations

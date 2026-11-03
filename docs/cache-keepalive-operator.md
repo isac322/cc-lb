@@ -20,12 +20,12 @@ are skipped at fire time and the session is cancelled with `reason=upstream_gone
 - **Bedrock, Vertex:** `max_tokens: 0` behavior is unverified.
 - **OpenRouter:** schema requires `max_tokens >= 1`.
 
-Nothing runs - no snapshot, no schedule - for principals whose
-`cache_keepalive.enabled` is `false` or unset, or for requests that carry
-no `cache_control` breakpoint, except that a response-derived compaction
-boundary may retire an already-active matching generation without creating a
-new snapshot or schedule. Ordinary no-breakpoint responses remain outside
-keep-alive completion sequencing.
+For an enabled cache-keepalive principal, no snapshot or schedule is created
+for requests with no `cache_control` breakpoint, except that a
+response-derived compaction boundary may retire an already-active matching
+generation without creating a new snapshot or schedule. Disabled or unset
+principals remain entirely out of keep-alive processing. Ordinary
+no-breakpoint responses remain outside keep-alive completion sequencing.
 
 ## Response compaction boundaries
 

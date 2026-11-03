@@ -250,9 +250,8 @@ impl LifecycleKeepalive {
         else {
             return;
         };
-        let compaction_boundary = super::classifier::HeuristicClassifier::is_compaction_boundary(
-            response_body_json,
-        );
+        let compaction_boundary =
+            super::classifier::HeuristicClassifier::is_compaction_boundary(response_body_json);
         if cache_metadata.cache_breakpoints.is_empty() && !compaction_boundary {
             return;
         }
@@ -314,9 +313,8 @@ impl LifecycleKeepalive {
         let Some(config) = cached.cache_keepalive().filter(|config| config.enabled) else {
             return;
         };
-        let compaction_boundary =
-            HeuristicClassifier::is_compaction_boundary(response_body_json);
-        if compaction_boundary {
+        let compaction_boundary = HeuristicClassifier::is_compaction_boundary(response_body_json);
+        if compaction_boundary && cache_metadata.cache_breakpoints.is_empty() {
             let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
                 return;
             };
@@ -324,19 +322,21 @@ impl LifecycleKeepalive {
             let session_key_hash = session_key.to_string();
             let mut shard = self.session_shard(&session_key).lock().await;
             let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
-            let expected_generation =
-                match enqueuer.observe_session_generation(&session_key_hash).await {
-                    Ok(expected) => expected,
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "cache_keepalive",
-                            principal_id = principal.id.as_str(),
-                            %error,
-                            "skipping cache keep-alive compaction fence: failed to observe session generation"
-                        );
-                        return;
-                    }
-                };
+            let expected_generation = match enqueuer
+                .observe_session_generation(&session_key_hash)
+                .await
+            {
+                Ok(expected) => expected,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        %error,
+                        "skipping cache keep-alive compaction fence: failed to observe session generation"
+                    );
+                    return;
+                }
+            };
             if is_latest {
                 self.cancel_session(
                     &session_key,
@@ -1015,6 +1015,76 @@ mod tests {
                 "auxiliary cannot replace the pending legitimate completion"
             );
         }
+
+        pub(crate) async fn assert_no_breakpoint_cannot_supersede_pending_completion(
+            dynamic_view: Arc<DynamicViewHolder>,
+            principal: Principal,
+            legitimate: RequestCacheMetadata,
+            body: Bytes,
+            ordinary_response: serde_json::Value,
+        ) {
+            let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+            let keepalive = LifecycleKeepalive::new(
+                Some(Arc::new(OrderedCompletionEnqueuer { events })),
+                dynamic_view,
+            );
+            let key = cache_keepalive_session_key(&principal, &legitimate)
+                .expect("legitimate session key");
+            let expected_key = key.to_string();
+            let mut ordinary = RequestCacheMetadata::default();
+            ordinary.thread_id = legitimate.thread_id.clone();
+            let headers = HeaderMap::new();
+            let shard = keepalive.session_shard(&key).lock().await;
+            keepalive.on_response_completed(
+                &serde_json::json!({
+                    "type": "message",
+                    "content": [{"type": "tool_use", "id": "toolu_pending", "name": "Bash", "input": {}}],
+                    "stop_reason": "tool_use"
+                }),
+                &principal,
+                "accounting-key".to_owned(),
+                &legitimate,
+                Uuid::nil(),
+                body.clone(),
+                body.clone(),
+                &headers,
+                Duration::ZERO,
+                12_000,
+            );
+            keepalive.on_response_completed(
+                &ordinary_response,
+                &principal,
+                "accounting-key".to_owned(),
+                &ordinary,
+                Uuid::nil(),
+                body.clone(),
+                body,
+                &headers,
+                Duration::ZERO,
+                12_000,
+            );
+            drop(shard);
+            let operations = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut operations = Vec::new();
+                loop {
+                    let event = received.recv().await.expect("completion event");
+                    let terminal = matches!(event, OrderedCompletion::Enqueue(..));
+                    operations.push(event);
+                    if terminal {
+                        break operations;
+                    }
+                }
+            })
+            .await
+            .expect("legitimate completion must reach durable enqueue");
+            assert_eq!(
+                operations,
+                vec![
+                    OrderedCompletion::Observe(expected_key.clone()),
+                    OrderedCompletion::Enqueue(expected_key, Some(41)),
+                ]
+            );
+        }
     }
 
     #[test]
@@ -1561,7 +1631,7 @@ mod tests {
                 "key".to_owned(),
                 &metadata,
                 Uuid::new_v4(),
-                request_body,
+                request_body.clone(),
                 Bytes::new(),
                 &HeaderMap::new(),
                 Duration::from_secs(1),
@@ -1574,5 +1644,48 @@ mod tests {
         );
         assert_eq!(journal.cancelled.lock().expect("cancelled lock").len(), 1);
         assert!(journal.enqueued.lock().expect("enqueued lock").is_empty());
+        for ordinary_response in [
+            serde_json::json!({"stop_reason": "end_turn", "content": []}),
+            serde_json::json!({"stop_reason": "max_tokens", "content": []}),
+            response_fresh.clone(),
+        ] {
+            LifecycleKeepalive::assert_no_breakpoint_cannot_supersede_pending_completion(
+                Arc::clone(&keepalive.dynamic_view),
+                principal.clone(),
+                metadata.clone(),
+                request_body.clone(),
+                ordinary_response,
+            )
+            .await;
+        }
+
+        let mut no_breakpoint = RequestCacheMetadata::default();
+        no_breakpoint.thread_id = metadata.thread_id.clone();
+        let before_enqueued = journal.enqueued.lock().expect("enqueued lock").len();
+        let before_cancelled = journal.cancelled.lock().expect("cancelled lock").len();
+        keepalive
+            .persist_completion(
+                1,
+                &response_compaction,
+                &principal,
+                "key".to_owned(),
+                &no_breakpoint,
+                Uuid::nil(),
+                Bytes::new(),
+                Bytes::new(),
+                &HeaderMap::new(),
+                Duration::ZERO,
+                0,
+            )
+            .await;
+        assert_eq!(
+            journal.enqueued.lock().expect("enqueued lock").len(),
+            before_enqueued
+        );
+        assert_eq!(
+            journal.cancelled.lock().expect("cancelled lock").len(),
+            before_cancelled,
+            "stale no-breakpoint compaction cannot cancel a newer completion"
+        );
     }
 }
