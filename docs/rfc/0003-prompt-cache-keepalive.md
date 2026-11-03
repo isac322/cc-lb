@@ -177,6 +177,7 @@ mapping table. Key rules:
   completion sequencing; they do not enqueue, cancel, or supersede a pending
   cache-bearing completion. The compaction boundary is the deliberate
   response-derived exception.
+- `stop_reason == "pause_turn"` without a compaction block → **AgentInTurn**.
 - `stop_reason == "refusal"` or `"model_context_window_exceeded"` →
   **UserTurn**.
 - `tool_use` with only wait-for-user tools
