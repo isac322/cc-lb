@@ -224,19 +224,8 @@ impl SchedulerDispatch {
                 "cache keepalive accounting key is unavailable".to_owned(),
             ));
         };
-        let keepalive_body = snapshot
-            .build_keepalive_body()
-            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
-        let value: serde_json::Value = sonic_rs::from_slice(&keepalive_body)
-            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
-        let model = value
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
-        let max_tokens = value
-            .get("max_tokens")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0);
+        let model = snapshot.keepalive_model();
+        let max_tokens = 0;
         let cost_estimate_micros = self
             .price_catalog
             .estimate_max(

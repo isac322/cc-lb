@@ -350,16 +350,18 @@ fn oauth_upstream_is_keepalive_safe_without_api_key_ciphertext() {
 
 #[test]
 fn resolve_keepalive_url_oauth_beta_and_replaced_path() {
-    let snapshot = RequestSnapshot {
-        url: "https://api.anthropic.com/v1/messages?foo=1"
+    let snapshot = RequestSnapshot::capture(
+        "https://api.anthropic.com/v1/messages?foo=1"
             .parse()
             .unwrap(),
-        method: Method::POST,
-        headers: HeaderMap::new(),
-        body: Bytes::from_static(br#"{"model":"m"}"#),
-        upstream_id: Uuid::nil(),
-        ttl: cc_lb_storage_api::CacheTtl::Ttl5m,
-    };
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::from_static(br#"{"model":"m"}"#),
+        Uuid::nil(),
+        cc_lb_storage_api::CacheTtl::Ttl5m,
+        usize::MAX,
+    )
+    .unwrap();
     let base_url = "https://proxy.example.com/prefix".parse().unwrap();
 
     let oauth = UpstreamRecord {
@@ -373,12 +375,10 @@ fn resolve_keepalive_url_oauth_beta_and_replaced_path() {
         "https://proxy.example.com/v1/messages?foo=1&beta=true"
     );
 
-    let existing_beta = RequestSnapshot {
-        url: "https://api.anthropic.com/v1/messages?beta=true"
-            .parse()
-            .unwrap(),
-        ..snapshot.clone()
-    };
+    let mut existing_beta = snapshot.clone();
+    existing_beta.url = "https://api.anthropic.com/v1/messages?beta=true"
+        .parse()
+        .unwrap();
     let resolved = resolve_keepalive_url(&existing_beta, &oauth).unwrap();
     assert_eq!(
         resolved.as_str(),
@@ -399,14 +399,16 @@ fn resolve_keepalive_url_oauth_beta_and_replaced_path() {
 
 #[test]
 fn resolve_keepalive_url_oauth_none_base_url_adds_beta() {
-    let snapshot = RequestSnapshot {
-        url: "https://api.anthropic.com/v1/messages".parse().unwrap(),
-        method: Method::POST,
-        headers: HeaderMap::new(),
-        body: Bytes::from_static(br#"{"model":"m"}"#),
-        upstream_id: Uuid::nil(),
-        ttl: cc_lb_storage_api::CacheTtl::Ttl5m,
-    };
+    let snapshot = RequestSnapshot::capture(
+        "https://api.anthropic.com/v1/messages".parse().unwrap(),
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::from_static(br#"{"model":"m"}"#),
+        Uuid::nil(),
+        cc_lb_storage_api::CacheTtl::Ttl5m,
+        usize::MAX,
+    )
+    .unwrap();
 
     let oauth = UpstreamRecord {
         kind: UpstreamKind::AnthropicOauth,
@@ -460,11 +462,11 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_preserves_thinking() {
         store,
         http.clone(),
     );
-    let snapshot = RequestSnapshot {
-        url: "https://api.anthropic.com/v1/messages".parse().unwrap(),
-        method: Method::POST,
-        headers: HeaderMap::new(),
-        body: Bytes::from(
+    let snapshot = RequestSnapshot::capture(
+        "https://api.anthropic.com/v1/messages".parse().unwrap(),
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::from(
             serde_json::to_vec(&json!({
                 "model": "claude-opus-5-5",
                 "max_tokens": 8193,
@@ -484,8 +486,10 @@ async fn oauth_keepalive_dispatch_records_beta_url_and_preserves_thinking() {
             .unwrap(),
         ),
         upstream_id,
-        ttl: cc_lb_storage_api::CacheTtl::Ttl5m,
-    };
+        cc_lb_storage_api::CacheTtl::Ttl5m,
+        usize::MAX,
+    )
+    .unwrap();
 
     let outcome = dispatcher
         .dispatch(
