@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use std::cell::Cell;
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
