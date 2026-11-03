@@ -239,10 +239,12 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
     settle().await;
 
     assert_eq!(enqueuer.enqueued.lock().expect("enqueued lock").len(), 1);
-    let cancelled = enqueuer.cancelled.lock().expect("cancelled lock");
-    assert_eq!(cancelled.len(), 1);
-    assert_eq!(cancelled[0].expected_generation, Some(42));
-    drop(cancelled);
+    let cancelled_generation = {
+        let cancelled = enqueuer.cancelled.lock().expect("cancelled lock");
+        assert_eq!(cancelled.len(), 1);
+        cancelled[0].expected_generation
+    };
+    assert_eq!(cancelled_generation, Some(42));
 
     let after = handle_keepalive_response_with(
         agent_turn_body("msg_after_compaction", "Bash", 12_000),
