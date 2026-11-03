@@ -959,12 +959,32 @@ fn limited_lifecycle(
     state: &TestState,
     dispatch: Option<Arc<dyn UpstreamDispatch>>,
 ) -> Lifecycle {
-    let base_url: url::Url = "http://upstream.local/".parse().expect("test URL parses");
+    limited_lifecycle_at(
+        kind,
+        limits,
+        state,
+        dispatch,
+        Some("http://upstream.local/".parse().expect("test URL parses")),
+    )
+}
+
+fn limited_lifecycle_at(
+    kind: StorageUpstreamKind,
+    limits: Vec<Limit>,
+    state: &TestState,
+    dispatch: Option<Arc<dyn UpstreamDispatch>>,
+    record_base_url: Option<url::Url>,
+) -> Lifecycle {
+    let base_url = record_base_url.clone().unwrap_or_else(|| {
+        "https://api.anthropic.com/"
+            .parse()
+            .expect("official URL parses")
+    });
     let record = UpstreamRecord {
         id: uuid::Uuid::from_u128(2),
         name: "usd-limit-upstream".to_owned(),
         kind,
-        base_url: Some(base_url.clone()),
+        base_url: record_base_url,
         api_key_ciphertext: Some(Vec::new()),
         ..oauth_upstream_record()
     };
@@ -1513,6 +1533,227 @@ async fn admission_local_plus_opaque_marker_preserves_local_precedence() {
         &body,
         LimitKind::CostUsd,
         14_015,
+    )
+    .await;
+}
+
+fn serving_policy_admission_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": PRICED_RAW_CLAUDE_ALIAS,
+        "max_tokens": 1,
+        "tools": [{
+            "name": "inspect",
+            "description": "p".repeat(16_000),
+            "input_schema": {"type": "object"}
+        }],
+        "system": [{
+            "type": "text",
+            "text": "x-anthropic-billing-header: cron",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        }],
+        "messages": [{
+            "role": "user",
+            "content": "t".repeat(40_000)
+        }]
+    })
+}
+
+async fn assert_serving_policy_cost_boundary(
+    label: &str,
+    body: &serde_json::Value,
+    kind: StorageUpstreamKind,
+    base_url: Option<&str>,
+    boundary_micros: i64,
+) {
+    let bytes = Bytes::from(serde_json::to_vec(body).expect("policy request serializes"));
+    for (cap_micros, expected_status, expected_calls) in [
+        (boundary_micros, StatusCode::OK, 1),
+        (boundary_micros - 1, StatusCode::TOO_MANY_REQUESTS, 0),
+    ] {
+        let state = TestState::default();
+        let lifecycle = limited_lifecycle_at(
+            kind,
+            vec![Limit {
+                kind: LimitKind::CostUsd,
+                window_secs: 60,
+                cap_micros,
+            }],
+            &state,
+            None,
+            base_url.map(|value| value.parse().expect("policy URL parses")),
+        );
+        let response = handle(&lifecycle, messages_request(bytes.clone())).await;
+        let (status, _, response_body) = collect_body(response).await;
+        assert_eq!(
+            status, expected_status,
+            "{label}, {kind:?}, URL {base_url:?}, cap {cap_micros}: {response_body:?}"
+        );
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            expected_calls,
+            "{label}, {kind:?}, cap {cap_micros}"
+        );
+        if expected_status == StatusCode::TOO_MANY_REQUESTS {
+            let error: serde_json::Value =
+                serde_json::from_slice(&response_body).expect("limit rejection JSON");
+            assert_eq!(error["error"]["type"], "rate_limit_error", "{label}");
+            assert_eq!(error["error"]["limit_kind"], "cost_usd", "{label}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_official_billing_only_breakpoint_preserves_opaque_cost_boundary() {
+    let body = serving_policy_admission_body();
+    // The official bundle has no effective breakpoint. The unchanged raw
+    // marker therefore retains the existing opaque gross bound, not a local
+    // cache partition: 1,048,576 input micros plus 10 output micros.
+    for kind in [
+        StorageUpstreamKind::AnthropicApiKey,
+        StorageUpstreamKind::AnthropicOauth,
+    ] {
+        for base_url in [None, Some("https://api.anthropic.com:443/proxy")] {
+            assert_serving_policy_cost_boundary(
+                "official header-only fallback",
+                &body,
+                kind,
+                base_url,
+                1_048_586,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_custom_billing_only_breakpoint_uses_literal_cost_boundary() {
+    let body = serving_policy_admission_body();
+    // Tools = 16,013 string bytes; billing block = 47. The literal
+    // one-hour prefix is exactly 4,015 tokens. Tail = 10,001 tokens.
+    // Real catalog pricing derives $2/M for 1h and charges $1/M tail,
+    // $10/M output: 2 * 4,015 + 10,001 + 10 = 18,041 micros.
+    // This is below the stale official bundle's 1,048,586-micro bound.
+    for kind in [
+        StorageUpstreamKind::AnthropicApiKey,
+        StorageUpstreamKind::AnthropicOauth,
+    ] {
+        for base_url in [
+            "https://proxy.example.com/anthropic",
+            "https://user:pass@api.anthropic.com",
+        ] {
+            assert_serving_policy_cost_boundary(
+                "custom header-only literal",
+                &body,
+                kind,
+                Some(base_url),
+                18_041,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_non_billing_breakpoint_preserves_local_cost_across_policies() {
+    let mut body = serving_policy_admission_body();
+    // Same raw string length as the billing header, but not excluded by
+    // either policy. Both serving bundles must keep the same local partition.
+    body["system"][0]["text"] = serde_json::json!("v".repeat(32));
+    for kind in [
+        StorageUpstreamKind::AnthropicApiKey,
+        StorageUpstreamKind::AnthropicOauth,
+    ] {
+        for base_url in [None, Some("https://proxy.example.com/anthropic")] {
+            assert_serving_policy_cost_boundary(
+                "ordinary system control",
+                &body,
+                kind,
+                base_url,
+                18_041,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_custom_billing_one_hour_prefix_keeps_its_rate_before_five_minute_tail() {
+    let mut body = serving_policy_admission_body();
+    body["system"]
+        .as_array_mut()
+        .expect("system array")
+        .push(serde_json::json!({
+            "type": "text",
+            "text": "b".repeat(8_000),
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }));
+    // Literal: 4,015 one-hour tokens, then 8,015 bytes => 2,003 five-minute
+    // tokens; tail is 10,001. Cost = 20,044 micros.
+    // Official excludes only the first breakpoint: the whole raw prefix
+    // is 6,018 five-minute tokens, cost = 16,029. Reusing that bundle for
+    // custom would admit the request at 20,043, under-reserving by 4,015.
+    assert_serving_policy_cost_boundary(
+        "custom mixed TTL",
+        &body,
+        StorageUpstreamKind::AnthropicApiKey,
+        Some("https://proxy.example.com/anthropic"),
+        20_044,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admission_official_mixed_ttl_preserves_effective_breakpoint_control() {
+    let mut body = serving_policy_admission_body();
+    body["system"]
+        .as_array_mut()
+        .expect("system array")
+        .push(serde_json::json!({
+            "type": "text",
+            "text": "b".repeat(8_000),
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }));
+    assert_serving_policy_cost_boundary(
+        "official mixed TTL control",
+        &body,
+        StorageUpstreamKind::AnthropicApiKey,
+        None,
+        16_029,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admission_five_literal_slots_do_not_inherit_four_official_slots() {
+    let mut body = serving_policy_admission_body();
+    for _ in 0..4 {
+        body["system"]
+            .as_array_mut()
+            .expect("system array")
+            .push(serde_json::json!({
+                "type": "text",
+                "text": "b".repeat(8_000),
+                "cache_control": {"type": "ephemeral", "ttl": "5m"}
+            }));
+    }
+    // Official has four valid markers: 48,120 prefix bytes / 4 = 12,030
+    // five-minute tokens, plus 10,001 tail and 10 output => 22,041.
+    // Literal has five markers and is invalid, so it must retain the
+    // conservative opaque fallback, never borrow the official four slots.
+    assert_serving_policy_cost_boundary(
+        "four official slots",
+        &body,
+        StorageUpstreamKind::AnthropicApiKey,
+        None,
+        22_041,
+    )
+    .await;
+    assert_serving_policy_cost_boundary(
+        "five literal slots fallback",
+        &body,
+        StorageUpstreamKind::AnthropicApiKey,
+        Some("https://proxy.example.com/anthropic"),
+        1_048_586,
     )
     .await;
 }
