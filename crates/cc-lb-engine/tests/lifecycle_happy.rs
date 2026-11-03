@@ -315,6 +315,96 @@ async fn explicit_native_shape_removes_attribution_and_preserves_serving_identit
 }
 
 #[tokio::test]
+async fn native_openai_opaque_cache_extensions_remain_neutral_and_unchanged()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = Bytes::from(serde_json::to_vec_pretty(&serde_json::json!({
+        "model": "gpt-limit-test",
+        "max_output_tokens": 1,
+        "input": "opaque native payload",
+        "cache_control": {"vendor": "opaque-extension"},
+        "system": [
+            {"type":"text","text":"x-anthropic-billing-header: normal cc_workload=cron;"},
+            {
+                "type":"text",
+                "text":"cache-bearing vendor context",
+                "cache_control":{"type":"ephemeral"}
+            }
+        ],
+        "messages": [{"role":"user","content":[{
+            "type":"text",
+            "text":"cache-bearing vendor tail",
+            "cache_control":{"type":"ephemeral"}
+        }]}]
+    }))?);
+    // Positive control: a generic Anthropic analysis would produce cache
+    // metadata from this payload. These extensions stay opaque on Responses.
+    let hypothetical_anthropic = cc_lb_engine::parse_request_cache_breakpoints(
+        &http::HeaderMap::new(),
+        &body,
+    );
+    assert!(!hypothetical_anthropic.is_empty());
+
+    let state = TestState::default();
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        HashMap::new(),
+    ));
+    let authn = TestAuthn::with_principal_view(state, principal_view.clone());
+    let dispatcher = CapturingSignedDispatch::default();
+    let upstream_id = uuid::Uuid::from_u128(1_004_001);
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(principal_view)
+        .upstream_records(vec![UpstreamRecord {
+            id: upstream_id,
+            name: "native-openai-neutral".to_owned(),
+            kind: StorageUpstreamKind::OpenaiApiKey,
+            base_url: Some("https://api.openai.com/".parse()?),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(32);
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(dispatcher.clone()),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("x-api-key", managed_api_key())
+        .body(body.clone())?;
+    let response = handle(&lifecycle, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await?;
+
+    let route = next_route(&mut lifecycle_events).await;
+    assert_eq!(route.upstream_id, upstream_id);
+    assert_eq!(route.upstream_name, "native-openai-neutral");
+    assert!(
+        route.cache_breakpoints.as_ref().is_some_and(Vec::is_empty),
+        "native capability must not inherit Anthropic cache metadata"
+    );
+    assert!(route.cache_prefix_hash.is_none());
+    assert!(route.matched_v3_cache_key.is_none());
+    let dispatched = dispatcher
+        .bodies
+        .lock()
+        .expect("captured native bodies lock");
+    assert_eq!(dispatched.as_slice(), &[body]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn requested_service_tier_reaches_limit_cost_estimator_before_dispatch() {
     // Given a priority request with limit reservation enabled.
     let state = TestState::default();
