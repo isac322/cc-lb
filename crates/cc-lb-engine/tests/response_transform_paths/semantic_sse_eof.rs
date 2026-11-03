@@ -1,0 +1,547 @@
+use super::*;
+use cc_lb_lifecycle::{StreamError, StreamSuccess};
+use tower::ServiceExt as _;
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+const START: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1027\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":13,\"output_tokens\":0}}}\n\n";
+const CONTENT: &str = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n";
+const DELTA: &str = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n";
+const STOP: &str = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+const REQUEST: &[u8] = br#"{"model":"claude-test","messages":[],"stream":true}"#;
+
+struct Observation {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+    row: cc_lb_storage_api::RequestEvent,
+    events: Vec<LifecycleEvent>,
+}
+
+impl Observation {
+    fn completion(&self) -> &Result<StreamSuccess, StreamError> {
+        let completed = self
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                LifecycleEvent::StreamCompleted { result, .. } => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "exactly one stream completion");
+        completed[0]
+    }
+
+    fn assert_terminal(&self, error_code: Option<&str>) {
+        let terminal = self
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                LifecycleEvent::RequestTerminated {
+                    reason,
+                    client_status,
+                    ..
+                } => Some((reason, client_status)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let expected = error_code.map_or(TerminationReason::Success, |code| {
+            TerminationReason::ErrorCode(code.to_owned())
+        });
+        assert_eq!(terminal.len(), 1, "exactly one request termination");
+        assert_eq!(terminal[0].0, &expected);
+        assert_eq!(*terminal[0].1, self.status.as_u16());
+        assert_eq!(self.row.status, self.status.as_u16());
+        assert_eq!(self.row.error_code.as_deref(), error_code);
+        assert_eq!(self.row.upstream_stream_warning_type, None);
+        assert_eq!(self.row.upstream_stream_warning_message, None);
+    }
+
+    fn assert_incomplete_outcome(&self) {
+        assert_eq!(self.status, StatusCode::OK);
+        let error = self
+            .completion()
+            .as_ref()
+            .expect_err("missing semantic stop is incomplete");
+        assert_eq!(error.error_type, "upstream_response_incomplete");
+        self.assert_terminal(Some("upstream_stream_error"));
+        assert_eq!(
+            self.row.upstream_error_type.as_deref(),
+            Some("upstream_response_incomplete")
+        );
+        assert_eq!(
+            self.row.upstream_error_message.as_deref(),
+            Some(error.error_message.as_str())
+        );
+    }
+
+    fn assert_incomplete(&self, input: u64, output: u64) {
+        self.assert_incomplete_outcome();
+        assert_eq!(
+            (self.row.input_tokens, self.row.output_tokens),
+            (Some(input), Some(output))
+        );
+        let completion_index = self
+            .events
+            .iter()
+            .position(|event| matches!(event, LifecycleEvent::StreamCompleted { .. }))
+            .expect("stream completion observed");
+        let usage = self.events[..completion_index]
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                LifecycleEvent::UsageObserved { usage, .. } => Some(usage),
+                _ => None,
+            })
+            .expect("incomplete EOF emits accumulated usage before completion");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (input, output));
+    }
+
+    fn assert_success(&self, input: u64, output: u64, stopped: bool) {
+        let success = self
+            .completion()
+            .as_ref()
+            .expect("stream completes successfully");
+        self.assert_terminal(None);
+        assert_eq!(self.row.upstream_error_type, None);
+        assert_eq!(self.row.upstream_error_message, None);
+        assert_eq!(
+            (success.usage.input_tokens, success.usage.output_tokens),
+            (input, output)
+        );
+        assert_eq!(
+            (self.row.input_tokens, self.row.output_tokens),
+            (Some(input), Some(output))
+        );
+        assert_eq!(success.stream_message_stop_ms.is_some(), stopped);
+        assert_eq!(self.row.stream_message_stop_ms.is_some(), stopped);
+    }
+}
+
+async fn observe(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    transform: bool,
+    record: UpstreamRecord,
+    request: http::Request<Bytes>,
+) -> TestResult<Observation> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "semantic-sse-eof.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut rx = test_bus.bus.subscribe_lifecycle();
+    let hook = transform
+        .then(|| Arc::new(UnchangedSseTransform::default()) as Arc<dyn SseEventTransformHook>);
+    let lifecycle = lifecycle_with_record_and_config(
+        None,
+        hook,
+        dispatcher,
+        LifecycleConfig::default(),
+        record,
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let response = handle_authenticated(&lifecycle, request).await?;
+    let (status, headers, body) = collect_body(response).await;
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut events = Vec::new();
+        loop {
+            let event = rx.recv().await.expect("lifecycle event delivered");
+            let terminated = matches!(event, LifecycleEvent::RequestTerminated { .. });
+            events.push(event);
+            if terminated {
+                break events;
+            }
+        }
+    })
+    .await
+    .expect("request terminates after downstream EOF");
+    let mut rows = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(rows.len(), 1);
+    Ok(Observation {
+        status,
+        headers,
+        body,
+        row: rows.remove(0),
+        events,
+    })
+}
+
+async fn anthropic(
+    body: Bytes,
+    status: StatusCode,
+    gzip: bool,
+    transform: bool,
+) -> TestResult<Observation> {
+    let wire = if gzip {
+        gzip_bytes(&body)
+    } else {
+        body.clone()
+    };
+    let mut headers = sse_headers();
+    if gzip {
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    let observed = observe(
+        Arc::new(FixedDispatch {
+            status,
+            headers,
+            body: wire.clone(),
+        }),
+        transform,
+        default_upstream_record(),
+        messages_request(Bytes::from_static(REQUEST)),
+    )
+    .await?;
+    let expected = if gzip && !transform { &wire } else { &body };
+    assert_eq!(
+        &observed.body, expected,
+        "no replay or synthetic terminal/error bytes"
+    );
+    assert_eq!(
+        observed.headers.get(CONTENT_ENCODING).is_some(),
+        gzip && !transform
+    );
+    Ok(observed)
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_before_delta_matrix() -> TestResult {
+    for gzip in [false, true] {
+        for transform in [false, true] {
+            let observed = anthropic(
+                Bytes::from(format!("{START}{CONTENT}")),
+                StatusCode::OK,
+                gzip,
+                transform,
+            )
+            .await?;
+            observed.assert_incomplete(13, 0);
+            assert_eq!(observed.row.stream_message_stop_ms, None);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_after_delta_matrix() -> TestResult {
+    for gzip in [false, true] {
+        for transform in [false, true] {
+            let observed = anthropic(
+                Bytes::from(format!("{START}{CONTENT}{DELTA}")),
+                StatusCode::OK,
+                gzip,
+                transform,
+            )
+            .await?;
+            observed.assert_incomplete(13, 7);
+            assert_eq!(observed.row.stream_message_stop_ms, None);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_complete_matrix() -> TestResult {
+    for gzip in [false, true] {
+        for transform in [false, true] {
+            let observed = anthropic(
+                Bytes::from(format!("{START}{CONTENT}{DELTA}{STOP}")),
+                StatusCode::OK,
+                gzip,
+                transform,
+            )
+            .await?;
+            observed.assert_success(13, 7, true);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_terminal_is_json_type_not_event_name() -> TestResult {
+    for transform in [false, true] {
+        for payload in [
+            "event: message_stop\ndata: {}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
+        ] {
+            let output = if payload.contains("message_delta") {
+                7
+            } else {
+                0
+            };
+            let observed = anthropic(
+                Bytes::from(format!("{START}{payload}")),
+                StatusCode::OK,
+                false,
+                transform,
+            )
+            .await?;
+            observed.assert_incomplete(13, output);
+        }
+        let observed = anthropic(
+            Bytes::from(format!(
+                "{START}event: ping\ndata: {{\"type\":\"message_stop\"}}\n\n"
+            )),
+            StatusCode::OK,
+            false,
+            transform,
+        )
+        .await?;
+        observed.assert_success(13, 0, true);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_empty_and_ping_only_are_incomplete() -> TestResult {
+    for body in [
+        Bytes::new(),
+        Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n"),
+    ] {
+        for transform in [false, true] {
+            let observed = anthropic(body.clone(), StatusCode::OK, false, transform).await?;
+            observed.assert_incomplete_outcome();
+            assert_eq!(observed.row.stream_message_stop_ms, None);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_existing_error_precedence() -> TestResult {
+    for transform in [false, true] {
+        let provider = anthropic(
+            Bytes::from(format!("{START}event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}}}\n\n")),
+            StatusCode::OK, false, transform,
+        ).await?;
+        assert_eq!(
+            provider.row.upstream_error_type.as_deref(),
+            Some("overloaded_error")
+        );
+        assert_eq!(
+            provider.row.upstream_error_message.as_deref(),
+            Some("Overloaded")
+        );
+        provider.assert_terminal(Some("upstream_stream_error"));
+        let provider_errors = provider
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                LifecycleEvent::StreamCompleted {
+                    result: Err(error), ..
+                } => Some(error.error_type.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(provider_errors, vec!["overloaded_error"]);
+
+        let http_error = anthropic(
+            Bytes::from_static(START.as_bytes()),
+            StatusCode::TOO_MANY_REQUESTS,
+            false,
+            transform,
+        )
+        .await?;
+        http_error.assert_terminal(Some("upstream_4xx"));
+        assert!(
+            http_error.completion().is_ok(),
+            "clean HTTP error EOF is not an incomplete-response error"
+        );
+        assert_ne!(
+            http_error.row.upstream_error_type.as_deref(),
+            Some("upstream_response_incomplete")
+        );
+
+        for (stop, code) in [
+            ("refusal", "upstream_refusal"),
+            (
+                "model_context_window_exceeded",
+                "upstream_context_window_exceeded",
+            ),
+        ] {
+            let observed = anthropic(
+                Bytes::from(format!("{START}event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{stop}\"}},\"usage\":{{\"output_tokens\":7}}}}\n\n")),
+                StatusCode::OK, false, transform,
+            ).await?;
+            observed.assert_terminal(Some(code));
+            assert_eq!(observed.row.upstream_error_type.as_deref(), Some(stop));
+            assert!(
+                observed.completion().is_ok(),
+                "abnormal stop retains existing completion behavior"
+            );
+            assert_eq!(observed.row.stream_message_stop_ms, None);
+        }
+    }
+    Ok(())
+}
+
+struct FixtureDispatch {
+    app: axum::Router,
+    mode: &'static str,
+    delivered: Arc<Mutex<Vec<u8>>>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for FixtureDispatch {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let (url, method, mut headers, body) = request.into_parts();
+        headers.insert("x-fake-mode", HeaderValue::from_static(self.mode));
+        let mut request = http::Request::builder()
+            .method(method)
+            .uri(url.as_str())
+            .body(Body::from(body))
+            .expect("fixture request builds");
+        *request.headers_mut() = headers;
+        let response = self
+            .app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("fixture router is infallible");
+        let (parts, mut body) = response.into_parts();
+        let delivered = Arc::clone(&self.delivered);
+        let stream = async_stream::stream! {
+            while let Some(frame) = body.frame().await {
+                let frame = frame.expect("fake upstream body frame succeeds");
+                if let Ok(bytes) = frame.into_data() {
+                    delivered.lock().expect("fixture capture lock").extend_from_slice(&bytes);
+                    yield Ok::<Bytes, std::convert::Infallible>(bytes);
+                }
+            }
+        };
+        Ok(Response::from_parts(parts, Body::from_stream(stream)))
+    }
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_fake_anthropic_truncate_vs_ok() -> TestResult {
+    for mode in ["ok", "truncate-mid-stream"] {
+        for transform in [false, true] {
+            let delivered = Arc::new(Mutex::new(Vec::new()));
+            let observed = observe(
+                Arc::new(FixtureDispatch {
+                    app: fake_anthropic::app(fake_anthropic::AppConfig::default()),
+                    mode,
+                    delivered: Arc::clone(&delivered),
+                }),
+                transform,
+                default_upstream_record(),
+                messages_request(Bytes::from_static(REQUEST)),
+            )
+            .await?;
+            assert_eq!(
+                observed.body.as_ref(),
+                delivered.lock().expect("fixture capture lock").as_slice(),
+                "fixture bytes are relayed exactly"
+            );
+            if mode == "truncate-mid-stream" {
+                observed.assert_incomplete(100, 0);
+                assert_eq!(observed.row.stream_message_stop_ms, None);
+                assert!(!std::str::from_utf8(&observed.body)?.contains("event: message_stop"));
+            } else {
+                observed.assert_success(100, 50, true);
+                assert_eq!(
+                    std::str::from_utf8(&observed.body)?
+                        .matches("event: message_stop")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_unsupported_stacked_encoding_preserves_success() -> TestResult {
+    let plaintext = Bytes::from(format!("{START}{CONTENT}{DELTA}{STOP}"));
+    let wire = brotli_bytes(&gzip_bytes(&plaintext));
+    for transform in [false, true] {
+        let mut headers = sse_headers();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip, br"));
+        let observed = observe(
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers,
+                body: wire.clone(),
+            }),
+            transform,
+            default_upstream_record(),
+            messages_request(Bytes::from_static(REQUEST)),
+        )
+        .await?;
+        assert_eq!(observed.status, StatusCode::OK);
+        assert_eq!(observed.body, wire);
+        assert_eq!(
+            observed.headers.get(CONTENT_ENCODING),
+            Some(&HeaderValue::from_static("gzip, br"))
+        );
+        observed.assert_terminal(None);
+        assert_eq!(observed.row.upstream_error_type, None);
+        assert_eq!(observed.row.upstream_error_message, None);
+        observed
+            .completion()
+            .as_ref()
+            .expect("unsupported encoding remains successful raw passthrough");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_sse_eof_non_anthropic_and_non_sse_controls() -> TestResult {
+    let cases = [
+        (
+            default_upstream_record(),
+            "/v1/messages",
+            br#"{"model":"claude-test","messages":[]}"#.as_slice(),
+            br#"{"type":"message","usage":{"input_tokens":13,"output_tokens":7}}"#.as_slice(),
+            false,
+            13,
+            7,
+        ),
+        (
+            upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+            "/v1/responses",
+            br#"{"model":"gpt-test","input":"hello","stream":true}"#.as_slice(),
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"output_tokens\":7}}}\n\n".as_slice(),
+            true,
+            13,
+            7,
+        ),
+        (
+            upstream_record(StorageUpstreamKind::GeminiApiKey, "https://generativelanguage.googleapis.com/"),
+            "/v1beta/models/gemini-test:streamGenerateContent?alt=sse",
+            br#"{"contents":[]}"#.as_slice(),
+            b"data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"hello\"}]}}],\"usageMetadata\":{\"promptTokenCount\":13,\"candidatesTokenCount\":7}}\n\n".as_slice(),
+            true,
+            13,
+            7,
+        ),
+    ];
+    for (record, path, request_body, body, sse, input, output) in cases {
+        let body = Bytes::copy_from_slice(body);
+        let headers = if sse {
+            sse_headers()
+        } else {
+            json_headers(body.len(), false)
+        };
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::copy_from_slice(request_body))?;
+        let observed = observe(
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers,
+                body: body.clone(),
+            }),
+            false,
+            record,
+            request,
+        )
+        .await?;
+        assert_eq!(observed.body, body);
+        observed.assert_success(input, output, false);
+    }
+    Ok(())
+}
