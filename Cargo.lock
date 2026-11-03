@@ -930,6 +930,7 @@ dependencies = [
  "cc-lb-upstream",
  "chrono",
  "dashmap",
+ "fake-anthropic",
  "flate2",
  "futures-core",
  "h2",
