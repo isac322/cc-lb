@@ -1,11 +1,13 @@
 use crate::common;
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::body::Body;
+use base64::Engine as _;
 use bytes::Bytes;
 use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
@@ -14,19 +16,14 @@ use cc_lb_control::api_keys::principal_view::{
 };
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream};
-use cc_lb_engine::{
-    DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator, UpstreamDispatch,
-};
+use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind, RouteInfo};
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{KeyStatus, MetaStore, Storage as StorageTrait, StoredApiKeyRecord};
 use cc_lb_storage_sqlite::SqliteStorage;
-use cc_lb_upstream::{
-    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    UpstreamDialect,
-};
+use cc_lb_upstream::{DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest, UpstreamDialect};
 use http::StatusCode;
 use http_body_util::BodyExt;
 use tokio::time::{Duration, timeout};
@@ -54,6 +51,23 @@ impl LimitCostEstimator for RecordingLimitCostEstimator {
             .expect("service tier lock")
             .push(service_tier.map(ToOwned::to_owned));
         Some(1)
+    }
+    fn estimate_max_with_local_cache(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.estimate_max(
+            model,
+            input
+                .uncached_input_tokens
+                .saturating_add(input.cache_prefix_5m_tokens)
+                .saturating_add(input.cache_prefix_1h_tokens),
+            max_output,
+            service_tier,
+        )
     }
 }
 
@@ -775,6 +789,17 @@ impl LimitCostEstimator for CatalogLimitCostEstimator {
             )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+    fn estimate_max_with_local_cache(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache(model, input, max_output, service_tier)
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
 }
 
 fn priced_catalog() -> Arc<PriceCatalog> {
@@ -825,6 +850,24 @@ fn usd_limited_lifecycle(
     cap_micros: i64,
     state: &TestState,
 ) -> Lifecycle {
+    limited_lifecycle(
+        kind,
+        vec![Limit {
+            kind: LimitKind::CostUsd,
+            window_secs: 60,
+            cap_micros,
+        }],
+        state,
+        None,
+    )
+}
+
+fn limited_lifecycle(
+    kind: StorageUpstreamKind,
+    limits: Vec<Limit>,
+    state: &TestState,
+    dispatch: Option<Arc<dyn UpstreamDispatch>>,
+) -> Lifecycle {
     let base_url: url::Url = "http://upstream.local/".parse().expect("test URL parses");
     let record = UpstreamRecord {
         id: uuid::Uuid::from_u128(2),
@@ -852,11 +895,7 @@ fn usd_limited_lifecycle(
         kind: cc_lb_storage_api::PrincipalKind::Machine,
         allowed_models: vec!["*".to_owned()],
         allowed_upstreams: vec![record.id],
-        default_limits: vec![Limit {
-            kind: LimitKind::CostUsd,
-            window_secs: 60,
-            cap_micros,
-        }],
+        default_limits: limits,
         enabled: true,
         deleted_at_unix_secs: None,
         revision: 1,
@@ -877,9 +916,11 @@ fn usd_limited_lifecycle(
     Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
-        Arc::new(MockDispatch {
-            state: state.clone(),
-            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+        dispatch.unwrap_or_else(|| {
+            Arc::new(MockDispatch {
+                state: state.clone(),
+                mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+            })
         }),
         LifecycleConfig::default(),
         Arc::new(cc_lb_clock::SystemClock),
@@ -975,6 +1016,435 @@ struct CapturingSignedDispatch {
 #[async_trait]
 impl UpstreamDispatch for CapturingSignedDispatch {
     async fn dispatch(&self, request: SignedRequest) -> Result<http::Response<Body>, DispatchError> {
+// Real grayscale PNGs: filter-0 scanlines, zlib IDAT, and CRC-checked chunks.
+// Compression changes encoded length, not the approved admission allowance.
+fn synthetic_png_base64(side: u32, compression: flate2::Compression) -> String {
+    fn chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        png.extend_from_slice(
+            &u32::try_from(data.len())
+                .expect("small PNG chunk")
+                .to_be_bytes(),
+        );
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        let mut crc = !0_u32;
+        for byte in kind.iter().chain(data) {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+            }
+        }
+        png.extend_from_slice(&(!crc).to_be_bytes());
+    }
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&side.to_be_bytes());
+    ihdr.extend_from_slice(&side.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    chunk(&mut png, b"IHDR", &ihdr);
+    let row = vec![0_u8; usize::try_from(side).expect("small side") + 1];
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), compression);
+    for _ in 0..side {
+        encoder.write_all(&row).expect("PNG scanline compresses");
+    }
+    chunk(
+        &mut png,
+        b"IDAT",
+        &encoder.finish().expect("PNG zlib stream finishes"),
+    );
+    chunk(&mut png, b"IEND", &[]);
+    base64::engine::general_purpose::STANDARD.encode(png)
+}
+
+fn native_base64_image(data: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": data}
+    })
+}
+
+fn anthropic_content_request(content: serde_json::Value, max_tokens: i64) -> serde_json::Value {
+    serde_json::json!({
+        "model": PRICED_RAW_CLAUDE_ALIAS,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": content}]
+    })
+}
+
+async fn assert_anthropic_limit_boundary(
+    label: &str,
+    body: &serde_json::Value,
+    kind: LimitKind,
+    expected_reservation: i64,
+) {
+    for (cap, expected_status, expected_calls) in [
+        (expected_reservation, StatusCode::OK, 1),
+        (expected_reservation - 1, StatusCode::TOO_MANY_REQUESTS, 0),
+    ] {
+        let state = TestState::default();
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::AnthropicApiKey,
+            vec![Limit {
+                kind,
+                window_secs: 60,
+                cap_micros: cap,
+            }],
+            &state,
+            None,
+        );
+        let response = handle(
+            &lifecycle,
+            messages_request(Bytes::from(serde_json::to_vec(body).expect("request JSON"))),
+        )
+        .await;
+        let (status, _, response_body) = collect_body(response).await;
+        assert_eq!(
+            status, expected_status,
+            "{label}, cap {cap}: {response_body:?}"
+        );
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            expected_calls,
+            "{label}, cap {cap}"
+        );
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let error: serde_json::Value =
+                serde_json::from_slice(&response_body).expect("rate limit JSON");
+            assert_eq!(error["error"]["type"], "rate_limit_error", "{label}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_large_valid_base64_image_observes_exact_cost_boundary() {
+    let data = synthetic_png_base64(1024, flate2::Compression::none());
+    assert!(
+        data.len() > 1_000_000,
+        "fixture reproduces the encoded-byte false 429"
+    );
+    let body = anthropic_content_request(serde_json::json!([native_base64_image(&data)]), 1);
+    // user(4) + image(5) + base64(6) + image/png(9) = 24 retained bytes.
+    // $1/M input and $10/M output: 4,784 + 24/4 + 10 = 4,800 micros.
+    assert_anthropic_limit_boundary("valid large PNG", &body, LimitKind::CostUsd, 4_800).await;
+}
+
+#[tokio::test]
+async fn admission_text_control_preserves_exact_cost_boundary() {
+    let body = anthropic_content_request(serde_json::json!("x".repeat(16_004)), 1);
+    // user(4) plus 16,004 text bytes => 4,002 input and 10 output micros.
+    assert_anthropic_limit_boundary("text control", &body, LimitKind::CostUsd, 4_012).await;
+}
+
+#[tokio::test]
+async fn admission_native_images_increment_input_and_total_tokens_at_exact_boundary() {
+    let data = synthetic_png_base64(1, flate2::Compression::best());
+    for count in [0_usize, 1, 2, 4] {
+        let images: Vec<_> = (0..count).map(|_| native_base64_image(&data)).collect();
+        let body = anthropic_content_request(serde_json::json!(images), 7);
+        let count = i64::try_from(count).expect("small image count");
+        let whole = (4_784 * count + (4 + 20 * count) / 4).max(4_000);
+        assert_anthropic_limit_boundary("native image input", &body, LimitKind::InputTokens, whole)
+            .await;
+        assert_anthropic_limit_boundary(
+            "native image total",
+            &body,
+            LimitKind::TotalTokens,
+            whole + 7,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn admission_compressed_same_geometry_image_pair_cannot_escape_allowance() {
+    let compressed = synthetic_png_base64(1568, flate2::Compression::best());
+    let uncompressed = synthetic_png_base64(1568, flate2::Compression::none());
+    assert!(
+        compressed.len() * 100 < uncompressed.len(),
+        "same pixels, different encoding size"
+    );
+    // Two visual allowances plus user(4) and two image metadata groups(20 each).
+    for data in [&compressed, &uncompressed] {
+        let body = anthropic_content_request(
+            serde_json::json!([native_base64_image(data), native_base64_image(data)]),
+            1,
+        );
+        assert_anthropic_limit_boundary("same-geometry pair", &body, LimitKind::InputTokens, 9_579)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn admission_nested_tool_result_images_use_native_image_allowance() {
+    let data = synthetic_png_base64(1024, flate2::Compression::none());
+    let body = anthropic_content_request(
+        serde_json::json!([{
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": [native_base64_image(&data), {"type": "text", "text": "done"}]
+        }]),
+        1,
+    );
+    // user(4), tool_result(11), toolu_1(7), image metadata(20), text(4), done(4).
+    let whole = 4_784 + 50 / 4;
+    assert_anthropic_limit_boundary("nested tool result", &body, LimitKind::InputTokens, whole)
+        .await;
+    assert_anthropic_limit_boundary(
+        "nested tool result cost",
+        &body,
+        LimitKind::CostUsd,
+        whole + 10,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admission_native_url_images_exclude_only_the_reference_value() {
+    for reference in [
+        "https://images.example/pixel.png".to_owned(),
+        format!(
+            "https://images.example/pixel.png?signature={}",
+            "x".repeat(40_000)
+        ),
+    ] {
+        let body = anthropic_content_request(
+            serde_json::json!([{"type":"image", "source":{"type":"url", "url":reference}}]),
+            1,
+        );
+        // user(4), image(5), url(3); the reference itself is not text input.
+        assert_anthropic_limit_boundary("URL image", &body, LimitKind::InputTokens, 4_787).await;
+    }
+    let body = anthropic_content_request(
+        serde_json::json!([{
+            "type":"image",
+            "source":{"type":"url", "url":"https://images.example/pixel.png", "note":"x".repeat(16_000)}
+        }]),
+        1,
+    );
+    assert_anthropic_limit_boundary(
+        "retained source metadata",
+        &body,
+        LimitKind::InputTokens,
+        8_787,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admission_document_tool_schema_and_text_images_remain_generic_strings() {
+    let data = synthetic_png_base64(128, flate2::Compression::none());
+    let image = native_base64_image(&data);
+    let cases = [
+        anthropic_content_request(
+            serde_json::json!([{"type":"document", "source":{"type":"base64","media_type":"application/pdf","data":data}}]),
+            1,
+        ),
+        anthropic_content_request(
+            serde_json::json!([{"type":"tool_use","id":"toolu_1","name":"inspect","input":{"example":image}}]),
+            1,
+        ),
+        anthropic_content_request(
+            serde_json::json!([{"type":"text", "text":image.to_string()}]),
+            1,
+        ),
+        serde_json::json!({
+            "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+            "tools":[{"name":"inspect","input_schema":{"type":"object","example":image}}],
+            "messages":[{"role":"user","content":"hello"}]
+        }),
+    ];
+    for body in cases {
+        // Generic-string oracle for negative controls only: none of these
+        // image-looking values are native image content.
+        let whole = i64::try_from(selected_string_bytes(&body) / 4)
+            .expect("small generic estimate")
+            .max(4_000);
+        assert!(
+            whole > 4_784,
+            "fixture distinguishes generic data from one image"
+        );
+        assert_anthropic_limit_boundary("non-image control", &body, LimitKind::InputTokens, whole)
+            .await;
+    }
+}
+
+fn selected_string_bytes(body: &serde_json::Value) -> usize {
+    fn strings(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::String(text) => text.len(),
+            serde_json::Value::Array(values) => values.iter().map(strings).sum(),
+            serde_json::Value::Object(values) => values.values().map(strings).sum(),
+            _ => 0,
+        }
+    }
+    [
+        "tools",
+        "system",
+        "messages",
+        "instructions",
+        "input",
+        "systemInstruction",
+        "contents",
+    ]
+    .iter()
+    .filter_map(|key| body.get(key))
+    .map(strings)
+    .sum()
+}
+
+#[tokio::test]
+async fn admission_non_anthropic_image_shaped_json_keeps_generic_estimate() {
+    let data = synthetic_png_base64(128, flate2::Compression::none());
+    for (kind, model, path, root) in [
+        (
+            StorageUpstreamKind::OpenaiApiKey,
+            PRICED_OPENAI_MODEL,
+            "/v1/responses",
+            "input",
+        ),
+        (
+            StorageUpstreamKind::GeminiApiKey,
+            PRICED_GEMINI_MODEL,
+            "/v1beta/models/gemini-limit-test:generateContent",
+            "contents",
+        ),
+    ] {
+        let mut body = serde_json::json!({"model":model, "max_tokens":1});
+        body[root] = serde_json::json!([native_base64_image(&data)]);
+        let whole = i64::try_from(selected_string_bytes(&body) / 4)
+            .expect("small estimate")
+            .max(4_000);
+        assert!(whole > 4_784);
+        for (cap, expected_status) in [
+            (whole, StatusCode::OK),
+            (whole - 1, StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let state = TestState::default();
+            let lifecycle = limited_lifecycle(
+                kind,
+                vec![Limit {
+                    kind: LimitKind::InputTokens,
+                    window_secs: 60,
+                    cap_micros: cap,
+                }],
+                &state,
+                None,
+            );
+            let request = http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("x-api-key", managed_api_key())
+                .body(Bytes::from(
+                    serde_json::to_vec(&body).expect("request JSON"),
+                ))
+                .expect("provider request builds");
+            let (status, _, response_body) = collect_body(handle(&lifecycle, request).await).await;
+            assert_eq!(
+                status, expected_status,
+                "{model}, cap {cap}: {response_body:?}"
+            );
+            assert_eq!(
+                state.upstream_calls.load(Ordering::Relaxed),
+                u64::from(status == StatusCode::OK)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_local_prefix_and_tail_do_not_overlap_at_exact_cost_boundary() {
+    let body = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "system":[{"type":"text","text":"p".repeat(16_000),"cache_control":{"type":"ephemeral","ttl":"5m"}}],
+        "messages":[{"role":"user","content":[{"type":"text","text":"t".repeat(40_000)}]}]
+    });
+    // Prefix: text(4)+16,000+ephemeral(9)+5m(2) = 16,015 bytes
+    // => 4,003 units, remainder 3. Tail: user(4)+text(4)+40,000
+    // plus that remainder => 10,002 units. Gross 14,005, not serialized bytes.
+    assert_anthropic_limit_boundary("disjoint local 5m", &body, LimitKind::CostUsd, 14_015).await;
+    assert_anthropic_limit_boundary(
+        "whole input includes cached prefix",
+        &body,
+        LimitKind::InputTokens,
+        14_005,
+    )
+    .await;
+    assert_anthropic_limit_boundary(
+        "whole total includes cached prefix",
+        &body,
+        LimitKind::TotalTokens,
+        14_006,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admission_local_one_hour_and_mixed_ttl_regions_are_disjoint() {
+    let one_hour = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "system":[{"type":"text","text":"p".repeat(16_000),"cache_control":{"type":"ephemeral","ttl":"1h"}}],
+        "messages":[{"role":"user","content":[{"type":"text","text":"t".repeat(40_000)}]}]
+    });
+    // P1=4,003 at derived $2/M, tail=10,002 at $1/M, output=10.
+    assert_anthropic_limit_boundary("derived 1h", &one_hour, LimitKind::CostUsd, 18_018).await;
+    let mixed = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "system":[
+            {"type":"text","text":"a".repeat(16_000),"cache_control":{"type":"ephemeral","ttl":"1h"}},
+            {"type":"text","text":"b".repeat(8_000),"cache_control":{"type":"ephemeral","ttl":"5m"}}
+        ],
+        "messages":[{"role":"user","content":[{"type":"text","text":"t".repeat(40_000)}]}]
+    });
+    // Shared remainder: P1=4,003 (3), P5=2,004 (2), tail=10,002.
+    // Prefix snapshots must not be added: 2*4,003 + 2,004 + 10,002 + 10.
+    assert_anthropic_limit_boundary("mixed TTL", &mixed, LimitKind::CostUsd, 20_022).await;
+}
+
+#[tokio::test]
+async fn admission_automatic_and_explicit_local_markers_share_request_floor_once() {
+    let explicit = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]
+    });
+    let automatic = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "cache_control":{"type":"ephemeral"},
+        "messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+    });
+    for body in [explicit, automatic] {
+        assert_anthropic_limit_boundary("single request floor", &body, LimitKind::CostUsd, 4_010)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn admission_local_plus_opaque_marker_preserves_local_precedence() {
+    let body = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "prompt_cache_key":"opaque-context",
+        "system":[{"type":"text","text":"p".repeat(16_000),"cache_control":{"type":"ephemeral","ttl":"5m"}}],
+        "messages":[{"role":"user","content":[{"type":"text","text":"t".repeat(40_000)}]}]
+    });
+    assert_anthropic_limit_boundary(
+        "resolved local suppresses opaque padding",
+        &body,
+        LimitKind::CostUsd,
+        14_015,
+    )
+    .await;
+}
+
+struct CapturingAdmissionDispatch {
+    inner: MockDispatch,
+    bodies: Arc<Mutex<Vec<Bytes>>>,
+}
+
+#[async_trait::async_trait]
+impl UpstreamDispatch for CapturingAdmissionDispatch {
+    async fn dispatch(
+        &self,
+        request: SignedRequest,
+    ) -> Result<http::Response<axum::body::Body>, DispatchError> {
         self.bodies
             .lock()
             .expect("captured bodies lock")
@@ -1182,4 +1652,318 @@ async fn sqlite_storage_for_lifecycle_happy(
             .await?;
     storage.initialize().await?;
     Ok(storage)
+        self.inner.dispatch(request).await
+    }
+}
+
+#[tokio::test]
+async fn admission_image_fix_preserves_forwarded_bytes_and_routing_prefix_units() {
+    let data = synthetic_png_base64(1024, flate2::Compression::none());
+    let body = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "messages":[{"role":"user","content":[{
+            "type":"image", "source":{"type":"base64","media_type":"image/png","data":data},
+            "cache_control":{"type":"ephemeral","ttl":"5m"}
+        }]}]
+    });
+    let bytes = Bytes::from(serde_json::to_vec_pretty(&body).expect("pretty request JSON"));
+    let before = cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &bytes);
+    let prefix = before.first().expect("native image breakpoint");
+    assert!(
+        prefix.prefix_bytes.get() > 1_000_000,
+        "routing retains serialized payload bytes"
+    );
+    assert_eq!(
+        cc_lb_domain::PrefixBytes::ESTIMATE_SOURCE,
+        "serialized_prefix_bytes_v1"
+    );
+    let state = TestState::default();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let dispatch = Arc::new(CapturingAdmissionDispatch {
+        inner: MockDispatch {
+            state: state.clone(),
+            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+        },
+        bodies: Arc::clone(&bodies),
+    });
+    // Input = 4,784 + (user4+image5+base646+image/png9+ephemeral9+5m2)/4
+    // = 4,792; output adds 10 micros. Prefix bytes must not set this cap.
+    let lifecycle = limited_lifecycle(
+        StorageUpstreamKind::AnthropicApiKey,
+        vec![Limit {
+            kind: LimitKind::CostUsd,
+            window_secs: 60,
+            cap_micros: 4_802,
+        }],
+        &state,
+        Some(dispatch),
+    );
+    let response = handle(&lifecycle, messages_request(bytes.clone())).await;
+    let (status, _, response_body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK, "{response_body:?}");
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+    let captured = bodies.lock().expect("captured body lock");
+    let forwarded = captured.first().expect("one dispatched body");
+    assert_eq!(forwarded, &bytes, "admission must not rewrite the payload");
+    let after = cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), forwarded);
+    assert_eq!(
+        serde_json::to_value(&after).expect("breakpoints serialize"),
+        serde_json::to_value(&before).expect("breakpoints serialize")
+    );
+}
+
+#[tokio::test]
+async fn admission_tools_and_message_breakpoints_use_structural_regions() {
+    let tool = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "tools":[{
+            "name":"inspect", "description":"p".repeat(16_000),
+            "input_schema":{"type":"object"},
+            "cache_control":{"type":"ephemeral","ttl":"5m"}
+        }],
+        "messages":[{"role":"user","content":"t".repeat(40_000)}]
+    });
+    // Tool strings: 7+16,000+6+9+2 = 16,024 => P5=4,006.
+    // Tail: user(4)+40,000 => 10,001; output adds 10.
+    assert_anthropic_limit_boundary("tool breakpoint", &tool, LimitKind::CostUsd, 14_017).await;
+    let message = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "messages":[
+            {"role":"user","content":[{"type":"text","text":"p".repeat(16_000),"cache_control":{"type":"ephemeral","ttl":"5m"}}]},
+            {"role":"user","content":[{"type":"text","text":"t".repeat(40_000)}]}
+        ]
+    });
+    // P5=4,003 with carry 3. Both role strings stay in the uncached
+    // accumulator: tail=(8+4+40,000+3)/4=10,003.
+    assert_anthropic_limit_boundary("message breakpoint", &message, LimitKind::CostUsd, 14_016)
+        .await;
+}
+
+#[tokio::test]
+async fn admission_nested_tool_result_prefix_counts_its_image_once() {
+    let data = synthetic_png_base64(1024, flate2::Compression::none());
+    let body = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "messages":[{"role":"user","content":[
+            {
+                "type":"tool_result","tool_use_id":"toolu_1",
+                "content":[native_base64_image(&data)],
+                "cache_control":{"type":"ephemeral","ttl":"5m"}
+            },
+            {"type":"text","text":"t".repeat(40_000)}
+        ]}]
+    });
+    // Parent prefix: tool_result11+toolu_1(7)+image metadata20+ephemeral9+5m2
+    // =49 bytes => 12 with carry 1, plus one 4,784 image. Tail=10,002.
+    assert_anthropic_limit_boundary("nested cached image", &body, LimitKind::CostUsd, 14_808).await;
+    assert_anthropic_limit_boundary(
+        "nested cached image whole input",
+        &body,
+        LimitKind::InputTokens,
+        14_798,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admission_unresolved_empty_marker_retains_opaque_fallback() {
+    let body = serde_json::json!({
+        "model":PRICED_RAW_CLAUDE_ALIAS, "max_tokens":1,
+        "cache_control":{"type":"ephemeral"},
+        "messages":[]
+    });
+    let bytes = Bytes::from(serde_json::to_vec(&body).expect("request JSON"));
+    assert!(
+        cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &bytes).is_empty()
+    );
+    // Empty automatic input cannot resolve a local block. Preserve the
+    // existing 1,048,576-token opaque gross bound, plus 10 output micros.
+    assert_anthropic_limit_boundary("unresolved marker", &body, LimitKind::CostUsd, 1_048_586)
+        .await;
+}
+
+#[tokio::test]
+async fn admission_file_image_preserves_existing_pre_admission_affinity_gate() {
+    for reference in ["file_1".to_owned(), format!("file_{}", "x".repeat(40_000))] {
+        let body = anthropic_content_request(
+            serde_json::json!([{"type":"image","source":{"type":"file","file_id":reference}}]),
+            1,
+        );
+        // File affinity is resolved before limits. Neither cap may bypass that
+        // existing 503 gate; local file-image arithmetic belongs in T1 tests.
+        for (cap, expected_status) in [
+            (4_786, StatusCode::SERVICE_UNAVAILABLE),
+            (4_787, StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let state = TestState::default();
+            let lifecycle = limited_lifecycle(
+                StorageUpstreamKind::AnthropicApiKey,
+                vec![Limit {
+                    kind: LimitKind::InputTokens,
+                    window_secs: 60,
+                    cap_micros: cap,
+                }],
+                &state,
+                None,
+            );
+            let response = handle(
+                &lifecycle,
+                messages_request(Bytes::from(
+                    serde_json::to_vec(&body).expect("request JSON"),
+                )),
+            )
+            .await;
+            let (status, _, response_body) = collect_body(response).await;
+            assert_eq!(
+                status, expected_status,
+                "file image cap {cap}: {response_body:?}"
+            );
+            assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+}
+
+struct GatedAdmissionDispatch {
+    inner: MockDispatch,
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl UpstreamDispatch for GatedAdmissionDispatch {
+    async fn dispatch(
+        &self,
+        request: SignedRequest,
+    ) -> Result<http::Response<axum::body::Body>, DispatchError> {
+        self.entered.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("dispatch gate open")
+            .forget();
+        self.inner.dispatch(request).await
+    }
+}
+
+#[tokio::test]
+async fn admission_two_in_flight_images_use_the_sum_of_corrected_reservations() {
+    let data = synthetic_png_base64(1, flate2::Compression::best());
+    let body = anthropic_content_request(serde_json::json!([native_base64_image(&data)]), 1);
+    let bytes = Bytes::from(serde_json::to_vec(&body).expect("request JSON"));
+    // Each request reserves 4,790 input tokens. Hold the first dispatch open
+    // so provider settlement cannot conceal an under-reserved second request.
+    for (cap, expected_second_status, expected_calls) in [
+        (9_580, StatusCode::OK, 2),
+        (9_579, StatusCode::TOO_MANY_REQUESTS, 1),
+    ] {
+        let state = TestState::default();
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let dispatch = Arc::new(GatedAdmissionDispatch {
+            inner: MockDispatch {
+                state: state.clone(),
+                mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+            },
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::AnthropicApiKey,
+            vec![Limit {
+                kind: LimitKind::InputTokens,
+                window_secs: 60,
+                cap_micros: cap,
+            }],
+            &state,
+            Some(dispatch),
+        );
+        let first = handle(&lifecycle, messages_request(bytes.clone()));
+        tokio::pin!(first);
+        tokio::select! {
+            permit = entered.acquire() => permit.expect("first dispatch entered").forget(),
+            response = &mut first => panic!("first request returned before dispatch gate: {}", response.status()),
+        }
+        let second = handle(&lifecycle, messages_request(bytes.clone()));
+        tokio::pin!(second);
+        let second_response = tokio::select! {
+            permit = entered.acquire() => {
+                permit.expect("second dispatch entered").forget();
+                release.add_permits(2);
+                second.await
+            },
+            response = &mut second => {
+                release.add_permits(1);
+                response
+            },
+        };
+        let (first_status, _, first_body) = collect_body(first.await).await;
+        let (second_status, _, second_body) = collect_body(second_response).await;
+        assert_eq!(first_status, StatusCode::OK, "cap {cap}: {first_body:?}");
+        assert_eq!(
+            second_status, expected_second_status,
+            "cap {cap}: {second_body:?}"
+        );
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            expected_calls,
+            "cap {cap}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admission_over_limit_and_unsupported_markers_keep_opaque_fallback() {
+    let too_many: Vec<_> = (0..5)
+        .map(|_| {
+            serde_json::json!({
+                "type":"text","text":"hello","cache_control":{"type":"ephemeral"}
+            })
+        })
+        .collect();
+    let bodies = [
+        anthropic_content_request(serde_json::json!(too_many), 1),
+        anthropic_content_request(
+            serde_json::json!([{
+                "type":"future_block", "payload":"hello",
+                "cache_control":{"type":"ephemeral"}
+            }]),
+            1,
+        ),
+    ];
+    for body in bodies {
+        let bytes = Bytes::from(serde_json::to_vec(&body).expect("request JSON"));
+        assert!(
+            cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &bytes)
+                .is_empty()
+        );
+        assert_anthropic_limit_boundary(
+            "unresolved invalid marker",
+            &body,
+            LimitKind::CostUsd,
+            1_048_586,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn admission_missing_and_unsupported_image_sources_keep_generic_estimate() {
+    let data = synthetic_png_base64(128, flate2::Compression::none());
+    for image in [
+        serde_json::json!({"type":"image"}),
+        serde_json::json!({"type":"image","source":null}),
+        serde_json::json!({"type":"image","source":{"type":"unsupported","data":data}}),
+    ] {
+        let body = anthropic_content_request(serde_json::json!([image]), 1);
+        let whole = i64::try_from(selected_string_bytes(&body) / 4)
+            .expect("small generic estimate")
+            .max(4_000);
+        assert_anthropic_limit_boundary(
+            "unrecognized source",
+            &body,
+            LimitKind::InputTokens,
+            whole,
+        )
+        .await;
+    }
 }

@@ -1206,6 +1206,23 @@ impl LimitCostEstimator for CountingLimitCostEstimator {
         *self.calls.lock().expect("estimator calls lock") += 1;
         Some(1)
     }
+    fn estimate_max_with_local_cache(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.estimate_max(
+            model,
+            input
+                .uncached_input_tokens
+                .saturating_add(input.cache_prefix_5m_tokens)
+                .saturating_add(input.cache_prefix_1h_tokens),
+            max_output,
+            service_tier,
+        )
+    }
 }
 
 const LIMIT_KEY: &str = "key-test";
