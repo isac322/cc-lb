@@ -236,7 +236,9 @@ impl LifecycleKeepalive {
         if self.enqueuer.is_none() {
             return;
         }
-        if !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref()) {
+        if cache_metadata.explicit_auxiliary
+            || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
+        {
             return;
         }
         let view = self.dynamic_view.load();
@@ -294,7 +296,9 @@ impl LifecycleKeepalive {
         let Some(enqueuer) = self.enqueuer.as_ref() else {
             return;
         };
-        if !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref()) {
+        if cache_metadata.explicit_auxiliary
+            || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
+        {
             return;
         }
         let view = self.dynamic_view.load();
@@ -784,6 +788,192 @@ mod tests {
         SigningCapability, UpstreamError,
     };
     use http::HeaderValue;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum OrderedCompletion {
+        Observe(String),
+        Enqueue(String, Option<u64>),
+        NotTracked(String),
+        Cancel(String, Option<u64>),
+    }
+
+    struct OrderedCompletionEnqueuer {
+        events: tokio::sync::mpsc::UnboundedSender<OrderedCompletion>,
+    }
+
+    #[async_trait]
+    impl CacheKeepaliveEnqueuer for OrderedCompletionEnqueuer {
+        async fn observe_session_generation(
+            &self,
+            key: &str,
+        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+            self.events
+                .send(OrderedCompletion::Observe(key.to_owned()))
+                .expect("observer receiver");
+            Ok(Some(41))
+        }
+
+        async fn enqueue_cache_keepalive(
+            &self,
+            request: CacheKeepaliveEnqueueRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            self.events
+                .send(OrderedCompletion::Enqueue(
+                    request.session_key_hash,
+                    request.expected_generation,
+                ))
+                .expect("enqueue receiver");
+            Ok(())
+        }
+
+        async fn cancel_cache_keepalive(
+            &self,
+            request: CacheKeepaliveCancelRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            assert_eq!(request.reason, CancelReason::UserTurnDetected);
+            self.events
+                .send(OrderedCompletion::Cancel(
+                    request.session_key_hash,
+                    request.expected_generation,
+                ))
+                .expect("cancel receiver");
+            Ok(())
+        }
+
+        async fn record_cache_keepalive_not_tracked(
+            &self,
+            request: CacheKeepaliveNotTrackedRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            assert_eq!(request.reason, "user turn (stop_reason=end_turn)");
+            self.events
+                .send(OrderedCompletion::NotTracked(request.session_key_hash))
+                .expect("not-tracked receiver");
+            Ok(())
+        }
+    }
+
+    impl LifecycleKeepalive {
+        // Called from lifecycle's metadata tests so the auxiliary identity is built
+        // by the real header/body constructor, without exposing a production API.
+        pub(crate) async fn assert_auxiliary_cannot_supersede_pending_completion(
+            dynamic_view: Arc<DynamicViewHolder>,
+            principal: Principal,
+            legitimate: RequestCacheMetadata,
+            auxiliary: RequestCacheMetadata,
+            body: Bytes,
+            cancellation: bool,
+            detached_gate: bool,
+        ) {
+            let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+            let keepalive = LifecycleKeepalive::new(
+                Some(Arc::new(OrderedCompletionEnqueuer { events })),
+                dynamic_view,
+            );
+            let key = cache_keepalive_session_key(&principal, &legitimate)
+                .expect("legitimate session key");
+            assert_eq!(
+                cache_keepalive_session_key(&principal, &auxiliary),
+                Some(key.clone())
+            );
+            let expected_key = key.to_string();
+            let headers = HeaderMap::new();
+            let agent_turn = serde_json::json!({
+                "type": "message",
+                "content": [{"type": "tool_use", "id": "toolu_ordered", "name": "Bash", "input": {}}],
+                "stop_reason": "tool_use"
+            });
+            let user_turn = serde_json::json!({
+                "type": "message", "content": [{"type": "text", "text": "done"}],
+                "stop_reason": "end_turn"
+            });
+            let (legitimate_response, auxiliary_response) = if cancellation {
+                (&user_turn, &agent_turn)
+            } else {
+                (&agent_turn, &user_turn)
+            };
+            if detached_gate {
+                keepalive
+                    .persist_completion(
+                        1,
+                        auxiliary_response,
+                        &principal,
+                        "accounting-key".to_owned(),
+                        &auxiliary,
+                        Uuid::nil(),
+                        body.clone(),
+                        body.clone(),
+                        &headers,
+                        Duration::ZERO,
+                        12_000,
+                    )
+                    .await;
+                assert!(
+                    received.try_recv().is_err(),
+                    "an auxiliary detached completion must not observe or mutate a generation"
+                );
+            }
+            let shard = keepalive.session_shard(&key).lock().await;
+            keepalive.on_response_completed(
+                legitimate_response,
+                &principal,
+                "accounting-key".to_owned(),
+                &legitimate,
+                Uuid::nil(),
+                body.clone(),
+                body.clone(),
+                &headers,
+                Duration::ZERO,
+                12_000,
+            );
+            if !detached_gate {
+                keepalive.on_response_completed(
+                    auxiliary_response,
+                    &principal,
+                    "accounting-key".to_owned(),
+                    &auxiliary,
+                    Uuid::nil(),
+                    body.clone(),
+                    body,
+                    &headers,
+                    Duration::ZERO,
+                    12_000,
+                );
+            }
+            drop(shard);
+            let operations = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut operations = Vec::new();
+                loop {
+                    let event = received.recv().await.expect("completion event");
+                    let terminal = matches!(
+                        event,
+                        OrderedCompletion::Enqueue(..) | OrderedCompletion::Cancel(..)
+                    );
+                    operations.push(event);
+                    if terminal {
+                        break operations;
+                    }
+                }
+            })
+            .await
+            .expect("legitimate completion must reach its durable operation");
+            let expected = if cancellation {
+                vec![
+                    OrderedCompletion::Observe(expected_key.clone()),
+                    OrderedCompletion::NotTracked(expected_key.clone()),
+                    OrderedCompletion::Cancel(expected_key, Some(41)),
+                ]
+            } else {
+                vec![
+                    OrderedCompletion::Observe(expected_key.clone()),
+                    OrderedCompletion::Enqueue(expected_key, Some(41)),
+                ]
+            };
+            assert_eq!(
+                operations, expected,
+                "auxiliary cannot replace the pending legitimate completion"
+            );
+        }
+    }
 
     #[test]
     fn keepalive_eligibility_reuses_cached_json_for_unchanged_bytes() {
