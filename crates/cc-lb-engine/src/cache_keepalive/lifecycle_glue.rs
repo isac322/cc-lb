@@ -778,8 +778,8 @@ mod tests {
     };
     use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
     use cc_lb_upstream::{
-        ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, Signer, SignerError,
-        SignerFactory, SigningCapability, Upstream, UpstreamError,
+        ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, Signer, SignerError, SignerFactory,
+        SigningCapability, Upstream, UpstreamError,
     };
 
     #[test]
@@ -1112,7 +1112,10 @@ mod tests {
                 &self,
                 request: CacheKeepaliveNotTrackedRequest,
             ) -> Result<(), CacheKeepaliveEnqueueError> {
-                self.not_tracked.lock().expect("not-tracked lock").push(request);
+                self.not_tracked
+                    .lock()
+                    .expect("not-tracked lock")
+                    .push(request);
                 self.mutations.add_permits(1);
                 Ok(())
             }
@@ -1122,7 +1125,10 @@ mod tests {
         struct TestSigner;
 
         impl ApiKeyAwareSignerFactory for TestSignerFactory {
-            fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
+            fn with_router_choice(
+                &self,
+                _router_chosen_upstream_name: String,
+            ) -> Arc<dyn SignerFactory> {
                 Arc::new(Self)
             }
         }
@@ -1141,7 +1147,9 @@ mod tests {
                 shaped: ShapedRequest,
                 capability: &mut SigningCapability,
             ) -> Result<cc_lb_upstream::SignedRequest, SignerError> {
-                Ok(cc_lb_upstream::SignedRequest::from_shaped(shaped, capability))
+                Ok(cc_lb_upstream::SignedRequest::from_shaped(
+                    shaped, capability,
+                ))
             }
 
             async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
@@ -1256,15 +1264,15 @@ mod tests {
             60_000,
         );
 
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            journal.mutations.acquire_many(2),
-        )
-        .await
-        .expect("completion journal mutations")
-        .expect("completion mutations available")
-        .forget();
-        assert_eq!(journal.not_tracked.lock().expect("not-tracked lock").len(), 1);
+        tokio::time::timeout(Duration::from_secs(5), journal.mutations.acquire_many(2))
+            .await
+            .expect("completion journal mutations")
+            .expect("completion mutations available")
+            .forget();
+        assert_eq!(
+            journal.not_tracked.lock().expect("not-tracked lock").len(),
+            1
+        );
         assert!(journal.cancelled.lock().expect("cancelled lock").is_empty());
         assert_eq!(journal.enqueued.lock().expect("enqueued lock").len(), 1);
     }
