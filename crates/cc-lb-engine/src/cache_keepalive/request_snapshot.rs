@@ -33,6 +33,8 @@ pub struct RequestSnapshot {
     pub body: Bytes,
     pub upstream_id: Uuid,
     pub ttl: CacheTtl,
+    keepalive_body: Bytes,
+    keepalive_model: String,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -102,8 +104,11 @@ impl RequestSnapshot {
             }
             Err(_) => return Err(SnapshotError::InvalidJson),
         };
-        let map = value.as_object_mut().ok_or(SnapshotError::NotAnObject)?;
-        let body = if trim_uncached_messages_for_keepalive(map) {
+        let trimmed = {
+            let map = value.as_object_mut().ok_or(SnapshotError::NotAnObject)?;
+            trim_uncached_messages_for_keepalive(map)
+        };
+        let body = if trimmed {
             let trimmed = serde_json::to_vec(&value).map_err(|_| SnapshotError::InvalidJson)?;
             Bytes::from(trimmed)
         } else {
@@ -115,6 +120,14 @@ impl RequestSnapshot {
                 max: max_bytes,
             });
         }
+        let map = value.as_object_mut().ok_or(SnapshotError::NotAnObject)?;
+        transform_for_keepalive(map);
+        let keepalive_model = value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let keepalive_body = serde_json::to_vec(&value).map_err(|_| SnapshotError::InvalidJson)?;
         Ok(Self {
             url,
             method,
@@ -122,16 +135,17 @@ impl RequestSnapshot {
             body,
             upstream_id,
             ttl,
+            keepalive_body: Bytes::from(keepalive_body),
+            keepalive_model,
         })
     }
 
+    pub fn keepalive_model(&self) -> &str {
+        &self.keepalive_model
+    }
+
     pub fn build_keepalive_body(&self) -> Result<Bytes, SnapshotError> {
-        let mut value: Value =
-            sonic_rs::from_slice(&self.body).map_err(|_| SnapshotError::InvalidJson)?;
-        let map = value.as_object_mut().ok_or(SnapshotError::NotAnObject)?;
-        transform_for_keepalive(map);
-        let serialized = serde_json::to_vec(&value).map_err(|_| SnapshotError::InvalidJson)?;
-        Ok(Bytes::from(serialized))
+        Ok(self.keepalive_body.clone())
     }
 
     pub fn to_persisted(&self) -> PersistedRequestSnapshot {
@@ -180,13 +194,13 @@ impl RequestSnapshot {
 
 /// Shapes a captured request for a zero-output cache keepalive.
 ///
-/// Only `max_tokens`, `stream`, and uncached trailing messages are modified so
-/// `thinking`, `output_config`, and `tool_choice` remain identical to the live
-/// request and hit the same prompt-cache prefix.
+/// The captured request has already had uncached trailing messages trimmed.
+/// Only `max_tokens` and `stream` are modified here so `thinking`,
+/// `output_config`, and `tool_choice` remain identical to the live request and
+/// hit the same prompt-cache prefix.
 fn transform_for_keepalive(map: &mut Map<String, Value>) {
     map.insert("max_tokens".into(), Value::from(0));
     map.remove("stream");
-    trim_uncached_messages_for_keepalive(map);
 }
 
 fn trim_uncached_messages_for_keepalive(map: &mut Map<String, Value>) -> bool {
@@ -382,14 +396,16 @@ mod tests {
     use serde_json::json;
 
     fn empty_snapshot(body: Bytes) -> RequestSnapshot {
-        RequestSnapshot {
-            url: "https://api.anthropic.com/v1/messages".parse().unwrap(),
-            method: Method::POST,
-            headers: HeaderMap::new(),
+        RequestSnapshot::capture(
+            "https://api.anthropic.com/v1/messages".parse().unwrap(),
+            Method::POST,
+            HeaderMap::new(),
             body,
-            upstream_id: Uuid::nil(),
-            ttl: CacheTtl::Ttl5m,
-        }
+            Uuid::nil(),
+            CacheTtl::Ttl5m,
+            usize::MAX,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -845,14 +861,16 @@ mod tests {
     fn persisted_snapshot_round_trips_without_debug_auth_material() {
         let mut headers = HeaderMap::new();
         headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
-        let snapshot = RequestSnapshot {
-            url: "https://api.anthropic.com/v1/messages".parse().unwrap(),
-            method: Method::POST,
+        let snapshot = RequestSnapshot::capture(
+            "https://api.anthropic.com/v1/messages".parse().unwrap(),
+            Method::POST,
             headers,
-            body: Bytes::from_static(b"{\"model\":\"m\",\"max_tokens\":0}"),
-            upstream_id: Uuid::from_u128(7),
-            ttl: CacheTtl::Ttl5m,
-        };
+            Bytes::from_static(b"{\"model\":\"m\",\"max_tokens\":0}"),
+            Uuid::from_u128(7),
+            CacheTtl::Ttl5m,
+            usize::MAX,
+        )
+        .unwrap();
 
         let round = RequestSnapshot::from_persisted(snapshot.to_persisted()).unwrap();
 
@@ -862,6 +880,8 @@ mod tests {
         assert_eq!(round.body, snapshot.body);
         assert_eq!(round.upstream_id, snapshot.upstream_id);
         assert_eq!(round.ttl, snapshot.ttl);
+
+        assert_eq!(round.keepalive_model(), "m");
     }
 
     #[test]

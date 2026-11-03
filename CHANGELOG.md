@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Prompt-cache keep-alive snapshots now materialize the renewal body and model once for reuse during dispatch and accounting. New encrypted payloads store captured body bytes in explicit raw/zstd frame codecs instead of JSON byte arrays; legacy and v2 JSON payloads remain readable and migrate on their next successful cache-hit reschedule. ([#1013](https://github.com/isac322/cc-lb/issues/1013))
 - Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
 - Test fixture condition waiters no longer lose broadcasts when their state changes during observation.
 - The notification burst test uses a controlled clock, avoiding false extra-rebuild failures under scheduler contention.
@@ -24,6 +25,7 @@ All notable changes to this project will be documented in this file.
 ### Upgrade notes
 
 - Existing stored prompt-cache observations keep their recorded expiry and need no migration. The new default and dispatch anchor apply to newly recorded or refreshed observations; set `prompt_cache_shadow.grace_margin_secs = 30` to retain the previous margin.
+- Coordinate the keep-alive payload upgrade: drain and stop all old workers before starting any new writer. Old binaries cannot read the new v2 frame codecs `2` and `3`; mixed-version operation is unsupported. Do not downgrade while active sessions contain these codecs.
 
 ## [2.1.0] - 2026-10-31
 

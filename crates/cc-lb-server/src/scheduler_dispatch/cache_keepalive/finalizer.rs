@@ -31,9 +31,9 @@ impl SchedulerDispatch {
                     "cache keepalive upstream is unavailable during finalization".to_owned(),
                 )
             })?;
-        let model = keepalive_model(snapshot)?;
+        let model = keepalive_model(snapshot);
         let cost = virtual_cost_micros_full_with_context(
-            &model,
+            model,
             finalization.usage.input_tokens,
             finalization.usage.output_tokens,
             finalization.usage.cache_creation_input_tokens,
@@ -50,7 +50,7 @@ impl SchedulerDispatch {
             source_ref_id: &source_ref_id,
             record,
             upstream: &upstream,
-            model: &model,
+            model,
             usage: &finalization.usage,
             cost: &cost,
             status: finalization.status,
@@ -60,7 +60,7 @@ impl SchedulerDispatch {
         let projections = renewal_projections(RenewalProjectionInput {
             source_ref_id: &source_ref_id,
             record,
-            model: &model,
+            model,
             usage: &finalization.usage,
             cost_micros: cost.total_micros,
             hit_miss,
@@ -100,7 +100,7 @@ impl SchedulerDispatch {
                 source_ref_id: &source_ref_id,
                 record,
                 upstream: &upstream,
-                model: &model,
+                model,
                 usage: &finalization.usage,
                 reservation_id,
                 status: finalization.status,
@@ -136,17 +136,8 @@ struct RenewalProjectionInput<'a> {
     ts: u64,
 }
 
-fn keepalive_model(snapshot: &RequestSnapshot) -> SchedulerResult<String> {
-    let body = snapshot
-        .build_keepalive_body()
-        .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
-    let value: serde_json::Value = sonic_rs::from_slice(&body)
-        .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
-    Ok(value
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown")
-        .to_owned())
+fn keepalive_model(snapshot: &RequestSnapshot) -> &str {
+    snapshot.keepalive_model()
 }
 
 fn duration_ms(duration: std::time::Duration) -> u64 {

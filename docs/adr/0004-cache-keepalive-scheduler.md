@@ -81,6 +81,8 @@ Unchanged by the Section 1' amendment.
 
 The eligibility gate inspects the upstream-shaped body, not merely the original downstream input. Shape plugins can introduce incompatible fields. Compare original and shaped bytes in the detached completion task: reuse the existing downstream parsed value when identical, and parse changed shaped bytes with `sonic-rs` before making the decision.
 
+`RequestSnapshot::capture` retains the raw captured upstream-shaped body bytes after any history trim in `body`. This remains the persisted body, including the live `max_tokens` and `stream` fields. Capture also materializes a separate shaped keep-alive body with the transformations above and caches its model. `from_persisted` rebuilds this cached representation once. Signing reuses the cached body bytes; reservation and finalization reuse the cached model without reparsing or serializing the body.
+
 Alternatives rejected:
 
 - **1-token dummy generation.** Costs at least one output token per fire (currently ~$0.0000005 for Haiku but not $0). Also has a nonzero risk of "generating a real answer" that pollutes any downstream logging.
@@ -145,6 +147,12 @@ Persisted keepalive payloads must use the existing `cc-lb-aead` service, prefera
 - generation,
 - upstream id,
 - job type / payload purpose.
+
+The v2 payload envelope (`CCLBCKA2`) writes explicit frame codecs: `2` stores the raw frame and `3` stores its zstd-compressed form. The frame (`CCLBPS01`) contains metadata and body lengths, JSON metadata, and the exact captured body bytes. It does not encode the body as a JSON integer array or persist the cached keep-alive body/model. The codec and decoded frame length are AAD-bound alongside the payload generation.
+
+Readers continue accepting legacy no-magic encrypted JSON and v2 JSON codecs `0` (raw) and `1` (zstd). These formats request one rewrite on the next successful cache hit that reschedules the session. The rewrite uses codec `2` or `3`; later synthetic refreshes retain that ciphertext across generation changes. Terminal sessions discard their payload instead of migrating it.
+
+This is a coordinated upgrade, not mixed-version compatibility. Drain and stop every old keep-alive worker before starting a new writer, including replicas that capture real requests or reschedule renewals. Old binaries cannot read codecs `2` and `3`. Do not downgrade while active new-codec sessions remain; first stop new writers and let those sessions terminate or expire under a compatible binary.
 
 Downstream `x-api-key` and `Authorization` headers must not be persisted or replayed. Keepalive dispatch re-fetches the upstream and signs at fire time with storage-backed upstream credentials or fresh OAuth, using the same signer factory path as real requests. Protocol headers required by Anthropic, such as `anthropic-version` and required betas, may be retained as non-secret metadata when needed.
 
