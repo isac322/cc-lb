@@ -235,6 +235,12 @@ async fn every_retained_request_event_scalar_roundtrips_relationally() -> TestRe
             .await?
             .expect("stored relational event");
         assert_eq!(restored, event);
+        // Cursor reads require the cluster-wide xmin horizon, unlike direct GET.
+        // Match the existing request_events_cursor fixture's 30-second bound.
+        fixture
+            .storage
+            .request_event_stable_seq_ceiling(std::time::Duration::from_secs(30))
+            .await?;
         let page = fixture
             .storage
             .query_request_events_between_cursors(cursor - 1, cursor, 10, &Default::default())
