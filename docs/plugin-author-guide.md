@@ -183,6 +183,15 @@ Shape example (Unified Slot):
 
 A plugin registered to the `shape` slot must implement all three wire hook functions: request shaping, buffered response transform, and SSE event transform. If your plugin only needs to shape requests or only needs to transform responses, you must explicitly implement no-op handlers for the other hooks.
 
+Prompt-cache identity is computed before shaping. For a deterministic shape plugin,
+the shaped request must preserve the provider-effective cached prefix for the
+modeled upstream. For Anthropic API-key/OAuth upstreams on
+`https://api.anthropic.com` with the default port and no userinfo, the first exact
+`system[0]` billing-header attribution block is ignored for cache identity even
+when a shape plugin is configured. Do not copy that ignored attribution into
+other cached content or redirect the route to a custom provider; configure and
+model the actual provider upstream.
+
 Here is an example of a complete shape plugin that shapes requests and provides explicit no-op handlers for response transformation:
 
 ```rust

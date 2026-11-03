@@ -678,6 +678,57 @@ async fn oauth_429_fails_over_to_api_key_same_request() -> Result<(), Box<dyn st
     Ok(())
 }
 
+#[tokio::test]
+async fn failover_final_row_uses_serving_custom_literal_bundle()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = sqlite_storage(&dir).await?;
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut update_rx = test_bus.bus.subscribe();
+    let mut official =
+        oauth(1, "official").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]);
+    official.record.base_url = None;
+    let fixture = Fixture::new(vec![official, api_key(2, "custom")])
+        .with_lifecycle(|lifecycle| lifecycle.with_event_bus(test_bus.bus_arc()));
+    let official_replies = fixture
+        .dispatch
+        .replies
+        .lock()
+        .expect("dispatch replies lock")
+        .remove(&host("official"))
+        .ok_or("official scripted reply missing")?;
+    fixture
+        .dispatch
+        .replies
+        .lock()
+        .expect("dispatch replies lock")
+        .insert("api.anthropic.com".to_owned(), official_replies);
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":16,"system":[{"type":"text","text":"x-anthropic-billing-header: cron","cache_control":{"type":"ephemeral"}}],"messages":[]}"#,
+    ));
+
+    let (status, _body) = fixture.send_request(request).await;
+    wait_for_final_request_event(&mut update_rx).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        fixture.hosts(),
+        vec!["api.anthropic.com".to_owned(), host("custom")]
+    );
+    let events = stored_request_events(storage.as_ref()).await?;
+    assert_eq!(events.len(), 1);
+    assert!(events[0].cache_breakpoints.is_empty());
+    let diagnostics = test_bus.diagnostics_records();
+    let serving_breakpoints = &diagnostics
+        .first()
+        .ok_or("custom serving diagnostics missing")?
+        .cache_breakpoints;
+    assert_eq!(serving_breakpoints.len(), 1);
+    assert_eq!(serving_breakpoints[0].path, "system[0]");
+    assert_eq!(events[0].upstream_name.as_deref(), Some("custom"));
+    Ok(())
+}
+
 /// SEC-FAILOVER-DOS-03: a failed-over 429 body is never read. A stalled or
 /// never-ending body cannot hold the fallback dispatch, and no byte of it is
 /// buffered. Time is paused: without the fix the idle runtime auto-advances
@@ -1172,6 +1223,276 @@ impl LimitCostEstimator for CountingLimitCostEstimator {
             service_tier,
         )
     }
+}
+
+struct PolicyCatalogLimitCostEstimator {
+    catalog: Arc<cc_lb_pricing::PriceCatalog>,
+}
+
+impl LimitCostEstimator for PolicyCatalogLimitCostEstimator {
+    fn estimate_max(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max(model, max_input, max_output, service_tier)
+            .and_then(|cost| i64::try_from(cost).ok())
+    }
+
+    fn estimate_max_with_local_cache(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache(model, input, max_output, service_tier)
+            .and_then(|cost| i64::try_from(cost).ok())
+    }
+
+    fn estimate_max_with_cache(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                service_tier,
+            )
+            .and_then(|cost| i64::try_from(cost).ok())
+    }
+}
+
+fn policy_limit_cost_estimator() -> Arc<dyn LimitCostEstimator> {
+    let catalog = cc_lb_pricing::PriceCatalog::new_empty();
+    catalog.install_snapshot(cc_lb_pricing::CatalogSnapshot {
+        models: HashMap::from([(
+            "claude-test".to_owned(),
+            cc_lb_pricing::Pricing {
+                model: "claude-test".to_owned(),
+                input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(1),
+                output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(10),
+                by_tier: Default::default(),
+            },
+        )]),
+        status: cc_lb_pricing::CatalogStatus::Ok,
+        ..cc_lb_pricing::CatalogSnapshot::empty_cost_disabled()
+    });
+    Arc::new(PolicyCatalogLimitCostEstimator { catalog })
+}
+
+fn policy_limit_request() -> Request<Bytes> {
+    messages_request(Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "model": "claude-test",
+            "max_tokens": 1,
+            "tools": [{
+                "name": "inspect",
+                "description": "p".repeat(16_000),
+                "input_schema": {"type": "object"}
+            }],
+            "system": [
+                {
+                    "type": "text",
+                    "text": "x-anthropic-billing-header: cron",
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                },
+                {
+                    "type": "text",
+                    "text": "b".repeat(8_000),
+                    "cache_control": {"type": "ephemeral", "ttl": "5m"}
+                }
+            ],
+            "messages": [{
+                "role": "user",
+                "content": "t".repeat(40_000)
+            }]
+        }))
+        .expect("policy limit request serializes"),
+    ))
+}
+
+async fn assert_selected_bundle_failover_cost_boundary(
+    cap_micros: i64,
+    expected_status: StatusCode,
+) {
+    let mut official =
+        oauth(1, "official").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]);
+    official.record.base_url = None;
+    let custom = api_key(2, "custom");
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(64);
+    let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let limit_engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let reconcile = spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, limit_engine.clone());
+    let fixture = Fixture::with_limits(
+        vec![official, custom],
+        vec![
+            Limit {
+                kind: LimitKind::CostUsd,
+                window_secs: 60,
+                // Official: 6,018 five-minute tokens + 10,001 tail + 10
+                // output = 16,029. Custom: 4,015 one-hour tokens at $2/M,
+                // 2,003 five-minute tokens, 10,001 tail, and output = 20,044.
+                cap_micros,
+            },
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 1,
+            },
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            },
+            Limit {
+                kind: LimitKind::InputTokens,
+                window_secs: 60,
+                cap_micros: 16_019,
+            },
+            Limit {
+                kind: LimitKind::OutputTokens,
+                window_secs: 60,
+                cap_micros: 1,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 16_020,
+            },
+        ],
+    )
+    .with_lifecycle(|lifecycle| {
+        lifecycle
+            .with_static_limit_subject(
+                limit_engine.clone(),
+                PRINCIPAL.to_owned(),
+                LIMIT_KEY.to_owned(),
+                StoredApiKeyRecord {
+                    key_hash_b64: LIMIT_KEY.to_owned(),
+                    status: KeyStatus::Active,
+                    ..StoredApiKeyRecord::default()
+                },
+            )
+            .with_limit_cost_estimator(policy_limit_cost_estimator())
+            .with_event_bus(test_bus.bus_arc())
+    });
+    let official_replies = fixture
+        .dispatch
+        .replies
+        .lock()
+        .expect("dispatch replies lock")
+        .remove(&host("official"))
+        .expect("official scripted reply exists");
+    fixture
+        .dispatch
+        .replies
+        .lock()
+        .expect("dispatch replies lock")
+        .insert("api.anthropic.com".to_owned(), official_replies);
+
+    let (status, body) = fixture.send_request(policy_limit_request()).await;
+    assert_eq!(status, expected_status, "cap {cap_micros}, body: {body:?}");
+    let expected_hosts = if expected_status == StatusCode::OK {
+        vec!["api.anthropic.com".to_owned(), host("custom")]
+    } else {
+        vec!["api.anthropic.com".to_owned()]
+    };
+    assert_eq!(
+        fixture.hosts(),
+        expected_hosts,
+        "the selected custom bundle must be admitted before dispatch, cap {cap_micros}"
+    );
+    if expected_status == StatusCode::TOO_MANY_REQUESTS {
+        let error: serde_json::Value = serde_json::from_slice(&body).expect("limit rejection JSON");
+        assert_eq!(error["error"]["type"], "rate_limit_error");
+        assert_eq!(error["error"]["limit_kind"], "cost_usd");
+    }
+    let mut reservation_ids = Vec::new();
+    let mut terminated = false;
+    while let Ok(event) = lifecycle_events.try_recv() {
+        match event {
+            LifecycleEvent::LimitDecision {
+                decision: LimitDecisionKind::Reserved { reservation_id, .. },
+                ..
+            } => reservation_ids.push(reservation_id),
+            LifecycleEvent::RequestTerminated { .. } => terminated = true,
+            _ => {}
+        }
+    }
+    assert!(
+        terminated,
+        "the consumed response reaches its terminal event"
+    );
+    assert_eq!(
+        reservation_ids.len(),
+        if expected_status == StatusCode::OK {
+            2
+        } else {
+            1
+        },
+        "publish the replacement ID only after its admission"
+    );
+    if let Some((first, rest)) = reservation_ids.split_first() {
+        assert!(
+            rest.iter().all(|id| id != first),
+            "the subscriber must receive the new reservation ID"
+        );
+    }
+    reconcile.shutdown().await;
+    for id in reservation_ids {
+        assert!(
+            !limit_engine.refund_by_id(&id),
+            "old and final reservations must already be settled"
+        );
+    }
+    let headers = limit_engine.headers_for(LIMIT_KEY, PRINCIPAL);
+    assert_eq!(
+        remaining(&headers, "anthropic-ratelimit-requests-remaining"),
+        if expected_status == StatusCode::OK {
+            0
+        } else {
+            1
+        },
+        "successful usage counts once; rejected failover refunds the request"
+    );
+    assert_eq!(
+        remaining(&headers, "anthropic-ratelimit-tokens-remaining"),
+        if expected_status == StatusCode::OK {
+            16_018
+        } else {
+            16_020
+        },
+        "reconcile only the final usage, or refund every unbilled attempt"
+    );
+    assert_eq!(concurrency.current(LIMIT_KEY), 0);
+}
+
+#[tokio::test]
+async fn failover_official_to_custom_admits_exact_selected_bundle_cost_boundary() {
+    // The cap is less than the sum of both holds. Admission also proves
+    // replacement neither double-holds cost nor counts a second request.
+    assert_selected_bundle_failover_cost_boundary(20_044, StatusCode::OK).await;
+}
+
+#[tokio::test]
+async fn failover_official_to_custom_rejects_below_selected_bundle_cost_boundary() {
+    assert_selected_bundle_failover_cost_boundary(20_043, StatusCode::TOO_MANY_REQUESTS).await;
 }
 
 const LIMIT_KEY: &str = "key-test";

@@ -304,7 +304,7 @@ async fn successful_keepalive_publishes_observation_before_reschedule_cap() {
         assert_eq!(refreshed.ttl, "0");
         assert_eq!(refreshed.expires_at, (NOW + 270 + 300 - grace) as i64);
         assert_eq!(refreshed.observed_at, (NOW + 270) as i64);
-        assert_eq!(refreshed.schema, 5);
+        assert_eq!(refreshed.schema, 6);
         assert_eq!(refreshed.block_index, 2);
         assert_eq!(refreshed.prefix_bytes, expected_prefix_bytes);
         assert_eq!(refreshed.estimate_source, "serialized_prefix_bytes_v1");

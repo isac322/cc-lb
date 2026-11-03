@@ -12,9 +12,9 @@ const MODEL: &str = "claude-sonnet-4-5-20250929";
 const READ_DELAY_SECS: u64 = 3;
 const TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
 const HASH_SCHEMA_VERSION: i64 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION as i64;
-// Independent oracle for the deepest resolved breakpoint in the explicit fixture below.
+// Independent schema-6 oracle for the deepest resolved breakpoint in the explicit fixture below.
 const UNPREDICTED_EXPLICIT_KEY: &str =
-    "5941e0168a65b3e6aa9b3921ee75015614419bbaa1a2f4c3a4c5d002bce58739";
+    "a9dbee437076709a34484806d86886bf7c0d944be8ef721bad98659895c52036";
 const UNPREDICTED_EXPLICIT_INDEX: i64 = 2;
 const UNPREDICTED_EXPLICIT_BYTES: i64 = 19_821;
 const UNPREDICTED_AUTOMATIC_BYTES: i64 = 19_677;

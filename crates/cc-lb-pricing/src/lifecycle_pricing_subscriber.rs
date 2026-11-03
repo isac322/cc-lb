@@ -327,6 +327,8 @@ mod tests {
         tx.send(LifecycleEvent::RouteCompleted {
             event_id: eid("evt-1"),
             result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
                 upstream_id: Uuid::nil(),
                 upstream_name: "u1".into(),
                 model: Some("claude-sonnet-4-5-20250929".into()),
@@ -450,6 +452,8 @@ mod tests {
         tx.send(LifecycleEvent::RouteCompleted {
             event_id: eid("evt-stream"),
             result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
                 upstream_id: Uuid::nil(),
                 upstream_name: "u1".into(),
                 model: Some("claude-sonnet-4-5-20250929".into()),

@@ -5,6 +5,8 @@ use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
+use axum::body::Body;
 use base64::Engine as _;
 use bytes::Bytes;
 use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
@@ -12,17 +14,21 @@ use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_control::api_keys::principal_view::{
     DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
 };
-use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
-use cc_lb_domain::TerminalStrategy;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
+use cc_lb_domain::{Principal, TerminalStrategy, Upstream};
 use cc_lb_engine::{
     DispatchError, Lifecycle, LifecycleConfig, LimitCostEstimator, UpstreamDispatch,
 };
-use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind};
+use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind, RouteInfo};
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
-use cc_lb_upstream::SignedRequest;
+use cc_lb_storage_api::{KeyStatus, MetaStore, Storage as StorageTrait, StoredApiKeyRecord};
+use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
+    UpstreamDialect,
+};
 use http::StatusCode;
 use http_body_util::BodyExt;
 use tokio::time::{Duration, timeout};
@@ -141,6 +147,259 @@ async fn happy_non_streaming_relays_response() {
         .to_bytes();
 
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn explicit_native_shape_removes_attribution_and_preserves_serving_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage_for_lifecycle_happy(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(128);
+    let mut updates = test_bus.bus.subscribe();
+
+    let cases = [
+        (
+            "official-api-key",
+            StorageUpstreamKind::AnthropicApiKey,
+            None,
+        ),
+        (
+            "official-oauth",
+            StorageUpstreamKind::AnthropicOauth,
+            Some("https://api.anthropic.com:443/proxy?tenant=one#fragment"),
+        ),
+        (
+            "custom-api-key",
+            StorageUpstreamKind::AnthropicApiKey,
+            Some("https://proxy.example.com/anthropic"),
+        ),
+        (
+            "custom-oauth",
+            StorageUpstreamKind::AnthropicOauth,
+            Some("https://user:pass@api.anthropic.com"),
+        ),
+    ];
+
+    for (index, (name, kind, record_base_url)) in cases.into_iter().enumerate() {
+        let state = TestState::default();
+        let dispatcher = CapturingSignedDispatch::default();
+        let lifecycle = explicit_native_lifecycle(
+            &state,
+            kind,
+            record_base_url.map(|url| url.parse()).transpose()?,
+            Arc::new(dispatcher.clone()),
+            test_bus.bus_arc(),
+            index as u128 + 100,
+            name,
+        );
+
+        let normal = shaped_prompt_request("normal");
+        let normal_body = normal.body().clone();
+        let response = handle(&lifecycle, normal).await;
+        assert_eq!(response.status(), StatusCode::OK, "{name} normal response");
+        response.into_body().collect().await?;
+        let normal_route = next_route(&mut lifecycle_events).await;
+        wait_for_final_update(&mut updates).await;
+
+        let cron = shaped_prompt_request("normal cc_workload=cron;");
+        let cron_body = cron.body().clone();
+        let response = handle(&lifecycle, cron).await;
+        assert_eq!(response.status(), StatusCode::OK, "{name} cron response");
+        response.into_body().collect().await?;
+        let cron_route = next_route(&mut lifecycle_events).await;
+        wait_for_final_update(&mut updates).await;
+
+        let dispatched = dispatcher
+            .bodies
+            .lock()
+            .expect("captured bodies lock")
+            .clone();
+        assert_eq!(dispatched.len(), 2, "{name} dispatch count");
+        let normal_dispatched = serde_json::from_slice::<serde_json::Value>(&dispatched[0])?;
+        let cron_dispatched = serde_json::from_slice::<serde_json::Value>(&dispatched[1])?;
+        let normal_original = serde_json::from_slice::<serde_json::Value>(&normal_body)?;
+        let cron_original = serde_json::from_slice::<serde_json::Value>(&cron_body)?;
+        assert_eq!(
+            normal_original["model"], cron_original["model"],
+            "{name} model"
+        );
+        assert_eq!(
+            normal_original["system"][1], cron_original["system"][1],
+            "{name} system tail"
+        );
+        assert_eq!(
+            normal_original["tools"], cron_original["tools"],
+            "{name} tools"
+        );
+        assert!(
+            normal_original["system"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("x-anthropic-billing-header:")),
+            "{name} normal request lacks attribution control"
+        );
+        assert!(
+            cron_original["system"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("x-anthropic-billing-header:")),
+            "{name} cron request lacks attribution control"
+        );
+        assert_ne!(
+            normal_original["system"][0]["text"], cron_original["system"][0]["text"],
+            "{name} attribution differs"
+        );
+        assert_eq!(
+            normal_dispatched["model"], cron_dispatched["model"],
+            "{name} dispatched model"
+        );
+        assert_eq!(
+            normal_dispatched["system"]
+                .as_array()
+                .and_then(|system| system.last()),
+            cron_dispatched["system"]
+                .as_array()
+                .and_then(|system| system.last()),
+            "{name} dispatched system tail"
+        );
+        assert_eq!(
+            normal_dispatched["tools"], cron_dispatched["tools"],
+            "{name} dispatched tools"
+        );
+
+        assert_eq!(
+            normal_dispatched, cron_dispatched,
+            "{name} shaped normal/cron bodies"
+        );
+        assert_eq!(
+            normal_dispatched["system"][0]["text"], "stable system tail",
+            "{name} first billing block removed by actual shape"
+        );
+        assert!(
+            !String::from_utf8_lossy(&dispatched[0]).contains("x-anthropic-billing-header:"),
+            "{name} shaped body contains attribution header"
+        );
+
+        assert!(
+            normal_route.cache_prefix_hash.is_some(),
+            "{name} serving cache identity missing"
+        );
+        assert!(
+            cron_route.cache_prefix_hash.is_some(),
+            "{name} cron serving cache identity missing"
+        );
+        if name.starts_with("official-") {
+            assert_eq!(
+                normal_route.cache_prefix_hash, cron_route.cache_prefix_hash,
+                "{name} lifecycle serving cache identity"
+            );
+        } else {
+            assert_ne!(
+                normal_route.cache_prefix_hash, cron_route.cache_prefix_hash,
+                "{name} lifecycle literal cache identity"
+            );
+        }
+
+        let diagnostics = test_bus.diagnostics_records();
+        let records = diagnostics
+            .iter()
+            .filter(|record| record.upstream_name.as_deref() == Some(name))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2, "{name} diagnostics count");
+        assert_eq!(records[0].model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(records[1].model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(records[0].status, StatusCode::OK.as_u16());
+        assert_eq!(records[1].status, StatusCode::OK.as_u16());
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_openai_opaque_cache_extensions_remain_neutral_and_unchanged()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = Bytes::from(serde_json::to_vec_pretty(&serde_json::json!({
+        "model": "gpt-limit-test",
+        "max_output_tokens": 1,
+        "input": "opaque native payload",
+        "cache_control": {"vendor": "opaque-extension"},
+        "system": [
+            {"type":"text","text":"x-anthropic-billing-header: normal cc_workload=cron;"},
+            {
+                "type":"text",
+                "text":"cache-bearing vendor context",
+                "cache_control":{"type":"ephemeral"}
+            }
+        ],
+        "messages": [{"role":"user","content":[{
+            "type":"text",
+            "text":"cache-bearing vendor tail",
+            "cache_control":{"type":"ephemeral"}
+        }]}]
+    }))?);
+    // Positive control: a generic Anthropic analysis would produce cache
+    // metadata from this payload. These extensions stay opaque on Responses.
+    let hypothetical_anthropic =
+        cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &body);
+    assert!(!hypothetical_anthropic.is_empty());
+
+    let state = TestState::default();
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        HashMap::new(),
+    ));
+    let authn = TestAuthn::with_principal_view(state, principal_view.clone());
+    let dispatcher = CapturingSignedDispatch::default();
+    let upstream_id = uuid::Uuid::from_u128(1_004_001);
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(principal_view)
+        .upstream_records(vec![UpstreamRecord {
+            id: upstream_id,
+            name: "native-openai-neutral".to_owned(),
+            kind: StorageUpstreamKind::OpenaiApiKey,
+            base_url: Some("https://api.openai.com/".parse()?),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(32);
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(dispatcher.clone()),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("x-api-key", managed_api_key())
+        .body(body.clone())?;
+    let response = handle(&lifecycle, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await?;
+
+    let route = next_route(&mut lifecycle_events).await;
+    assert_eq!(route.upstream_id, upstream_id);
+    assert_eq!(route.upstream_name, "native-openai-neutral");
+    assert!(
+        route.cache_breakpoints.as_ref().is_some_and(Vec::is_empty),
+        "native capability must not inherit Anthropic cache metadata"
+    );
+    assert!(route.cache_prefix_hash.is_none());
+    assert!(route.matched_v3_cache_key.is_none());
+    let dispatched = dispatcher
+        .bodies
+        .lock()
+        .expect("captured native bodies lock");
+    assert_eq!(dispatched.as_slice(), &[body]);
+    Ok(())
 }
 
 #[tokio::test]
@@ -703,12 +962,32 @@ fn limited_lifecycle(
     state: &TestState,
     dispatch: Option<Arc<dyn UpstreamDispatch>>,
 ) -> Lifecycle {
-    let base_url: url::Url = "http://upstream.local/".parse().expect("test URL parses");
+    limited_lifecycle_at(
+        kind,
+        limits,
+        state,
+        dispatch,
+        Some("http://upstream.local/".parse().expect("test URL parses")),
+    )
+}
+
+fn limited_lifecycle_at(
+    kind: StorageUpstreamKind,
+    limits: Vec<Limit>,
+    state: &TestState,
+    dispatch: Option<Arc<dyn UpstreamDispatch>>,
+    record_base_url: Option<url::Url>,
+) -> Lifecycle {
+    let base_url = record_base_url.clone().unwrap_or_else(|| {
+        "https://api.anthropic.com/"
+            .parse()
+            .expect("official URL parses")
+    });
     let record = UpstreamRecord {
         id: uuid::Uuid::from_u128(2),
         name: "usd-limit-upstream".to_owned(),
         kind,
-        base_url: Some(base_url.clone()),
+        base_url: record_base_url,
         api_key_ciphertext: Some(Vec::new()),
         ..oauth_upstream_record()
     };
@@ -1702,6 +1981,227 @@ async fn admission_local_plus_opaque_marker_preserves_local_precedence() {
     .await;
 }
 
+fn serving_policy_admission_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": PRICED_RAW_CLAUDE_ALIAS,
+        "max_tokens": 1,
+        "tools": [{
+            "name": "inspect",
+            "description": "p".repeat(16_000),
+            "input_schema": {"type": "object"}
+        }],
+        "system": [{
+            "type": "text",
+            "text": "x-anthropic-billing-header: cron",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        }],
+        "messages": [{
+            "role": "user",
+            "content": "t".repeat(40_000)
+        }]
+    })
+}
+
+async fn assert_serving_policy_cost_boundary(
+    label: &str,
+    body: &serde_json::Value,
+    kind: StorageUpstreamKind,
+    base_url: Option<&str>,
+    boundary_micros: i64,
+) {
+    let bytes = Bytes::from(serde_json::to_vec(body).expect("policy request serializes"));
+    for (cap_micros, expected_status, expected_calls) in [
+        (boundary_micros, StatusCode::OK, 1),
+        (boundary_micros - 1, StatusCode::TOO_MANY_REQUESTS, 0),
+    ] {
+        let state = TestState::default();
+        let lifecycle = limited_lifecycle_at(
+            kind,
+            vec![Limit {
+                kind: LimitKind::CostUsd,
+                window_secs: 60,
+                cap_micros,
+            }],
+            &state,
+            None,
+            base_url.map(|value| value.parse().expect("policy URL parses")),
+        );
+        let response = handle(&lifecycle, messages_request(bytes.clone())).await;
+        let (status, _, response_body) = collect_body(response).await;
+        assert_eq!(
+            status, expected_status,
+            "{label}, {kind:?}, URL {base_url:?}, cap {cap_micros}: {response_body:?}"
+        );
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            expected_calls,
+            "{label}, {kind:?}, cap {cap_micros}"
+        );
+        if expected_status == StatusCode::TOO_MANY_REQUESTS {
+            let error: serde_json::Value =
+                serde_json::from_slice(&response_body).expect("limit rejection JSON");
+            assert_eq!(error["error"]["type"], "rate_limit_error", "{label}");
+            assert_eq!(error["error"]["limit_kind"], "cost_usd", "{label}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_official_billing_only_breakpoint_preserves_opaque_cost_boundary() {
+    let body = serving_policy_admission_body();
+    // The official bundle has no effective breakpoint. The unchanged raw
+    // marker therefore retains the existing opaque gross bound, not a local
+    // cache partition: 1,048,576 input micros plus 10 output micros.
+    for kind in [
+        StorageUpstreamKind::AnthropicApiKey,
+        StorageUpstreamKind::AnthropicOauth,
+    ] {
+        for base_url in [None, Some("https://api.anthropic.com:443/proxy")] {
+            assert_serving_policy_cost_boundary(
+                "official header-only fallback",
+                &body,
+                kind,
+                base_url,
+                1_048_586,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_custom_billing_only_breakpoint_uses_literal_cost_boundary() {
+    let body = serving_policy_admission_body();
+    // Tools = 16,013 string bytes; billing block = 47. The literal
+    // one-hour prefix is exactly 4,015 tokens. Tail = 10,001 tokens.
+    // Real catalog pricing derives $2/M for 1h and charges $1/M tail,
+    // $10/M output: 2 * 4,015 + 10,001 + 10 = 18,041 micros.
+    // This is below the stale official bundle's 1,048,586-micro bound.
+    for kind in [
+        StorageUpstreamKind::AnthropicApiKey,
+        StorageUpstreamKind::AnthropicOauth,
+    ] {
+        for base_url in [
+            "https://proxy.example.com/anthropic",
+            "https://user:pass@api.anthropic.com",
+        ] {
+            assert_serving_policy_cost_boundary(
+                "custom header-only literal",
+                &body,
+                kind,
+                Some(base_url),
+                18_041,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_non_billing_breakpoint_preserves_local_cost_across_policies() {
+    let mut body = serving_policy_admission_body();
+    // Same raw string length as the billing header, but not excluded by
+    // either policy. Both serving bundles must keep the same local partition.
+    body["system"][0]["text"] = serde_json::json!("v".repeat(32));
+    for kind in [
+        StorageUpstreamKind::AnthropicApiKey,
+        StorageUpstreamKind::AnthropicOauth,
+    ] {
+        for base_url in [None, Some("https://proxy.example.com/anthropic")] {
+            assert_serving_policy_cost_boundary(
+                "ordinary system control",
+                &body,
+                kind,
+                base_url,
+                18_041,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_custom_billing_one_hour_prefix_keeps_its_rate_before_five_minute_tail() {
+    let mut body = serving_policy_admission_body();
+    body["system"]
+        .as_array_mut()
+        .expect("system array")
+        .push(serde_json::json!({
+            "type": "text",
+            "text": "b".repeat(8_000),
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }));
+    // Literal: 4,015 one-hour tokens, then 8,015 bytes => 2,003 five-minute
+    // tokens; tail is 10,001. Cost = 20,044 micros.
+    // Official excludes only the first breakpoint: the whole raw prefix
+    // is 6,018 five-minute tokens, cost = 16,029. Reusing that bundle for
+    // custom would admit the request at 20,043, under-reserving by 4,015.
+    assert_serving_policy_cost_boundary(
+        "custom mixed TTL",
+        &body,
+        StorageUpstreamKind::AnthropicApiKey,
+        Some("https://proxy.example.com/anthropic"),
+        20_044,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admission_official_mixed_ttl_preserves_effective_breakpoint_control() {
+    let mut body = serving_policy_admission_body();
+    body["system"]
+        .as_array_mut()
+        .expect("system array")
+        .push(serde_json::json!({
+            "type": "text",
+            "text": "b".repeat(8_000),
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }));
+    assert_serving_policy_cost_boundary(
+        "official mixed TTL control",
+        &body,
+        StorageUpstreamKind::AnthropicApiKey,
+        None,
+        16_029,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admission_five_literal_slots_do_not_inherit_four_official_slots() {
+    let mut body = serving_policy_admission_body();
+    for _ in 0..4 {
+        body["system"]
+            .as_array_mut()
+            .expect("system array")
+            .push(serde_json::json!({
+                "type": "text",
+                "text": "b".repeat(8_000),
+                "cache_control": {"type": "ephemeral", "ttl": "5m"}
+            }));
+    }
+    // Official has four valid markers: 48,120 prefix bytes / 4 = 12,030
+    // five-minute tokens, plus 10,001 tail and 10 output => 22,041.
+    // Literal has five markers and is invalid, so it must retain the
+    // conservative opaque fallback, never borrow the official four slots.
+    assert_serving_policy_cost_boundary(
+        "four official slots",
+        &body,
+        StorageUpstreamKind::AnthropicApiKey,
+        None,
+        22_041,
+    )
+    .await;
+    assert_serving_policy_cost_boundary(
+        "five literal slots fallback",
+        &body,
+        StorageUpstreamKind::AnthropicApiKey,
+        Some("https://proxy.example.com/anthropic"),
+        1_048_586,
+    )
+    .await;
+}
+
 struct CapturingAdmissionDispatch {
     inner: MockDispatch,
     bodies: Arc<Mutex<Vec<Bytes>>>,
@@ -1719,6 +2219,213 @@ impl UpstreamDispatch for CapturingAdmissionDispatch {
             .push(request.body().clone());
         self.inner.dispatch(request).await
     }
+}
+
+struct AttributionRemovingDialect {
+    base_url: url::Url,
+}
+
+impl UpstreamDialect for AttributionRemovingDialect {
+    fn shape(
+        &self,
+        context: &DialectShapeContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        let body = remove_original_billing_block(&context.body_bytes)?;
+
+        let mut url = self.base_url.clone();
+        url.set_path(context.path.trim_start_matches('/'));
+        url.set_query(context.query.as_deref());
+        Ok(builder.shaped_request(
+            url,
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            body,
+        ))
+    }
+}
+
+fn remove_original_billing_block(body: &Bytes) -> Result<Bytes, DialectError> {
+    let mut value = serde_json::from_slice::<serde_json::Value>(body).map_err(|error| {
+        DialectError::UnsupportedRequest {
+            reason: format!("test dialect received invalid JSON: {error}"),
+        }
+    })?;
+    let Some(system) = value
+        .get_mut("system")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(Bytes::from(serde_json::to_vec(&value).map_err(
+            |error| DialectError::UnsupportedRequest {
+                reason: format!("test dialect failed to serialize JSON: {error}"),
+            },
+        )?));
+    };
+    let remove_first = system.first().is_some_and(|block| {
+        block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+            && block
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
+    });
+    if remove_first {
+        system.remove(0);
+    }
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|error| DialectError::UnsupportedRequest {
+            reason: format!("test dialect failed to serialize JSON: {error}"),
+        })
+}
+
+fn explicit_native_lifecycle(
+    state: &TestState,
+    kind: StorageUpstreamKind,
+    record_base_url: Option<url::Url>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    event_bus: Arc<dyn cc_lb_control::RequestEventBus>,
+    id_suffix: u128,
+    name: &str,
+) -> Lifecycle {
+    let dialect_base_url = record_base_url.clone().unwrap_or_else(|| {
+        "https://api.anthropic.com/"
+            .parse()
+            .expect("official URL parses")
+    });
+    let upstream_id = uuid::Uuid::from_u128(id_suffix);
+    let principal = PrincipalRecord {
+        id: uuid::Uuid::from_u128(id_suffix + 10_000),
+        name: "principal-test".to_owned(),
+        kind: cc_lb_storage_api::PrincipalKind::Machine,
+        allowed_models: vec!["*".to_owned()],
+        allowed_upstreams: vec![upstream_id],
+        default_limits: Vec::new(),
+        enabled: true,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
+        router_terminal_strategy: Default::default(),
+        cache_keepalive: None,
+    };
+    let record = UpstreamRecord {
+        id: upstream_id,
+        name: name.to_owned(),
+        kind,
+        base_url: record_base_url,
+        enabled: true,
+        api_key_ciphertext: matches!(kind, StorageUpstreamKind::AnthropicApiKey).then(Vec::new),
+        ..UpstreamRecord::default()
+    };
+    let dialect = Arc::new(AttributionRemovingDialect {
+        base_url: dialect_base_url,
+    });
+    let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (
+            Some(Arc::new(RouterPipelineCache::empty(
+                TerminalStrategy::FirstPick,
+            ))),
+            DialectCache::Explicit(ShapePluginCache { dialect }),
+        ),
+    );
+    let authn = TestAuthn::with_principal_view(
+        state.clone(),
+        Arc::new(PrincipalView::from_db(&[principal], chains)),
+    );
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![record])
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(event_bus)
+}
+
+fn shaped_prompt_request(attribution: &str) -> http::Request<Bytes> {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "tools": [{
+            "name": "lookup",
+            "description": "stable tool",
+            "input_schema": {"type": "object"}
+        }],
+        "system": [
+            {"type": "text", "text": format!("x-anthropic-billing-header: {attribution}")},
+            {
+                "type": "text",
+                "text": "stable system tail",
+                "cache_control": {"type": "ephemeral"}
+            }
+        ],
+        "messages": [{"role": "user", "content": "same user prompt"}]
+    }))
+    .expect("prompt body serializes");
+    messages_request(Bytes::from(body))
+}
+
+async fn next_route(
+    lifecycle_events: &mut tokio::sync::mpsc::Receiver<LifecycleEvent>,
+) -> RouteInfo {
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let event = lifecycle_events
+                .recv()
+                .await
+                .expect("lifecycle event stream remains open");
+            if let LifecycleEvent::RouteCompleted {
+                result: Ok(route), ..
+            } = event
+            {
+                return route;
+            }
+        }
+    })
+    .await
+    .expect("route event arrives")
+}
+
+async fn wait_for_final_update(
+    updates: &mut tokio::sync::broadcast::Receiver<cc_lb_request_log::RequestEventUpdate>,
+) {
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                updates
+                    .recv()
+                    .await
+                    .expect("request update stream remains open"),
+                cc_lb_request_log::RequestEventUpdate::Final(_)
+            ) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("final request event arrives");
+}
+
+async fn sqlite_storage_for_lifecycle_happy(
+    dir: &tempfile::TempDir,
+) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
+    let database_url = format!(
+        "sqlite://{}",
+        dir.path().join("lifecycle-happy.sqlite").display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await?;
+    storage.initialize().await?;
+    Ok(storage)
 }
 
 #[tokio::test]
@@ -2030,5 +2737,26 @@ async fn admission_missing_and_unsupported_image_sources_keep_generic_estimate()
             whole,
         )
         .await;
+    }
+}
+
+#[derive(Clone, Default)]
+struct CapturingSignedDispatch {
+    bodies: Arc<Mutex<Vec<Bytes>>>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for CapturingSignedDispatch {
+    async fn dispatch(
+        &self,
+        request: SignedRequest,
+    ) -> Result<http::Response<Body>, DispatchError> {
+        self.bodies
+            .lock()
+            .expect("captured bodies lock")
+            .push(request.body().clone());
+        Ok(http::Response::new(Body::from(Bytes::from_static(
+            br#"{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ))))
     }
 }

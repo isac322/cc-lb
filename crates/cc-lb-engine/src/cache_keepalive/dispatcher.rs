@@ -23,11 +23,12 @@ use url::Url;
 use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Signed};
 use crate::lifecycle::{
     PromptCacheUsage, UpstreamDispatch, decode_prompt_cache_observations_pure,
-    prompt_cache_observation_context, publish_prompt_cache_observations,
+    prompt_cache_observation_context, prompt_cache_policy_for_upstream,
+    publish_prompt_cache_observations,
 };
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
-    V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+    V3PromptCacheBlockSource, analyze_v3_prompt_cache_with_policy,
     cacheable_breakpoint_prefix_keys_with_tokenize_duration,
 };
 use crate::usage_decoder::decode_full_body;
@@ -147,7 +148,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Ok(input) => input,
             Err(error) => return DispatchOutcome::Error(error),
         };
-        let observation_plan = keepalive_observation_plan(&keepalive_body);
+        let observation_plan = keepalive_observation_plan(&keepalive_body, &upstream);
 
         let dispatch_started = Instant::now();
         let (dispatch_result, accounting_guard, dispatch_anchor_unix_secs) = match context
@@ -316,14 +317,21 @@ struct KeepaliveObservationPlan {
     cacheable_breakpoint_prefix_keys: HashSet<String>,
 }
 
-fn keepalive_observation_plan(body: &[u8]) -> Option<KeepaliveObservationPlan> {
+fn keepalive_observation_plan(
+    body: &[u8],
+    upstream: &UpstreamRecord,
+) -> Option<KeepaliveObservationPlan> {
     let value = sonic_rs::from_slice::<Value>(body).ok()?;
     let canonical_model = value
         .get("model")
         .and_then(Value::as_str)
         .map(canonical_model_id)?
         .to_owned();
-    let analysis = analyze_v3_prompt_cache(&value, &canonical_model);
+    let (analysis, _) = analyze_v3_prompt_cache_with_policy(
+        &value,
+        &canonical_model,
+        prompt_cache_policy_for_upstream(upstream),
+    );
     if analysis.breakpoints.is_empty() {
         return None;
     }

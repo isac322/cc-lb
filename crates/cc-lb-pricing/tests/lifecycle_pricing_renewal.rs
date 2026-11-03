@@ -149,6 +149,8 @@ async fn send_renewal_pricing_inputs(tx: &mpsc::Sender<LifecycleEvent>, event_id
     tx.send(LifecycleEvent::RouteCompleted {
         event_id: event_id.to_owned(),
         result: Ok(RouteInfo {
+            cache_breakpoints: None,
+            cache_prefix_hash: None,
             upstream_id: Uuid::nil(),
             upstream_name: "renewal-oauth".to_owned(),
             model: Some("claude-renewal".to_owned()),

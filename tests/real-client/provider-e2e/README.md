@@ -64,3 +64,15 @@ Stages an isolated working directory, starts the OTLP collector, runs the select
 - `GEMINI_MANAGED_API_KEY` or `GEMINI_API_KEY`: Google Gemini API key for `omp-gemini` and `agy`
 - `CC_LB_BIN`: Path to `cc-lb` binary (defaults to `target/debug/cc-lb`)
 - `AGY_BIN`: Path to `agy` binary if not on `PATH`
+
+### 4. Manual Claude Code attribution-cache regression (release build)
+
+This is a manual live-provider procedure, not one of the four automated profiles above. Run it only with a published/release `cc-lb` build and an isolated official Anthropic upstream configured with a valid API key or an access-only OAuth credential marked `never_refresh: true`. Install Claude Code through its documented public installation path and use only the command-line options shown by the installed binary's `--help`.
+
+1. Start the release build using the documented setup and serving commands. Confirm the isolated upstream is the official Anthropic endpoint and that refresh is disabled for this run.
+2. In one Claude Code session, perform a normal request that reads a file and completes a tool-result round trip.
+3. In the same session, run a cron-attribution request, then another normal request, then a healthy normal control. Keep the model, tools, system blocks after `system[0]`, speed, and the first non-text block identical across all four requests. Change only the exact 18-byte attribution suffix pair.
+4. Record request IDs from the request diagnostics and compare the final diagnostics with the provider SSE usage. Confirm the old hash differs while the new effective hash is equal across the attribution pair, and confirm the raw diagnostic `prefix_token_count` retains the 18-byte raw-prefix difference.
+5. Require an actual streaming response, tool round trip, and positive provider-reported cache read before calling the run a pass. Aggregate SSE cache-read usage is evidence of provider cache activity, but it does not prove which individual breakpoint or full-prefix key was hit.
+
+Do not put credentials, private copies, local filesystem paths, cluster identifiers, or personal data in reports. A requested procedure is not a pass claim; record pass/fail and evidence only after executing it. If provider credentials or Claude Code installation access are unavailable, record the item as blocked rather than inferring success.

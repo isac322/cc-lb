@@ -1484,6 +1484,8 @@ mod tests {
         LifecycleEvent::RouteCompleted {
             event_id: event_id.to_owned(),
             result: Ok(RouteInfo {
+                cache_breakpoints: None,
+                cache_prefix_hash: None,
                 upstream_id: uuid::Uuid::nil(),
                 upstream_name: upstream_name.to_owned(),
                 model: model.map(str::to_owned),
