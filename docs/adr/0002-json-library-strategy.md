@@ -137,7 +137,7 @@ remain.
   these comparisons.
 - `v5_blake3_prefix_key_golden` in
   `crates/cc-lb-engine/tests/prompt_cache_structural_properties.rs` pins a
-  schema-5 prefix key.
+  schema-6 prefix key.
 - The byte-oracle corpus includes `base_request_trailing_space.json`, but no
   current assertion compares it with `base_request.json` to prove whitespace
   sensitivity directly. Add that explicit comparison before relying on the

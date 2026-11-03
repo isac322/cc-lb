@@ -77,8 +77,10 @@ use crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys;
 use crate::prompt_cache_simulator::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
     PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
-    analyze_v3_prompt_cache, analyze_v3_prompt_cache_literal_from_official,
+    analyze_v3_prompt_cache,
 };
+#[cfg(test)]
+use crate::prompt_cache_simulator::analyze_v3_prompt_cache_literal_from_official;
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
@@ -3745,6 +3747,7 @@ impl Lifecycle {
                     analysis: V3PromptCacheAnalysis {
                         blocks: Vec::new(),
                         breakpoints: Vec::new(),
+                        literal_breakpoints: Vec::new(),
                     },
                     cacheable_breakpoint_prefix_keys: Vec::new(),
                     timings: PromptCacheAnalysisTimings::default(),
@@ -8526,17 +8529,26 @@ fn prompt_cache_bundle_from_analysis(
     analysis: &V3PromptCacheAnalysis,
     cacheable_prefix_keys: HashSet<String>,
 ) -> PromptCacheBundle {
-    let cache_breakpoints = plugin_cache_breakpoints_from_analysis(analysis);
+    prompt_cache_bundle_from_breakpoints(
+        &analysis.breakpoints,
+        cacheable_prefix_keys,
+    )
+}
+
+fn prompt_cache_bundle_from_breakpoints(
+    breakpoints: &[crate::prompt_cache_simulator::V3PromptCacheBreakpoint],
+    cacheable_prefix_keys: HashSet<String>,
+) -> PromptCacheBundle {
+    let cache_breakpoints = breakpoints
+        .iter()
+        .map(plugin_cache_breakpoint_from_v3)
+        .collect();
     PromptCacheBundle {
-        request_breakpoints: analysis
-            .breakpoints
+        request_breakpoints: breakpoints
             .iter()
             .map(request_cache_breakpoint_from_v3)
             .collect(),
-        cache_prefix_hash: analysis
-            .breakpoints
-            .last()
-            .map(|breakpoint| breakpoint.prefix_key.clone()),
+        cache_prefix_hash: breakpoints.last().map(|breakpoint| breakpoint.prefix_key.clone()),
         cacheable_breakpoint_prefix_keys: cacheable_prefix_keys,
         cache_breakpoints,
     }
@@ -8566,33 +8578,39 @@ fn request_cache_breakpoint_from_v3(
     }
 }
 
+fn plugin_cache_breakpoint_from_v3(
+    breakpoint: &crate::prompt_cache_simulator::V3PromptCacheBreakpoint,
+) -> CacheBreakpoint {
+    CacheBreakpoint {
+        block_index: saturating_u64_to_u32(breakpoint.block_index),
+        source: plugin_cache_breakpoint_source(request_breakpoint_source_from_v3(
+            breakpoint.source,
+        )),
+        path: breakpoint.path.clone(),
+        message_index: breakpoint.message_index.map(saturating_u64_to_u32),
+        prefix_hash: breakpoint.prefix_key.clone(),
+        prefix_bytes: breakpoint.prefix_bytes,
+        requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
+        lookback_prefixes: breakpoint
+            .lookback_prefixes
+            .iter()
+            .map(|prefix| CacheLookbackPrefix {
+                prefix_hash: prefix.prefix_key.clone(),
+                content_block_index: saturating_u64_to_u32(prefix.content_block_index),
+                lookback_distance: saturating_u64_to_u32(prefix.lookback_distance),
+            })
+            .collect(),
+        token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+    }
+}
+
 fn plugin_cache_breakpoints_from_analysis(
     analysis: &V3PromptCacheAnalysis,
 ) -> Vec<CacheBreakpoint> {
     analysis
         .breakpoints
         .iter()
-        .map(|breakpoint| CacheBreakpoint {
-            block_index: saturating_u64_to_u32(breakpoint.block_index),
-            source: plugin_cache_breakpoint_source(request_breakpoint_source_from_v3(
-                breakpoint.source,
-            )),
-            path: breakpoint.path.clone(),
-            message_index: breakpoint.message_index.map(saturating_u64_to_u32),
-            prefix_hash: breakpoint.prefix_key.clone(),
-            prefix_bytes: breakpoint.prefix_bytes,
-            requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
-            lookback_prefixes: breakpoint
-                .lookback_prefixes
-                .iter()
-                .map(|prefix| CacheLookbackPrefix {
-                    prefix_hash: prefix.prefix_key.clone(),
-                    content_block_index: saturating_u64_to_u32(prefix.content_block_index),
-                    lookback_distance: saturating_u64_to_u32(prefix.lookback_distance),
-                })
-                .collect(),
-            token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
-        })
+        .map(plugin_cache_breakpoint_from_v3)
         .collect()
 }
 
@@ -8974,10 +8992,8 @@ fn request_cache_metadata_from_value_with_analysis(
                 .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
     });
     let literal_bundle = if has_billing_header {
-        let literal_analysis =
-            analyze_v3_prompt_cache_literal_from_official(value, &canonical_model_id, &analysis);
-        let mut literal_keys = literal_analysis
-            .breakpoints
+        let literal_breakpoints = &analysis.literal_breakpoints;
+        let mut literal_keys = literal_breakpoints
             .iter()
             .filter_map(|literal_breakpoint| {
                 analysis
@@ -8991,8 +9007,7 @@ fn request_cache_metadata_from_value_with_analysis(
                     .map(|_| literal_breakpoint.prefix_key.clone())
             })
             .collect::<HashSet<_>>();
-        let literal_only_indices = literal_analysis
-            .breakpoints
+        let literal_only_indices = literal_breakpoints
             .iter()
             .filter(|literal_breakpoint| {
                 !analysis.breakpoints.iter().any(|official_breakpoint| {
@@ -9002,14 +9017,15 @@ fn request_cache_metadata_from_value_with_analysis(
             .map(|breakpoint| breakpoint.block_index)
             .collect::<Vec<_>>();
         literal_keys.extend(
-            crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys_for_indices(
-                &literal_analysis,
+            crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys_for_breakpoints(
+                &analysis,
+                literal_breakpoints,
                 &canonical_model_id,
                 cache_threshold_tokens(&canonical_model_id),
                 &literal_only_indices,
             ),
         );
-        prompt_cache_bundle_from_analysis(&literal_analysis, literal_keys)
+        prompt_cache_bundle_from_breakpoints(literal_breakpoints, literal_keys)
     } else {
         official_bundle.clone()
     };

@@ -544,7 +544,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
 
     durations.count_lookup = Some(count_lookup_duration);
     durations.tokenize = Some(Duration::ZERO);
-    let analysis = finish_structural_analysis(structural, prefix_bytes)
+    let analysis = finish_structural_analysis(structural, prefix_bytes, canonical_model)
         .unwrap_or_else(unanalyzable_prompt_cache);
     (analysis, stats, durations)
 }
