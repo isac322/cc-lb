@@ -1088,9 +1088,7 @@ mod tests {
             enqueued: std::sync::Mutex<Vec<CacheKeepaliveEnqueueRequest>>,
             cancelled: std::sync::Mutex<Vec<CacheKeepaliveCancelRequest>>,
             not_tracked: std::sync::Mutex<Vec<CacheKeepaliveNotTrackedRequest>>,
-            mutations: tokio::sync::Semaphore,
         }
-
         #[async_trait]
         impl CacheKeepaliveEnqueuer for Journal {
             async fn enqueue_cache_keepalive(
@@ -1098,7 +1096,6 @@ mod tests {
                 request: CacheKeepaliveEnqueueRequest,
             ) -> Result<(), CacheKeepaliveEnqueueError> {
                 self.enqueued.lock().expect("enqueued lock").push(request);
-                self.mutations.add_permits(1);
                 Ok(())
             }
 
@@ -1107,7 +1104,6 @@ mod tests {
                 request: CacheKeepaliveCancelRequest,
             ) -> Result<(), CacheKeepaliveEnqueueError> {
                 self.cancelled.lock().expect("cancelled lock").push(request);
-                self.mutations.add_permits(1);
                 Ok(())
             }
 
@@ -1119,7 +1115,6 @@ mod tests {
                     .lock()
                     .expect("not-tracked lock")
                     .push(request);
-                self.mutations.add_permits(1);
                 Ok(())
             }
         }
@@ -1195,7 +1190,6 @@ mod tests {
             enqueued: std::sync::Mutex::new(Vec::new()),
             cancelled: std::sync::Mutex::new(Vec::new()),
             not_tracked: std::sync::Mutex::new(Vec::new()),
-            mutations: tokio::sync::Semaphore::new(0),
         });
         let keepalive = LifecycleKeepalive::new(
             Some(Arc::clone(&journal) as Arc<dyn CacheKeepaliveEnqueuer>),
@@ -1239,42 +1233,82 @@ mod tests {
             "usage": {"cache_read_input_tokens": 60_000}
         });
 
-        keepalive.on_response_completed(
-            &response_compaction,
-            &principal,
-            "key".to_owned(),
-            &metadata,
-            Uuid::new_v4(),
-            request_body.clone(),
-            request_body.clone(),
-            &HeaderMap::new(),
-            Duration::from_secs(1),
-            60_000,
-        );
-        metadata.thread_id = Some("stale-order".to_owned());
-        keepalive.on_response_completed(
-            &response_fresh,
-            &principal,
-            "key".to_owned(),
-            &metadata,
-            Uuid::new_v4(),
-            request_body.clone(),
-            request_body,
-            &HeaderMap::new(),
-            Duration::from_secs(1),
-            60_000,
-        );
-
-        tokio::time::timeout(Duration::from_secs(5), journal.mutations.acquire_many(2))
-            .await
-            .expect("completion journal mutations")
-            .expect("completion mutations available")
-            .forget();
+        keepalive
+            .persist_completion(
+                2,
+                &response_fresh,
+                &principal,
+                "key".to_owned(),
+                &metadata,
+                Uuid::new_v4(),
+                request_body.clone(),
+                request_body.clone(),
+                &HeaderMap::new(),
+                Duration::from_secs(1),
+                60_000,
+            )
+            .await;
+        keepalive
+            .persist_completion(
+                1,
+                &response_compaction,
+                &principal,
+                "key".to_owned(),
+                &metadata,
+                Uuid::new_v4(),
+                request_body.clone(),
+                request_body.clone(),
+                &HeaderMap::new(),
+                Duration::from_secs(1),
+                60_000,
+            )
+            .await;
         assert_eq!(
             journal.not_tracked.lock().expect("not-tracked lock").len(),
             1
         );
         assert!(journal.cancelled.lock().expect("cancelled lock").is_empty());
         assert_eq!(journal.enqueued.lock().expect("enqueued lock").len(), 1);
+
+        journal.enqueued.lock().expect("enqueued lock").clear();
+        journal.cancelled.lock().expect("cancelled lock").clear();
+        journal
+            .not_tracked
+            .lock()
+            .expect("not-tracked lock")
+            .clear();
+        keepalive
+            .persist_completion(
+                4,
+                &response_compaction,
+                &principal,
+                "key".to_owned(),
+                &metadata,
+                Uuid::new_v4(),
+                request_body.clone(),
+                request_body.clone(),
+                &HeaderMap::new(),
+                Duration::from_secs(1),
+                60_000,
+            )
+            .await;
+        keepalive
+            .persist_completion(
+                3,
+                &response_fresh,
+                &principal,
+                "key".to_owned(),
+                &metadata,
+                Uuid::new_v4(),
+                request_body,
+                Bytes::new(),
+                &HeaderMap::new(),
+                Duration::from_secs(1),
+                60_000,
+            )
+            .await;
+        assert_eq!(journal.not_tracked.lock().expect("not-tracked lock").len(), 1);
+        assert_eq!(journal.cancelled.lock().expect("cancelled lock").len(), 1);
+        assert!(journal.enqueued.lock().expect("enqueued lock").is_empty());
     }
 }
