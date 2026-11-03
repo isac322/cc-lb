@@ -160,7 +160,7 @@ impl SseEventTransformHook for ComposedSseResponseTransformHook<'_> {
 }
 pub(crate) fn apply_buffered_transform_result(
     upstream_status: StatusCode,
-    upstream_headers: HeaderMap,
+    mut upstream_headers: HeaderMap,
     upstream_body: Bytes,
     result: TransformResponseResult,
 ) -> BufferedTransformParts {
@@ -182,14 +182,28 @@ pub(crate) fn apply_buffered_transform_result(
                     (upstream_body, content_encoding)
                 }
             };
-            let headers = headers.unwrap_or(upstream_headers);
+            let mut headers = match headers {
+                Some(mut headers) => {
+                    // A replacement map is plugin-owned. Only the original,
+                    // non-hop-by-hop unified values may reach the client.
+                    strip_hop_by_hop(&mut upstream_headers);
+                    sanitize_host_owned_headers(&mut headers);
+                    for (name, value) in &upstream_headers {
+                        if is_upstream_unified_header(name.as_str()) {
+                            headers.append(name.clone(), value.clone());
+                        }
+                    }
+                    headers
+                }
+                None => {
+                    sanitize_client_output_headers(&mut upstream_headers);
+                    upstream_headers
+                }
+            };
+            set_downstream_response_framing(&mut headers, body.len(), content_encoding);
             BufferedTransformParts {
                 status: status.unwrap_or(upstream_status),
-                headers: sanitize_downstream_response_headers(
-                    headers,
-                    body.len(),
-                    content_encoding,
-                ),
+                headers,
                 body,
             }
         }
@@ -207,21 +221,43 @@ pub(crate) fn sanitize_downstream_response_headers(
     body_len: usize,
     content_encoding: Option<HeaderValue>,
 ) -> HeaderMap {
-    sanitize_host_owned_headers(&mut headers);
+    sanitize_client_output_headers(&mut headers);
+    set_downstream_response_framing(&mut headers, body_len, content_encoding);
+    headers
+}
+
+fn set_downstream_response_framing(
+    headers: &mut HeaderMap,
+    body_len: usize,
+    content_encoding: Option<HeaderValue>,
+) {
     if let Some(content_encoding) = content_encoding {
         headers.insert(CONTENT_ENCODING, content_encoding);
     }
     if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
         headers.insert(CONTENT_LENGTH, value);
     }
-    headers
 }
 
 pub(crate) fn sanitize_downstream_stream_headers(headers: &mut HeaderMap) {
-    sanitize_host_owned_headers(headers);
+    sanitize_client_output_headers(headers);
 }
 
 fn sanitize_host_owned_headers(headers: &mut HeaderMap) {
+    sanitize_response_headers_except(headers, |_| false);
+}
+
+fn sanitize_client_output_headers(headers: &mut HeaderMap) {
+    // These are original upstream headers, unlike a plugin replacement map.
+    // Keep unified values in place rather than cloning and reattaching them.
+    sanitize_response_headers_except(headers, is_upstream_unified_header);
+}
+
+fn is_upstream_unified_header(name: &str) -> bool {
+    name.starts_with("anthropic-ratelimit-unified-")
+}
+
+fn sanitize_response_headers_except(headers: &mut HeaderMap, preserve: impl Fn(&str) -> bool) {
     strip_hop_by_hop(headers);
     headers.remove(CONTENT_ENCODING);
     headers.remove(CONTENT_LENGTH);
@@ -229,12 +265,13 @@ fn sanitize_host_owned_headers(headers: &mut HeaderMap) {
         .keys()
         .filter(|name| {
             let name = name.as_str();
-            name.starts_with("x-cc-lb-")
-                || name.starts_with("anthropic-ratelimit-")
-                || name.starts_with("x-ratelimit-")
-                || name == "authorization"
-                || name == "proxy-authorization"
-                || name == "x-api-key"
+            !preserve(name)
+                && (name.starts_with("x-cc-lb-")
+                    || name.starts_with("anthropic-ratelimit-")
+                    || name.starts_with("x-ratelimit-")
+                    || name == "authorization"
+                    || name == "proxy-authorization"
+                    || name == "x-api-key")
         })
         .cloned()
         .collect::<Vec<_>>();

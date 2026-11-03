@@ -69,6 +69,8 @@ The host owns response safety:
 - reattach proxy-owned headers after transform; and
 - normalize transformed output to identity encoding for V1, with future recompression allowed as an optimization.
 
+Plugin input continues to redact the full host-owned `anthropic-ratelimit-*` family. For transformed or decoded client-visible output, the host restores only the original upstream `anthropic-ratelimit-unified-*` entries after hop-by-hop and framing sanitization. It preserves values and per-name duplicate order unchanged, does not synthesize absent values, and does not restore names listed in the upstream `Connection` header.
+
 The hook can see upstream-produced 2xx and upstream-produced 4xx/5xx responses by default. Proxy-generated 502/503/bulkhead/timeout failures are not transformable by default. Buffered plugin trap/error fails open and returns the original upstream response.
 
 ### SSE event hook
