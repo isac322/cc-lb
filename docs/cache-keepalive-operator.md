@@ -43,10 +43,52 @@ Scheduling is anchored to cache creation / response begin:
   and 30-second lead, the job fires 270 seconds after `message_start`, not 270
   seconds after final response completion.
 
-Successful keepalive hits preserve the original duration anchor, increment
-`refresh_count`, record the synthetic hit's new response-begin/cache anchor,
-and enqueue the next generation. New real requests reset `refresh_count` and
-`first_scheduled_at`.
+Successful keepalive processing preserves the original duration anchor. When
+session caps permit another renewal, rescheduling increments `refresh_count`
+and enqueues the next generation using the existing synthetic
+response-begin/cache anchor. A final capped renewal does not increment
+`refresh_count`. New real requests reset `refresh_count` and `first_scheduled_at`.
+
+An eligible successful read-only renewal attempts observation publication
+through the existing bounded, nonblocking best-effort sink. The shared decoder
+uses the exact transformed body sent to the provider, its canonical model, and
+its eligible resolved explicit or automatic breakpoints. The snapshot's
+scheduling TTL does not identify the deepest observed breakpoint. Publication
+is attempted before finalization, rescheduling, or cap handling, including the
+final successful renewal when a session cap prevents another fire. Misses,
+errors, unsupported providers, and ambiguous usage produce no new keepalive
+observations.
+
+Read-only evidence requires a numeric positive `cache_read_input_tokens` and
+numeric zero creation: flat `cache_creation_input_tokens: 0`, both nested
+`cache_creation.ephemeral_5m_input_tokens: 0` and
+`cache_creation.ephemeral_1h_input_tokens: 0`, or the complete suffix pair
+`cache_creation_input_tokens_5m: 0` and `cache_creation_input_tokens_1h: 0`.
+Every supplied representation must contain complete, valid unsigned counters,
+and flat, nested, and suffix totals must agree. Suffix fields are evidence-only;
+numeric accounting remains unchanged. Missing or null values cannot establish
+new evidence. For SSE, omitted or null fields preserve the corresponding prior
+evidence components; complete numeric flat, nested, or suffix snapshots replace
+the prior representation and may change evidence state. Partial, malformed, or
+contradictory snapshots invalidate evidence; partial nested or suffix SSE
+snapshots cannot be combined into zero evidence. In ordinary response
+attribution, positive creation disables only the
+new no-predicted-match inferred-hit branch; existing creation/write and
+predicted-match behavior remain unchanged.
+
+The dispatcher captures an immutable absolute observation-expiry anchor
+immediately before the actual signed HTTP dispatch. This is separate from the
+response-begin/cache anchors used for scheduling above; it is never finalizer
+time or a scheduler reconstruction of `now - cache_anchor_age`. Existing
+scheduler anchors are unchanged; ordinary response observations retain their
+existing dispatch-based expiry anchor.
+
+Publication does not wait for durable commit. A full or closed sink or a
+storage failure does not fail the renewal, and publication does not change
+accounting, status, authorization, generation fencing, caps, scheduling, or
+failure behavior. It uses the existing observation store without a new schema,
+API DTO, retry, outbox, or flush. It does not verify live provider cache state
+or guarantee provider acceptance or a provider cache hit.
 
 Prompt snapshots are stored only as AEAD ciphertext in
 `cache_keepalive_sessions.encrypted_payload`. The AAD binds principal id,
