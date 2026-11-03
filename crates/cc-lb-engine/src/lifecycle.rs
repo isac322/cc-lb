@@ -148,6 +148,7 @@ const SSE_BUFFER_SMALL_EVENT_CAPACITY_FRACTION: usize = 8;
 const UPSTREAM_RESPONSE_BODY_ERROR_TYPE: &str = "upstream_response_body_error";
 const UPSTREAM_RESPONSE_DECODE_ERROR_TYPE: &str = "upstream_response_decode_error";
 const UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE: &str = "upstream_response_framing_error";
+const UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE: &str = "upstream_response_incomplete";
 const UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE: &str = "api_error";
 const UPSTREAM_AFFINITY_ERROR_TYPE: &str = "upstream_affinity_error";
 const UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE: &str =
@@ -7116,6 +7117,37 @@ impl Lifecycle {
                     yield Ok::<Bytes, Infallible>(frame);
                 }
                 buffer.clear();
+            }
+            if upstream_is_sse
+                && status.is_success()
+                && parse_sse_events_active
+                && transform_decode_supported
+                && semantic_terminal_event_type(response_affinity_context.capability)
+                    == Some("message_stop")
+                && !semantic_message_stop_seen
+                && sse_buffer_is_blank(&buffer)
+                && stream_abnormal_stop.is_none()
+                && !stream_provider_error_seen
+                && stream_upstream_error.is_none()
+                && stream_transform_error.is_none()
+                && stream_affinity_error.is_none()
+            {
+                if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                        event_id: o.event_id().to_owned(),
+                        usage: to_usage_snapshot(&usage),
+                        source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                    });
+                }
+                stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                    error_type: UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE.to_owned(),
+                    error_message:
+                        "upstream SSE response ended before message_stop".to_owned(),
+                });
+                downstream_drop_guard.mark_upstream_error(
+                    StreamTerminationCause::Unknown,
+                    None,
+                );
             }
             if stream_affinity_error.is_none()
                 && stream_upstream_error.is_none()

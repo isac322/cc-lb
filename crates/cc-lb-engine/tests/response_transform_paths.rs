@@ -36,6 +36,9 @@ use uuid::Uuid;
 
 use common::{TestAuthn, TestLifecycleBus, TestState, collect_body, messages_request};
 
+#[path = "response_transform_paths/semantic_sse_eof.rs"]
+mod semantic_sse_eof;
+
 #[tokio::test]
 async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
     let transform = Arc::new(BufferedToolNameTransform::default());
@@ -2017,7 +2020,8 @@ async fn sse_unterminated_passthrough_is_upstream_framing_error()
 
 #[tokio::test]
 async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn std::error::Error>> {
-    let body = Bytes::from_static(b"event: message_stop\ndata: {}\n\n\r\n");
+    let body =
+        Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\r\n");
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "trailing-terminators.sqlite").await?);
     let test_bus =

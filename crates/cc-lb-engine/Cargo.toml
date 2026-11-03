@@ -83,6 +83,7 @@ zstd.workspace = true
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
+fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", default-features = false }
 insta.workspace = true
 metrics-exporter-prometheus.workspace = true
 metrics-util.workspace = true
