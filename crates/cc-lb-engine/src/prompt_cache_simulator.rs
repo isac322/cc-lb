@@ -1881,12 +1881,30 @@ mod tests {
             ("string-system", json!("x-anthropic-billing-header: cron")),
             ("empty-array", json!([{"type":"text","text":""}])),
             ("null-array", json!([Value::Null])),
-            ("non-text-array", json!([{"type":"image","source":{"type":"base64"}}])),
-            ("leading-space", json!([{"type":"text","text":" x-anthropic-billing-header: cron"}])),
-            ("case", json!([{"type":"text","text":"X-anthropic-billing-header: cron"}])),
-            ("different-prefix", json!([{"type":"text","text":"x-anthropic-billing-headers: cron"}])),
-            ("index-one", json!([{"type":"text","text":"ordinary first"}, billing.clone()])),
-            ("index-one-after-empty", json!([{"type":"text","text":""}, billing.clone()])),
+            (
+                "non-text-array",
+                json!([{"type":"image","source":{"type":"base64"}}]),
+            ),
+            (
+                "leading-space",
+                json!([{"type":"text","text":" x-anthropic-billing-header: cron"}]),
+            ),
+            (
+                "case",
+                json!([{"type":"text","text":"X-anthropic-billing-header: cron"}]),
+            ),
+            (
+                "different-prefix",
+                json!([{"type":"text","text":"x-anthropic-billing-headers: cron"}]),
+            ),
+            (
+                "index-one",
+                json!([{"type":"text","text":"ordinary first"}, billing.clone()]),
+            ),
+            (
+                "index-one-after-empty",
+                json!([{"type":"text","text":""}, billing.clone()]),
+            ),
             ("index-one-after-null", json!([Value::Null, billing])),
         ];
         for (name, system) in cases {
@@ -1900,11 +1918,16 @@ mod tests {
                 }]}]
             });
             let official = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
-            let literal =
-                super::analyze_v3_prompt_cache_literal(&request, "claude-sonnet-4-5");
-            assert!(!official.breakpoints.is_empty(), "{name}: valid cached message tail");
+            let literal = super::analyze_v3_prompt_cache_literal(&request, "claude-sonnet-4-5");
+            assert!(
+                !official.breakpoints.is_empty(),
+                "{name}: valid cached message tail"
+            );
             assert_eq!(official.blocks, literal.blocks, "{name}: raw blocks");
-            assert_eq!(official.breakpoints, literal.breakpoints, "{name}: prefix identity and bytes");
+            assert_eq!(
+                official.breakpoints, literal.breakpoints,
+                "{name}: prefix identity and bytes"
+            );
         }
     }
 
@@ -1920,17 +1943,26 @@ mod tests {
                 "text":format!("{prefix} cron"),
                 "cache_control":{"type":"ephemeral"}
             })];
-            system.extend((0..tail_count).map(|index| json!({
-                "type":"text",
-                "text":format!("cached tail {index}"),
-                "cache_control":{"type":"ephemeral"}
-            })));
+            system.extend((0..tail_count).map(|index| {
+                json!({
+                    "type":"text",
+                    "text":format!("cached tail {index}"),
+                    "cache_control":{"type":"ephemeral"}
+                })
+            }));
             let request = json!({"model":"claude-sonnet-4-5","system":system});
             let official = analyze_v3_prompt_cache(&request, "claude-sonnet-4-5");
-            let literal =
-                super::analyze_v3_prompt_cache_literal(&request, "claude-sonnet-4-5");
-            assert_eq!(official.breakpoints.len(), official_count, "{prefix}, tails={tail_count}");
-            assert_eq!(literal.breakpoints.len(), literal_count, "{prefix}, tails={tail_count}");
+            let literal = super::analyze_v3_prompt_cache_literal(&request, "claude-sonnet-4-5");
+            assert_eq!(
+                official.breakpoints.len(),
+                official_count,
+                "{prefix}, tails={tail_count}"
+            );
+            assert_eq!(
+                literal.breakpoints.len(),
+                literal_count,
+                "{prefix}, tails={tail_count}"
+            );
         }
     }
 
