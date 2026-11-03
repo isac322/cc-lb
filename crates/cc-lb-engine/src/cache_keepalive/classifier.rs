@@ -76,8 +76,11 @@ impl<'a> HeuristicClassifier<'a> {
     fn classify_inner(&self, request_body: &Value, response_body: &Value) -> TurnDecision {
         let stop_reason = response_body.get("stop_reason").and_then(Value::as_str);
         let content = response_body.get("content").and_then(Value::as_array);
+        if stop_reason == Some("compaction") || has_compaction_block(content) {
+            return TurnDecision::UserTurn;
+        }
         match stop_reason {
-            Some("pause_turn") | Some("compaction") => TurnDecision::AgentInTurn,
+            Some("pause_turn") => TurnDecision::AgentInTurn,
             Some("refusal") | Some("model_context_window_exceeded") => TurnDecision::UserTurn,
             Some("end_turn") => self.classify_end_turn(request_body, content),
             Some("tool_use") => self.classify_tool_use(content),
@@ -87,10 +90,6 @@ impl<'a> HeuristicClassifier<'a> {
     }
 
     fn classify_end_turn(&self, req: &Value, content: Option<&Vec<Value>>) -> TurnDecision {
-        if has_compaction_block(content) {
-            return TurnDecision::AgentInTurn;
-        }
-
         let defined_completion_tools = self.collect_defined_completion_tools(req);
         if !defined_completion_tools.is_empty() {
             let invoked_tools = collect_tool_use_names(content);
@@ -98,7 +97,6 @@ impl<'a> HeuristicClassifier<'a> {
                 return TurnDecision::AgentInTurn;
             }
         }
-
         if self.config.treat_end_turn_as_ambiguous {
             TurnDecision::Ambiguous
         } else {
@@ -206,11 +204,43 @@ mod tests {
     }
 
     #[test]
-    fn compaction_stop_reason_is_agent_in_turn() {
+    fn compaction_stop_reason_is_user_turn_boundary() {
         let d = classify(
             &default_config(),
             json!({}),
             json!({"stop_reason": "compaction", "content": []}),
+        );
+        assert_eq!(d, TurnDecision::UserTurn);
+    }
+
+    #[test]
+    fn compaction_block_is_user_turn_boundary_for_continuations() {
+        for stop_reason in ["end_turn", "tool_use", "pause_turn"] {
+            let d = classify(
+                &default_config(),
+                json!({}),
+                json!({
+                    "stop_reason": stop_reason,
+                    "content": [
+                        {"type": "compaction", "content": "summary"},
+                        {"type": "tool_use", "name": "Bash", "id": "t1", "input": {}}
+                    ],
+                }),
+            );
+            assert_eq!(d, TurnDecision::UserTurn, "stop_reason={stop_reason}");
+        }
+    }
+
+
+    #[test]
+    fn ordinary_tool_use_remains_agent_in_turn_without_compaction() {
+        let d = classify(
+            &default_config(),
+            json!({}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "name": "Bash", "id": "t1", "input": {}}],
+            }),
         );
         assert_eq!(d, TurnDecision::AgentInTurn);
     }
@@ -262,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn end_turn_with_compaction_block_is_agent_in_turn() {
+    fn end_turn_with_compaction_block_is_user_turn_boundary() {
         let d = classify(
             &default_config(),
             json!({}),
@@ -271,7 +301,7 @@ mod tests {
                 "content": [{"type": "compaction"}, {"type": "text", "text": "ok"}],
             }),
         );
-        assert_eq!(d, TurnDecision::AgentInTurn);
+        assert_eq!(d, TurnDecision::UserTurn);
     }
 
     #[test]

@@ -99,8 +99,8 @@ Unchanged by the Section 1' amendment.
 - **`tool_use` with only `server_tool_use` blocks -> UserTurn.** The server already handled it.
 - **`tool_use` where every client `tool_use` block name is on the wait-for-user list -> UserTurn.** Built-in list: `AskUserQuestion`, `ExitPlanMode`, `ask_followup_question`, `ask_question`, `ask`, `cursor_ask_question`, `question`, `attempt_completion`, `submit_and_exit`, `finish`, `plan_mode_respond`, `act_mode_respond`, `report_bug`. Cross-verified across the client set above. Extendable per-principal via `extra_wait_for_user_tools`.
 - **`end_turn` with a completion tool defined-but-not-invoked -> AgentInTurn.** e.g. Cline's `attempt_completion`, OpenHands' `finish`, OpenCode's `ExitPlanMode`. Convention: if the framework declared the tool and the model did not call it, the model is not done.
-- **`end_turn` with a `compaction` content block -> AgentInTurn.** The documented `pause_after_compaction=true` context-management beta.
-- **`pause_turn` / `compaction` stop_reason -> AgentInTurn.**
+- **Response-derived compaction boundary (amended 2026-11-03).** `stop_reason: "compaction"` or any top-level `compaction` content block maps to `UserTurn` for keep-alive purposes, regardless of the final stop reason (including `tool_use`). The request snapshot predates the compaction summary and must not be renewed. The existing completion-order and durable generation fence cancels matching obsolete work; a fresh post-compaction completion may establish a new generation. This supersedes the original `AgentInTurn` compaction rule.
+- **`pause_turn` without a compaction block -> AgentInTurn.**
 - **`refusal` / `model_context_window_exceeded` -> UserTurn.**
 - **`max_tokens` / `stop_sequence` -> Ambiguous.**
 - **`null` / unknown -> UserTurn** (fail-safe).

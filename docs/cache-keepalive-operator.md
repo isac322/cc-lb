@@ -24,6 +24,17 @@ Nothing runs - no snapshot, no schedule - for principals whose
 `cache_keepalive.enabled` is `false` or unset, or for requests that carry
 no `cache_control` breakpoint.
 
+## Response compaction boundaries
+
+When a completed response reports `stop_reason: "compaction"` or contains a
+top-level `compaction` block, the matching keep-alive generation is retired
+through the durable fence. cc-lb does not schedule the pre-compaction request
+snapshot, including when the response continues with a client tool use. This
+response-derived boundary does not depend on optional gateway hint headers.
+A later main response built from the adopted summary can establish a new
+generation. Plain `pause_turn` and ordinary tool use without a compaction block
+retain their existing behavior.
+
 ## Scheduler and storage model
 
 Apalis is the only timer/worker transport for GA. The durable session fence is
