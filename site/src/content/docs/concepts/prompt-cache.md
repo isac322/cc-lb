@@ -27,6 +27,12 @@ ordinary `pause_turn` and tool-use responses without a compaction block retain
 their existing behavior. Explicit compaction-class requests remain excluded
 from keepalive state changes.
 
+## Attribution and observations
+
+For ordinary responses where routing predicted no match, cc-lb can infer one deepest eligible resolved explicit or automatic breakpoint when usage reports numeric positive `cache_read_input_tokens` and explicit zero cache creation. Zero creation can be a flat `cache_creation_input_tokens: 0`, complete nested `cache_creation` counters with zero `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`, or the complete zero suffix pair `cache_creation_input_tokens_5m` and `cache_creation_input_tokens_1h`. Every supplied representation must contain complete, valid unsigned counters with matching totals. Suffix fields are evidence-only; numeric accounting remains unchanged. Missing, null, partial, invalid, contradictory, or positive-creation usage does not establish evidence for this inferred branch. For SSE, omitted or null fields preserve the corresponding prior evidence components; complete numeric flat, nested, or suffix snapshots replace the prior representation and may change evidence state. Partial, malformed, or contradictory snapshots invalidate evidence; partial snapshots cannot be combined into zero evidence. Predicted-match attribution remains unchanged.
+
+Eligible successful read-only keep-alive renewals publish observations from the exact transformed dispatched body through a bounded, nonblocking best-effort sink, including final capped renewals. Misses, errors, unsupported providers, and ambiguous usage produce no observation. Publication is asynchronous and does not guarantee a synchronous commit, provider acceptance, or cache hit. Observation expiry is anchored immediately before signed dispatch; scheduling still uses response-begin anchors and shared-store decisions are unchanged.
+
 ## Configuration shape
 
 ```json

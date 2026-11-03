@@ -1,17 +1,9 @@
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
-use apalis::layers::catch_panic::CatchPanicLayer;
-use apalis::prelude::{WorkerBuilder, WorkerError};
-use apalis_core::backend::ext::BackendExt as _;
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_scheduler::middleware::TraceparentLayer;
-use cc_lb_scheduler::retry::RetryClass;
-use cc_lb_scheduler::worker::{
-    ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage, PostgresSchedulerBackend, SchedulerBackend,
-};
+use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, PostgresSchedulerBackend, SchedulerBackend};
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_storage_api::MetaStore;
 use sqlx::postgres::PgPoolOptions;
@@ -20,7 +12,6 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ImageExt, runners::AsyncRunner},
 };
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -30,7 +21,7 @@ use super::common::{
 };
 use super::fake::FakeAnthropic;
 use super::scenario::run_race_scenario;
-use super::worker::{OAuthWorkerProbe, OAuthWorkerState, entity_job_handler};
+use super::worker::{OAuthWorkerProbe, OAuthWorkerState, spawn_oauth_worker};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {
@@ -56,7 +47,6 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
     ));
     storage.initialize().await?;
 
-    let config = postgres_queue_config();
     let backend = SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pool.clone()));
     let aead = Arc::new(AeadService::from_master_key([83; 32]));
     let oauth_cfg = Arc::new(AnthropicOAuthConfig {
@@ -82,19 +72,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
         probe.clone(),
     );
     let cancel = CancellationToken::new();
-    let strategy = apalis_core::backend::ext::poll_strategy::Strategy::new()
-        .stream(apalis_postgres::Pubsub::new(
-            pool.clone(),
-            ADAPTIVE_QUEUE.to_owned(),
-        ))
-        .interval(Duration::from_millis(1));
-    let worker = spawn_postgres_worker(
-        apalis_postgres::PostgresStorage::<AdaptiveJob>::new(&pool)
-            .with_config(config)
-            .poll_with_strategy(strategy),
-        state,
-        cancel.clone(),
-    );
+    let worker = spawn_oauth_worker(&backend, state, cancel.clone())?;
     let lazy = LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
             stores: stores_from_storage(storage.clone()),
@@ -161,48 +139,6 @@ fn database_url(base_url: &str, database: &str) -> TestResult<String> {
     let mut url = Url::parse(base_url)?;
     url.set_path(database);
     Ok(url.to_string())
-}
-
-fn spawn_postgres_worker(
-    storage: PostgresApalisStorage,
-    state: OAuthWorkerState<cc_lb_storage_postgres::PostgresStorage>,
-    cancel: CancellationToken,
-) -> JoinHandle<Result<(), WorkerError>> {
-    tokio::spawn(async move {
-        WorkerBuilder::new(ADAPTIVE_QUEUE)
-            .backend(storage)
-            .data(state)
-            .layer(TraceparentLayer::new().with_scheduler_metrics())
-            .layer(RetryClass::Probe.layer())
-            .layer(test_catch_panic_layer())
-            .build(entity_job_handler::<cc_lb_storage_postgres::PostgresStorage>)
-            .run_until(async move {
-                cancel.cancelled_owned().await;
-                Ok::<(), WorkerError>(())
-            })
-            .await
-    })
-}
-
-fn test_catch_panic_layer() -> CatchPanicLayer<
-    impl FnMut(&Box<dyn std::any::Any + Send>) -> apalis_core::error::AbortError
-    + Clone
-    + Send
-    + Sync
-    + 'static,
-    apalis_core::error::AbortError,
-> {
-    CatchPanicLayer::with_panic_handler(|_: &Box<dyn std::any::Any + Send>| {
-        apalis_core::error::AbortError::new(apalis::layers::catch_panic::PanicError(
-            "worker panicked".to_owned(),
-        ))
-    })
-}
-
-fn postgres_queue_config() -> apalis_postgres::Config {
-    apalis_postgres::Config::default()
-        .queue(ADAPTIVE_QUEUE)
-        .batch_size(8)
 }
 
 async fn postgres_metadata_count(pool: &sqlx::PgPool, upstream_id: Uuid) -> TestResult<i64> {

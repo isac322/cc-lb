@@ -12,6 +12,12 @@ const MODEL: &str = "claude-sonnet-4-5-20250929";
 const READ_DELAY_SECS: u64 = 3;
 const TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
 const HASH_SCHEMA_VERSION: i64 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION as i64;
+// Independent oracle for the deepest resolved breakpoint in the explicit fixture below.
+const UNPREDICTED_EXPLICIT_KEY: &str =
+    "5941e0168a65b3e6aa9b3921ee75015614419bbaa1a2f4c3a4c5d002bce58739";
+const UNPREDICTED_EXPLICIT_INDEX: i64 = 2;
+const UNPREDICTED_EXPLICIT_BYTES: i64 = 19_821;
+const UNPREDICTED_AUTOMATIC_BYTES: i64 = 19_677;
 
 fn assert_message_response(response: &common::RawResponse, usage_field: &str) -> Value {
     assert_eq!(response.status, 200);
@@ -224,6 +230,158 @@ async fn top_level_cache_control_creates_a_breakpoint_and_holds_affinity() {
     assert!(second_event.cache_read_input_tokens.unwrap_or_default() > 0);
     assert!(second_event.matched_cache_key().is_some());
     assert!(second_event.predicted_read_tokens().unwrap_or_default() > 0);
+}
+
+/// A successful read-only response without a selected warm match must still publish the deepest
+/// resolved breakpoint. The committed observation must then drive the next request's route.
+async fn assert_unpredicted_case(
+    label: &str,
+    request: Value,
+    expected_ttl: &str,
+    expected_bytes: i64,
+) {
+    let script = MessageScript::new();
+    for _ in 0..2 {
+        let mut read = ScriptedMessageResponse::ok();
+        read.body["usage"]["cache_creation_input_tokens"] = json!(0);
+        read.body["usage"]["cache_creation"] = json!({
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 0
+        });
+        read.body["usage"]["cache_read_input_tokens"] = json!(1234);
+        script.push_response(read);
+    }
+    let fake_config = AppConfig {
+        message_script: Some(script.clone()),
+        ..AppConfig::default()
+    };
+    let server =
+        common::spawn_test_server_with_two_upstreams(DIAGNOSTICS_CONFIG, fake_config).await;
+    let pool = support::open_sqlite_pool(&server).await;
+    let upstream_rows = support::fetch_upstreams(&pool).await;
+    assert_eq!(upstream_rows.len(), 2, "{label}: two eligible upstreams");
+
+    let (initial_observations, _) = support::observation_stats(&pool, MODEL, Duration::ZERO).await;
+    assert_eq!(
+        initial_observations, 0,
+        "{label}: the first request starts cold"
+    );
+
+    let body = serde_json::to_string(&request).expect("serialize unpredicted-hit request");
+    let first = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &body,
+        &[],
+    )
+    .await
+    .expect("send first unpredicted-hit request through cc-lb proxy");
+    assert_message_response(&first, "cache_read_input_tokens");
+    let first_event = support::wait_for_settled_event(&server, MODEL, 0).await;
+    assert_eq!(
+        first_event.cache_read_input_tokens,
+        Some(1234),
+        "{label}: the provider returned affirmative read evidence"
+    );
+    assert_eq!(
+        first_event.predicted_read_tokens().unwrap_or_default(),
+        0,
+        "{label}: the first request must have no positive predicted read score"
+    );
+
+    let persisted =
+        support::wait_for_committed_observation(&pool, &first_event.upstream_id, MODEL).await;
+    let (observation_count, _) = support::observation_stats(&pool, MODEL, Duration::ZERO).await;
+    assert_eq!(
+        observation_count, 1,
+        "{label}: read-only inference publishes only the deepest resolved observation"
+    );
+    assert_eq!(persisted.v3_prefix_key, UNPREDICTED_EXPLICIT_KEY);
+    assert_eq!(
+        persisted.prefix_content_block_index,
+        UNPREDICTED_EXPLICIT_INDEX
+    );
+    assert_eq!(persisted.ttl_class, expected_ttl);
+    assert_eq!(persisted.estimated_prefix_tokens, expected_bytes);
+
+    let second = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &body,
+        &[],
+    )
+    .await
+    .expect("send warm follow-up request through cc-lb proxy");
+    assert_message_response(&second, "cache_read_input_tokens");
+    assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
+    let second_event = support::wait_for_settled_event(&server, MODEL, first_event.id).await;
+    assert_eq!(
+        second_event.upstream_id, first_event.upstream_id,
+        "{label}: the matched follow-up must use the upstream owning the observation"
+    );
+    assert_eq!(
+        second_event.matched_cache_key(),
+        Some(UNPREDICTED_EXPLICIT_KEY),
+        "{label}: the next request must match the persisted deepest breakpoint"
+    );
+    assert!(
+        second_event
+            .predicted_read_tokens()
+            .is_some_and(|tokens| tokens > 0),
+        "{label}: the persisted key must produce a positive selected routing score"
+    );
+}
+
+#[tokio::test]
+async fn unpredicted_read_only_hit_persists_and_routes_next_request() {
+    let explicit = json!({
+        "model": MODEL,
+        "max_tokens": 64,
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "system": [{
+            "type": "text",
+            "text": "system ".repeat(1024),
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        }],
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "alpha ".repeat(1024),
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                },
+                {
+                    "type": "text",
+                    "text": "omega ".repeat(1024),
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                }
+            ]
+        }]
+    });
+    let automatic = json!({
+        "model": MODEL,
+        "max_tokens": 64,
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "cache_control": {"type": "ephemeral"},
+        "system": [{"type": "text", "text": "system ".repeat(1024)}],
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "alpha ".repeat(1024)},
+                {"type": "text", "text": "omega ".repeat(1024)}
+            ]
+        }]
+    });
+
+    for (label, request, expected_ttl, expected_bytes) in [
+        ("explicit", explicit, "1", UNPREDICTED_EXPLICIT_BYTES),
+        ("automatic", automatic, "0", UNPREDICTED_AUTOMATIC_BYTES),
+    ] {
+        assert_unpredicted_case(label, request, expected_ttl, expected_bytes).await;
+    }
 }
 
 /// Base request for the invalidator-scope cases: a cached tools tier and a cached message tier,
