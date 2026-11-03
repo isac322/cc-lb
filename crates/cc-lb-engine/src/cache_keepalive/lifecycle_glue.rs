@@ -774,11 +774,11 @@ mod tests {
     use super::*;
     use cc_lb_control::api_keys::principal_view::PrincipalView;
     use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+    use cc_lb_domain::Upstream;
     use cc_lb_storage_api::principal::{
         Limit, PrincipalKind as StoragePrincipalKind, PrincipalRecord as StoragePrincipalRecord,
     };
     use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
-    use cc_lb_domain::Upstream;
     use cc_lb_upstream::{
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, Signer, SignerError, SignerFactory,
         SigningCapability, UpstreamError,
@@ -1212,22 +1212,20 @@ mod tests {
             "messages": [{"role": "user", "content": "hello"}]
         });
         let request_body = Bytes::from(serde_json::to_vec(&request_json).expect("request JSON"));
-        let mut metadata = RequestCacheMetadata {
-            request_json: Some(request_json),
-            thread_id: Some("stale-order".to_owned()),
-            cache_breakpoints: vec![cc_lb_request_log::RequestCacheBreakpoint {
-                block_index: 0,
-                source: cc_lb_request_log::RequestCacheBreakpointSource::System,
-                path: "system[0]".to_owned(),
-                message_index: None,
-                ttl: Some("5m".to_owned()),
-                prefix_hash: "stale-prefix".to_owned(),
-                prefix_token_count: 12_000,
-                lookback_prefixes: Vec::new(),
-                token_estimate_source: None,
-            }],
-            ..RequestCacheMetadata::default()
-        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.request_json = Some(request_json);
+        metadata.thread_id = Some("stale-order".to_owned());
+        metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
+            block_index: 0,
+            source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+            path: "system[0]".to_owned(),
+            message_index: None,
+            ttl: Some("5m".to_owned()),
+            prefix_hash: "stale-prefix".to_owned(),
+            prefix_token_count: 12_000,
+            lookback_prefixes: Vec::new(),
+            token_estimate_source: None,
+        }];
         let response_compaction = serde_json::json!({
             "type": "message",
             "content": [{"type": "compaction", "content": "summary"}],
