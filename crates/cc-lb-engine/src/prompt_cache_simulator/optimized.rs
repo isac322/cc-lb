@@ -998,6 +998,54 @@ mod tests {
     }
 
     #[test]
+    fn worker_policy_outputs_share_ambiguous_prefix_tokenization() {
+        let request = serde_json::json!({
+            "model": MODEL,
+            "system": [
+                {"type":"text","text":"x-anthropic-billing-header: cron","cache_control":{"type":"ephemeral"}},
+                {"type":"text","text":format!(" a{}", "a".repeat(1_400)),"cache_control":{"type":"ephemeral"}}
+            ]
+        });
+        let mut scratch = super::SerializationScratch::default();
+        let structural = super::analyze_v3_prompt_cache_structure(
+            &request,
+            MODEL,
+            super::PromptCachePolicy::AnthropicOfficial,
+            &mut scratch,
+        )
+        .expect("header request remains analyzable");
+        let cache = super::PromptTokenCountCache::new(32);
+        let (analysis, _, durations) = super::analyze_v3_prompt_cache_optimized_scoped(
+            &request,
+            MODEL,
+            &[0; 32],
+            &cache,
+        );
+        assert_eq!(analysis.breakpoints.len(), 1);
+        assert_eq!(analysis.literal_breakpoints.len(), 2);
+        crate::tokenizer::reset_tokenizer_call_count();
+        let output = super::analysis_output(
+            analysis,
+            MODEL,
+            Some(1_024),
+            durations,
+            true,
+        );
+        assert_eq!(crate::tokenizer::tokenizer_call_count(), 1);
+        assert_eq!(
+            output.cacheable_breakpoint_prefix_keys.len(),
+            1,
+            "official policy must admit its ambiguous breakpoint"
+        );
+        assert_eq!(
+            output.literal_cacheable_breakpoint_prefix_keys.len(),
+            2,
+            "literal policy must reuse the shared ambiguous boundary"
+        );
+        assert_eq!(structural.breakpoints.len(), 1);
+    }
+
+    #[test]
     fn metric_emission_uses_fixed_cache_labels() {
         let recorder = RecordingMetrics::default();
         let _recorder_guard = metrics::set_default_local_recorder(&recorder);
