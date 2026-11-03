@@ -695,6 +695,222 @@ fn expected_keepalive_identity_body() -> Value {
     })
 }
 
+fn billing_keepalive_observation_fixture(
+    kind: UpstreamKind,
+    base_url: Option<&str>,
+    header_only: bool,
+) -> Result<KeepaliveObservationFixture, Box<dyn std::error::Error>> {
+    let mut fixture = keepalive_observation_fixture(
+        StatusCode::OK,
+        br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"input_tokens":7,"output_tokens":0}}"#,
+    )?;
+    let upstream = UpstreamRecord {
+        id: fixture.snapshot.upstream_id,
+        name: "keepalive-observation-oauth".to_owned(),
+        kind,
+        base_url: base_url.map(str::parse).transpose()?,
+        enabled: true,
+        ..UpstreamRecord::default()
+    };
+    fixture.dispatcher.upstream_store = Arc::new(TestUpstreamStore::new(upstream));
+    fixture.dispatcher.clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+    let mut system = vec![json!({
+        "type": "text",
+        "text": format!("x-anthropic-billing-header: {}", "attribution ".repeat(2_000)),
+        "cache_control": {"type":"ephemeral","ttl":"5m"}
+    })];
+    if !header_only {
+        system.push(json!({
+            "type":"text",
+            "text":"stable renewal context ".repeat(1_024),
+            "cache_control":{"type":"ephemeral","ttl":"1h"}
+        }));
+    }
+    fixture.snapshot = RequestSnapshot::capture(
+        "https://api.anthropic.com/v1/messages".parse()?,
+        Method::POST,
+        HeaderMap::new(),
+        Bytes::from(serde_json::to_vec(&json!({
+            "model":"claude-sonnet-4-5",
+            "max_tokens":1,
+            "system":system,
+            "messages":[{"role":"user","content":"uncached tail"}]
+        }))?),
+        fixture.snapshot.upstream_id,
+        cc_lb_storage_api::CacheTtl::Ttl5m,
+        usize::MAX,
+    )?;
+    Ok(fixture)
+}
+
+async fn assert_billing_keepalive_observation(
+    fixture: KeepaliveObservationFixture,
+    literal: bool,
+    expected_ttl: TtlClass,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dispatched_body = fixture.snapshot.build_keepalive_body()?;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "billing-policy-renewal".to_owned()),
+        )
+        .await;
+    assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
+    let requests = fixture
+        .http
+        .requests
+        .lock()
+        .map_err(|_| "HTTP requests poisoned")?;
+    let [request] = requests.as_slice() else {
+        panic!("renewal must dispatch exactly once");
+    };
+    assert_eq!(request.body(), &dispatched_body);
+    let request_value: Value = serde_json::from_slice(request.body())?;
+    let analysis = analyze_v3_prompt_cache(&request_value, canonical_model_id("claude-sonnet-4-5"));
+    let expected = if literal {
+        analysis.literal_breakpoints.last()
+    } else {
+        analysis.breakpoints.last()
+    }
+    .ok_or("expected dispatched-body prefix missing")?;
+    if let Some(official) = analysis.breakpoints.last()
+        && let Some(custom) = analysis.literal_breakpoints.last()
+    {
+        assert_ne!(
+            official.prefix_key, custom.prefix_key,
+            "policy discriminator"
+        );
+        assert_eq!(
+            official.prefix_bytes, custom.prefix_bytes,
+            "raw prefix bytes"
+        );
+    }
+    let records = fixture.observations.records.lock();
+    let [record] = records.as_slice() else {
+        panic!("read-only renewal must publish exactly one eligible owner prefix");
+    };
+    assert_eq!(record.upstream_id, fixture.snapshot.upstream_id);
+    assert_eq!(record.v3_prefix_key, expected.prefix_key);
+    assert_eq!(
+        record.prefix_content_block_index,
+        u32::try_from(expected.block_index)?
+    );
+    assert_eq!(record.estimated_prefix_tokens, expected.prefix_bytes.get());
+    assert_eq!(record.ttl_class, expected_ttl);
+    assert_eq!(
+        record.hash_schema_version,
+        crate::lifecycle::HASH_SCHEMA_VERSION
+    );
+    assert_eq!(record.last_observed_at_unix_secs, 1_800_000_000);
+    let ttl_secs = match expected_ttl {
+        TtlClass::Ephemeral5m => 300,
+        TtlClass::Ephemeral1h => 3_600,
+    };
+    assert_eq!(record.expires_at_unix_secs, 1_800_000_000 + ttl_secs - 30);
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_keepalive_custom_oauth_refreshes_literal_owner_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_billing_keepalive_observation(
+        billing_keepalive_observation_fixture(
+            UpstreamKind::AnthropicOauth,
+            Some("https://proxy.example.com/anthropic"),
+            false,
+        )?,
+        true,
+        TtlClass::Ephemeral1h,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn read_only_keepalive_official_oauth_refreshes_excluded_header_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    for base_url in [
+        None,
+        Some("https://api.anthropic.com/proxy?tenant=one#fragment"),
+    ] {
+        assert_billing_keepalive_observation(
+            billing_keepalive_observation_fixture(UpstreamKind::AnthropicOauth, base_url, false)?,
+            false,
+            TtlClass::Ephemeral1h,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_keepalive_custom_header_only_refreshes_literal_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_billing_keepalive_observation(
+        billing_keepalive_observation_fixture(
+            UpstreamKind::AnthropicOauth,
+            Some("https://proxy.example.com"),
+            true,
+        )?,
+        true,
+        TtlClass::Ephemeral5m,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn read_only_keepalive_official_header_only_has_no_eligible_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = billing_keepalive_observation_fixture(UpstreamKind::AnthropicOauth, None, true)?;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "official-header-only".to_owned()),
+        )
+        .await;
+    assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
+    assert_eq!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .map_err(|_| "HTTP requests poisoned")?
+            .len(),
+        1
+    );
+    assert!(fixture.observations.records.lock().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_keepalive_non_anthropic_rejects_without_dispatch_or_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = billing_keepalive_observation_fixture(
+        UpstreamKind::OpenaiOauth,
+        Some("https://api.openai.com"),
+        false,
+    )?;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "non-anthropic-owner".to_owned()),
+        )
+        .await;
+    assert!(matches!(outcome, DispatchOutcome::UnsupportedProvider(_)));
+    assert!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .map_err(|_| "HTTP requests poisoned")?
+            .is_empty()
+    );
+    assert!(fixture.observations.records.lock().is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn oauth_keepalive_publishes_exact_dispatched_prefix_before_finalization()
 -> Result<(), Box<dyn std::error::Error>> {

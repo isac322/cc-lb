@@ -8588,6 +8588,7 @@ mod prompt_cache_policy_tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 8_192,
                 cache_read_input_tokens: 0,
+                read_only_evidence: false,
             },
             1_800_000_000,
         );
@@ -11314,7 +11315,10 @@ mod tests {
                 upstream_id: Uuid::from_u128(1_003),
                 canonical_model_id: TEST_MODEL.to_owned(),
                 cache_breakpoints: metadata.plugin_cache_breakpoints(),
-                cacheable_breakpoint_prefix_keys: metadata.cacheable_breakpoint_prefix_keys,
+                cacheable_breakpoint_prefix_keys: metadata
+                    .bundles
+                    .official
+                    .cacheable_breakpoint_prefix_keys,
                 selected_match: None,
                 sink: cache.clone(),
                 grace_margin_secs: 30,
@@ -11375,7 +11379,10 @@ mod tests {
                 upstream_id: Uuid::from_u128(1_003),
                 canonical_model_id: TEST_MODEL.to_owned(),
                 cache_breakpoints: metadata.plugin_cache_breakpoints(),
-                cacheable_breakpoint_prefix_keys: metadata.cacheable_breakpoint_prefix_keys,
+                cacheable_breakpoint_prefix_keys: metadata
+                    .bundles
+                    .official
+                    .cacheable_breakpoint_prefix_keys,
                 selected_match: None,
                 sink: cache.clone(),
                 grace_margin_secs: 30,
