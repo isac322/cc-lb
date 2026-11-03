@@ -1431,6 +1431,7 @@ async fn build_app_with_storage_inner(
         Arc::clone(&dynamic_view_holder),
         Arc::clone(&stores.upstreams),
         Arc::clone(&dispatcher),
+        clock.clone(),
     ));
     let cache_keepalive_enqueuer = Arc::new(
         crate::cache_keepalive_enqueuer::ServerCacheKeepaliveEnqueuer::new(

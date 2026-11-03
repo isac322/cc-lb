@@ -235,6 +235,7 @@ impl Fixture {
                 self.dynamic_view.clone(),
                 self.storage_dyn.clone(),
                 self.http.clone(),
+                Arc::new(SystemClock),
             )
             .with_timeout(Duration::from_secs(1)),
         );
@@ -259,6 +260,7 @@ impl Fixture {
                 self.dynamic_view.clone(),
                 self.storage_dyn.clone(),
                 self.http.clone(),
+                Arc::new(SystemClock),
             )
             .with_timeout(Duration::from_secs(1)),
         );

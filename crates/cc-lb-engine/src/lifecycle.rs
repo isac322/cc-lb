@@ -1804,6 +1804,9 @@ pub struct PromptCacheObservationContext {
 pub(crate) struct PromptCacheUsage {
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_read_input_tokens: u64,
+    /// True only for present valid positive reads and complete numeric zero
+    /// creation evidence, never from accounting counters' zero defaults.
+    pub(crate) read_only_evidence: bool,
 }
 
 impl From<&UsageCounts> for PromptCacheUsage {
@@ -1811,6 +1814,7 @@ impl From<&UsageCounts> for PromptCacheUsage {
         Self {
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             cache_read_input_tokens: usage.cache_read_input_tokens,
+            read_only_evidence: usage.has_affirmative_read_only_cache_usage(),
         }
     }
 }
@@ -1886,6 +1890,35 @@ pub(crate) fn decode_prompt_cache_observations_pure(
             ),
             prefix_content_block_index: matched.content_block_index,
             estimated_prefix_bytes: matched.estimated_prefix_bytes,
+            kind: DecodedPromptCacheObservationKind::Hit,
+        });
+    } else if context.selected_match.is_none()
+        && usage.cache_creation_input_tokens == 0
+        && usage.cache_read_input_tokens > 0
+        && usage.read_only_evidence
+        && let Some(breakpoint) = context
+            .cache_breakpoints
+            .iter()
+            .filter(|breakpoint| {
+                context
+                    .cacheable_breakpoint_prefix_keys
+                    .contains(&breakpoint.prefix_hash)
+            })
+            .max_by_key(|breakpoint| breakpoint.block_index)
+    {
+        // Explicit and automatic controls are already resolved to the same
+        // breakpoint representation. Infer only its deepest eligible boundary,
+        // never a lookback key or a replacement for a carried predicted match.
+        observations.push(DecodedPromptCacheObservation {
+            prefix_hash: breakpoint.prefix_hash.clone(),
+            ttl_class: breakpoint.requested_ttl,
+            expires_at_unix_secs: prompt_cache_observation_expires_at(
+                now_unix_secs,
+                breakpoint.requested_ttl,
+                grace_secs,
+            ),
+            prefix_content_block_index: breakpoint.block_index,
+            estimated_prefix_bytes: breakpoint.prefix_bytes,
             kind: DecodedPromptCacheObservationKind::Hit,
         });
     }
@@ -9950,6 +9983,7 @@ mod tests {
                         PromptCacheUsage {
                             cache_creation_input_tokens: if is_hit { 0 } else { 2_400 },
                             cache_read_input_tokens: if is_hit { 2_400 } else { 0 },
+                            read_only_evidence: false,
                         },
                         dispatch,
                     );
@@ -10023,6 +10057,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 800,
                 cache_read_input_tokens: 2_400,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10067,6 +10102,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 2_400,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10122,6 +10158,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 2_400,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10164,6 +10201,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10192,6 +10230,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 1_023,
                 cache_read_input_tokens: 0,
+                ..PromptCacheUsage::default()
             },
             cache.clock_now_unix_secs(),
         );
@@ -10232,6 +10271,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 2_400,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10262,6 +10302,7 @@ mod tests {
         let usage = PromptCacheUsage {
             cache_creation_input_tokens: 800,
             cache_read_input_tokens: 2_400,
+            ..PromptCacheUsage::default()
         };
 
         let buffered = decode_prompt_cache_observations_pure(&context, usage, now);
@@ -10300,6 +10341,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 2_000,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10336,6 +10378,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 2_000,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10378,6 +10421,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 2_400,
                 cache_read_input_tokens: 0,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10393,7 +10437,7 @@ mod tests {
     }
 
     #[test]
-    fn read_positive_no_predict_records_unknown() {
+    fn read_positive_no_predict_without_eligible_key_stays_unknown() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000232").unwrap();
         let now = 1_800_000_000;
         let cache =
@@ -10418,13 +10462,14 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 2_400,
+                ..PromptCacheUsage::default()
             },
             now,
         );
 
         assert!(
             decoded.observations.is_empty(),
-            "a provider read with no predicted match must not fabricate a Hit key"
+            "a positive read with no eligible breakpoint (empty no-eligible-key control) must not fabricate a Hit key"
         );
         assert!(cache.upserts().is_empty());
     }
@@ -10455,6 +10500,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 3_000,
                 cache_read_input_tokens: 2_500,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10509,6 +10555,7 @@ mod tests {
             PromptCacheUsage {
                 cache_creation_input_tokens: 3_600,
                 cache_read_input_tokens: 2_400,
+                ..PromptCacheUsage::default()
             },
             now,
         );
@@ -10525,6 +10572,616 @@ mod tests {
                 ("shared", TtlClass::Ephemeral1h),
                 ("later", TtlClass::Ephemeral5m)
             ]
+        );
+    }
+
+    fn unpredicted_read_context(
+        cache: Arc<RecordingPromptCacheObservationSink>,
+    ) -> PromptCacheObservationContext {
+        PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1_003),
+            canonical_model_id: TEST_MODEL.to_owned(),
+            // Deliberately unsorted: structural depth, not vector order, bytes,
+            // or the highest unqualified breakpoint, selects the inferred key.
+            cache_breakpoints: vec![
+                cache_breakpoint(5, "deep-eligible", 2_800, TtlClass::Ephemeral1h),
+                cache_breakpoint(8, "deep-ineligible", 9_600, TtlClass::Ephemeral5m),
+                cache_breakpoint(2, "shallow-eligible", 8_400, TtlClass::Ephemeral5m),
+            ],
+            cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&[
+                "deep-eligible",
+                "shallow-eligible",
+            ]),
+            selected_match: None,
+            grace_margin_secs: 30,
+            sink: cache,
+        }
+    }
+
+    #[test]
+    fn unpredicted_read_requires_affirmative_zero_creation() {
+        let now = 1_800_000_000;
+        for (reported, inferred) in [
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0}"#,
+                true,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+                true,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+                true,
+            ),
+            (r#"{"cache_read_input_tokens":2400}"#, false),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":null}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation":null}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation":{}}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation":{"ephemeral_5m_input_tokens":0}}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation":{"ephemeral_1h_input_tokens":0}}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":null}}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0,"cache_creation":{}}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":"0"}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":false}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":-1}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0.5}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":0,"cache_creation_input_tokens":0}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":null,"cache_creation_input_tokens":0}"#,
+                false,
+            ),
+            (r#"{"cache_creation_input_tokens":0}"#, false),
+            (
+                r#"{"cache_read_input_tokens":"2400","cache_creation_input_tokens":0}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":true,"cache_creation_input_tokens":0}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":-1,"cache_creation_input_tokens":0}"#,
+                false,
+            ),
+            (
+                r#"{"cache_read_input_tokens":2.5,"cache_creation_input_tokens":0}"#,
+                false,
+            ),
+        ] {
+            let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+            let context = unpredicted_read_context(cache.clone());
+            let body = format!(r#"{{"usage":{reported}}}"#);
+            let usage = usage_parser::observe_non_stream_json_body(body.as_bytes()).usage;
+            let decoded = decode_prompt_cache_observations_pure(
+                &context,
+                PromptCacheUsage::from(&usage),
+                now,
+            );
+            let expected = if inferred {
+                vec![DecodedPromptCacheObservation {
+                    prefix_hash: "deep-eligible".to_owned(),
+                    ttl_class: TtlClass::Ephemeral1h,
+                    expires_at_unix_secs: 1_800_003_570,
+                    prefix_content_block_index: 5,
+                    estimated_prefix_bytes: PrefixBytes::new(2_800),
+                    kind: DecodedPromptCacheObservationKind::Hit,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(decoded.observations, expected, "{reported}");
+            assert_eq!(decoded.dropped_below_threshold, 0, "{reported}");
+            publish_prompt_cache_observations(&context, &decoded, now);
+            let records = cache.upserts();
+            assert_eq!(records.len(), usize::from(inferred), "{reported}");
+            if let Some(record) = records.first() {
+                assert_eq!(record.v3_prefix_key, "deep-eligible");
+                assert_eq!(record.prefix_content_block_index, 5);
+                assert_eq!(record.ttl_class, TtlClass::Ephemeral1h);
+                assert_eq!(record.expires_at_unix_secs, 1_800_003_570);
+                assert_eq!(record.estimated_prefix_tokens, 2_800);
+                assert_eq!(record.token_estimate_source, PrefixBytes::ESTIMATE_SOURCE);
+            }
+        }
+    }
+
+    #[test]
+    fn unpredicted_positive_creation_preserves_writes_without_inferred_hits() {
+        for reported in [
+            r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":700}"#,
+            r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":700,"ephemeral_1h_input_tokens":0}}"#,
+            r#"{"cache_read_input_tokens":2400,"cache_creation_input_tokens":700,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+        ] {
+            let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+            let context = unpredicted_read_context(cache);
+            let body = format!(r#"{{"usage":{reported}}}"#);
+            let usage = usage_parser::observe_non_stream_json_body(body.as_bytes()).usage;
+            let decoded = decode_prompt_cache_observations_pure(
+                &context,
+                PromptCacheUsage::from(&usage),
+                1_800_000_000,
+            );
+            assert_eq!(
+                decoded.observations,
+                vec![
+                    DecodedPromptCacheObservation {
+                        prefix_hash: "deep-eligible".to_owned(),
+                        ttl_class: TtlClass::Ephemeral1h,
+                        expires_at_unix_secs: 1_800_003_570,
+                        prefix_content_block_index: 5,
+                        estimated_prefix_bytes: PrefixBytes::new(2_800),
+                        kind: DecodedPromptCacheObservationKind::Write,
+                    },
+                    DecodedPromptCacheObservation {
+                        prefix_hash: "shallow-eligible".to_owned(),
+                        ttl_class: TtlClass::Ephemeral5m,
+                        expires_at_unix_secs: 1_800_000_270,
+                        prefix_content_block_index: 2,
+                        estimated_prefix_bytes: PrefixBytes::new(8_400),
+                        kind: DecodedPromptCacheObservationKind::Write,
+                    },
+                ],
+                "{reported}",
+            );
+            assert_eq!(decoded.dropped_below_threshold, 1);
+        }
+    }
+
+    #[test]
+    fn affirmative_unpredicted_evidence_never_replaces_carried_shallow_or_same_key_hit() {
+        let usage = usage_parser::observe_non_stream_json_body(
+            br#"{"usage":{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0}}"#,
+        )
+        .usage;
+        for (key, index, bytes) in [
+            ("lookback-shallow", 1, 1_400),
+            ("shallow-eligible", 2, 8_400),
+        ] {
+            let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+            let mut context = unpredicted_read_context(cache.clone());
+            context.selected_match =
+                Some(selected_match_hit(key, index, TtlClass::Ephemeral1h, bytes));
+            let decoded = decode_prompt_cache_observations_pure(
+                &context,
+                PromptCacheUsage::from(&usage),
+                1_800_000_000,
+            );
+            assert_eq!(
+                decoded.observations,
+                vec![DecodedPromptCacheObservation {
+                    prefix_hash: key.to_owned(),
+                    ttl_class: TtlClass::Ephemeral1h,
+                    expires_at_unix_secs: 1_800_003_570,
+                    prefix_content_block_index: index,
+                    estimated_prefix_bytes: PrefixBytes::new(bytes),
+                    kind: DecodedPromptCacheObservationKind::Hit,
+                }],
+            );
+            publish_prompt_cache_observations(&context, &decoded, 1_800_000_000);
+            let records = cache.upserts();
+            assert_eq!(records.len(), 1);
+            let record = records.first().expect("carried match record");
+            assert_eq!(record.v3_prefix_key, key);
+            assert_eq!(record.ttl_class, TtlClass::Ephemeral1h);
+            assert_eq!(record.prefix_content_block_index, index);
+            assert_eq!(record.estimated_prefix_tokens, bytes);
+        }
+    }
+
+    /// Independent reference bytes and hash chain for this fixed two-block
+    /// request; expectations never come from analyzed/decoded breakpoint data.
+    fn read_inference_request_fixture(automatic: bool, large: bool) -> (Value, String, u64) {
+        let text = if large {
+            "cache evidence ".repeat(3_000)
+        } else {
+            "tiny".to_owned()
+        };
+        let mut tail = json!({"type":"text","text":"tail"});
+        if !automatic {
+            tail["cache_control"] = json!({"type":"ephemeral","ttl":"5m"});
+        }
+        let first = json!({
+            "type":"text","text":text,
+            "cache_control":{"type":"ephemeral","ttl":"1h"},
+        });
+        let mut request = json!({
+            "model":TEST_MODEL,
+            "messages":[{"role":"user","content":[first.clone(),tail.clone()]}],
+            "max_tokens":16,
+        });
+        if automatic {
+            request["cache_control"] = json!({"type":"ephemeral","ttl":"5m"});
+        }
+        let mut seed = blake3::Hasher::new();
+        seed.update(b"cc-lb-cache-v5:seed");
+        seed.update(b"claude-sonnet-4-5-20250929");
+        let mut previous = seed.finalize();
+        for (index, block_text) in [(0, text.as_str()), (1, "tail")] {
+            let digest_value = json!({
+                "path":format!("messages[0].content[{index}]"),
+                "source":"message",
+                "value":{"text":block_text,"type":"text"},
+            });
+            let mut block = blake3::Hasher::new();
+            block.update(b"cc-lb-cache-v5:block");
+            block.update(&serde_json::to_vec(&digest_value).expect("reference block JSON"));
+            let mut prefix = blake3::Hasher::new();
+            prefix.update(b"cc-lb-cache-v5:prefix");
+            prefix.update(previous.as_bytes());
+            prefix.update(block.finalize().as_bytes());
+            previous = prefix.finalize();
+        }
+        let reference_prefix = json!({
+            "content_blocks":[
+                {"source":"message","value":first},
+                {"source":"message","value":tail},
+            ],
+            "model":"claude-sonnet-4-5-20250929",
+        });
+        let bytes = serde_json::to_vec(&reference_prefix)
+            .expect("reference prefix JSON")
+            .len() as u64;
+        (request, previous.to_hex().to_string(), bytes)
+    }
+
+    #[tokio::test]
+    async fn unpredicted_read_infers_deepest_resolved_explicit_and_automatic_boundary() {
+        for automatic in [false, true] {
+            let (request, expected_key, expected_bytes) =
+                read_inference_request_fixture(automatic, true);
+            let output = PromptCacheAnalysisExecutor::default()
+                .analyze(
+                    Arc::new(request.clone()),
+                    TEST_MODEL.to_owned(),
+                    [0; 32],
+                    Some(1_024),
+                )
+                .await;
+            let metadata = request_cache_metadata_from_value_with_analysis(
+                &HeaderMap::new(),
+                Some(&request),
+                Some(output),
+            );
+            let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+            let context = PromptCacheObservationContext {
+                upstream_id: Uuid::from_u128(1_003),
+                canonical_model_id: TEST_MODEL.to_owned(),
+                cache_breakpoints: metadata.plugin_cache_breakpoints(),
+                cacheable_breakpoint_prefix_keys: metadata.cacheable_breakpoint_prefix_keys,
+                selected_match: None,
+                sink: cache.clone(),
+                grace_margin_secs: 30,
+            };
+            let usage = usage_parser::observe_non_stream_json_body(
+                br#"{"usage":{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0}}"#,
+            )
+            .usage;
+            let decoded = decode_prompt_cache_observations_pure(
+                &context,
+                PromptCacheUsage::from(&usage),
+                1_800_000_000,
+            );
+            assert_eq!(
+                decoded.observations,
+                vec![DecodedPromptCacheObservation {
+                    prefix_hash: expected_key.clone(),
+                    ttl_class: TtlClass::Ephemeral5m,
+                    expires_at_unix_secs: 1_800_000_270,
+                    prefix_content_block_index: 1,
+                    estimated_prefix_bytes: PrefixBytes::new(expected_bytes),
+                    kind: DecodedPromptCacheObservationKind::Hit,
+                }],
+                "automatic={automatic}",
+            );
+            publish_prompt_cache_observations(&context, &decoded, 1_800_000_000);
+            let records = cache.upserts();
+            assert_eq!(records.len(), 1);
+            let record = records.first().expect("inferred boundary record");
+            assert_eq!(record.v3_prefix_key, expected_key);
+            assert_eq!(record.prefix_content_block_index, 1);
+            assert_eq!(record.estimated_prefix_tokens, expected_bytes);
+            assert_eq!(record.ttl_class, TtlClass::Ephemeral5m);
+            assert_eq!(record.expires_at_unix_secs, 1_800_000_270);
+        }
+    }
+
+    #[tokio::test]
+    async fn unpredicted_read_with_empty_or_actual_below_threshold_eligibility_stays_unknown() {
+        for automatic in [false, true] {
+            let (request, _, _) = read_inference_request_fixture(automatic, false);
+            let output = PromptCacheAnalysisExecutor::default()
+                .analyze(
+                    Arc::new(request.clone()),
+                    TEST_MODEL.to_owned(),
+                    [0; 32],
+                    Some(1_024),
+                )
+                .await;
+            assert!(output.cacheable_breakpoint_prefix_keys.is_empty());
+            let metadata = request_cache_metadata_from_value_with_analysis(
+                &HeaderMap::new(),
+                Some(&request),
+                Some(output),
+            );
+            let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+            let mut context = PromptCacheObservationContext {
+                upstream_id: Uuid::from_u128(1_003),
+                canonical_model_id: TEST_MODEL.to_owned(),
+                cache_breakpoints: metadata.plugin_cache_breakpoints(),
+                cacheable_breakpoint_prefix_keys: metadata.cacheable_breakpoint_prefix_keys,
+                selected_match: None,
+                sink: cache.clone(),
+                grace_margin_secs: 30,
+            };
+            let usage = usage_parser::observe_non_stream_json_body(
+                br#"{"usage":{"cache_read_input_tokens":2400,"cache_creation_input_tokens":0}}"#,
+            )
+            .usage;
+            for empty_breakpoints in [false, true] {
+                if empty_breakpoints {
+                    context.cache_breakpoints.clear();
+                }
+                let decoded = decode_prompt_cache_observations_pure(
+                    &context,
+                    PromptCacheUsage::from(&usage),
+                    1_800_000_000,
+                );
+                assert!(decoded.observations.is_empty());
+                publish_prompt_cache_observations(&context, &decoded, 1_800_000_000);
+                assert!(cache.upserts().is_empty());
+            }
+        }
+    }
+
+    struct ObservationSseDialect {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl UpstreamDialect for ObservationSseDialect {
+        fn shape(
+            &self,
+            context: &DialectShapeContext,
+            upstream: &Upstream,
+            principal: &Principal,
+            builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
+            RawPassthroughDialect {
+                base_url: Url::parse("https://api.anthropic.com").expect("test upstream URL"),
+                openai_oauth: false,
+                openai_oauth_default: false,
+            }
+            .shape(context, upstream, principal, builder)
+        }
+
+        fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
+            Some(self)
+        }
+    }
+
+    impl SseEventTransformHook for ObservationSseDialect {
+        fn transform_sse_event(
+            &self,
+            _request: cc_lb_upstream::TransformSseEventRequest,
+        ) -> Result<cc_lb_upstream::TransformSseEventResult, ResponseTransformError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(cc_lb_upstream::TransformSseEventResult::Unchanged)
+        }
+    }
+
+    fn read_inference_lifecycle(
+        upstream_response: Response<Body>,
+        cache: Arc<RecordingPromptCacheObservationSink>,
+        transform_calls: Option<Arc<AtomicUsize>>,
+    ) -> Lifecycle {
+        let dialect = transform_calls.map_or(
+            cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+            |calls| {
+                cc_lb_control::api_keys::principal_view::DialectCache::Explicit(
+                    cc_lb_control::api_keys::principal_view::ShapePluginCache {
+                        dialect: Arc::new(ObservationSseDialect { calls }),
+                    },
+                )
+            },
+        );
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(failure_principal_view("principal-test", (None, dialect)))
+            .upstream_records(vec![upstream_record(Uuid::from_u128(1_003))])
+            .prompt_cache_observation_sink(cache)
+            .prompt_cache_grace_margin_secs(30)
+            .build();
+        Lifecycle::new_with_dynamic_view(
+            failure_authn(),
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(QueueDispatch::new(vec![Ok(upstream_response)])),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000)),
+        )
+    }
+
+    fn assert_inferred_published_record(
+        records: &[PromptCacheObservationRecord],
+        expected_key: &str,
+        expected_bytes: u64,
+    ) {
+        assert_eq!(records.len(), 1, "publish exactly one deepest boundary");
+        let record = records.first().expect("inferred published record");
+        assert_eq!(record.upstream_id, Uuid::from_u128(1_003));
+        assert_eq!(record.canonical_model_id, TEST_MODEL);
+        assert_eq!(record.v3_prefix_key, expected_key);
+        assert_eq!(record.prefix_content_block_index, 1);
+        assert_eq!(record.ttl_class, TtlClass::Ephemeral5m);
+        assert_eq!(
+            record.expires_at_unix_secs,
+            record.last_observed_at_unix_secs + 270,
+        );
+        assert_eq!(record.estimated_prefix_tokens, expected_bytes);
+        assert_eq!(record.token_estimate_source, PrefixBytes::ESTIMATE_SOURCE);
+        assert_eq!(record.hash_schema_version, HASH_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn buffered_unpredicted_read_publishes_one_resolved_boundary() {
+        for automatic in [false, true] {
+            let (request, expected_key, expected_bytes) =
+                read_inference_request_fixture(automatic, true);
+            let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+            let lifecycle = read_inference_lifecycle(
+                upstream_response(
+                    StatusCode::OK,
+                    br#"{"id":"msg_read","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":2400,"cache_creation_input_tokens":0}}"#,
+                ),
+                cache.clone(),
+                None,
+            );
+            let request = failure_request(Bytes::from(
+                serde_json::to_vec(&request).expect("request JSON"),
+            ));
+            let auth = lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("request authenticates");
+            let response = lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("buffered request succeeds");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_inferred_published_record(&cache.upserts(), &expected_key, expected_bytes);
+            let _ = collect_response_body(response).await;
+            assert_inferred_published_record(&cache.upserts(), &expected_key, expected_bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_and_transformed_sse_unpredicted_reads_publish_early_exactly_once() {
+        for automatic in [false, true] {
+            for transformed in [false, true] {
+                for drop_after_start in [false, true] {
+                    let (mut request, expected_key, expected_bytes) =
+                        read_inference_request_fixture(automatic, true);
+                    request["stream"] = Value::Bool(true);
+                    let (release, released) = tokio::sync::oneshot::channel::<()>();
+                    let stream = async_stream::stream! {
+                        yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_read\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5-20250929\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":2400,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":0}}}}\n\n"
+                        ));
+                        let _ = released.await;
+                        yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":17,\"cache_read_input_tokens\":2400,\"cache_creation_input_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                        ));
+                    };
+                    let mut upstream = Response::new(Body::from_stream(stream));
+                    upstream
+                        .headers_mut()
+                        .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+                    let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+                    let transform_calls = Arc::new(AtomicUsize::new(0));
+                    let lifecycle = read_inference_lifecycle(
+                        upstream,
+                        cache.clone(),
+                        transformed.then(|| transform_calls.clone()),
+                    );
+                    let request = failure_request(Bytes::from(
+                        serde_json::to_vec(&request).expect("streaming request JSON"),
+                    ));
+                    let auth = lifecycle
+                        .authenticate(request.headers())
+                        .await
+                        .expect("request authenticates");
+                    let response = lifecycle
+                        .handle(request, &auth)
+                        .await
+                        .expect("streaming request succeeds");
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert!(cache.upserts().is_empty(), "body has not been polled yet");
+                    let mut body = response.into_body();
+                    let first = tokio::time::timeout(Duration::from_secs(5), body.frame())
+                        .await
+                        .expect("message_start arrives before upstream completion")
+                        .expect("message_start frame")
+                        .expect("message_start body data");
+                    assert!(first.is_data());
+                    assert_inferred_published_record(
+                        &cache.upserts(),
+                        &expected_key,
+                        expected_bytes,
+                    );
+                    if transformed {
+                        assert!(transform_calls.load(Ordering::SeqCst) > 0);
+                    }
+                    if drop_after_start {
+                        drop(body);
+                        drop(release);
+                    } else {
+                        release.send(()).expect("release stream completion");
+                        let _ = body.collect().await.expect("remaining SSE collects");
+                    }
+                    assert_inferred_published_record(
+                        &cache.upserts(),
+                        &expected_key,
+                        expected_bytes,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expiry_anchored_at_start_not_completion() {
+        let dispatch_started = Instant::now();
+        let dispatch_unix_secs = 1_000_u64;
+        let message_start_at = dispatch_started + Duration::from_secs(2);
+        let anchor =
+            response_start_unix_secs(dispatch_unix_secs, dispatch_started, Some(message_start_at));
+        assert_eq!(anchor, 1_002);
+
+        let grace = 60;
+        let expires = prompt_cache_observation_expires_at(anchor, TtlClass::Ephemeral5m, grace);
+        assert_eq!(expires, 1_002 + 300 - 60);
+
+        let completion_unix = dispatch_unix_secs + 62;
+        let completion_expires =
+            prompt_cache_observation_expires_at(completion_unix, TtlClass::Ephemeral5m, grace);
+        assert!(
+            expires < completion_expires,
+            "start anchor must not extend expiry by the generation duration"
         );
     }
 
