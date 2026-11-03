@@ -123,7 +123,7 @@ Do not run `Lifecycle::handle`'s prompt-cache analysis directly on a Tokio worke
 - Limit concurrent CPU jobs with `tokio::sync::Semaphore`.
 - Default concurrency is `available_parallelism - 1`, minimum 1.
 - The queue has no timeout or approximation. Waiting is async and functionality is preserved.
-- The sync APIs `preview_route` and `parse_request_cache_breakpoints` keep the existing exact sync analyzer.
+- `preview_route` and `parse_request_cache_breakpoints` are official-Anthropic convenience APIs. They use the exact official policy by default and are not candidate-aware projections; mixed-provider routing must use the serving candidate bundles produced by lifecycle routing.
 
 Do not change the public signatures of `Lifecycle::new` and `new_with_dynamic_view`. The executor and cache are created as internal private fields. Do not add a production public API just for tests.
 
