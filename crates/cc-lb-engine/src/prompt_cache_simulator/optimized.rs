@@ -693,18 +693,17 @@ fn analysis_output(
             let mut keys = Vec::new();
             let mut duration = Duration::ZERO;
             for literal_breakpoint in &analysis.literal_breakpoints {
-                let shared_official_key = analysis
+                if let Some(official) = analysis
                     .breakpoints
                     .iter()
-                    .find(|official| {
-                        official.block_index == literal_breakpoint.block_index
-                            && cacheable_breakpoint_prefix_keys
-                                .iter()
-                                .any(|key| key == &official.prefix_key)
-                    })
-                    .map(|_| literal_breakpoint.prefix_key.clone());
-                if let Some(key) = shared_official_key {
-                    keys.push(key);
+                    .find(|official| official.block_index == literal_breakpoint.block_index)
+                {
+                    if cacheable_breakpoint_prefix_keys
+                        .iter()
+                        .any(|key| key == &official.prefix_key)
+                    {
+                        keys.push(literal_breakpoint.prefix_key.clone());
+                    }
                     continue;
                 }
                 let (extra_keys, extra_duration) =
