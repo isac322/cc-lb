@@ -16,6 +16,12 @@ Prompt-cache keepalive is a principal-scoped feature. When enabled, cc-lb observ
 
 The feature is best effort. A keepalive can miss because the cache changed, credentials failed, the session expired, or the provider rejected the request. Those are terminal business outcomes for that scheduled generation rather than a retry promise.
 
+## Renewal accounting
+
+Keepalive renewals use Anthropic's nested 5-minute and 1-hour cache-creation counts for usage records and the local cost breakdown. A positive flat creation total with an absent, empty, or all-zero nested breakdown uses the same 5-minute fallback as regular usage accounting. It does not imply a 1-hour write.
+
+This applies to future renewals. Historical usage rows are not rewritten.
+
 ## Request eligibility
 
 An explicit `x-claude-code-request-class: auxiliary` excludes a request from keep-alive completion sequencing, generation observation or mutation, enqueueing, cancellation, and detached bookkeeping. The exclusion follows the explicit header even when body classification reports `unknown`, `subagent`, `main`, or `advisor`. Existing named side-request exclusions remain in place. Headerless `unknown` and `subagent` requests retain their existing eligibility, and real subagent turns remain isolated under their agent-scoped session key.

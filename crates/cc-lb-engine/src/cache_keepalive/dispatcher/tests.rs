@@ -297,6 +297,284 @@ fn classifies_zero_cache_read_as_miss() {
 }
 
 #[test]
+fn nested_anthropic_cache_creation_preserves_one_hour_accounting() {
+    let body = br#"{
+        "content": [],
+        "stop_reason": "max_tokens",
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 42,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 42
+            }
+        }
+    }"#;
+
+    let outcome = classify_success_body(
+        body,
+        Duration::ZERO,
+        Duration::from_millis(1),
+        accounting_guard(),
+    );
+    let finalization = match outcome {
+        DispatchOutcome::CacheMiss { finalization } => finalization,
+        DispatchOutcome::CacheHit { .. }
+        | DispatchOutcome::UnsupportedProvider(_)
+        | DispatchOutcome::Error(_) => panic!("nested cache creation should be a miss"),
+    };
+    let canonical = crate::usage_parser::observe_non_stream_json_body(body);
+    println!(
+        "keepalive classifier split: total={} 5m={} 1h={}; canonical: total={} 5m={} 1h={}",
+        finalization.usage.cache_creation_input_tokens,
+        finalization.usage.cache_creation_input_tokens_5m,
+        finalization.usage.cache_creation_input_tokens_1h,
+        canonical.usage.cache_creation_input_tokens,
+        canonical.usage.cache_creation_input_tokens_5m,
+        canonical.usage.cache_creation_input_tokens_1h
+    );
+
+    assert_eq!(canonical.usage.cache_creation_input_tokens, 42);
+    assert_eq!(canonical.usage.cache_creation_input_tokens_5m, 0);
+    assert_eq!(canonical.usage.cache_creation_input_tokens_1h, 42);
+    assert_eq!(finalization.usage.cache_creation_input_tokens, 42);
+    assert_eq!(finalization.usage.cache_creation_input_tokens_5m, 0);
+    assert_eq!(finalization.usage.cache_creation_input_tokens_1h, 42);
+}
+
+#[test]
+fn classifies_cache_creation_with_canonical_ttl_split() {
+    let cases = [
+        (
+            "mixed TTLs",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":49,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#,
+            (49, 7, 42),
+        ),
+        (
+            "nested only",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#,
+            (49, 7, 42),
+        ),
+        (
+            "nested overrides conflicting flat total",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":999,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#,
+            (49, 7, 42),
+        ),
+        (
+            "flat only",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "empty nested falls back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":{}}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "zero nested falls back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "all zero",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}"#,
+            (0, 0, 0),
+        ),
+        (
+            "nested sum saturates",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":18446744073709551615,"ephemeral_1h_input_tokens":42}}}"#,
+            (u64::MAX, u64::MAX, 42),
+        ),
+        (
+            "null nested falls back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":null}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "nonobject nested falls back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":[]}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "invalid nested counters fall back",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":42,"cache_creation":{"ephemeral_5m_input_tokens":"7","ephemeral_1h_input_tokens":-42}}}"#,
+            (42, 42, 0),
+        ),
+        (
+            "invalid nested counters without flat stay zero",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":1.5,"ephemeral_1h_input_tokens":null}}}"#,
+            (0, 0, 0),
+        ),
+        (
+            "valid one-hour counter overrides invalid five-minute counter",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":999,"cache_creation":{"ephemeral_5m_input_tokens":{},"ephemeral_1h_input_tokens":42}}}"#,
+            (42, 0, 42),
+        ),
+        (
+            "valid five-minute counter overrides invalid one-hour counter",
+            r#"{"usage":{"input_tokens":11,"output_tokens":3,"cache_creation_input_tokens":999,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":true}}}"#,
+            (7, 7, 0),
+        ),
+    ];
+
+    for (name, body, expected) in cases {
+        let outcome = classify_success_body(
+            body.as_bytes(),
+            Duration::ZERO,
+            Duration::from_millis(25),
+            accounting_guard(),
+        );
+        let finalization = match outcome {
+            DispatchOutcome::CacheMiss { finalization } => finalization,
+            DispatchOutcome::CacheHit { .. }
+            | DispatchOutcome::UnsupportedProvider(_)
+            | DispatchOutcome::Error(_) => panic!("{name}: expected cache miss"),
+        };
+        let usage = &finalization.usage;
+        assert_eq!(
+            (
+                usage.cache_creation_input_tokens,
+                usage.cache_creation_input_tokens_5m,
+                usage.cache_creation_input_tokens_1h,
+            ),
+            expected,
+            "{name}"
+        );
+        let canonical = crate::usage_parser::observe_non_stream_json_body(body.as_bytes());
+        assert_eq!(
+            (
+                canonical.usage.cache_creation_input_tokens,
+                canonical.usage.cache_creation_input_tokens_5m,
+                canonical.usage.cache_creation_input_tokens_1h,
+            ),
+            expected,
+            "{name}: canonical contract"
+        );
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens
+            ),
+            (11, 3, 0),
+            "{name}"
+        );
+        assert_eq!(finalization.status, StatusCode::OK.as_u16(), "{name}");
+        assert_eq!(finalization.duration, Duration::from_millis(25), "{name}");
+    }
+}
+
+#[test]
+fn classifies_null_usage_as_zero_usage_miss() {
+    let outcome = classify_success_body(
+        br#"{"content":[],"stop_reason":"max_tokens","usage":null}"#,
+        Duration::ZERO,
+        Duration::from_millis(10),
+        accounting_guard(),
+    );
+    let finalization = match outcome {
+        DispatchOutcome::CacheMiss { finalization } => finalization,
+        DispatchOutcome::CacheHit { .. }
+        | DispatchOutcome::UnsupportedProvider(_)
+        | DispatchOutcome::Error(_) => panic!("null usage should be a miss"),
+    };
+    let usage = &finalization.usage;
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_creation_input_tokens_5m,
+            usage.cache_creation_input_tokens_1h,
+            usage.cache_read_input_tokens,
+        ),
+        (0, 0, 0, 0, 0, 0)
+    );
+    assert_eq!(finalization.status, StatusCode::OK.as_u16());
+    assert_eq!(finalization.duration, Duration::from_millis(10));
+}
+
+#[test]
+fn classifies_mixed_cache_read_and_creation_as_hit() {
+    let body = br#"{"content":[],"stop_reason":"max_tokens","usage":{"input_tokens":11,"output_tokens":3,"cache_read_input_tokens":1234,"cache_creation_input_tokens":49,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#;
+    let outcome = classify_success_body(
+        body,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+        accounting_guard(),
+    );
+    let finalization = match outcome {
+        DispatchOutcome::CacheHit {
+            cache_anchor_age,
+            finalization,
+        } => {
+            assert_eq!(cache_anchor_age, Duration::from_secs(2));
+            finalization
+        }
+        DispatchOutcome::CacheMiss { .. }
+        | DispatchOutcome::UnsupportedProvider(_)
+        | DispatchOutcome::Error(_) => panic!("positive cache read should remain a hit"),
+    };
+    let usage = &finalization.usage;
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_creation_input_tokens_5m,
+            usage.cache_creation_input_tokens_1h,
+            usage.cache_read_input_tokens,
+        ),
+        (11, 3, 49, 7, 42, 1234)
+    );
+    assert_eq!(finalization.status, StatusCode::OK.as_u16());
+    assert_eq!(finalization.duration, Duration::from_millis(50));
+    assert_eq!(finalization.accounting_guard.reservation_id(), None);
+}
+
+#[test]
+fn rejects_malformed_success_usage_without_relaxing_flat_counters() {
+    let cases = [
+        ("invalid JSON", r#"{"usage":"#),
+        ("nonobject usage", r#"{"usage":true}"#),
+        ("string input", r#"{"usage":{"input_tokens":"11"}}"#),
+        ("null input", r#"{"usage":{"input_tokens":null}}"#),
+        ("negative output", r#"{"usage":{"output_tokens":-3}}"#),
+        (
+            "fractional read",
+            r#"{"usage":{"cache_read_input_tokens":1.5}}"#,
+        ),
+        (
+            "string flat creation",
+            r#"{"usage":{"cache_creation_input_tokens":"42"}}"#,
+        ),
+        (
+            "out-of-range flat creation",
+            r#"{"usage":{"cache_creation_input_tokens":18446744073709551616}}"#,
+        ),
+        (
+            "null flat five-minute",
+            r#"{"usage":{"cache_creation_input_tokens_5m":null}}"#,
+        ),
+        (
+            "string flat one-hour",
+            r#"{"usage":{"cache_creation_input_tokens_1h":"42"}}"#,
+        ),
+    ];
+    for (name, body) in cases {
+        let outcome = classify_success_body(
+            body.as_bytes(),
+            Duration::ZERO,
+            Duration::from_millis(1),
+            accounting_guard(),
+        );
+        assert!(matches!(outcome, DispatchOutcome::Error(_)), "{name}");
+    }
+}
+
+#[test]
 fn classifies_missing_usage_as_miss() {
     let body = br#"{"content":[],"stop_reason":"max_tokens"}"#;
 
@@ -309,7 +587,18 @@ fn classifies_missing_usage_as_miss() {
 
     match outcome {
         DispatchOutcome::CacheMiss { finalization } => {
-            assert_eq!(finalization.usage.cache_read_input_tokens, 0);
+            let usage = &finalization.usage;
+            assert_eq!(
+                (
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_creation_input_tokens_5m,
+                    usage.cache_creation_input_tokens_1h,
+                    usage.cache_read_input_tokens,
+                ),
+                (0, 0, 0, 0, 0, 0)
+            );
             assert_eq!(finalization.status, StatusCode::OK.as_u16());
             assert_eq!(finalization.duration, Duration::from_millis(10));
         }
@@ -1065,6 +1354,67 @@ async fn oauth_keepalive_suffix_cache_creation_evidence_controls_publication()
         assert!(
             fixture.observations.records.lock().is_empty(),
             "{name} must not publish cache observations"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn oauth_keepalive_nested_ttl_accounting_preserves_publication_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    type Case = (&'static str, &'static [u8], (u64, u64, u64), usize);
+    let cases: &[Case] = &[
+        (
+            "complete nested zero",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}"#,
+            (0, 0, 0),
+            1,
+        ),
+        (
+            "nested one-hour creation",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":42,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":42}}}"#,
+            (42, 0, 42),
+            0,
+        ),
+        (
+            "nested creation overrides zero flat total",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":42}}}"#,
+            (49, 7, 42),
+            0,
+        ),
+        (
+            "incomplete nested zero is not affirmative evidence",
+            br#"{"usage":{"cache_read_input_tokens":1234,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0}}}"#,
+            (0, 0, 0),
+            0,
+        ),
+    ];
+    for &(name, body, expected_split, expected_observations) in cases {
+        let fixture = keepalive_observation_fixture(StatusCode::OK, body)?;
+        let outcome = fixture
+            .dispatcher
+            .dispatch(
+                &fixture.snapshot,
+                KeepaliveDispatchContext::new(None, name.to_owned()),
+            )
+            .await;
+        let DispatchOutcome::CacheHit { finalization, .. } = outcome else {
+            panic!("{name}: positive reads must remain cache hits");
+        };
+        assert_eq!(finalization.usage.cache_read_input_tokens, 1234, "{name}");
+        assert_eq!(
+            (
+                finalization.usage.cache_creation_input_tokens,
+                finalization.usage.cache_creation_input_tokens_5m,
+                finalization.usage.cache_creation_input_tokens_1h,
+            ),
+            expected_split,
+            "{name}"
+        );
+        assert_eq!(
+            fixture.observations.records.lock().len(),
+            expected_observations,
+            "{name}: publication must use complete evidence, not accounting defaults"
         );
     }
     Ok(())

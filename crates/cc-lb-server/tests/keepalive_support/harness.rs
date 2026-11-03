@@ -16,7 +16,9 @@ use cc_lb_storage_api::upstream::{
     OAuthTokensCreate, UpstreamCreate, UpstreamKind, UpstreamUpdate,
 };
 use cc_lb_storage_api::{
-    CacheKeepaliveConfig, ManagedKeyStore, MetaStore, PrincipalStore, Storage, UpstreamStore,
+    CacheKeepaliveConfig, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
+    ManagedKeyStore, MetaStore, PrincipalStore, RequestEvent, RequestEventStore, Storage,
+    UpstreamStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use reqwest::{Client, Response};
@@ -296,6 +298,9 @@ impl Harness {
             ..Default::default()
         };
         config.price_catalog.url = "http://127.0.0.1:9/price-catalog.json".to_owned();
+        if let Some(dir) = &dir {
+            config.price_catalog.cache_path = dir.path().join("price-catalog.json");
+        }
         config.body.messages_cap_bytes = 12 * 1024 * 1024;
         if matches!(options.clock, ClockMode::System) {
             // Disable unrelated recurring inserts so D1/D2 cannot borrow their notification wakes.
@@ -774,6 +779,31 @@ impl Harness {
                 .expect("count events"),
             ),
         }
+    }
+    pub async fn read_renewal_accounting(
+        &self,
+        session_key_hash: &str,
+        generation: u64,
+    ) -> (RequestEvent, CacheKeepaliveTurnRecord) {
+        let source_ref_id = format!("{session_key_hash}:{generation}");
+        let event = RequestEventStore::get_request_event(
+            self.storage.as_storage(),
+            &format!("renewal:{source_ref_id}"),
+        )
+        .await
+        .expect("read persisted renewal request event")
+        .expect("completed renewal must persist its request event");
+        let turn = CacheKeepaliveSessionReadStore::list_cache_keepalive_turns(
+            self.storage.as_storage(),
+            &self.principal_id.to_string(),
+            session_key_hash,
+        )
+        .await
+        .expect("read persisted renewal turns")
+        .into_iter()
+        .find(|turn| turn.source_ref_id == source_ref_id)
+        .expect("completed renewal must persist its turn");
+        (event, turn)
     }
     pub async fn read_job_timing(&self, job_key: &str) -> Option<JobTiming> {
         match &self.scheduler_pool {

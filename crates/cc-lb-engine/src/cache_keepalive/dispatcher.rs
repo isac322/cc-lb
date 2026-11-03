@@ -32,7 +32,7 @@ use crate::prompt_cache_simulator::{
     cacheable_breakpoint_prefix_keys_with_tokenize_duration,
 };
 use crate::usage_decoder::decode_full_body;
-use crate::usage_parser::observe_non_stream_json_value;
+use crate::usage_parser::{cache_creation_split, observe_non_stream_json_value};
 
 use super::request_snapshot::RequestSnapshot;
 use super::scheduler::{
@@ -437,10 +437,13 @@ struct KeepaliveResponseUsage {
     output_tokens: u64,
     #[serde(default)]
     cache_creation_input_tokens: u64,
+    // Preserve validation of legacy flat TTL counters without using them as buckets.
+    #[serde(default, rename = "cache_creation_input_tokens_5m")]
+    _cache_creation_input_tokens_5m: u64,
+    #[serde(default, rename = "cache_creation_input_tokens_1h")]
+    _cache_creation_input_tokens_1h: u64,
     #[serde(default)]
-    cache_creation_input_tokens_5m: u64,
-    #[serde(default)]
-    cache_creation_input_tokens_1h: u64,
+    cache_creation: serde_json::Value,
     #[serde(default)]
     cache_read_input_tokens: u64,
 }
@@ -459,13 +462,17 @@ fn classify_success_body(
     match sonic_rs::from_slice::<KeepaliveResponseBody>(body) {
         Ok(parsed) => {
             let usage = parsed.usage.unwrap_or_default();
+            let (cache_creation_total, cache_creation_5m, cache_creation_1h) = cache_creation_split(
+                usage.cache_creation_input_tokens,
+                Some(&usage.cache_creation),
+            );
             let finalization = RenewalFinalization {
                 usage: RenewalUsage {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
-                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                    cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
-                    cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
+                    cache_creation_input_tokens: cache_creation_total,
+                    cache_creation_input_tokens_5m: cache_creation_5m,
+                    cache_creation_input_tokens_1h: cache_creation_1h,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                 },
                 status: StatusCode::OK.as_u16(),
