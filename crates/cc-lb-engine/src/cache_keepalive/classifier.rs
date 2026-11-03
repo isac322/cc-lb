@@ -231,7 +231,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn ordinary_tool_use_remains_agent_in_turn_without_compaction() {
         let d = classify(
