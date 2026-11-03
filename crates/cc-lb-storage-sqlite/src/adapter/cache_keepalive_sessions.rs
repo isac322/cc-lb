@@ -124,10 +124,15 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             None => None,
         };
         if let Some((_, _, status, existing_anchor, existing_updated)) = parsed_existing {
-            if existing_anchor > request.cache_anchor_at_unix_secs {
+            // A newer real ticket supersedes a terminal fence, not a newer
+            // active cache anchor (which may have advanced through a cache hit).
+            if (status != CacheKeepaliveSessionStatus::Terminal || expected_ticket.is_none())
+                && existing_anchor > request.cache_anchor_at_unix_secs
+            {
                 return Ok(None);
             }
-            if status == CacheKeepaliveSessionStatus::Terminal
+            if expected_ticket.is_none()
+                && status == CacheKeepaliveSessionStatus::Terminal
                 && existing_updated > request.cache_anchor_at_unix_secs
             {
                 return Ok(None);
@@ -451,14 +456,17 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .await
             .map_err(map_sqlx_error)?;
         }
+        // A validated completion ticket orders a real cancellation even when a
+        // synthetic cache hit advanced the anchor after that real response.
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
              encrypted_payload = X'', updated_at = ?
-             WHERE session_key_hash = ? AND status = 'active' AND cache_anchor_at <= ?",
+             WHERE session_key_hash = ? AND status = 'active' AND (? OR cache_anchor_at <= ?)",
         )
         .bind(reason.as_str())
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
+        .bind(expected_ticket.is_some())
         .bind(u64_to_i64(
             cancel_anchor_at_unix_secs,
             "cache keepalive cancel_anchor_at",

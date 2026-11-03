@@ -188,6 +188,8 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 .await
                 .map_err(map_sqlx_error)?;
         }
+        // Ticket order supersedes terminal timestamps. Active rows retain the
+        // anchor guard, including anchors advanced by synthetic cache hits.
         let row = sqlx::query(
             "INSERT INTO cache_keepalive_sessions
              (session_key_hash, principal_id, accounting_key_id, upstream_id, generation, refresh_count,
@@ -216,8 +218,9 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
               terminal_reason = NULL,
               expires_at = EXCLUDED.expires_at,
               updated_at = EXCLUDED.updated_at
-             WHERE cache_keepalive_sessions.cache_anchor_at <= EXCLUDED.cache_anchor_at
-               AND (cache_keepalive_sessions.status != 'terminal' OR cache_keepalive_sessions.updated_at <= EXCLUDED.cache_anchor_at)
+             WHERE (cache_keepalive_sessions.status = 'terminal' AND $17)
+                OR (cache_keepalive_sessions.cache_anchor_at <= EXCLUDED.cache_anchor_at
+                    AND (cache_keepalive_sessions.status != 'terminal' OR cache_keepalive_sessions.updated_at <= EXCLUDED.cache_anchor_at))
              RETURNING *",
         )
         .bind(&request.session_key_hash)
@@ -257,6 +260,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             request.now_unix_secs,
             "cache keepalive updated_at",
         )?)
+        .bind(expected_ticket.is_some())
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -480,14 +484,17 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 .await
                 .map_err(map_sqlx_error)?;
         }
+        // A validated completion ticket orders a real cancellation even when a
+        // synthetic cache hit advanced the anchor after that real response.
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, error = NULL, running_since_unix_secs = NULL,
              encrypted_payload = ''::bytea, updated_at = $2
-             WHERE session_key_hash = $3 AND status = 'active' AND cache_anchor_at <= $4",
+             WHERE session_key_hash = $3 AND status = 'active' AND ($4 OR cache_anchor_at <= $5)",
         )
         .bind(reason.as_str())
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
+        .bind(expected_ticket.is_some())
         .bind(u64_to_i64(
             cancel_anchor_at_unix_secs,
             "cache keepalive cancel_anchor_at",
