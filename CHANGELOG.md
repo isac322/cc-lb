@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-04
+
 ### Added
 
 - `cc_lb_cache_prediction_total{outcome}` exposes request-level prompt-cache prediction outcomes across four fixed values, comparing positive predictions with final observed cache reads.
@@ -13,6 +15,8 @@ All notable changes to this project will be documented in this file.
 - Prompt-cache attribution now infers one deepest eligible explicit or automatic breakpoint for ordinary responses that predicted no match when usage shows numeric positive `cache_read_input_tokens` and explicit zero cache creation. Flat `cache_creation_input_tokens: 0`, complete nested 5m/1h zero counters, or the complete zero suffix pair `cache_creation_input_tokens_5m` and `cache_creation_input_tokens_1h` qualify. All supplied representations must be complete, valid unsigned counters with consistent totals. Suffix fields are evidence-only; numeric accounting remains unchanged. Missing, null, partial, invalid, contradictory, or positive-creation evidence does not establish this inferred hit. For SSE, omitted or null fields preserve the corresponding prior evidence components; complete numeric flat, nested, or suffix snapshots replace the prior representation and may change evidence state. Partial, malformed, or contradictory snapshots invalidate evidence; partial snapshots cannot be combined into zero evidence. Predicted-match attribution remains unchanged.
 
 - Eligible successful read-only prompt-cache keep-alive renewals now publish observations from the exact transformed dispatched body through a bounded, nonblocking best-effort sink, including final capped renewals. Misses, errors, unsupported providers, and ambiguous usage publish nothing. Publication does not guarantee a synchronous commit, provider acceptance, or cache hit; sink or storage failures do not fail the renewal. Existing keep-alive scheduling and shared-store decisions remain unchanged.
+
+- Updated the embedded Wasmtime plugin host to `50.0.1` (`wasmparser` `0.263.0`), `reqwest` to `0.13.5` with the `ring` TLS provider, `tokio` to `1.54.1`, `hyper` to `1.12.0`, `h2` to `0.4.20`, and the background scheduler to Apalis `1.0.0`. Guest plugins continue using wire version `1` without recompilation, and SQLite scheduler setup restores `PRAGMA synchronous = NORMAL` immediately after Apalis initialization. ([#989](https://github.com/isac322/cc-lb/pull/989))
 
 ### Fixed
 
@@ -28,12 +32,8 @@ All notable changes to this project will be documented in this file.
 - Local HTTP limit reservations now distinguish impossible Requests, Input, Total, and Cost reservations from temporary window or concurrency exhaustion. Impossible reservations return `429` with `x-should-retry: false`, no `Retry-After` header, and no body delay; temporary window and concurrency rejections retain `Retry-After` and body delays of 60 and 1 second, while output-cap violations remain `400` without a retry hint. ([#1025](https://github.com/isac322/cc-lb/issues/1025))
 - Explicit Claude Code auxiliary requests now stay out of prompt-cache keep-alive completion sequencing and generation bookkeeping across classifier fallback, while preserving `unknown`, `subagent`, `main`, and `advisor` reporting and legitimate headerless-turn eligibility. ([#1022](https://github.com/isac322/cc-lb/issues/1022))
 - Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
-- Test fixture condition waiters no longer lose broadcasts when their state changes during observation.
-- Scheduler OAuth refresh race tests now use the production worker factory for both storage backends, so idle-queue polling exercises the server's wakeup handling instead of a separate fixture-only interval.
-- PostgreSQL retained-event roundtrip tests now wait for the existing stable export horizon before paging, preserving full scalar checks when sibling transactions hold the snapshot boundary.
-- The notification burst test uses a controlled clock, avoiding false extra-rebuild failures under scheduler contention.
 - Request diagnostics now report `matched_v3_cache_key` and match indices only for an actual selected route match. Routed misses omit those match-only fields while retaining request prefix hashes and cold prediction fields. ([#1006](https://github.com/isac322/cc-lb/issues/1006))
-- Prompt-cache routing now defaults `prompt_cache_shadow.grace_margin_secs` to `0` (previously `30`), avoiding early expiry of live cache observations. Explicitly configured grace margins remain effective. Buffered and SSE observations now share the upstream request-dispatch expiry anchor, so TTFB and response generation cannot extend the provider TTL. (#1002)
+- Prompt-cache routing now defaults `prompt_cache_shadow.grace_margin_secs` to `0` (previously `30`), avoiding early expiry of live cache observations. Explicitly configured grace margins remain effective. Buffered and SSE observations now share the upstream request-dispatch expiry anchor, so TTFB and response generation cannot extend the provider TTL. ([#1002](https://github.com/isac322/cc-lb/issues/1002))
 - Prompt-cache keep-alive now skips live requests with enabled thinking, structured output (`output_config.format`), or forced tool choice (`tool` / `any`), recording a `not_tracked` reason instead of sending a renewal Anthropic rejects at `max_tokens: 0`. An incompatible turn cancels any existing active session. Adaptive thinking with automatic tool choice continues renewing unchanged.
   Eligibility checks the actual upstream-shaped body, so shape plugins cannot introduce an incompatible renewal unnoticed; unchanged bodies reuse the existing JSON parse.
 - Prompt-cache keep-alive renewals now preserve request `thinking`, `output_config`, and `tool_choice` fields unchanged instead of rewriting `thinking` to `disabled`, include `beta=true` on Anthropic OAuth renewal URLs, and persist terminal failure messages in `cache_keepalive_sessions.error` while resetting `enqueue_state` to `pending`.
@@ -41,13 +41,12 @@ All notable changes to this project will be documented in this file.
   keep-alive generation instead of scheduling the obsolete pre-compaction
   snapshot. The fence applies to paused and continuation responses, including
   complete SSE assemblies, without relying on gateway hint headers.
-
 - PostgreSQL scheduler workers now drive task polling with a dedicated 1-second interval and auto-reconnecting notification strategy, preventing future-scheduled keep-alive and OAuth refresh jobs from stalling across idle intervals or listener disconnects.
 
 ### Upgrade notes
 
 - Existing stored prompt-cache observations keep their recorded expiry and need no migration. Schema-5 observations are cold-started by the v6 hash filter; the new default and dispatch anchor apply to newly recorded or refreshed observations. Set `prompt_cache_shadow.grace_margin_secs = 30` to retain the previous margin.
-- Coordinate the keep-alive payload upgrade: drain and stop all old workers before starting any new writer. Old binaries cannot read the new v2 frame codecs `2` and `3`; mixed-version operation is unsupported. Do not downgrade while active sessions contain these codecs.
+- Coordinate the upgrade across all replicas and scheduler workers: drain and stop all `2.1.0` instances before starting `2.2.0` writers or scheduler workers. `2.1.0` binaries cannot read keep-alive v2 frame codecs `2` and `3`, and Apalis `1.0.0` updates the scheduler job queue encoding; mixed-version operation is unsupported, and active sessions containing codecs `2` or `3` cannot be downgraded in place. No new `cc-lb` SQLite or PostgreSQL schema migrations are added in this release.
 
 ## [2.1.0] - 2026-10-31
 
@@ -553,7 +552,8 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.1.0...HEAD
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.2.0...HEAD
+[2.2.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.1.0...cc-lb-v2.2.0
 [2.1.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.2...cc-lb-v2.1.0
 [2.0.2]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.1...cc-lb-v2.0.2
 [2.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.0...cc-lb-v2.0.1
