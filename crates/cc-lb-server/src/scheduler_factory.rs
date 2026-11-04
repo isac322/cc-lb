@@ -4,6 +4,20 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "postgres")]
 const SCHEDULER_SETUP_LOCK_KEY: i64 = 0x_CC1B_5CDE_0002_i64;
+#[cfg(feature = "postgres")]
+const APALIS_FIRST_MIGRATION_VERSION: i64 = 20220530084123;
+#[cfg(feature = "postgres")]
+const APALIS_PRE_1_0_FIRST_MIGRATION_CHECKSUM: [u8; 48] = [
+    0x0e, 0x2a, 0xe5, 0xfd, 0x11, 0x7c, 0x32, 0x92, 0x5d, 0x7f, 0xf4, 0xba, 0x4f, 0x26, 0x36, 0x82,
+    0x69, 0xfb, 0xa7, 0x70, 0x6b, 0xf1, 0xc3, 0xe9, 0x57, 0x8a, 0x76, 0x3a, 0x3e, 0x2a, 0xcc, 0x5f,
+    0xd4, 0x4c, 0x8e, 0xdf, 0x2a, 0xa2, 0x5e, 0x7c, 0x0a, 0xc1, 0xc6, 0xeb, 0xc8, 0xe9, 0x5a, 0x9a,
+];
+#[cfg(feature = "postgres")]
+const APALIS_1_0_FIRST_MIGRATION_CHECKSUM: [u8; 48] = [
+    0xd0, 0x83, 0x9c, 0x6f, 0x57, 0xa3, 0x79, 0x76, 0x9d, 0xc2, 0x7c, 0xcd, 0x58, 0x1f, 0xeb, 0x3d,
+    0x27, 0x09, 0x23, 0x9c, 0x8f, 0x13, 0x8e, 0x05, 0x27, 0x1c, 0x9e, 0x3c, 0x76, 0x0c, 0x45, 0x17,
+    0xa7, 0x8a, 0x4d, 0x89, 0x12, 0xab, 0x3d, 0x63, 0xb0, 0x74, 0xb2, 0x8d, 0x15, 0xec, 0x74, 0xe9,
+];
 
 #[cfg(feature = "postgres")]
 pub use cc_lb_scheduler::worker::PostgresSchedulerBackend;
@@ -211,22 +225,139 @@ async fn run_postgres_scheduler_setup(
             .execute(&mut conn)
             .await
             .map_err(migration_error)?;
-        let migrator = apalis_postgres::PostgresStorage::<()>::migrations();
-        let apalis_result = migrator.run_direct(None, &mut conn, false).await;
-        let post_setup_result = if apalis_result.is_ok() {
-            cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await
-        } else {
+        let setup_result: Result<(), SchedulerFactoryError> = async {
+            reconcile_pre_1_0_apalis_migration_history(&mut conn).await?;
+            let migrator = apalis_postgres::PostgresStorage::<()>::migrations();
+            migrator
+                .run_direct(None, &mut conn, false)
+                .await
+                .map_err(migration_error)?;
+            cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
+                .await
+                .map_err(migration_error)?;
             Ok(())
-        };
+        }
+        .await;
         let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(SCHEDULER_SETUP_LOCK_KEY)
             .execute(&mut conn)
             .await;
-        apalis_result.map_err(migration_error)?;
-        post_setup_result.map_err(migration_error)
+        setup_result
     })
     .await
     .map_err(migration_error)?
+}
+
+#[cfg(feature = "postgres")]
+async fn reconcile_pre_1_0_apalis_migration_history(
+    conn: &mut sqlx::PgConnection,
+) -> Result<(), SchedulerFactoryError> {
+    use sqlx::Acquire as _;
+
+    let legacy_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('cc_lb_scheduler._sqlx_migrations') IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(migration_error)?;
+    if !legacy_exists {
+        return Ok(());
+    }
+
+    let mut tx = conn.begin().await.map_err(migration_error)?;
+    let legacy_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cc_lb_scheduler._sqlx_migrations")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(migration_error)?;
+    if legacy_rows == 0 {
+        sqlx::query("DROP TABLE cc_lb_scheduler._sqlx_migrations")
+            .execute(&mut *tx)
+            .await
+            .map_err(migration_error)?;
+        tx.commit().await.map_err(migration_error)?;
+        return Ok(());
+    }
+
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS apalis")
+        .execute(&mut *tx)
+        .await
+        .map_err(migration_error)?;
+    let target_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('apalis._sqlx_migrations') IS NOT NULL")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(migration_error)?;
+    if target_exists {
+        let target_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM apalis._sqlx_migrations")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(migration_error)?;
+        if target_rows > 0 {
+            tx.rollback().await.map_err(migration_error)?;
+            return Err(SchedulerFactoryError::MigrationFailed {
+                message: format!(
+                    "both cc_lb_scheduler._sqlx_migrations ({legacy_rows} rows) and non-empty apalis._sqlx_migrations ({target_rows} rows) exist; refusing to overwrite authoritative scheduler migration ledger"
+                ),
+            });
+        }
+        sqlx::query("DROP TABLE apalis._sqlx_migrations")
+            .execute(&mut *tx)
+            .await
+            .map_err(migration_error)?;
+    }
+
+    let first_checksum: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT checksum FROM cc_lb_scheduler._sqlx_migrations WHERE version = $1",
+    )
+    .bind(APALIS_FIRST_MIGRATION_VERSION)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(migration_error)?;
+
+    match first_checksum.as_deref() {
+        Some(bytes) if bytes == APALIS_PRE_1_0_FIRST_MIGRATION_CHECKSUM => {
+            sqlx::query("ALTER TABLE cc_lb_scheduler._sqlx_migrations SET SCHEMA apalis")
+                .execute(&mut *tx)
+                .await
+                .map_err(migration_error)?;
+            let updated = sqlx::query(
+                "UPDATE apalis._sqlx_migrations SET checksum = $1 WHERE version = $2 AND checksum = $3",
+            )
+            .bind(&APALIS_1_0_FIRST_MIGRATION_CHECKSUM[..])
+            .bind(APALIS_FIRST_MIGRATION_VERSION)
+            .bind(&APALIS_PRE_1_0_FIRST_MIGRATION_CHECKSUM[..])
+            .execute(&mut *tx)
+            .await
+            .map_err(migration_error)?;
+            if updated.rows_affected() != 1 {
+                tx.rollback().await.map_err(migration_error)?;
+                return Err(SchedulerFactoryError::MigrationFailed {
+                    message: format!(
+                        "expected to update 1 checksum row for migration {APALIS_FIRST_MIGRATION_VERSION}, updated {}",
+                        updated.rows_affected()
+                    ),
+                });
+            }
+            tx.commit().await.map_err(migration_error)?;
+            Ok(())
+        }
+        Some(bytes) if bytes == APALIS_1_0_FIRST_MIGRATION_CHECKSUM => {
+            sqlx::query("ALTER TABLE cc_lb_scheduler._sqlx_migrations SET SCHEMA apalis")
+                .execute(&mut *tx)
+                .await
+                .map_err(migration_error)?;
+            tx.commit().await.map_err(migration_error)?;
+            Ok(())
+        }
+        _ => {
+            tx.rollback().await.map_err(migration_error)?;
+            Err(SchedulerFactoryError::MigrationFailed {
+                message: format!(
+                    "unexpected checksum for migration {APALIS_FIRST_MIGRATION_VERSION} in cc_lb_scheduler._sqlx_migrations"
+                ),
+            })
+        }
+    }
 }
 
 #[cfg(feature = "sqlite")]
