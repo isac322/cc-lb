@@ -4,9 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-11-04
+
 ### Fixed
 
-- PostgreSQL scheduler startup now moves a pre-`2.2.0` `cc_lb_scheduler._sqlx_migrations` ledger into `apalis._sqlx_migrations` and updates the `20220530084123` checksum to match `apalis-postgres` `1.0.0` before running pending scheduler migrations, including recovering from an empty `apalis._sqlx_migrations` table left by a failed `2.2.0` boot.
+- PostgreSQL scheduler startup now moves a pre-`2.2.0` `cc_lb_scheduler._sqlx_migrations` ledger into `apalis._sqlx_migrations` and updates the `20220530084123` checksum to match `apalis-postgres` `1.0.0` before running pending scheduler migrations, including recovering from an empty `apalis._sqlx_migrations` table left by a failed `2.2.0` boot. ([#1047](https://github.com/isac322/cc-lb/pull/1047))
+
+### Upgrade notes
+
+- Deployments upgrading directly from `2.1.0` or earlier must still drain and stop all pre-`2.2.0` replicas and scheduler workers before starting `2.2.1`, as `2.1.0` binaries cannot read keep-alive v2 frame codecs `2` and `3` or the Apalis `1.0.0` scheduler queue encoding. If an attempted `2.2.0` upgrade already created an empty `apalis._sqlx_migrations` table, `2.2.1` cleans it up and completes the ledger migration automatically at startup.
 
 ## [2.2.0] - 2026-11-04
 
@@ -556,7 +562,8 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.2.0...HEAD
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.2.1...HEAD
+[2.2.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.2.0...cc-lb-v2.2.1
 [2.2.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.1.0...cc-lb-v2.2.0
 [2.1.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.2...cc-lb-v2.1.0
 [2.0.2]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.1...cc-lb-v2.0.2
