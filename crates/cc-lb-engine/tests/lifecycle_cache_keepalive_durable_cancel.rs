@@ -1,5 +1,5 @@
 use crate::common;
-
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +19,470 @@ use http::{Response, StatusCode};
 use serde_json::json;
 
 use common::{TestAuthn, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle};
+
+#[tokio::test]
+async fn cache_keepalive_response_compaction_boundary_is_not_scheduled_json_and_sse() {
+    let request = Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 4096,
+            "context_management": {"edits": [{
+                "type": "compact_20260112", "pause_after_compaction": true
+            }]},
+            "messages": [{"role": "user", "content": [{
+                "type": "text", "text": "pre-compaction history",
+                "cache_control": {"type": "ephemeral"}
+            }]}]
+        }))
+        .expect("request JSON"),
+    );
+    for (stop_reason, content, streaming) in [
+        (
+            "compaction",
+            json!([{"type": "compaction", "content": "summary"}]),
+            false,
+        ),
+        (
+            "end_turn",
+            json!([
+                {"type": "compaction", "content": "summary"},
+                {"type": "text", "text": "done"}
+            ]),
+            false,
+        ),
+        (
+            "compaction",
+            json!([{"type": "compaction", "content": "summary"}]),
+            true,
+        ),
+        (
+            "end_turn",
+            json!([
+                {"type": "compaction", "content": "summary"},
+                {"type": "text", "text": "done"}
+            ]),
+            true,
+        ),
+    ] {
+        let response_body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "type": "message",
+                "id": "msg_compaction",
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": content,
+                "stop_reason": stop_reason,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 4,
+                    "cache_read_input_tokens": 60_000
+                }
+            }))
+            .expect("response JSON"),
+        );
+        let expected_body = if streaming {
+            streaming_body_from_message(&response_body)
+        } else {
+            response_body.clone()
+        };
+        let enqueuer = Arc::new(RecordingEnqueuer::default());
+        let response = handle_keepalive_response_with(
+            response_body,
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+            principal_with_keepalive(),
+            request.clone(),
+            &[
+                ("anthropic-beta", "compact-2026-01-12"),
+                ("x-claude-code-request-class", "main"),
+            ],
+            streaming,
+        )
+        .await;
+        let (status, _headers, body) = collect_body(response).await;
+        settle().await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected_body, "streaming={streaming}");
+        assert!(
+            enqueuer.enqueued().is_empty(),
+            "stop_reason={stop_reason}, streaming={streaming}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_compaction_request_class_is_excluded_from_keepalive() {
+    let enqueuer = Arc::new(RecordingEnqueuer::default());
+    let response = handle_keepalive_response_with(
+        agent_turn_body("msg_explicit_compaction", "Bash", 12_000),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal_with_keepalive(),
+        standard_keepalive_request(),
+        &[("x-claude-code-request-class", "compaction")],
+        false,
+    )
+    .await;
+    let (status, _headers, _body) = collect_body(response).await;
+    settle().await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(enqueuer.enqueued().is_empty());
+    assert!(enqueuer.cancelled().is_empty());
+    assert!(enqueuer.not_tracked().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_block_precedes_tool_use_without_enqueue_json_and_sse() {
+    for streaming in [false, true] {
+        let response_body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "type": "message",
+                "id": "msg_compaction_tool",
+                "role": "assistant",
+                "content": [
+                    {"type": "compaction", "content": "summary"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 0, "output_tokens": 4, "cache_read_input_tokens": 60_000}
+            }))
+            .expect("response JSON"),
+        );
+        let expected_body = if streaming {
+            streaming_body_from_message(&response_body)
+        } else {
+            response_body.clone()
+        };
+        let enqueuer = Arc::new(RecordingEnqueuer::default());
+        let response = handle_keepalive_response_with(
+            response_body,
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+            principal_with_keepalive(),
+            standard_keepalive_request(),
+            &[],
+            streaming,
+        )
+        .await;
+        let (status, _headers, body) = collect_body(response).await;
+        settle().await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected_body, "streaming={streaming}");
+        assert!(enqueuer.enqueued().is_empty(), "streaming={streaming}");
+    }
+}
+
+#[tokio::test]
+async fn compaction_response_without_current_breakpoint_fences_generation_json_and_sse() {
+    for (stop_reason, content) in [
+        (
+            "compaction",
+            json!([{"type": "compaction", "content": "summary"}]),
+        ),
+        (
+            "tool_use",
+            json!([
+                {"type": "compaction", "content": "summary"},
+                {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {}}
+            ]),
+        ),
+    ] {
+        for streaming in [false, true] {
+            let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+            let principal = principal_with_keepalive();
+            let main_headers = [("x-claude-code-session-id", "no-breakpoint")];
+            let child_headers = [
+                ("x-claude-code-session-id", "no-breakpoint"),
+                ("x-claude-code-agent-id", "child-agent"),
+            ];
+            establish_scoped_keepalive(&enqueuer, principal.clone(), &main_headers).await;
+            establish_scoped_keepalive(&enqueuer, principal.clone(), &child_headers).await;
+
+            let response_body = Bytes::from(
+                serde_json::to_vec(&json!({
+                    "type": "message",
+                    "id": "msg_no_breakpoint_compaction",
+                    "content": content.clone(),
+                    "stop_reason": stop_reason,
+                    "usage": {}
+                }))
+                .expect("response JSON"),
+            );
+            let expected_body = response_body.clone();
+            let (response, _) = observed_keepalive_response(
+                response_body,
+                Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+                principal,
+                no_breakpoint_request(),
+                &main_headers,
+                streaming,
+            )
+            .await;
+            assert_keepalive_response_fidelity(response, &expected_body, streaming).await;
+            enqueuer.wait_for_completion().await;
+
+            let state = enqueuer.snapshot();
+            assert_eq!(
+                state.generations.len(),
+                1,
+                "only unrelated child generation remains: {stop_reason}, streaming={streaming}"
+            );
+            assert!(
+                state
+                    .generations
+                    .keys()
+                    .any(|key| key.ends_with("/thread:no-breakpoint/agent:child-agent"))
+            );
+            assert_eq!(
+                state
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(operation, KeepaliveOperation::Enqueue(_, _)))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                state
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(operation, KeepaliveOperation::Cancel(key, _, _) if key.ends_with("/thread:no-breakpoint")))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                state
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(operation, KeepaliveOperation::NotTracked(_, _)))
+                    .count(),
+                0
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_response_without_cache_breakpoint_does_not_mutate_keepalive() {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    let headers = [("x-claude-code-session-id", "ordinary-no-breakpoint")];
+    establish_scoped_keepalive(&enqueuer, principal.clone(), &headers).await;
+    let before = enqueuer.snapshot();
+
+    let response_body = agent_turn_body("msg_ordinary_no_breakpoint", "Bash", 12_000);
+    let (response, _) = observed_keepalive_response(
+        response_body.clone(),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal,
+        no_breakpoint_request(),
+        &headers,
+        false,
+    )
+    .await;
+    assert_keepalive_response_fidelity(response, &response_body, false).await;
+    assert_eq!(enqueuer.snapshot(), before);
+}
+
+#[tokio::test]
+async fn compaction_response_fences_matching_generation_and_allows_fresh_completion() {
+    #[derive(Default)]
+    struct GenerationRecordingEnqueuer {
+        enqueued: Mutex<Vec<CacheKeepaliveEnqueueRequest>>,
+        cancelled: Mutex<Vec<CacheKeepaliveCancelRequest>>,
+    }
+
+    #[async_trait]
+    impl CacheKeepaliveEnqueuer for GenerationRecordingEnqueuer {
+        async fn enqueue_cache_keepalive(
+            &self,
+            request: CacheKeepaliveEnqueueRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            self.enqueued.lock().expect("enqueued lock").push(request);
+            Ok(())
+        }
+
+        async fn cancel_cache_keepalive(
+            &self,
+            request: CacheKeepaliveCancelRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            self.cancelled.lock().expect("cancelled lock").push(request);
+            Ok(())
+        }
+
+        async fn record_cache_keepalive_not_tracked(
+            &self,
+            _request: CacheKeepaliveNotTrackedRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            Ok(())
+        }
+
+        async fn observe_session_generation(
+            &self,
+            _session_key_hash: &str,
+        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+            Ok(Some(42))
+        }
+    }
+
+    let principal = principal_with_keepalive();
+    let enqueuer = Arc::new(GenerationRecordingEnqueuer::default());
+    let before = handle_keepalive_response_with(
+        agent_turn_body("msg_before_compaction", "Bash", 12_000),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal.clone(),
+        standard_keepalive_request(),
+        &[("x-claude-code-session-id", "compaction-fence")],
+        false,
+    )
+    .await;
+    assert_eq!(collect_body(before).await.0, StatusCode::OK);
+    settle().await;
+
+    let boundary = handle_keepalive_response_with(
+        Bytes::from_static(
+            br#"{"type":"message","id":"msg_compaction_fence","content":[{"type":"compaction","content":"summary"}],"stop_reason":"compaction","usage":{"cache_read_input_tokens":60000}}"#,
+        ),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal.clone(),
+        standard_keepalive_request(),
+        &[("x-claude-code-session-id", "compaction-fence")],
+        false,
+    )
+    .await;
+    assert_eq!(collect_body(boundary).await.0, StatusCode::OK);
+    settle().await;
+
+    assert_eq!(enqueuer.enqueued.lock().expect("enqueued lock").len(), 1);
+    let cancelled_generation = {
+        let cancelled = enqueuer.cancelled.lock().expect("cancelled lock");
+        assert_eq!(cancelled.len(), 1);
+        cancelled[0].expected_generation
+    };
+    assert_eq!(cancelled_generation, Some(42));
+
+    let after = handle_keepalive_response_with(
+        agent_turn_body("msg_after_compaction", "Bash", 12_000),
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        principal,
+        standard_keepalive_request(),
+        &[("x-claude-code-session-id", "compaction-fence")],
+        false,
+    )
+    .await;
+    assert_eq!(collect_body(after).await.0, StatusCode::OK);
+    settle().await;
+
+    let enqueued = enqueuer.enqueued.lock().expect("enqueued lock");
+    assert_eq!(enqueued.len(), 2);
+    assert_eq!(enqueued[0].expected_generation, Some(42));
+    assert_eq!(enqueued[1].expected_generation, Some(42));
+}
+
+#[tokio::test]
+async fn compaction_fence_retains_unrelated_agent_scope_state() {
+    struct ScopedEnqueuer {
+        active: Mutex<HashMap<String, u64>>,
+        cancelled: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CacheKeepaliveEnqueuer for ScopedEnqueuer {
+        async fn enqueue_cache_keepalive(
+            &self,
+            request: CacheKeepaliveEnqueueRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            self.active.lock().expect("active sessions lock").insert(
+                request.session_key_hash,
+                request.expected_generation.unwrap_or(1),
+            );
+            Ok(())
+        }
+
+        async fn cancel_cache_keepalive(
+            &self,
+            request: CacheKeepaliveCancelRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            let mut active = self.active.lock().expect("active sessions lock");
+            if active.get(&request.session_key_hash) == request.expected_generation.as_ref() {
+                active.remove(&request.session_key_hash);
+            }
+            self.cancelled
+                .lock()
+                .expect("cancelled keys lock")
+                .push(request.session_key_hash);
+            Ok(())
+        }
+
+        async fn record_cache_keepalive_not_tracked(
+            &self,
+            _request: CacheKeepaliveNotTrackedRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            Ok(())
+        }
+
+        async fn observe_session_generation(
+            &self,
+            session_key_hash: &str,
+        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+            Ok(self
+                .active
+                .lock()
+                .expect("active sessions lock")
+                .get(session_key_hash)
+                .copied())
+        }
+    }
+
+    let principal = principal_with_keepalive();
+    let enqueuer = Arc::new(ScopedEnqueuer {
+        active: Mutex::new(HashMap::new()),
+        cancelled: Mutex::new(Vec::new()),
+    });
+    for (response, headers) in [
+        (
+            agent_turn_body("msg_main_scope", "Bash", 12_000),
+            vec![("x-claude-code-session-id", "scope-session")],
+        ),
+        (
+            agent_turn_body("msg_child_scope", "Bash", 12_000),
+            vec![
+                ("x-claude-code-session-id", "scope-session"),
+                ("x-claude-code-agent-id", "child-agent"),
+            ],
+        ),
+        (
+            Bytes::from_static(
+                br#"{"type":"message","id":"msg_main_compaction","content":[{"type":"compaction","content":"summary"}],"stop_reason":"compaction","usage":{"cache_read_input_tokens":60000}}"#,
+            ),
+            vec![("x-claude-code-session-id", "scope-session")],
+        ),
+    ] {
+        let response = handle_keepalive_response_with(
+            response,
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+            principal.clone(),
+            standard_keepalive_request(),
+            &headers,
+            false,
+        )
+        .await;
+        assert_eq!(collect_body(response).await.0, StatusCode::OK);
+        settle().await;
+    }
+
+    let active = enqueuer.active.lock().expect("active sessions lock");
+    assert!(
+        !active
+            .keys()
+            .any(|key| key.ends_with("/thread:scope-session"))
+    );
+    assert!(
+        active
+            .keys()
+            .any(|key| key.ends_with("/thread:scope-session/agent:child-agent"))
+    );
+    drop(active);
+    let cancelled = enqueuer.cancelled.lock().expect("cancelled keys lock");
+    assert_eq!(cancelled.len(), 1);
+    assert!(cancelled[0].ends_with("/thread:scope-session"));
+}
 
 #[tokio::test]
 async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {
@@ -1552,6 +2016,12 @@ async fn handle_keepalive_response_with(
 fn standard_keepalive_request() -> Bytes {
     Bytes::from_static(
         br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
+    )
+}
+
+fn no_breakpoint_request() -> Bytes {
+    Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}"#,
     )
 }
 

@@ -188,6 +188,8 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 .await
                 .map_err(map_sqlx_error)?;
         }
+        // Real tickets compare the stable real-completion boundary; synthetic
+        // hits advance cache_anchor_at but leave first_scheduled_at unchanged.
         let row = sqlx::query(
             "INSERT INTO cache_keepalive_sessions
              (session_key_hash, principal_id, accounting_key_id, upstream_id, generation, refresh_count,
@@ -216,8 +218,9 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
               terminal_reason = NULL,
               expires_at = EXCLUDED.expires_at,
               updated_at = EXCLUDED.updated_at
-             WHERE cache_keepalive_sessions.cache_anchor_at <= EXCLUDED.cache_anchor_at
-               AND (cache_keepalive_sessions.status != 'terminal' OR cache_keepalive_sessions.updated_at <= EXCLUDED.cache_anchor_at)
+             WHERE ($17 AND cache_keepalive_sessions.first_scheduled_at <= EXCLUDED.cache_anchor_at)
+                OR (NOT $17 AND cache_keepalive_sessions.cache_anchor_at <= EXCLUDED.cache_anchor_at
+                    AND (cache_keepalive_sessions.status != 'terminal' OR cache_keepalive_sessions.updated_at <= EXCLUDED.cache_anchor_at))
              RETURNING *",
         )
         .bind(&request.session_key_hash)
@@ -257,6 +260,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             request.now_unix_secs,
             "cache keepalive updated_at",
         )?)
+        .bind(expected_ticket.is_some())
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -480,14 +484,19 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 .await
                 .map_err(map_sqlx_error)?;
         }
+        // Ticketed cancellation advances the stable logical boundary while
+        // leaving the synthetic scheduling/activity anchor unchanged.
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = ''::bytea, updated_at = $2
-             WHERE session_key_hash = $3 AND status = 'active' AND cache_anchor_at <= $4",
+             encrypted_payload = ''::bytea, updated_at = $2,
+             first_scheduled_at = CASE WHEN $4 THEN $5 ELSE first_scheduled_at END
+             WHERE session_key_hash = $3 AND status = 'active'
+               AND (CASE WHEN $4 THEN first_scheduled_at ELSE cache_anchor_at END) <= $5",
         )
         .bind(reason.as_str())
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
+        .bind(expected_ticket.is_some())
         .bind(u64_to_i64(
             cancel_anchor_at_unix_secs,
             "cache keepalive cancel_anchor_at",
@@ -495,8 +504,13 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        if result.rows_affected() == 0 {
+            // Rejecting a stale logical anchor must not consume its ticket.
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Ok(false);
+        }
         tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(result.rows_affected() == 1)
+        Ok(true)
     }
 
     async fn mark_latest_cache_keepalive_terminal(

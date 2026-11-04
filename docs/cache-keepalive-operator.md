@@ -20,9 +20,23 @@ are skipped at fire time and the session is cancelled with `reason=upstream_gone
 - **Bedrock, Vertex:** `max_tokens: 0` behavior is unverified.
 - **OpenRouter:** schema requires `max_tokens >= 1`.
 
-Nothing runs - no snapshot, no schedule - for principals whose
-`cache_keepalive.enabled` is `false` or unset, or for requests that carry
-no `cache_control` breakpoint.
+For an enabled cache-keepalive principal, no snapshot or schedule is created
+for requests with no `cache_control` breakpoint, except that a
+response-derived compaction boundary may retire an already-active matching
+generation without creating a new snapshot or schedule. Disabled or unset
+principals remain entirely out of keep-alive processing. Ordinary
+no-breakpoint responses remain outside keep-alive completion sequencing.
+
+## Response compaction boundaries
+
+When a completed response reports `stop_reason: "compaction"` or contains a
+top-level `compaction` block, the matching keep-alive generation is retired
+through the durable fence. cc-lb does not schedule the pre-compaction request
+snapshot, including when the response continues with a client tool use. This
+response-derived boundary does not depend on optional gateway hint headers.
+A later main response built from the adopted summary can establish a new
+generation. Plain `pause_turn` and ordinary tool use without a compaction block
+retain their existing behavior.
 
 ## Scheduler and storage model
 

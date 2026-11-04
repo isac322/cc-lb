@@ -106,29 +106,44 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                 reason: "value exceeds u64 milliseconds range".to_owned(),
             })?;
         let mut tx = self.begin_immediate().await?;
-        let existing = sqlx::query_as::<_, (i64, i64, String, i64, i64)>(
-            "SELECT generation, created_at, status, cache_anchor_at, updated_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+        let existing = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64)>(
+            "SELECT generation, created_at, status, cache_anchor_at, updated_at, first_scheduled_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
         )
         .bind(&request.session_key_hash)
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
         let parsed_existing = match existing {
-            Some((generation, created_at, status, cache_anchor_at, updated_at)) => Some((
+            Some((
+                generation,
+                created_at,
+                status,
+                cache_anchor_at,
+                updated_at,
+                first_scheduled_at,
+            )) => Some((
                 i64_to_u64(generation, "cache keepalive generation")?,
                 i64_to_u64(created_at, "cache keepalive created_at")?,
                 status_from_db(&status)?,
                 i64_to_u64(cache_anchor_at, "cache keepalive cache_anchor_at")?,
                 i64_to_u64(updated_at, "cache keepalive updated_at")?,
+                i64_to_u64(first_scheduled_at, "cache keepalive first_scheduled_at")?,
             )),
             None => None,
         };
-        if let Some((_, _, status, existing_anchor, existing_updated)) = parsed_existing {
-            if existing_anchor > request.cache_anchor_at_unix_secs {
-                return Ok(None);
-            }
-            if status == CacheKeepaliveSessionStatus::Terminal
-                && existing_updated > request.cache_anchor_at_unix_secs
+        if let Some((_, _, status, existing_anchor, existing_updated, logical_anchor)) =
+            parsed_existing
+        {
+            // Synthetic hits move cache_anchor_at, but not the real-completion
+            // boundary in first_scheduled_at. Ticket order alone is insufficient
+            // because a slower, older response can observe a higher ticket.
+            if expected_ticket.is_some() {
+                if logical_anchor > request.cache_anchor_at_unix_secs {
+                    return Ok(None);
+                }
+            } else if existing_anchor > request.cache_anchor_at_unix_secs
+                || status == CacheKeepaliveSessionStatus::Terminal
+                    && existing_updated > request.cache_anchor_at_unix_secs
             {
                 return Ok(None);
             }
@@ -157,14 +172,14 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .map_err(map_sqlx_error)?;
         }
         let generation = parsed_existing
-            .map(|(generation, _, _, _, _)| generation)
+            .map(|(generation, _, _, _, _, _)| generation)
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| StorageError::Fatal {
                 message: "cache keepalive generation overflow".to_owned(),
             })?;
         let created_at = parsed_existing
-            .map(|(_, created_at, _, _, _)| created_at)
+            .map(|(_, created_at, _, _, _, _)| created_at)
             .unwrap_or(request.now_unix_secs);
         let job_key = cache_keepalive_job_key(&request.session_key_hash, generation);
         sqlx::query(
@@ -451,23 +466,36 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .await
             .map_err(map_sqlx_error)?;
         }
+        // Ticketed real completions compare against the stable logical boundary,
+        // not the sliding cache anchor maintained by synthetic refreshes.
+        let cancel_anchor = u64_to_i64(
+            cancel_anchor_at_unix_secs,
+            "cache keepalive cancel_anchor_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = X'', updated_at = ?
-             WHERE session_key_hash = ? AND status = 'active' AND cache_anchor_at <= ?",
+             encrypted_payload = X'', updated_at = ?,
+             first_scheduled_at = CASE WHEN ? THEN ? ELSE first_scheduled_at END
+             WHERE session_key_hash = ? AND status = 'active'
+               AND (CASE WHEN ? THEN first_scheduled_at ELSE cache_anchor_at END) <= ?",
         )
         .bind(reason.as_str())
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
+        .bind(expected_ticket.is_some())
+        .bind(cancel_anchor)
         .bind(session_key_hash)
-        .bind(u64_to_i64(
-            cancel_anchor_at_unix_secs,
-            "cache keepalive cancel_anchor_at",
-        )?)
+        .bind(expected_ticket.is_some())
+        .bind(cancel_anchor)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        if result.rows_affected() == 0 {
+            // Do not consume the ticket when its logical anchor was stale.
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            return Ok(false);
+        }
         tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(result.rows_affected() == 1)
+        Ok(true)
     }
 
     async fn mark_latest_cache_keepalive_terminal(

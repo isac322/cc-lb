@@ -21,6 +21,10 @@ All notable changes to this project will be documented in this file.
 - Response transforms now preserve upstream `anthropic-ratelimit-unified-*` values for clients after hop-by-hop and framing sanitization, without synthesizing absent values or restoring connection-listed names; plugin input still redacts the full `anthropic-ratelimit-*` family. ([#1026](https://github.com/isac322/cc-lb/issues/1026))
 - Prompt-cache keep-alive renewal accounting now preserves Anthropic's nested cache-creation TTL buckets and uses the canonical flat-total fallback semantics. ([#1020](https://github.com/isac322/cc-lb/issues/1020))
 - Prompt-cache keep-alive snapshots now materialize the renewal body and model once for reuse during dispatch and accounting. New encrypted payloads store captured body bytes in explicit raw/zstd frame codecs instead of JSON byte arrays; legacy and v2 JSON payloads remain readable and migrate on their next successful cache-hit reschedule. ([#1013](https://github.com/isac322/cc-lb/issues/1013))
+- Response-derived Anthropic compaction boundaries now retire an active
+  keep-alive generation even when the triggering request has no current cache
+  breakpoint. Ordinary no-breakpoint responses remain outside keep-alive
+  completion sequencing and do not supersede pending cache-bearing work.
 - Local HTTP limit reservations now distinguish impossible Requests, Input, Total, and Cost reservations from temporary window or concurrency exhaustion. Impossible reservations return `429` with `x-should-retry: false`, no `Retry-After` header, and no body delay; temporary window and concurrency rejections retain `Retry-After` and body delays of 60 and 1 second, while output-cap violations remain `400` without a retry hint. ([#1025](https://github.com/isac322/cc-lb/issues/1025))
 - Explicit Claude Code auxiliary requests now stay out of prompt-cache keep-alive completion sequencing and generation bookkeeping across classifier fallback, while preserving `unknown`, `subagent`, `main`, and `advisor` reporting and legitimate headerless-turn eligibility. ([#1022](https://github.com/isac322/cc-lb/issues/1022))
 - Limit admission now uses a 4,784-token allowance per native Anthropic image instead of counting its base64 payload or URL/file reference as text, with one request-wide 4,000-token floor. Local prompt-cache reservations count prefix and uncached tail once and include the applicable 1-hour write rate. These are admission estimates; actual usage accounting is unchanged.
@@ -33,6 +37,10 @@ All notable changes to this project will be documented in this file.
 - Prompt-cache keep-alive now skips live requests with enabled thinking, structured output (`output_config.format`), or forced tool choice (`tool` / `any`), recording a `not_tracked` reason instead of sending a renewal Anthropic rejects at `max_tokens: 0`. An incompatible turn cancels any existing active session. Adaptive thinking with automatic tool choice continues renewing unchanged.
   Eligibility checks the actual upstream-shaped body, so shape plugins cannot introduce an incompatible renewal unnoticed; unchanged bodies reuse the existing JSON parse.
 - Prompt-cache keep-alive renewals now preserve request `thinking`, `output_config`, and `tool_choice` fields unchanged instead of rewriting `thinking` to `disabled`, include `beta=true` on Anthropic OAuth renewal URLs, and persist terminal failure messages in `cache_keepalive_sessions.error` while resetting `enqueue_state` to `pending`.
+- Response-derived Anthropic compaction boundaries now retire the matching
+  keep-alive generation instead of scheduling the obsolete pre-compaction
+  snapshot. The fence applies to paused and continuation responses, including
+  complete SSE assemblies, without relying on gateway hint headers.
 
 - PostgreSQL scheduler workers now drive task polling with a dedicated 1-second interval and auto-reconnecting notification strategy, preventing future-scheduled keep-alive and OAuth refresh jobs from stalling across idle intervals or listener disconnects.
 

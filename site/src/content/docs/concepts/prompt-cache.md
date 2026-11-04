@@ -16,6 +16,19 @@ Prompt-cache keepalive is a principal-scoped feature. When enabled, cc-lb observ
 
 The feature is best effort. A keepalive can miss because the cache changed, credentials failed, the session expired, or the provider rejected the request. Those are terminal business outcomes for that scheduled generation rather than a retry promise.
 
+## Compaction boundaries
+
+When a completed Anthropic response contains `stop_reason: "compaction"` or a
+top-level `compaction` content block, cc-lb retires the matching keepalive
+generation instead of scheduling the pre-compaction request snapshot. This
+response-derived fence also works when the current request has no cache
+breakpoint, and it works without gateway hint headers. A later main completion
+built from the adopted summary can establish a fresh generation; ordinary
+no-breakpoint responses remain no-ops and do not supersede pending
+cache-bearing work, while ordinary `pause_turn` and tool-use responses without
+a compaction block retain their existing behavior. Explicit compaction-class
+requests remain excluded from keep-alive state changes.
+
 ## Renewal accounting
 
 Keepalive renewals use Anthropic's nested 5-minute and 1-hour cache-creation counts for usage records and the local cost breakdown. A positive flat creation total with an absent, empty, or all-zero nested breakdown uses the same 5-minute fallback as regular usage accounting. It does not imply a 1-hour write.

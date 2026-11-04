@@ -167,15 +167,24 @@ Applied on the *response* body of every real completed request. Returns
 `UserTurn`, `AgentInTurn`, or `Ambiguous`. See ADR 0004 for the full
 mapping table. Key rules:
 
-- `stop_reason == "pause_turn"` or `"compaction"` → **AgentInTurn** (both
-  are server-side "keep going" signals).
+- A response with `stop_reason == "compaction"` or any top-level
+  `content` block of type `compaction` is a **UserTurn** boundary. The
+  pre-response request snapshot is obsolete, so the existing generation-fenced
+  cancellation path retires it without scheduling a renewal. This applies
+  even when the current request has no cache breakpoint, and regardless of the
+  final stop reason, including a continuation with `tool_use`.
+- Ordinary responses without a cache breakpoint remain outside keep-alive
+  completion sequencing; they do not enqueue, cancel, or supersede a pending
+  cache-bearing completion. The compaction boundary is the deliberate
+  response-derived exception.
+- `stop_reason == "pause_turn"` without a compaction block → **AgentInTurn**.
 - `stop_reason == "refusal"` or `"model_context_window_exceeded"` →
   **UserTurn**.
-  `tool_use` with only wait-for-user tools
+- `tool_use` with only wait-for-user tools
   (`attempt_completion`, `ExitPlanMode`, `ask_followup_question`, `ask`, …) or
   only `server_tool_use` → **UserTurn**.
-- `stop_reason == "end_turn"` with a `compaction` content block or with a
-  completion-tool defined-but-not-invoked → **AgentInTurn**.
+- `stop_reason == "end_turn"` with a completion-tool defined-but-not-invoked →
+  **AgentInTurn**.
 - `stop_reason == "end_turn"` (plain) → **UserTurn** (unless
   `treat_end_turn_as_ambiguous` opts in).
 - `stop_reason == "max_tokens" | "stop_sequence"` → **Ambiguous**.

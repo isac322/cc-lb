@@ -45,6 +45,11 @@ async fn run_conformance(url: &str) -> Result<()> {
     concurrent_replace_from_real_request_bumps_each_generation(&storage).await?;
     concurrent_hit_reschedule_allows_only_one_generation_cas(&storage).await?;
     concurrent_claim_allows_exactly_one_enqueued_generation_winner(&storage).await?;
+    ticketed_cancel_retires_generation_after_synthetic_refresh(&storage).await?;
+    newer_ticket_replaces_terminal_generation_before_terminal_write_timestamp(&storage).await?;
+    completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(&storage).await?;
+    ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_responses(&storage)
+        .await?;
 
     fixture.drop_schema().await
 }
@@ -582,6 +587,336 @@ async fn concurrent_claim_allows_exactly_one_enqueued_generation_winner(
         .expect("session exists");
     assert_eq!(claimed.enqueue_state, CacheKeepaliveEnqueueState::Running);
     assert_eq!(claimed.running_since_unix_secs, Some(200));
+    Ok(())
+}
+
+async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_responses(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "ticketed-stable-logical-anchor";
+    let original = storage
+        .replace_from_real_request(&replace_request(key, b"original-prefix", 100))
+        .await?;
+    let replacement_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
+    let refreshed = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: key.to_owned(),
+            generation: original.generation,
+            cache_anchor_at_unix_secs: 371,
+            run_at_unix_secs: 641,
+            expires_at_unix_secs: 671,
+            encrypted_payload: None,
+            now_unix_secs: 371,
+        })
+        .await?
+        .expect("refreshed generation");
+    assert_eq!(refreshed.first_scheduled_at_unix_secs, 100);
+    let active = storage
+        .replace_from_real_request_fenced(
+            &replace_request(key, b"new-real-prefix", 370),
+            Some(replacement_ticket),
+        )
+        .await?
+        .expect("real logical anchor is newer despite older sliding anchor");
+    assert_eq!(active.first_scheduled_at_unix_secs, 370);
+    assert_eq!(active.cache_anchor_at_unix_secs, 370);
+    assert_eq!(active.generation, refreshed.generation + 1);
+
+    let cancel_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
+    assert!(
+        !storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                Some(cancel_ticket),
+                369,
+                CacheKeepaliveTerminalReason::Cancelled,
+                400,
+            )
+            .await?
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("2:1".to_owned())
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("protected real generation exists"),
+        active
+    );
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                Some(cancel_ticket),
+                372,
+                CacheKeepaliveTerminalReason::Cancelled,
+                400,
+            )
+            .await?
+    );
+    let terminal = storage
+        .get_cache_keepalive_session(key)
+        .await?
+        .expect("logical cancellation fence exists");
+    assert_eq!(terminal.first_scheduled_at_unix_secs, 372);
+    assert_eq!(terminal.cache_anchor_at_unix_secs, 370);
+
+    let newer_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
+    assert!(
+        storage
+            .replace_from_real_request_fenced(
+                &replace_request(key, b"slow-old-prefix", 371),
+                Some(newer_ticket),
+            )
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("3:2".to_owned())
+    );
+    let replacement = storage
+        .replace_from_real_request_fenced(
+            &replace_request(key, b"new-post-compaction-prefix", 373),
+            Some(newer_ticket),
+        )
+        .await?
+        .expect("newer logical anchor reactivates terminal state");
+    assert_eq!(replacement.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(replacement.first_scheduled_at_unix_secs, 373);
+    assert_eq!(replacement.generation, terminal.generation + 1);
+    assert_eq!(replacement.encrypted_payload, b"new-post-compaction-prefix");
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("3:3".to_owned())
+    );
+    Ok(())
+}
+
+async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "ticketed-compaction-after-hit";
+    let original = storage
+        .replace_from_real_request(&replace_request(key, b"old-prefix", 100))
+        .await?;
+    let ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
+    assert_eq!(ticket, 1);
+    let refreshed = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: key.to_owned(),
+            generation: original.generation,
+            cache_anchor_at_unix_secs: 371,
+            run_at_unix_secs: 641,
+            expires_at_unix_secs: 671,
+            encrypted_payload: None,
+            now_unix_secs: 371,
+        })
+        .await?
+        .expect("refreshed generation");
+
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                Some(ticket),
+                370,
+                CacheKeepaliveTerminalReason::Cancelled,
+                400,
+            )
+            .await?
+    );
+    let terminal = storage
+        .get_cache_keepalive_session(key)
+        .await?
+        .expect("terminal generation exists");
+    assert_eq!(terminal.generation, refreshed.generation);
+    assert_eq!(terminal.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(terminal.cache_anchor_at_unix_secs, 371);
+    assert_eq!(terminal.first_scheduled_at_unix_secs, 370);
+    assert_eq!(terminal.updated_at_unix_secs, 400);
+    assert!(terminal.encrypted_payload.is_empty());
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("1:1".to_owned())
+    );
+    assert!(
+        !storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                Some(ticket),
+                401,
+                CacheKeepaliveTerminalReason::Cancelled,
+                401,
+            )
+            .await?
+    );
+    Ok(())
+}
+
+async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timestamp(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "ticketed-post-compaction-completion";
+    let original = storage
+        .replace_from_real_request(&replace_request(key, b"old-prefix", 100))
+        .await?;
+    let cancelled_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                Some(cancelled_ticket),
+                100,
+                CacheKeepaliveTerminalReason::Cancelled,
+                103,
+            )
+            .await?
+    );
+    let newer_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
+    assert_eq!(newer_ticket, cancelled_ticket + 1);
+    let active = storage
+        .replace_from_real_request_fenced(
+            &replace_request(key, b"post-compaction-prefix", 102),
+            Some(newer_ticket),
+        )
+        .await?
+        .expect("newer ticket supersedes terminal write timestamp");
+    assert_eq!(active.generation, original.generation + 1);
+    assert_eq!(active.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(active.cache_anchor_at_unix_secs, 102);
+    assert_eq!(active.encrypted_payload, b"post-compaction-prefix");
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("2:2".to_owned())
+    );
+    assert!(
+        storage
+            .replace_from_real_request_fenced(
+                &replace_request(key, b"obsolete-completion-prefix", 200),
+                Some(cancelled_ticket),
+            )
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("post-compaction generation exists"),
+        active
+    );
+    Ok(())
+}
+
+async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "ticketed-active-and-legacy-guards";
+    let original = storage
+        .replace_from_real_request(&replace_request(key, b"newer-active-prefix", 371))
+        .await?;
+    let ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
+    for expected_ticket in [None, Some(ticket)] {
+        assert!(
+            storage
+                .replace_from_real_request_fenced(
+                    &replace_request(key, b"older-prefix", 370),
+                    expected_ticket,
+                )
+                .await?
+                .is_none()
+        );
+    }
+    assert!(
+        !storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                None,
+                370,
+                CacheKeepaliveTerminalReason::Cancelled,
+                400,
+            )
+            .await?
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("active generation exists"),
+        original
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(key))
+            .await?,
+        Some("1:0".to_owned())
+    );
+    assert!(
+        storage
+            .cancel_cache_keepalive_fenced(
+                key,
+                None,
+                371,
+                CacheKeepaliveTerminalReason::Cancelled,
+                400,
+            )
+            .await?
+    );
+    assert!(
+        storage
+            .replace_from_real_request_fenced(
+                &replace_request(key, b"stale-terminal-prefix", 399),
+                None,
+            )
+            .await?
+            .is_none()
+    );
+    assert!(
+        storage
+            .replace_from_real_request_fenced(
+                &replace_request(key, b"older-logical-prefix", 370),
+                Some(ticket),
+            )
+            .await?
+            .is_none()
+    );
+    let replacement = storage
+        .replace_from_real_request_fenced(
+            &replace_request(key, b"logically-newer-prefix", 371),
+            Some(ticket),
+        )
+        .await?
+        .expect("same ticket can replace at the logical boundary");
+    assert_eq!(replacement.generation, original.generation + 1);
+    assert_eq!(replacement.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(replacement.encrypted_payload, b"logically-newer-prefix");
     Ok(())
 }
 
