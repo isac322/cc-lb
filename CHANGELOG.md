@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- PostgreSQL scheduler startup now moves a pre-`2.2.0` `cc_lb_scheduler._sqlx_migrations` ledger into `apalis._sqlx_migrations` and updates the `20220530084123` checksum to match `apalis-postgres` `1.0.0` before running pending scheduler migrations, including recovering from an empty `apalis._sqlx_migrations` table left by a failed `2.2.0` boot.
+
 ## [2.2.0] - 2026-11-04
 
 ### Added
