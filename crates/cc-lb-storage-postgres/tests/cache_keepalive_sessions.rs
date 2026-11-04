@@ -48,7 +48,8 @@ async fn run_conformance(url: &str) -> Result<()> {
     ticketed_cancel_retires_generation_after_synthetic_refresh(&storage).await?;
     newer_ticket_replaces_terminal_generation_before_terminal_write_timestamp(&storage).await?;
     completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(&storage).await?;
-    ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_responses(&storage).await?;
+    ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_responses(&storage)
+        .await?;
 
     fixture.drop_schema().await
 }
@@ -596,7 +597,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     let original = storage
         .replace_from_real_request(&replace_request(key, b"original-prefix", 100))
         .await?;
-    let replacement_ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    let replacement_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
     let refreshed = storage
         .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
             session_key_hash: key.to_owned(),
@@ -621,7 +624,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(active.cache_anchor_at_unix_secs, 370);
     assert_eq!(active.generation, refreshed.generation + 1);
 
-    let cancel_ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    let cancel_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
     assert!(
         !storage
             .cancel_cache_keepalive_fenced(
@@ -664,7 +669,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(terminal.first_scheduled_at_unix_secs, 372);
     assert_eq!(terminal.cache_anchor_at_unix_secs, 370);
 
-    let newer_ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    let newer_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
     assert!(
         storage
             .replace_from_real_request_fenced(
@@ -707,7 +714,9 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh(
     let original = storage
         .replace_from_real_request(&replace_request(key, b"old-prefix", 100))
         .await?;
-    let ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    let ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
     assert_eq!(ticket, 1);
     let refreshed = storage
         .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
@@ -770,7 +779,9 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
     let original = storage
         .replace_from_real_request(&replace_request(key, b"old-prefix", 100))
         .await?;
-    let cancelled_ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    let cancelled_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
     assert!(
         storage
             .cancel_cache_keepalive_fenced(
@@ -782,7 +793,9 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
             )
             .await?
     );
-    let newer_ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    let newer_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
     assert_eq!(newer_ticket, cancelled_ticket + 1);
     let active = storage
         .replace_from_real_request_fenced(
@@ -827,7 +840,9 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(
     let original = storage
         .replace_from_real_request(&replace_request(key, b"newer-active-prefix", 371))
         .await?;
-    let ticket = storage.allocate_cache_keepalive_completion_ticket(key).await?;
+    let ticket = storage
+        .allocate_cache_keepalive_completion_ticket(key)
+        .await?;
     for expected_ticket in [None, Some(ticket)] {
         assert!(
             storage

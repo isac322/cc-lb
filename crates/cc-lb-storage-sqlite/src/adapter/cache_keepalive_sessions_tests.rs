@@ -99,7 +99,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     );
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key("session-hash"))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                "session-hash"
+            ))
             .await
             .expect("rejected cancellation must roll back applied order"),
         Some("2:1".to_owned())
@@ -148,7 +150,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     );
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key("session-hash"))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                "session-hash"
+            ))
             .await
             .expect("rejected replacement must roll back applied order"),
         Some("3:2".to_owned())
@@ -167,7 +171,9 @@ async fn ticketed_completions_use_stable_logical_anchor_and_reject_slow_older_re
     assert_eq!(replacement.encrypted_payload, b"new-post-compaction-prefix");
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key("session-hash"))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                "session-hash"
+            ))
             .await
             .expect("successful retry commits applied order"),
         Some("3:3".to_owned())
@@ -225,7 +231,9 @@ async fn ticketed_cancel_retires_generation_after_synthetic_refresh() {
     assert!(terminal.encrypted_payload.is_empty());
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key("session-hash"))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                "session-hash"
+            ))
             .await
             .expect("load completion order"),
         Some("1:1".to_owned())
@@ -286,7 +294,9 @@ async fn newer_ticket_replaces_terminal_generation_before_terminal_write_timesta
     assert_eq!(active.encrypted_payload, b"post-compaction-prefix");
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key("session-hash"))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                "session-hash"
+            ))
             .await
             .expect("load completion order"),
         Some("2:2".to_owned())
@@ -356,7 +366,9 @@ async fn completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards()
     );
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key("session-hash"))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                "session-hash"
+            ))
             .await
             .expect("rejected replacement preserves completion order"),
         Some("1:0".to_owned())

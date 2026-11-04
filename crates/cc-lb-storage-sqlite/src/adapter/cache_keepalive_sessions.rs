@@ -114,7 +114,14 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         .await
         .map_err(map_sqlx_error)?;
         let parsed_existing = match existing {
-            Some((generation, created_at, status, cache_anchor_at, updated_at, first_scheduled_at)) => Some((
+            Some((
+                generation,
+                created_at,
+                status,
+                cache_anchor_at,
+                updated_at,
+                first_scheduled_at,
+            )) => Some((
                 i64_to_u64(generation, "cache keepalive generation")?,
                 i64_to_u64(created_at, "cache keepalive created_at")?,
                 status_from_db(&status)?,
@@ -124,7 +131,9 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             )),
             None => None,
         };
-        if let Some((_, _, status, existing_anchor, existing_updated, logical_anchor)) = parsed_existing {
+        if let Some((_, _, status, existing_anchor, existing_updated, logical_anchor)) =
+            parsed_existing
+        {
             // Synthetic hits move cache_anchor_at, but not the real-completion
             // boundary in first_scheduled_at. Ticket order alone is insufficient
             // because a slower, older response can observe a higher ticket.
