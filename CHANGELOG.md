@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent. Source-filtered aggregates determine absence only from the requested source. Limit-reset nudges for absent 5-hour windows recompute `at_limit` even when the provider omits the exhausted-window list.
+- Cache keep-alive rescheduling now returns its own updated session snapshot on SQLite and PostgreSQL, and SQLite real-request replacement captures its result before commit. Concurrent completions can no longer make stale work enqueue or overwrite a newer generation's payload. ([#1042](https://github.com/isac322/cc-lb/issues/1042))
 
 ### Security
 
