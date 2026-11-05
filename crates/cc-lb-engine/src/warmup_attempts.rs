@@ -1,9 +1,10 @@
 use cc_lb_quota::rate_limit_headers::UnifiedQuotaObservation;
 use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::{
-    Storage, SubscriptionQuotaWindow, WarmupAttemptOutcome, WarmupAttemptRecord,
-    WarmupAttemptTrigger, WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason,
-    WarmupSuccessReason, WarmupTransientFailureReason,
+    Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaWindow,
+    WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptTrigger, WarmupDispatchKind,
+    WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
+    WarmupTransientFailureReason,
 };
 use http::StatusCode;
 use uuid::Uuid;
@@ -115,17 +116,38 @@ async fn idle_secs_since_prev_window(
             return None;
         }
     };
-    latest
-        .into_iter()
+    idle_secs_since_prev_window_from_latest(&latest, attempted_at_unix_secs)
+}
+
+fn idle_secs_since_prev_window_from_latest(
+    latest: &[SubscriptionQuotaSample],
+    attempted_at_unix_secs: i64,
+) -> Option<i64> {
+    idle_reset_for_latest_quota(latest).map(|prev_window_end| {
+        attempted_at_unix_secs
+            .saturating_sub(prev_window_end)
+            .max(0)
+    })
+}
+
+fn idle_reset_for_latest_quota(latest: &[SubscriptionQuotaSample]) -> Option<i64> {
+    let latest_five_hour = latest
+        .iter()
         .filter(|record| record.window == SubscriptionQuotaWindow::FiveHour)
-        .max_by_key(|record| record.observed_at_unix_millis)
-        .and_then(|record| record.resets_at_unix_secs)
-        .and_then(|resets_at| i64::try_from(resets_at).ok())
-        .map(|prev_window_end| {
-            attempted_at_unix_secs
-                .saturating_sub(prev_window_end)
-                .max(0)
-        })
+        .max_by_key(|record| record.observed_at_unix_millis)?;
+
+    // Keep the 5h reset for normal accounts; only an explicit absent marker
+    // permits the weekly-only fallback.
+    let reset = match latest_five_hour.sample_kind {
+        SubscriptionQuotaSampleKind::Sample => latest_five_hour.resets_at_unix_secs,
+        SubscriptionQuotaSampleKind::Absent => latest
+            .iter()
+            .filter(|record| record.window == SubscriptionQuotaWindow::SevenDay)
+            .max_by_key(|record| record.observed_at_unix_millis)
+            .filter(|record| record.sample_kind == SubscriptionQuotaSampleKind::Sample)
+            .and_then(|record| record.resets_at_unix_secs),
+    }?;
+    i64::try_from(reset).ok()
 }
 
 fn dialect_plugin_snapshot(upstream: &UpstreamRecord) -> Option<serde_json::Value> {
