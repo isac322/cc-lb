@@ -5827,7 +5827,8 @@ impl Lifecycle {
                 event_ctx.requested_model.as_deref(),
             ),
         )
-        .with_response_accounting_guard(response_accounting_guard);
+        .with_response_accounting_guard(response_accounting_guard)
+        .with_keepalive_completion(keepalive, keepalive_completion);
         let completion_observer = Arc::clone(&self.completion_observer);
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
         let stream_body_io_timing = response_body_timing.clone();
@@ -5870,7 +5871,6 @@ impl Lifecycle {
             let mut prompt_cache_observations_published = false;
             let mut semantic_message_stop_seen = false;
             let mut semantic_completion_observed = false;
-            let mut keepalive_response = crate::cache_keepalive::StreamingKeepaliveResponse::default();
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
@@ -6152,6 +6152,11 @@ impl Lifecycle {
                                 let parsed_event = parse_sse_event(&raw);
                                 let usage_update =
                                     accumulate_sse_usage(&parsed_event, &mut usage);
+                                downstream_drop_guard.set_keepalive_cached_tokens(
+                                    usage
+                                        .cache_read_input_tokens
+                                        .saturating_add(usage.cache_creation_input_tokens),
+                                );
                                 if let Some(err) =
                                     usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                                 {
@@ -6328,12 +6333,15 @@ impl Lifecycle {
                                     );
                                     break 'upstream;
                                 }
-                                if !sse_transform_active && keepalive_completion.is_some() {
-                                    keepalive_response.observe(&parsed_event);
+                                if !sse_transform_active
+                                    && downstream_drop_guard.has_keepalive_completion()
+                                {
+                                    downstream_drop_guard.observe_keepalive(&parsed_event);
                                 }
                                 match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
                                         message_start_at = Some(now);
+                                        downstream_drop_guard.set_keepalive_anchor_at(now);
                                     }
                                     Some(b"content_block_start")
                                         if content_block_start_at.is_none() =>
@@ -6360,6 +6368,7 @@ impl Lifecycle {
                                 if usage_update.message_start_usage {
                                     if message_start_at.is_none() {
                                         message_start_at = Some(now);
+                                        downstream_drop_guard.set_keepalive_anchor_at(now);
                                     }
                                     if status == StatusCode::OK
                                         && !prompt_cache_observations_published
@@ -6469,8 +6478,9 @@ impl Lifecycle {
                                             SseTransformOutcome::Emit(bytes) => {
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
-                                                if keepalive_completion.is_some() {
-                                                    keepalive_response.observe_emitted(&bytes);
+                                                if downstream_drop_guard.has_keepalive_completion() {
+                                                    downstream_drop_guard
+                                                        .observe_keepalive_emitted(&bytes);
                                                 }
                                                 bytes
                                             }
@@ -6865,6 +6875,11 @@ impl Lifecycle {
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
                             let usage_update = accumulate_sse_usage(&parsed_event, &mut usage);
+                            downstream_drop_guard.set_keepalive_cached_tokens(
+                                usage
+                                    .cache_read_input_tokens
+                                    .saturating_add(usage.cache_creation_input_tokens),
+                            );
                             let mut affinity_persist_failed = false;
                             let affinity_binding = if success_sse_affinity_gate {
                                 let response_keys = match
@@ -6980,8 +6995,10 @@ impl Lifecycle {
                                 }
                                 break;
                             }
-                            if !sse_transform_active && keepalive_completion.is_some() {
-                                keepalive_response.observe(&parsed_event);
+                            if !sse_transform_active
+                                && downstream_drop_guard.has_keepalive_completion()
+                            {
+                                downstream_drop_guard.observe_keepalive(&parsed_event);
                             }
                             if let Some(err) =
                                 usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
@@ -7081,8 +7098,9 @@ impl Lifecycle {
                                         raw.clone(),
                                     ) {
                                         SseTransformOutcome::Emit(bytes) => {
-                                            if keepalive_completion.is_some() {
-                                                keepalive_response.observe_emitted(&bytes);
+                                            if downstream_drop_guard.has_keepalive_completion() {
+                                                downstream_drop_guard
+                                                    .observe_keepalive_emitted(&bytes);
                                             }
                                             bytes
                                         }
@@ -7456,27 +7474,6 @@ impl Lifecycle {
             downstream_drop_guard.detach_lifecycle_observer();
             stream_body_io_timing.stop();
             let response_body_completed_at = Instant::now();
-            if stream_affinity_error.is_none()
-                && let Some(context) = keepalive_completion
-                && let Some(response_json) = keepalive_response.into_value()
-            {
-                keepalive.on_response_completed(
-                    &response_json,
-                    &context.principal,
-                    context.accounting_key_id,
-                    &context.cache_metadata,
-                    context.upstream_id,
-                    context.shaped_body,
-                    context.original_body,
-                    &context.downstream_headers,
-                    message_start_at
-                        .unwrap_or(context.request_dispatched_at)
-                        .elapsed(),
-                    usage
-                        .cache_read_input_tokens
-                        .saturating_add(usage.cache_creation_input_tokens),
-                );
-            }
             let elapsed_ms = |to: Option<Instant>| {
                 to.map(|t| duration_to_ms(t.saturating_duration_since(relay_start)))
             };
@@ -7633,6 +7630,7 @@ impl Lifecycle {
             } else {
                 duration_to_ms(response_body_completed_at.elapsed())
             };
+            downstream_drop_guard.complete_keepalive();
             // Mandatory lifecycle, accounting, affinity, and termination work is complete.
             // Only best-effort latency logging crosses this bounded boundary.
             let stream_latency = StreamLatency {
