@@ -238,7 +238,6 @@ pub struct CacheKeepaliveGenerationCheck {
 
 #[async_trait]
 pub trait CacheKeepaliveSessionStore: Send + Sync {
-    /// Returns the row image produced by this mutation, even if a later write supersedes it.
     async fn replace_from_real_request(
         &self,
         request: &CacheKeepaliveReplaceRequest,
@@ -252,7 +251,6 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         Ok(0)
     }
 
-    /// Returns the accepted mutation's row image, not a later writer's session record.
     async fn replace_from_real_request_fenced(
         &self,
         request: &CacheKeepaliveReplaceRequest,
@@ -306,7 +304,6 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         session_key_hash: &str,
     ) -> StorageResult<Option<CacheKeepaliveGenerationCheck>>;
 
-    /// Returns the updated row image; a later replacement or cancellation may supersede it.
     async fn reschedule_after_cache_hit(
         &self,
         request: &CacheKeepaliveHitRefreshRequest,
@@ -327,6 +324,12 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         reason: CacheKeepaliveTerminalReason,
         now_unix_secs: u64,
     ) -> StorageResult<bool>;
+
+    async fn recover_cache_keepalive_stale_running(
+        &self,
+        stale_running_cutoff_unix_secs: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<u64>;
 
     async fn purge_cache_keepalive_expired(&self, cutoff_unix_secs: u64) -> StorageResult<u64>;
 

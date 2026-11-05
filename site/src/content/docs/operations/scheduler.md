@@ -17,6 +17,10 @@ Warm-up is enabled by default for OAuth upstreams after credentials exist. It do
 
 The [consistency contract source notes](/docs/reference/source/consistency-contract/) describe what an enqueued or completed scheduler job guarantees and which state converges later.
 
+## SQLite storage ownership
+
+On SQLite, the application pool uses the configured database file, while the scheduler pool uses the derived `path.with_extension("scheduler.sqlite")` file. Application-owned tables such as `cache_keepalive_sessions` stay in the application database; Apalis `Jobs` and `Workers` stay in the derived scheduler database. Housekeeping recovers stale running sessions and purges stale pending or expired sessions in application storage, kills stale running cache keepalive jobs in scheduler storage, and retains fresh queued/running work. Retention later removes older pending and terminal Apalis rows. No new configuration, schema, or migration is required.
+
 ## Retry classes
 
 | Class | Use | Attempts |

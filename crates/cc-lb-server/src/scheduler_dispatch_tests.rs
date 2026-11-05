@@ -107,6 +107,637 @@ impl KeepaliveDispatcher for StaticRenewalDispatcher {
 }
 
 #[tokio::test]
+async fn apalis_housekeeping_maintains_separate_sqlite_application_and_scheduler_files() {
+    use cc_lb_clock::TestClock;
+    use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+    use cc_lb_scheduler::worker::SchedulerBackend;
+    use cc_lb_storage_api::{CacheKeepaliveReplaceRequest, CacheTtl};
+
+    const NOW: u64 = 1_800_000_000;
+    const RUNNING_CUTOFF: u64 = NOW - 120;
+    const PENDING_CUTOFF: u64 = NOW - 3_600;
+
+    let fixture = Fixture::new().await;
+    let scheduler_pool = match &fixture.backend.backend {
+        SchedulerBackend::Sqlite(backend) => backend.pool(),
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("fixture must open SQLite scheduler storage"),
+    };
+    let application_file: String =
+        sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+            .fetch_one(fixture.storage.pool())
+            .await
+            .expect("read application database file");
+    let scheduler_file: String =
+        sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+            .fetch_one(scheduler_pool)
+            .await
+            .expect("read scheduler database file");
+    assert_ne!(application_file, scheduler_file);
+    assert!(application_file.ends_with("cc-lb.sqlite"));
+    assert!(scheduler_file.ends_with("cc-lb.scheduler.sqlite"));
+
+    let mut sessions_before = Vec::new();
+    for (key, state, running_since, updated_at, expires_at) in [
+        (
+            "stale-running",
+            "running",
+            Some(RUNNING_CUTOFF - 1),
+            NOW,
+            NOW + 3_600,
+        ),
+        ("expired", "enqueued", None, NOW, NOW - 1),
+        (
+            "stale-pending",
+            "pending",
+            None,
+            PENDING_CUTOFF - 1,
+            NOW + 3_600,
+        ),
+        (
+            "fresh-running",
+            "running",
+            Some(RUNNING_CUTOFF + 1),
+            PENDING_CUTOFF - 1,
+            NOW + 3_600,
+        ),
+        (
+            "cutoff-running",
+            "running",
+            Some(RUNNING_CUTOFF),
+            PENDING_CUTOFF - 1,
+            NOW + 3_600,
+        ),
+        ("healthy-pending", "pending", None, NOW, NOW + 3_600),
+        (
+            "cutoff-pending",
+            "pending",
+            None,
+            PENDING_CUTOFF,
+            NOW + 3_600,
+        ),
+        (
+            "healthy-enqueued",
+            "enqueued",
+            None,
+            PENDING_CUTOFF - 1,
+            NOW + 3_600,
+        ),
+    ] {
+        fixture
+            .storage
+            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                session_key_hash: key.to_owned(),
+                principal_id: "principal".to_owned(),
+                accounting_key_id: None,
+                upstream_id: fixture.upstream_id,
+                cache_anchor_at_unix_secs: NOW - 60,
+                ttl: CacheTtl::Ttl5m,
+                run_at_unix_secs: NOW + 30,
+                expires_at_unix_secs: NOW + 3_600,
+                encrypted_payload: vec![1, 2, 3, 4],
+                display_reason: "housekeeping regression".to_owned(),
+                config_snapshot: fixture.enqueue_request().config_snapshot,
+                now_unix_secs: NOW - 7_200,
+            })
+            .await
+            .expect("create application keepalive session through storage");
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET enqueue_state = ?2, running_since_unix_secs = ?3, updated_at = ?4,
+                 expires_at = ?5, error = 'before-housekeeping'
+             WHERE session_key_hash = ?1",
+        )
+        .bind(key)
+        .bind(state)
+        .bind(running_since.map(|value| i64::try_from(value).expect("lease fits i64")))
+        .bind(i64::try_from(updated_at).expect("updated timestamp fits i64"))
+        .bind(i64::try_from(expires_at).expect("expiry fits i64"))
+        .execute(fixture.storage.pool())
+        .await
+        .expect("seed persisted application session lifecycle");
+        sessions_before.push(
+            fixture
+                .storage
+                .get_cache_keepalive_session(key)
+                .await
+                .expect("read seeded session")
+                .expect("seeded session exists"),
+        );
+    }
+
+    sqlx::query(
+        "INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at)
+         VALUES ('housekeeping-live-worker', 'cron', 'default', '', ?1, ?1)",
+    )
+    .bind(i64::try_from(NOW).expect("now fits i64"))
+    .execute(scheduler_pool)
+    .await
+    .expect("seed live scheduler worker");
+    let job_seeds = [
+        (
+            "stale-keepalive",
+            "adaptive",
+            Some("cache_keepalive:stale-running:1"),
+            RUNNING_CUTOFF - 1,
+        ),
+        (
+            "cutoff-keepalive",
+            "cache_keepalive",
+            Some("cache_keepalive:cutoff-running:1"),
+            RUNNING_CUTOFF,
+        ),
+        (
+            "fresh-keepalive",
+            "cache_keepalive",
+            Some("cache_keepalive:fresh-running:1"),
+            RUNNING_CUTOFF + 1,
+        ),
+        ("stale-generic", "cron", None, RUNNING_CUTOFF - 1),
+        ("cutoff-generic", "cron", None, RUNNING_CUTOFF),
+        ("fresh-generic", "cron", None, RUNNING_CUTOFF + 1),
+    ];
+    for (id, job_type, idempotency_key, lock_at) in job_seeds {
+        sqlx::query(
+            "INSERT INTO Jobs
+             (job, id, job_type, status, run_at, lock_by, lock_at, attempts,
+              last_result, idempotency_key)
+             VALUES (?1, ?2, ?3, 'Running', ?4, 'housekeeping-live-worker', ?5, 2,
+                     ?6, ?7)",
+        )
+        .bind(vec![0_u8])
+        .bind(id)
+        .bind(job_type)
+        .bind(i64::try_from(NOW).expect("run timestamp fits i64"))
+        .bind(i64::try_from(lock_at).expect("lock timestamp fits i64"))
+        .bind(r#"{"Ok":"untouched"}"#)
+        .bind(idempotency_key)
+        .execute(scheduler_pool)
+        .await
+        .expect("seed scheduler job");
+    }
+
+    let mut dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    dispatch.clock = Arc::new(TestClock::new_at_secs(NOW));
+    let outcome = dispatch
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("dispatch real housekeeping singleton");
+    assert_eq!(outcome, JobOutcome::Done);
+
+    let application_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'cache_keepalive_sessions'",
+    )
+    .fetch_one(fixture.storage.pool())
+    .await
+    .expect("inspect application session table");
+    let scheduler_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'cache_keepalive_sessions'",
+    )
+    .fetch_one(scheduler_pool)
+    .await
+    .expect("inspect scheduler table ownership");
+    assert_eq!(application_tables, 1);
+    assert_eq!(
+        scheduler_tables, 0,
+        "application tables must not be duplicated"
+    );
+
+    for mut expected in sessions_before {
+        let persisted = fixture
+            .storage
+            .get_cache_keepalive_session(&expected.session_key_hash)
+            .await
+            .expect("read persisted session after housekeeping");
+        match expected.session_key_hash.as_str() {
+            "expired" | "stale-pending" => {
+                assert!(
+                    persisted.is_none(),
+                    "{} must be purged",
+                    expected.session_key_hash
+                );
+            }
+            "stale-running" => {
+                expected.status = CacheKeepaliveSessionStatus::Terminal;
+                expected.terminal_reason = Some(CacheKeepaliveTerminalReason::Stale);
+                expected.enqueue_state = CacheKeepaliveEnqueueState::Pending;
+                expected.running_since_unix_secs = None;
+                expected.encrypted_payload.clear();
+                expected.error = Some("keepalive renewal timed out while running".to_owned());
+                expected.updated_at_unix_secs = NOW;
+                assert_eq!(
+                    persisted,
+                    Some(expected),
+                    "stale recovery must scrub payload/lease and preserve session identity",
+                );
+            }
+            _ => assert_eq!(
+                persisted,
+                Some(expected),
+                "healthy session must be unchanged"
+            ),
+        }
+    }
+    let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_sessions")
+        .fetch_one(fixture.storage.pool())
+        .await
+        .expect("count surviving application sessions");
+    assert_eq!(session_count, 6);
+
+    for (id, job_type, idempotency_key, lock_at) in job_seeds {
+        type PersistedJobRow = (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            i64,
+            Option<String>,
+            String,
+            Option<String>,
+        );
+        let (
+            status,
+            done_at,
+            lock_by,
+            persisted_lock_at,
+            attempts,
+            last_result,
+            persisted_type,
+            persisted_key,
+        ): PersistedJobRow = sqlx::query_as(
+            "SELECT status, done_at, lock_by, lock_at, attempts, last_result,
+                    job_type, idempotency_key FROM Jobs WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_one(scheduler_pool)
+        .await
+        .expect("read persisted scheduler job");
+        assert_eq!(persisted_type, job_type);
+        assert_eq!(persisted_key.as_deref(), idempotency_key);
+        if id == "stale-keepalive" || id == "stale-generic" {
+            assert_eq!(
+                status,
+                if id == "stale-keepalive" {
+                    "Killed"
+                } else {
+                    "Pending"
+                }
+            );
+            assert_eq!(
+                done_at,
+                (id == "stale-keepalive").then_some(i64::try_from(NOW).expect("now fits i64")),
+            );
+            assert!(lock_by.is_none(), "{id} lock owner must be cleared");
+            assert!(persisted_lock_at.is_none(), "{id} lease must be cleared");
+            assert_eq!(attempts, if id == "stale-keepalive" { 2 } else { 3 });
+            let result: Value =
+                serde_json::from_str(&last_result.expect("stale job has housekeeping reason"))
+                    .expect("housekeeping result is JSON");
+            let error = result["Err"].as_str().expect("housekeeping error reason");
+            assert!(error.contains("cc-lb housekeeping") && error.contains("stale"));
+        } else {
+            assert_eq!(
+                status, "Running",
+                "{id} must not be reaped at or after cutoff"
+            );
+            assert!(done_at.is_none());
+            assert_eq!(lock_by.as_deref(), Some("housekeeping-live-worker"));
+            assert_eq!(
+                persisted_lock_at,
+                Some(i64::try_from(lock_at).expect("lock timestamp fits i64")),
+            );
+            assert_eq!(attempts, 2);
+            assert_eq!(last_result.as_deref(), Some(r#"{"Ok":"untouched"}"#));
+        }
+    }
+    let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM Jobs")
+        .fetch_one(scheduler_pool)
+        .await
+        .expect("count retained scheduler jobs");
+    assert_eq!(
+        job_count, 6,
+        "stale keepalive must be killed, not deleted or requeued"
+    );
+}
+
+#[tokio::test]
+async fn apalis_housekeeping_missing_application_table_retries_and_recovers_qa10() {
+    use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+
+    let fixture = Fixture::new().await;
+    sqlx::query(
+        "ALTER TABLE cache_keepalive_sessions RENAME TO cache_keepalive_sessions_unavailable",
+    )
+    .execute(fixture.storage.pool())
+    .await
+    .expect("hide application session table");
+
+    let outcome = fixture
+        .dispatch(Arc::new(FailingPusher))
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("dispatch housekeeping with missing application table");
+    assert_eq!(
+        outcome,
+        JobOutcome::Retry {
+            delay: Duration::from_secs(60)
+        },
+        "QA-10: missing application table must retry, not complete"
+    );
+
+    sqlx::query(
+        "ALTER TABLE cache_keepalive_sessions_unavailable RENAME TO cache_keepalive_sessions",
+    )
+    .execute(fixture.storage.pool())
+    .await
+    .expect("restore application session table");
+    let recovered = fixture
+        .dispatch(Arc::new(FailingPusher))
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("redispatch housekeeping after restoring application table");
+    assert_eq!(recovered, JobOutcome::Done);
+}
+
+#[tokio::test]
+async fn apalis_housekeeping_malformed_application_table_retries_and_recovers_qa11() {
+    use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+
+    let fixture = Fixture::new().await;
+    sqlx::query(
+        "ALTER TABLE cache_keepalive_sessions RENAME COLUMN updated_at TO updated_at_malformed",
+    )
+    .execute(fixture.storage.pool())
+    .await
+    .expect("rename required application column away");
+
+    let outcome = fixture
+        .dispatch(Arc::new(FailingPusher))
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("dispatch housekeeping with malformed application table");
+    assert_eq!(
+        outcome,
+        JobOutcome::Retry {
+            delay: Duration::from_secs(60)
+        },
+        "QA-11: malformed application table must retry, not complete"
+    );
+
+    sqlx::query(
+        "ALTER TABLE cache_keepalive_sessions RENAME COLUMN updated_at_malformed TO updated_at",
+    )
+    .execute(fixture.storage.pool())
+    .await
+    .expect("restore required application column");
+    let recovered = fixture
+        .dispatch(Arc::new(FailingPusher))
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("redispatch housekeeping after restoring valid schema");
+    assert_eq!(recovered, JobOutcome::Done);
+}
+
+#[tokio::test]
+async fn apalis_housekeeping_reopened_scheduler_factory_cleans_existing_files_qa18() {
+    use cc_lb_clock::TestClock;
+    use cc_lb_config::{SchedulerConfig, StorageConfig};
+    use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+    use cc_lb_scheduler::worker::SchedulerBackend;
+    use cc_lb_storage_api::{CacheKeepaliveReplaceRequest, CacheTtl};
+
+    const NOW: u64 = 1_800_000_000;
+    let mut fixture = Fixture::new().await;
+    fixture
+        .storage
+        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+            session_key_hash: "qa18-stale".to_owned(),
+            principal_id: "principal".to_owned(),
+            accounting_key_id: None,
+            upstream_id: fixture.upstream_id,
+            cache_anchor_at_unix_secs: NOW - 60,
+            ttl: CacheTtl::Ttl5m,
+            run_at_unix_secs: NOW,
+            expires_at_unix_secs: NOW + 3_600,
+            encrypted_payload: vec![1, 2, 3],
+            display_reason: "QA-18".to_owned(),
+            config_snapshot: fixture.enqueue_request().config_snapshot,
+            now_unix_secs: NOW - 7_200,
+        })
+        .await
+        .expect("seed existing application file");
+    sqlx::query(
+        "INSERT INTO Workers
+         (id, worker_type, storage_name, layers, last_seen, started_at)
+         VALUES ('qa18-worker', 'cron', 'default', '', ?1, ?1)",
+    )
+    .bind(i64::try_from(NOW).expect("timestamp fits i64"))
+    .execute(match &fixture.backend.backend {
+        SchedulerBackend::Sqlite(backend) => backend.pool(),
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("QA-18 requires SQLite scheduler storage"),
+    })
+    .await
+    .expect("seed scheduler worker");
+    sqlx::query(
+        "INSERT INTO Jobs
+         (job, id, job_type, status, run_at, lock_by, lock_at, attempts,
+          last_result, idempotency_key)
+         VALUES (?1, ?2, 'cache_keepalive', 'Running', ?3, 'qa18-worker', ?4, 0,
+                 ?5, ?6)",
+    )
+    .bind(vec![0_u8])
+    .bind("qa18-scheduler-row")
+    .bind(i64::try_from(NOW).expect("timestamp fits i64"))
+    .bind(i64::try_from(NOW - 121).expect("timestamp fits i64"))
+    .bind(r#"{"Ok":"untouched"}"#)
+    .bind("cache_keepalive:qa18-stale:1")
+    .execute(match &fixture.backend.backend {
+        SchedulerBackend::Sqlite(backend) => backend.pool(),
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("QA-18 requires SQLite scheduler storage"),
+    })
+    .await
+    .expect("seed existing scheduler file");
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions
+         SET enqueue_state = 'running',
+             running_since_unix_secs = ?1, updated_at = ?2",
+    )
+    .bind(i64::try_from(NOW - 121).expect("timestamp fits i64"))
+    .bind(i64::try_from(NOW).expect("timestamp fits i64"))
+    .execute(fixture.storage.pool())
+    .await
+    .expect("seed stale application session");
+
+    let application_file: String =
+        sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+            .fetch_one(fixture.storage.pool())
+            .await
+            .expect("read existing application file");
+    let reopened_storage = crate::storage_factory::open_storage(
+        &StorageConfig::Sqlite {
+            path: std::path::PathBuf::from(&application_file),
+        },
+        Arc::new(SystemClock),
+    )
+    .await
+    .expect("reopen application through production factory");
+    fixture.backend = crate::scheduler_factory::open_scheduler_storage(
+        &StorageConfig::Sqlite {
+            path: std::path::PathBuf::from(application_file),
+        },
+        &SchedulerConfig::default(),
+        Arc::new(SystemClock),
+    )
+    .await
+    .expect("reopen scheduler through production factory");
+
+    let scheduler_pool = match &fixture.backend.backend {
+        SchedulerBackend::Sqlite(backend) => backend.pool(),
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("QA-18 requires SQLite scheduler storage"),
+    };
+    let scheduler_application_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'cache_keepalive_sessions'",
+    )
+    .fetch_one(scheduler_pool)
+    .await
+    .expect("inspect reopened scheduler tables");
+    assert_eq!(
+        scheduler_application_tables, 0,
+        "reopening scheduler storage must not add application tables"
+    );
+
+    let mut dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    dispatch.storage = reopened_storage.storage;
+    dispatch.clock = Arc::new(TestClock::new_at_secs(NOW));
+    let outcome = dispatch
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("dispatch housekeeping after reopening existing files");
+    assert_eq!(outcome, JobOutcome::Done);
+    let scheduler_status: String =
+        sqlx::query_scalar("SELECT status FROM Jobs WHERE id = 'qa18-scheduler-row'")
+            .fetch_one(scheduler_pool)
+            .await
+            .expect("read cleaned scheduler row");
+    assert_eq!(scheduler_status, "Killed");
+    let session = fixture
+        .storage
+        .get_cache_keepalive_session("qa18-stale")
+        .await
+        .expect("read cleaned application session")
+        .expect("seeded application session remains as terminal record");
+    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        session.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Stale)
+    );
+}
+
+#[tokio::test]
+async fn apalis_housekeeping_repeat_dispatch_converges_and_preserves_healthy_rows_qa12() {
+    use cc_lb_clock::TestClock;
+    use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+    use cc_lb_storage_api::{CacheKeepaliveReplaceRequest, CacheTtl};
+
+    const NOW: u64 = 1_800_000_000;
+    let fixture = Fixture::new().await;
+    for (key, running_since) in [("qa12-stale", Some(NOW - 121)), ("qa12-healthy", None)] {
+        fixture
+            .storage
+            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                session_key_hash: key.to_owned(),
+                principal_id: "principal".to_owned(),
+                accounting_key_id: None,
+                upstream_id: fixture.upstream_id,
+                cache_anchor_at_unix_secs: NOW - 60,
+                ttl: CacheTtl::Ttl5m,
+                run_at_unix_secs: NOW,
+                expires_at_unix_secs: NOW + 3_600,
+                encrypted_payload: vec![4, 5, 6],
+                display_reason: "QA-12".to_owned(),
+                config_snapshot: fixture.enqueue_request().config_snapshot,
+                now_unix_secs: NOW - 7_200,
+            })
+            .await
+            .expect("seed application session");
+        if let Some(running_since) = running_since {
+            sqlx::query(
+                "UPDATE cache_keepalive_sessions
+                 SET enqueue_state = 'running', status = 'active',
+                     running_since_unix_secs = ?1, updated_at = ?2
+                 WHERE session_key_hash = ?3",
+            )
+            .bind(i64::try_from(running_since).expect("timestamp fits i64"))
+            .bind(i64::try_from(NOW).expect("timestamp fits i64"))
+            .bind(key)
+            .execute(fixture.storage.pool())
+            .await
+            .expect("seed stale running session");
+        } else {
+            sqlx::query(
+                "UPDATE cache_keepalive_sessions
+                 SET updated_at = ?1
+                 WHERE session_key_hash = ?2",
+            )
+            .bind(i64::try_from(NOW).expect("timestamp fits i64"))
+            .bind(key)
+            .execute(fixture.storage.pool())
+            .await
+            .expect("seed healthy session timestamp");
+        }
+    }
+    let mut dispatch = fixture.dispatch(Arc::new(FailingPusher));
+    dispatch.clock = Arc::new(TestClock::new_at_secs(NOW));
+    let first = dispatch
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("first housekeeping dispatch");
+    assert_eq!(first, JobOutcome::Done);
+    let healthy_after_first = fixture
+        .storage
+        .get_cache_keepalive_session("qa12-healthy")
+        .await
+        .expect("read healthy row after first dispatch")
+        .expect("healthy row survives first dispatch");
+    let stale_after_first = fixture
+        .storage
+        .get_cache_keepalive_session("qa12-stale")
+        .await
+        .expect("read stale row after first dispatch")
+        .expect("stale row is terminalized, not purged");
+
+    let second = dispatch
+        .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
+        .await
+        .expect("second housekeeping dispatch");
+    assert_eq!(second, JobOutcome::Done);
+    assert_eq!(
+        fixture
+            .storage
+            .get_cache_keepalive_session("qa12-healthy")
+            .await
+            .expect("read healthy row after second dispatch"),
+        Some(healthy_after_first),
+        "QA-12: repeated housekeeping preserves healthy rows"
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_cache_keepalive_session("qa12-stale")
+            .await
+            .expect("read stale row after second dispatch"),
+        Some(stale_after_first),
+        "QA-12: repeated housekeeping converges without rewriting terminal rows"
+    );
+}
+
+#[tokio::test]
 async fn default_upstream_affinity_purge_physically_removes_stale_null_expiry_rows() {
     let fixture = Fixture::new().await;
     sqlx::query(

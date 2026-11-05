@@ -378,13 +378,12 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         let updated_at = u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?;
         let generation = u64_to_i64(request.generation, "cache keepalive generation")?;
         let current_job_key = cache_keepalive_job_key(&request.session_key_hash, next_generation);
-        let row = if let Some(encrypted_payload) = request.encrypted_payload.as_deref() {
+        let result = if let Some(encrypted_payload) = request.encrypted_payload.as_deref() {
             sqlx::query(
                 "UPDATE cache_keepalive_sessions SET generation = $1, refresh_count = refresh_count + 1,
                  cache_anchor_at = $2, run_at = $3, status = 'active', enqueue_state = 'pending', running_since_unix_secs = NULL,
                  current_job_key = $4, encrypted_payload = $5, terminal_reason = NULL, error = NULL, expires_at = $6, updated_at = $7
-                 WHERE session_key_hash = $8 AND generation = $9 AND status = 'active'
-                 RETURNING *",
+                 WHERE session_key_hash = $8 AND generation = $9 AND status = 'active'",
             )
             .bind(next_generation_db)
             .bind(cache_anchor_at)
@@ -395,7 +394,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             .bind(updated_at)
             .bind(&request.session_key_hash)
             .bind(generation)
-            .fetch_optional(&self.pool)
+            .execute(&self.pool)
             .await
             .map_err(map_sqlx_error)?
         } else {
@@ -403,8 +402,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 "UPDATE cache_keepalive_sessions SET generation = $1, refresh_count = refresh_count + 1,
                  cache_anchor_at = $2, run_at = $3, status = 'active', enqueue_state = 'pending', running_since_unix_secs = NULL,
                  current_job_key = $4, terminal_reason = NULL, error = NULL, expires_at = $5, updated_at = $6
-                 WHERE session_key_hash = $7 AND generation = $8 AND status = 'active'
-                 RETURNING *",
+                 WHERE session_key_hash = $7 AND generation = $8 AND status = 'active'",
             )
             .bind(next_generation_db)
             .bind(cache_anchor_at)
@@ -414,11 +412,15 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             .bind(updated_at)
             .bind(&request.session_key_hash)
             .bind(generation)
-            .fetch_optional(&self.pool)
+            .execute(&self.pool)
             .await
             .map_err(map_sqlx_error)?
         };
-        row.map(row_to_record).transpose()
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_cache_keepalive_session(&request.session_key_hash)
+            .await
     }
 
     async fn mark_cache_keepalive_terminal(
@@ -529,6 +531,31 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         .await
         .map_err(map_sqlx_error)?;
         Ok(result.rows_affected() == 1)
+    }
+    async fn recover_cache_keepalive_stale_running(
+        &self,
+        stale_running_cutoff_unix_secs: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<u64> {
+        let result = sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = 'terminal', terminal_reason = 'stale', enqueue_state = 'pending',
+                 error = 'keepalive renewal timed out while running',
+                 running_since_unix_secs = NULL, encrypted_payload = ''::bytea, updated_at = $1
+             WHERE status = 'active'
+               AND enqueue_state = 'running'
+               AND running_since_unix_secs IS NOT NULL
+               AND running_since_unix_secs < $2",
+        )
+        .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
+        .bind(u64_to_i64(
+            stale_running_cutoff_unix_secs,
+            "cache keepalive stale running cutoff",
+        )?)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
     }
 
     async fn purge_cache_keepalive_expired(&self, cutoff_unix_secs: u64) -> StorageResult<u64> {
