@@ -162,7 +162,7 @@ pub(crate) async fn get_upstream_limit_resets(
     // backed by a known identity, and stamped with the still-current
     // invalidation epoch — anything else reports `null` rather than a
     // possibly-consumed or foreign-account coupon.
-    let cedar_ember = match (coupon, account_id.as_ref(), fingerprint) {
+    let mut cedar_ember = match (coupon, account_id.as_ref(), fingerprint) {
         (Some(record), Some(_), Some(fingerprint))
             if record.credential_fingerprint == fingerprint
                 && current_epoch == Some(record.epoch)
@@ -173,6 +173,24 @@ pub(crate) async fn get_upstream_limit_resets(
         }
         _ => None,
     };
+    if let Some(status) = &mut cedar_ember {
+        let latest = storage
+            .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+            .await?;
+        let snapshots = state
+            .dynamic_view
+            .load()
+            .subscription_quota_cache
+            .snapshot_for_upstream(upstream_id, now_unix_millis, max_staleness_secs);
+        if crate::subscription_quotas::five_hour_is_absent(
+            latest.iter(),
+            snapshots.iter().find(|snapshot| snapshot.window == "5h"),
+            now_unix_millis,
+            max_staleness_secs,
+        ) {
+            remove_absent_five_hour(status);
+        }
+    }
 
     Ok(Json(LimitResetsResponse {
         account_id,
@@ -433,6 +451,31 @@ fn live_identity(
     Ok((account_id, organization_id))
 }
 
+fn remove_absent_five_hour(status: &mut CedarEmberStatusResponse) {
+    if status.exhausted.iter().any(|window| window == "5h") {
+        status.exhausted.retain(|window| window != "5h");
+        status.at_limit = !status.exhausted.is_empty();
+    }
+    status.grants.retain(|grant| {
+        !grant.clears.iter().any(|window| window == "5h")
+            || grant.clears.iter().any(|window| window != "5h")
+    });
+    for grant in &mut status.grants {
+        grant
+            .blocking
+            .retain(|window| window != "5h" && window != "five_hour");
+        grant.clears.retain(|window| window != "5h");
+        grant.percent_used.remove("5h");
+    }
+    if status
+        .next_grant_id
+        .as_ref()
+        .is_some_and(|id| !status.grants.iter().any(|grant| &grant.id == id))
+    {
+        status.next_grant_id = None;
+    }
+}
+
 fn cedar_ember_response(status: &CedarEmberStatus) -> CedarEmberStatusResponse {
     CedarEmberStatusResponse {
         eligible: status.eligible,
@@ -550,5 +593,48 @@ fn provider_claim_error(error: CedarEmberError) -> UpstreamError {
         | CedarEmberError::Transport(_)
         | CedarEmberError::Parse(_) => UpstreamError::ClaimOutcomeUnknown,
         CedarEmberError::Request(detail) => UpstreamError::Internal { detail },
+    }
+}
+
+#[cfg(test)]
+mod absent_five_hour_tests {
+    use super::*;
+
+    #[test]
+    fn absent_five_hour_removes_only_five_hour_coupon_nudges() {
+        let provider: CedarEmberStatus = serde_json::from_value(serde_json::json!({
+            "eligible": true,
+            "at_limit": true,
+            "exhausted": ["five_hour", "seven_day"],
+            "next_grant_id": "five-only",
+            "grants": [
+                {
+                    "id": "five-only", "resets_left": 1,
+                    "clears": ["five_hour"], "usable_now": true,
+                    "percent_used": {"five_hour": 100}
+                },
+                {
+                    "id": "weekly", "resets_left": 1,
+                    "clears": ["five_hour", "seven_day"], "usable_now": true,
+                    "percent_used": {"five_hour": 100, "seven_day": 100}
+                }
+            ]
+        }))
+        .expect("provider status fixture");
+        let mut response = cedar_ember_response(&provider);
+        remove_absent_five_hour(&mut response);
+        assert!(response.at_limit);
+        assert_eq!(response.exhausted, ["7d"]);
+        assert_eq!(response.grants.len(), 1);
+        let weekly = response.grants.first().expect("weekly grant is retained");
+        assert_eq!(weekly.id, "weekly");
+        assert_eq!(weekly.clears, ["7d"]);
+        assert_eq!(weekly.percent_used.get("7d"), Some(&100));
+        assert!(!weekly.percent_used.contains_key("5h"));
+        assert!(response.next_grant_id.is_none());
+
+        response.exhausted = vec!["5h".to_owned()];
+        remove_absent_five_hour(&mut response);
+        assert!(!response.at_limit);
     }
 }
