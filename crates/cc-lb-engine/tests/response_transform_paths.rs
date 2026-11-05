@@ -2369,6 +2369,60 @@ async fn sse_transform_failure_before_output_fails_open_raw() {
 }
 
 #[tokio::test]
+async fn sse_transform_fail_open_preserves_keepalive_observation() {
+    let body = Bytes::from_static(
+        b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_failopen_keepalive\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"cache_read_input_tokens\":12000}}}\n\n\
+          event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_failopen\",\"name\":\"Bash\",\"input\":{}}}\n\n\
+          event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n\
+          event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let enqueuer = Arc::new(TransformedQuestionEnqueuer::default());
+    let lifecycle = lifecycle_with_record_config_and_keepalive(
+        None,
+        Some(Arc::new(AlwaysFailingSseTransform)),
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+        LifecycleConfig::default(),
+        default_upstream_record(),
+        Some(CacheKeepaliveConfig {
+            enabled: true,
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
+            classifier: ClassifierConfig::default(),
+        }),
+    )
+    .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
+    let mut request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+    ));
+    request.headers_mut().insert(
+        "x-claude-code-session-id",
+        HeaderValue::from_static("fail-open-keepalive"),
+    );
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("fail-open response");
+    let (_status, _headers, downstream) = collect_body(response).await;
+    assert_eq!(downstream, body);
+
+    tokio::time::timeout(Duration::from_secs(5), enqueuer.completed.notified())
+        .await
+        .expect("keepalive classification completes");
+    assert_eq!(
+        enqueuer.enqueued.lock().expect("enqueue lock").len(),
+        1,
+        "raw SSE fail-open must still produce a keep-alive snapshot"
+    );
+}
+
+#[tokio::test]
 async fn sse_unterminated_final_event_is_upstream_framing_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let body = Bytes::from_static(b"event: message_stop\ndata: {}\n");

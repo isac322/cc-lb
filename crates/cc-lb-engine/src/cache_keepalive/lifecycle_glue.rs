@@ -713,13 +713,36 @@ pub(crate) struct StreamingKeepaliveResponse {
     message: Option<Value>,
     content_blocks: Vec<Value>,
     stop_reason: Option<String>,
+    pending_sse_bytes: Vec<u8>,
 }
 
 impl StreamingKeepaliveResponse {
-    pub(crate) fn observe_emitted(&mut self, mut bytes: &[u8]) {
-        while let Some(end) = crate::usage_parser::find_sse_event_end(bytes) {
-            self.observe(&crate::usage_parser::parse_sse_event(&bytes[..end]));
-            bytes = &bytes[end..];
+    pub(crate) fn observe_emitted(&mut self, bytes: &[u8]) {
+        if self.pending_sse_bytes.is_empty() {
+            let mut offset = 0;
+            while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
+                let end = offset + end;
+                self.observe(&crate::usage_parser::parse_sse_event(&bytes[offset..end]));
+                offset = end;
+            }
+            if offset < bytes.len() {
+                self.pending_sse_bytes.extend_from_slice(&bytes[offset..]);
+            }
+            return;
+        }
+
+        self.pending_sse_bytes.extend_from_slice(bytes);
+        let mut offset = 0;
+        while let Some(relative_end) =
+            crate::usage_parser::find_sse_event_end(&self.pending_sse_bytes[offset..])
+        {
+            let end = offset + relative_end;
+            let event_bytes = self.pending_sse_bytes[offset..end].to_vec();
+            self.observe(&crate::usage_parser::parse_sse_event(&event_bytes));
+            offset = end;
+        }
+        if offset > 0 {
+            self.pending_sse_bytes.drain(..offset);
         }
     }
 
@@ -1297,6 +1320,24 @@ mod tests {
                 {"type": "tool_use", "name": "ask"}
             ])
         );
+        assert_eq!(value["stop_reason"], "tool_use");
+    }
+    #[test]
+    fn emitted_sse_chunks_reassemble_partial_events() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe_emitted(
+            b"event: message_start\ndata: {\"message\":{\"content\":[]}}\n\n\
+              event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"que",
+        );
+        response.observe_emitted(
+            b"stion\"}}\n\n\
+              event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+        );
+
+        let value = response
+            .into_value()
+            .expect("partial emitted event reassembled");
+        assert_eq!(value["content"][0]["name"], "question");
         assert_eq!(value["stop_reason"], "tool_use");
     }
 

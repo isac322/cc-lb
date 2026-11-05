@@ -5893,6 +5893,7 @@ impl Lifecycle {
             let mut upstream_error_body_decode_failed = false;
             let mut parse_sse_events_active = parse_sse_events;
             let mut raw_before_transform_output: Vec<Bytes> = Vec::new();
+            let mut keepalive_raw_passthrough_active = false;
             // Downstream bytes produced from the final upstream frame of a
             // Content-Length body. A client stops polling once the declared
             // length is satisfied, so these bytes are yielded only after the
@@ -6138,6 +6139,7 @@ impl Lifecycle {
                                         }
                                         debug_assert!(downstream_stream_is_identity);
                                         sse_transform_active = false;
+                                        keepalive_raw_passthrough_active = true;
                                         raw_passthrough_current_chunk = true;
                                     }
                                 }
@@ -6521,9 +6523,11 @@ impl Lifecycle {
                                                 parse_sse_events_active = false;
                                                 buffer.clear();
                                                 sse_transform_active = false;
+                                                keepalive_raw_passthrough_active = true;
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
+                                                    downstream_drop_guard.observe_keepalive_emitted(&raw);
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
                                                 }
@@ -6566,9 +6570,11 @@ impl Lifecycle {
                                                 parse_sse_events_active = false;
                                                 buffer.clear();
                                                 sse_transform_active = false;
+                                                keepalive_raw_passthrough_active = true;
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
+                                                    downstream_drop_guard.observe_keepalive_emitted(&raw);
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
                                                 }
@@ -6592,6 +6598,7 @@ impl Lifecycle {
                                         break 'upstream;
                                     } else {
                                         sse_transform_active = false;
+                                        keepalive_raw_passthrough_active = true;
                                         raw_passthrough_current_chunk = true;
                                         Bytes::new()
                                     };
@@ -6734,8 +6741,10 @@ impl Lifecycle {
                                         break 'upstream;
                                     }
                                     sse_transform_active = false;
+                                    keepalive_raw_passthrough_active = true;
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
+                                        downstream_drop_guard.observe_keepalive_emitted(&raw);
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
@@ -6745,6 +6754,10 @@ impl Lifecycle {
                                 if !success_sse_affinity_gate && !hold_unsolicited_chunk {
                                     // Chunk fanout stays inline — high-volume, not bus-worthy.
                                     if upstream_is_sse && downstream_stream_is_identity {
+                                        if keepalive_raw_passthrough_active {
+                                            downstream_drop_guard
+                                                .observe_keepalive_emitted(&data);
+                                        }
                                         downstream_sse_boundary.observe(&data);
                                     }
                                     batch_index = batch_index.saturating_add(1);
@@ -7208,6 +7221,7 @@ impl Lifecycle {
                                 } else {
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
+                                        downstream_drop_guard.observe_keepalive_emitted(&raw);
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
