@@ -325,6 +325,7 @@ async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
     const PREFIX_LEN: usize = 501;
     const MATCH_LEN: usize = 501;
 
+    backend.wait_for_events_visible_for_rollup(storage).await?;
     let after = storage.current_request_event_cursor().await?;
     let mut expected_rows = Vec::with_capacity(PREFIX_LEN + MATCH_LEN + 1);
     for index in 0..(PREFIX_LEN + MATCH_LEN) {
@@ -591,6 +592,7 @@ async fn assert_cursor_model_filter_preserves_ascii_case<B: ConformanceBackend>(
     backend: &B,
     storage: &B::Storage,
 ) -> Result<()> {
+    backend.wait_for_events_visible_for_rollup(storage).await?;
     let after = storage.current_request_event_cursor().await?;
     let mut expected_rows = Vec::new();
     for (index, model) in ["Éclair", "ÉCLAIR-preview", "éclair"]
@@ -632,6 +634,7 @@ async fn assert_cursor_model_filter_preserves_ascii_case<B: ConformanceBackend>(
     }
 
     const PREFIX_LEN: usize = 501;
+    backend.wait_for_events_visible_for_rollup(storage).await?;
     let after = storage.current_request_event_cursor().await?;
     let mut expected_rows = Vec::with_capacity(PREFIX_LEN + 1);
     for index in 0..=PREFIX_LEN {
