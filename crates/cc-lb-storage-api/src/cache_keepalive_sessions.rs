@@ -328,6 +328,12 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         now_unix_secs: u64,
     ) -> StorageResult<bool>;
 
+    async fn recover_cache_keepalive_stale_running(
+        &self,
+        stale_running_cutoff_unix_secs: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<u64>;
+
     async fn purge_cache_keepalive_expired(&self, cutoff_unix_secs: u64) -> StorageResult<u64>;
 
     async fn purge_cache_keepalive_stale_pending(
