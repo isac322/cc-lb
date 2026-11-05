@@ -452,10 +452,8 @@ fn live_identity(
 }
 
 fn remove_absent_five_hour(status: &mut CedarEmberStatusResponse) {
-    if status.exhausted.iter().any(|window| window == "5h") {
-        status.exhausted.retain(|window| window != "5h");
-        status.at_limit = !status.exhausted.is_empty();
-    }
+    status.exhausted.retain(|window| window != "5h");
+    status.at_limit = !status.exhausted.is_empty();
     status.grants.retain(|grant| {
         !grant.clears.iter().any(|window| window == "5h")
             || grant.clears.iter().any(|window| window != "5h")

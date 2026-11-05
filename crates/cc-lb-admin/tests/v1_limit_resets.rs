@@ -245,6 +245,73 @@ async fn get_limit_resets_returns_cached_status_without_provider_calls() {
 }
 
 #[tokio::test]
+async fn get_limit_resets_without_exhausted_only_clears_at_limit_for_absent_five_hour() {
+    for exhausted in [Some(json!([])), None] {
+        let provider = MockServer::start().await;
+        let server = admin_test_common::spawn_admin_server().await;
+        let upstream = seed_oauth_upstream(&server, &provider.uri()).await;
+        use_production_staleness_window(&server);
+        let mut coupon = cedar_ember_body();
+        if let Some(exhausted) = exhausted {
+            coupon["exhausted"] = exhausted;
+        } else {
+            coupon.as_object_mut().unwrap().remove("exhausted");
+        }
+        seed_coupon(&server, &upstream, coupon).await;
+        seed_identity(&server, &upstream).await;
+
+        let route = format!("/admin/v1/upstreams/{}/limit-resets", upstream.id);
+        let now = now_unix_millis();
+        let mut sample: cc_lb_storage_api::SubscriptionQuotaSample =
+            serde_json::from_value(json!({
+                "upstream_id": upstream.id,
+                "window": "5h",
+                "source": "api",
+                "sample_kind": "sample",
+                "observed_at_unix_millis": now,
+                "sample_id": Uuid::new_v4(),
+                "utilization": 0.40,
+                "resets_at_unix_secs": now / 1_000 + 3_600,
+                "ingested_at_unix_millis": now,
+            }))
+            .expect("present quota fixture");
+        cc_lb_storage_api::UpstreamSubscriptionQuotaStore::record_subscription_quota_samples(
+            server.storage.as_ref(),
+            std::slice::from_ref(&sample),
+        )
+        .await
+        .unwrap();
+        let (status, _, body) = server.client.get(&route).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["cedar_ember"]["at_limit"], true,
+            "a present 5h window must preserve the provider's at_limit"
+        );
+
+        sample.sample_kind = cc_lb_storage_api::SubscriptionQuotaSampleKind::Absent;
+        sample.sample_id = Uuid::new_v4();
+        sample.observed_at_unix_millis = now + 1;
+        sample.ingested_at_unix_millis = now + 1;
+        sample.utilization = None;
+        sample.resets_at_unix_secs = None;
+        cc_lb_storage_api::UpstreamSubscriptionQuotaStore::record_subscription_quota_samples(
+            server.storage.as_ref(),
+            &[sample],
+        )
+        .await
+        .unwrap();
+        let (status, _, body) = server.client.get(&route).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cedar_ember"]["exhausted"], json!([]));
+        assert_eq!(
+            body["cedar_ember"]["at_limit"], false,
+            "an absent 5h window with no exhausted weekly windows is not at limit"
+        );
+        assert!(provider.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn get_limit_resets_repeated_polls_never_hit_provider() {
     let provider = MockServer::start().await;
     let server = admin_test_common::spawn_admin_server().await;

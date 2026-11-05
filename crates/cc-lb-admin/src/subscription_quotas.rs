@@ -817,6 +817,7 @@ pub async fn build_cc_lb_aggregate_response(
             .await?
     };
     let dynamic_view = dynamic_view.load();
+    let allowed_sources = sources_for_merge(source);
     let mut latest_candidates = Vec::new();
     let mut absent_five_hour = HashSet::new();
     for upstream in &upstreams {
@@ -826,10 +827,12 @@ pub async fn build_cc_lb_aggregate_response(
             max_staleness_secs,
         );
         if five_hour_is_absent(
-            durable_latest
-                .iter()
-                .filter(|sample| sample.upstream_id == upstream.id),
-            snapshots.iter().find(|snapshot| snapshot.window == "5h"),
+            durable_latest.iter().filter(|sample| {
+                sample.upstream_id == upstream.id && allowed_sources.contains(&sample.source)
+            }),
+            snapshots.iter().find(|snapshot| {
+                snapshot.window == "5h" && snapshot_matches_source(snapshot, source)
+            }),
             now_unix_millis,
             max_staleness_secs,
         ) {
@@ -857,7 +860,6 @@ pub async fn build_cc_lb_aggregate_response(
         }
     }
 
-    let allowed_sources = sources_for_merge(source);
     type FreshCandidate = (u64, SubscriptionQuotaDataState, Option<f64>, Option<u64>);
     let mut freshest_observed: HashMap<(Uuid, SubscriptionQuotaWindow), Vec<FreshCandidate>> =
         HashMap::new();

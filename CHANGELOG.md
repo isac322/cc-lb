@@ -4,17 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
+
 ### Fixed
 
-- Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent.
+- Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent. Source-filtered aggregates determine absence only from the requested source. Limit-reset nudges for absent 5-hour windows recompute `at_limit` even when the provider omits the exhausted-window list.
 
 ### Security
 
 - OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
-
-### Changed
-
-- Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
 
 ## [2.2.1] - 2026-11-04
 
