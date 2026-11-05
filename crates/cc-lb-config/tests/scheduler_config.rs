@@ -64,6 +64,70 @@ jitter_secs = 4
 }
 
 #[test]
+fn scheduler_pool_omitted_sslmode_stays_omitted_when_serialized() {
+    let config = Config::from_stored_toml(
+        r#"[scheduler]
+[scheduler.separate_pool]
+max_connections = 3
+"#,
+    )
+    .unwrap();
+
+    let json = serde_json::to_value(&config).unwrap();
+    let pool = json["scheduler"]["separate_pool"]
+        .as_object()
+        .expect("serialized scheduler pool");
+    assert!(
+        !pool.contains_key("sslmode"),
+        "omitted sslmode must not materialize in JSON: {json}"
+    );
+
+    let serialized_toml = toml::to_string_pretty(&config).unwrap();
+    let reparsed_toml: toml::Value = toml::from_str(&serialized_toml).unwrap();
+    let pool = reparsed_toml["scheduler"]["separate_pool"]
+        .as_table()
+        .expect("serialized scheduler pool");
+    assert!(
+        !pool.contains_key("sslmode"),
+        "omitted sslmode must not materialize in TOML: {serialized_toml}"
+    );
+
+    let reparsed = Config::from_stored_toml(&serialized_toml).unwrap();
+    let reparsed_json = serde_json::to_value(reparsed).unwrap();
+    assert!(
+        !reparsed_json["scheduler"]["separate_pool"]
+            .as_object()
+            .unwrap()
+            .contains_key("sslmode")
+    );
+}
+
+#[test]
+fn scheduler_pool_explicit_sslmode_values_survive_roundtrip() {
+    for sslmode in [
+        "disable",
+        "prefer",
+        "require",
+        "verify-ca",
+        "verify_ca",
+        "verify-full",
+        "verify_full",
+    ] {
+        let raw_toml = format!(
+            r#"[scheduler.separate_pool]
+sslmode = "{sslmode}"
+"#
+        );
+        let config = Config::from_stored_toml(&raw_toml).unwrap();
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let reparsed = Config::from_stored_toml(&serialized).unwrap();
+        let json = serde_json::to_value(reparsed).unwrap();
+
+        assert_eq!(json["scheduler"]["separate_pool"]["sslmode"], sslmode,);
+    }
+}
+
+#[test]
 fn partial_recurring_job_override_preserves_other_defaults() {
     let toml = r#"
 [scheduler.recurring_jobs.usage_rollup]

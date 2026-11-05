@@ -16,6 +16,7 @@ fn test_state() -> AdminState {
     let config = Config::default();
     AdminState {
         config_path: None,
+        build: admin_test_common::test_build_info(),
         startup_config_overrides: Default::default(),
         storage: None,
         key_store: None,

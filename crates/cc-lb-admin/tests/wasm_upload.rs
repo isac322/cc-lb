@@ -606,6 +606,7 @@ async fn build_admin_state(
     use std::sync::Arc;
     cc_lb_admin::AdminState {
         config_path: None,
+        build: admin_test_common::test_build_info(),
         startup_config_overrides: Default::default(),
         storage: Some(server.storage.clone()),
         key_store: Some(admin_test_common::key_store(server.storage.clone())),

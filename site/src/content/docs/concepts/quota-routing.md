@@ -14,7 +14,9 @@ This keeps a warm, lower-cost candidate in contention without turning cost into 
 
 ## Weekly pace gate
 
-Five-hour pressure is combined with weekly pressure only when the weekly snapshot shows that the current window may be needed before the weekly reset. Missing or stale snapshots fall back to the established pressure behavior. The selection trace records the formula version and bounded pressure fields for diagnosis.
+For plans that report a five-hour window, the weekly pace gate suppresses five-hour pressure when usable weekly snapshots show that the current five-hour window is not needed before the weekly reset. Unusable snapshots retain the established conservative fallback. The selection trace records the formula version and bounded pressure fields for diagnosis.
+
+A provider-confirmed `Absent` five-hour window contributes no five-hour pressure and does not trigger the unusable-five-hour fallback. Weekly-only plans route on their reported weekly windows. `Unobserved` (no observation yet) and `Stale` (an outdated actual sample) remain distinct from `Absent` and retain conservative fallback behavior; missing response headers alone do not prove that a window is absent.
 
 ## Inspecting a decision
 

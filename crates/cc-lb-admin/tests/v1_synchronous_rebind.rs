@@ -124,6 +124,7 @@ fn admin_state(
 ) -> AdminState {
     AdminState {
         config_path: None,
+        build: admin_test_common::test_build_info(),
         startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: Some(admin_test_common::key_store(storage)),

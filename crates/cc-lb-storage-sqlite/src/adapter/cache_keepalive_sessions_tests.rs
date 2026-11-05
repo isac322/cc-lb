@@ -520,6 +520,54 @@ async fn concurrent_claim_allows_exactly_one_enqueued_generation_winner() {
 }
 
 #[tokio::test]
+async fn pending_claim_requires_payload_and_mark_cannot_overwrite_running() {
+    let (_dir, storage) = storage().await;
+    let record = storage
+        .replace_from_real_request(&replace_request(b"", 100))
+        .await
+        .expect("insert pending placeholder");
+
+    assert!(
+        !storage
+            .claim_cache_keepalive_turn("session-hash", record.generation, 101)
+            .await
+            .expect("reject empty pending payload")
+    );
+    assert!(
+        storage
+            .update_cache_keepalive_payload("session-hash", record.generation, b"ciphertext", 102)
+            .await
+            .expect("fill pending payload")
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn("session-hash", record.generation, 103)
+            .await
+            .expect("claim published pending payload")
+    );
+    let claimed = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load running session")
+        .expect("running session exists");
+    assert_eq!(claimed.enqueue_state, CacheKeepaliveEnqueueState::Running);
+    assert_eq!(claimed.running_since_unix_secs, Some(103));
+    assert!(
+        !storage
+            .mark_cache_keepalive_enqueued("session-hash", record.generation, 104)
+            .await
+            .expect("running mark is a no-op")
+    );
+    let unchanged = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("reload running session")
+        .expect("running session remains");
+    assert_eq!(unchanged.enqueue_state, CacheKeepaliveEnqueueState::Running);
+    assert_eq!(unchanged.running_since_unix_secs, Some(103));
+}
+
+#[tokio::test]
 async fn update_payload_only_mutates_matching_pending_generation() {
     let (_dir, storage) = storage().await;
     let record = storage

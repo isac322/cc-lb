@@ -128,6 +128,20 @@ Set the main and scheduler pool limits against PostgreSQL's configured
 and operational work; recheck the budget when changing pool limits or replica
 count.
 
+### PostgreSQL TLS
+
+Storage and scheduler connections use `storage.url`, but resolve TLS mode independently. Storage connections, including startup preflight, use `storage.pool.sslmode`. The scheduler uses `scheduler.separate_pool.sslmode`; it does not inherit `storage.pool.sslmode`.
+
+For each pool, TLS mode follows this precedence:
+
+1. An explicit pool `sslmode` overrides the URL mode.
+2. If the pool setting is omitted, the URL's `sslmode` or `ssl-mode` query parameter applies.
+3. If neither specifies a mode, cc-lb uses `prefer`, even when `PGSSLMODE` is set.
+
+Omit each pool's `sslmode` to inherit the URL policy. An explicit `prefer` or `disable` intentionally overrides even a strict URL mode such as `require`, `verify-ca`, or `verify-full`; remove a redundant `prefer` when the URL should control TLS.
+
+After upgrading, a strict URL mode takes effect wherever the pool setting is omitted. Connections that previously relied on the implicit `prefer` fallback may fail until the database and client TLS configuration satisfy that policy.
+
 ## 4. Idempotency and Scheduling State
 
 The scheduler now relies on Apalis Jobs as the durable coordination point for scheduler-side effects that do not require separate domain cursors. This keeps queueing, retry attempts, and idempotency keys in one table.

@@ -12,6 +12,7 @@ import type { OAuthReconnectNudge } from '../../lib/oauthReconnect';
 import type { Upstream } from '../../lib/queries';
 import {
   buildUpstreamUsageRows,
+  rowMaxUsedPct,
   sortUpstreamRowsByUsage,
   type UpstreamUsageData,
   UpstreamUsageTable,
@@ -65,14 +66,21 @@ function upstream(
   } as Upstream;
 }
 
-function snap(window: '5h' | '7d', utilization: number): QuotaSnapshot {
+function snap(
+  window: '5h' | '7d' | '7d_fable',
+  utilization: number | null,
+  state: QuotaSnapshot['state'] = 'fresh',
+): QuotaSnapshot {
   return {
     window,
-    state: 'fresh',
+    state,
     source: 'api',
     utilization,
     status: null,
-    resets_at_unix_secs: NOW + 3 * 3600 + 12 * 60 + 30,
+    resets_at_unix_secs:
+      state === 'absent' || state === 'unobserved'
+        ? null
+        : NOW + 3 * 3600 + 12 * 60 + 30,
     surpassed_threshold: false,
     representative_claim: null,
     disabled_reason: null,
@@ -141,17 +149,17 @@ const rowNames = () =>
 
 describe('UpstreamUsageTable', () => {
   it('orders problems first, then quota by most-used window, API keys, disabled last', () => {
-    render(
-      <UpstreamUsageTable
-        data={data([
-          ['key-a', 'anthropic_api_key', true, 'active', null, null],
-          ['calm', 'anthropic_oauth', true, 'active', 0.1, 0.2],
-          ['off', 'anthropic_oauth', false, 'active', 0.99, 0.99],
-          ['busy', 'anthropic_oauth', true, 'active', 0.3, 0.9],
-          ['broken', 'anthropic_api_key', true, 'error', null, null],
-        ])}
-      />,
-    );
+    const usageData = data([
+      ['key-a', 'anthropic_api_key', true, 'active', null, null],
+      ['calm', 'anthropic_oauth', true, 'active', 0.1, 0.2],
+      ['off', 'anthropic_oauth', false, 'active', 0.99, 0.99],
+      ['busy', 'anthropic_oauth', true, 'active', 0.3, 0.9],
+      ['broken', 'anthropic_api_key', true, 'error', null, null],
+    ]);
+    usageData.rows
+      .find((row) => row.upstream.id === 'busy')!
+      .windows.push(snap('7d_fable', null, 'unobserved'));
+    render(<UpstreamUsageTable data={usageData} />);
 
     expect(rowNames()).toEqual(['broken', 'busy', 'calm', 'key-a', 'off']);
     const rows = screen.getAllByTestId('upstream-usage-row');
@@ -188,6 +196,142 @@ describe('UpstreamUsageTable', () => {
         '[data-window="7d_fable"] [data-slot="pace-marker"]',
       ),
     ).toBeNull();
+  });
+
+  it('omits the 5h header and cells for an all-weekly OAuth fleet', () => {
+    const usageData = data([
+      ['weekly-a', 'anthropic_oauth', true, 'active', null, 0.2],
+      ['weekly-b', 'anthropic_oauth', true, 'active', null, 0.6],
+      ['key', 'anthropic_api_key', true, 'active', 0.99, null],
+    ]);
+    for (const row of usageData.rows) {
+      if (row.upstream.kind === 'anthropic_oauth') {
+        row.windows.push(snap('5h', null, 'absent'));
+      }
+    }
+    const { container } = render(<UpstreamUsageTable data={usageData} />);
+
+    expect(screen.queryByText('5h')).toBeNull();
+    expect(container.querySelectorAll('[data-window="5h"]')).toHaveLength(0);
+    expect(screen.getAllByRole('meter')).toHaveLength(2);
+    expect(screen.queryAllByText('No reading')).toHaveLength(0);
+    expect(screen.queryByText('0%')).toBeNull();
+    expect(screen.getByTestId('usage-no-quota').textContent).toBe(
+      'No subscription quota',
+    );
+    expect(screen.getByTestId('usage-no-quota').className).toContain(
+      '@4xl:col-span-1',
+    );
+  });
+
+  it('keeps an inert desktop cell for absent 5h in a mixed fleet and hides it when stacked', () => {
+    const usageData = data([
+      ['weekly', 'anthropic_oauth', true, 'active', null, 0.2],
+      ['normal', 'anthropic_oauth', true, 'active', 0.4, 0.3],
+      ['key', 'anthropic_api_key', true, 'active', null, null],
+    ]);
+    usageData.rows[0]!.windows.push(snap('5h', null, 'absent'));
+    render(<UpstreamUsageTable data={usageData} />);
+
+    expect(screen.getAllByText('5h')).toHaveLength(2);
+    const weekly = screen.getByRole('link', { name: /weekly/ });
+    const normal = screen.getByRole('link', { name: /normal/ });
+    const absent = within(weekly).getByTestId('usage-absent-cell');
+    expect(absent.getAttribute('data-window')).toBe('5h');
+    expect(absent.getAttribute('aria-hidden')).toBe('true');
+    expect(absent.className).toBe('hidden @4xl:block');
+    expect(absent.textContent).toBe('');
+    expect(within(absent).queryByRole('meter')).toBeNull();
+    expect(within(weekly).queryAllByText('No reading')).toHaveLength(0);
+    expect(within(weekly).queryByText('0%')).toBeNull();
+    expect(within(weekly).getAllByTestId('usage-cell')).toHaveLength(1);
+    expect(within(normal).getAllByTestId('usage-cell')).toHaveLength(2);
+    expect(weekly.className).toBe(normal.className);
+    expect(weekly.className).toContain(
+      '@4xl:grid-cols-[minmax(12rem,1.4fr)_repeat(2,minmax(0,1fr))]',
+    );
+    expect(screen.getByTestId('usage-no-quota').className).toContain(
+      '@4xl:col-span-2',
+    );
+  });
+
+  it('ignores absent readings when computing max usage and ordering rows', () => {
+    const usageData = data([
+      ['weekly', 'anthropic_oauth', true, 'active', null, 0.2],
+      ['normal', 'anthropic_oauth', true, 'active', 0.4, 0.3],
+      ['absent-only', 'anthropic_oauth', true, 'active', null, null],
+    ]);
+    usageData.rows[0]!.windows.push(snap('5h', 0.99, 'absent'));
+    usageData.rows[2]!.windows.push(snap('5h', 1, 'absent'));
+
+    expect(rowMaxUsedPct(usageData.rows[0]!)).toBe(20);
+    expect(rowMaxUsedPct(usageData.rows[2]!)).toBeNull();
+    expect(
+      sortUpstreamRowsByUsage(usageData.rows).map((row) => row.upstream.id),
+    ).toEqual(['normal', 'weekly', 'absent-only']);
+  });
+
+  it('preserves fresh and unobserved 5h cells for normal subscription plans', () => {
+    const usageData = data([
+      ['normal', 'anthropic_oauth', true, 'active', 0.4, 0.3],
+      ['unknown', 'anthropic_oauth', true, 'active', null, 0.2],
+    ]);
+    usageData.rows[1]!.windows.push(snap('5h', null, 'unobserved'));
+    render(<UpstreamUsageTable data={usageData} />);
+
+    expect(screen.getAllByText('5h')).toHaveLength(3);
+    const normal = screen.getByRole('link', { name: /normal/ });
+    const unknown = screen.getByRole('link', { name: /unknown/ });
+    expect(
+      within(normal)
+        .getByRole('meter', { name: '5h window used' })
+        .getAttribute('aria-valuenow'),
+    ).toBe('40');
+    expect(
+      within(unknown)
+        .getByRole('meter', { name: '5h window used' })
+        .getAttribute('aria-valuetext'),
+    ).toBe('No reading');
+    expect(screen.queryByTestId('usage-absent-cell')).toBeNull();
+  });
+
+  it('retains all existing columns and skeleton cells while quota is pending', () => {
+    const usageData = data([
+      ['pending', 'anthropic_oauth', true, 'active', null, null],
+    ]);
+    const { container } = render(
+      <UpstreamUsageTable data={{ ...usageData, quotaPending: true }} />,
+    );
+
+    expect(screen.getAllByText('5h')).toHaveLength(2);
+    expect(screen.getAllByText('7d')).toHaveLength(2);
+    expect(screen.getAllByText('7d (Fable)')).toHaveLength(2);
+    expect(screen.getAllByTestId('usage-cell')).toHaveLength(3);
+    expect(screen.queryAllByRole('meter')).toHaveLength(0);
+    expect(screen.queryAllByText('No reading')).toHaveLength(0);
+    expect(container.querySelectorAll('.skeleton')).toHaveLength(9);
+  });
+
+  it('removes and restores the 5h column as the reported plan changes', () => {
+    const usageData = data([
+      ['changing', 'anthropic_oauth', true, 'active', 0.4, 0.3],
+    ]);
+    const { rerender } = render(<UpstreamUsageTable data={usageData} />);
+    expect(screen.getByRole('meter', { name: '5h window used' })).toBeTruthy();
+
+    const weeklyData = {
+      ...usageData,
+      rows: usageData.rows.map((row) => ({
+        ...row,
+        windows: [snap('5h', null, 'absent'), snap('7d', 0.3)],
+      })),
+    };
+    rerender(<UpstreamUsageTable data={weeklyData} />);
+    expect(screen.queryByText('5h')).toBeNull();
+    expect(screen.queryByRole('meter', { name: '5h window used' })).toBeNull();
+
+    rerender(<UpstreamUsageTable data={usageData} />);
+    expect(screen.getByRole('meter', { name: '5h window used' })).toBeTruthy();
   });
 
   it('keeps a disabled expired OAuth warning above quota danger and disabled healthy rows', () => {

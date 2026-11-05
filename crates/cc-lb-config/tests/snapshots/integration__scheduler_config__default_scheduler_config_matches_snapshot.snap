@@ -8,8 +8,7 @@ expression: "SchedulerConfig::default()"
     "min_connections": 1,
     "acquire_timeout_secs": 5,
     "idle_timeout_secs": 600,
-    "statement_timeout_secs": 30,
-    "sslmode": "prefer"
+    "statement_timeout_secs": 30
   },
   "recurring_jobs": {
     "anthropic_compat_refresh": {
