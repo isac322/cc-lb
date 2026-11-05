@@ -12,10 +12,11 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent. Source-filtered aggregates determine absence only from the requested source. Limit-reset nudges for absent 5-hour windows recompute `at_limit` even when the provider omits the exhausted-window list.
-- Keep-alive session, decision, and renewal-event detail lookups no longer return route-level 404 errors behind path-normalizing reverse proxies when IDs contain `/`. Detail IDs travel in query values encoded once. ([#1052](https://github.com/isac322/cc-lb/issues/1052))
+- Cache keep-alive rescheduling now returns its own updated session snapshot on SQLite and PostgreSQL, and SQLite real-request replacement captures its result before commit. Concurrent completions can no longer make stale work enqueue or overwrite a newer generation's payload. ([#1042](https://github.com/isac322/cc-lb/issues/1042))
 - Streaming requests that receive non-SSE bodies now run the buffered response transform once over the complete, bounded body; oversized bodies return the existing 502 collection error without invoking the hook, while ordinary JSON responses remain outside the ingress cap.
 - Client closes after Anthropic `message_stop` or OpenAI Responses `response.completed` now finalize streams with observed usage and limit reconciliation instead of 499 cancellations. Abnormal Anthropic stops retain refusal or context-window classification, while upstream and proxy errors keep precedence. OpenAI Responses streams are recognized as SSE when the upstream omits `Content-Type`.
 - Mid-stream `error: null` fields no longer classify OpenAI Responses completion events as provider errors.
+- Keep-alive session, decision, and renewal-event detail lookups no longer return route-level 404 errors behind path-normalizing reverse proxies when IDs contain `/`. Detail IDs travel in query values encoded once. ([#1052](https://github.com/isac322/cc-lb/issues/1052))
 
 ### Security
 
