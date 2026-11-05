@@ -464,17 +464,39 @@ async fn apalis_housekeeping_missing_application_table_retries_and_recovers_qa10
 #[tokio::test]
 async fn apalis_housekeeping_malformed_application_table_retries_and_recovers_qa11() {
     use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+    use cc_lb_storage_api::MetaStore;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     let fixture = Fixture::new().await;
+    let malformed_dir = tempfile::tempdir().expect("qa11 tempdir");
+    let malformed_path = malformed_dir.path().join("qa11-malformed.sqlite");
+    let malformed_url = format!("sqlite://{}", malformed_path.display());
+    let malformed_options = malformed_url
+        .parse::<SqliteConnectOptions>()
+        .expect("parse isolated malformed application database URL")
+        .create_if_missing(true);
+    let malformed_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(malformed_options)
+        .await
+        .expect("open isolated malformed application database");
+    let malformed_storage = Arc::new(cc_lb_storage_sqlite::SqliteStorage::new(
+        malformed_pool,
+        Arc::new(SystemClock),
+    ));
+    malformed_storage
+        .initialize()
+        .await
+        .expect("initialize isolated malformed application database");
     sqlx::query(
         "ALTER TABLE cache_keepalive_sessions RENAME COLUMN updated_at TO updated_at_malformed",
     )
-    .execute(fixture.storage.pool())
+    .execute(malformed_storage.pool())
     .await
     .expect("rename required application column away");
 
     let outcome = fixture
-        .dispatch(Arc::new(FailingPusher))
+        .dispatch_with_application_storage(malformed_storage, Arc::new(FailingPusher))
         .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
         .await
         .expect("dispatch housekeeping with malformed application table");
@@ -486,17 +508,11 @@ async fn apalis_housekeeping_malformed_application_table_retries_and_recovers_qa
         "QA-11: malformed application table must retry, not complete"
     );
 
-    sqlx::query(
-        "ALTER TABLE cache_keepalive_sessions RENAME COLUMN updated_at_malformed TO updated_at",
-    )
-    .execute(fixture.storage.pool())
-    .await
-    .expect("restore required application column");
     let recovered = fixture
         .dispatch(Arc::new(FailingPusher))
         .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
         .await
-        .expect("redispatch housekeeping after restoring valid schema");
+        .expect("redispatch housekeeping with valid application schema");
     assert_eq!(recovered, JobOutcome::Done);
 }
 
