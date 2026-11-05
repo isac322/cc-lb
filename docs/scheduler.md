@@ -115,7 +115,7 @@ The exclusion applies only to credentials that are actually stored as long-lived
 
 ## 3. DB Pool Isolation
 
-To prevent background tasks from starving the main request-handling path, the scheduler uses a separate connection pool. This isolation is configured via the `separate_pool` setting in `SchedulerConfig`. Both pools connect to the same database file (SQLite) or the same DSN (Postgres), but they maintain separate connection limits.
+To prevent background tasks from starving the main request-handling path, the scheduler uses a separate connection pool. This isolation is configured via the `separate_pool` setting in `SchedulerConfig`. On PostgreSQL, both pools use the same DSN with separate connection limits. On SQLite, the application pool uses the configured database file, while the scheduler pool uses the derived `path.with_extension("scheduler.sqlite")` file. Application-owned tables such as `cache_keepalive_sessions` stay in the application database; Apalis `Jobs` and `Workers` stay in the derived scheduler database.
 
 Budget the configured pool limits across all replicas:
 
@@ -214,7 +214,7 @@ Cache keepalive-specific operator notes:
 - `CacheKeepaliveJob` payloads are lightweight metadata only. Prompt snapshots are AEAD-encrypted in `cache_keepalive_sessions.encrypted_payload` with AAD bound to principal, session hash, upstream id, generation, and job type/version.
 - New keepalive snapshots store the captured body in framed raw/zstd payload codecs. Before upgrading from the JSON payload format, drain and stop all old workers and request-serving replicas before starting a new writer. The new version reads old snapshots and migrates them on their next successful renewal; old versions cannot read the new format. Do not downgrade while active sessions contain new-format payloads.
 - The first schedule uses the response-begin cache anchor (`message_start` for streaming, first upstream response event for non-stream, request dispatch time fallback), not response completion. Run time is `cache_anchor_at + ttl - lead`.
-- Cleanup may delete expired keepalive sessions, terminal keepalive Apalis rows, and old `Pending` keepalive Apalis rows. It must not delete `Queued` or `Running` rows; generation checks make those stale rows no-op when they eventually run.
+- Cleanup recovers stale active/running sessions through application storage, then purges stale pending and expired sessions. It kills stale running cache keepalive Apalis jobs in scheduler storage; fresh queued and running work is retained. Retention later removes older pending and terminal Apalis rows. Generation checks make stale rows no-op when they eventually run.
 - `cclb_scheduler_init_failure` (Gauge): Tracks scheduler initialization failure state (0 or 1).
   - Cardinality: 1
 - `cclb_scheduler_lazy_refresh_timeout_total` (Counter): Tracks timed-out lazy OAuth refresh waits.

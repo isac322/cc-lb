@@ -934,6 +934,431 @@ async fn mark_latest_terminal_only_mutates_active_latest_session() {
 }
 
 #[tokio::test]
+async fn recover_stale_running_requires_active_running_strictly_old_lease_and_scrubs_payload() {
+    let (_dir, storage) = storage().await;
+    let cutoff = 200;
+    let now = 500;
+    let mut before = Vec::new();
+
+    for (key, status, enqueue_state, lease) in [
+        ("stale-running", "active", "running", Some(199_i64)),
+        ("exact-cutoff", "active", "running", Some(200)),
+        ("fresh-running", "active", "running", Some(201)),
+        ("null-lease", "active", "running", None),
+        ("pending", "active", "pending", Some(199)),
+        ("enqueued", "active", "enqueued", Some(199)),
+        ("terminal", "terminal", "running", Some(199)),
+    ] {
+        let mut request = replace_request(key.as_bytes(), 100);
+        request.session_key_hash = key.to_owned();
+        request.accounting_key_id = Some(format!("accounting-{key}"));
+        storage
+            .replace_from_real_request(&request)
+            .await
+            .expect("insert session");
+        request.now_unix_secs = 101;
+        storage
+            .replace_from_real_request(&request)
+            .await
+            .expect("replace session to exercise a noninitial generation");
+
+        // Legacy state combinations isolate each predicate, including a missing lease
+        // and old leases on rows that are not active/running.
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = ?, enqueue_state = ?, running_since_unix_secs = ?, error = ?
+             WHERE session_key_hash = ?",
+        )
+        .bind(status)
+        .bind(enqueue_state)
+        .bind(lease)
+        .bind("previous error")
+        .bind(key)
+        .execute(storage.pool())
+        .await
+        .expect("seed recovery state");
+        before.push(
+            storage
+                .get_cache_keepalive_session(key)
+                .await
+                .expect("load seeded session")
+                .expect("seeded session exists"),
+        );
+    }
+
+    let affected = storage
+        .recover_cache_keepalive_stale_running(cutoff, now)
+        .await
+        .expect("recover stale running sessions");
+    assert_eq!(affected, 1);
+
+    let mut expected = before.remove(0);
+    let recovered = storage
+        .get_cache_keepalive_session(&expected.session_key_hash)
+        .await
+        .expect("load recovered session")
+        .expect("recovered session remains persisted");
+    assert_eq!(recovered.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        recovered.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Stale)
+    );
+    assert_eq!(recovered.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert_eq!(
+        recovered.error.as_deref(),
+        Some("keepalive renewal timed out while running")
+    );
+    assert_eq!(recovered.running_since_unix_secs, None);
+    assert!(recovered.encrypted_payload.is_empty());
+    assert_eq!(recovered.updated_at_unix_secs, now);
+    assert_eq!(recovered.generation, expected.generation);
+    assert_eq!(recovered.current_job_key, expected.current_job_key);
+
+    expected.status = CacheKeepaliveSessionStatus::Terminal;
+    expected.terminal_reason = Some(CacheKeepaliveTerminalReason::Stale);
+    expected.enqueue_state = CacheKeepaliveEnqueueState::Pending;
+    expected.error = Some("keepalive renewal timed out while running".to_owned());
+    expected.running_since_unix_secs = None;
+    expected.encrypted_payload.clear();
+    expected.updated_at_unix_secs = now;
+    assert_eq!(recovered, expected, "unrelated session fields must survive");
+
+    for control in before {
+        let persisted = storage
+            .get_cache_keepalive_session(&control.session_key_hash)
+            .await
+            .expect("load noncandidate")
+            .expect("noncandidate remains persisted");
+        assert_eq!(
+            persisted, control,
+            "noncandidates must retain their payload, identity, and all other fields"
+        );
+    }
+    assert_eq!(
+        storage
+            .recover_cache_keepalive_stale_running(cutoff, now + 1)
+            .await
+            .expect("recovery is idempotent"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn recover_stale_running_rejects_overflow_without_mutation() {
+    let (_dir, storage) = storage().await;
+    let record = storage
+        .replace_from_real_request(&replace_request(b"overflow", 100))
+        .await
+        .expect("insert running session");
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("session-hash", record.generation, 110)
+            .await
+            .expect("mark enqueued")
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn("session-hash", record.generation, 150)
+            .await
+            .expect("claim running turn")
+    );
+    let before = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session before overflow checks")
+        .expect("running session exists");
+
+    for (cutoff, now) in [(200, u64::MAX), (u64::MAX, 500)] {
+        assert!(
+            storage
+                .recover_cache_keepalive_stale_running(cutoff, now)
+                .await
+                .is_err(),
+            "out-of-range recovery timestamp must be rejected"
+        );
+        assert_eq!(
+            storage
+                .get_cache_keepalive_session("session-hash")
+                .await
+                .expect("load session after overflow rejection")
+                .expect("running session remains"),
+            before,
+            "overflow rejection must not mutate persisted state"
+        );
+    }
+}
+
+#[tokio::test]
+async fn purge_expired_uses_a_strict_cutoff_boundary() {
+    let (_dir, storage) = storage().await;
+    for (key, now) in [
+        ("expired-before-cutoff", 99),
+        ("exact-cutoff-expiry", 100),
+        ("future-expiry", 101),
+    ] {
+        let mut request = replace_request(key.as_bytes(), now);
+        request.session_key_hash = key.to_owned();
+        storage
+            .replace_from_real_request(&request)
+            .await
+            .expect("insert expiry boundary session");
+    }
+
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_expired(400)
+            .await
+            .expect("purge before cutoff"),
+        1
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session("expired-before-cutoff")
+            .await
+            .expect("load expired row")
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session("exact-cutoff-expiry")
+            .await
+            .expect("load exact boundary row")
+            .is_some(),
+        "expiry equal to cutoff must not be purged"
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session("future-expiry")
+            .await
+            .expect("load future row")
+            .is_some()
+    );
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_expired(401)
+            .await
+            .expect("purge exact boundary after advancing cutoff"),
+        1
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session("exact-cutoff-expiry")
+            .await
+            .expect("load exact row after advancing cutoff")
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session("future-expiry")
+            .await
+            .expect("load future row after purge")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn purge_stale_pending_uses_strict_cutoff_and_state_predicates() {
+    let (_dir, storage) = storage().await;
+    for key in [
+        "stale-pending-boundary",
+        "exact-pending-boundary",
+        "running-old",
+        "terminal-old",
+        "enqueued-old",
+    ] {
+        let mut request = replace_request(key.as_bytes(), 100);
+        request.session_key_hash = key.to_owned();
+        storage
+            .replace_from_real_request(&request)
+            .await
+            .expect("insert pending predicate session");
+    }
+    for (key, status, enqueue_state, lease) in [
+        ("stale-pending-boundary", "active", "pending", None),
+        ("exact-pending-boundary", "active", "pending", None),
+        ("running-old", "active", "running", Some(199_i64)),
+        ("terminal-old", "terminal", "pending", None),
+        ("enqueued-old", "active", "enqueued", None),
+    ] {
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = ?, enqueue_state = ?, running_since_unix_secs = ?, updated_at = ?
+             WHERE session_key_hash = ?",
+        )
+        .bind(status)
+        .bind(enqueue_state)
+        .bind(lease)
+        .bind(if key == "exact-pending-boundary" {
+            200_i64
+        } else {
+            199_i64
+        })
+        .bind(key)
+        .execute(storage.pool())
+        .await
+        .expect("seed pending predicate state");
+    }
+
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_stale_pending(200)
+            .await
+            .expect("purge stale pending"),
+        1
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session("stale-pending-boundary")
+            .await
+            .expect("load stale pending")
+            .is_none()
+    );
+    for (key, expected_status, expected_enqueue_state) in [
+        (
+            "exact-pending-boundary",
+            CacheKeepaliveSessionStatus::Active,
+            CacheKeepaliveEnqueueState::Pending,
+        ),
+        (
+            "running-old",
+            CacheKeepaliveSessionStatus::Active,
+            CacheKeepaliveEnqueueState::Running,
+        ),
+        (
+            "terminal-old",
+            CacheKeepaliveSessionStatus::Terminal,
+            CacheKeepaliveEnqueueState::Pending,
+        ),
+        (
+            "enqueued-old",
+            CacheKeepaliveSessionStatus::Active,
+            CacheKeepaliveEnqueueState::Enqueued,
+        ),
+    ] {
+        let persisted = storage
+            .get_cache_keepalive_session(key)
+            .await
+            .expect("load excluded pending predicate state")
+            .expect("excluded state remains persisted");
+        assert_eq!(persisted.status, expected_status);
+        assert_eq!(persisted.enqueue_state, expected_enqueue_state);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_recovery_counts_once_and_replacement_reschedule_preserve_latest_active_payload()
+{
+    let (_dir, storage) = storage().await;
+    let storage = Arc::new(storage);
+    let running = storage
+        .replace_from_real_request(&replace_request(b"concurrent-running", 100))
+        .await
+        .expect("insert concurrent recovery session");
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("session-hash", running.generation, 110)
+            .await
+            .expect("mark concurrent session enqueued")
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn("session-hash", running.generation, 150)
+            .await
+            .expect("claim concurrent session")
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let first = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            storage
+                .recover_cache_keepalive_stale_running(200, 500)
+                .await
+        }
+    });
+    let second = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            storage
+                .recover_cache_keepalive_stale_running(200, 500)
+                .await
+        }
+    });
+    let (first, second) = tokio::try_join!(first, second).expect("concurrent recovery tasks");
+    let first = first.expect("first recovery");
+    let second = second.expect("second recovery");
+    assert_eq!(first + second, 1);
+    let recovered = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load recovered concurrent session")
+        .expect("recovered concurrent session exists");
+    assert_eq!(recovered.status, CacheKeepaliveSessionStatus::Terminal);
+    assert!(recovered.encrypted_payload.is_empty());
+
+    let latest_key = "latest-before-recovery";
+    let mut previous_request = replace_request(b"previous-generation", 100);
+    previous_request.session_key_hash = latest_key.to_owned();
+    let previous = storage
+        .replace_from_real_request(&previous_request)
+        .await
+        .expect("insert previous active generation");
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued(latest_key, previous.generation, 110)
+            .await
+            .expect("mark previous generation enqueued")
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn(latest_key, previous.generation, 150)
+            .await
+            .expect("claim previous generation")
+    );
+    let mut latest_request = replace_request(b"latest-before-recovery", 600);
+    latest_request.session_key_hash = latest_key.to_owned();
+    let latest = storage
+        .replace_from_real_request(&latest_request)
+        .await
+        .expect("replace with latest active generation");
+    let refreshed = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: latest_key.to_owned(),
+            generation: latest.generation,
+            cache_anchor_at_unix_secs: 650,
+            run_at_unix_secs: 920,
+            expires_at_unix_secs: 950,
+            encrypted_payload: Some(b"latest-rescheduled-payload".to_vec()),
+            now_unix_secs: 650,
+        })
+        .await
+        .expect("reschedule latest active generation")
+        .expect("latest active generation remains");
+    assert_eq!(refreshed.generation, latest.generation + 1);
+    assert_eq!(refreshed.encrypted_payload, b"latest-rescheduled-payload");
+    assert_eq!(refreshed.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(refreshed.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert_eq!(
+        storage
+            .recover_cache_keepalive_stale_running(700, 800)
+            .await
+            .expect("recover after latest replacement"),
+        0
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(latest_key)
+            .await
+            .expect("load latest after recovery")
+            .expect("latest session exists"),
+        refreshed
+    );
+}
+
+#[tokio::test]
 async fn purge_stale_pending_keeps_enqueued_work() {
     let (_dir, storage) = storage().await;
     let pending = storage
