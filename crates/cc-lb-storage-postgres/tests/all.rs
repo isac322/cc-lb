@@ -6,6 +6,8 @@ mod api_key_usage;
 mod audit;
 #[path = "batch_lookup_50k_under_500ms.rs"]
 mod batch_lookup_50k_under_500ms;
+#[path = "cache_keepalive_result_ownership.rs"]
+mod cache_keepalive_result_ownership;
 #[path = "cache_keepalive_session_reads.rs"]
 mod cache_keepalive_session_reads;
 #[path = "cache_keepalive_sessions.rs"]

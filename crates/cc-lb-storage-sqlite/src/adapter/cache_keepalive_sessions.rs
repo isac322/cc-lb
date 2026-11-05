@@ -249,11 +249,16 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-        let record = self
-            .get_cache_keepalive_session(&request.session_key_hash)
-            .await?
+        let row = sqlx::query("SELECT * FROM cache_keepalive_sessions WHERE session_key_hash = ?")
+            .bind(&request.session_key_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let record = row
+            .map(row_to_record)
+            .transpose()?
             .ok_or_else(missing_after_write)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(Some(record))
     }
 
@@ -364,12 +369,13 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         let updated_at = u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?;
         let generation = u64_to_i64(request.generation, "cache keepalive generation")?;
         let current_job_key = cache_keepalive_job_key(&request.session_key_hash, next_generation);
-        let result = if let Some(encrypted_payload) = request.encrypted_payload.as_deref() {
+        let row = if let Some(encrypted_payload) = request.encrypted_payload.as_deref() {
             sqlx::query(
                 "UPDATE cache_keepalive_sessions SET generation = ?, refresh_count = refresh_count + 1,
                  cache_anchor_at = ?, run_at = ?, ttl = ttl, status = 'active', enqueue_state = 'pending',
                  running_since_unix_secs = NULL, current_job_key = ?, encrypted_payload = ?, terminal_reason = NULL, error = NULL, expires_at = ?, updated_at = ?
-                 WHERE session_key_hash = ? AND generation = ? AND status = 'active'",
+                 WHERE session_key_hash = ? AND generation = ? AND status = 'active'
+                 RETURNING *",
             )
             .bind(next_generation_db)
             .bind(cache_anchor_at)
@@ -380,7 +386,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .bind(updated_at)
             .bind(&request.session_key_hash)
             .bind(generation)
-            .execute(self.pool())
+            .fetch_optional(self.pool())
             .await
             .map_err(map_sqlx_error)?
         } else {
@@ -388,7 +394,8 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                 "UPDATE cache_keepalive_sessions SET generation = ?, refresh_count = refresh_count + 1,
                  cache_anchor_at = ?, run_at = ?, ttl = ttl, status = 'active', enqueue_state = 'pending',
                  running_since_unix_secs = NULL, current_job_key = ?, terminal_reason = NULL, error = NULL, expires_at = ?, updated_at = ?
-                 WHERE session_key_hash = ? AND generation = ? AND status = 'active'",
+                 WHERE session_key_hash = ? AND generation = ? AND status = 'active'
+                 RETURNING *",
             )
             .bind(next_generation_db)
             .bind(cache_anchor_at)
@@ -398,15 +405,11 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .bind(updated_at)
             .bind(&request.session_key_hash)
             .bind(generation)
-            .execute(self.pool())
+            .fetch_optional(self.pool())
             .await
             .map_err(map_sqlx_error)?
         };
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
-        self.get_cache_keepalive_session(&request.session_key_hash)
-            .await
+        row.map(row_to_record).transpose()
     }
 
     async fn mark_cache_keepalive_terminal(
