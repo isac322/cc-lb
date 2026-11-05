@@ -28,8 +28,30 @@ For an OAuth upstream, create the resource, call the start endpoint, open the re
 
 A principal receives the built-in `subscription-preference` router entry at creation. Use the plugin-chain endpoints to add, remove, or reorder additional entries. Registry reference counts include principal chains and upstream warm-up dialect bindings.
 
+## Detail lookups
+
+Keep-alive sessions, decisions, and request events use static detail paths with a required `id` query parameter:
+
+| Resource | Endpoint |
+| --- | --- |
+| Keep-alive session or decision | `GET /admin/v1/principals/{principal_id}/cache-keepalive/detail?id=<encoded ID>` |
+| Request event, including a keep-alive renewal | `GET /admin/v1/events/detail?id=<encoded ID>` |
+
+Pass the original ID to `URLSearchParams` or an equivalent query encoder, such as Python's `urllib.parse.urlencode` or Rust's `url::form_urlencoded`. Encode the query value once; do not call `encodeURIComponent` before passing it to `URLSearchParams`.
+
+```js
+const sessionQuery = new URLSearchParams({ id: sessionId });
+const eventQuery = new URLSearchParams({ id: eventId });
+const sessionUrl = `/admin/v1/principals/${principalId}/cache-keepalive/detail?${sessionQuery}`;
+const eventUrl = `/admin/v1/events/detail?${eventQuery}`;
+```
+
+Stored IDs, including composite IDs containing `/`, stay unchanged. Authentication, principal scoping, and response shapes are unchanged.
+
+The old `/admin/v1/principals/{principal_id}/cache-keepalive/{session_or_decision_id}` and `/admin/v1/events/detail/{event_id}` routes are removed. Migrate direct scripts and API clients to the query endpoints. Event-detail audit entries use the static route `/admin/v1/events/detail` and retain the original ID in `payload.event_id`.
+
 ## Request event diagnostic fields
 
-Request events are stored in `request_events_v1` with all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so `GET /admin/v1/events/detail/{event_id}`, `GET /admin/v1/events/delta`, and final updates on `GET /admin/v1/events/stream` read the committed relational representation directly with zero TOAST overhead.
+Request events are stored in `request_events_v1` with all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so `GET /admin/v1/events/detail?id=<encoded ID>`, `GET /admin/v1/events/delta`, and final updates on `GET /admin/v1/events/stream` read the committed relational representation directly with zero TOAST overhead.
 
 The optional `observability.request_diagnostics_log` setting additionally emits a `cc_lb.request_diagnostics.v1` stdout line after the row commits. Each line carries five deep diagnostic fields — `cache_breakpoints` without `lookback_prefixes`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors` — plus eight self-contained outcome and session-correlation fields: `thread_id`, `observed_session_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `duration_ms`, and `upstream_ttfb_ms`.

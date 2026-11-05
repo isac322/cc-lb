@@ -28,9 +28,14 @@ pub fn router() -> Router<AdminState> {
             get(list_cache_keepalive),
         )
         .route(
-            "/admin/v1/principals/{principal_id}/cache-keepalive/{session_or_decision_id}",
+            "/admin/v1/principals/{principal_id}/cache-keepalive/detail",
             get(get_cache_keepalive_detail),
         )
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheKeepaliveDetailQuery {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,7 +150,8 @@ async fn list_cache_keepalive(
 
 async fn get_cache_keepalive_detail(
     State(state): State<AdminState>,
-    Path((principal_id, session_or_decision_id)): Path<(String, String)>,
+    Path(principal_id): Path<String>,
+    Query(query): Query<CacheKeepaliveDetailQuery>,
 ) -> axum::response::Response {
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
@@ -157,7 +163,7 @@ async fn get_cache_keepalive_detail(
     let item = match CacheKeepaliveSessionReadStore::get_cache_keepalive_list_item(
         storage,
         &principal_id,
-        &session_or_decision_id,
+        &query.id,
     )
     .await
     {

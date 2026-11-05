@@ -1,10 +1,11 @@
 use axum::{
     Extension, Router,
-    extract::{Path, State},
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
@@ -15,16 +16,18 @@ use crate::{
 };
 
 pub fn router() -> Router<AdminState> {
-    Router::new().route(
-        "/admin/v1/events/detail/{event_id}",
-        get(handle_event_detail),
-    )
+    Router::new().route("/admin/v1/events/detail", get(handle_event_detail))
 }
 
-pub async fn handle_event_detail(
+#[derive(Debug, Deserialize)]
+struct EventDetailQuery {
+    id: String,
+}
+
+async fn handle_event_detail(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
-    Path(event_id): Path<String>,
+    Query(query): Query<EventDetailQuery>,
 ) -> Response {
     if authorize(&identity, AdminAction::SensitiveRead).is_err() {
         return forbidden();
@@ -33,21 +36,20 @@ pub async fn handle_event_detail(
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable();
     };
-    match fetch_request_event_detail(storage.as_ref(), &event_id).await {
+    match fetch_request_event_detail(storage.as_ref(), &query.id).await {
         Ok(Some(event)) => {
-            let route = format!("/admin/v1/events/detail/{event_id}");
             if let Err(error) = record_admin_audit(
                 &state,
                 AdminAuditEvent {
                     identity: Some(&identity),
                     system_component: None,
                     action: "request_event_detail_read",
-                    route: &route,
+                    route: "/admin/v1/events/detail",
                     target_principal_id: None,
                     target_upstream: None,
                     api_key_id: None,
                     status: 200,
-                    payload: Some(json!({ "event_id": event_id })),
+                    payload: Some(json!({ "event_id": query.id })),
                 },
             )
             .await

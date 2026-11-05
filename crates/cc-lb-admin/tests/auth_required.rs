@@ -83,6 +83,11 @@ async fn test_auth_required() {
         ("/admin/v1/principals", "GET"),
         ("/admin/v1/principals", "POST"),
         (
+            "/admin/v1/principals/00000000-0000-0000-0000-000000000001/cache-keepalive/detail?id=key",
+            "GET",
+        ),
+        ("/admin/v1/events/detail?id=event", "GET"),
+        (
             "/admin/v1/principals/00000000-0000-0000-0000-000000000001",
             "GET",
         ),
