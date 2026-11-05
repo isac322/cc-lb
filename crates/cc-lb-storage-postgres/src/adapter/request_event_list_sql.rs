@@ -259,7 +259,12 @@ pub(super) fn list_request_events_query(
         None => {}
     }
 
-    if let Some(event_kind) = query.filters.event_kind {
+    // The pinned renewal source already determines the effective kind. A
+    // duplicate predicate makes the planner underestimate the matching rows.
+    if let Some(event_kind) = query.filters.event_kind
+        && !(query.source_kind.as_deref() == Some("renewal")
+            && event_kind == RequestEventKind::Renewal)
+    {
         builder.push(
             " AND CASE WHEN r.source_kind = 'renewal' THEN 'renewal' \
              ELSE COALESCE(r.event_kind, 'unclassified') END = ",

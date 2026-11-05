@@ -33,6 +33,12 @@ pub struct RequestEventStreamFilters {
     /// exclusion on list/histogram queries unless `source_kind` is also
     /// explicitly supplied.
     pub event_kind: Option<cc_lb_request_log::RequestEventKind>,
+    /// Cursor-only exact source-kind filter; `None` leaves sources unrestricted.
+    /// List and histogram queries use their separate `source_kind` fields.
+    pub source_kind: Option<String>,
+    /// Cursor-only exclusion, combined with every other filter. Historical
+    /// NULL sources remain included. `Default` leaves renewals unrestricted.
+    pub exclude_renewal: bool,
 }
 
 /// One page of the operator diagnostics export: rows with

@@ -193,6 +193,18 @@ function normalizeFilters(filters: RequestEventsFeedFilters): LogRowFilters & {
   };
 }
 
+function addEventKindFilter(
+  base: Record<string, string>,
+  input: RequestEventsFeedFilters,
+  normalized: LogRowFilters,
+) {
+  if (input.event_kind === 'all') {
+    base.source_kind = 'all';
+  } else if (normalized.event_kind) {
+    base.event_kind = normalized.event_kind;
+  }
+}
+
 /** Convert the shared row filters into the historical list API query. */
 export function buildRequestEventsHistoryFilters(
   input: RequestEventsFeedFilters = {},
@@ -204,7 +216,7 @@ export function buildRequestEventsHistoryFilters(
   if (filters.session) base.thread_id = filters.session;
   if (filters.model) base.model = filters.model;
   if (filters.status) base.status_class = filters.status;
-  if (filters.event_kind) base.event_kind = filters.event_kind;
+  addEventKindFilter(base, input, filters);
   if (filters.since_unix_secs != null) {
     base.since_unix_secs = String(filters.since_unix_secs);
   }
@@ -229,7 +241,7 @@ export function buildRequestEventsLiveFilters(
   if (filters.status && filters.status !== 'errors') {
     base.status_class = filters.status;
   }
-  if (filters.event_kind) base.event_kind = filters.event_kind;
+  addEventKindFilter(base, input, filters);
   return base;
 }
 
@@ -310,7 +322,7 @@ export function useRequestEventsFeed(
       session,
       model,
       status: statusFilter,
-      event_kind: event_kind === 'all' ? undefined : event_kind,
+      event_kind,
       since_unix_secs,
       until_unix_secs,
     }),

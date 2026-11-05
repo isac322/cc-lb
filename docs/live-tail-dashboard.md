@@ -41,7 +41,7 @@ Every alert in `deploy/alerts/live-tail.yml` has a matching dashboard panel. The
 Live-tail is a "silence is healthy" system. Several panels are expected to hover at zero and only jump during real incidents:
 
 - **Assembler overflow (stat)** — expected 0. Any nonzero value paints the panel red and matches `LiveTailAssemblerMpscOverflow`.
-- **Reset rate by reason (timeseries)** — sustained nonzero means clients keep being asked to resync. Look at the `reason` label: `backfill_cap` (client too far behind), `bus_lagged` (broadcast slower than emit), `storage_error` (SSE storage tail query failing).
+- **Reset rate by reason (timeseries)** — sustained nonzero means clients keep being asked to resync. Look at the `reason` label: `backfill_cap` (replay reached 500 matching events), `bus_lagged` (broadcast slower than emit), `storage_error` (SSE storage tail query failing).
 - **Tripwire row → malformed frames / lagged clients** — expected 0 in normal operation.
 - **Tripwire row → HTTP fallback outcomes** — nonzero means partials exceeded the NOTIFY payload cap and the receiver had to fetch over HTTP; nonzero is not itself pathological but it does mean either a very large partial or a config drift on `NOTIFY_PAYLOAD_LIMIT_BYTES`.
 

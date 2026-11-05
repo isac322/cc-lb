@@ -817,6 +817,134 @@ describe('logs polling surfaces', () => {
     expect(routeState.liveCalls.length).toBeGreaterThan(0);
   });
 
+  test('keeps history and live renewals in All kinds and removes them on Messages', async () => {
+    routeState.renderRealTable = true;
+    routeState.search = { event_kind: 'all', status: 'errors' };
+    const historyEvents: RecentEventsPayload['events'] = [
+      {
+        ts: 1_700_000_000,
+        request_id: 'history-renewal',
+        source_kind: 'renewal',
+        status: 503,
+        duration_ms: 25,
+      },
+      {
+        ts: 1_700_000_001,
+        request_id: 'history-message',
+        event_kind: 'messages',
+        status: 429,
+        duration_ms: 25,
+      },
+    ];
+    routeState.recent = {
+      data: pageFromEvents(historyEvents),
+      isPlaceholderData: false,
+      isPending: false,
+      refetch: vi.fn(),
+    };
+    routeState.histogram = {
+      data: { buckets: [], bucket_count: 0, bucket_ms: 60_000 },
+      isError: false,
+      isFetching: false,
+      isPending: false,
+    };
+    const view = renderLogs();
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText('View request history-renewal'),
+      ).toBeDefined(),
+    );
+    expect(screen.getByLabelText('View request history-message')).toBeDefined();
+
+    routeState.live = {
+      ...routeState.live,
+      eventsMap: new Map([
+        [
+          'live-renewal',
+          {
+            phase: 'final',
+            event: {
+              ts: 1_700_000_002,
+              request_id: 'live-renewal',
+              source_kind: 'renewal',
+              status: 500,
+              duration_ms: 25,
+            },
+          },
+        ],
+      ]),
+      version: 1,
+    };
+    view.rerenderLogs();
+    await waitFor(() =>
+      expect(screen.getByLabelText('View request live-renewal')).toBeDefined(),
+    );
+
+    for (const calls of [
+      routeState.recentCalls.map(({ filters }) => filters),
+      routeState.histogramCalls,
+      routeState.liveCalls,
+    ]) {
+      expect(calls.length).toBeGreaterThan(0);
+      for (const filters of calls) {
+        expect(filters.source_kind).toBe('all');
+        expect(filters.event_kind).toBeUndefined();
+      }
+    }
+    expect(routeState.recentCalls.at(-1)?.filters.status_class).toBe('errors');
+    expect(routeState.histogramCalls.at(-1)?.status_class).toBe('errors');
+    expect(routeState.liveCalls.at(-1)).not.toHaveProperty('status_class');
+
+    routeState.search = {
+      event_kind: 'all',
+      status: 'errors',
+      since_unix_secs: 1_699_999_999,
+      until_unix_secs: 1_700_000_010,
+    };
+    // A new query identity receives its own settled history response.
+    routeState.recent = {
+      ...routeState.recent,
+      data: pageFromEvents([...historyEvents]),
+    };
+    view.rerenderLogs();
+    expect(routeState.recentCalls.at(-1)?.filters).toMatchObject({
+      source_kind: 'all',
+      status_class: 'errors',
+      since_unix_secs: '1699999999',
+      until_unix_secs: '1700000010',
+    });
+    expect(
+      screen
+        .getByRole('button', { name: 'Live tail logs' })
+        .getAttribute('aria-pressed'),
+    ).toBe('false');
+    expect(screen.getByLabelText('View request history-renewal')).toBeDefined();
+
+    routeState.search = { status: 'errors' };
+    routeState.recent = {
+      ...routeState.recent,
+      data: pageFromEvents([...historyEvents]),
+    };
+    view.rerenderLogs();
+    await waitFor(() =>
+      expect(
+        screen.queryByLabelText('View request history-renewal'),
+      ).toBeNull(),
+    );
+    expect(screen.queryByLabelText('View request live-renewal')).toBeNull();
+    expect(screen.getByLabelText('View request history-message')).toBeDefined();
+    expect(routeState.recentCalls.at(-1)?.filters).toEqual({
+      event_kind: 'messages',
+      status_class: 'errors',
+    });
+    expect(routeState.liveCalls.at(-1)).toEqual({ event_kind: 'messages' });
+    expect(
+      screen
+        .getByRole('button', { name: 'Live tail logs' })
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+  });
+
   test('lists only messages requests when the URL names no kind', async () => {
     routeState.search = {};
     routeState.recent = {
