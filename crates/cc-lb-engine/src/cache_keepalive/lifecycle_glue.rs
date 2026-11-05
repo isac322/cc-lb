@@ -4,7 +4,7 @@ use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -108,6 +108,7 @@ pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) shaped_body: Bytes,
     pub(crate) original_body: Bytes,
     pub(crate) downstream_headers: HeaderMap,
+    pub(crate) request_dispatched_at: Instant,
 }
 
 const SESSION_SHARD_COUNT: usize = 64;
@@ -213,6 +214,66 @@ impl LifecycleKeepalive {
         }
         shard.insert(session_key.clone(), completion_seq);
         true
+    }
+
+    /// Fence queued work before a real request reaches the upstream. Unlike
+    /// completion persistence this must finish on the dispatch path.
+    pub(crate) async fn on_request_started(
+        &self,
+        _authenticated: &crate::authn_rail::Authenticated,
+        principal: &Principal,
+        cache_metadata: &RequestCacheMetadata,
+    ) {
+        let Some(enqueuer) = self.enqueuer.as_ref() else {
+            return;
+        };
+        if cache_metadata.explicit_auxiliary
+            || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
+            || cache_metadata.cache_breakpoints.is_empty()
+        {
+            return;
+        }
+        let view = self.dynamic_view.load();
+        if !view
+            .principal_view
+            .get(&principal.id)
+            .and_then(|cached| cached.cache_keepalive())
+            .is_some_and(|config| config.enabled)
+        {
+            return;
+        }
+        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
+            return;
+        };
+        let sequence = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.record_issued_seq(&session_key, sequence);
+        let mut shard = self.session_shard(&session_key).lock().await;
+        // Freshness suppresses stale completions, never a real request's fence:
+        // a newer waiter may be dropped before it performs its durable write.
+        let _ = self.claim_completion_seq(&mut shard, &session_key, sequence);
+        let expected_generation = match enqueuer
+            .observe_session_generation(&session_key.to_string())
+            .await
+        {
+            Ok(expected) => expected,
+            Err(error) => {
+                tracing::warn!(
+                    target: "cache_keepalive",
+                    principal_id = principal.id.as_str(),
+                    %error,
+                    "skipping cache keep-alive request fence: failed to observe session generation"
+                );
+                return;
+            }
+        };
+        self.cancel_session(
+            &session_key,
+            principal,
+            CancelReason::NewRequest,
+            expected_generation,
+            Duration::ZERO,
+        )
+        .await;
     }
 
     /// Detaches classification and the serial keep-alive storage writes onto a
@@ -652,9 +713,53 @@ pub(crate) struct StreamingKeepaliveResponse {
     message: Option<Value>,
     content_blocks: Vec<Value>,
     stop_reason: Option<String>,
+    pending_sse_bytes: Vec<u8>,
+    sse_observation_disabled: bool,
 }
 
 impl StreamingKeepaliveResponse {
+    pub(crate) fn observe_emitted(&mut self, bytes: &[u8], max_pending_sse_bytes: usize) {
+        if self.sse_observation_disabled {
+            return;
+        }
+        if self.pending_sse_bytes.is_empty() {
+            let mut offset = 0;
+            while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
+                let end = offset + end;
+                self.observe(&crate::usage_parser::parse_sse_event(&bytes[offset..end]));
+                offset = end;
+            }
+            if offset < bytes.len() {
+                let pending = &bytes[offset..];
+                if pending.len() > max_pending_sse_bytes {
+                    self.sse_observation_disabled = true;
+                } else {
+                    self.pending_sse_bytes.extend_from_slice(pending);
+                }
+            }
+            return;
+        }
+
+        if self.pending_sse_bytes.len().saturating_add(bytes.len()) > max_pending_sse_bytes {
+            self.pending_sse_bytes.clear();
+            self.sse_observation_disabled = true;
+            return;
+        }
+        self.pending_sse_bytes.extend_from_slice(bytes);
+        let mut offset = 0;
+        while let Some(relative_end) =
+            crate::usage_parser::find_sse_event_end(&self.pending_sse_bytes[offset..])
+        {
+            let end = offset + relative_end;
+            let event_bytes = self.pending_sse_bytes[offset..end].to_vec();
+            self.observe(&crate::usage_parser::parse_sse_event(&event_bytes));
+            offset = end;
+        }
+        if offset > 0 {
+            self.pending_sse_bytes.drain(..offset);
+        }
+    }
+
     pub(crate) fn observe(&mut self, event: &ParsedSseEvent<'_>) {
         let Ok(Some(value)) = event.value() else {
             return;
@@ -824,7 +929,7 @@ mod tests {
     use cc_lb_storage_api::principal::{
         Limit, PrincipalKind as StoragePrincipalKind, PrincipalRecord as StoragePrincipalRecord,
     };
-    use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
+    use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig, MetaStore};
     use cc_lb_upstream::{
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, Signer, SignerError, SignerFactory,
         SigningCapability, UpstreamError,
@@ -1212,6 +1317,58 @@ mod tests {
         );
     }
     #[test]
+    fn emitted_sse_batch_observes_every_transformed_content_block() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe_emitted(
+            b"event: message_start\ndata: {\"message\":{\"content\":[]}}\n\n\
+              event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"question\"}}\n\n\
+              event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"ask\"}}\n\n\
+              event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            1024,
+        );
+        response.observe_emitted(b"", 1024);
+        let value = response.into_value().expect("emitted message");
+        assert_eq!(
+            value["content"],
+            serde_json::json!([
+                {"type": "tool_use", "name": "question"},
+                {"type": "tool_use", "name": "ask"}
+            ])
+        );
+        assert_eq!(value["stop_reason"], "tool_use");
+    }
+    #[test]
+    fn emitted_sse_chunks_reassemble_partial_events() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe_emitted(
+            b"event: message_start\ndata: {\"message\":{\"content\":[]}}\n\n\
+              event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"que",
+            1024,
+        );
+        response.observe_emitted(
+            b"stion\"}}\n\n\
+              event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            1024,
+        );
+
+        let value = response
+            .into_value()
+            .expect("partial emitted event reassembled");
+        assert_eq!(value["content"][0]["name"], "question");
+        assert_eq!(value["stop_reason"], "tool_use");
+    }
+
+    #[test]
+    fn emitted_sse_partial_buffer_disables_observation_at_budget() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe_emitted(b"data: ", 4);
+        response.observe_emitted(b"xxxxx", 4);
+
+        assert!(response.sse_observation_disabled);
+        assert!(response.pending_sse_bytes.is_empty());
+    }
+
+    #[test]
     fn session_key_uses_agent_identity_when_present() {
         let principal = Principal {
             id: "principal-test".to_owned(),
@@ -1413,6 +1570,255 @@ mod tests {
             assert!(is_keepalive_eligible_request_kind(kind), "{kind:?}");
         }
     }
+    struct TestSignerFactory;
+    struct TestSigner;
+
+    impl ApiKeyAwareSignerFactory for TestSignerFactory {
+        fn with_router_choice(
+            &self,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for TestSignerFactory {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+            Ok(Arc::new(TestSigner))
+        }
+    }
+
+    #[async_trait]
+    impl Signer for TestSigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<cc_lb_upstream::SignedRequest, SignerError> {
+            Ok(cc_lb_upstream::SignedRequest::from_shaped(
+                shaped, capability,
+            ))
+        }
+
+        async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
+    #[tokio::test]
+    async fn superseded_request_still_fences_before_dispatch_boundary() {
+        assert_superseded_request_fences(false).await;
+    }
+
+    #[tokio::test]
+    async fn dropped_newer_request_cannot_remove_older_request_fence() {
+        assert_superseded_request_fences(true).await;
+    }
+
+    async fn assert_superseded_request_fences(drop_newer: bool) {
+        struct RequestFenceEnqueuer {
+            ordered: OrderedCompletionEnqueuer,
+            active_generation: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait]
+        impl CacheKeepaliveEnqueuer for RequestFenceEnqueuer {
+            async fn observe_session_generation(
+                &self,
+                key: &str,
+            ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+                self.ordered.observe_session_generation(key).await
+            }
+
+            async fn enqueue_cache_keepalive(
+                &self,
+                request: CacheKeepaliveEnqueueRequest,
+            ) -> Result<(), CacheKeepaliveEnqueueError> {
+                self.ordered.enqueue_cache_keepalive(request).await
+            }
+
+            async fn cancel_cache_keepalive(
+                &self,
+                request: CacheKeepaliveCancelRequest,
+            ) -> Result<(), CacheKeepaliveEnqueueError> {
+                assert_eq!(request.reason, CancelReason::NewRequest);
+                assert_eq!(request.expected_generation, Some(41));
+                self.active_generation.store(false, Ordering::SeqCst);
+                self.ordered
+                    .events
+                    .send(OrderedCompletion::Cancel(
+                        request.session_key_hash,
+                        request.expected_generation,
+                    ))
+                    .expect("request fence observer");
+                Ok(())
+            }
+
+            async fn record_cache_keepalive_not_tracked(
+                &self,
+                request: CacheKeepaliveNotTrackedRequest,
+            ) -> Result<(), CacheKeepaliveEnqueueError> {
+                self.ordered
+                    .record_cache_keepalive_not_tracked(request)
+                    .await
+            }
+        }
+
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                .await
+                .expect("request fence auth storage"),
+        );
+        storage
+            .initialize()
+            .await
+            .expect("request fence auth schema");
+        let principal_record = cc_lb_storage_api::PrincipalStore::create(
+            storage.as_ref(),
+            cc_lb_storage_api::principal::PrincipalCreate {
+                name: "request-fence".to_owned(),
+                kind: StoragePrincipalKind::Machine,
+                allowed_models: vec!["*".to_owned()],
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: Some(CacheKeepaliveConfig {
+                    enabled: true,
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                    min_cache_tokens: 10_000,
+                    classifier: ClassifierConfig::default(),
+                }),
+            },
+            cc_lb_clock::unix_secs(clock.now()),
+        )
+        .await
+        .expect("request fence principal");
+        let generated = cc_lb_control::api_keys::secret::generate_new();
+        cc_lb_storage_api::ManagedKeyStore::issue(
+            storage.as_ref(),
+            &principal_record.id.to_string(),
+            &generated.key_id,
+            cc_lb_storage_api::IssueParams {
+                label: "request-fence".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+                secret_salt: generated.secret_salt,
+                verify_hash: generated.verify_hash,
+                last_4: generated.last_4,
+                index_hash: generated.index_hash,
+            },
+        )
+        .await
+        .expect("request fence authentication key");
+        let authn = cc_lb_control::api_keys::builtin_authn::BuiltinAuthn::new(
+            Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(storage)),
+            clock,
+        );
+        let mut auth_headers = HeaderMap::new();
+        auth_headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(generated.plaintext.expose()).expect("generated key header"),
+        );
+        let dynamic_view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(
+                std::slice::from_ref(&principal_record),
+                HashMap::new(),
+            )))
+            .build();
+        let authenticated = crate::authn_rail::authenticate_first(
+            &authn,
+            &auth_headers,
+            &dynamic_view.principal_view,
+        )
+        .await
+        .expect("request fence authenticates through the real rail");
+        let principal = Principal {
+            id: principal_record.id.to_string(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.thread_id = Some("superseded-request".to_owned());
+        metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
+            block_index: 0,
+            source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+            path: "system[0]".to_owned(),
+            message_index: None,
+            ttl: Some("5m".to_owned()),
+            prefix_hash: "request-fence-prefix".to_owned(),
+            prefix_token_count: 12_000,
+            lookback_prefixes: Vec::new(),
+            token_estimate_source: None,
+        }];
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let enqueuer = Arc::new(RequestFenceEnqueuer {
+            ordered: OrderedCompletionEnqueuer { events },
+            active_generation: std::sync::atomic::AtomicBool::new(true),
+        });
+        let keepalive = LifecycleKeepalive::new(
+            Some(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>),
+            Arc::new(DynamicViewHolder::new(dynamic_view)),
+        );
+        let key = cache_keepalive_session_key(&principal, &metadata).expect("request session");
+        let held_shard = keepalive.session_shard(&key).lock().await;
+        let mut first =
+            Box::pin(keepalive.on_request_started(&authenticated, &principal, &metadata));
+        std::future::poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let first_sequence = keepalive.latest_issued_seq(&key);
+        assert_eq!(first_sequence, 1);
+        let mut newer = Some(Box::pin(keepalive.on_request_started(
+            &authenticated,
+            &principal,
+            &metadata,
+        )));
+        std::future::poll_fn(|cx| {
+            assert!(
+                newer
+                    .as_mut()
+                    .expect("newer request")
+                    .as_mut()
+                    .poll(cx)
+                    .is_pending()
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(keepalive.latest_issued_seq(&key), first_sequence + 1);
+        assert!(
+            received.try_recv().is_err(),
+            "the held shard prevents durable writes"
+        );
+        if drop_newer {
+            drop(newer.take());
+        }
+        drop(held_shard);
+        first.await;
+        assert!(
+            !enqueuer.active_generation.load(Ordering::SeqCst),
+            "returning to actual dispatch must fence the queued generation even when a newer request issued a sequence"
+        );
+        assert_eq!(
+            received.try_recv().expect("durable observe"),
+            OrderedCompletion::Observe(key.to_string())
+        );
+        assert_eq!(
+            received.try_recv().expect("durable cancellation"),
+            OrderedCompletion::Cancel(key.to_string(), Some(41))
+        );
+        if let Some(newer) = newer {
+            newer.await;
+        }
+    }
+
     #[tokio::test]
     async fn stale_compaction_completion_cannot_cancel_or_resurrect_newer_generation() {
         struct Journal {
@@ -1447,42 +1853,6 @@ mod tests {
                     .expect("not-tracked lock")
                     .push(request);
                 Ok(())
-            }
-        }
-
-        struct TestSignerFactory;
-        struct TestSigner;
-
-        impl ApiKeyAwareSignerFactory for TestSignerFactory {
-            fn with_router_choice(
-                &self,
-                _router_chosen_upstream_name: String,
-            ) -> Arc<dyn SignerFactory> {
-                Arc::new(Self)
-            }
-        }
-
-        #[async_trait]
-        impl SignerFactory for TestSignerFactory {
-            async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
-                Ok(Arc::new(TestSigner))
-            }
-        }
-
-        #[async_trait]
-        impl Signer for TestSigner {
-            async fn sign(
-                &self,
-                shaped: ShapedRequest,
-                capability: &mut SigningCapability,
-            ) -> Result<cc_lb_upstream::SignedRequest, SignerError> {
-                Ok(cc_lb_upstream::SignedRequest::from_shaped(
-                    shaped, capability,
-                ))
-            }
-
-            async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
-                RetryDecision::Fail
             }
         }
 

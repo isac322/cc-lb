@@ -76,7 +76,7 @@ impl SchedulerDispatch {
                         ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
                     apalis_housekeeping_outcome(
                         ApalisHousekeepingJobHandler::new(sqlite.pool().clone(), config)
-                            .handle(job, unix_secs(self.clock.now()))
+                            .handle(job, unix_secs(self.clock.now()), self.storage.as_ref())
                             .await,
                     )
                 }
@@ -86,7 +86,7 @@ impl SchedulerDispatch {
                         ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
                     apalis_housekeeping_outcome(
                         ApalisHousekeepingJobHandler::new(postgres.pool().clone(), config)
-                            .handle(job, unix_secs(self.clock.now()))
+                            .handle(job, unix_secs(self.clock.now()), self.storage.as_ref())
                             .await,
                     )
                 }

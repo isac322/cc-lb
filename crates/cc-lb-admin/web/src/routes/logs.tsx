@@ -83,17 +83,17 @@ const unixSecondsSearchParam = z.preprocess((value) => {
 
 /** `event_kind` value that lifts the default kind filter. */
 const ALL_EVENT_KINDS = 'all';
+type EffectiveEventKind = RequestEventKind | typeof ALL_EVENT_KINDS;
 /** The kind Logs lists when the URL names none: model traffic, `/v1/messages`. */
 export const DEFAULT_EVENT_KIND: RequestEventKind = 'messages';
 
 /**
  * The kind the list is filtered to: the URL's kind, the default kind when the
- * URL has none, or undefined (every kind) for `all`.
+ * URL has none, or `all` (every kind) for the explicit opt-out.
  */
 export function effectiveEventKind(
   eventKind: RequestEventKind | typeof ALL_EVENT_KINDS | undefined,
-): RequestEventKind | undefined {
-  if (eventKind === ALL_EVENT_KINDS) return undefined;
+): EffectiveEventKind {
   return eventKind ?? DEFAULT_EVENT_KIND;
 }
 
@@ -478,7 +478,7 @@ function LogsPage() {
             key: 'event_kind' as const,
             label: 'Kind',
             value:
-              eventKindFilter == null
+              eventKindFilter === ALL_EVENT_KINDS
                 ? 'All kinds'
                 : REQUEST_EVENT_KIND_LABELS[eventKindFilter],
           },
@@ -676,7 +676,7 @@ function LogsPage() {
           <Field label="Kind">
             <Select
               size="sm"
-              value={eventKindFilter ?? ''}
+              value={eventKindFilter === ALL_EVENT_KINDS ? '' : eventKindFilter}
               options={eventKindSelectOptions}
               // The default kind keeps the URL clean; "All kinds" is written
               // out, since an absent kind means the default.

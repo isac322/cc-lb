@@ -5,7 +5,10 @@ use tower::ServiceExt as _;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const START: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1027\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":13,\"output_tokens\":0}}}\n\n";
+const CACHE_START: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1027\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":13,\"output_tokens\":0,\"cache_read_input_tokens\":12000}}}\n\n";
 const CONTENT: &str = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n";
+const AGENT_CONTENT: &str = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_agent\",\"name\":\"Bash\",\"input\":{}}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n";
+const AGENT_DELTA: &str = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}\n\n";
 const DELTA: &str = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n";
 const STOP: &str = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 const REQUEST: &[u8] = br#"{"model":"claude-test","messages":[],"stream":true}"#;
@@ -116,6 +119,25 @@ impl Observation {
         assert_eq!(success.stream_message_stop_ms.is_some(), stopped);
         assert_eq!(self.row.stream_message_stop_ms.is_some(), stopped);
     }
+
+    fn assert_semantic_success(&self, input: u64, output: u64, stopped: bool) {
+        self.assert_terminal(None);
+        assert_eq!(self.row.upstream_error_type, None);
+        assert_eq!(self.row.upstream_error_message, None);
+        assert_eq!(
+            (self.row.input_tokens, self.row.output_tokens),
+            (Some(input), Some(output))
+        );
+        assert_eq!(self.row.stream_message_stop_ms.is_some(), stopped);
+        assert!(
+            self.events
+                .iter()
+                .filter(|event| matches!(event, LifecycleEvent::StreamCompleted { .. }))
+                .count()
+                <= 1,
+            "semantic close must not emit duplicate stream completion"
+        );
+    }
 }
 
 async fn observe(
@@ -164,6 +186,64 @@ async fn observe(
         events,
     })
 }
+async fn observe_eof_with_keepalive(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    record: UpstreamRecord,
+    request: http::Request<Bytes>,
+    enqueuer: Arc<dyn CacheKeepaliveEnqueuer>,
+) -> TestResult<Observation> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "semantic-sse-eof-keepalive.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut rx = test_bus.bus.subscribe_lifecycle();
+    let lifecycle = with_test_limit_subject(
+        lifecycle_with_record_config_and_keepalive(
+            None,
+            None,
+            dispatcher,
+            LifecycleConfig::default(),
+            record,
+            Some(CacheKeepaliveConfig {
+                enabled: true,
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+                min_cache_tokens: 10_000,
+                classifier: ClassifierConfig::default(),
+            }),
+        )
+        .with_cache_keepalive_enqueuer(enqueuer),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let response = handle_authenticated(&lifecycle, request).await?;
+    let (status, headers, body) = collect_body(response).await;
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut events = Vec::new();
+        loop {
+            let event = rx.recv().await.expect("lifecycle event delivered");
+            let terminated = matches!(event, LifecycleEvent::RequestTerminated { .. });
+            events.push(event);
+            if terminated {
+                break events;
+            }
+        }
+    })
+    .await
+    .expect("request terminates after downstream EOF");
+    let mut rows = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(rows.len(), 1);
+    Ok(Observation {
+        status,
+        headers,
+        body,
+        row: rows.remove(0),
+        events,
+    })
+}
+
 async fn observe_drop_after_terminal(
     dispatcher: Arc<dyn UpstreamDispatch>,
     record: UpstreamRecord,
@@ -171,18 +251,49 @@ async fn observe_drop_after_terminal(
     terminal_marker: &'static [u8],
     transform: Option<Arc<dyn SseEventTransformHook>>,
 ) -> TestResult<Observation> {
+    observe_drop_after_terminal_with_keepalive(
+        dispatcher,
+        record,
+        request,
+        terminal_marker,
+        transform,
+        None,
+    )
+    .await
+}
+
+async fn observe_drop_after_terminal_with_keepalive(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    record: UpstreamRecord,
+    request: http::Request<Bytes>,
+    terminal_marker: &'static [u8],
+    transform: Option<Arc<dyn SseEventTransformHook>>,
+    keepalive: Option<(CacheKeepaliveConfig, Arc<dyn CacheKeepaliveEnqueuer>)>,
+) -> TestResult<Observation> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "semantic-sse-drop.sqlite").await?);
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut rx = test_bus.bus.subscribe_lifecycle();
-    let lifecycle = lifecycle_with_record_and_config(
-        None,
-        transform,
-        dispatcher,
-        LifecycleConfig::default(),
-        record,
-    )
+    let lifecycle = if let Some((config, enqueuer)) = keepalive {
+        lifecycle_with_record_config_and_keepalive(
+            None,
+            transform,
+            dispatcher,
+            LifecycleConfig::default(),
+            record,
+            Some(config),
+        )
+        .with_cache_keepalive_enqueuer(enqueuer)
+    } else {
+        lifecycle_with_record_and_config(
+            None,
+            transform,
+            dispatcher,
+            LifecycleConfig::default(),
+            record,
+        )
+    }
     .with_event_bus(test_bus.bus_arc());
     let response = tokio::time::timeout(
         Duration::from_secs(3),
@@ -363,6 +474,113 @@ async fn anthropic_terminal_client_close_is_success() -> TestResult {
     assert_eq!(
         (observed.row.input_tokens, observed.row.output_tokens),
         (Some(13), Some(7))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_terminal_client_close_enqueues_keepalive_once() -> TestResult {
+    let enqueuer = Arc::new(TransformedQuestionEnqueuer::default());
+    let mut request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"tools":[{"name":"Bash","description":"run a command","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+    ));
+    request.headers_mut().insert(
+        "x-claude-code-session-id",
+        HeaderValue::from_static("semantic-close-keepalive"),
+    );
+    let observed = observe_drop_after_terminal_with_keepalive(
+        Arc::new(PendingDispatch {
+            headers: sse_headers(),
+            body: Bytes::from(format!("{CACHE_START}{AGENT_CONTENT}{AGENT_DELTA}{STOP}")),
+        }),
+        default_upstream_record(),
+        request,
+        b"event: message_stop",
+        None,
+        Some((
+            CacheKeepaliveConfig {
+                enabled: true,
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+                min_cache_tokens: 10_000,
+                classifier: ClassifierConfig::default(),
+            },
+            Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+        )),
+    )
+    .await?;
+
+    observed.assert_semantic_success(13, 7, false);
+    assert!(
+        observed
+            .body
+            .windows(b"event: message_stop".len())
+            .any(|window| window == b"event: message_stop"),
+        "semantic terminal bytes must reach the client before close"
+    );
+    assert_eq!(
+        observed.row.cache_read_input_tokens,
+        Some(12_000),
+        "semantic close must preserve provider cache-read usage"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !enqueuer.enqueued.lock().expect("enqueue lock").is_empty() {
+                break;
+            }
+            enqueuer.completed.notified().await;
+        }
+    })
+    .await
+    .expect("semantic close completes keepalive classification");
+    assert_eq!(
+        enqueuer.enqueued.lock().expect("enqueue lock").len(),
+        1,
+        "semantic close must enqueue one fresh agent-in-turn generation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_normal_eof_enqueues_keepalive_once() -> TestResult {
+    let enqueuer = Arc::new(TransformedQuestionEnqueuer::default());
+    let mut request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"tools":[{"name":"Bash","description":"run a command","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+    ));
+    request.headers_mut().insert(
+        "x-claude-code-session-id",
+        HeaderValue::from_static("normal-eof-keepalive"),
+    );
+    let observed = observe_eof_with_keepalive(
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body: Bytes::from(format!("{CACHE_START}{AGENT_CONTENT}{AGENT_DELTA}{STOP}")),
+        }),
+        default_upstream_record(),
+        request,
+        Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>,
+    )
+    .await?;
+
+    observed.assert_success(13, 7, true);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !enqueuer.enqueued.lock().expect("enqueue lock").is_empty() {
+                break;
+            }
+            enqueuer.completed.notified().await;
+        }
+    })
+    .await
+    .expect("normal EOF completes keepalive classification");
+    assert_eq!(
+        enqueuer.enqueued.lock().expect("enqueue lock").len(),
+        1,
+        "normal EOF must enqueue one keepalive completion"
     );
     Ok(())
 }

@@ -87,7 +87,11 @@ SELECT \
     list_cost_cache_creation_1h_micros AS cost_cache_creation_1h_micros, \
     list_cost_cache_read_micros AS cost_cache_read_micros \
 FROM request_events_v1 \
-WHERE ts >= ?1 AND ts <= ?2 \
+WHERE ";
+
+const LIST_REQUEST_EVENTS_SQL_BOUNDED_TIME: &str = "ts >= ?1 AND ts <= ?2";
+const LIST_REQUEST_EVENTS_SQL_UNBOUNDED_TIME: &str = "+ts >= ?1 AND +ts <= ?2";
+const LIST_REQUEST_EVENTS_SQL_FILTERS: &str = "\
   AND (?3 IS NULL OR principal_id = ?3) \
   AND (?4 IS NULL OR lower(model) LIKE ?4 ESCAPE '\\' OR lower(model) LIKE ?16 ESCAPE '\\') \
   AND (?5 IS NULL OR upstream_id = ?5) \
@@ -209,6 +213,18 @@ pub(super) async fn list_request_events(
         return Ok(Vec::new());
     }
 
+    let rows = bind_list_query(list_request_events_sql(query), query)?
+        .fetch_all(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+
+    rows.into_iter().map(list_row_to_item).collect()
+}
+
+fn bind_list_query<'q>(
+    sql: &'static str,
+    query: &'q RequestEventListQuery,
+) -> StorageResult<sqlx::query::QueryAs<'q, sqlx::Sqlite, ListRow, sqlx::sqlite::SqliteArguments>> {
     let (status_min, status_max) = query
         .filters
         .status_class
@@ -227,25 +243,7 @@ pub(super) async fn list_request_events(
         .map_or([None, None], |[prefix, contains]| {
             [Some(prefix), Some(contains)]
         });
-
-    static SQL: std::sync::LazyLock<(String, String)> = std::sync::LazyLock::new(|| {
-        (
-            [LIST_REQUEST_EVENTS_SQL_HEAD, LIST_REQUEST_EVENTS_SQL_TAIL].concat(),
-            [
-                LIST_REQUEST_EVENTS_SQL_HEAD,
-                LIST_REQUEST_EVENTS_EVENT_KIND_FILTER,
-                LIST_REQUEST_EVENTS_SQL_TAIL,
-            ]
-            .concat(),
-        )
-    });
-    let sql = if query.filters.event_kind.is_some() {
-        SQL.1.as_str()
-    } else {
-        SQL.0.as_str()
-    };
-
-    let rows = sqlx::query_as::<_, ListRow>(sql)
+    Ok(sqlx::query_as::<_, ListRow>(sql)
         .bind(u64_to_i64(
             query.since_unix_secs,
             "request event list since",
@@ -270,12 +268,34 @@ pub(super) async fn list_request_events(
         .bind(query.filters.event_kind.map(|kind| kind.as_str()))
         .bind(i64::from(query.filters.errors_only))
         // Parameter `?16`: second arm of the model-pattern disjunction.
-        .bind(model_contains_pattern)
-        .fetch_all(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?;
+        .bind(model_contains_pattern))
+}
 
-    rows.into_iter().map(list_row_to_item).collect()
+fn list_request_events_sql(query: &RequestEventListQuery) -> &'static str {
+    static SQL: std::sync::LazyLock<[[String; 2]; 2]> = std::sync::LazyLock::new(|| {
+        [
+            LIST_REQUEST_EVENTS_SQL_BOUNDED_TIME,
+            LIST_REQUEST_EVENTS_SQL_UNBOUNDED_TIME,
+        ]
+        .map(|time_predicate| {
+            ["", LIST_REQUEST_EVENTS_EVENT_KIND_FILTER].map(|event_kind_predicate| {
+                [
+                    LIST_REQUEST_EVENTS_SQL_HEAD,
+                    time_predicate,
+                    " ",
+                    LIST_REQUEST_EVENTS_SQL_FILTERS,
+                    event_kind_predicate,
+                    LIST_REQUEST_EVENTS_SQL_TAIL,
+                ]
+                .concat()
+            })
+        })
+    });
+    // With no effective time bound, a ts skip-scan can materialize and sort
+    // the whole log instead of reading one ordered page. Bounded windows
+    // keep ts indexable so narrow historical/future reads still seek.
+    let unbounded = query.since_unix_secs == 0 && query.until_unix_secs >= i64::MAX as u64;
+    SQL[usize::from(unbounded)][usize::from(query.filters.event_kind.is_some())].as_str()
 }
 
 pub(super) async fn get_request_event(
@@ -313,5 +333,208 @@ pub(super) fn source_kind_filter(source_kind: Option<&str>) -> (bool, Option<&st
         Some("all") => (true, None),
         Some(kind) => (false, Some(kind)),
         None => (false, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cc_lb_storage_api::{MetaStore, RequestEventKind, RequestEventStreamFilters};
+    use sqlx::{AssertSqlSafe, Execute, Row};
+
+    use super::*;
+
+    async fn explain_list(storage: &SqliteStorage, query: &RequestEventListQuery) -> Vec<String> {
+        let mut statement = bind_list_query(list_request_events_sql(query), query)
+            .expect("build production list query");
+        let sql = format!("EXPLAIN QUERY PLAN {}", list_request_events_sql(query));
+        let arguments = statement
+            .take_arguments()
+            .expect("encode list arguments")
+            .expect("list arguments");
+        sqlx::query_with(AssertSqlSafe(sql), arguments)
+            .fetch_all(storage.pool())
+            .await
+            .expect("explain production list query")
+            .into_iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect()
+    }
+
+    fn list_query(
+        source_kind: Option<&str>,
+        event_kind: Option<RequestEventKind>,
+        until_ts_ms: Option<u64>,
+        until_event_id: Option<&str>,
+    ) -> RequestEventListQuery {
+        timed_list_query(
+            0,
+            u64::MAX,
+            source_kind,
+            event_kind,
+            until_ts_ms,
+            until_event_id,
+        )
+    }
+
+    fn timed_list_query(
+        since_unix_secs: u64,
+        until_unix_secs: u64,
+        source_kind: Option<&str>,
+        event_kind: Option<RequestEventKind>,
+        until_ts_ms: Option<u64>,
+        until_event_id: Option<&str>,
+    ) -> RequestEventListQuery {
+        RequestEventListQuery {
+            since_unix_secs,
+            until_unix_secs,
+            until_ts_ms,
+            until_event_id: until_event_id.map(str::to_owned),
+            limit: 100,
+            filters: RequestEventStreamFilters {
+                event_kind,
+                ..Default::default()
+            },
+            source_kind: source_kind.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn analyzed_request_event_list_plans_preserve_order_without_skip_scan() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let database_url = format!("sqlite://{}", temp_dir.path().join("plan.sqlite").display());
+        let storage = crate::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+        storage.initialize().await.expect("initialize sqlite");
+        sqlx::query(
+            "WITH RECURSIVE seq(n) AS ( \
+                 SELECT 0 \
+                 UNION ALL \
+                 SELECT n + 1 FROM seq WHERE n < 9999 \
+             ) \
+             INSERT INTO request_events_v1 \
+                 (request_id, ts, event_id, principal_id, key_id, model, \
+                  list_ts_ms, list_event_key, list_status, source_kind, event_kind) \
+             SELECT printf('plan-request-%06d', n), \
+                    1900000000 + n, \
+                    printf('plan-event-%06d', n), \
+                    'principal-single', \
+                    NULL, \
+                    'claude-sonnet-4-5', \
+                    (1900000000 + n) * 1000, \
+                    printf('plan-event-%06d', n), \
+                    200, \
+                    'proxy', \
+                    'messages' \
+             FROM seq",
+        )
+        .execute(storage.pool())
+        .await
+        .expect("seed 10000 request events");
+        sqlx::query(
+            "INSERT INTO request_events_v1 \
+             (request_id, ts, event_id, principal_id, key_id, model, \
+              list_ts_ms, list_event_key, list_status, source_kind, event_kind) \
+             VALUES \
+                ('plan-renewal-1', 1900400000, 'plan-renewal-1', 'principal-single', NULL, \
+                 'claude-sonnet-4-5', 1900400000000, 'plan-renewal-1', 200, 'renewal', 'renewal'), \
+                ('plan-renewal-2', 1900400001, 'plan-renewal-2', 'principal-single', NULL, \
+                 'claude-sonnet-4-5', 1900400001000, 'plan-renewal-2', 200, 'renewal', 'renewal')",
+        )
+        .execute(storage.pool())
+        .await
+        .expect("seed renewal request events");
+        // Approximate ANALYZE mirrors the production CLI's PRAGMA optimize
+        // path, which leaves STAT1-only statistics instead of full STAT4
+        // samples: https://www.sqlite.org/lang_analyze.html#approximate_analyze_for_large_databases
+        let mut connection = storage
+            .pool()
+            .acquire()
+            .await
+            .expect("acquire analyze connection");
+        sqlx::query("PRAGMA analysis_limit = 1000")
+            .execute(&mut *connection)
+            .await
+            .expect("set approximate analyze limit");
+        sqlx::query("ANALYZE")
+            .execute(&mut *connection)
+            .await
+            .expect("analyze");
+        drop(connection);
+        storage.pool().close().await;
+        let storage =
+            crate::open_sqlite_existing(&database_url, Arc::new(cc_lb_clock::SystemClock))
+                .await
+                .expect("reopen analyzed sqlite");
+
+        let cases = [
+            ("default", list_query(None, None, None, None)),
+            (
+                "messages",
+                list_query(None, Some(RequestEventKind::Messages), None, None),
+            ),
+            ("all", list_query(Some("all"), None, None, None)),
+            (
+                "renewal-conjunctive",
+                list_query(Some("renewal"), Some(RequestEventKind::Renewal), None, None),
+            ),
+            (
+                "cursor-continuation",
+                list_query(
+                    Some("all"),
+                    None,
+                    Some(1_900_005_000_000),
+                    Some("plan-event-005000"),
+                ),
+            ),
+            (
+                "saturated-i64-max",
+                timed_list_query(0, i64::MAX as u64, None, None, None, None),
+            ),
+        ];
+        for (name, query) in cases {
+            let details = explain_list(&storage, &query).await;
+            assert!(
+                details
+                    .iter()
+                    .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+                "{name} list plan must preserve index ordering: {details:?}"
+            );
+            assert!(
+                details
+                    .iter()
+                    .all(|detail| !detail.contains("principal_key_ts_idx")),
+                "{name} list plan must not skip-scan principal/key/ts: {details:?}"
+            );
+        }
+        let bounded_cases = [
+            (
+                "bounded-narrow-old",
+                timed_list_query(1_900_000_000, 1_900_000_010, None, None, None, None),
+            ),
+            (
+                "bounded-future",
+                timed_list_query(2_000_000_000, 2_000_000_010, None, None, None, None),
+            ),
+            (
+                "sentinel-max-minus-one",
+                timed_list_query(0, i64::MAX as u64 - 1, None, None, None, None),
+            ),
+            (
+                "bounded-since-one",
+                timed_list_query(1, u64::MAX, None, None, None, None),
+            ),
+        ];
+        for (name, query) in bounded_cases {
+            let details = explain_list(&storage, &query).await;
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("principal_key_ts_idx")),
+                "{name} must retain the bounded ts plan variant: {details:?}"
+            );
+        }
     }
 }

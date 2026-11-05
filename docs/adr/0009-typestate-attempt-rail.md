@@ -22,6 +22,14 @@ Background cache-keepalive (renewal) traffic is moved onto this same rail. This 
 
 To prevent data loss under saturation, renewal accounting is a durable exactly-once design. It doesn't rely on the best-effort, drop-on-full event bus. The bus is observability-only. Cost computation in the renewal finalizer runs inline using the same pricing path as the subscriber, with the selected database upstream supplying its kind. It writes the final `RequestEvent` and projections via the awaited `append_request_event_with_projections` method. The event ID is deterministic: `renewal_event_id(session_id, turn_id)`, so a replay can idempotently converge on the same row.
 
+Disabling or clearing keep-alive prevents a queued renewal from dispatching
+once the worker sees the updated authorization. If authorization is removed
+after dispatch completes with `CacheHit` or `CacheMiss`, the finalizer still
+records the completed request, turn, and cost, reconciles the reservation
+exactly once, and releases the accounting guard without a refund. The session
+then becomes `cancelled` and no next job is enqueued. `Error` and
+`UnsupportedProvider` outcomes keep the RAII refund path.
+
 ### Per-Turn Claim CAS and At-Most-Once Crash Recovery
 
 Before decrypting, reserving, signing, or dispatching, the scheduler atomically claims the turn. This is done via a compare-and-swap (CAS) `UPDATE` query that transitions the session's `enqueue_state` from `enqueued` to `running`. Only the winner of this CAS proceeds.
@@ -59,5 +67,5 @@ These tests prove that:
 2. Duplicate delivery attempts are blocked by the claim CAS, billing exactly once.
 3. ObserveOnly sessions write priced rows but emit no `LimitDecision`.
 4. Saturated event bus channels don't block durable accounting or direct reconciliation.
-5. Disabling keepalive mid-cycle refunds the reservation and finalizes the orphan sequence cleanly.
+5. Disabling or clearing keepalive before dispatch cancels the queued turn without an upstream call. After a completed `CacheHit` or `CacheMiss`, it preserves the event, turn, cost, and exactly-once quota reconciliation, then cancels without rescheduling. `Error` and `UnsupportedProvider` outcomes retain the reservation refund.
 6. Stale running sessions are reclaimed to terminal (`Stale`) by the housekeeper without re-dispatching.

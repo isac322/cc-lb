@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cc_lb_storage_api::cache_keepalive_job_key;
 
 use super::keepalive_support::harness::{
-    Backend, ClockMode, Harness, HarnessOptions, KeepaliveOptions, request_body,
+    Backend, ClockMode, Harness, HarnessOptions, JobTiming, KeepaliveOptions, request_body,
 };
 
 const IDLE_AFTER_WORKER_START: Duration = Duration::from_secs(45);
@@ -29,6 +29,21 @@ fn options(backend: Backend) -> HarnessOptions {
             ..KeepaliveOptions::default()
         },
     }
+}
+
+async fn first_job_timing(harness: &Harness, session_key_hash: &str) -> JobTiming {
+    // The live worker can finish generation one before its session is observed.
+    // Its exact job retains the claim timestamps across session rescheduling.
+    let job_key = cache_keepalive_job_key(session_key_hash, 1);
+    harness
+        .wait_for_job_locked(&job_key, JOB_LOCK_WAIT)
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "cache keepalive job was not locked within {JOB_LOCK_WAIT:?}; \
+                 lock_at is NULL at the deadline for {job_key}"
+            )
+        })
 }
 
 async fn run_wall_clock(backend: Backend, lock_delay_bound_secs: i64) {
@@ -101,20 +116,9 @@ async fn run_wall_clock(backend: Backend, lock_delay_bound_secs: i64) {
         .await;
     assert_eq!(live["stop_reason"], "tool_use");
     let session_key_hash = harness.session_key_hash(SESSION_ID, None);
-    harness
-        .wait_for_enqueued_generation(&session_key_hash, 1)
-        .await;
-    let job_key = cache_keepalive_job_key(&session_key_hash, 1);
-
     // Measure scheduler latency independently of upstream request validation.
     // If the worker never claims the job, this is the #987 failure signal.
-    let timing = harness.wait_for_job_locked(&job_key, JOB_LOCK_WAIT).await;
-    let timing = timing.unwrap_or_else(|| {
-        panic!(
-            "cache keepalive job was not locked within {JOB_LOCK_WAIT:?}; \
-             lock_at is NULL at the deadline for {job_key}"
-        )
-    });
+    let timing = first_job_timing(&harness, &session_key_hash).await;
     let run_at = timing.run_at.expect("cache keepalive job has run_at");
     let lock_at = timing
         .lock_at
@@ -181,4 +185,76 @@ async fn d2_sqlite_wall_clock_scheduler_dispatches_before_expiry() {
 #[tokio::test]
 async fn d1_postgres_wall_clock_scheduler_claims_near_run_at() {
     run_wall_clock(Backend::Postgres, 2).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn late_observer_reads_first_job_after_session_generation_advances() {
+    use super::keepalive_support::harness::DueJob;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after Unix epoch")
+        .as_secs();
+    let harness = Harness::with_options(HarnessOptions {
+        clock: ClockMode::Test {
+            now_secs: now + 86_400,
+        },
+        ..HarnessOptions::default()
+    })
+    .await
+    .expect("late-observer harness");
+    let live = harness
+        .post(
+            request_body(100_000, "late-observer", 90_000, "bash", "tool_use", false),
+            SESSION_ID,
+            None,
+        )
+        .await;
+    assert_eq!(live["stop_reason"], "tool_use");
+    let session_key_hash = harness.session_key_hash(SESSION_ID, None);
+    harness
+        .wait_for_enqueued_generation(&session_key_hash, 1)
+        .await;
+    harness
+        .advance_and_dispatch_due(
+            Duration::from_secs(270),
+            &[DueJob {
+                session_key_hash: &session_key_hash,
+                generation: 1,
+                mock_prefix: Some("late-observer"),
+            }],
+        )
+        .await;
+    assert_eq!(
+        harness
+            .wait_for_latest_enqueued_generation(&session_key_hash, JOB_LOCK_WAIT)
+            .await,
+        Some(2)
+    );
+    let next = harness
+        .read_job_timing(&cache_keepalive_job_key(&session_key_hash, 2))
+        .await
+        .expect("generation two job exists");
+    let real_now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after Unix epoch")
+        .as_secs();
+    assert!(
+        next.run_at
+            .is_some_and(|run_at| run_at > i64::try_from(real_now).expect("timestamp fits i64")),
+        "only generation one is released to the live scheduler"
+    );
+    assert!(next.lock_at.is_none(), "generation two remains unclaimed");
+
+    let first = first_job_timing(&harness, &session_key_hash).await;
+    assert_eq!(
+        first.run_at,
+        Some(0),
+        "observe the released generation-one job"
+    );
+    assert!(
+        first.lock_at.is_some(),
+        "retain its historical worker claim"
+    );
 }
