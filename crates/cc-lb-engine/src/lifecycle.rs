@@ -4476,13 +4476,12 @@ impl Lifecycle {
                         }
                         return Ok(response);
                     }
-                    return Ok(self.relay_unauthorized(
-                        unauthorized,
-                        signer.as_ref(),
-                        active_limit.as_ref(),
-                        observer.as_ref(),
-                        &attempt_timings,
-                    ));
+                    break (
+                        response_from_collected(unauthorized),
+                        dispatch_started,
+                        dispatch_unix_secs,
+                        signer,
+                    );
                 };
                 announce_attempt(
                     observer.as_ref(),
@@ -5346,59 +5345,6 @@ impl Lifecycle {
         response
     }
 
-    /// Terminal relay of an upstream 401 whose signer declined to refresh and
-    /// that is not failed over.
-    fn relay_unauthorized(
-        &self,
-        unauthorized: CollectedResponse,
-        signer: &dyn Signer,
-        active_limit: Option<&ActiveLimit>,
-        observer: Option<&LifecycleContext>,
-        attempt_timings: &AttemptTimings,
-    ) -> Response<Body> {
-        if let (Some(o), Some(body)) = (observer, unauthorized.body.as_deref())
-            && let Ok(Some(error_body)) = decode_full_body(
-                &unauthorized.headers,
-                body,
-                decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
-            )
-            && !error_body.is_empty()
-        {
-            let (error_type, error_message) = usage_parser::observe_http_error_body(&error_body)
-                .map(|error| error.into_parts(signer))
-                .unwrap_or_default();
-            o.emit_lifecycle(
-                cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
-                    event_id: o.event_id().to_owned(),
-                    error_type: error_type.unwrap_or_default(),
-                    error_message: match error_message {
-                        Some(message) => message,
-                        None => scrubbed_upstream_error_body(signer, &error_body, false),
-                    },
-                    retry_after: None,
-                },
-            );
-        }
-        let mut response = response_from_collected(unauthorized);
-        self.attach_limit_headers(&mut response, active_limit);
-        let status = response.status();
-        if let Some(o) = observer {
-            o.set_attempt_timings(
-                attempt_timings.shape_ms,
-                attempt_timings.sign_ms,
-                attempt_timings.upstream_ttfb_ms,
-            );
-            let code = if status.is_client_error() {
-                UpstreamErrorCode::Upstream4xx
-            } else {
-                UpstreamErrorCode::Upstream5xx
-            };
-            o.set_upstream_error(status, code);
-            o.finish();
-        }
-        response
-    }
-
     fn emit_routing_failure_event(
         &self,
         observer: Option<&LifecycleContext>,
@@ -5838,7 +5784,8 @@ impl Lifecycle {
                 &event_ctx.upstream_name,
                 event_ctx.requested_model.as_deref(),
             ),
-        );
+        )
+        .with_response_accounting_guard(response_accounting_guard);
         let completion_observer = Arc::clone(&self.completion_observer);
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
         let stream_body_io_timing = response_body_timing.clone();
@@ -5897,7 +5844,6 @@ impl Lifecycle {
             let mut stream_upstream_error_frame_emitted = false;
             let mut downstream_sse_boundary = SseDownstreamBoundaryTracker::default();
             let mut stream_provider_error_seen = false;
-            let mut stream_abnormal_stop: Option<usage_parser::AbnormalStop> = None;
             let mut last_partial_at: Option<Instant> = None;
             let mut last_partial_output_tokens: u64 = 0;
             let mut upstream_error_body: Vec<u8> = Vec::new();
@@ -6194,14 +6140,13 @@ impl Lifecycle {
                                         }
                                     }
                                 }
-                                if stream_abnormal_stop.is_none()
+                                if !downstream_drop_guard.has_abnormal_stop()
                                     && let Some(stop) =
                                         usage_parser::detect_abnormal_stop(&parsed_event)
                                 {
-                                    // Latch only: the upstream-error observation is emitted
-                                    // at finalization, where it is known whether a later
-                                    // provider/proxy error wins the terminal classification.
-                                    stream_abnormal_stop = Some(stop);
+                                    let error_message = abnormal_stop_error_message(&stop);
+                                    downstream_drop_guard
+                                        .mark_abnormal_stop(stop.stop_reason, error_message);
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 let event_name = parsed_event.event_name();
@@ -7019,14 +6964,13 @@ impl Lifecycle {
                                     }
                                 }
                             }
-                            if stream_abnormal_stop.is_none()
+                            if !downstream_drop_guard.has_abnormal_stop()
                                 && let Some(stop) =
                                     usage_parser::detect_abnormal_stop(&parsed_event)
                             {
-                                // Latch only: the upstream-error observation is emitted
-                                // at finalization, where it is known whether a later
-                                // provider/proxy error wins the terminal classification.
-                                stream_abnormal_stop = Some(stop);
+                                let error_message = abnormal_stop_error_message(&stop);
+                                downstream_drop_guard
+                                    .mark_abnormal_stop(stop.stop_reason, error_message);
                             }
                             observe_sse_terminal_event(
                                 response_affinity_context.capability,
@@ -7397,7 +7341,7 @@ impl Lifecycle {
                     == Some("message_stop")
                 && !semantic_message_stop_seen
                 && sse_buffer_is_blank(&buffer)
-                && stream_abnormal_stop.is_none()
+                && !downstream_drop_guard.has_abnormal_stop()
                 && !stream_provider_error_seen
                 && stream_upstream_error.is_none()
                 && stream_transform_error.is_none()
@@ -7490,13 +7434,9 @@ impl Lifecycle {
                 }
                 _ => None,
             };
-            // The stream reached its terminal outcome: hand the reservation to the
-            // reconcile subscriber, which reconciles a measured success and refunds
-            // upstream/affinity/transform errors on `RequestTerminated`. A client
-            // cancel drops the stream before this point and refunds via RAII.
-            if let Some(response_accounting_guard) = response_accounting_guard {
-                response_accounting_guard.forget();
-            }
+            // Final outcomes are settled by the reconcile subscriber. A
+            // pre-terminal client cancellation still refunds through RAII.
+            downstream_drop_guard.handoff_response_accounting();
             if stream_provider_error_seen {
                 downstream_drop_guard.mark_upstream_error(
                     StreamTerminationCause::ProviderError,
@@ -7624,24 +7564,9 @@ impl Lifecycle {
                     o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                 } else if stream_transform_error.is_some() && !upstream_error_status {
                     o.set_upstream_error(StatusCode::OK, UpstreamErrorCode::StreamError);
-                } else if let Some(stop) = stream_abnormal_stop.as_ref()
-                    && !upstream_error_status
-                    && !stream_provider_error_seen
+                } else if !upstream_error_status
+                    && !downstream_drop_guard.record_abnormal_stop(o)
                 {
-                    o.emit_lifecycle(
-                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
-                            event_id: o.event_id().to_owned(),
-                            error_type: stop.stop_reason.clone(),
-                            error_message: abnormal_stop_error_message(stop),
-                            retry_after: None,
-                        },
-                    );
-                    let code = match stop.stop_reason.as_str() {
-                        "refusal" => UpstreamErrorCode::Refusal,
-                        _ => UpstreamErrorCode::ContextWindowExceeded,
-                    };
-                    o.set_upstream_error(status, code);
-                } else if !upstream_error_status {
                     o.set_success_status(status);
                 }
                 let finalize_ms = duration_to_ms(response_body_completed_at.elapsed());

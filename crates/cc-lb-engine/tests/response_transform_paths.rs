@@ -385,6 +385,75 @@ async fn buffered_transform_rewrites_upstream_error_response() {
     assert!(body_text.contains(r#""name":"bash""#));
     assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
 }
+
+#[tokio::test]
+async fn terminal_unauthorized_without_refresh_uses_buffered_transform() {
+    for stream in [false, true] {
+        let transform = Arc::new(BufferedToolNameTransform::default());
+        let plaintext = Bytes::from_static(
+            br#"{"error":{"type":"authentication_error","message":"failed","name":"Bash"}}"#,
+        );
+        let lifecycle = lifecycle_with_options(
+            Some(transform.clone()),
+            None,
+            Arc::new(FixedDispatch {
+                status: StatusCode::UNAUTHORIZED,
+                headers: json_headers(plaintext.len(), false),
+                body: plaintext.clone(),
+            }),
+            LifecycleConfig::default(),
+            default_upstream_record(),
+            false,
+            Vec::new(),
+        );
+        let response = handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from(format!(
+                r#"{{"model":"claude-test","messages":[],"stream":{stream}}}"#,
+            ))),
+        )
+        .await
+        .expect("terminal upstream 401 is handled");
+        let (status, _headers, body) = collect_body(response).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body,
+            replace_bytes(&plaintext, br#""name":"Bash""#, br#""name":"bash""#)
+        );
+        assert_eq!(transform.seen_bodies(), vec![plaintext]);
+    }
+}
+
+#[tokio::test]
+async fn terminal_unauthorized_generated_body_skips_transform_when_refresh_declined() {
+    let transform = Arc::new(UnchangedBufferedTransform::default());
+    let body = Bytes::from(vec![b'x'; 16 * 1024]);
+    let lifecycle = lifecycle_with_options(
+        Some(transform.clone()),
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::UNAUTHORIZED,
+            headers: json_headers(body.len(), false),
+            body,
+        }),
+        LifecycleConfig::default(),
+        default_upstream_record(),
+        false,
+        Vec::new(),
+    );
+    let response = handle_authenticated(
+        &lifecycle,
+        messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )),
+    )
+    .await
+    .expect("generated 401 collection error is handled");
+    let (status, _headers, body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(transform.seen_bodies().is_empty());
+    assert!(String::from_utf8_lossy(&body).contains("upstream response body could not be read"));
+}
 #[tokio::test]
 async fn stream_request_json_errors_use_buffered_transform() {
     for limited in [false, true] {
@@ -2925,6 +2994,26 @@ fn lifecycle_with_record_and_config(
     config: LifecycleConfig,
     record: UpstreamRecord,
 ) -> Lifecycle {
+    lifecycle_with_options(
+        response_transform,
+        sse_transform,
+        dispatcher,
+        config,
+        record,
+        true,
+        Vec::new(),
+    )
+}
+
+fn lifecycle_with_options(
+    response_transform: Option<Arc<dyn ResponseTransformHook>>,
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    config: LifecycleConfig,
+    record: UpstreamRecord,
+    refresh_allowed: bool,
+    limits: Vec<cc_lb_storage_api::principal::Limit>,
+) -> Lifecycle {
     let dialect = Arc::new(ShapeTransformDialect::new(
         response_transform,
         sse_transform,
@@ -2946,7 +3035,7 @@ fn lifecycle_with_record_and_config(
         kind: cc_lb_storage_api::PrincipalKind::Machine,
         allowed_models: vec!["*".to_owned()],
         allowed_upstreams: vec![record.id],
-        default_limits: Vec::new(),
+        default_limits: limits,
         enabled: true,
         deleted_at_unix_secs: None,
         revision: 1,
@@ -2955,10 +3044,11 @@ fn lifecycle_with_record_and_config(
         router_terminal_strategy: Default::default(),
         cache_keepalive: None,
     };
-    let authn = TestAuthn::with_principal_view(
+    let mut authn = TestAuthn::with_principal_view(
         state,
         Arc::new(PrincipalView::from_db(&[principal], chains)),
     );
+    authn.refresh_allowed = refresh_allowed;
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .principal_view(authn.principal_view.clone())
