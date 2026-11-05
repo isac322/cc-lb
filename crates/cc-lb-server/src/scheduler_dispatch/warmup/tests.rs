@@ -7,6 +7,7 @@ use super::scheduling::POST_RESET_GUARD_SECS;
 
 const NOW_UNIX_SECS: i64 = 1_782_000_000;
 const NOW_UNIX_MILLIS: u64 = 1_782_000_000_000;
+const FIVE_HOURS: i64 = 5 * 60 * 60;
 const SEVEN_DAYS: i64 = 7 * 24 * 60 * 60;
 
 #[test]
@@ -268,6 +269,39 @@ fn both_active_targets_skip_until_earliest_reset() {
 }
 
 #[test]
+fn active_five_hour_with_unknown_weekly_target_skips_until_five_hour_reset() {
+    let active_five_hour = quota_snapshot(
+        SubscriptionQuotaWindow::FiveHour,
+        SubscriptionQuotaDataState::Fresh,
+        Some(0.2),
+        Some(SubscriptionQuotaStatus::Allowed),
+        Some(NOW_UNIX_SECS + 2_000),
+    );
+    for weekly in [
+        Some(quota_snapshot_with_observed_at(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Stale,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + SEVEN_DAYS),
+            NOW_UNIX_MILLIS,
+        )),
+        None,
+    ] {
+        let mut snapshots = vec![active_five_hour.clone()];
+        if let Some(weekly) = weekly {
+            snapshots.push(weekly);
+        }
+        assert_eq!(
+            quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+            WarmupQuotaPreflightDecision::ActiveWindow {
+                cycle_key: NOW_UNIX_SECS + 2_000
+            }
+        );
+    }
+}
+
+#[test]
 fn exhausted_weekly_window_skips_until_reset() {
     let snapshots = [
         quota_snapshot(
@@ -321,6 +355,32 @@ fn success_uses_earliest_future_reset_from_response_or_snapshot() {
     assert_eq!(
         next_warmup_evaluation_after_success(&snapshots, &observations, NOW_UNIX_SECS),
         NOW_UNIX_SECS + 1_000
+    );
+}
+
+#[test]
+fn success_with_stale_five_hour_snapshot_uses_short_cadence() {
+    let snapshots = [
+        quota_snapshot_with_observed_at(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Stale,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + FIVE_HOURS),
+            NOW_UNIX_MILLIS - 181_000,
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + SEVEN_DAYS),
+        ),
+    ];
+
+    assert_eq!(
+        next_warmup_evaluation_after_success(&snapshots, &[], NOW_UNIX_SECS),
+        NOW_UNIX_SECS + FIVE_HOURS
     );
 }
 

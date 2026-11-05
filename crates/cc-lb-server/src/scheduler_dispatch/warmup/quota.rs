@@ -63,8 +63,6 @@ pub(super) fn quota_preflight_decision_from_snapshots(
         return WarmupQuotaPreflightDecision::SevenDayQuotaExhausted { cycle_key };
     }
 
-    let mut present_target = false;
-    let mut unknown_target = false;
     let mut earliest_active_reset = None;
 
     for window in target_windows_for_kind() {
@@ -72,19 +70,14 @@ pub(super) fn quota_preflight_decision_from_snapshots(
             .iter()
             .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
         else {
-            unknown_target = true;
             continue;
         };
 
-        // An explicitly absent target is not a target for this account. This is
-        // how weekly-only Claude accounts warm their available 7d window.
-        if snapshot.state == SubscriptionQuotaDataState::Absent {
-            continue;
-        }
-        present_target = true;
-
-        if !quota_snapshot_is_usable(snapshot, now_unix_secs) {
-            unknown_target = true;
+        // Explicitly absent targets and unknown samples cannot invalidate a
+        // known active target. A fresh idle target still requests warm-up.
+        if snapshot.state == SubscriptionQuotaDataState::Absent
+            || !quota_snapshot_is_usable(snapshot, now_unix_secs)
+        {
             continue;
         }
 
@@ -95,16 +88,9 @@ pub(super) fn quota_preflight_decision_from_snapshots(
             Some(earliest_active_reset.map_or(reset, |current: i64| current.min(reset)));
     }
 
-    if unknown_target && earliest_active_reset.is_some() {
-        return WarmupQuotaPreflightDecision::SendWarmup;
-    }
-    if unknown_target || !present_target {
-        WarmupQuotaPreflightDecision::Unknown
-    } else {
-        WarmupQuotaPreflightDecision::ActiveWindow {
-            cycle_key: earliest_active_reset.expect("present target has a reset"),
-        }
-    }
+    earliest_active_reset.map_or(WarmupQuotaPreflightDecision::Unknown, |cycle_key| {
+        WarmupQuotaPreflightDecision::ActiveWindow { cycle_key }
+    })
 }
 
 pub(super) fn next_warmup_evaluation_after_success(
@@ -112,49 +98,52 @@ pub(super) fn next_warmup_evaluation_after_success(
     observations: &[UnifiedQuotaObservation],
     now_unix_secs: i64,
 ) -> i64 {
-    let response_reset = target_windows_for_kind()
-        .iter()
-        .flat_map(|window| {
-            observations
-                .iter()
-                .filter(move |observation| observation.window == *window)
-                .filter_map(|observation| observation.resets_at_unix_secs)
-                .filter_map(|reset| i64::try_from(reset).ok())
-                .filter(|reset| *reset > now_unix_secs)
-        })
-        .min();
+    let mut earliest_reset = None;
+    let mut shortest_present_duration = None;
+    let mut unknown_target = false;
 
-    let snapshot_reset = target_windows_for_kind()
-        .iter()
-        .filter_map(|window| {
-            snapshots
-                .iter()
-                .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
-                .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
-                .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs))
-        })
-        .min();
+    for window in target_windows_for_kind() {
+        let snapshot = snapshots
+            .iter()
+            .find(|snapshot| quota_snapshot_matches_window(snapshot, *window));
+        let response_present = observations
+            .iter()
+            .any(|observation| observation.window == *window);
+        if !response_present
+            && snapshot.is_some_and(|snapshot| snapshot.state == SubscriptionQuotaDataState::Absent)
+        {
+            continue;
+        }
 
-    if let Some(reset) = response_reset.into_iter().chain(snapshot_reset).min() {
-        return reset;
+        let duration = quota_window_duration_secs(*window);
+        shortest_present_duration =
+            Some(shortest_present_duration.map_or(duration, |current: i64| current.min(duration)));
+        let response_reset = observations
+            .iter()
+            .filter(|observation| observation.window == *window)
+            .filter_map(|observation| observation.resets_at_unix_secs)
+            .filter_map(|reset| i64::try_from(reset).ok())
+            .filter(|reset| *reset > now_unix_secs)
+            .min();
+        let snapshot_reset = snapshot
+            .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
+            .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs));
+        match response_reset.into_iter().chain(snapshot_reset).min() {
+            Some(reset) => {
+                earliest_reset =
+                    Some(earliest_reset.map_or(reset, |current: i64| current.min(reset)));
+            }
+            None => unknown_target = true,
+        }
     }
 
-    let shortest_present_duration = target_windows_for_kind()
-        .iter()
-        .filter(|window| {
-            let response_present = observations
-                .iter()
-                .any(|observation| observation.window == **window);
-            let snapshot_present = snapshots
-                .iter()
-                .find(|snapshot| quota_snapshot_matches_window(snapshot, **window))
-                .is_none_or(|snapshot| snapshot.state != SubscriptionQuotaDataState::Absent);
-            response_present || snapshot_present
-        })
-        .map(|window| quota_window_duration_secs(*window))
-        .min()
-        .unwrap_or(FIVE_HOUR_WINDOW_SECS);
-    now_unix_secs.saturating_add(shortest_present_duration)
+    let fallback =
+        now_unix_secs.saturating_add(shortest_present_duration.unwrap_or(FIVE_HOUR_WINDOW_SECS));
+    match earliest_reset {
+        Some(reset) if unknown_target => reset.min(fallback),
+        Some(reset) => reset,
+        None => fallback,
+    }
 }
 
 fn target_windows_for_kind() -> &'static [SubscriptionQuotaWindow] {

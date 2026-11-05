@@ -87,7 +87,9 @@ The warm-up system logs its activity using tracing events. All events use the `w
 
 Warm-up targets the five-hour and seven-day windows independently.
 
-If a target window is explicitly absent, warm-up ignores it. If any present target is idle or unknown, the scheduler sends a warm-up request. If every present target is active, it skips the request and schedules the next evaluation at the earliest target reset, with the existing post-reset guard and stable jitter. An account with no present targets remains unknown and follows the normal fallback evaluation cadence.
+Warm-up ignores explicitly absent targets. It sends a request when any fresh target is idle. Otherwise, a known active target skips the request until the earliest known reset, even when another target is stale or missing. If no target is known active, unknown samples allow the normal warm-up request. All scheduled evaluations retain the post-reset guard and stable jitter.
+
+After a successful request, the scheduler uses the earliest future target reset reported by the response or a fresh snapshot. If a present target still has no known future reset, the next evaluation is also bounded by the shortest present window's normal cadence: five hours for accounts with a five-hour target, or seven days for weekly-only accounts.
 
 If the local usage cache or a warm-up response shows a fresh seven-day window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
 
