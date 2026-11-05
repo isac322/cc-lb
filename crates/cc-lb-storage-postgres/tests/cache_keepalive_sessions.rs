@@ -45,6 +45,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     concurrent_replace_from_real_request_bumps_each_generation(&storage).await?;
     concurrent_hit_reschedule_allows_only_one_generation_cas(&storage).await?;
     concurrent_claim_allows_exactly_one_enqueued_generation_winner(&storage).await?;
+    pending_claim_requires_payload_and_mark_cannot_overwrite_running(&storage).await?;
     ticketed_cancel_retires_generation_after_synthetic_refresh(&storage).await?;
     newer_ticket_replaces_terminal_generation_before_terminal_write_timestamp(&storage).await?;
     completion_tickets_preserve_active_anchor_and_legacy_timestamp_guards(&storage).await?;
@@ -538,6 +539,53 @@ async fn concurrent_hit_reschedule_allows_only_one_generation_cas(
         .expect("row exists");
     assert_eq!(final_record.generation, 2);
     assert_eq!(final_record.refresh_count, 1);
+    Ok(())
+}
+
+async fn pending_claim_requires_payload_and_mark_cannot_overwrite_running(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let session_key_hash = "pending-claim-payload";
+    let record = storage
+        .replace_from_real_request(&replace_request(session_key_hash, b"", 100))
+        .await?;
+    assert!(
+        !storage
+            .claim_cache_keepalive_turn(session_key_hash, record.generation, 101)
+            .await?
+    );
+    assert!(
+        storage
+            .update_cache_keepalive_payload(
+                session_key_hash,
+                record.generation,
+                b"ciphertext",
+                102,
+            )
+            .await?
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn(session_key_hash, record.generation, 103)
+            .await?
+    );
+    let claimed = storage
+        .get_cache_keepalive_session(session_key_hash)
+        .await?
+        .expect("running session exists");
+    assert_eq!(claimed.enqueue_state, CacheKeepaliveEnqueueState::Running);
+    assert_eq!(claimed.running_since_unix_secs, Some(103));
+    assert!(
+        !storage
+            .mark_cache_keepalive_enqueued(session_key_hash, record.generation, 104)
+            .await?
+    );
+    let unchanged = storage
+        .get_cache_keepalive_session(session_key_hash)
+        .await?
+        .expect("running session remains");
+    assert_eq!(unchanged.enqueue_state, CacheKeepaliveEnqueueState::Running);
+    assert_eq!(unchanged.running_since_unix_secs, Some(103));
     Ok(())
 }
 

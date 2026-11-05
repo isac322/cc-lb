@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - Streaming requests that receive non-SSE bodies now run the buffered response transform once over the complete, bounded body; oversized bodies return the existing 502 collection error without invoking the hook, while ordinary JSON responses remain outside the ingress cap.
 - Client closes after Anthropic `message_stop` or OpenAI Responses `response.completed` now finalize streams with observed usage and limit reconciliation instead of 499 cancellations. Abnormal Anthropic stops retain refusal or context-window classification, while upstream and proxy errors keep precedence. OpenAI Responses streams are recognized as SSE when the upstream omits `Content-Type`.
 - Mid-stream `error: null` fields no longer classify OpenAI Responses completion events as provider errors.
+- Cache keep-alive turn claims now accept a published `pending` session once its encrypted payload is stored, preventing a due worker from acknowledging the job `Done` as a no-op before the producer's post-publish `enqueued` mark completes.
 
 ### Security
 

@@ -1904,6 +1904,243 @@ async fn cache_keepalive_revoked_principal_terminalizes_before_dispatch() {
     assert!(requests.is_empty());
 }
 
+#[tokio::test]
+async fn worker_dispatches_published_job_before_producer_marks_enqueued() {
+    use std::panic::AssertUnwindSafe;
+
+    use cc_lb_config::SchedulerConfig;
+    use cc_lb_scheduler::worker::{
+        AdaptiveDispatchFn, AdaptiveJob, Filter, SchedulerCtx, SchedulerPushTask, TaskStatus,
+    };
+    use futures_util::FutureExt as _;
+    use tokio::sync::{Notify, mpsc};
+
+    struct HoldAfterRealPush {
+        backend: crate::scheduler_factory::SchedulerBackend,
+        published: Arc<Notify>,
+        resume: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl CacheKeepaliveTaskPusher for HoldAfterRealPush {
+        async fn push_cache_keepalive_task(
+            &self,
+            task: SchedulerPushTask<AdaptiveJob>,
+        ) -> SchedulerResult<()> {
+            self.backend.push_keepalive_task(task).await?;
+            self.published.notify_one();
+            self.resume.notified().await;
+            Ok(())
+        }
+    }
+
+    let fixture = Fixture::new().await;
+    fixture.http.return_cache_hit_usage(0, 0, 10);
+    let published = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let marked = Arc::new(Notify::new());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(HoldAfterRealPush {
+        backend: fixture.backend.backend.clone(),
+        published: Arc::clone(&published),
+        resume: Arc::clone(&resume),
+    });
+    let enqueuer = fixture.enqueuer(pusher);
+    let dispatch = fixture.dispatch(Arc::new(fixture.backend.backend.clone()));
+    let mut request = fixture.enqueue_request();
+    request.params.delay = Duration::from_secs(1);
+    request.params.max_refreshes = 1;
+    let cancel = CancellationToken::new();
+    let mut handles = Vec::new();
+
+    let result = AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let producer = async {
+                let result = enqueuer.enqueue_cache_keepalive(request).await;
+                marked.notify_one();
+                result
+            };
+            let observer = async {
+                published.notified().await;
+                let before = fixture
+                    .storage
+                    .get_cache_keepalive_session("session-hash")
+                    .await
+                    .expect("read committed pending session")
+                    .expect("published session exists");
+                assert_eq!(before.status, CacheKeepaliveSessionStatus::Active);
+                assert_eq!(before.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+                assert!(!before.encrypted_payload.is_empty());
+                let tasks = fixture
+                    .backend
+                    .backend
+                    .list_keepalive_tasks(&Filter {
+                        status: Some(TaskStatus::Pending),
+                        page: 1,
+                        page_size: Some(10),
+                    })
+                    .await
+                    .expect("read real queue publication");
+                assert_eq!(tasks.len(), 1);
+                assert_eq!(
+                    tasks[0].idempotency_key.as_deref(),
+                    Some(before.current_job_key.as_str())
+                );
+                assert_eq!(tasks[0].run_at_unix_secs, before.run_at_unix_secs);
+                let expected_job = fixture.pending_keepalive_job(before.generation).await;
+                assert_eq!(expected_job.session_key_hash, before.session_key_hash);
+                assert_eq!(expected_job.generation, before.generation);
+                assert_eq!(expected_job.refresh_delay_secs, 1);
+                assert_eq!(expected_job.max_refreshes, 1);
+
+                let (outcome_tx, mut outcome_rx) = mpsc::unbounded_channel();
+                let cron_dispatch = dispatch.clone().cron_dispatch();
+                let adaptive_dispatch: AdaptiveDispatchFn = Arc::new(move |job| {
+                    let dispatch = dispatch.clone();
+                    let outcome_tx = outcome_tx.clone();
+                    Box::pin(async move {
+                        let observed_job = match &job {
+                            AdaptiveJob::CacheKeepalive(job) => Some(job.clone()),
+                            _ => None,
+                        };
+                        let dispatched_at = cc_lb_clock::unix_secs(SystemTime::now());
+                        let result = dispatch.dispatch_entity(job).await;
+                        if let (Some(job), Ok(outcome)) = (observed_job, &result) {
+                            let _ = outcome_tx.send((job, outcome.clone(), dispatched_at));
+                        }
+                        result
+                    })
+                });
+                handles = fixture
+                    .backend
+                    .backend
+                    .spawn(
+                        SchedulerCtx::new(
+                            SchedulerConfig::default(),
+                            adaptive_dispatch,
+                            cron_dispatch,
+                            Arc::new(SystemClock),
+                        ),
+                        cancel.clone(),
+                    )
+                    .await
+                    .expect("spawn actual SQLite scheduler consumers");
+                let (job, outcome, dispatched_at) = outcome_rx
+                    .recv()
+                    .await
+                    .expect("actual worker reports its dispatcher result");
+                assert_eq!(job, expected_job);
+                assert!(
+                    before.run_at_unix_secs <= dispatched_at,
+                    "worker waited until due"
+                );
+                assert!(
+                    dispatched_at < before.expires_at_unix_secs,
+                    "session was live"
+                );
+                assert_eq!(outcome, JobOutcome::Done);
+                assert_eq!(
+                    fixture.http.requests.lock().expect("requests lock").len(),
+                    1
+                );
+
+                let done = loop {
+                    let tasks = fixture
+                        .backend
+                        .backend
+                        .list_keepalive_tasks(&Filter {
+                            status: Some(TaskStatus::Done),
+                            page: 1,
+                            page_size: Some(10),
+                        })
+                        .await
+                        .expect("observe actual queue acknowledgment");
+                    if let Some(task) = tasks.into_iter().find(|task| {
+                        task.idempotency_key.as_deref() == Some(before.current_job_key.as_str())
+                    }) {
+                        break task;
+                    }
+                    tokio::task::yield_now().await;
+                };
+                let actual_job = match done.args {
+                    AdaptiveJob::CacheKeepalive(actual) => actual,
+                    other => panic!("unexpected acknowledged job: {other:?}"),
+                };
+                assert_eq!(actual_job, expected_job);
+                let terminal = fixture
+                    .storage
+                    .get_cache_keepalive_session("session-hash")
+                    .await
+                    .expect("read terminal session before producer resumes")
+                    .expect("terminal session exists");
+                assert_eq!(terminal.status, CacheKeepaliveSessionStatus::Terminal);
+                assert_eq!(
+                    terminal.terminal_reason,
+                    Some(CacheKeepaliveTerminalReason::MaxRefreshes)
+                );
+                assert_eq!(terminal.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+
+                resume.notify_one();
+                marked.notified().await;
+                let after = fixture
+                    .storage
+                    .get_cache_keepalive_session("session-hash")
+                    .await
+                    .expect("read session after producer resumes")
+                    .expect("session remains");
+                assert_eq!(after.status, CacheKeepaliveSessionStatus::Terminal);
+                assert_eq!(after.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+                assert_eq!(
+                    after.terminal_reason,
+                    Some(CacheKeepaliveTerminalReason::MaxRefreshes)
+                );
+                assert_eq!(after.generation, before.generation);
+                assert_eq!(
+                    fixture.http.requests.lock().expect("requests lock").len(),
+                    1
+                );
+                let pending = fixture
+                    .backend
+                    .backend
+                    .list_keepalive_tasks(&Filter {
+                        status: Some(TaskStatus::Pending),
+                        page: 1,
+                        page_size: Some(10),
+                    })
+                    .await
+                    .expect("read pending jobs after actual ACK");
+                assert!(pending.is_empty(), "no queued retry remains after ACK");
+            };
+            let (enqueue_result, ()) = tokio::join!(producer, observer);
+            enqueue_result.expect("producer completes after worker terminalization");
+        })
+        .await
+        .expect("real worker completes the controlled schedule within ten seconds");
+    })
+    .catch_unwind()
+    .await;
+
+    cancel.cancel();
+    let mut shutdown_failed = false;
+    for mut handle in handles {
+        match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => shutdown_failed = true,
+            Err(_) => {
+                handle.abort();
+                let _ = handle.await;
+                shutdown_failed = true;
+            }
+        }
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        !shutdown_failed,
+        "all owned scheduler workers must join cleanly"
+    );
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_idle_keepalive_worker_renews_session_before_expiry() {

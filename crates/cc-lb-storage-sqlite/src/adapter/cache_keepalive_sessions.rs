@@ -303,7 +303,8 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions
              SET enqueue_state = 'running', running_since_unix_secs = ?, updated_at = ?
-             WHERE session_key_hash = ? AND generation = ? AND status = 'active' AND enqueue_state = 'enqueued'",
+             WHERE session_key_hash = ? AND generation = ? AND status = 'active'
+               AND (enqueue_state = 'enqueued' OR (enqueue_state = 'pending' AND length(encrypted_payload) > 0))",
         )
         .bind(now_unix_secs)
         .bind(now_unix_secs)
