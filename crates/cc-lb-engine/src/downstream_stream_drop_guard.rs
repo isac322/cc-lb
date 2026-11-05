@@ -5,10 +5,11 @@ use http::StatusCode;
 use metrics::SharedString;
 use tracing::Span;
 
+use crate::attempt_rail::ResponseAccountingGuard;
 use crate::body_io_timing::BodyIoTiming;
 use crate::terminal_observer::{
     LifecycleContext, StreamErrorClassification, StreamTerminationCause, StreamTerminationOutcome,
-    numeric_attribute,
+    UpstreamErrorCode, numeric_attribute,
 };
 
 const CLIENT_CLOSED_STATUS: u16 = 499;
@@ -36,6 +37,9 @@ pub(crate) struct DownstreamStreamDropGuard {
     span: Span,
     initial_upstream_status: StatusCode,
     pending_terminal: Option<(StreamTerminationOutcome, StreamTerminationCause)>,
+    semantic_completed: bool,
+    response_accounting_guard: Option<ResponseAccountingGuard>,
+    abnormal_stop: Option<(String, String)>,
     finalized: bool,
     relay_start: Instant,
     body_io_timing: BodyIoTiming,
@@ -59,11 +63,63 @@ impl DownstreamStreamDropGuard {
             span,
             pending_terminal: initial_upstream_error
                 .map(|cause| (StreamTerminationOutcome::UpstreamError, cause)),
+            semantic_completed: false,
+            response_accounting_guard: None,
+            abnormal_stop: None,
             finalized: false,
             relay_start,
             body_io_timing,
             attribution,
         }
+    }
+
+    pub(crate) fn with_response_accounting_guard(
+        mut self,
+        guard: Option<ResponseAccountingGuard>,
+    ) -> Self {
+        self.response_accounting_guard = guard;
+        self
+    }
+
+    pub(crate) fn handoff_response_accounting(&mut self) {
+        if let Some(guard) = self.response_accounting_guard.take() {
+            guard.forget();
+        }
+    }
+
+    pub(crate) fn has_abnormal_stop(&self) -> bool {
+        self.abnormal_stop.is_some()
+    }
+
+    pub(crate) fn mark_abnormal_stop(&mut self, error_type: String, error_message: String) {
+        self.abnormal_stop
+            .get_or_insert((error_type, error_message));
+    }
+
+    /// Apply only after the terminal outcome is known, so provider/proxy
+    /// failures supersede a previously observed abnormal stop.
+    pub(crate) fn record_abnormal_stop(&mut self, observer: &LifecycleContext) -> bool {
+        if self.pending_terminal.is_some() {
+            return false;
+        }
+        let Some((error_type, error_message)) = self.abnormal_stop.take() else {
+            return false;
+        };
+        let code = if error_type == "refusal" {
+            UpstreamErrorCode::Refusal
+        } else {
+            UpstreamErrorCode::ContextWindowExceeded
+        };
+        observer.emit_lifecycle(
+            cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                event_id: observer.event_id().to_owned(),
+                error_type,
+                error_message,
+                retry_after: None,
+            },
+        );
+        observer.set_upstream_error(self.initial_upstream_status, code);
+        true
     }
 
     pub(crate) fn mark_upstream_error(
@@ -80,6 +136,12 @@ impl DownstreamStreamDropGuard {
 
     pub(crate) fn mark_proxy_error(&mut self, cause: StreamTerminationCause) {
         self.mark_error(StreamTerminationOutcome::ProxyError, cause, None);
+    }
+    /// Record that the downstream received the provider's semantic terminal
+    /// event. A later downstream close is successful unless an upstream or
+    /// proxy error was recorded first.
+    pub(crate) fn mark_semantic_completion(&mut self) {
+        self.semantic_completed = true;
     }
 
     pub(crate) fn detach_lifecycle_observer(&mut self) {
@@ -198,9 +260,31 @@ impl Drop for DownstreamStreamDropGuard {
             if let Some(observer) = self.observer.as_ref() {
                 observer.set_upstream_body_ms_if_absent(response_body_ms);
                 observer.set_finalize_ms(finalize_ms);
+                if outcome == StreamTerminationOutcome::Completed {
+                    observer.finish();
+                }
             }
             self.record_response_timings(response_body_ms, finalize_ms);
             self.record_terminal(outcome, cause);
+            return;
+        }
+        if self.semantic_completed {
+            // Leave the reservation alive before RequestTerminated is
+            // published; the subscriber reconciles success or refunds an
+            // abnormal stop. Pre-terminal cancellation retains RAII refund.
+            self.handoff_response_accounting();
+            let finalize_ms = duration_to_ms(cancellation_at.elapsed());
+            if let Some(observer) = self.observer.take() {
+                self.record_abnormal_stop(&observer);
+                observer.set_upstream_body_ms_if_absent(response_body_ms);
+                observer.set_finalize_ms(finalize_ms);
+                observer.finish();
+            }
+            self.record_response_timings(response_body_ms, finalize_ms);
+            self.record_terminal(
+                StreamTerminationOutcome::Completed,
+                StreamTerminationCause::None,
+            );
             return;
         }
         if let Some(observer) = self.observer.take()
