@@ -1,6 +1,7 @@
 //! Loopback strict Anthropic Messages API mock used by keepalive scenarios.
 
 use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -13,10 +14,12 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing::post};
+use bytes::Bytes;
 use cc_lb_clock::{ClockHandle, unix_secs};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -51,6 +54,38 @@ pub enum RenewalFailure {
     Hang,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyPause {
+    Ttfb,
+    Streaming,
+}
+
+struct GatedProxy {
+    pause: ProxyPause,
+    reached: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+pub struct ProxyGate {
+    reached: oneshot::Receiver<()>,
+    release: oneshot::Sender<()>,
+}
+
+impl ProxyGate {
+    pub async fn wait_until_paused(&mut self) {
+        tokio::time::timeout(Duration::from_secs(20), &mut self.reached)
+            .await
+            .expect("real upstream request must reach its response gate")
+            .expect("real upstream response gate must acknowledge arrival");
+    }
+
+    pub fn release(self) {
+        self.release
+            .send(())
+            .expect("release real upstream response");
+    }
+}
+
 #[derive(Clone)]
 struct CacheEntry {
     last_access_ts: u64,
@@ -64,6 +99,7 @@ struct MockState {
     events: Arc<Mutex<Vec<MockEvent>>>,
     failures: Arc<Mutex<VecDeque<RenewalFailure>>>,
     next_renewal_response: Arc<Mutex<Option<Value>>>,
+    next_proxy_gate: Arc<Mutex<Option<GatedProxy>>>,
     notify: Arc<Notify>,
 }
 
@@ -83,6 +119,7 @@ impl MockAnthropic {
             events: Arc::new(Mutex::new(Vec::new())),
             failures: Arc::new(Mutex::new(VecDeque::new())),
             next_renewal_response: Arc::new(Mutex::new(None)),
+            next_proxy_gate: Arc::new(Mutex::new(None)),
             notify: Arc::new(Notify::new()),
         };
         let router = Router::new()
@@ -121,6 +158,21 @@ impl MockAnthropic {
     }
     pub fn respond_to_next_renewal(&self, body: Value) {
         *lock(&self.state.next_renewal_response) = Some(body);
+    }
+    pub fn pause_next_proxy(&self, pause: ProxyPause) -> ProxyGate {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let mut slot = lock(&self.state.next_proxy_gate);
+        assert!(slot.is_none(), "only one real response gate may be armed");
+        *slot = Some(GatedProxy {
+            pause,
+            reached: reached_tx,
+            release: release_rx,
+        });
+        ProxyGate {
+            reached: reached_rx,
+            release: release_tx,
+        }
     }
     pub fn events(&self) -> Vec<MockEvent> {
         lock(&self.state.events).clone()
@@ -267,20 +319,22 @@ async fn messages(State(state): State<MockState>, request: Request<Body>) -> Res
     let keys = cache_keys(&value);
     let deepest = keys.last().cloned().unwrap_or_else(|| cache_key(&value));
     let breakpoint_ttls = breakpoint_ttls(&value);
-    let mut cache = lock(&state.cache);
-    let hit = cache
-        .get(&deepest)
-        .is_some_and(|entry| now < entry.last_access_ts.saturating_add(entry.ttl));
-    for (index, key) in keys.iter().enumerate() {
-        cache.insert(
-            key.clone(),
-            CacheEntry {
-                last_access_ts: now,
-                ttl: breakpoint_ttls.get(index).copied().unwrap_or(CACHE_TTL_5M),
-            },
-        );
-    }
-    drop(cache);
+    let hit = {
+        let mut cache = lock(&state.cache);
+        let hit = cache
+            .get(&deepest)
+            .is_some_and(|entry| now < entry.last_access_ts.saturating_add(entry.ttl));
+        for (index, key) in keys.iter().enumerate() {
+            cache.insert(
+                key.clone(),
+                CacheEntry {
+                    last_access_ts: now,
+                    ttl: breakpoint_ttls.get(index).copied().unwrap_or(CACHE_TTL_5M),
+                },
+            );
+        }
+        hit
+    };
     let cached_tokens = prefix_tokens(&value);
     let event = MockEvent {
         kind,
@@ -301,6 +355,23 @@ async fn messages(State(state): State<MockState>, request: Request<Body>) -> Res
         let body = lock(&state.next_renewal_response).take();
         if let Some(body) = body {
             return (StatusCode::OK, Json(body)).into_response();
+        }
+    }
+    let gate = if synthetic {
+        None
+    } else {
+        lock(&state.next_proxy_gate).take()
+    };
+    if let Some(gate) = gate {
+        match gate.pause {
+            ProxyPause::Ttfb => {
+                let _ = gate.reached.send(());
+                let _ = gate.release.await;
+            }
+            ProxyPause::Streaming => {
+                assert_eq!(value["stream"], true, "streaming gate requires SSE");
+                return gated_stream(response_body(&value, &model, now, hit, cached_tokens), gate);
+            }
         }
     }
     response(&value, &model, now, hit, cached_tokens)
@@ -350,7 +421,7 @@ fn invalid(status: StatusCode, message: impl Into<String>) -> Response<Body> {
     (status, Json(invalid_request_body(message))).into_response()
 }
 
-fn response(value: &Value, model: &str, now: u64, hit: bool, cached_tokens: u64) -> Response<Body> {
+fn response_body(value: &Value, model: &str, now: u64, hit: bool, cached_tokens: u64) -> Value {
     let tail = value
         .get("messages")
         .and_then(Value::as_array)
@@ -370,7 +441,7 @@ fn response(value: &Value, model: &str, now: u64, hit: bool, cached_tokens: u64)
     } else {
         vec![json!({"type":"tool_use","id":format!("tool-{now}"),"name":tool,"input":{}})]
     };
-    let body = json!({
+    json!({
         "id": format!("msg-{now}"),
         "type": "message",
         "role": "assistant",
@@ -384,8 +455,49 @@ fn response(value: &Value, model: &str, now: u64, hit: bool, cached_tokens: u64)
             "cache_read_input_tokens": if hit { cached_tokens } else { 0 },
             "cache_creation_input_tokens": if hit { 0 } else { cached_tokens },
         },
+    })
+}
+
+fn response(value: &Value, model: &str, now: u64, hit: bool, cached_tokens: u64) -> Response<Body> {
+    (
+        StatusCode::OK,
+        Json(response_body(value, model, now, hit, cached_tokens)),
+    )
+        .into_response()
+}
+
+fn gated_stream(body: Value, gate: GatedProxy) -> Response<Body> {
+    let mut message = body.clone();
+    message["content"] = json!([]);
+    message["stop_reason"] = Value::Null;
+    message["usage"]["output_tokens"] = json!(0);
+    let mut tool = body["content"][0].clone();
+    tool["input"] = json!({});
+    let prefix = format!(
+        "event: message_start\ndata: {}\n\nevent: content_block_start\ndata: {}\n\n",
+        json!({"type": "message_start", "message": message}),
+        json!({"type": "content_block_start", "index": 0, "content_block": tool}),
+    );
+    let suffix = format!(
+        "event: content_block_delta\ndata: {}\n\nevent: content_block_stop\ndata: {}\n\nevent: message_delta\ndata: {}\n\nevent: message_stop\ndata: {}\n\n",
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "message_delta", "delta": {"stop_reason": body["stop_reason"], "stop_sequence": null}, "usage": {"output_tokens": 1}}),
+        json!({"type": "message_stop"}),
+    );
+    let prefix =
+        futures_util::stream::once(async move { Ok::<_, Infallible>(Bytes::from(prefix)) });
+    let suffix = futures_util::stream::once(async move {
+        let _ = gate.reached.send(());
+        let _ = gate.release.await;
+        Ok::<_, Infallible>(Bytes::from(suffix))
     });
-    (StatusCode::OK, Json(body)).into_response()
+    (
+        StatusCode::OK,
+        [("content-type", "text/event-stream")],
+        Body::from_stream(prefix.chain(suffix)),
+    )
+        .into_response()
 }
 
 fn breakpoint_ttls(value: &Value) -> Vec<u64> {

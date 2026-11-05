@@ -11,10 +11,15 @@ use cc_lb_control::api_keys::principal_view::{
 };
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_domain::{Principal, PrincipalKind, TerminalStrategy, Upstream};
+use cc_lb_engine::cache_keepalive::{
+    CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason,
+};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProxyError, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_storage_api::principal::PrincipalRecord;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -2364,6 +2369,60 @@ async fn sse_transform_failure_before_output_fails_open_raw() {
 }
 
 #[tokio::test]
+async fn sse_transform_fail_open_preserves_keepalive_observation() {
+    let body = Bytes::from_static(
+        b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_failopen_keepalive\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"cache_read_input_tokens\":12000}}}\n\n\
+          event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_failopen\",\"name\":\"Bash\",\"input\":{}}}\n\n\
+          event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n\
+          event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let enqueuer = Arc::new(TransformedQuestionEnqueuer::default());
+    let lifecycle = lifecycle_with_record_config_and_keepalive(
+        None,
+        Some(Arc::new(AlwaysFailingSseTransform)),
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+        LifecycleConfig::default(),
+        default_upstream_record(),
+        Some(CacheKeepaliveConfig {
+            enabled: true,
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
+            classifier: ClassifierConfig::default(),
+        }),
+    )
+    .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
+    let mut request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+    ));
+    request.headers_mut().insert(
+        "x-claude-code-session-id",
+        HeaderValue::from_static("fail-open-keepalive"),
+    );
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("fail-open response");
+    let (_status, _headers, downstream) = collect_body(response).await;
+    assert_eq!(downstream, body);
+
+    tokio::time::timeout(Duration::from_secs(5), enqueuer.completed.notified())
+        .await
+        .expect("keepalive classification completes");
+    assert_eq!(
+        enqueuer.enqueued.lock().expect("enqueue lock").len(),
+        1,
+        "raw SSE fail-open must still produce a keep-alive snapshot"
+    );
+}
+
+#[tokio::test]
 async fn sse_unterminated_final_event_is_upstream_framing_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let body = Bytes::from_static(b"event: message_stop\ndata: {}\n");
@@ -2934,6 +2993,334 @@ async fn sse_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+#[tokio::test]
+async fn buffered_transformed_question_is_user_turn_without_keepalive_enqueue() {
+    transformed_question_classification(false, QuestionTransformMode::Rename).await;
+}
+
+#[tokio::test]
+async fn sse_transformed_question_is_user_turn_without_keepalive_enqueue() {
+    transformed_question_classification(true, QuestionTransformMode::Rename).await;
+}
+
+#[tokio::test]
+async fn sse_dropped_question_is_not_renewed() {
+    transformed_question_classification(true, QuestionTransformMode::Drop).await;
+}
+
+#[tokio::test]
+async fn sse_explicitly_dropped_question_is_not_renewed() {
+    transformed_question_classification(true, QuestionTransformMode::DropVariant).await;
+}
+
+#[tokio::test]
+async fn sse_multi_event_question_is_user_turn_without_keepalive_enqueue() {
+    transformed_question_classification(true, QuestionTransformMode::Multiple).await;
+}
+
+#[tokio::test]
+async fn failed_open_question_transform_preserves_original_body_and_usage() {
+    for streaming in [false, true] {
+        let original = if streaming {
+            Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_failopen\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"cache_read_input_tokens\":12000}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_question\",\"name\":\"Question\",\"input\":{}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )
+        } else {
+            Bytes::from_static(
+                br#"{"type":"message","content":[{"type":"tool_use","id":"tool_question","name":"Question","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":3,"output_tokens":5,"cache_read_input_tokens":12000}}"#,
+            )
+        };
+        let bus = TestLifecycleBus::new();
+        let mut events = bus.bus.subscribe_lifecycle();
+        let lifecycle = lifecycle_with_transforms(
+            if streaming {
+                None
+            } else {
+                Some(Arc::new(FailingBufferedTransform))
+            },
+            if streaming {
+                Some(Arc::new(AlwaysFailingSseTransform))
+            } else {
+                None
+            },
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers: if streaming {
+                    sse_headers()
+                } else {
+                    json_headers(original.len(), false)
+                },
+                body: original.clone(),
+            }),
+        )
+        .with_event_bus(bus.bus_arc());
+        let response = handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-test","messages":[]}"#,
+            )),
+        )
+        .await
+        .expect("fail-open response");
+        let (status, _, downstream) = collect_body(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            downstream, original,
+            "fail-open must preserve every raw upstream byte"
+        );
+        let mut observed_usage = None;
+        let mut completed = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                LifecycleEvent::UsageObserved { usage, .. } => observed_usage = Some(usage),
+                LifecycleEvent::StreamCompleted { result, .. } => {
+                    completed = true;
+                    if streaming {
+                        let success = result.expect("identity SSE fail-open remains successful");
+                        assert_eq!(success.body_bytes, Some(original.len() as u64));
+                        observed_usage = Some(success.usage);
+                    } else {
+                        assert_eq!(
+                            result
+                                .expect_err("buffered failure remains observable")
+                                .error_type,
+                            "response_transform_error"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            completed,
+            "real lifecycle must complete its accounting observation"
+        );
+        let usage = observed_usage.expect("original upstream usage must remain observable");
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens
+            ),
+            (3, 5, 12_000),
+            "the provider snapshot before fail-open must not be replaced or discarded"
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum QuestionTransformMode {
+    Rename,
+    Drop,
+    DropVariant,
+    Multiple,
+}
+
+async fn transformed_question_classification(streaming: bool, mode: QuestionTransformMode) {
+    let message = Bytes::from_static(
+        br#"{"id":"msg_question","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_question","name":"Question","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":3,"output_tokens":5,"cache_read_input_tokens":12000}}"#,
+    );
+    let upstream_body = if streaming {
+        Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_question\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":0,\"cache_read_input_tokens\":12000}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_question\",\"name\":\"Question\",\"input\":{}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )
+    } else {
+        message
+    };
+    let dispatch = Arc::new(FixedDispatch {
+        status: StatusCode::OK,
+        headers: if streaming {
+            sse_headers()
+        } else {
+            json_headers(upstream_body.len(), false)
+        },
+        body: upstream_body.clone(),
+    });
+    let hook = Arc::new(QuestionToLowercaseTransform(mode));
+    let enqueuer = Arc::new(TransformedQuestionEnqueuer::default());
+    let lifecycle = lifecycle_with_record_config_and_keepalive(
+        if streaming {
+            None
+        } else {
+            Some(hook.clone() as Arc<dyn ResponseTransformHook>)
+        },
+        if streaming {
+            Some(hook as Arc<dyn SseEventTransformHook>)
+        } else {
+            None
+        },
+        dispatch,
+        LifecycleConfig::default(),
+        default_upstream_record(),
+        Some(CacheKeepaliveConfig {
+            enabled: true,
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
+            classifier: ClassifierConfig::default(),
+        }),
+    )
+    .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
+    let mut request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
+    ));
+    request.headers_mut().insert(
+        "x-claude-code-session-id",
+        HeaderValue::from_static("transformed-question"),
+    );
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("question response");
+    let (status, _, downstream) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK);
+    match mode {
+        QuestionTransformMode::Rename => assert_eq!(
+            downstream,
+            replace_bytes(
+                &upstream_body,
+                br#""name":"Question""#,
+                br#""name":"question""#
+            ),
+            "public hook must emit the client-facing wait-for-user tool"
+        ),
+        QuestionTransformMode::Drop | QuestionTransformMode::DropVariant => {
+            let text = std::str::from_utf8(&downstream).expect("dropped SSE utf8");
+            assert!(!text.contains("content_block_start"));
+            assert!(text.contains("message_stop"));
+        }
+        QuestionTransformMode::Multiple => {
+            let text = std::str::from_utf8(&downstream).expect("multiple SSE utf8");
+            assert_eq!(text.matches("event: content_block_start").count(), 2);
+            assert!(text.contains(r#""name":"question""#));
+            assert!(text.contains(r#""name":"ask""#));
+            assert!(!text.contains(r#""name":"Question""#));
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), enqueuer.completed.notified())
+        .await
+        .expect("keepalive classification completes");
+    assert!(
+        enqueuer.enqueued.lock().expect("enqueue lock").is_empty(),
+        "a client waiting for question input must not schedule a renewal"
+    );
+    assert_eq!(
+        enqueuer.not_tracked.lock().expect("not tracked lock").len(),
+        1
+    );
+    assert!(
+        enqueuer
+            .cancelled
+            .lock()
+            .expect("cancel lock")
+            .iter()
+            .any(|request| request.reason == CancelReason::UserTurnDetected),
+        "the lifecycle must persist its non-agent cancellation"
+    );
+}
+
+struct QuestionToLowercaseTransform(QuestionTransformMode);
+
+impl ResponseTransformHook for QuestionToLowercaseTransform {
+    fn transform_response(
+        &self,
+        request: TransformResponseRequest,
+    ) -> Result<TransformResponseResult, ResponseTransformError> {
+        Ok(TransformResponseResult::Replace {
+            status: None,
+            headers: None,
+            body: Some(replace_bytes(
+                &request.body,
+                br#""name":"Question""#,
+                br#""name":"question""#,
+            )),
+        })
+    }
+}
+
+impl SseEventTransformHook for QuestionToLowercaseTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        if request.event.event != "content_block_start" {
+            return Ok(TransformSseEventResult::Unchanged);
+        }
+        if matches!(self.0, QuestionTransformMode::DropVariant) {
+            return Ok(TransformSseEventResult::Drop);
+        }
+        if matches!(self.0, QuestionTransformMode::Drop) {
+            return Ok(TransformSseEventResult::Replace { events: vec![] });
+        }
+        let mut events = vec![SseEvent {
+            event: request.event.event.clone(),
+            data: replace_bytes(
+                &request.event.data,
+                br#""name":"Question""#,
+                br#""name":"question""#,
+            ),
+        }];
+        if matches!(self.0, QuestionTransformMode::Multiple) {
+            events.push(SseEvent {
+                event: request.event.event,
+                data: Bytes::from_static(
+                    br#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_ask","name":"ask","input":{}}}"#,
+                ),
+            });
+        }
+        Ok(TransformSseEventResult::Replace { events })
+    }
+}
+
+#[derive(Default)]
+struct TransformedQuestionEnqueuer {
+    enqueued: Mutex<Vec<CacheKeepaliveEnqueueRequest>>,
+    cancelled: Mutex<Vec<CacheKeepaliveCancelRequest>>,
+    not_tracked: Mutex<Vec<CacheKeepaliveNotTrackedRequest>>,
+    completed: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl CacheKeepaliveEnqueuer for TransformedQuestionEnqueuer {
+    async fn enqueue_cache_keepalive(
+        &self,
+        request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.enqueued.lock().expect("enqueue lock").push(request);
+        self.completed.notify_one();
+        Ok(())
+    }
+
+    async fn cancel_cache_keepalive(
+        &self,
+        request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.cancelled.lock().expect("cancel lock").push(request);
+        if !self
+            .not_tracked
+            .lock()
+            .expect("not tracked lock")
+            .is_empty()
+        {
+            self.completed.notify_one();
+        }
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.not_tracked
+            .lock()
+            .expect("not tracked lock")
+            .push(request);
+        Ok(())
+    }
+}
+
 async fn handle_authenticated(
     lifecycle: &Lifecycle,
     request: http::Request<Bytes>,
@@ -3005,6 +3392,26 @@ fn lifecycle_with_record_and_config(
     )
 }
 
+fn lifecycle_with_record_config_and_keepalive(
+    response_transform: Option<Arc<dyn ResponseTransformHook>>,
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    config: LifecycleConfig,
+    record: UpstreamRecord,
+    cache_keepalive: Option<CacheKeepaliveConfig>,
+) -> Lifecycle {
+    lifecycle_with_options_and_keepalive(
+        response_transform,
+        sse_transform,
+        dispatcher,
+        config,
+        record,
+        true,
+        Vec::new(),
+        cache_keepalive,
+    )
+}
+
 fn lifecycle_with_options(
     response_transform: Option<Arc<dyn ResponseTransformHook>>,
     sse_transform: Option<Arc<dyn SseEventTransformHook>>,
@@ -3013,6 +3420,29 @@ fn lifecycle_with_options(
     record: UpstreamRecord,
     refresh_allowed: bool,
     limits: Vec<cc_lb_storage_api::principal::Limit>,
+) -> Lifecycle {
+    lifecycle_with_options_and_keepalive(
+        response_transform,
+        sse_transform,
+        dispatcher,
+        config,
+        record,
+        refresh_allowed,
+        limits,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lifecycle_with_options_and_keepalive(
+    response_transform: Option<Arc<dyn ResponseTransformHook>>,
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    config: LifecycleConfig,
+    record: UpstreamRecord,
+    refresh_allowed: bool,
+    limits: Vec<cc_lb_storage_api::principal::Limit>,
+    cache_keepalive: Option<CacheKeepaliveConfig>,
 ) -> Lifecycle {
     let dialect = Arc::new(ShapeTransformDialect::new(
         response_transform,
@@ -3042,7 +3472,7 @@ fn lifecycle_with_options(
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
-        cache_keepalive: None,
+        cache_keepalive,
     };
     let mut authn = TestAuthn::with_principal_view(
         state,

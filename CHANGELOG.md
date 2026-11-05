@@ -15,6 +15,13 @@ All notable changes to this project will be documented in this file.
 - Logs `All kinds` now preserves `source_kind=all` through history, live, delta, and histogram requests, so keepalive renewal rows appear without sending invalid `event_kind=all`.
 - Delta and SSE event reads now filter before the 500-row matching cap, advance exhausted deltas safely, and retain the existing reset at exactly 500 matching backfill events.
 - Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent. Source-filtered aggregates determine absence only from the requested source. Limit-reset nudges for absent 5-hour windows recompute `at_limit` even when the provider omits the exhausted-window list.
+- Prompt-cache keep-alive now applies cache anchor age only to the initial schedule; cache-hit renewals use the full configured TTL-minus-lead interval.
+- Disabling or clearing keep-alive now retains accounting and charges completed hit/miss renewals exactly once, then cancels without rescheduling; error and unsupported-provider outcomes retain reservation refunds.
+- Keep-alive classification now uses transformed client-facing tool names in SSE and buffered responses, while usage, provider errors, and affinity retain the original upstream response.
+- Corrected keep-alive operator guidance for emitted metrics, cancellation scope, disable behavior, and unsupported-provider versus missing-upstream terminal reasons.
+- Renewal request events now retain the originating thread id for thread-scoped sessions, including agent-scoped sessions.
+- Keep-alive snapshot capture, trimming, renewal shaping, and persistence now preserve shaped JSON object key order without changing canonical routing hashes.
+- Authenticated, non-auxiliary real requests now retire the matching active keep-alive generation before upstream dispatch, preventing queued renewals during response-header waits and streaming. Failed real requests do not resume the old snapshot. ([#1051](https://github.com/isac322/cc-lb/issues/1051))
 - The admin web now hides explicitly absent Claude 5-hour windows from quota cards, history charts, pool legends, usage tables, and upstream rows while preserving normal 5-hour readings and mixed-fleet alignment.
 - Cache keep-alive rescheduling now returns its own updated session snapshot on SQLite and PostgreSQL, and SQLite real-request replacement captures its result before commit. Concurrent completions can no longer make stale work enqueue or overwrite a newer generation's payload. ([#1042](https://github.com/isac322/cc-lb/issues/1042))
 - Admin health, status, and scheduler status now report the server-resolved build provenance instead of crate-local unknown values. ([#1054](https://github.com/isac322/cc-lb/issues/1054))
@@ -602,4 +609,3 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 [0.8.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.0...cc-lb-v0.8.1
 [0.8.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.7.0...cc-lb-v0.8.0
 [0.7.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.6.0...cc-lb-v0.7.0
-

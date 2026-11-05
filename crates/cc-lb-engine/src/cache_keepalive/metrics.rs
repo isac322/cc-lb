@@ -5,6 +5,7 @@ pub const CLASSIFIER_DECISIONS_TOTAL: &str = "cc_lb_cache_keepalive_classifier_d
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CancelReason {
+    NewRequest,
     UserTurnDetected,
     SnapshotTooLarge,
     CachedPrefixTooSmall,
@@ -14,6 +15,7 @@ pub enum CancelReason {
 impl CancelReason {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NewRequest => "new_request",
             Self::UserTurnDetected => "user_turn_detected",
             Self::SnapshotTooLarge => "snapshot_too_large",
             Self::CachedPrefixTooSmall => "cached_prefix_too_small",

@@ -242,7 +242,7 @@ async fn compaction_response_without_current_breakpoint_fences_generation_json_a
                 state
                     .operations
                     .iter()
-                    .filter(|operation| matches!(operation, KeepaliveOperation::Cancel(key, _, _) if key.ends_with("/thread:no-breakpoint")))
+                    .filter(|operation| matches!(operation, KeepaliveOperation::Cancel(key, _, CancelReason::UserTurnDetected) if key.ends_with("/thread:no-breakpoint")))
                     .count(),
                 1
             );
@@ -352,8 +352,12 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
     assert_eq!(enqueuer.enqueued.lock().expect("enqueued lock").len(), 1);
     let cancelled_generation = {
         let cancelled = enqueuer.cancelled.lock().expect("cancelled lock");
-        assert_eq!(cancelled.len(), 1);
-        cancelled[0].expected_generation
+        let completion_cancellations = cancelled
+            .iter()
+            .filter(|request| request.reason == CancelReason::UserTurnDetected)
+            .collect::<Vec<_>>();
+        assert_eq!(completion_cancellations.len(), 1);
+        completion_cancellations[0].expected_generation
     };
     assert_eq!(cancelled_generation, Some(42));
 
@@ -480,8 +484,20 @@ async fn compaction_fence_retains_unrelated_agent_scope_state() {
     );
     drop(active);
     let cancelled = enqueuer.cancelled.lock().expect("cancelled keys lock");
-    assert_eq!(cancelled.len(), 1);
-    assert!(cancelled[0].ends_with("/thread:scope-session"));
+    assert_eq!(
+        cancelled
+            .iter()
+            .filter(|key| key.ends_with("/thread:scope-session"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        cancelled
+            .iter()
+            .filter(|key| key.ends_with("/thread:scope-session/agent:child-agent"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -501,7 +517,7 @@ async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {
     settle().await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_user_turn"));
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
@@ -521,7 +537,7 @@ async fn cache_keepalive_ambiguous_cancels_durable_without_scheduler() {
     settle().await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_ambiguous"));
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
@@ -541,7 +557,7 @@ async fn cache_keepalive_cancel_failure_does_not_change_proxy_response() {
     settle().await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_cancel_fail"));
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 #[tokio::test]
 async fn cache_keepalive_subagent_and_auxiliary_cancel_only_eligible_scopes() {
@@ -609,7 +625,11 @@ async fn cache_keepalive_subagent_and_auxiliary_cancel_only_eligible_scopes() {
     settle().await;
 
     let keys = keys.lock().expect("recorded cancellation keys lock");
-    assert_eq!(keys.len(), 1, "auxiliary request must not cancel");
+    assert_eq!(
+        keys.len(),
+        2,
+        "request fence and user-turn cancellation stay in the subagent scope; auxiliary must not cancel"
+    );
     assert!(keys[0].ends_with("/thread:session-1/agent:agent-1"));
     assert!(!keys.iter().any(|key| key.ends_with("/thread:session-1")));
 }
@@ -665,7 +685,7 @@ async fn cache_keepalive_trimmed_uncached_tail_is_enqueued() {
     settle().await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(enqueuer.enqueued().len(), 1);
-    assert!(enqueuer.cancelled().is_empty());
+    assert!(enqueuer.completion_cancellations().is_empty());
     assert!(enqueuer.not_tracked().is_empty());
 }
 
@@ -716,9 +736,9 @@ async fn cache_keepalive_oversized_cached_prefix_durably_cancels_agent_and_user_
         assert!(enqueuer.enqueued().is_empty());
         assert_eq!(enqueuer.not_tracked().len(), 1);
         assert_eq!(enqueuer.not_tracked()[0].reason, "snapshot too large");
-        assert_eq!(enqueuer.cancelled().len(), 1);
+        assert_eq!(enqueuer.completion_cancellations().len(), 1);
         assert_eq!(
-            enqueuer.cancelled()[0].reason,
+            enqueuer.completion_cancellations()[0].reason,
             CancelReason::SnapshotTooLarge
         );
     }
@@ -762,14 +782,14 @@ async fn cache_keepalive_subagent_cancellation_is_scoped_away_from_parent() {
     .await;
     let _ = collect_body(subagent_response).await;
     settle().await;
-    assert_eq!(enqueuer.cancelled().len(), 1);
+    assert_eq!(enqueuer.completion_cancellations().len(), 1);
     assert!(
-        enqueuer.cancelled()[0]
+        enqueuer.completion_cancellations()[0]
             .session_key_hash
             .ends_with("/thread:S/agent:agent-sub-1")
     );
     assert!(
-        !enqueuer.cancelled()[0]
+        !enqueuer.completion_cancellations()[0]
             .session_key_hash
             .ends_with("/thread:S")
     );
@@ -788,9 +808,9 @@ async fn cache_keepalive_subagent_cancellation_is_scoped_away_from_parent() {
     .await;
     let _ = collect_body(main_response).await;
     settle().await;
-    assert_eq!(enqueuer.cancelled().len(), 2);
+    assert_eq!(enqueuer.completion_cancellations().len(), 2);
     assert!(
-        enqueuer.cancelled()[1]
+        enqueuer.completion_cancellations()[1]
             .session_key_hash
             .ends_with("/thread:S")
     );
@@ -818,7 +838,7 @@ async fn cache_keepalive_omp_ask_tool_use_cancels_as_user_turn() {
         "user turn (stop_reason=tool_use)"
     );
     assert_eq!(
-        enqueuer.cancelled()[0].reason,
+        enqueuer.completion_cancellations()[0].reason,
         CancelReason::UserTurnDetected
     );
 }
@@ -849,7 +869,7 @@ async fn cache_keepalive_small_cached_prefix_cancels_without_enqueue_json_and_ss
             "cached prefix too small (3547 tokens < minimum 10000)"
         );
         assert_eq!(
-            enqueuer.cancelled()[0].reason,
+            enqueuer.completion_cancellations()[0].reason,
             CancelReason::CachedPrefixTooSmall
         );
     }
@@ -905,7 +925,7 @@ async fn cache_keepalive_zero_token_incompatible_requests_are_not_tracked_json_a
                 format!("zero-token renewal unsupported: {reason}")
             );
             assert_eq!(
-                enqueuer.cancelled()[0].reason.as_str(),
+                enqueuer.completion_cancellations()[0].reason.as_str(),
                 "zero_token_renewal_unsupported"
             );
         }
@@ -934,7 +954,7 @@ async fn cache_keepalive_adaptive_auto_requests_remain_eligible_json_and_sse() {
         assert_eq!(collect_body(response).await.0, StatusCode::OK);
         enqueuer.wait_for_completion().await;
         assert!(enqueuer.not_tracked().is_empty());
-        assert!(enqueuer.cancelled().is_empty());
+        assert!(enqueuer.completion_cancellations().is_empty());
         let enqueued = enqueuer.enqueued();
         assert_eq!(enqueued.len(), 1);
         let renewal: serde_json::Value = serde_json::from_slice(
@@ -1072,6 +1092,7 @@ struct ScopedKeepaliveState {
 struct ScopedKeepaliveEnqueuer {
     state: Mutex<ScopedKeepaliveState>,
     completed: tokio::sync::Notify,
+    enqueued: tokio::sync::Notify,
 }
 
 impl ScopedKeepaliveEnqueuer {
@@ -1083,6 +1104,12 @@ impl ScopedKeepaliveEnqueuer {
         tokio::time::timeout(std::time::Duration::from_secs(5), self.completed.notified())
             .await
             .expect("scoped keepalive completion");
+    }
+
+    async fn wait_for_enqueue(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.enqueued.notified())
+            .await
+            .expect("scoped keepalive enqueue");
     }
 }
 
@@ -1117,6 +1144,7 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
         state.next_generation += 1;
         let generation = state.next_generation;
         state.generations.insert(key, generation);
+        self.enqueued.notify_one();
         self.completed.notify_one();
         Ok(())
     }
@@ -1137,7 +1165,9 @@ impl CacheKeepaliveEnqueuer for ScopedKeepaliveEnqueuer {
             request.reason,
         ));
         state.generations.remove(&key);
-        self.completed.notify_one();
+        if request.reason.as_str() != "new_request" {
+            self.completed.notify_one();
+        }
         Ok(())
     }
 
@@ -1264,6 +1294,7 @@ async fn establish_scoped_keepalive(
     .await;
     assert_keepalive_response_fidelity(response, &body, false).await;
     enqueuer.wait_for_completion().await;
+    enqueuer.wait_for_enqueue().await;
 }
 
 #[tokio::test]
@@ -1284,11 +1315,20 @@ async fn auxiliary_unknown_kind_must_not_cancel_main_session_scope() {
     let key = before.generations.keys().next().expect("main session key");
     assert!(key.ends_with("/thread:auxiliary-repro"));
     assert_eq!(
-        before.operations,
-        vec![
-            KeepaliveOperation::Observe(key.clone(), None),
-            KeepaliveOperation::Enqueue(key.clone(), None),
-        ]
+        before
+            .operations
+            .iter()
+            .filter(|operation| matches!(
+                operation, KeepaliveOperation::Enqueue(session, None) if session == key
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        before.operations.iter().filter(|operation| matches!(
+            operation, KeepaliveOperation::Cancel(session, None, reason) if session == key && reason.as_str() == "new_request"
+        )).count(),
+        1
     );
 
     let body = end_turn_body("msg_auxiliary_repro");
@@ -1617,11 +1657,20 @@ async fn non_auxiliary_turns_preserve_keepalive_lifecycle() {
                 );
             }
             assert_eq!(
-                active.operations,
-                vec![
-                    KeepaliveOperation::Observe(key.clone(), None),
-                    KeepaliveOperation::Enqueue(key.clone(), None),
-                ]
+                active
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(
+                        operation, KeepaliveOperation::Enqueue(session, None) if session == key
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                active.operations.iter().filter(|operation| matches!(
+                    operation, KeepaliveOperation::Cancel(session, None, reason) if session == key && reason.as_str() == "new_request"
+                )).count(),
+                1
             );
             let body = end_turn_body("msg_control_user");
             let (response, kind) = observed_keepalive_response(
@@ -1639,38 +1688,419 @@ async fn non_auxiliary_turns_preserve_keepalive_lifecycle() {
             let completed = enqueuer.snapshot();
             assert!(completed.generations.is_empty());
             assert_eq!(
-                &completed.operations[2..],
-                &[
-                    KeepaliveOperation::Observe(key.clone(), Some(*generation)),
-                    KeepaliveOperation::NotTracked(
-                        key.clone(),
-                        "user turn (stop_reason=end_turn)".to_owned()
-                    ),
-                    KeepaliveOperation::Cancel(
-                        key.clone(),
-                        Some(*generation),
-                        CancelReason::UserTurnDetected
-                    ),
-                ]
+                completed.operations.iter().filter(|operation| matches!(
+                    operation, KeepaliveOperation::Cancel(session, Some(previous), reason)
+                        if session == key && previous == generation && reason.as_str() == "new_request"
+                )).count(),
+                1
+            );
+            assert_eq!(
+                completed
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(
+                        operation, KeepaliveOperation::NotTracked(session, reason)
+                            if session == key && reason == "user turn (stop_reason=end_turn)"
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                completed.operations.iter().filter(|operation| matches!(
+                    operation, KeepaliveOperation::Cancel(session, None, CancelReason::UserTurnDetected)
+                        if session == key
+                )).count(),
+                1
+            );
+            assert_eq!(
+                completed
+                    .operations
+                    .iter()
+                    .filter(|operation| matches!(operation, KeepaliveOperation::Enqueue(_, _)))
+                    .count(),
+                1,
+                "a user turn must not add a replacement generation"
             );
         }
     }
 }
 
-struct BlockingGenerationEnqueuer {
+#[tokio::test]
+async fn real_followup_fences_queued_generation_before_pending_ttfb_and_sse() {
+    for (streaming, session_scoped) in [(false, true), (true, true), (false, false), (true, false)]
+    {
+        let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+        let principal = principal_with_keepalive();
+        let headers = if session_scoped {
+            vec![("x-claude-code-session-id", "active-followup")]
+        } else {
+            Vec::new()
+        };
+        establish_scoped_keepalive(&enqueuer, principal.clone(), &headers).await;
+        establish_scoped_keepalive(
+            &enqueuer,
+            principal.clone(),
+            &[
+                ("x-claude-code-session-id", "active-followup"),
+                ("x-claude-code-agent-id", "unrelated-agent"),
+            ],
+        )
+        .await;
+        establish_scoped_keepalive(
+            &enqueuer,
+            principal.clone(),
+            &[("x-claude-code-session-id", "unrelated-followup")],
+        )
+        .await;
+        let before = enqueuer.snapshot();
+        let (key, old_generation) = before
+            .generations
+            .iter()
+            .find(|(key, _)| {
+                if session_scoped {
+                    key.ends_with("/thread:active-followup")
+                } else {
+                    key.contains("/prefix:")
+                }
+            })
+            .expect("setup creates the real session generation");
+        let dispatch = Arc::new(PendingFollowupDispatch {
+            streaming,
+            body: agent_turn_body("msg_active_followup", "Bash", 12_000),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let authn = TestAuthn::with_principal_view(
+            TestState::default(),
+            Arc::new(PrincipalView::from_db(&[principal], HashMap::new())),
+        );
+        let lifecycle =
+            lifecycle_with_parts(authn, dispatch.clone(), LifecycleConfig::default())
+                .with_cache_keepalive_enqueuer(
+                    Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>
+                );
+        let request = followup_request(
+            if session_scoped {
+                "active-followup"
+            } else {
+                ""
+            },
+            false,
+            true,
+        );
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("real followup authenticates");
+        let completion = async {
+            let response = lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("followup handles");
+            assert_keepalive_response_fidelity(response, &dispatch.body, streaming).await;
+        };
+        tokio::pin!(completion);
+        tokio::select! {
+            () = dispatch.entered.notified() => {}
+            () = &mut completion => panic!("upstream must remain pending until released"),
+        }
+        assert_eq!(dispatch.calls.load(Ordering::SeqCst), 1);
+        let pending = enqueuer.snapshot();
+        assert_ne!(
+            pending.generations.get(key),
+            Some(old_generation),
+            "the old queued generation must be fenced before upstream completion, streaming={streaming}"
+        );
+        for (other_key, generation) in &before.generations {
+            if other_key != key {
+                assert_eq!(
+                    pending.generations.get(other_key),
+                    Some(generation),
+                    "an unrelated thread must remain renewable"
+                );
+            }
+        }
+        dispatch.release.notify_one();
+        completion.await;
+        enqueuer.wait_for_enqueue().await;
+        let completed = enqueuer.snapshot();
+        assert!(
+            completed
+                .generations
+                .get(key)
+                .is_some_and(|generation| generation > old_generation),
+            "successful agent completion must establish a fresh generation"
+        );
+        assert_eq!(
+            completed.operations.iter().filter(
+                |operation| matches!(operation, KeepaliveOperation::Enqueue(session, _) if session == key)
+            ).count(),
+            2,
+            "one setup enqueue and exactly one completion enqueue"
+        );
+        for (other_key, generation) in &before.generations {
+            if other_key != key {
+                assert_eq!(completed.generations.get(other_key), Some(generation));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn real_dispatch_waits_for_durable_request_cancellation() {
+    struct BlockingRequestFence {
+        inner: Arc<ScopedKeepaliveEnqueuer>,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl CacheKeepaliveEnqueuer for BlockingRequestFence {
+        async fn observe_session_generation(
+            &self,
+            key: &str,
+        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+            self.inner.observe_session_generation(key).await
+        }
+
+        async fn enqueue_cache_keepalive(
+            &self,
+            request: CacheKeepaliveEnqueueRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            self.inner.enqueue_cache_keepalive(request).await
+        }
+
+        async fn cancel_cache_keepalive(
+            &self,
+            request: CacheKeepaliveCancelRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            if request.reason.as_str() == "new_request" {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.cancel_cache_keepalive(request).await
+        }
+
+        async fn record_cache_keepalive_not_tracked(
+            &self,
+            request: CacheKeepaliveNotTrackedRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            self.inner.record_cache_keepalive_not_tracked(request).await
+        }
+    }
+
+    let inner = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    establish_scoped_keepalive(
+        &inner,
+        principal.clone(),
+        &[("x-claude-code-session-id", "blocked-fence")],
+    )
+    .await;
+    let before = inner.snapshot();
+    let fence = Arc::new(BlockingRequestFence {
+        inner: Arc::clone(&inner),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let dispatch = Arc::new(PendingFollowupDispatch {
+        streaming: false,
+        body: agent_turn_body("msg_after_durable_fence", "Bash", 12_000),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        calls: AtomicUsize::new(0),
+    });
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::with_principal_view(
+            TestState::default(),
+            Arc::new(PrincipalView::from_db(&[principal], HashMap::new())),
+        ),
+        dispatch.clone(),
+        LifecycleConfig::default(),
+    )
+    .with_cache_keepalive_enqueuer(Arc::clone(&fence) as Arc<dyn CacheKeepaliveEnqueuer>);
+    let request = followup_request("blocked-fence", false, true);
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("followup authenticates");
+    let completion = async {
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("followup handles");
+        assert_keepalive_response_fidelity(response, &dispatch.body, false).await;
+    };
+    tokio::pin!(completion);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            () = fence.entered.notified() => {}
+            () = &mut completion => panic!("response must await the durable fence"),
+        }
+        assert_eq!(dispatch.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(inner.snapshot().generations, before.generations);
+        fence.release.notify_one();
+        tokio::select! {
+            () = dispatch.entered.notified() => {}
+            () = &mut completion => panic!("upstream remains pending until released"),
+        }
+        assert_eq!(dispatch.calls.load(Ordering::SeqCst), 1);
+        assert!(inner.snapshot().generations.is_empty());
+        dispatch.release.notify_one();
+        completion.await;
+        inner.wait_for_enqueue().await;
+    })
+    .await
+    .expect("durable fence and dispatch finish");
+    let after = inner.snapshot();
+    assert_eq!(after.generations.len(), 1);
+    let (key, old_generation) = before.generations.iter().next().expect("old generation");
+    assert!(
+        after
+            .generations
+            .get(key)
+            .is_some_and(|generation| generation > old_generation)
+    );
+}
+
+#[tokio::test]
+async fn auxiliary_and_unauthenticated_followups_preserve_queued_generations() {
+    let enqueuer = Arc::new(ScopedKeepaliveEnqueuer::default());
+    let principal = principal_with_keepalive();
+    establish_scoped_keepalive(
+        &enqueuer,
+        principal.clone(),
+        &[("x-claude-code-session-id", "preserved-followup")],
+    )
+    .await;
+    let before = enqueuer.snapshot();
+    let dispatch = Arc::new(PendingFollowupDispatch {
+        streaming: false,
+        body: agent_turn_body("msg_auxiliary_followup", "Bash", 12_000),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        calls: AtomicUsize::new(0),
+    });
+    let authn = TestAuthn::with_principal_view(
+        TestState::default(),
+        Arc::new(PrincipalView::from_db(&[principal], HashMap::new())),
+    );
+    let lifecycle = lifecycle_with_parts(authn, dispatch.clone(), LifecycleConfig::default())
+        .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
+    let unauthenticated = followup_request("preserved-followup", false, false);
+    assert!(
+        lifecycle
+            .authenticate(unauthenticated.headers())
+            .await
+            .is_err()
+    );
+    assert_eq!(dispatch.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(enqueuer.snapshot(), before);
+
+    let request = followup_request("preserved-followup", true, true);
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("auxiliary authenticates");
+    let completion = async {
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("auxiliary handles");
+        assert_keepalive_response_fidelity(response, &dispatch.body, false).await;
+    };
+    tokio::pin!(completion);
+    tokio::select! {
+        () = dispatch.entered.notified() => {}
+        () = &mut completion => panic!("auxiliary upstream must remain pending"),
+    }
+    assert_eq!(dispatch.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(enqueuer.snapshot(), before);
+    dispatch.release.notify_one();
+    completion.await;
+    assert_eq!(enqueuer.snapshot(), before);
+}
+
+fn followup_request(session: &str, auxiliary: bool, authenticated: bool) -> http::Request<Bytes> {
+    let mut request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("anthropic-version", "2023-06-01")
+        .header(
+            "x-claude-code-request-class",
+            if auxiliary { "auxiliary" } else { "main" },
+        );
+    if !session.is_empty() {
+        request = request.header("x-claude-code-session-id", session);
+    }
+    if authenticated {
+        request = request.header("x-api-key", managed_api_key());
+    }
+    request
+        .body(standard_keepalive_request())
+        .expect("followup request")
+}
+
+struct PendingFollowupDispatch {
+    streaming: bool,
+    body: Bytes,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl UpstreamDispatch for PendingFollowupDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.streaming {
+            self.entered.notify_one();
+            self.release.notified().await;
+            let mut response = Response::new(Body::from(self.body.clone()));
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+            return Ok(response);
+        }
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
+        let body = streaming_body_from_message(&self.body);
+        let split = body
+            .windows(2)
+            .position(|bytes| bytes == b"\n\n")
+            .expect("message_start boundary")
+            + 2;
+        let start = body.slice(..split);
+        let rest = body.slice(split..);
+        let stream = async_stream::stream! {
+            yield Ok::<Bytes, std::convert::Infallible>(start);
+            entered.notify_one();
+            release.notified().await;
+            yield Ok::<Bytes, std::convert::Infallible>(rest);
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        Ok(response)
+    }
+}
+
+struct BlockingCompletionEnqueuer {
     inner: ScopedKeepaliveEnqueuer,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
 
 #[async_trait]
-impl CacheKeepaliveEnqueuer for BlockingGenerationEnqueuer {
+impl CacheKeepaliveEnqueuer for BlockingCompletionEnqueuer {
     async fn observe_session_generation(
         &self,
         key: &str,
     ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
-        self.entered.notify_one();
-        self.release.notified().await;
         self.inner.observe_session_generation(key).await
     }
 
@@ -1678,6 +2108,8 @@ impl CacheKeepaliveEnqueuer for BlockingGenerationEnqueuer {
         &self,
         request: CacheKeepaliveEnqueueRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.entered.notify_one();
+        self.release.notified().await;
         self.inner.enqueue_cache_keepalive(request).await
     }
 
@@ -1699,7 +2131,7 @@ impl CacheKeepaliveEnqueuer for BlockingGenerationEnqueuer {
 #[tokio::test]
 async fn cache_keepalive_response_completion_does_not_await_generation_persistence() {
     for streaming in [false, true] {
-        let enqueuer = Arc::new(BlockingGenerationEnqueuer {
+        let enqueuer = Arc::new(BlockingCompletionEnqueuer {
             inner: ScopedKeepaliveEnqueuer::default(),
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
@@ -1729,7 +2161,7 @@ async fn cache_keepalive_response_completion_does_not_await_generation_persisten
         .await
         .expect("the complete downstream response must arrive while persistence is blocked");
         enqueuer.release.notify_one();
-        enqueuer.inner.wait_for_completion().await;
+        enqueuer.inner.wait_for_enqueue().await;
         assert_eq!(enqueuer.inner.snapshot().generations.len(), 1);
     }
 }
@@ -1757,6 +2189,13 @@ impl RecordingEnqueuer {
         self.cancelled.lock().expect("cancelled lock").clone()
     }
 
+    fn completion_cancellations(&self) -> Vec<CacheKeepaliveCancelRequest> {
+        self.cancelled()
+            .into_iter()
+            .filter(|request| request.reason.as_str() != "new_request")
+            .collect()
+    }
+
     fn not_tracked(&self) -> Vec<CacheKeepaliveNotTrackedRequest> {
         self.not_tracked.lock().expect("not-tracked lock").clone()
     }
@@ -1777,8 +2216,11 @@ impl CacheKeepaliveEnqueuer for RecordingEnqueuer {
         &self,
         request: CacheKeepaliveCancelRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
+        let is_completion = request.reason.as_str() != "new_request";
         self.cancelled.lock().expect("cancelled lock").push(request);
-        self.completed.notify_one();
+        if is_completion {
+            self.completed.notify_one();
+        }
         Ok(())
     }
 

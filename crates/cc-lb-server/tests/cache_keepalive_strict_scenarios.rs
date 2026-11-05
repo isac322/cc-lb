@@ -2,11 +2,14 @@
 
 use std::time::Duration;
 
-use cc_lb_storage_api::cache_keepalive_job_key;
+use cc_lb_storage_api::{
+    CacheKeepaliveEnqueueState, CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason,
+    cache_keepalive_job_key,
+};
 use serde_json::{Value, json};
 
 use super::keepalive_support::harness::{DueJob, Harness, HarnessOptions, NOW};
-use super::keepalive_support::mock_upstream::MockEvent;
+use super::keepalive_support::mock_upstream::{MockEvent, ProxyPause};
 const SESSION: &str = "00000000-0000-7000-8000-000000000101";
 const AGENT: &str = "subagent-worker-01";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -196,6 +199,22 @@ async fn b2_subagent_thread_has_its_own_session_and_renewal() {
             .expect("B2 live event")
             .cache_key
     );
+    let (event, _) = harness.read_renewal_accounting(&agent_key, 1).await;
+    let response = harness.admin_get(&format!(
+        "/admin/v1/events/recent?since_unix_secs={NOW}&until_unix_secs={}&event_kind=renewal&source_kind=all&thread_id={SESSION}",
+        NOW + 300,
+    )).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let filtered: Value = response.json().await.expect("agent renewal thread query");
+    assert_eq!(
+        filtered["events"].as_array().expect("events array").len(),
+        1
+    );
+    assert_eq!(
+        filtered["events"][0]["event_id"],
+        event.event_id.as_deref().expect("event id")
+    );
+    assert_eq!(event.thread_id.as_deref(), Some(SESSION));
 }
 
 #[tokio::test]
@@ -597,6 +616,217 @@ async fn nested_one_hour_renewal_persists_ttl_split_and_cost() {
         Some(turn.source_ref_id.as_str())
     );
     assert_eq!(harness.count_renewal_rows().await, (1, 1));
+    let event_id = event.event_id.as_deref().expect("renewal event id");
+    let query = format!(
+        "/admin/v1/events/recent?since_unix_secs={NOW}&until_unix_secs={}&event_kind=renewal&source_kind=all",
+        NOW + 7_200,
+    );
+    let response = harness.admin_get(&query).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let unfiltered: Value = response.json().await.expect("unfiltered renewal list");
+    assert_eq!(
+        unfiltered["events"].as_array().expect("events array").len(),
+        1
+    );
+    assert_eq!(unfiltered["events"][0]["event_id"], event_id);
+    let response = harness
+        .admin_get(&format!("{query}&thread_id={session}"))
+        .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let filtered: Value = response.json().await.expect("thread filtered renewal list");
+    assert_eq!(
+        filtered["events"], unfiltered["events"],
+        "thread filter must retain the completed renewal"
+    );
+    assert_eq!(event.thread_id.as_deref(), Some(session));
+}
+
+#[tokio::test]
+async fn real_thread_followup_ttfb_fences_due_sqlite_renewal() {
+    real_followup_fences_due_sqlite_renewal(ProxyPause::Ttfb, Some(SESSION)).await;
+}
+
+#[tokio::test]
+async fn real_thread_followup_stream_fences_due_sqlite_renewal() {
+    real_followup_fences_due_sqlite_renewal(ProxyPause::Streaming, Some(SESSION)).await;
+}
+
+#[tokio::test]
+async fn real_prefix_followup_ttfb_fences_due_sqlite_renewal() {
+    real_followup_fences_due_sqlite_renewal(ProxyPause::Ttfb, None).await;
+}
+
+#[tokio::test]
+async fn real_prefix_followup_stream_fences_due_sqlite_renewal() {
+    real_followup_fences_due_sqlite_renewal(ProxyPause::Streaming, None).await;
+}
+
+async fn real_followup_fences_due_sqlite_renewal(pause: ProxyPause, session: Option<&str>) {
+    let harness = Harness::new(8_388_608).await;
+    let prefix = "in-flight-real-followup";
+    // Start off the whole-second boundary, then complete the follow-up across it.
+    harness.advance_clock(Duration::from_millis(900));
+    let first = claude_code_request(
+        &harness,
+        strict_body(
+            "claude-opus-5-5",
+            prefix,
+            83_900,
+            "5m",
+            "first",
+            json!({"type": "auto"}),
+        ),
+        session,
+        None,
+    )
+    .send()
+    .await
+    .expect("initial real request");
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let first: Value = first.json().await.expect("initial real response");
+    assert_eq!(first["stop_reason"], "tool_use");
+    let (hash, old_generation) = harness.wait_for_single_enqueued_session().await;
+    assert_eq!(old_generation, 1);
+    if let Some(session) = session {
+        assert_eq!(hash, harness.session_key_hash(session, None));
+    } else {
+        assert!(
+            hash.contains("/prefix:"),
+            "expected routed prefix session: {hash}"
+        );
+    }
+    let timing = harness
+        .read_job_timing(&cache_keepalive_job_key(&hash, old_generation))
+        .await
+        .expect("old scheduled SQLite job");
+    let due_at = u64::try_from(timing.run_at.expect("old run_at")).expect("positive due time");
+    harness.advance_clock(Duration::from_secs(due_at - NOW - 1));
+    let mut followup: Value = serde_json::from_slice(&strict_body(
+        "claude-opus-5-5",
+        prefix,
+        83_900,
+        "5m",
+        "followup",
+        json!({"type": "auto"}),
+    ))
+    .expect("follow-up body");
+    followup["stream"] = json!(pause == ProxyPause::Streaming);
+    let mut gate = harness.mock.pause_next_proxy(pause);
+    let stream_observed = tokio::sync::Notify::new();
+    let request = async {
+        let mut response = claude_code_request(
+            &harness,
+            serde_json::to_vec(&followup).expect("follow-up JSON"),
+            session,
+            None,
+        )
+        .send()
+        .await
+        .expect("follow-up response headers");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        if pause == ProxyPause::Streaming {
+            assert!(
+                response.headers()["content-type"]
+                    .to_str()
+                    .expect("SSE content type")
+                    .starts_with("text/event-stream")
+            );
+            let mut body = Vec::new();
+            let mut acknowledged = false;
+            while let Some(chunk) = response.chunk().await.expect("real SSE response chunk") {
+                body.extend_from_slice(&chunk);
+                if !acknowledged && String::from_utf8_lossy(&body).contains("event: message_start")
+                {
+                    acknowledged = true;
+                    stream_observed.notify_one();
+                }
+            }
+            let body = String::from_utf8(body).expect("SSE UTF-8");
+            assert!(
+                acknowledged,
+                "client must receive the partial stream before renewal is due"
+            );
+            assert!(body.contains("event: message_stop"));
+            assert!(body.contains("\"tool_use\""));
+        } else {
+            let body: Value = response.json().await.expect("real buffered follow-up");
+            assert_eq!(body["stop_reason"], "tool_use");
+        }
+    };
+    let while_in_flight = async {
+        gate.wait_until_paused().await;
+        if pause == ProxyPause::Streaming {
+            tokio::time::timeout(Duration::from_secs(20), stream_observed.notified())
+                .await
+                .expect("client must observe the partial real SSE stream");
+        }
+        let events = harness.mock_events();
+        let proxy =
+            event_for_prefix(&events, "proxy", prefix).expect("real follow-up reached upstream");
+        assert!(
+            proxy.accepted(),
+            "strict provider contract: {:?}",
+            proxy.rejection
+        );
+        assert_eq!(
+            events.iter().filter(|event| event.kind == "proxy").count(),
+            2
+        );
+        // Release only this exact old job and await its real SchedulerDispatch completion.
+        harness
+            .advance_and_dispatch_due(
+                Duration::from_secs(1),
+                &[DueJob {
+                    session_key_hash: &hash,
+                    generation: old_generation,
+                    mock_prefix: None,
+                }],
+            )
+            .await;
+        assert_eq!(
+            harness
+                .mock_events()
+                .iter()
+                .filter(|event| event.kind == "renewal")
+                .count(),
+            0,
+            "a due old generation must not reach upstream during real TTFB/SSE"
+        );
+        assert_eq!(harness.count_renewal_rows().await, (0, 0));
+        let cancelled = harness.read_session_record(&hash).await;
+        assert_eq!(cancelled.generation, old_generation);
+        assert_eq!(cancelled.status, CacheKeepaliveSessionStatus::Terminal);
+        assert_eq!(
+            cancelled.terminal_reason,
+            Some(CacheKeepaliveTerminalReason::Cancelled)
+        );
+        // The real completion has not happened yet; the queued job cannot replace it.
+        harness.advance_clock(Duration::from_millis(200));
+        gate.release();
+    };
+    tokio::join!(request, while_in_flight);
+    let (completed_hash, generation) = harness.wait_for_single_enqueued_session().await;
+    assert_eq!(
+        completed_hash, hash,
+        "real completion must retain its routed session scope"
+    );
+    assert_eq!(generation, old_generation + 1);
+    let completed = harness.read_session_record(&hash).await;
+    assert_eq!(completed.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(
+        completed.enqueue_state,
+        CacheKeepaliveEnqueueState::Enqueued
+    );
+    assert_eq!(completed.terminal_reason, None);
+    assert_eq!(completed.refresh_count, 0);
+    assert!(
+        harness
+            .read_job_timing(&cache_keepalive_job_key(&hash, generation))
+            .await
+            .is_some(),
+        "the real completion must durably enqueue its new generation"
+    );
+    assert_eq!(harness.count_renewal_rows().await, (0, 0));
 }
 
 async fn post_with_claude_code_headers(
@@ -605,20 +835,32 @@ async fn post_with_claude_code_headers(
     session: &str,
     agent: Option<&str>,
 ) -> Value {
+    let request = claude_code_request(harness, body, Some(session), agent);
+    let response = request.send().await.expect("proxy request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response.json().await.expect("proxy JSON")
+}
+
+fn claude_code_request(
+    harness: &Harness,
+    body: Vec<u8>,
+    session: Option<&str>,
+    agent: Option<&str>,
+) -> reqwest::RequestBuilder {
     let mut request = harness
         .client
         .post(format!("http://{}/v1/messages", harness.proxy_addr))
         .header("x-api-key", &harness.key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("anthropic-beta", CLAUDE_CODE_BETA)
-        .header("x-claude-code-session-id", session)
         .body(body);
+    if let Some(session) = session {
+        request = request.header("x-claude-code-session-id", session);
+    }
     if let Some(agent) = agent {
         request = request.header("x-claude-code-agent-id", agent);
     }
-    let response = request.send().await.expect("proxy request");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    response.json().await.expect("proxy JSON")
+    request
 }
 
 fn strict_body(
