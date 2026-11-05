@@ -11,6 +11,7 @@ import {
   missingCapacityUpstreams,
   oldestProviderObservation,
   poolQuotaResponseLatest,
+  poolQuotaWindowsPresent,
   poolWindowResets,
 } from './-overviewPoolQuota';
 
@@ -62,6 +63,24 @@ describe('Overview pooled quota history', () => {
       '5h': null,
       '7d': null,
       '7d_fable': null,
+    });
+  });
+
+  it('keeps chart rows sparse when the provider omits the 5h window', () => {
+    const windows = [
+      historyWindow('7d', [[100, 40]], 35),
+      historyWindow('7d_fable', [[100, 80]], 75),
+    ];
+
+    expect(buildPoolQuotaChartData(windows)).toEqual([
+      { unix: 100, '7d': 40, '7d_fable': 80 },
+    ]);
+    expect(
+      poolQuotaResponseLatest(windows, buildPoolQuotaChartData(windows)),
+    ).toEqual({
+      '5h': null,
+      '7d': 35,
+      '7d_fable': 75,
     });
   });
 });
@@ -119,6 +138,24 @@ function aggregate(
     })),
   };
 }
+
+describe('poolQuotaWindowsPresent', () => {
+  it('unions sparse history and aggregate windows without inventing absent ones', () => {
+    const history = [
+      historyWindow('7d', [[100, 40]]),
+      historyWindow('7d_fable', [[100, 80]]),
+    ];
+    const mixedAggregate = aggregate({ '5h': [], '7d': [] });
+
+    expect(poolQuotaWindowsPresent(history)).toEqual(['7d', '7d_fable']);
+    expect(poolQuotaWindowsPresent(history, mixedAggregate)).toEqual([
+      '5h',
+      '7d',
+      '7d_fable',
+    ]);
+    expect(poolQuotaWindowsPresent([])).toEqual([]);
+  });
+});
 
 describe('poolWindowResets', () => {
   it('reads each window reset and treats an unset reset as none', () => {

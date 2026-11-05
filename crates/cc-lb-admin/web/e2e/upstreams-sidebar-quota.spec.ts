@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test';
-import type { QuotaSnapshot } from '../src/lib/api';
+import type { AuthSession, QuotaSnapshot } from '../src/lib/api';
 
 type UpstreamFixture = {
   id: string;
@@ -42,6 +42,7 @@ async function installAppFixtures(
   } = {},
 ) {
   const upstreams = [oauthHealthy()];
+  let latestWindows = options.latestWindows ?? [];
 
   await page.addInitScript(() => {
     window.localStorage.setItem('cc-lb-admin-token', 'mock-token');
@@ -60,6 +61,18 @@ async function installAppFixtures(
         body: JSON.stringify(body),
       });
 
+    if (pathname === '/admin/v1/auth/session' && method === 'GET') {
+      return json(200, {
+        authority: 'e2e',
+        subject: 'e2e-operator',
+        kind: 'human',
+        provider_id: 'e2e',
+        email: null,
+        display_name: 'E2E operator',
+        expires_at_unix_secs: Math.floor(Date.now() / 1000) + 3600,
+        auth_mode: 'static_token',
+      } satisfies AuthSession);
+    }
     if (pathname === '/admin/v1/upstreams' && method === 'GET') {
       return json(200, { upstreams });
     }
@@ -69,7 +82,9 @@ async function installAppFixtures(
     const upstreamMatch = pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)$/);
     if (upstreamMatch && method === 'GET') {
       const upstream = upstreams.find((candidate) => candidate.id === upstreamMatch[1]);
-      return upstream ? json(200, upstream, { etag: `"${upstream.spec_revision}"` }) : json(404, { error: 'not_found' });
+      return upstream
+        ? json(200, upstream, { etag: `"${upstream.spec_revision}"` })
+        : json(404, { error: 'not_found' });
     }
     if (pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/oauth\/status$/)) {
       return json(200, {
@@ -83,7 +98,11 @@ async function installAppFixtures(
       });
     }
     if (pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/subscription-metadata/)) {
-      return json(200, { upstream_id: pathname.split('/')[4], subscription_metadata: null, organization_metadata: null });
+      return json(200, {
+        upstream_id: pathname.split('/')[4],
+        subscription_metadata: null,
+        organization_metadata: null,
+      });
     }
     if (pathname === '/admin/v1/status') {
       return json(200, {
@@ -92,7 +111,13 @@ async function installAppFixtures(
         uptime_secs: 1,
         build: { rust_version: 'mock', profile: 'debug', target: 'mock' },
         generation: 1,
-        upstreams: upstreams.map((upstream) => ({ id: upstream.id, name: upstream.name, status: upstream.enabled ? 'active' : 'disabled', last_apply_at_unix_secs: null, last_apply_error: null })),
+        upstreams: upstreams.map((upstream) => ({
+          id: upstream.id,
+          name: upstream.name,
+          status: upstream.enabled ? 'active' : 'disabled',
+          last_apply_at_unix_secs: null,
+          last_apply_error: null,
+        })),
       });
     }
     if (pathname === '/admin/v1/dashboard/usage') {
@@ -113,23 +138,55 @@ async function installAppFixtures(
       return json(200, {
         now_unix_secs: Math.floor(Date.now() / 1000),
         max_staleness_secs: 300,
-        upstreams: [
-          {
-            upstream_id: 'oauth-healthy',
-            windows: options.latestWindows ?? []
-          }
-        ]
+        upstreams: [{ upstream_id: 'oauth-healthy', windows: latestWindows }],
       });
     }
     if (pathname === '/admin/v1/subscription-quotas/series') {
-      return json(200, { since_unix_secs: 0, until_unix_secs: 0, bucket_secs: 60, source: 'merged', series: [] });
+      return json(200, {
+        since_unix_secs: 0,
+        until_unix_secs: 0,
+        bucket_secs: 60,
+        source: 'merged',
+        series: [],
+      });
     }
     return json(200, {});
   });
+
+  return {
+    setLatestWindows(nextWindows: QuotaSnapshot[]) {
+      latestWindows = nextWindows;
+    },
+  };
 }
 
+async function openUpstreams(
+  page: Page,
+  selectedId?: string,
+): Promise<void> {
+  const query = selectedId
+    ? `?selectedId=${encodeURIComponent(selectedId)}`
+    : '';
+  await page.goto(`/upstreams${query}`, { waitUntil: 'commit' });
+  if (selectedId) {
+    await expect(page.getByTestId('quota-snapshot-grid')).toBeVisible();
+  } else {
+    await expect(
+      page.getByRole('list', { name: 'Upstreams', exact: true }),
+    ).toBeVisible();
+  }
+}
+
+async function reloadSelectedUpstream(page: Page): Promise<void> {
+  await page.reload({ waitUntil: 'commit' });
+  await expect(page.getByTestId('quota-snapshot-grid')).toBeVisible();
+}
+
+
 test.describe('Upstreams Sidebar Quota', () => {
-  test('Scenario: Fable meter transitions and responsive checks', async ({ page }, testInfo) => {
+  test('Scenario: Fable meter transitions and responsive checks', async ({
+    page,
+  }, testInfo) => {
     const now = Math.floor(Date.now() / 1000);
 
     const baseSnap = {
@@ -144,116 +201,173 @@ test.describe('Upstreams Sidebar Quota', () => {
       age_secs: null,
     };
 
-    // 1. Fresh Fable (within 7 days)
+    // 1. Fresh Fable (within 7 days).
     let latestWindows: QuotaSnapshot[] = [
       { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d', utilization: 0.2, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d_fable', utilization: 0.3, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
-      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
+      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_enabled: true, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
     ];
 
-    await installAppFixtures(page, { latestWindows });
+    const fixtures = await installAppFixtures(page, { latestWindows });
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto('/upstreams?selectedId=oauth-healthy');
+    await openUpstreams(page, 'oauth-healthy');
 
-    // Wait for sidebar to render
-    await expect(page.getByTestId('warmup-card').or(page.getByTestId('api-usage-card'))).toBeVisible();
-    const sidebar = page.locator('aside').nth(1);
-    await expect(sidebar).toBeVisible();
+    const quota = page.getByTestId('quota-snapshot-grid');
+    await expect(quota).toBeVisible();
+    await expect(quota.getByRole('listitem')).toHaveCount(4);
+    await expect(quota.getByRole('meter')).toHaveCount(4);
+    await expect(quota.getByRole('meter').nth(0)).toHaveAccessibleName('5h');
+    await expect(quota.getByRole('meter').nth(1)).toHaveAccessibleName('7d');
+    await expect(quota.getByRole('meter').nth(2)).toHaveAccessibleName('7d (Fable)');
+    await expect(quota.getByRole('meter').nth(3)).toHaveAccessibleName('Extra usage');
+    await expect(quota.getByRole('meter', { name: '5h', exact: true })).toHaveAttribute('aria-valuenow', '10');
+    await expect(quota.getByRole('meter', { name: '7d', exact: true })).toHaveAttribute('aria-valuenow', '20');
+    await expect(quota.getByRole('meter', { name: '7d (Fable)', exact: true })).toHaveAttribute('aria-valuenow', '30');
+    await expect(quota.getByRole('meter', { name: 'Extra usage', exact: true })).toHaveAttribute('aria-valuenow', '50');
 
-    // Check order: 5h, 7d, Fable, Extra
-    const meters = sidebar.locator('.flex.items-center.gap-2.w-full.text-\\[10px\\].font-mono');
-    await expect(meters).toHaveCount(4);
-    await expect(meters.nth(0)).toContainText('5h');
-    await expect(meters.nth(1)).toContainText('7d');
-    await expect(meters.nth(2)).toContainText('Fable');
-    await expect(meters.nth(3)).toContainText('Extra');
-
-    // Check Fable percentage
-    await expect(meters.nth(2)).toContainText('30%');
-
-    // 2. Change to unobserved Fable
+    // 2. Unobserved Fable: the optional model window is omitted.
     latestWindows = [
       { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d', utilization: 0.2, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d_fable', utilization: 0.3, state: 'unobserved', source: 'api', observed_at_unix_millis: now * 1000 },
-      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
+      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_enabled: true, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
     ];
-    await installAppFixtures(page, { latestWindows });
-    await page.reload();
-    await expect(sidebar).toBeVisible();
-    await expect(meters).toHaveCount(3);
-    await expect(meters.nth(0)).toContainText('5h');
-    await expect(meters.nth(1)).toContainText('7d');
-    await expect(meters.nth(2)).toContainText('Extra');
+    fixtures.setLatestWindows(latestWindows);
+    await reloadSelectedUpstream(page);
+    await expect(quota.getByRole('listitem')).toHaveCount(3);
+    await expect(quota.getByRole('meter', { name: '5h', exact: true })).toHaveCount(1);
+    await expect(quota.getByRole('meter', { name: '7d', exact: true })).toHaveCount(1);
+    await expect(quota.getByRole('meter', { name: '7d (Fable)', exact: true })).toHaveCount(0);
+    await expect(quota.getByRole('meter', { name: 'Extra usage', exact: true })).toHaveCount(1);
     await page.screenshot({ path: testInfo.outputPath('fable-sidebar-missing-desktop.png'), fullPage: true });
-    // 3. Hide a shared window that the successful usage response omitted
+
+    // 3. Absent Fable: proven absent windows are omitted, while shared 7d remains.
     latestWindows = [
       { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
-      { ...baseSnap, window: '7d', utilization: null, state: 'absent', source: 'api', observed_at_unix_millis: now * 1000 },
-      { ...baseSnap, window: '7d_fable', utilization: 0.3, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
-      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
+      { ...baseSnap, window: '7d', utilization: 0.2, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
+      { ...baseSnap, window: '7d_fable', utilization: null, state: 'absent', source: 'api', observed_at_unix_millis: now * 1000 },
+      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_enabled: true, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
     ];
-    await installAppFixtures(page, { latestWindows });
-    await page.reload();
-    await expect(sidebar).toBeVisible();
-    await expect(meters).toHaveCount(3);
-    await expect(meters.nth(0)).toContainText('5h');
-    await expect(meters.nth(1)).toContainText('Fable');
-    await expect(meters.nth(2)).toContainText('Extra');
+    fixtures.setLatestWindows(latestWindows);
+    await reloadSelectedUpstream(page);
+    await expect(quota.getByRole('listitem')).toHaveCount(3);
+    await expect(quota.getByRole('meter', { name: '5h', exact: true })).toHaveCount(1);
+    await expect(quota.getByRole('meter', { name: '7d', exact: true })).toHaveCount(1);
+    await expect(quota.getByRole('meter', { name: '7d (Fable)', exact: true })).toHaveCount(0);
+    await expect(quota.getByRole('meter', { name: 'Extra usage', exact: true })).toHaveCount(1);
 
-
-    // 4. Change to stale Fable (> 7 days)
+    // 4. Stale Fable (> 7 days): quota cards retain the stale reading.
     latestWindows = [
       { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d', utilization: 0.2, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d_fable', utilization: 0.3, state: 'stale', source: 'api', observed_at_unix_millis: (now - 604801) * 1000 },
-      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
+      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_enabled: true, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
     ];
-    await installAppFixtures(page, { latestWindows });
-    await page.reload();
-    await expect(sidebar).toBeVisible();
-    await expect(meters).toHaveCount(3);
-    await expect(meters.nth(0)).toContainText('5h');
-    await expect(meters.nth(1)).toContainText('7d');
-    await expect(meters.nth(2)).toContainText('Extra');
+    fixtures.setLatestWindows(latestWindows);
+    await reloadSelectedUpstream(page);
+    await expect(quota.getByRole('listitem')).toHaveCount(4);
+    await expect(quota.getByRole('meter')).toHaveCount(4);
+    await expect(quota.getByRole('meter', { name: '5h', exact: true })).toHaveCount(1);
+    await expect(quota.getByRole('meter', { name: '7d', exact: true })).toHaveCount(1);
+    await expect(quota.getByRole('meter', { name: '7d (Fable)', exact: true })).toHaveAttribute('aria-valuenow', '30');
+    await expect(quota.getByRole('meter', { name: 'Extra usage', exact: true })).toHaveCount(1);
     await page.screenshot({ path: testInfo.outputPath('fable-sidebar-stale-desktop.png'), fullPage: true });
 
-    // 5. Responsive checks with fresh Fable
+    // 5. Responsive checks with fresh Fable.
     latestWindows = [
       { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d', utilization: 0.2, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d_fable', utilization: 0.3, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
-      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
+      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_enabled: true, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
     ];
-    await installAppFixtures(page, { latestWindows });
+    fixtures.setLatestWindows(latestWindows);
 
-    const viewports = [
+    for (const vp of [
       { width: 1280, height: 800, name: 'desktop' },
       { width: 768, height: 1024, name: 'tablet' },
       { width: 375, height: 667, name: 'mobile' },
-    ];
-
-    for (const vp of viewports) {
+    ]) {
       await page.setViewportSize({ width: vp.width, height: vp.height });
-      await page.goto('/upstreams');
+      await openUpstreams(page, 'oauth-healthy');
 
-      await expect(meters.nth(2)).toBeVisible();
-
-      // Assert no horizontal overflow
-      const overflow = await page.evaluate(() => {
-        return document.documentElement.scrollWidth > document.documentElement.clientWidth;
-      });
-      expect(overflow).toBe(false);
-
-      // Assert Fable text is not clipped
-      const fableLabel = meters.nth(2).locator('.w-8.shrink-0.text-text-faint.truncate');
-      const isClipped = await fableLabel.evaluate((el) => {
-        return el.scrollWidth > el.clientWidth;
-      });
-      expect(isClipped).toBe(false);
-
+      await expect(quota.getByRole('meter', { name: '7d (Fable)', exact: true })).toBeVisible();
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        ),
+      ).toBe(false);
+      await expect(quota.getByText('7d (Fable)', { exact: true })).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath(`fable-sidebar-${vp.name}.png`), fullPage: true });
+    }
+  });
+
+  test('Scenario: Explicit weekly-only quota hides absent 5h on desktop and mobile', async ({
+    page,
+  }) => {
+    const now = Math.floor(Date.now() / 1000);
+    const baseSnap = {
+      status: null,
+      resets_at_unix_secs: now + 7 * 24 * 3600,
+      surpassed_threshold: null,
+      representative_claim: null,
+      disabled_reason: null,
+      extra_usage_enabled: null,
+      extra_usage_monthly_limit: null,
+      extra_usage_used_credits: null,
+      age_secs: 0,
+      source: 'api' as const,
+      observed_at_unix_millis: now * 1000,
+    };
+    const latestWindows: QuotaSnapshot[] = [
+      { ...baseSnap, window: '5h', state: 'absent', utilization: null, resets_at_unix_secs: null },
+      { ...baseSnap, window: '7d', state: 'fresh', utilization: 0.2 },
+      { ...baseSnap, window: '7d_fable', state: 'fresh', utilization: 0.3 },
+      { ...baseSnap, window: 'overage', state: 'fresh', utilization: null, extra_usage_enabled: true, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
+    ];
+    await installAppFixtures(page, { latestWindows });
+
+    for (const viewport of [
+      { width: 1280, height: 800 },
+      { width: 375, height: 667 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await openUpstreams(page);
+      const upstreamList = page.getByRole('list', { name: 'Upstreams', exact: true });
+      await expect(upstreamList).toBeVisible();
+      await expect(upstreamList.getByText('7d', { exact: true })).toBeVisible();
+      await expect(upstreamList.getByText('Fable', { exact: true })).toBeVisible();
+      await expect(upstreamList.getByText('20%', { exact: true })).toBeVisible();
+      await expect(upstreamList.getByText(/\b5h\b/)).toHaveCount(0);
+      await expect(upstreamList.getByText('No reading', { exact: true })).toHaveCount(0);
+      await expect(upstreamList.getByText(/^0%(?: used)?$/)).toHaveCount(0);
+
+      await Promise.all([
+        page.waitForURL(/selectedId=oauth-healthy/),
+        upstreamList.getByRole('button', { name: /oauth-healthy/ }).click(),
+      ]);
+      await reloadSelectedUpstream(page);
+      await expect(page).toHaveURL(/selectedId=oauth-healthy/);
+
+      const quota = page.getByTestId('quota-snapshot-grid');
+      await expect(quota).toBeVisible();
+      await expect(quota.getByRole('listitem')).toHaveCount(3);
+      await expect(quota.getByRole('meter')).toHaveCount(3);
+      await expect(quota.getByRole('meter', { name: '5h', exact: true })).toHaveCount(0);
+      await expect(quota.getByText(/\b5h\b/)).toHaveCount(0);
+      await expect(quota.getByText('No reading', { exact: true })).toHaveCount(0);
+      await expect(quota.getByText(/^0%(?: used)?$/)).toHaveCount(0);
+      await expect(quota.getByRole('meter', { name: '7d', exact: true })).toHaveAttribute('aria-valuenow', '20');
+      await expect(quota.getByRole('meter', { name: '7d (Fable)', exact: true })).toHaveAttribute('aria-valuenow', '30');
+      await expect(quota.getByRole('meter', { name: 'Extra usage', exact: true })).toHaveAttribute('aria-valuenow', '50');
+      await expect(quota.getByText('7d', { exact: true })).toBeVisible();
+      await expect(quota.getByText('7d (Fable)', { exact: true })).toBeVisible();
+      await expect(quota.getByText('Extra usage', { exact: true })).toBeVisible();
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        ),
+      ).toBe(false);
     }
   });
 });

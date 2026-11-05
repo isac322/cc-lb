@@ -77,7 +77,7 @@ export function QuotaWindowRow({
   // `unified` is not a renderable SubscriptionQuotaWindow, but the wire can
   // still report it (routing/overage) — the row never renders either way.
   const windowName: string = snap.window;
-  if (windowName === 'unified') return null;
+  if (windowName === 'unified' || snap.state === 'absent') return null;
   const isOverage = snap.window === 'overage';
   const unobserved = snap.state === 'unobserved';
   if (isOverage && !isOverageActive(snap)) return null;

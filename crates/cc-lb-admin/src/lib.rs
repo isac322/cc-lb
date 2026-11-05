@@ -98,8 +98,17 @@ pub struct StartupConfigOverrides {
     pub runtime_data_dir: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdminBuildInfo {
+    pub git_sha: &'static str,
+    pub rustc: &'static str,
+    pub profile: &'static str,
+    pub target: &'static str,
+}
+
 #[derive(Clone)]
 pub struct AdminState {
+    pub build: AdminBuildInfo,
     pub config_path: Option<PathBuf>,
     pub startup_config_overrides: StartupConfigOverrides,
     pub storage: Option<Arc<dyn Storage>>,

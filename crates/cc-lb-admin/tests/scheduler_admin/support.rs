@@ -18,8 +18,16 @@ pub struct RouteFixture<Pool> {
 }
 
 pub fn app_with_scheduler(scheduler: SchedulerAdminHandle) -> axum::Router {
+    app_with_scheduler_and_build(scheduler, crate::admin_test_common::test_build_info())
+}
+
+pub fn app_with_scheduler_and_build(
+    scheduler: SchedulerAdminHandle,
+    build: cc_lb_admin::AdminBuildInfo,
+) -> axum::Router {
     let config = Config::default();
     let state = cc_lb_admin::AdminState {
+        build,
         config_path: None,
         startup_config_overrides: Default::default(),
         storage: None,

@@ -13,10 +13,6 @@ use crate::AdminState;
 
 const DEFAULT_FAILURE_LIMIT: u32 = 100;
 const MAX_FAILURE_LIMIT: u32 = 500;
-const SCHEDULE_VERSION: &str = match option_env!("CC_LB_GIT_SHA") {
-    Some(value) => value,
-    None => "unknown",
-};
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -52,7 +48,7 @@ async fn status(State(state): State<AdminState>) -> Response {
     };
     match scheduler.status(&state.config.scheduler).await {
         Ok(snapshot) => Json(SchedulerStatusResponse {
-            schedule_version: SCHEDULE_VERSION,
+            schedule_version: state.build.git_sha,
             recurring_jobs: snapshot.recurring_jobs,
             pool_in_use: snapshot.pool_in_use,
             pool_idle: snapshot.pool_idle,

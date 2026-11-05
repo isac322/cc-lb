@@ -1719,6 +1719,7 @@ async fn build_app_with_storage_inner(
 
     let admin_config = Arc::new(config.clone());
     let admin_state = AdminState {
+        build: BuildMeta::current().admin_build_info(),
         storage: Some(storage.clone()),
         key_store: Some(key_store),
         aead: aead.clone(),

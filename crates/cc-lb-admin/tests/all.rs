@@ -72,8 +72,6 @@ mod reorder_rebalance_revalidates_slot;
 mod scheduler_admin;
 #[path = "snapshot_audit_query.rs"]
 mod snapshot_audit_query;
-#[path = "snapshot_health.rs"]
-mod snapshot_health;
 #[path = "static_assets_cache.rs"]
 mod static_assets_cache;
 #[path = "static_assets_served.rs"]
