@@ -46,6 +46,7 @@ pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptF
             observations,
             execution.expected_cycle_key,
             execution.scheduled_for_unix_secs,
+            execution.attempted_at_unix_secs,
             error_detail,
         ),
         WarmupAttemptExecutionResult::TransientFailure {
@@ -92,12 +93,13 @@ fn response_attempt_fields(
     observations: &[UnifiedQuotaObservation],
     expected_cycle_key: Option<i64>,
     scheduled_for_unix_secs: i64,
+    now_unix_secs: i64,
     error_detail: Option<&str>,
 ) -> AttemptFields {
     let candidate_cycle_key = expected_cycle_key.unwrap_or(scheduled_for_unix_secs);
     let http_status = Some(status_to_i32(status));
     let owned_detail = error_detail.map(ToOwned::to_owned);
-    match classify_response(status, observations, candidate_cycle_key) {
+    match classify_response(status, observations, candidate_cycle_key, now_unix_secs) {
         ResponseClassification::SuccessNewCycle { cycle_key } => {
             let success_reason = match expected_cycle_key {
                 Some(expected) if cycle_key > expected => WarmupSuccessReason::CycleAdvanced,
@@ -141,25 +143,22 @@ fn classify_response(
     status: StatusCode,
     observations: &[UnifiedQuotaObservation],
     candidate_cycle_key: i64,
+    now_unix_secs: i64,
 ) -> ResponseClassification {
     if status.is_success() {
         return ResponseClassification::SuccessNewCycle {
-            cycle_key: five_hour_cycle_key(observations).unwrap_or(candidate_cycle_key),
+            cycle_key: target_cycle_key(observations, now_unix_secs).unwrap_or(candidate_cycle_key),
         };
     }
     match status {
         StatusCode::TOO_MANY_REQUESTS => {
-            if let Some(cycle_key) = seven_day_exhausted_cycle_key(observations)
-                && cycle_key > candidate_cycle_key
-            {
+            if let Some(cycle_key) = seven_day_exhausted_cycle_key(observations, now_unix_secs) {
                 return ResponseClassification::SevenDayExhausted { cycle_key };
             }
 
-            match five_hour_cycle_key(observations) {
-                Some(cycle_key) if cycle_key > candidate_cycle_key => {
-                    ResponseClassification::WindowAlreadyActive { cycle_key }
-                }
-                Some(_) | None => ResponseClassification::Transient {
+            match target_cycle_key(observations, now_unix_secs) {
+                Some(cycle_key) => ResponseClassification::WindowAlreadyActive { cycle_key },
+                None => ResponseClassification::Transient {
                     reason: WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
                 },
             }
@@ -185,16 +184,27 @@ fn classify_response(
     }
 }
 
-fn five_hour_cycle_key(observations: &[UnifiedQuotaObservation]) -> Option<i64> {
-    cycle_key_for_window(observations, SubscriptionQuotaWindow::FiveHour)
+fn target_cycle_key(observations: &[UnifiedQuotaObservation], now_unix_secs: i64) -> Option<i64> {
+    [
+        SubscriptionQuotaWindow::FiveHour,
+        SubscriptionQuotaWindow::SevenDay,
+    ]
+    .into_iter()
+    .filter_map(|window| cycle_key_for_window(observations, window))
+    .filter(|reset| *reset > now_unix_secs)
+    .min()
 }
 
-fn seven_day_exhausted_cycle_key(observations: &[UnifiedQuotaObservation]) -> Option<i64> {
+fn seven_day_exhausted_cycle_key(
+    observations: &[UnifiedQuotaObservation],
+    now_unix_secs: i64,
+) -> Option<i64> {
     SubscriptionQuotaWindow::all()
         .iter()
         .copied()
         .filter(|window| window.is_weekly())
-        .find_map(|window| exhausted_cycle_key_for_window(observations, window))
+        .filter_map(|window| exhausted_cycle_key_for_window(observations, window))
+        .find(|reset| *reset > now_unix_secs)
 }
 
 fn exhausted_cycle_key_for_window(

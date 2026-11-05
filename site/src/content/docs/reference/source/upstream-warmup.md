@@ -6,7 +6,7 @@ slug: docs/reference/source/upstream-warmup
 
 ## What it does
 
-Anthropic OAuth upstreams require periodic activity to keep their five-hour rate limit reset windows active. If an upstream remains idle for too long, the reset window closes, which can lead to unexpected rate limits when traffic resumes. This warm-up system automatically sends minimal requests to keep these windows ticking. It ensures that your upstreams are always ready to handle incoming requests without artificial delays.
+Anthropic OAuth upstreams require periodic activity to keep their reported quota windows active. Warm-up targets the five-hour and seven-day windows, and it automatically skips a target that the account reports as absent. Weekly-only Claude accounts therefore warm their seven-day window instead of being treated as unknown.
 
 Warm-up is opt-out for `anthropic_oauth`: `warmup_enabled` defaults to `true` for OAuth upstreams created through `POST /admin/v1/upstreams` and through the OAuth flow. Other upstream kinds default to `false`. Only `anthropic_oauth` upstreams that hold OAuth credentials are ever scheduled, so the flag is inert until an upstream completes OAuth.
 
@@ -83,9 +83,15 @@ The warm-up system logs its activity using tracing events. All events use the `w
 
 ## Quota-aware scheduling
 
-Warm-up distinguishes the five-hour active window from seven-day quota exhaustion.
+Warm-up targets the five-hour and seven-day windows independently.
 
-If the local usage cache already shows a fresh active five-hour window, the warm-up attempt is skipped as `WindowAlreadyActive`; no provider request is sent. If a warm-up request or fresh usage cache shows the seven-day window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
+Warm-up ignores explicitly absent targets. It sends a request when any fresh target is idle. Otherwise, a known active target skips the request until the earliest known reset, even when another target is stale or missing. If no target is known active, unknown samples allow the normal warm-up request. All scheduled evaluations retain the post-reset guard and stable jitter.
+
+After a successful request, each response-present window supersedes its older cached snapshot, including when the response omits a future reset. For targets not reported by that response, the scheduler uses fresh snapshot resets. It selects the earliest known future reset, bounded by the shortest present window's normal cadence when any target still has no known future reset: five hours for accounts with a five-hour target, or seven days for weekly-only accounts.
+
+Presence follows the latest selected sample kind, not its age: an `Absent` sample remains absent after its freshness interval expires, so an older stale five-hour sample cannot restore the five-hour cadence. A newer actual sample or a window reported by the successful response establishes presence again. Stale actual samples and unobserved targets are unknown, not evidence of structural absence; without an explicit `Absent` sample, their cadence remains conservative.
+
+If the local usage cache or a warm-up response shows a fresh seven-day window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
 
 Seven-day exhaustion does not stamp the upstream as successfully warmed. Instead, the scheduler enqueues the next warm-up after the seven-day reset at `reset + 30..59s`, using the idempotency key `adaptive:warmup:{upstream_id}:{reset}`. The 30-second guard lets Anthropic roll the window before cc-lb retries; the stable jitter avoids a thundering herd across upstreams.
 

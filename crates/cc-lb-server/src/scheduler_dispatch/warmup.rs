@@ -18,8 +18,8 @@ mod scheduling;
 mod support;
 
 use quota::{
-    WarmupPreflightReject, WarmupQuotaPreflightDecision, quota_preflight_decision_from_snapshots,
-    warmup_preflight_reject,
+    WarmupPreflightReject, WarmupQuotaPreflightDecision, next_warmup_evaluation_after_success,
+    quota_preflight_decision_from_snapshots, warmup_preflight_reject,
 };
 use request::{WarmupDispatchAttempt, WarmupDispatchResult};
 use scheduling::next_warmup_task;
@@ -177,8 +177,22 @@ impl SchedulerDispatch {
 
         match record.outcome {
             WarmupAttemptOutcome::Success(_) => {
-                let response_cycle_key = record.cycle_key.unwrap_or(expected_cycle_key);
-                self.write_status_after_warmup_success(upstream.id, response_cycle_key)
+                let now_unix_secs = now_unix_secs_i64(&*self.clock)?;
+                let view = self.dynamic_view.load();
+                let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
+                drop(view);
+                let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
+                    upstream.id,
+                    now_unix_millis(&*self.clock),
+                    max_staleness_secs,
+                );
+                let observations = match &final_attempt.result {
+                    WarmupDispatchResult::Response { observations, .. } => observations.as_slice(),
+                    _ => &[],
+                };
+                let next_evaluation =
+                    next_warmup_evaluation_after_success(&snapshots, observations, now_unix_secs);
+                self.write_status_after_warmup_success(upstream.id, next_evaluation)
                     .await?;
                 if let WarmupDispatchResult::Response { observations, .. } = final_attempt.result {
                     self.record_warmup_observations(upstream.id, observations)?;
