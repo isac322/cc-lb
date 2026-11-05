@@ -8,10 +8,6 @@ use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParam
 use cc_lb_storage_api::MetaStore;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ImageExt, runners::AsyncRunner},
-};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -25,19 +21,39 @@ use super::worker::{OAuthWorkerProbe, OAuthWorkerState, spawn_oauth_worker};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {
-    with_postgres_container(run_postgres_race).await
+    with_postgres_database(run_postgres_race).await
 }
 
 async fn run_postgres_race(url: String) -> TestResult<()> {
+    if !is_safe_database_url(&url) {
+        eprintln!("SKIP: PostgreSQL URL is not a recognized local test database");
+        return Ok(());
+    }
+
+    let databases = create_test_databases(&url).await?;
+    let result = run_postgres_race_inner(&databases).await;
+    let cleanup_result = drop_test_databases(&url, &databases).await;
+
+    match (result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(test_error), Ok(())) => Err(test_error),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(test_error), Err(cleanup_error)) => Err(format!(
+            "{test_error}; failed to clean up temporary PostgreSQL databases: {cleanup_error}"
+        )
+        .into()),
+    }
+}
+
+async fn run_postgres_race_inner(databases: &TestDatabases) -> TestResult<()> {
     let fake = FakeAnthropic::spawn().await?;
-    let (scheduler_url, runtime_url) = create_test_databases(&url).await?;
     let pool = PgPoolOptions::new()
         .max_connections(6)
-        .connect(&scheduler_url)
+        .connect(&databases.scheduler_url)
         .await?;
     let storage_pool = StoragePgPoolOptions::new()
         .max_connections(4)
-        .connect(&runtime_url)
+        .connect(&databases.runtime_url)
         .await?;
     apalis_postgres::PostgresStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
@@ -107,32 +123,78 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
     .await;
     cancel.cancel();
     worker.await??;
+    pool.close().await;
+    storage_pool.close().await;
     result
 }
 
-async fn create_test_databases(base_url: &str) -> TestResult<(String, String)> {
+struct TestDatabases {
+    scheduler_url: String,
+    runtime_url: String,
+    scheduler_name: String,
+    runtime_name: String,
+}
+
+async fn create_test_databases(base_url: &str) -> TestResult<TestDatabases> {
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(base_url)
         .await?;
     let suffix = Uuid::new_v4().simple().to_string();
-    let scheduler_db = format!("scheduler_{suffix}");
-    let runtime_db = format!("runtime_{suffix}");
+    let scheduler_name = format!("scheduler_{suffix}");
+    let runtime_name = format!("runtime_{suffix}");
+    let scheduler_url = database_url(base_url, &scheduler_name)?;
+    let runtime_url = database_url(base_url, &runtime_name)?;
+
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        r#"CREATE DATABASE "{scheduler_db}""#
+        r#"CREATE DATABASE "{scheduler_name}""#
     )))
     .execute(&admin)
     .await?;
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        r#"CREATE DATABASE "{runtime_db}""#
+    if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{runtime_name}""#
     )))
     .execute(&admin)
-    .await?;
+    .await
+    {
+        let _ = drop_database(&admin, &scheduler_name).await;
+        admin.close().await;
+        return Err(error.into());
+    }
     admin.close().await;
-    Ok((
-        database_url(base_url, &scheduler_db)?,
-        database_url(base_url, &runtime_db)?,
-    ))
+
+    Ok(TestDatabases {
+        scheduler_url,
+        runtime_url,
+        scheduler_name,
+        runtime_name,
+    })
+}
+
+async fn drop_test_databases(base_url: &str, databases: &TestDatabases) -> TestResult<()> {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(base_url)
+        .await?;
+    let scheduler_result = drop_database(&admin, &databases.scheduler_name).await;
+    let runtime_result = drop_database(&admin, &databases.runtime_name).await;
+    admin.close().await;
+    scheduler_result?;
+    runtime_result?;
+    Ok(())
+}
+
+async fn drop_database(pool: &sqlx::PgPool, database: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE IF EXISTS "{database}" WITH (FORCE)"#
+    )))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn is_safe_database_url(url: &str) -> bool {
+    url.contains("localhost") || url.contains("127.0.0.1") || url.contains("cc_lb_test")
 }
 
 fn database_url(base_url: &str, database: &str) -> TestResult<String> {
@@ -157,38 +219,22 @@ async fn postgres_metadata_count(pool: &sqlx::PgPool, upstream_id: Uuid) -> Test
     .await?)
 }
 
-async fn with_postgres_container<F, Fut>(run: F) -> TestResult<()>
+async fn with_postgres_database<F, Fut>(run: F) -> TestResult<()>
 where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = TestResult<()>>,
 {
-    let docker_host = match std::env::var("DOCKER_HOST") {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!(
-                "SKIP: DOCKER_HOST not set for lazy/proactive race test; expected DOCKER_HOST=tcp://localhost:2375 ({error})"
-            );
-            return Ok(());
-        }
+    let database_url = std::env::var("CI_POSTGRES_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("DATABASE_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
+    let Some(database_url) = database_url else {
+        eprintln!("SKIP: CI_POSTGRES_URL or DATABASE_URL not set for lazy/proactive race test");
+        return Ok(());
     };
-    let container = match Postgres::default().with_tag("18-alpine").start().await {
-        Ok(container) => container,
-        Err(error) => {
-            eprintln!(
-                "SKIP: could not start postgres testcontainer using DOCKER_HOST={docker_host}: {error}"
-            );
-            return Ok(());
-        }
-    };
-    let port = match container.get_host_port_ipv4(5432).await {
-        Ok(port) => port,
-        Err(error) => {
-            eprintln!("SKIP: could not read postgres testcontainer port: {error}");
-            return Ok(());
-        }
-    };
-    run(format!(
-        "postgres://postgres:postgres@127.0.0.1:{port}/postgres"
-    ))
-    .await
+    run(database_url).await
 }
