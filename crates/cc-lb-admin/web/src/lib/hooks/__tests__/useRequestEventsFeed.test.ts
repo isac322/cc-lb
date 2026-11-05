@@ -8,7 +8,11 @@ import type {
   RequestEvent,
   RequestEventUpdate,
 } from '../../api';
-import { useRequestEventsFeed } from '../../useRequestEventsFeed';
+import {
+  buildRequestEventsHistoryFilters,
+  buildRequestEventsLiveFilters,
+  useRequestEventsFeed,
+} from '../../useRequestEventsFeed';
 
 const mocks = vi.hoisted(() => {
   const live = {
@@ -102,6 +106,42 @@ function makeWrapper(client: QueryClient) {
     return createElement(QueryClientProvider, { client }, children);
   };
 }
+
+describe('request event feed query filters', () => {
+  it.each([
+    ['messages', { event_kind: 'messages' }],
+    ['renewal', { event_kind: 'renewal' }],
+    ['all', { source_kind: 'all' }],
+  ] as const)(
+    'serializes %s without losing its backend meaning',
+    (kind, expected) => {
+      expect(buildRequestEventsHistoryFilters({ event_kind: kind })).toEqual(
+        expected,
+      );
+      expect(buildRequestEventsLiveFilters({ event_kind: kind })).toEqual(
+        expected,
+      );
+    },
+  );
+
+  it('keeps All kinds in bounded errors history without restricting live corrections', () => {
+    const filters = {
+      event_kind: 'all' as const,
+      status: 'errors' as const,
+      since_unix_secs: 100,
+      until_unix_secs: 200,
+    };
+    expect(buildRequestEventsHistoryFilters(filters)).toEqual({
+      source_kind: 'all',
+      status_class: 'errors',
+      since_unix_secs: '100',
+      until_unix_secs: '200',
+    });
+    expect(buildRequestEventsLiveFilters(filters)).toEqual({
+      source_kind: 'all',
+    });
+  });
+});
 
 describe('useRequestEventsFeed', () => {
   beforeEach(() => {

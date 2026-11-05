@@ -133,7 +133,7 @@ sequenceDiagram
 
 The server emits an `event: reset` frame to force the client to clear its local state and resync from scratch. This happens under three specific conditions:
 
-1. `backfill_cap`: The client's `Last-Event-ID` is more than 500 cursors behind the current head. Replaying a larger gap from storage would place excessive load on the database. The client should clear its state and perform a REST-delta backfill from the current head. This limit is defined by `BACKFILL_MAX_EVENTS = 500` in [`crates/cc-lb-admin/src/events.rs`](../crates/cc-lb-admin/src/events.rs#L22).
+1. `backfill_cap`: The storage backfill returns 500 matching events (`BACKFILL_MAX_EVENTS`), after applying the active filters. The cap counts matching events, not raw cursor distance, so a large gap with sparse matches does not trigger a reset by itself. The server sends the reset with the last safely emitted cursor as its SSE id and closes the stream. Clients may use that id as a resume point when their recovery path performs REST delta; the protocol does not require a particular client recovery sequence. Filter-before-cap paging and exhausted-delta cursor advancement prevent filtered gaps from being skipped.
 2. `bus_lagged`: The SSE subscriber's tokio broadcast receiver lags behind the publisher, resulting in a `Lagged(n)` error. This indicates that the consumer instance or client connection is slower than the event emission rate.
 3. `storage_error`: The storage tail poll fails due to database health issues or query timeouts.
 
