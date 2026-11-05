@@ -1,0 +1,9 @@
+{
+  "cases": [
+    {
+      "name": "cc-lb-v2.1.0-postgres",
+      "dump": "cc-lb-v2.1.0-postgres.sql",
+      "sha256": "002101d1969052862eb06405436b4ada528256eeba9eb7acb1df8feec740b60e"
+    }
+  ]
+}

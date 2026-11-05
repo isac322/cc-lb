@@ -66,17 +66,21 @@ async fn open(database_url: &str) -> TestResult<SqliteStorage> {
 }
 
 async fn seed_historical_upstreams(storage: &SqliteStorage) -> TestResult {
-    for (id, name, kind, deleted_at) in [
+    for (id, name, kind, base_url, workspace_id, deleted_at) in [
         (
             Uuid::from_u128(1),
             "historical-api",
             "anthropic_api_key",
+            Some("https://migration.example.test"),
+            Some("historical-workspace"),
             None,
         ),
         (
             Uuid::from_u128(2),
             "historical-oauth",
             "anthropic_oauth",
+            None,
+            None,
             Some(1_030_i64),
         ),
     ] {
@@ -90,9 +94,9 @@ async fn seed_historical_upstreams(storage: &SqliteStorage) -> TestResult {
         .bind(id.to_string())
         .bind(name)
         .bind(kind)
-        .bind("https://migration.example.test")
+        .bind(base_url)
         .bind(deleted_at)
-        .bind("historical-workspace")
+        .bind(workspace_id)
         .execute(storage.pool())
         .await?;
         sqlx::query(
