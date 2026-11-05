@@ -528,58 +528,68 @@ def main() -> int:
     env = os.environ.copy()
     env.update({"QA_ADMIN_TOKEN": token, "QA_MASTER_KEY": master})
     log_path = work_dir / "cc-lb.log"
-    log_handle = log_path.open("wb")
-    process = subprocess.Popen([str(binary), "serve", "--config", str(config_path), "--data-dir", str(work_dir / "data")], cwd=str(work_dir), env=env, stdout=log_handle, stderr=subprocess.STDOUT)
-    ledger("process", f"detail-transport-server-pid:{process.pid}", f"kill {process.pid}")
-    ledger("process", f"detail-transport-harness-pid:{os.getpid()}", f"kill {os.getpid()}")
-    ledger("listener", f"detail-transport-admin:127.0.0.1:{admin_port};pid:{process.pid}", f"kill {process.pid}")
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda _signum, _frame: stop.set())
     signal.signal(signal.SIGINT, lambda _signum, _frame: stop.set())
     origins: dict[str, ThreadingHTTPServer] = {}
-    try:
-        wait_health(admin_port, token, process)
-        before = seed(db, executor)
-        manifest_path = work_dir / "fixture-manifest.json"
-        for name in ("direct", "forward", "redirect"):
-            origins[name] = make_origin(admin_port, spa_dir, name)
-            ledger("listener", f"detail-transport-{name}:127.0.0.1:{origins[name].server_address[1]}", f"stop listener in harness PID {os.getpid()}")
-        manifest = {
-            "issue": 1052,
-            "mode": args.mode,
-            "database": str(db),
-            "sqlite_executor": executor,
-            "cleanup_ledger": str(LEDGER_PATH),
-            "origins": {name: f"http://127.0.0.1:{server.server_address[1]}" for name, server in origins.items()},
-            "principal_id": PID,
-            "keepalive_ids": IDS,
-            "control_session_id": CONTROL_SESSION,
-            "event_ids": {"renewal": RENEWAL_EVENT, "ordinary": ORDINARY_EVENT},
-            "credentials_file": str(cred_path),
-            "db_snapshot_before": before,
-            "server_log": str(log_path),
-        }
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
-        print("DETAIL_FIXTURE_READY", flush=True)
-        print(json.dumps({"manifest": str(manifest_path), "mode": args.mode, "origins": manifest["origins"], "credentials_file": str(cred_path)}, ensure_ascii=False, sort_keys=True), flush=True)
-        while not stop.wait(1.0):
-            if process.poll() is not None:
-                raise FixtureError("cc-lb exited while held")
-        return 0
-    except Exception as exc:
-        print(f"DETAIL_FIXTURE_FAILED_RETAINED: {exc}", file=sys.stderr, flush=True)
-        stop.wait()
-        return 1
-    finally:
-        for server in origins.values():
-            server.shutdown(); server.server_close()
-        if process.poll() is None:
-            process.terminate()
+    process: subprocess.Popen[bytes] | None = None
+    with log_path.open("wb") as log_handle:
+        try:
+            process = subprocess.Popen([str(binary), "serve", "--config", str(config_path), "--data-dir", str(work_dir / "data")], cwd=str(work_dir), env=env, stdout=log_handle, stderr=subprocess.STDOUT)
+            ledger("process", f"detail-transport-server-pid:{process.pid}", f"kill {process.pid}")
+            ledger("process", f"detail-transport-harness-pid:{os.getpid()}", f"kill {os.getpid()}")
+            ledger("listener", f"detail-transport-admin:127.0.0.1:{admin_port};pid:{process.pid}", f"kill {process.pid}")
+            if stop.is_set():
+                return 0
+            registering = False
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill(); process.wait(timeout=5)
-        log_handle.close()
+                wait_health(admin_port, token, process)
+                before = seed(db, executor)
+                manifest_path = work_dir / "fixture-manifest.json"
+                for name in ("direct", "forward", "redirect"):
+                    origins[name] = make_origin(admin_port, spa_dir, name)
+                    registering = True
+                    ledger("listener", f"detail-transport-{name}:127.0.0.1:{origins[name].server_address[1]}", f"stop listener in harness PID {os.getpid()}")
+                    registering = False
+                manifest = {
+                    "issue": 1052,
+                    "mode": args.mode,
+                    "database": str(db),
+                    "sqlite_executor": executor,
+                    "cleanup_ledger": str(LEDGER_PATH),
+                    "origins": {name: f"http://127.0.0.1:{server.server_address[1]}" for name, server in origins.items()},
+                    "principal_id": PID,
+                    "keepalive_ids": IDS,
+                    "control_session_id": CONTROL_SESSION,
+                    "event_ids": {"renewal": RENEWAL_EVENT, "ordinary": ORDINARY_EVENT},
+                    "credentials_file": str(cred_path),
+                    "db_snapshot_before": before,
+                    "server_log": str(log_path),
+                }
+                manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+                print("DETAIL_FIXTURE_READY", flush=True)
+                print(json.dumps({"manifest": str(manifest_path), "mode": args.mode, "origins": manifest["origins"], "credentials_file": str(cred_path)}, ensure_ascii=False, sort_keys=True), flush=True)
+                while not stop.wait(1.0):
+                    if process.poll() is not None:
+                        raise FixtureError("cc-lb exited while held")
+                return 0
+            except Exception as exc:
+                if registering:
+                    raise
+                print(f"DETAIL_FIXTURE_FAILED_RETAINED: {exc}", file=sys.stderr, flush=True)
+                stop.wait()
+                return 1
+        finally:
+            try:
+                for server in origins.values():
+                    server.shutdown(); server.server_close()
+            finally:
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill(); process.wait(timeout=5)
 
 
 if __name__ == "__main__":
