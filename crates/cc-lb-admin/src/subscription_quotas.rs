@@ -19,9 +19,10 @@ use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaChartPointRecord,
     PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage,
     StorageError, SubscriptionQuotaBucket, SubscriptionQuotaProviderLot,
-    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionMetadataRecord, UsageTokenInterval, upstream::UpstreamKind,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
+    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UsageTokenInterval, upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -233,6 +234,8 @@ pub struct AggregateWindowResponse {
     contributing_upstreams: usize,
     stale_upstreams: usize,
     missing_capacity_upstreams: usize,
+    /// Pool members with this window; explicit provider absence is not missing data.
+    eligible_upstreams: usize,
     provider_lots: Vec<AggregateProviderLotResponse>,
     caveats: Vec<String>,
 }
@@ -353,7 +356,7 @@ async fn build_pool_history_response(
     query: PoolHistoryQuery,
 ) -> Result<PoolHistoryResponse, Response> {
     let storage = storage(state)?;
-    let windows = parse_pool_history_windows(query.windows.as_deref())?;
+    let mut windows = parse_pool_history_windows(query.windows.as_deref())?;
     let compact_series = match query.series_projection.as_deref() {
         None | Some("full") => false,
         Some("chart") => true,
@@ -366,6 +369,44 @@ async fn build_pool_history_response(
         }
     };
     let now_unix_secs = (now_unix_millis(&*state.clock) / 1_000) as i64;
+    if windows.contains(&SubscriptionQuotaWindow::FiveHour) {
+        let upstreams = pool_quota_upstreams(
+            list_all_upstreams_storage(storage)
+                .await
+                .map_err(storage_error)?,
+            None,
+        );
+        let ids = upstreams
+            .iter()
+            .map(|upstream| upstream.id)
+            .collect::<Vec<_>>();
+        let latest = storage
+            .list_latest_subscription_quota_for_upstreams(&ids)
+            .await
+            .map_err(storage_error)?;
+        let view = state.dynamic_view.load();
+        let now = now_unix_millis(&*state.clock);
+        let max_staleness = view.subscription_quota_routing_max_staleness_secs;
+        if !upstreams.is_empty()
+            && upstreams.iter().all(|upstream| {
+                let snapshots = view.subscription_quota_cache.snapshot_for_upstream(
+                    upstream.id,
+                    now,
+                    max_staleness,
+                );
+                five_hour_is_absent(
+                    latest
+                        .iter()
+                        .filter(|sample| sample.upstream_id == upstream.id),
+                    snapshots.iter().find(|snapshot| snapshot.window == "5h"),
+                    now,
+                    max_staleness,
+                )
+            })
+        {
+            windows.retain(|window| *window != SubscriptionQuotaWindow::FiveHour);
+        }
+    }
     let default_lookback_secs: i64 = 6 * 60 * 60;
     let since_unix_secs = query
         .since_unix_secs
@@ -764,14 +805,40 @@ pub async fn build_cc_lb_aggregate_response(
             .await?
     };
 
+    let durable_latest = if upstreams.is_empty() || duration_windows.is_empty() {
+        Vec::new()
+    } else {
+        let upstream_ids = upstreams
+            .iter()
+            .map(|upstream| upstream.id)
+            .collect::<Vec<_>>();
+        storage
+            .list_latest_subscription_quota_for_upstreams(&upstream_ids)
+            .await?
+    };
     let dynamic_view = dynamic_view.load();
+    let allowed_sources = sources_for_merge(source);
     let mut latest_candidates = Vec::new();
+    let mut absent_five_hour = HashSet::new();
     for upstream in &upstreams {
-        for snapshot in dynamic_view.subscription_quota_cache.snapshot_for_upstream(
+        let snapshots = dynamic_view.subscription_quota_cache.snapshot_for_upstream(
             upstream.id,
             now_unix_millis,
             max_staleness_secs,
+        );
+        if five_hour_is_absent(
+            durable_latest.iter().filter(|sample| {
+                sample.upstream_id == upstream.id && allowed_sources.contains(&sample.source)
+            }),
+            snapshots.iter().find(|snapshot| {
+                snapshot.window == "5h" && snapshot_matches_source(snapshot, source)
+            }),
+            now_unix_millis,
+            max_staleness_secs,
         ) {
+            absent_five_hour.insert(upstream.id);
+        }
+        for snapshot in snapshots {
             if !snapshot_matches_source(&snapshot, source) {
                 continue;
             }
@@ -793,18 +860,6 @@ pub async fn build_cc_lb_aggregate_response(
         }
     }
 
-    let allowed_sources = sources_for_merge(source);
-    let durable_latest = if upstreams.is_empty() || duration_windows.is_empty() {
-        Vec::new()
-    } else {
-        let upstream_ids = upstreams
-            .iter()
-            .map(|upstream| upstream.id)
-            .collect::<Vec<_>>();
-        storage
-            .list_latest_subscription_quota_for_upstreams(&upstream_ids)
-            .await?
-    };
     type FreshCandidate = (u64, SubscriptionQuotaDataState, Option<f64>, Option<u64>);
     let mut freshest_observed: HashMap<(Uuid, SubscriptionQuotaWindow), Vec<FreshCandidate>> =
         HashMap::new();
@@ -858,6 +913,11 @@ pub async fn build_cc_lb_aggregate_response(
         .iter()
         .filter_map(|lot| {
             let upstream = upstream_by_id.get(&lot.upstream_id)?;
+            if lot.window == SubscriptionQuotaWindow::FiveHour
+                && absent_five_hour.contains(&lot.upstream_id)
+            {
+                return None;
+            }
             Some(provider_lot_input_from_storage(
                 upstream,
                 lot,
@@ -918,6 +978,8 @@ pub async fn build_cc_lb_aggregate_response(
             .iter()
             .filter(|(upstream_id, window, _, _)| {
                 !covered_by_provider_lots.contains(&(*upstream_id, *window))
+                    && !(*window == SubscriptionQuotaWindow::FiveHour
+                        && absent_five_hour.contains(upstream_id))
             })
             .filter_map(|(upstream_id, window, snapshot, capacity_ratio)| {
                 upstream_by_id.get(upstream_id).map(|upstream| {
@@ -971,6 +1033,10 @@ pub async fn build_cc_lb_aggregate_response(
             let (cc_start, _) = cc_window_bounds(now_unix_secs, secs);
             let ids = upstreams
                 .iter()
+                .filter(|upstream| {
+                    window != SubscriptionQuotaWindow::FiveHour
+                        || !absent_five_hour.contains(&upstream.id)
+                })
                 .map(|upstream| push_interval(upstream.id, cc_start, now_unix_secs))
                 .collect::<Vec<_>>();
             (window, ids)
@@ -989,6 +1055,14 @@ pub async fn build_cc_lb_aggregate_response(
 
     let mut aggregate_windows = Vec::new();
     for window in duration_windows {
+        let ineligible_upstreams = if window == SubscriptionQuotaWindow::FiveHour {
+            absent_five_hour.len()
+        } else {
+            0
+        };
+        if ineligible_upstreams > 0 && ineligible_upstreams == upstreams.len() {
+            continue;
+        }
         let window_lots = lot_inputs
             .iter()
             .zip(&lot_interval_ids)
@@ -1017,12 +1091,10 @@ pub async fn build_cc_lb_aggregate_response(
             .filter_map(|interval_id| token_sums.get(interval_id))
             .copied()
             .sum();
-        aggregate_windows.push(build_aggregate_window_response(
-            window,
-            &window_lots,
-            used_tokens,
-            now_unix_secs,
-        ));
+        let mut response =
+            build_aggregate_window_response(window, &window_lots, used_tokens, now_unix_secs);
+        response.eligible_upstreams = upstreams.len().saturating_sub(ineligible_upstreams);
+        aggregate_windows.push(response);
     }
 
     let caveats = vec![
@@ -1045,7 +1117,6 @@ pub fn pool_quota_snapshots_from_aggregate(
     snapshot_at_unix_secs: i64,
     computed_at_unix_millis: i64,
 ) -> Vec<PoolQuotaSnapshotRecord> {
-    let eligible_upstreams = i64::try_from(aggregate.upstream_count).unwrap_or(i64::MAX);
     aggregate
         .windows
         .iter()
@@ -1086,7 +1157,8 @@ pub fn pool_quota_snapshots_from_aggregate(
                 utilization: window_response.utilization,
                 weighted_utilization_sum,
                 capacity_ratio_sum,
-                eligible_upstreams,
+                eligible_upstreams: i64::try_from(window_response.eligible_upstreams)
+                    .unwrap_or(i64::MAX),
                 contributing_upstreams: i64::try_from(window_response.contributing_upstreams)
                     .unwrap_or(i64::MAX),
                 stale_upstreams: i64::try_from(window_response.stale_upstreams).unwrap_or(i64::MAX),
@@ -1284,6 +1356,7 @@ fn build_aggregate_window_response(
         contributing_upstreams,
         stale_upstreams,
         missing_capacity_upstreams,
+        eligible_upstreams: latest_lots.len(),
         provider_lots: latest_lots,
         caveats,
     }
@@ -1817,6 +1890,50 @@ async fn list_all_upstreams_storage(
         }
     }
     Ok(all)
+}
+
+/// Successful provider enumeration is authoritative even after it ages out;
+/// missing headers never create an absence. Use the cache's fresh-first merge
+/// ordering for durable fallback, with API winning equal-timestamp ties.
+pub(crate) fn five_hour_is_absent<'a>(
+    samples: impl Iterator<Item = &'a SubscriptionQuotaSample>,
+    snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
+    now_unix_millis: u64,
+    max_staleness_secs: u64,
+) -> bool {
+    let rank = |observed_at: u64, api: bool| {
+        (
+            now_unix_millis.saturating_sub(observed_at) <= max_staleness_secs.saturating_mul(1_000),
+            observed_at,
+            api,
+        )
+    };
+    let durable = samples
+        .filter(|sample| sample.window == SubscriptionQuotaWindow::FiveHour)
+        .max_by_key(|sample| {
+            rank(
+                sample.observed_at_unix_millis,
+                sample.source == SubscriptionQuotaSource::Api,
+            )
+        });
+    let cached = snapshot.filter(|snapshot| {
+        snapshot.state != SubscriptionQuotaDataState::Unobserved
+            && snapshot.observed_at_unix_millis.is_some()
+    });
+    if let Some(cached) = cached
+        && durable.is_none_or(|sample| {
+            rank(
+                cached.observed_at_unix_millis.unwrap_or(0),
+                cached.source.as_deref() == Some("api"),
+            ) >= rank(
+                sample.observed_at_unix_millis,
+                sample.source == SubscriptionQuotaSource::Api,
+            )
+        })
+    {
+        return cached.state == SubscriptionQuotaDataState::Absent;
+    }
+    durable.is_some_and(|sample| sample.sample_kind == SubscriptionQuotaSampleKind::Absent)
 }
 
 fn latest_window_response(
@@ -2454,6 +2571,7 @@ mod tests {
             contributing_upstreams: 1,
             stale_upstreams: 0,
             missing_capacity_upstreams: 0,
+            eligible_upstreams: 1,
             provider_lots: Vec::new(),
             caveats: Vec::new(),
         }

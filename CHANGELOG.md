@@ -4,10 +4,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Security
-
-- OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
-
 ### Changed
 
 - Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
@@ -17,6 +13,14 @@ All notable changes to this project will be documented in this file.
 - Recent request-event reads use SQLite's `+ts` optimizer predicate only for `since=0` with a saturated upper bound; bounded time ranges retain their existing seekable `ts` predicates. PostgreSQL omits the redundant renewal event-kind predicate only when both source and event kind are `renewal`.
 - Logs `All kinds` now preserves `source_kind=all` through history, live, delta, and histogram requests, so keepalive renewal rows appear without sending invalid `event_kind=all`.
 - Delta and SSE event reads now filter before the 500-row matching cap, advance exhausted deltas safely, and retain the existing reset at exactly 500 matching backfill events.
+- Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent. Source-filtered aggregates determine absence only from the requested source. Limit-reset nudges for absent 5-hour windows recompute `at_limit` even when the provider omits the exhausted-window list.
+- Streaming requests that receive non-SSE bodies now run the buffered response transform once over the complete, bounded body; oversized bodies return the existing 502 collection error without invoking the hook, while ordinary JSON responses remain outside the ingress cap.
+- Client closes after Anthropic `message_stop` or OpenAI Responses `response.completed` now finalize streams with observed usage and limit reconciliation instead of 499 cancellations. Abnormal Anthropic stops retain refusal or context-window classification, while upstream and proxy errors keep precedence. OpenAI Responses streams are recognized as SSE when the upstream omits `Content-Type`.
+- Mid-stream `error: null` fields no longer classify OpenAI Responses completion events as provider errors.
+
+### Security
+
+- OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
 
 ## [2.2.1] - 2026-11-04
 
