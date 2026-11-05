@@ -1,7 +1,7 @@
 export const COPY = {
   cardTitle: 'Warmup',
   cardSubtitle:
-    'Keep the 5h OAuth subscription window primed by sending a small request before quota expires.',
+    'Keep the OAuth subscription quota primed by sending a small request before quota expires.',
   lastCycleLabel: 'Last cycle',
   dialectPluginLabel: 'Shape plugin',
   defaultPluginOption: 'None (default request shape)',
@@ -20,11 +20,11 @@ export const COPY = {
   dialectPluginSaveSuccess: 'Shape plugin updated',
   dialectPluginClearSuccess: 'Shape plugin cleared',
   disabledEmpty:
-    'Warmup is off for this upstream. Enable to keep the 5h OAuth window primed.',
+    'Warmup is off for this upstream. Enable to keep the subscription quota primed.',
   lastNull: 'Never warmed',
   confirmFireBody:
-    'This sends a real /messages request to {upstreamName} and consumes a small token. The schedule for the current 5h window will be skipped.',
-  fireSuccess: 'Warmup fired — 5h window primed',
+    'This sends a real /messages request to {upstreamName} and consumes a small token. The schedule for the current quota window will be skipped.',
+  fireSuccess: 'Warmup fired — quota window primed',
   leaseHeldTemplate:
     'Another replica ({heldBy}) is currently priming this upstream. Try again in ~30 seconds.',
   staleRevisionHint: 'Settings changed elsewhere — re-apply your changes.',

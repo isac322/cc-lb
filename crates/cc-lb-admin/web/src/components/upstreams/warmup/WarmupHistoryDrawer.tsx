@@ -368,7 +368,7 @@ function AttemptListRow({
           {attempt.reason
             ? REASON_LABEL[attempt.reason]
             : attempt.status === 'success'
-              ? 'Cycle key advanced — fresh 5h window'
+              ? 'Cycle key advanced — fresh quota window'
               : '—'}
         </p>
       </button>

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
+import { buildQuotaChartData } from './buildQuotaChartData';
 import {
   isObservedAtOrAfter,
   selectQuotaCardSnapshots,
@@ -265,6 +266,15 @@ describe('selectQuotaCardSnapshots', () => {
     ).toEqual(['5h']);
   });
 
+  it('omits an explicitly absent 5h window while retaining unobserved 5h', () => {
+    expect(
+      windowsOf([
+        snap({ window: '5h', state: 'absent', utilization: null }),
+        snap({ window: '7d', state: 'unobserved', utilization: null }),
+      ]),
+    ).toEqual(['7d']);
+  });
+
   it('drops unobserved windows other than 5h and 7d', () => {
     expect(
       windowsOf([
@@ -363,5 +373,26 @@ describe('range transitions', () => {
     expect(at(nowUnixSecs - 21600)).toEqual(['5h']); // 6h
     expect(at(nowUnixSecs - 86400)).toEqual(['5h']); // 24h
     expect(at(nowUnixSecs - 604800)).toEqual(['5h']); // 7d
+  });
+});
+describe('quota chart markers', () => {
+  it('does not add a start marker for absent or unobserved snapshots', () => {
+    const result = buildQuotaChartData(
+      [series('5h', [1200])],
+      [
+        {
+          window: '5h',
+          state: 'absent',
+          resets_at_unix_secs: 18_000,
+        },
+        {
+          window: '7d',
+          state: 'unobserved',
+          resets_at_unix_secs: 604_800,
+        },
+      ],
+      '1h',
+    );
+    expect(result.markers).toEqual([]);
   });
 });

@@ -21,7 +21,7 @@ export const REASON_LABEL: Record<
   string
 > = {
   cycle_advanced: 'Cycle key advanced',
-  window_already_active: '5h window already active',
+  window_already_active: 'Quota window already active',
   seven_day_quota_exhausted: '7-day quota exhausted',
   upstream_disabled: 'Upstream is disabled',
   upstream_deleted: 'Upstream was deleted',
