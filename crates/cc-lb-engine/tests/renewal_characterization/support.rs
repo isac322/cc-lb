@@ -118,6 +118,7 @@ impl RenewalFixture {
                 accounting_key_id: None,
                 upstream_id: self.upstream_id,
                 cycle_id: uuid::Uuid::nil(),
+                ttl: CacheTtl::Ttl5m,
                 cache_anchor_at_unix_secs: now,
                 run_at_unix_secs: now + 10,
                 expires_at_unix_secs: now + 300,

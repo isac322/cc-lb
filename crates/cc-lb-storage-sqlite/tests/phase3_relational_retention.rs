@@ -407,6 +407,45 @@ async fn rollup_and_keepalive_pruners_bound_total_rows_across_both_tables() {
 }
 
 #[tokio::test]
+async fn cache_keepalive_evidence_pruning_obeys_the_shared_batch_and_cutoff() {
+    let (_dir, storage) = storage("cache-keepalive-evidence.sqlite").await;
+    for (id, request_start_ms) in [("old-evidence", 10_000_i64), ("boundary-evidence", 20_000)] {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence
+             (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+              prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+              upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+              request_ref, event_ref, created_at_ms)
+             VALUES (?, NULL, 'follow_up', ?, 'fingerprint', 'prefix', 'policy', 'schema',
+                     'principal', ?, 'model', '5m', 'hit', 1, 1, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(request_start_ms)
+        .bind(Uuid::from_u128(7).to_string())
+        .bind(format!("request-{id}"))
+        .bind(format!("event-{id}"))
+        .bind(request_start_ms)
+        .execute(storage.pool())
+        .await
+        .expect("seed evidence");
+    }
+
+    assert_eq!(
+        storage
+            .prune_cache_keepalive_history_before(20, 1)
+            .await
+            .expect("prune one evidence row"),
+        1
+    );
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT evidence_id FROM cache_keepalive_evidence ORDER BY evidence_id")
+            .fetch_all(storage.pool())
+            .await
+            .expect("read remaining evidence");
+    assert_eq!(remaining, vec!["boundary-evidence"]);
+}
+
+#[tokio::test]
 async fn relational_migration_preserves_existing_columns_and_cursor_high_water() {
     use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
     use std::str::FromStr;

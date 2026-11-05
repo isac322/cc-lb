@@ -78,6 +78,24 @@ describe('useCacheKeepaliveSummary', () => {
     );
     expect(result.current.data).toEqual(cacheKeepaliveSummaryFixture);
   });
+
+  test('does not fetch while keep-alive is disabled', async () => {
+    const fetchMock = stubFetchOnce(cacheKeepaliveSummaryOnlyResponseFixture);
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useCacheKeepaliveSummary(PRINCIPAL_ID, enabled),
+      {
+        initialProps: { enabled: false },
+        wrapper: makeWrapper(makeClient()),
+      },
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.current.fetchStatus).toBe('idle');
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('useCacheKeepaliveSessions', () => {

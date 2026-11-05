@@ -1886,17 +1886,17 @@ export function useCacheKeepaliveSessions(
   });
 }
 
-export function useCacheKeepaliveSummary(principalId: string) {
+export function useCacheKeepaliveSummary(principalId: string, enabled = true) {
   return usePolledData(
     {
       queryKey: qk.cacheKeepaliveSummary(principalId),
-      enabled: Boolean(principalId),
+      enabled: enabled && Boolean(principalId),
       meta: { inlineError: true },
       placeholderData: undefined,
       queryFn: () => getCacheKeepaliveSessions(principalId, { limit: 0 }),
       select: (response) => response.summary,
     },
-    POLLING_INTERVALS.CACHE_KEEPALIVE_SUMMARY_MS,
+    enabled ? POLLING_INTERVALS.CACHE_KEEPALIVE_SUMMARY_MS : false,
   );
 }
 
@@ -1925,7 +1925,6 @@ export function useCacheKeepaliveSessionDetail(
       isHidden || isMissing(query.state.error)
         ? false
         : POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
-    queryFn: () =>
-      getCacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
+    queryFn: () => getCacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
   });
 }

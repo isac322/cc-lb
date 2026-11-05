@@ -75,11 +75,11 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
     assert!(body["summary"]["renewing_now"].is_number());
     assert!(body["summary"]["sessions_last_5m"].is_number());
     assert!(body["summary"]["renewals_fired"].is_number());
-    assert_eq!(body["summary"]["cost_saved"], -0.0432);
+    assert!(body["summary"]["cost_saved"].is_null());
     assert_eq!(body["summary"]["total_spent"], 0.0432);
-    assert_eq!(body["summary"]["total_avoided"], 0.0);
-    assert_eq!(body["summary"]["evidence_status"], "observed");
-    assert_eq!(body["summary"]["unknown_cycles"], 0);
+    assert!(body["summary"]["total_avoided"].is_null());
+    assert_eq!(body["summary"]["evidence_status"], "unknown");
+    assert_eq!(body["summary"]["unknown_cycles"], 3);
     assert!(body["summary"]["retained_from_ms"].is_null());
     assert_eq!(body["rows"], serde_json::json!([]));
     assert!(body["next_cursor"].is_null());

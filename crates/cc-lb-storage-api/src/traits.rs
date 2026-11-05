@@ -78,7 +78,7 @@ pub trait RequestEventStore: Send + Sync {
     async fn append_request_event_with_evidence(
         &self,
         event: &RequestEvent,
-        evidence: &crate::CacheKeepaliveEvidenceRow,
+        evidence: &[crate::CacheKeepaliveEvidenceRow],
     ) -> StorageResult<u64> {
         let _ = evidence;
         self.append_request_event(event).await

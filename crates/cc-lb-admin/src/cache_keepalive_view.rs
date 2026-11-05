@@ -208,20 +208,15 @@ fn evidence_status(
     let mut observed = false;
     for turn in turns {
         let Some(renewal) = renewals.iter().find(|entry| {
-            entry.cycle_id.is_some()
-                && entry
-                    .event_ref
-                    .as_deref()
-                    .is_some_and(|event_ref| event_ref == turn.source_ref_id)
+            entry
+                .event_ref
+                .as_deref()
+                .is_some_and(|event_ref| event_ref == turn.source_ref_id)
         }) else {
             unknown_cycles = unknown_cycles.saturating_add(1);
             continue;
         };
-        if renewal.prefix_fingerprint.is_none()
-            || renewal.prefix_hash.is_none()
-            || renewal.prefix_policy_version.is_none()
-            || renewal.prefix_schema_version.is_none()
-        {
+        if !renewal_evidence_known(renewal) {
             unknown_cycles = unknown_cycles.saturating_add(1);
         } else if follow_up_proven(turn, evidence) {
             observed = true;
@@ -238,41 +233,87 @@ fn evidence_status(
     }
 }
 
-fn follow_up_proven(
+fn renewal_evidence_for_turn<'a>(
     record: &CacheKeepaliveTurnRecord,
-    evidence: &[CacheKeepaliveEvidenceRecord],
-) -> bool {
-    let Some(renewal) = evidence.iter().find(|candidate| {
+    evidence: &'a [CacheKeepaliveEvidenceRecord],
+) -> Option<&'a CacheKeepaliveEvidenceRecord> {
+    evidence.iter().find(|candidate| {
         candidate.evidence_kind == "renewal"
             && candidate
                 .event_ref
                 .as_deref()
                 .is_some_and(|event_ref| event_ref == record.source_ref_id)
-            && candidate.cycle_id.is_some()
             && candidate.principal_id == record.principal_id
             && candidate.upstream_id == record.upstream_id
             && candidate.model == record.model
-    }) else {
+    })
+}
+
+fn renewal_evidence_known(evidence: &CacheKeepaliveEvidenceRecord) -> bool {
+    evidence.cycle_id.is_some()
+        && evidence.prefix_hash.is_some()
+        && evidence.prefix_policy_version.is_some()
+        && evidence.prefix_schema_version.is_some()
+}
+
+fn follow_up_matches(
+    renewal: &CacheKeepaliveEvidenceRecord,
+    follow_up: &CacheKeepaliveEvidenceRecord,
+) -> bool {
+    renewal_evidence_known(renewal)
+        && follow_up.evidence_kind == "follow_up"
+        && follow_up.principal_id == renewal.principal_id
+        && follow_up.upstream_id == renewal.upstream_id
+        && follow_up.model == renewal.model
+        && follow_up
+            .cache_read_input_tokens
+            .is_some_and(|tokens| tokens > 0)
+        && follow_up.request_start_ms > renewal.request_start_ms
+        && follow_up.request_start_ms
+            <= renewal
+                .request_start_ms
+                .saturating_add(renewal.ttl.as_secs().saturating_mul(1_000))
+        && follow_up.prefix_hash.is_some()
+        && follow_up.prefix_hash == renewal.prefix_hash
+}
+
+fn follow_up_proven(
+    record: &CacheKeepaliveTurnRecord,
+    evidence: &[CacheKeepaliveEvidenceRecord],
+) -> bool {
+    let Some(renewal) = renewal_evidence_for_turn(record, evidence) else {
         return false;
     };
-    evidence.iter().any(|candidate| {
-        candidate.evidence_kind == "follow_up"
-            && candidate.principal_id == renewal.principal_id
-            && candidate.upstream_id == renewal.upstream_id
-            && candidate.model == renewal.model
-            && candidate
-                .cache_read_input_tokens
-                .is_some_and(|tokens| tokens > 0)
-            && candidate.request_start_ms > renewal.request_start_ms
-            && candidate.request_start_ms
-                <= renewal
-                    .request_start_ms
-                    .saturating_add(renewal.ttl.as_secs().saturating_mul(1_000))
-            && candidate.prefix_fingerprint.is_some()
-            && candidate.prefix_fingerprint.as_deref() == renewal.prefix_fingerprint.as_deref()
-            && candidate.prefix_hash.is_some()
-            && candidate.prefix_hash.as_deref() == renewal.prefix_hash.as_deref()
-    })
+    let Some(cycle_id) = renewal.cycle_id else {
+        return false;
+    };
+    let cycle_renewals = evidence
+        .iter()
+        .filter(|candidate| {
+            candidate.evidence_kind == "renewal"
+                && candidate.cycle_id == Some(cycle_id)
+                && candidate.principal_id == renewal.principal_id
+                && candidate.upstream_id == renewal.upstream_id
+                && candidate.model == renewal.model
+        })
+        .collect::<Vec<_>>();
+    let Some(follow_up) = evidence
+        .iter()
+        .filter(|candidate| {
+            cycle_renewals
+                .iter()
+                .any(|candidate_renewal| follow_up_matches(candidate_renewal, candidate))
+        })
+        .min_by_key(|candidate| (candidate.request_start_ms, &candidate.evidence_id))
+    else {
+        return false;
+    };
+    cycle_renewals
+        .iter()
+        .filter(|candidate| follow_up_matches(candidate, follow_up))
+        .max_by_key(|candidate| (candidate.request_start_ms, &candidate.evidence_id))
+        .and_then(|candidate| candidate.event_ref.as_deref())
+        == Some(record.source_ref_id.as_str())
 }
 
 fn activity_turn(
@@ -283,20 +324,9 @@ fn activity_turn(
     ttl: CacheTtl,
     evidence: &[CacheKeepaliveEvidenceRecord],
 ) -> CacheKeepaliveActivityTurn {
-    let proven = follow_up_proven(record, evidence);
-    let evidence_known = evidence.iter().any(|entry| {
-        entry.evidence_kind == "renewal"
-            && entry.cycle_id.is_some()
-            && entry
-                .event_ref
-                .as_deref()
-                .is_some_and(|event_ref| event_ref == record.source_ref_id)
-            && entry.prefix_fingerprint.is_some()
-            && entry.prefix_hash.is_some()
-            && entry.prefix_policy_version.is_some()
-            && entry.prefix_schema_version.is_some()
-    });
-    let followed_up = !pending && proven && evidence_known;
+    let evidence_known =
+        renewal_evidence_for_turn(record, evidence).is_some_and(renewal_evidence_known);
+    let followed_up = !pending && follow_up_proven(record, evidence) && evidence_known;
     let pnl = rates_from_catalog(catalog, &record.model, ttl).map(|rates| {
         derive_turn_pnl(
             CacheKeepaliveTurnPnlInput {

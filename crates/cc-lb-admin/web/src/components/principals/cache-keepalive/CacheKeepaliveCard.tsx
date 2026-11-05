@@ -119,7 +119,10 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const togglePending = updateSettings.isPending;
   const toggleLocked = togglePending || principalWritePending;
-  const summaryQ = useCacheKeepaliveSummary(principal.id);
+  const summaryQ = useCacheKeepaliveSummary(
+    principal.id,
+    principal.cache_keepalive?.enabled ?? false,
+  );
   const summary = summaryQ.data;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -291,59 +294,59 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
               </div>
             ) : null}
             <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4 *:border-l *:border-subtle *:px-5 *:odd:border-l-0 *:odd:pl-0 md:*:nth-3:border-l md:*:nth-3:pl-5">
-            <MetricTile
-              label="Renewing now"
-              isLoading={summaryQ.isLoading}
-              value={
-                summaryQ.isLoading
-                  ? undefined
-                  : summary
-                    ? summary.renewing_now.toLocaleString('en-US')
-                    : '—'
-              }
-              subtext="current scheduled or mid-renewal"
-            />
-            <MetricTile
-              label="Sessions (last 5m)"
-              isLoading={summaryQ.isLoading}
-              value={
-                summaryQ.isLoading
-                  ? undefined
-                  : summary
-                    ? summary.sessions_last_5m.toLocaleString('en-US')
-                    : '—'
-              }
-              subtext="seen in last five minutes"
-            />
-            <MetricTile
-              label="Renewals fired"
-              isLoading={summaryQ.isLoading}
-              value={
-                summaryQ.isLoading
-                  ? undefined
-                  : summary
-                    ? summary.retained_successful_hits.toLocaleString('en-US')
-                    : '—'
-              }
-              subtext="retained history"
-            />
-            <MetricTile
-              label="Cost saved"
-              isLoading={summaryQ.isLoading}
-              value={
-                summaryQ.isLoading
-                  ? undefined
-                  : summary?.cost_saved === null || !summary
-                    ? '—'
-                    : formatMoney(summary.cost_saved)
-              }
-              subtext={
-                summary?.evidence_status === 'unknown'
-                  ? 'unknown evidence coverage'
-                  : 'net, after renewal spend'
-              }
-            />
-          </div>
+              <MetricTile
+                label="Renewing now"
+                isLoading={summaryQ.isLoading}
+                value={
+                  summaryQ.isLoading
+                    ? undefined
+                    : summary
+                      ? summary.renewing_now.toLocaleString('en-US')
+                      : '—'
+                }
+                subtext="current scheduled or mid-renewal"
+              />
+              <MetricTile
+                label="Sessions (last 5m)"
+                isLoading={summaryQ.isLoading}
+                value={
+                  summaryQ.isLoading
+                    ? undefined
+                    : summary
+                      ? summary.sessions_last_5m.toLocaleString('en-US')
+                      : '—'
+                }
+                subtext="seen in last five minutes"
+              />
+              <MetricTile
+                label="Renewals fired"
+                isLoading={summaryQ.isLoading}
+                value={
+                  summaryQ.isLoading
+                    ? undefined
+                    : summary
+                      ? summary.retained_successful_hits.toLocaleString('en-US')
+                      : '—'
+                }
+                subtext="retained history"
+              />
+              <MetricTile
+                label="Cost saved"
+                isLoading={summaryQ.isLoading}
+                value={
+                  summaryQ.isLoading
+                    ? undefined
+                    : summary?.cost_saved === null || !summary
+                      ? '—'
+                      : formatMoney(summary.cost_saved)
+                }
+                subtext={
+                  summary?.evidence_status === 'unknown'
+                    ? 'unknown evidence coverage'
+                    : 'net, after renewal spend'
+                }
+              />
+            </div>
           </>
         )}
       </DetailSection>

@@ -8,7 +8,15 @@ import {
   within,
 } from '@testing-library/react';
 import { useState } from 'react';
-import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type Mock,
+  vi,
+} from 'vitest';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -461,7 +469,9 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       });
       expect(useLatest.hasAttribute('disabled')).toBe(false);
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Use latest revision' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Use latest revision' }),
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     expect(mutateMock).toHaveBeenLastCalledWith(
@@ -566,7 +576,9 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     )[0] as HTMLInputElement;
     fireEvent.change(input, { target: { value: '' } });
     expect(input.value).toBe('');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Save changes' }),
+    );
     expect(mutateMock).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalledWith(
       'Numeric fields must be valid non-negative numbers',

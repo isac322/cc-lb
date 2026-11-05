@@ -4,8 +4,8 @@ import { toast } from 'sonner';
 import { ApiError } from '../../../lib/api';
 import {
   type Principal,
-  usePrincipalWritePending,
   usePrincipals,
+  usePrincipalWritePending,
   useUpdatePrincipalCacheKeepalive,
 } from '../../../lib/queries';
 import {
@@ -63,8 +63,9 @@ export function CacheKeepaliveSettingsDrawer({
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const saving = updateMutation.isPending;
   const [conflict, setConflict] = useState(false);
-  const [conflictPrincipal, setConflictPrincipal] =
-    useState<Principal | null>(null);
+  const [conflictPrincipal, setConflictPrincipal] = useState<Principal | null>(
+    null,
+  );
   const editingBasePrincipalRef = useRef(principal);
   const busy = saving || principalWritePending;
 
@@ -132,10 +133,7 @@ export function CacheKeepaliveSettingsDrawer({
     conflictPrincipal ??
     principalsQuery.data?.principals.find((item) => item.id === principal.id);
 
-  const applyLatestPrincipal = (
-    latest: Principal,
-    preserveDraft: boolean,
-  ) => {
+  const applyLatestPrincipal = (latest: Principal, preserveDraft: boolean) => {
     const initial = initialDraftRef.current;
     const server = getDraftSnapshot(latest);
     const current = {
@@ -148,33 +146,44 @@ export function CacheKeepaliveSettingsDrawer({
       extraTools,
       treatAmbiguous,
     };
-    const next = preserveDraft && initial
-      ? {
-          enabled: current.enabled !== initial.enabled ? current.enabled : server.enabled,
-          lead5m: current.lead5m !== initial.lead5m ? current.lead5m : server.lead5m,
-          lead1h: current.lead1h !== initial.lead1h ? current.lead1h : server.lead1h,
-          maxRenewals:
-            current.maxRenewals !== initial.maxRenewals
-              ? current.maxRenewals
-              : server.maxRenewals,
-          maxDuration:
-            current.maxDuration !== initial.maxDuration
-              ? current.maxDuration
-              : server.maxDuration,
-          snapshotBytes:
-            current.snapshotBytes !== initial.snapshotBytes
-              ? current.snapshotBytes
-              : server.snapshotBytes,
-          extraTools:
-            current.extraTools.join('\u0000') !== initial.extraTools.join('\u0000')
-              ? current.extraTools
-              : server.extraTools,
-          treatAmbiguous:
-            current.treatAmbiguous !== initial.treatAmbiguous
-              ? current.treatAmbiguous
-              : server.treatAmbiguous,
-        }
-      : server;
+    const next =
+      preserveDraft && initial
+        ? {
+            enabled:
+              current.enabled !== initial.enabled
+                ? current.enabled
+                : server.enabled,
+            lead5m:
+              current.lead5m !== initial.lead5m
+                ? current.lead5m
+                : server.lead5m,
+            lead1h:
+              current.lead1h !== initial.lead1h
+                ? current.lead1h
+                : server.lead1h,
+            maxRenewals:
+              current.maxRenewals !== initial.maxRenewals
+                ? current.maxRenewals
+                : server.maxRenewals,
+            maxDuration:
+              current.maxDuration !== initial.maxDuration
+                ? current.maxDuration
+                : server.maxDuration,
+            snapshotBytes:
+              current.snapshotBytes !== initial.snapshotBytes
+                ? current.snapshotBytes
+                : server.snapshotBytes,
+            extraTools:
+              current.extraTools.join('\u0000') !==
+              initial.extraTools.join('\u0000')
+                ? current.extraTools
+                : server.extraTools,
+            treatAmbiguous:
+              current.treatAmbiguous !== initial.treatAmbiguous
+                ? current.treatAmbiguous
+                : server.treatAmbiguous,
+          }
+        : server;
 
     editingBasePrincipalRef.current = latest;
     setEditingRevision(latest.revision);

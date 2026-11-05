@@ -111,9 +111,7 @@ function OverviewStrip({
   return (
     <div className="px-4 pt-3 pb-2 shrink-0 flex items-center justify-between gap-3 flex-wrap">
       <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap min-w-0">
-        <span className="text-caption text-text-muted">
-          Retained history:
-        </span>
+        <span className="text-caption text-text-muted">Retained history:</span>
         {isLoading ? (
           <>
             <Skeleton className="h-5 w-32" />
@@ -122,8 +120,8 @@ function OverviewStrip({
         ) : summary ? (
           <>
             <span className="text-body font-medium text-text tabular-nums">
-              {summary.retained_successful_hits.toLocaleString('en-US')}{' '}
-              renewal{summary.retained_successful_hits === 1 ? '' : 's'} fired
+              {summary.retained_successful_hits.toLocaleString('en-US')} renewal
+              {summary.retained_successful_hits === 1 ? '' : 's'} fired
             </span>
             <span className="text-caption text-text-faint tabular-nums max-sm:basis-full">
               <span aria-hidden="true" className="max-sm:hidden">
@@ -141,7 +139,9 @@ function OverviewStrip({
             </span>
           </>
         ) : (
-          <span className="text-caption text-text-faint">No summary available</span>
+          <span className="text-caption text-text-faint">
+            No summary available
+          </span>
         )}
       </div>
       {showHorizon ? (
@@ -388,6 +388,7 @@ export function CacheKeepaliveSessionsDrawer({
   const [selected, setSelected] = useState<CacheKeepaliveRow | null>(null);
   const [listElement, setListElement] = useState<HTMLUListElement | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset local drawer state when the principal identity changes
   useEffect(() => {
     setSelected(null);
     setFilter('all');

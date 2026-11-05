@@ -246,7 +246,7 @@ fn cache_keepalive_activity_requires_matching_followup_evidence() {
             cycle_id: None,
             evidence_kind: "follow_up".to_owned(),
             request_start_ms: 201_000,
-            prefix_fingerprint: Some("fp".to_owned()),
+            prefix_fingerprint: Some("extended-conversation-fp".to_owned()),
             prefix_hash: Some("hash".to_owned()),
             prefix_policy_version: Some("policy".to_owned()),
             prefix_schema_version: Some("schema".to_owned()),
@@ -273,4 +273,85 @@ fn cache_keepalive_activity_requires_matching_followup_evidence() {
     );
     assert!(activity.turns[0].followed_up);
     assert_eq!(activity.evidence_status, "observed");
+}
+#[test]
+fn cache_keepalive_activity_credits_only_the_latest_renewal_in_a_cycle() {
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let turns = [turn("renewal-a", 200), turn("renewal-b", 240)];
+    let evidence = [
+        CacheKeepaliveEvidenceRecord {
+            evidence_id: "renewal-a-evidence".to_owned(),
+            cycle_id: Some(Uuid::from_u128(1)),
+            evidence_kind: "renewal".to_owned(),
+            request_start_ms: 200_000,
+            prefix_fingerprint: Some("a".to_owned()),
+            prefix_hash: Some("base-prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: "claude-sonnet-4-5".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            cost_micros: Some(1),
+            request_ref: Some("request-a".to_owned()),
+            event_ref: Some("renewal-a".to_owned()),
+        },
+        CacheKeepaliveEvidenceRecord {
+            evidence_id: "renewal-b-evidence".to_owned(),
+            cycle_id: Some(Uuid::from_u128(1)),
+            evidence_kind: "renewal".to_owned(),
+            request_start_ms: 240_000,
+            prefix_fingerprint: Some("b".to_owned()),
+            prefix_hash: Some("base-prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: "claude-sonnet-4-5".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            cost_micros: Some(1),
+            request_ref: Some("request-b".to_owned()),
+            event_ref: Some("renewal-b".to_owned()),
+        },
+        CacheKeepaliveEvidenceRecord {
+            evidence_id: "followup-extension".to_owned(),
+            cycle_id: None,
+            evidence_kind: "follow_up".to_owned(),
+            request_start_ms: 300_000,
+            prefix_fingerprint: Some("new-extended-request".to_owned()),
+            prefix_hash: Some("base-prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: "claude-sonnet-4-5".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            cost_micros: Some(2),
+            request_ref: Some("followup".to_owned()),
+            event_ref: Some("followup".to_owned()),
+        },
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &turns,
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        PriceCatalog::new_empty().as_ref(),
+    );
+
+    assert_eq!(activity.evidence_status, "observed");
+    assert_eq!(activity.turns[0].source_ref_id, "renewal-b");
+    assert!(activity.turns[0].followed_up);
+    assert_eq!(activity.turns[1].source_ref_id, "renewal-a");
+    assert!(!activity.turns[1].followed_up);
 }

@@ -4,9 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../../../lib/api';
 import type { CacheKeepaliveDetail } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
-import type { PolledDataResult } from '../../../../lib/usePolledData';
 import { cacheKeepaliveRenewedDetailFixture } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
+import type { PolledDataResult } from '../../../../lib/usePolledData';
 import { SessionDetailPane } from '../SessionDetailPane';
+
 function renderWithProviders(ui: React.ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -569,12 +570,12 @@ describe('SessionDetailPane', () => {
       screen.getByText('This session is no longer available.'),
     ).toBeDefined();
     expect(
-      screen.queryByText(
-        'Refresh failed. Showing the last successful detail.',
-      ),
+      screen.queryByText('Refresh failed. Showing the last successful detail.'),
     ).toBeNull();
     expect(screen.queryByText('a1f39c2b7e04')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry session detail' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Retry session detail' }),
+    );
     expect(refetch).toHaveBeenCalledTimes(1);
   });
   it('resets config and raw disclosures when session identity changes', () => {
@@ -598,7 +599,9 @@ describe('SessionDetailPane', () => {
 
     rerender(
       <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        client={
+          new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        }
       >
         <SessionDetailPane
           principalId="p-123"
@@ -694,7 +697,9 @@ describe('SessionDetailPane', () => {
     expect(
       screen.getByRole('button', { name: 'Retry session detail' }),
     ).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry session detail' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Retry session detail' }),
+    );
     expect(refetch).toHaveBeenCalledTimes(1);
     expect(
       screen.getAllByRole('button', { name: 'Back to sessions' })[

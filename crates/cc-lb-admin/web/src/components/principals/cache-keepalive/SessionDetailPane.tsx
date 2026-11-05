@@ -1,7 +1,7 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
-import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
 import { ApiError } from '../../../lib/api';
+import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
 import { Badge, Button, cx, Skeleton } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
 
@@ -179,6 +179,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const [showConfig, setShowConfig] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset local disclosure state when the session identity changes
   useEffect(() => {
     setShowConfig(false);
     setShowRaw(false);

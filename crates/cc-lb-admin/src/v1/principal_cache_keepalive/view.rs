@@ -105,10 +105,46 @@ pub(super) async fn load_activity_batch<'a>(
         &session_key_hashes,
     )
     .await?;
-    let evidence =
-        CacheKeepaliveSessionReadStore::list_cache_keepalive_evidence(storage, principal_id)
-            .await?;
+    let evidence = match evidence_scope(&turns) {
+        Some((cycle_ids, source_ref_ids, from_ms, until_ms)) => {
+            CacheKeepaliveSessionReadStore::list_cache_keepalive_evidence_for_activity(
+                storage,
+                principal_id,
+                &cycle_ids,
+                &source_ref_ids,
+                from_ms,
+                until_ms,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
     Ok(CacheKeepaliveActivityBatch::from_turns(turns, evidence))
+}
+
+fn evidence_scope(
+    turns: &[CacheKeepaliveTurnRecord],
+) -> Option<(Vec<Uuid>, Vec<String>, u64, u64)> {
+    let first = turns.first()?;
+    let mut cycle_ids = BTreeSet::new();
+    let mut source_ref_ids = BTreeSet::new();
+    let mut from_ms = first.ts.saturating_mul(1_000);
+    let mut until_ms = from_ms;
+    for turn in turns {
+        if let Some(cycle_id) = turn.cycle_id {
+            cycle_ids.insert(cycle_id);
+        }
+        source_ref_ids.insert(turn.source_ref_id.clone());
+        let start_ms = turn.ts.saturating_mul(1_000);
+        from_ms = from_ms.min(start_ms);
+        until_ms = until_ms.max(start_ms.saturating_add(60 * 60 * 1_000));
+    }
+    Some((
+        cycle_ids.into_iter().collect(),
+        source_ref_ids.into_iter().collect(),
+        from_ms,
+        until_ms,
+    ))
 }
 #[cfg(test)]
 pub(crate) fn summary_for_items(
@@ -356,11 +392,20 @@ async fn load_detail_activity(
         }
         CacheKeepaliveSessionEntrySource::Decision => (None, Vec::new()),
     };
-    let evidence = CacheKeepaliveSessionReadStore::list_cache_keepalive_evidence(
-        context.storage,
-        &item.principal_id,
-    )
-    .await?;
+    let evidence = match evidence_scope(&turns) {
+        Some((cycle_ids, source_ref_ids, from_ms, until_ms)) => {
+            CacheKeepaliveSessionReadStore::list_cache_keepalive_evidence_for_activity(
+                context.storage,
+                &item.principal_id,
+                &cycle_ids,
+                &source_ref_ids,
+                from_ms,
+                until_ms,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
     let activity = derive_activity_view(
         CacheKeepaliveActivitySource {
             item,

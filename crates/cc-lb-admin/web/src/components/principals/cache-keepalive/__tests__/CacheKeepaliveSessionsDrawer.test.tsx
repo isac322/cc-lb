@@ -1075,7 +1075,9 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     activePrincipal = principalB.id;
     rerender(
       <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        client={
+          new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        }
       >
         <CacheKeepaliveSessionsDrawer
           open={true}
@@ -1087,7 +1089,9 @@ describe('CacheKeepaliveSessionsDrawer', () => {
 
     expect(screen.queryByText('Session detail')).toBeNull();
     expect(screen.getByText('session-b')).toBeDefined();
-    expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenLastCalledWith(
+    expect(
+      vi.mocked(queries.useCacheKeepaliveSessions),
+    ).toHaveBeenLastCalledWith(
       activePrincipal,
       { horizon: '24h', status: undefined, error: undefined },
       true,

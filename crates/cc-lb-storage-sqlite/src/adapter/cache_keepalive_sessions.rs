@@ -22,6 +22,10 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             return Ok(0);
         }
         let cutoff = u64_to_i64(cutoff_unix_secs, "keepalive history prune cutoff")?;
+        let cutoff_ms = u64_to_i64(
+            cutoff_unix_secs.saturating_mul(1_000),
+            "keepalive evidence prune cutoff",
+        )?;
         let limit =
             super::request_events::usize_to_i64(batch_size, "keepalive history prune batch size")?;
         let decisions_removed = sqlx::query(
@@ -51,7 +55,24 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         } else {
             0
         };
-        Ok(decisions_removed + turns_removed)
+        let remaining = remaining - turns_removed as i64;
+        let evidence_removed = if remaining > 0 {
+            sqlx::query(
+                "DELETE FROM cache_keepalive_evidence WHERE rowid IN ( \
+                 SELECT rowid FROM cache_keepalive_evidence \
+                 WHERE request_start_ms < ? \
+                 ORDER BY request_start_ms, evidence_id LIMIT ?)",
+            )
+            .bind(cutoff_ms)
+            .bind(remaining)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected()
+        } else {
+            0
+        };
+        Ok(decisions_removed + turns_removed + evidence_removed)
     }
 
     async fn replace_from_real_request(

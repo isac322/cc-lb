@@ -165,9 +165,10 @@ lifetime total and do not imply that a session is still active.
 
 - `total_spent` is the exact persisted renewal spend from retained turn rows.
   It includes misses and remains available after session reset or purge.
-- Avoided savings are credited at most once per cycle. A credit requires a
-  positive cache read on a real follow-up with matching effective prefix
-  evidence that starts within the renewal's provider TTL window.
+- Avoided savings are credited at most once per cycle. A credit is assigned to
+  the latest renewal whose TTL window contains the first positive-cache-read
+  follow-up whose effective prefix evidence matches one of the renewal's
+  candidate prefixes.
 - Missing, legacy, malformed, or ambiguous evidence is reported as
   `unknown`. Avoided savings and net savings are nullable when the evidence or
   pricing is incomplete; the UI must not display a guessed zero.
@@ -177,7 +178,8 @@ lifetime total and do not imply that a session is still active.
 - Summary-only requests use SQL aggregates over retained turns and evidence.
   They do not load every session, turn, or encrypted snapshot into Rust.
   List/detail requests load only the rows needed for their page or selected
-  session.
+  session. When keep-alive is disabled, the Admin Web card does not poll the
+  summary endpoint.
 
 The base status remains one of Renewed, Scheduled, Capped, Expired, or Not
 tracked. Errors are orthogonal: a terminal dispatch/decrypt/provider error

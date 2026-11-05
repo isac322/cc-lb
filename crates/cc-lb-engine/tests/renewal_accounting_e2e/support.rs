@@ -84,6 +84,7 @@ impl RenewalAccountingScenario {
                 accounting_key_id: accounting_key_id.map(ToOwned::to_owned),
                 upstream_id: self.fixture.upstream_id,
                 cycle_id: uuid::Uuid::nil(),
+                ttl: CacheTtl::Ttl5m,
                 cache_anchor_at_unix_secs: now,
                 run_at_unix_secs: now + 10,
                 expires_at_unix_secs: now + 300,

@@ -3,10 +3,10 @@ use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow, CacheKeepaliveProjectionStore,
     CacheKeepaliveTurnRow, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
+    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
     RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
-    model_filter_matches, normalize_usage_rollup_dimension,
+    normalize_usage_rollup_dimension,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, Postgres, QueryBuilder, Row};
@@ -87,7 +87,7 @@ impl RequestEventStore for PostgresStorage {
     async fn append_request_event_with_evidence(
         &self,
         event: &RequestEvent,
-        evidence: &CacheKeepaliveEvidenceRow,
+        evidence: &[CacheKeepaliveEvidenceRow],
     ) -> StorageResult<u64> {
         let event_id = required_event_id(event)?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
@@ -96,7 +96,9 @@ impl RequestEventStore for PostgresStorage {
             Some(seq) => seq,
             None => select_existing_event_id_in_tx(&mut tx, event_id).await?,
         };
-        insert_keepalive_evidence_in_tx(&mut tx, evidence).await?;
+        for evidence in evidence {
+            insert_keepalive_evidence_in_tx(&mut tx, evidence).await?;
+        }
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(seq, "request event cursor")
     }

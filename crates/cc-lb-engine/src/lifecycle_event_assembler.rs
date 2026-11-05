@@ -760,12 +760,12 @@ async fn write_finalized_rows(
     let mut attempts: u32 = 0;
     let cursor = loop {
         attempts += 1;
-        let append_result = if let Some(evidence) = evidence.as_ref() {
-            storage
-                .append_request_event_with_evidence(&row, evidence)
-                .await
-        } else {
+        let append_result = if evidence.is_empty() {
             storage.append_request_event(&row).await
+        } else {
+            storage
+                .append_request_event_with_evidence(&row, &evidence)
+                .await
         };
         match append_result {
             Ok(cursor) => {
@@ -820,16 +820,25 @@ async fn write_finalized_rows(
     };
     metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome).increment(1);
 }
-fn follow_up_evidence(row: &RequestEvent) -> Option<CacheKeepaliveEvidenceRow> {
-    let cache_read_input_tokens = row.cache_read_input_tokens?;
+fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
+    let Some(cache_read_input_tokens) = row.cache_read_input_tokens else {
+        return Vec::new();
+    };
     if cache_read_input_tokens == 0 || row.cache_breakpoints.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let principal_id = row.principal_id.clone()?;
-    let upstream_id = row.upstream_id?;
-    let model = row.model.clone()?;
-    let request_start_ms = row.ts_ms?;
-    let breakpoint = row.cache_breakpoints.last()?;
+    let Some(principal_id) = row.principal_id.clone() else {
+        return Vec::new();
+    };
+    let Some(upstream_id) = row.upstream_id else {
+        return Vec::new();
+    };
+    let Some(model) = row.model.clone() else {
+        return Vec::new();
+    };
+    let Some(request_start_ms) = row.ts_ms else {
+        return Vec::new();
+    };
     let mut hasher = Sha256::new();
     hasher.update(b"request-cache-breakpoint-v1");
     for breakpoint in &row.cache_breakpoints {
@@ -840,34 +849,61 @@ fn follow_up_evidence(row: &RequestEvent) -> Option<CacheKeepaliveEvidenceRow> {
             hasher.update(ttl.as_bytes());
         }
     }
-    Some(CacheKeepaliveEvidenceRow {
-        evidence_id: format!(
-            "follow-up-evidence:{}",
-            row.event_id.as_deref().unwrap_or(&row.request_id)
-        ),
-        cycle_id: None,
-        evidence_kind: "follow_up".to_owned(),
-        request_start_ms,
-        prefix_fingerprint: Some(
-            hasher
-                .finalize()
+    let fingerprint = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut prefix_hashes = Vec::new();
+    for breakpoint in &row.cache_breakpoints {
+        if !prefix_hashes.contains(&breakpoint.prefix_hash) {
+            prefix_hashes.push(breakpoint.prefix_hash.clone());
+        }
+        for lookback in &breakpoint.lookback_prefixes {
+            if !prefix_hashes.contains(&lookback.prefix_hash) {
+                prefix_hashes.push(lookback.prefix_hash.clone());
+            }
+        }
+    }
+    prefix_hashes
+        .into_iter()
+        .enumerate()
+        .map(|(index, prefix_hash)| {
+            let ttl = row
+                .cache_breakpoints
                 .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>(),
-        ),
-        prefix_hash: Some(breakpoint.prefix_hash.clone()),
-        prefix_policy_version: Some("prompt-cache-policy-v1".to_owned()),
-        prefix_schema_version: Some("request-cache-breakpoint-v1".to_owned()),
-        principal_id,
-        upstream_id,
-        model,
-        ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(breakpoint.ttl.as_deref()),
-        hit_miss: Some("hit".to_owned()),
-        cache_read_input_tokens: Some(cache_read_input_tokens),
-        cost_micros: row.cost_usd_micros,
-        request_ref: Some(row.request_id.clone()),
-        event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
-    })
+                .find(|breakpoint| {
+                    breakpoint.prefix_hash == prefix_hash
+                        || breakpoint
+                            .lookback_prefixes
+                            .iter()
+                            .any(|lookback| lookback.prefix_hash == prefix_hash)
+                })
+                .and_then(|breakpoint| breakpoint.ttl.as_deref());
+            CacheKeepaliveEvidenceRow {
+                evidence_id: format!(
+                    "follow-up-evidence:{}:{index}",
+                    row.event_id.as_deref().unwrap_or(&row.request_id)
+                ),
+                cycle_id: None,
+                evidence_kind: "follow_up".to_owned(),
+                request_start_ms,
+                prefix_fingerprint: Some(fingerprint.clone()),
+                prefix_hash: Some(prefix_hash),
+                prefix_policy_version: Some("prompt-cache-policy-v1".to_owned()),
+                prefix_schema_version: Some("request-cache-breakpoint-v1".to_owned()),
+                principal_id: principal_id.clone(),
+                upstream_id,
+                model: model.clone(),
+                ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(ttl),
+                hit_miss: Some("hit".to_owned()),
+                cache_read_input_tokens: Some(cache_read_input_tokens),
+                cost_micros: row.cost_usd_micros,
+                request_ref: Some(row.request_id.clone()),
+                event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
+            }
+        })
+        .collect()
 }
 
 async fn flush_expired_terminations(

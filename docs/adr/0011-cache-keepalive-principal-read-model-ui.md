@@ -38,20 +38,20 @@ The Principal-detail surfaces stay live through the existing admin-web React Que
 Sessions are displayed as exactly one base state — Renewed, Scheduled, Capped, Expired, or Not tracked — derived server-side from the stored status/terminal-reason/refresh-count. Error is modeled as an orthogonal nullable field (`error IS NOT NULL`), not a sixth base state, so an errored session still shows its real base state plus a red error treatment. The status filter scopes only the row list; it never changes the card metrics or the overview strip.
 ### Durable cycle/evidence projection
 
-Renewal attribution is backed by an append-only evidence projection rather
-than inferred from `hit_miss` alone. Each new cycle has a purge-safe cycle
-identity. Renewal evidence records the request start, effective prefix
+Renewal attribution is backed by a retention-managed evidence projection
+rather than inferred from `hit_miss` alone. Each new cycle has a purge-safe
+cycle identity. Renewal evidence records the request start, effective prefix
 fingerprint/hash and policy/schema identity, provider TTL, model, upstream,
 cache-read usage, and exact persisted cost. Real follow-up evidence records
-the request start, prefix evidence, positive cache read, and request identity.
-Evidence writes are committed atomically with their request-event or renewal
-projection.
+the request start, every candidate prefix hash that can represent the
+effective prefix, positive cache read, and request identity. Evidence writes
+are committed atomically with their request-event or renewal projection.
 
-A renewal receives avoided credit at most once. The credit requires a
-same-prefix follow-up that starts after the renewal and within that renewal's
-provider TTL window. Legacy, missing, malformed, or ambiguous evidence is
-`unknown`, never an inferred zero. Final scheduler caps do not close the
-evidence window.
+A renewal receives avoided credit at most once. The first positive-cache-read
+follow-up that matches a cycle's candidate prefix hashes is attributed to the
+latest renewal in that cycle whose TTL window contains it. Legacy, missing,
+malformed, or ambiguous evidence is `unknown`, never an inferred zero. Final
+scheduler caps do not close the evidence window.
 
 ### Retained economics and aggregate reads
 
@@ -65,7 +65,8 @@ Summary-only requests use SQL aggregates over retained turns and evidence,
 including grouped model/TTL avoided-token totals. They do not materialize all
 sessions, turns, or snapshots in Rust. List and detail paths load only their
 requested rows. Current-cycle detail renewal counts use cycle-linked evidence;
-retained history remains available independently.
+retained history remains available independently. The Admin Web card disables
+summary polling while keep-alive is disabled.
 
 
 ### Stable ordering and cursor pagination

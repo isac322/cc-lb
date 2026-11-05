@@ -24,6 +24,10 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             return Ok(0);
         }
         let cutoff = u64_to_i64(cutoff_unix_secs, "keepalive history prune cutoff")?;
+        let evidence_cutoff = u64_to_i64(
+            cutoff_unix_secs.saturating_mul(1_000),
+            "keepalive evidence prune cutoff",
+        )?;
         let limit = u64_to_i64(batch_size as u64, "keepalive history prune batch size")?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let mut removed = 0u64;
@@ -41,6 +45,22 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 .await
                 .map_err(map_sqlx_error)?
                 .rows_affected();
+        }
+        if removed < limit as u64 {
+            removed += sqlx::query(
+                "DELETE FROM cache_keepalive_evidence WHERE ctid IN (
+                    SELECT ctid FROM cache_keepalive_evidence
+                    WHERE request_start_ms < $1
+                    ORDER BY request_start_ms, evidence_id
+                    LIMIT $2
+                )",
+            )
+            .bind(evidence_cutoff)
+            .bind(limit - removed as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected();
         }
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(removed)

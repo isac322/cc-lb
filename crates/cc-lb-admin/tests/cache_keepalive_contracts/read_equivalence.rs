@@ -465,9 +465,10 @@ async fn summary_five_minute_cutoff_is_inclusive() {
     let mut expected = legacy_summary_oracle(&storage, &principal_id, now_ms).await;
     expected["summary"]["renewals_fired"] = json!(1);
     expected["summary"]["retained_successful_hits"] = json!(1);
-    expected["summary"]["evidence_status"] = json!("observed");
-    expected["summary"]["cost_saved"] = json!(0.0);
-    expected["summary"]["total_avoided"] = json!(0.0);
+    expected["summary"]["evidence_status"] = json!("unknown");
+    expected["summary"]["cost_saved"] = Value::Null;
+    expected["summary"]["total_avoided"] = Value::Null;
+    expected["summary"]["unknown_cycles"] = json!(1);
     let (status, candidate) = get_json(
         &state,
         &format!(

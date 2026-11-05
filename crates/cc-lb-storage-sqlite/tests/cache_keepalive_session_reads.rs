@@ -51,6 +51,7 @@ fn request(
         accounting_key_id: None,
         upstream_id: UPSTREAM_ID,
         cycle_id: uuid::Uuid::nil(),
+        ttl: CacheTtl::Ttl5m,
         cache_anchor_at_unix_secs: now_unix_secs,
         run_at_unix_secs: now_unix_secs + 270,
         expires_at_unix_secs: now_unix_secs + 300,

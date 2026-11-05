@@ -269,9 +269,13 @@ pub trait CacheKeepaliveSessionReadStore: Send + Sync {
         principal_id: &str,
         source_ref_id: &str,
     ) -> StorageResult<Option<CacheKeepaliveDecisionRecord>>;
-    async fn list_cache_keepalive_evidence(
+    async fn list_cache_keepalive_evidence_for_activity(
         &self,
         principal_id: &str,
+        cycle_ids: &[Uuid],
+        source_ref_ids: &[String],
+        follow_up_from_ms: u64,
+        follow_up_until_ms: u64,
     ) -> StorageResult<Vec<CacheKeepaliveEvidenceRecord>>;
 
     async fn read_cache_keepalive_summary_aggregate(

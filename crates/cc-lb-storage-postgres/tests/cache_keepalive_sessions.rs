@@ -1402,6 +1402,7 @@ fn replace_request(
         principal_id: "principal".to_owned(),
         upstream_id: Uuid::from_u128(7),
         cycle_id: Uuid::nil(),
+        ttl: CacheTtl::Ttl5m,
         cache_anchor_at_unix_secs: now,
         run_at_unix_secs: now + 270,
         expires_at_unix_secs: now + 300,
