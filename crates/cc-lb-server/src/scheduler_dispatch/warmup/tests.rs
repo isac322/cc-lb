@@ -242,6 +242,31 @@ fn weekly_only_anthropic_account_warms_on_seven_day_window() {
 }
 
 #[test]
+fn all_targets_absent_use_explicit_weekly_fallback() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Absent,
+            None,
+            None,
+            None,
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Absent,
+            None,
+            None,
+            None,
+        ),
+    ];
+
+    assert_eq!(
+        next_warmup_evaluation_after_success(&snapshots, &[], NOW_UNIX_SECS),
+        NOW_UNIX_SECS + SEVEN_DAYS
+    );
+}
+
+#[test]
 fn both_active_targets_skip_until_earliest_reset() {
     let snapshots = [
         quota_snapshot(

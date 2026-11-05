@@ -18,14 +18,22 @@ All notable changes to this project will be documented in this file.
 - Renewal request events now retain the originating thread id for thread-scoped sessions, including agent-scoped sessions.
 - Keep-alive snapshot capture, trimming, renewal shaping, and persistence now preserve shaped JSON object key order without changing canonical routing hashes.
 - Authenticated, non-auxiliary real requests now retire the matching active keep-alive generation before upstream dispatch, preventing queued renewals during response-header waits and streaming. Failed real requests do not resume the old snapshot. ([#1051](https://github.com/isac322/cc-lb/issues/1051))
+- The admin web now hides explicitly absent Claude 5-hour windows from quota cards, history charts, pool legends, usage tables, and upstream rows while preserving normal 5-hour readings and mixed-fleet alignment.
 - Cache keep-alive rescheduling now returns its own updated session snapshot on SQLite and PostgreSQL, and SQLite real-request replacement captures its result before commit. Concurrent completions can no longer make stale work enqueue or overwrite a newer generation's payload. ([#1042](https://github.com/isac322/cc-lb/issues/1042))
+- Admin health, status, and scheduler status now report the server-resolved build provenance instead of crate-local unknown values. ([#1054](https://github.com/isac322/cc-lb/issues/1054))
 - Streaming requests that receive non-SSE bodies now run the buffered response transform once over the complete, bounded body; oversized bodies return the existing 502 collection error without invoking the hook, while ordinary JSON responses remain outside the ingress cap.
 - Client closes after Anthropic `message_stop` or OpenAI Responses `response.completed` now finalize streams with observed usage and limit reconciliation instead of 499 cancellations. Abnormal Anthropic stops retain refusal or context-window classification, while upstream and proxy errors keep precedence. OpenAI Responses streams are recognized as SSE when the upstream omits `Content-Type`.
 - Mid-stream `error: null` fields no longer classify OpenAI Responses completion events as provider errors.
+- Cache keep-alive turn claims now accept a published `pending` session once its encrypted payload is stored, preventing a due worker from acknowledging the job `Done` as a no-op before the producer's post-publish `enqueued` mark completes.
 
 ### Security
 
 - OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
+- PostgreSQL storage, startup preflight, and scheduler connections now preserve the URL's `sslmode` or `ssl-mode` when the corresponding pool `sslmode` is omitted, instead of silently replacing it with `prefer`. Explicit pool modes still override the URL; the scheduler resolves its mode independently of the storage pool. ([#1053](https://github.com/isac322/cc-lb/issues/1053))
+
+### Upgrade notes
+
+- Strict PostgreSQL URL TLS modes now apply when the corresponding pool `sslmode` is omitted. Connections may fail until the database and client TLS configuration satisfy that policy. Remove redundant `prefer` settings from `storage.pool.sslmode` and `scheduler.separate_pool.sslmode` to inherit the URL; explicit `prefer` or `disable` continues to override strict URL modes.
 
 ## [2.2.1] - 2026-11-04
 

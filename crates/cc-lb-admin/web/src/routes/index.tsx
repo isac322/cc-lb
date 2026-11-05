@@ -114,6 +114,7 @@ import {
   type PoolQuotaLatest,
   type PoolQuotaWindow,
   poolQuotaResponseLatest,
+  poolQuotaWindowsPresent,
   poolTooltipRows,
   poolWindowResets,
 } from './-overviewPoolQuota';
@@ -1133,6 +1134,7 @@ type PoolQuotaChartProps = {
   rangeStartUnix: number;
   rangeEndUnix: number;
   latest: PoolQuotaLatest;
+  windows: readonly PoolQuotaWindow[];
 };
 
 /**
@@ -1228,6 +1230,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
           nowUnixSecs={serverNow}
           timeZone={timeZone}
           loading={loading}
+          windows={chart.windows}
         />
         <div
           className="relative h-[200px] w-full min-w-0 md:h-[240px] lg:h-[320px]"
@@ -1240,6 +1243,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
               seriesData={chart.data}
               rangeStartUnix={chart.rangeStartUnix}
               rangeEndUnix={chart.rangeEndUnix}
+              windows={chart.windows}
             />
           )}
         </div>
@@ -1301,15 +1305,19 @@ export function PoolQuotaThemedChart({
   seriesData,
   rangeStartUnix,
   rangeEndUnix,
+  windows: visibleWindows,
 }: {
   /** Used rows (0-100). */
   seriesData: PoolQuotaChartRow[];
   rangeStartUnix: number;
   rangeEndUnix: number;
+  windows: readonly PoolQuotaWindow[];
 }) {
   const gradientPrefix = `pool-fill-${useChartId()}`;
   // Back to front: the long windows first, 5h (the fastest mover) on top.
-  const windows = POOL_QUOTA_WINDOWS_DRAW_ORDER;
+  const windows = POOL_QUOTA_WINDOWS_DRAW_ORDER.filter((window) =>
+    visibleWindows.includes(window),
+  );
   return (
     <div className="absolute inset-0 min-h-0 min-w-0">
       {!seriesData.length ? (
@@ -1433,16 +1441,18 @@ function PoolQuotaLegend({
   nowUnixSecs = null,
   timeZone = 'UTC',
   loading = false,
+  windows,
 }: {
   latest?: PoolQuotaLatest;
   resets?: Record<PoolQuotaWindow, number | null>;
   nowUnixSecs?: number | null;
   timeZone?: string;
   loading?: boolean;
+  windows: readonly PoolQuotaWindow[];
 }) {
   return (
     <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 text-body text-text-muted">
-      {POOL_QUOTA_WINDOWS.map((window) => {
+      {windows.map((window) => {
         const value = latest?.[window] ?? null;
         const reset = resets?.[window] ?? null;
         const resetText =
@@ -1650,6 +1660,19 @@ function OverviewPage() {
     () => buildPoolQuotaChartData(quotaPoolHistory.data?.windows),
     [quotaPoolHistory.data],
   );
+  const returnedPoolWindows = useMemo(
+    () =>
+      poolQuotaWindowsPresent(
+        quotaPoolHistory.data?.windows,
+        quotaAggregate.data,
+      ),
+    [quotaAggregate.data, quotaPoolHistory.data],
+  );
+  // Keep the loading skeleton's geometry stable until both sparse responses
+  // settle; after that, only windows actually returned by either response show.
+  const displayedPoolWindows = quotaLoading
+    ? POOL_QUOTA_WINDOWS
+    : returnedPoolWindows;
   const visibleChartData = useMemo(
     () =>
       chartData.filter(
@@ -1671,10 +1694,12 @@ function OverviewPage() {
       rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
       rangeEndUnix: poolHistoryNowUnixSecs,
       latest: chartLatest,
+      windows: displayedPoolWindows,
     }),
     [
       chartLatest,
       displayedPoolHistoryRangeSecs,
+      displayedPoolWindows,
       poolHistoryNowUnixSecs,
       visibleChartData,
     ],

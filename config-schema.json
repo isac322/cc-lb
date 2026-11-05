@@ -191,7 +191,6 @@
           "idle_timeout_secs": 600,
           "max_connections": 5,
           "min_connections": 1,
-          "sslmode": "prefer",
           "statement_timeout_secs": 30
         },
         "singleton_concurrency": 2
@@ -613,8 +612,11 @@
           "minimum": 0
         },
         "sslmode": {
-          "type": "string",
-          "default": "prefer"
+          "description": "Optional SSL mode override; when omitted, inherit `sslmode` or `ssl-mode` from the PostgreSQL URL.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "statement_timeout_secs": {
           "type": "integer",
@@ -799,7 +801,6 @@
             "idle_timeout_secs": 600,
             "max_connections": 5,
             "min_connections": 1,
-            "sslmode": "prefer",
             "statement_timeout_secs": 30
           }
         },
@@ -840,8 +841,11 @@
           "minimum": 0
         },
         "sslmode": {
-          "type": "string",
-          "default": "prefer"
+          "description": "Optional SSL mode override for scheduler connections; when omitted, inherit `sslmode` or `ssl-mode` from the scheduler PostgreSQL URL.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "statement_timeout_secs": {
           "type": "integer",
@@ -877,7 +881,6 @@
                 "max_connections": 10,
                 "max_lifetime_secs": 1800,
                 "min_connections": 1,
-                "sslmode": "prefer",
                 "statement_timeout_secs": 30,
                 "test_before_acquire": true
               }

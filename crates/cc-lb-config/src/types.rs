@@ -297,8 +297,9 @@ pub struct PostgresPoolConfig {
     pub statement_timeout_secs: u64,
     #[serde(default = "default_test_before_acquire")]
     pub test_before_acquire: bool,
-    #[serde(default = "default_sslmode")]
-    pub sslmode: String,
+    /// Optional SSL mode override; when omitted, inherit `sslmode` or `ssl-mode` from the PostgreSQL URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sslmode: Option<String>,
 }
 
 impl Default for PostgresPoolConfig {
@@ -311,7 +312,7 @@ impl Default for PostgresPoolConfig {
             max_lifetime_secs: default_max_lifetime_secs(),
             statement_timeout_secs: default_statement_timeout_secs(),
             test_before_acquire: default_test_before_acquire(),
-            sslmode: default_sslmode(),
+            sslmode: None,
         }
     }
 }
@@ -366,8 +367,9 @@ pub struct SchedulerPoolConfig {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_statement_timeout_secs")]
     pub statement_timeout_secs: u64,
-    #[serde(default = "default_sslmode")]
-    pub sslmode: String,
+    /// Optional SSL mode override for scheduler connections; when omitted, inherit `sslmode` or `ssl-mode` from the scheduler PostgreSQL URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sslmode: Option<String>,
 }
 
 impl Default for SchedulerPoolConfig {
@@ -378,7 +380,7 @@ impl Default for SchedulerPoolConfig {
             acquire_timeout_secs: default_acquire_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
             statement_timeout_secs: default_statement_timeout_secs(),
-            sslmode: default_sslmode(),
+            sslmode: None,
         }
     }
 }
@@ -821,10 +823,6 @@ fn default_idle_timeout_secs() -> u64 {
 
 fn default_statement_timeout_secs() -> u64 {
     30
-}
-
-fn default_sslmode() -> String {
-    "prefer".to_owned()
 }
 
 fn default_min_connections() -> u32 {

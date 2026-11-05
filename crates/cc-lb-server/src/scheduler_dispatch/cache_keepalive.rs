@@ -385,6 +385,8 @@ impl SchedulerDispatch {
             .await
         {
             Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => {
+                // If a worker claimed, rescheduled, or terminated this generation first,
+                // the pending-only guard makes this producer mark a no-op.
                 CacheKeepaliveSessionStore::mark_cache_keepalive_enqueued(
                     self.storage.as_ref(),
                     &updated.session_key_hash,

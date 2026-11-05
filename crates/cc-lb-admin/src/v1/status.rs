@@ -193,9 +193,9 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
 
     Ok(StatusResponse {
         version: env!("CARGO_PKG_VERSION"),
-        git_sha: option_env!("CC_LB_GIT_SHA").unwrap_or("unknown"),
+        git_sha: state.build.git_sha,
         uptime_secs: state.start_time.elapsed().as_secs(),
-        build: build_info(),
+        build: build_info(state),
         replica_id: replica_identity.map(replica_id),
         generation: view.generation,
         upstreams,
@@ -394,11 +394,11 @@ fn export_registry_entry(entry: WasmRegistryEntry, size_bytes: u64) -> ExportReg
     }
 }
 
-fn build_info() -> BuildInfo {
+fn build_info(state: &AdminState) -> BuildInfo {
     BuildInfo {
-        rust_version: option_env!("CC_LB_RUSTC").unwrap_or("unknown"),
-        profile: option_env!("PROFILE").unwrap_or("unknown"),
-        target: option_env!("TARGET").unwrap_or("unknown"),
+        rust_version: state.build.rustc,
+        profile: state.build.profile,
+        target: state.build.target,
     }
 }
 

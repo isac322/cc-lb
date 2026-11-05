@@ -181,12 +181,11 @@ fn validation_field_from_message(message: &str) -> Option<String> {
 async fn health(State(state): State<AdminState>) -> Json<Value> {
     let uptime = state.start_time.elapsed().as_secs();
     let version = env!("CARGO_PKG_VERSION");
-    let git_sha = option_env!("CC_LB_GIT_SHA").unwrap_or("unknown");
 
     Json(json!({
         "status": "ok",
         "version": version,
-        "git_sha": git_sha,
+        "git_sha": state.build.git_sha,
         "uptime_secs": uptime,
     }))
 }

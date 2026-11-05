@@ -1,6 +1,9 @@
 use crate::config_admin_common;
 
-use axum::http::StatusCode;
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use cc_lb_admin::AdminPorts;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_config::Config;
@@ -12,11 +15,100 @@ use cc_lb_storage_api::{
     PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tower::ServiceExt;
 use uuid::Uuid;
 
+#[tokio::test]
+async fn admin_build_metadata_is_fixture_local_and_auth_boundaries_hold()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir_one, storage_one) = temp_storage().await;
+    let (_dir_two, storage_two) = temp_storage().await;
+    let mut state_one = test_state(Config::default(), Some(storage_one));
+    let mut state_two = test_state(Config::default(), Some(storage_two));
+    state_one.build = cc_lb_admin::AdminBuildInfo {
+        git_sha: "fixture-one-sha",
+        rustc: "fixture-one-rustc",
+        profile: "fixture-one-profile",
+        target: "fixture-one-target",
+    };
+    state_two.build = cc_lb_admin::AdminBuildInfo {
+        git_sha: "fixture-two-sha",
+        rustc: "fixture-two-rustc",
+        profile: "fixture-two-profile",
+        target: "fixture-two-target",
+    };
+
+    for (state, expected) in [
+        (
+            state_one,
+            [
+                "fixture-one-sha",
+                "fixture-one-rustc",
+                "fixture-one-profile",
+                "fixture-one-target",
+            ],
+        ),
+        (
+            state_two,
+            [
+                "fixture-two-sha",
+                "fixture-two-rustc",
+                "fixture-two-profile",
+                "fixture-two-target",
+            ],
+        ),
+    ] {
+        let (status, _, body, _) =
+            authed_json(app(state.clone()), "GET", "/admin/v1/status", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["git_sha"], expected[0]);
+        assert_eq!(body["build"]["rust_version"], expected[1]);
+        assert_eq!(body["build"]["profile"], expected[2]);
+        assert_eq!(body["build"]["target"], expected[3]);
+
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/health")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let health: Value =
+            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+        assert_eq!(health["git_sha"], expected[0]);
+
+        let unauthenticated_status = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/v1/status")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(unauthenticated_status.status(), StatusCode::UNAUTHORIZED);
+
+        let unauthenticated_scheduler = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/scheduler/status")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(unauthenticated_scheduler.status(), StatusCode::UNAUTHORIZED);
+
+        let scheduler_absent =
+            authed_json(app(state), "GET", "/admin/scheduler/status", None).await;
+        assert_eq!(scheduler_absent.0, StatusCode::NOT_IMPLEMENTED);
+    }
+    Ok(())
+}
 #[tokio::test]
 async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
     let (_dir, storage) = temp_storage().await;

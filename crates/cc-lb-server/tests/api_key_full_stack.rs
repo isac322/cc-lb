@@ -867,6 +867,7 @@ async fn admin_with_fake_org(stack: &Stack) -> Router {
         cc_lb_admin::auth::build_providers(&stage.config.admin.auth).expect("admin auth builds");
     cc_lb_admin::router(AdminState {
         config_path: None,
+        build: cc_lb_server::build_meta::BuildMeta::current().admin_build_info(),
         startup_config_overrides: Default::default(),
         storage: Some(storage),
         key_store: Some(Arc::new(KeyStore::new(stage.managed.clone()))),
