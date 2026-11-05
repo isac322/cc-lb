@@ -496,7 +496,7 @@ async fn apalis_housekeeping_malformed_application_table_retries_and_recovers_qa
     .expect("rename required application column away");
 
     let outcome = fixture
-        .dispatch_with_application_storage(malformed_storage, Arc::new(FailingPusher))
+        .dispatch_with_application_storage(Arc::clone(&malformed_storage), Arc::new(FailingPusher))
         .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
         .await
         .expect("dispatch housekeeping with malformed application table");
@@ -508,11 +508,17 @@ async fn apalis_housekeeping_malformed_application_table_retries_and_recovers_qa
         "QA-11: malformed application table must retry, not complete"
     );
 
+    sqlx::query(
+        "ALTER TABLE cache_keepalive_sessions RENAME COLUMN updated_at_malformed TO updated_at",
+    )
+    .execute(malformed_storage.pool())
+    .await
+    .expect("restore required application column");
     let recovered = fixture
-        .dispatch(Arc::new(FailingPusher))
+        .dispatch_with_application_storage(malformed_storage, Arc::new(FailingPusher))
         .dispatch_singleton(CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()))
         .await
-        .expect("redispatch housekeeping with valid application schema");
+        .expect("redispatch housekeeping after restoring application column");
     assert_eq!(recovered, JobOutcome::Done);
 }
 
