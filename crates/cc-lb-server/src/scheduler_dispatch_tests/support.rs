@@ -277,7 +277,8 @@ impl Fixture {
         limit_engine: Arc<LimitEngine>,
         keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
     ) -> SchedulerDispatch {
-        self.dispatch_with_config_limit_engine_and_keepalive_dispatcher(
+        self.dispatch_with_storage(
+            self.storage_dyn.clone(),
             pusher,
             limit_engine,
             keepalive_dispatcher,
@@ -285,31 +286,59 @@ impl Fixture {
         )
     }
 
-    fn dispatch_with_config_limit_engine_and_keepalive_dispatcher(
+    pub(super) fn dispatch_with_application_storage(
         &self,
+        storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+    ) -> SchedulerDispatch {
+        let storage_dyn: Arc<dyn Storage> = storage.clone();
+        let keepalive_dispatcher = Arc::new(
+            AnthropicKeepaliveDispatcher::new(
+                self.dynamic_view.clone(),
+                storage_dyn.clone(),
+                self.http.clone(),
+                Arc::new(SystemClock),
+            )
+            .with_timeout(Duration::from_secs(1)),
+        );
+        self.dispatch_with_storage(
+            storage_dyn,
+            pusher,
+            cc_lb_control::api_keys::limit_engine::LimitEngine::new(
+                Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+                Arc::new(SystemClock),
+            ),
+            keepalive_dispatcher,
+            Config::default(),
+        )
+    }
+
+    fn dispatch_with_storage(
+        &self,
+        storage: Arc<dyn Storage>,
         pusher: Arc<dyn CacheKeepaliveTaskPusher>,
         limit_engine: Arc<LimitEngine>,
         keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
         config: Config,
     ) -> SchedulerDispatch {
         let stores = Arc::new(Stores {
-            upstreams: self.storage_dyn.clone(),
-            principals: self.storage_dyn.clone(),
-            plugin_registry: self.storage_dyn.clone(),
-            upstream_rate_limits: self.storage_dyn.clone(),
-            upstream_subscription_quotas: self.storage_dyn.clone(),
-            upstream_subscription_metadata: self.storage_dyn.clone(),
-            organization_metadata: self.storage_dyn.clone(),
-            plan_tiers: self.storage_dyn.clone(),
-            prompt_cache_observations: self.storage_dyn.clone(),
-            anthropic_compatibility_kv: self.storage_dyn.clone(),
-            audit: Some(self.storage_dyn.clone()),
+            upstreams: storage.clone(),
+            principals: storage.clone(),
+            plugin_registry: storage.clone(),
+            upstream_rate_limits: storage.clone(),
+            upstream_subscription_quotas: storage.clone(),
+            upstream_subscription_metadata: storage.clone(),
+            organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
+            prompt_cache_observations: storage.clone(),
+            anthropic_compatibility_kv: storage.clone(),
+            audit: Some(storage.clone()),
         });
         SchedulerDispatch::new(SchedulerDispatchDeps {
             backend: self.backend.backend.clone(),
             cache_keepalive_pusher: pusher,
             config,
-            storage: self.storage_dyn.clone(),
+            storage,
             stores,
             aead: self.aead.clone(),
             oauth_cfg: Arc::new(AnthropicOAuthConfig::default()),
@@ -334,6 +363,22 @@ impl Fixture {
             anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
                 .expect("production Anthropic origin parses"),
         })
+    }
+
+    fn dispatch_with_config_limit_engine_and_keepalive_dispatcher(
+        &self,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+        limit_engine: Arc<LimitEngine>,
+        keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
+        config: Config,
+    ) -> SchedulerDispatch {
+        self.dispatch_with_storage(
+            self.storage_dyn.clone(),
+            pusher,
+            limit_engine,
+            keepalive_dispatcher,
+            config,
+        )
     }
 
     pub(super) fn enqueue_request(&self) -> CacheKeepaliveEnqueueRequest {
