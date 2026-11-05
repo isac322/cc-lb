@@ -153,8 +153,7 @@ async fn sto02_sqlite_upgrade_preserves_rows_and_is_idempotent() {
 
 #[test]
 fn sto02_postgres_upgrade_preserves_rows_and_is_idempotent() {
-    let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
-        eprintln!("skip: CI_POSTGRES_URL not set");
+    let Some(url) = postgres_url_for_test() else {
         return;
     };
     tokio::runtime::Runtime::new()
@@ -164,6 +163,21 @@ fn sto02_postgres_upgrade_preserves_rows_and_is_idempotent() {
             postgres_upgrade(&fixture.pool).await;
             fixture.drop_schema().await;
         });
+}
+
+fn postgres_url_for_test() -> Option<String> {
+    match std::env::var("CI_POSTGRES_URL") {
+        Ok(url) => Some(url),
+        Err(error)
+            if std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some() =>
+        {
+            panic!("CI_POSTGRES_URL is required in CI/GitHub Actions: {error}");
+        }
+        Err(_) => {
+            eprintln!("skip: CI_POSTGRES_URL not set outside CI/GitHub Actions");
+            None
+        }
+    }
 }
 
 async fn postgres_upgrade(pool: &PgPool) {
