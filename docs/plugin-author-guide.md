@@ -183,6 +183,13 @@ Shape example (Unified Slot):
 
 A plugin registered to the `shape` slot must implement all three wire hook functions: request shaping, buffered response transform, and SSE event transform. If your plugin only needs to shape requests or only needs to transform responses, you must explicitly implement no-op handlers for the other hooks.
 
+When a request asks for streaming but the upstream returns a non-SSE body,
+the host buffers the complete body within the configured response cap and
+calls the buffered response-transform hook once. Genuine SSE responses still
+use the SSE event-transform hook, and responses without a buffered hook are
+relayed as streams. A body over the cap becomes a 502 response without
+invoking the hook.
+
 Prompt-cache identity is computed before shaping. For a deterministic shape plugin,
 the shaped request must preserve the provider-effective cached prefix for the
 modeled upstream. For Anthropic API-key/OAuth upstreams on
