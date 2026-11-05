@@ -12,6 +12,12 @@ All notable changes to this project will be documented in this file.
 
 - Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
 
+### Fixed
+
+- Recent request-event reads use SQLite's `+ts` optimizer predicate only for `since=0` with a saturated upper bound; bounded time ranges retain their existing seekable `ts` predicates. PostgreSQL omits the redundant renewal event-kind predicate only when both source and event kind are `renewal`.
+- Logs `All kinds` now preserves `source_kind=all` through history, live, delta, and histogram requests, so keepalive renewal rows appear without sending invalid `event_kind=all`.
+- Delta and SSE event reads now filter before the 500-row matching cap, advance exhausted deltas safely, and retain the existing reset at exactly 500 matching backfill events.
+
 ## [2.2.1] - 2026-11-04
 
 ### Fixed

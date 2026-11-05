@@ -169,6 +169,91 @@ async fn events_stream_resets_after_one_backfill_page_when_over_cap() {
     assert_eq!(text.matches("event: reset").count(), 1);
     assert!(text.contains(r#"reason":"backfill_cap"#));
 }
+
+#[tokio::test]
+async fn events_stream_backfills_sparse_renewals_before_high_water_bookmark() {
+    let (_dir, storage) = temp_storage().await;
+    for index in 1..=512 {
+        let mut event = request_event(index);
+        event.event_kind = Some(RequestEventKind::Messages);
+        if index > 510 {
+            event.source_kind = Some("renewal".to_owned());
+        }
+        // Await committed storage, not the asynchronous assembler or live bus.
+        storage.append_request_event(&event).await.unwrap();
+    }
+    let cursor_hi = storage.current_request_event_cursor().await.unwrap();
+    let state = test_state(Config::default(), Some(storage));
+    for uri in [
+        "/admin/v1/events/stream?event_kind=renewal",
+        "/admin/v1/events/stream?source_kind=renewal",
+        "/admin/v1/events/stream?source_kind=renewal&event_kind=renewal",
+    ] {
+        let response = stream_response_uri(state.clone(), uri, Some("0")).await;
+        let text = read_backfill(response.into_body()).await;
+        assert_eq!(message_request_ids(&text), ["req-511", "req-512"], "{uri}");
+        assert!(!text.contains("event: reset"), "{text}");
+        assert_eq!(sse_frame_id(&text, "cursor"), Some(cursor_hi));
+        let bookmark = text.find("event: cursor").unwrap();
+        assert!(text.find("req-512").unwrap() < bookmark, "{text}");
+    }
+}
+
+#[tokio::test]
+async fn events_stream_filtered_cap_counts_matches_and_reconnects_without_gaps() {
+    for match_count in [499, 500, 501] {
+        let (_dir, storage) = temp_storage().await;
+        let mut cursors = Vec::new();
+        for index in 1..=match_count + 2 {
+            let mut event = request_event(index);
+            event.event_kind = Some(RequestEventKind::Messages);
+            if index == 1 || index == match_count + 2 {
+                event.source_kind = Some("renewal".to_owned());
+            }
+            cursors.push(storage.append_request_event(&event).await.unwrap());
+        }
+        let cursor_hi = *cursors.last().unwrap();
+        let state = test_state(Config::default(), Some(storage));
+        let expected: Vec<_> = (2..=match_count + 1)
+            .map(|index| format!("req-{index}"))
+            .collect();
+
+        for uri in [
+            "/admin/v1/events/stream",
+            "/admin/v1/events/stream?event_kind=messages",
+        ] {
+            let response = stream_response_uri(state.clone(), uri, Some("0")).await;
+            let first = read_backfill(response.into_body()).await;
+            let mut seen = message_request_ids(&first);
+            let first_page_size = (match_count as usize).min(500);
+            assert_eq!(
+                seen,
+                expected[..first_page_size],
+                "{uri}, matches={match_count}"
+            );
+            if match_count < 500 {
+                assert!(!first.contains("event: reset"), "{first}");
+                assert_eq!(sse_frame_id(&first, "cursor"), Some(cursor_hi));
+                continue;
+            }
+
+            // Exactly 500 matches still resets; no limit+1 lookahead.
+            assert!(first.contains(r#"reason":"backfill_cap"#), "{first}");
+            assert!(!first.contains("event: cursor"), "{first}");
+            let resume = sse_frame_id(&first, "reset").expect("reset cursor");
+            assert_eq!(resume, cursors[500]);
+            assert_eq!(sse_frame_id(&first, "message"), Some(resume));
+            let resume_header = resume.to_string();
+            let response = stream_response_uri(state.clone(), uri, Some(&resume_header)).await;
+            let second = read_backfill(response.into_body()).await;
+            assert!(!second.contains("event: reset"), "{second}");
+            assert_eq!(sse_frame_id(&second, "cursor"), Some(cursor_hi));
+            seen.extend(message_request_ids(&second));
+            assert_eq!(seen, expected, "{uri}, matches={match_count}");
+        }
+    }
+}
+
 /// A request can finalize between the subscription and the stream's first
 /// poll: its partials and its final then sit queued on the bus while the
 /// stream bookmarks the current cursor, which already includes the row. The
@@ -566,6 +651,49 @@ async fn stream_response_uri(
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     response
+}
+
+async fn read_backfill(mut body: Body) -> String {
+    timeout(Duration::from_secs(2), async move {
+        let mut text = String::new();
+        loop {
+            let frame = body
+                .frame()
+                .await
+                .expect("stream ended before backfill bookmark or reset")
+                .expect("backfill frame");
+            if let Ok(data) = frame.into_data() {
+                text.push_str(std::str::from_utf8(&data).unwrap());
+            }
+            let last_frame = text
+                .trim_end_matches('\n')
+                .rsplit("\n\n")
+                .next()
+                .unwrap_or_default();
+            if last_frame
+                .lines()
+                .any(|line| matches!(line, "event: cursor" | "event: reset"))
+            {
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("backfill bookmark or reset timeout")
+}
+
+fn sse_frame_id(text: &str, event_kind: &str) -> Option<u64> {
+    let event_line = format!("event: {event_kind}");
+    text.split("\n\n")
+        .filter(|frame| frame.lines().any(|line| line == event_line))
+        .filter_map(|frame| {
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix("id: "))?
+                .parse()
+                .ok()
+        })
+        .last()
 }
 
 async fn read_sse_frames(mut body: Body, frames: usize) -> String {

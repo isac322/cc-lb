@@ -2,7 +2,7 @@ use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStore,
+    RequestEvent, RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestEventStore,
     RequestEventStreamFilters, StatusClass,
 };
 use uuid::Uuid;
@@ -67,6 +67,8 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             event_kind: None,
             status_class: Some(StatusClass::TwoXx),
             errors_only: false,
+            source_kind: None,
+            exclude_renewal: false,
         };
 
         let default_page = storage
@@ -178,6 +180,8 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             ))
             .await?;
         assert!(third.is_empty());
+
+        assert_cursor_pages_filter_before_limit(storage.as_ref()).await?;
 
         Ok(())
     })
@@ -310,6 +314,318 @@ pub async fn request_event_list_model_filter_matches_case_insensitive_prefix<
         Ok(())
     })
     .await
+}
+
+async fn assert_cursor_pages_filter_before_limit<S: RequestEventStore + ?Sized>(
+    storage: &S,
+) -> Result<()> {
+    const PREFIX_LEN: usize = 501;
+    const MATCH_LEN: usize = 501;
+
+    let after = storage.current_request_event_cursor().await?;
+    let mut expected_rows = Vec::with_capacity(PREFIX_LEN + MATCH_LEN + 1);
+    for index in 0..(PREFIX_LEN + MATCH_LEN) {
+        let mut event = cursor_event(index);
+        if index < PREFIX_LEN {
+            event.principal_id = Some("cursor-other-principal".to_owned());
+            event.thread_id = Some("cursor-other-thread".to_owned());
+            event.upstream_id = Some(Uuid::from_u128(99));
+            event.model = Some("sonnetAA-local".to_owned());
+            event.status = 200;
+            event.event_kind = Some(RequestEventKind::Models);
+        } else {
+            let offset = index - PREFIX_LEN;
+            if offset >= 499 {
+                event.upstream_id = Some(Uuid::from_u128(99));
+                event.status = 200;
+            }
+            if offset == 498 {
+                event.source_kind = None;
+                event.event_kind = None;
+            } else if offset == 499 {
+                event.error_code = Some(String::new());
+                event.event_kind = Some(RequestEventKind::Renewal);
+            } else if offset == 500 {
+                event.thread_id = Some("cursor-other-thread".to_owned());
+                event.model = Some("cursor-gap-last".to_owned());
+                event.source_kind = Some("renewal".to_owned());
+            }
+        }
+        let cursor = storage.append_request_event(&event).await?;
+        expected_rows.push((cursor, event.event_id.expect("cursor fixture event ID")));
+    }
+    let hi = expected_rows.last().expect("cursor fixture high fence").0;
+    let outside = cursor_event(PREFIX_LEN + MATCH_LEN);
+    let outside_cursor = storage.append_request_event(&outside).await?;
+    expected_rows.push((
+        outside_cursor,
+        outside.event_id.expect("outside-fence event ID"),
+    ));
+
+    // Default is the raw tail-poller contract, not the admin list default:
+    // both a stored renewal kind and an authoritative renewal source survive.
+    let raw_filters = RequestEventStreamFilters::default();
+    let mut raw_after = after;
+    for (start, end) in [(0, 500), (500, 1_000), (1_000, 1_002)] {
+        let rows = storage
+            .query_request_events_between_cursors(raw_after, hi, 500, &raw_filters)
+            .await?;
+        assert_cursor_rows(
+            &rows,
+            &expected_rows,
+            &(start..end).collect::<Vec<_>>(),
+            "raw Default page includes renewals and respects fixed hi",
+        );
+        raw_after = rows.last().expect("nonempty raw page").0;
+    }
+    let later = storage
+        .query_request_events_between_cursors(hi, outside_cursor, 500, &raw_filters)
+        .await?;
+    assert_cursor_rows(
+        &later,
+        &expected_rows,
+        &[PREFIX_LEN + MATCH_LEN],
+        "append above fixed hi remains available to the next range",
+    );
+
+    let model = |needle: &str| RequestEventStreamFilters {
+        model: Some(needle.to_owned()),
+        ..Default::default()
+    };
+    let cases = [
+        (
+            "zero filtered matches",
+            RequestEventStreamFilters {
+                principal_id: Some("cursor-absent".to_owned()),
+                ..Default::default()
+            },
+            Vec::new(),
+        ),
+        (
+            "principal: 501 filtered matches",
+            RequestEventStreamFilters {
+                principal_id: Some("cursor-principal".to_owned()),
+                ..Default::default()
+            },
+            (501..1_002).collect(),
+        ),
+        (
+            "thread: 500 filtered matches",
+            RequestEventStreamFilters {
+                thread_id: Some("cursor-thread".to_owned()),
+                ..Default::default()
+            },
+            (501..1_001).collect(),
+        ),
+        (
+            "upstream: 499 filtered matches",
+            RequestEventStreamFilters {
+                upstream_id: Some(Uuid::from_u128(7)),
+                ..Default::default()
+            },
+            (501..1_000).collect(),
+        ),
+        (
+            "model prefix and vendor contains are case-insensitive and literal",
+            model("  SoNnEt%_  "),
+            (502..1_001).collect(),
+        ),
+        (
+            "model prefix arm",
+            model("SONNET%_-LOCAL"),
+            (503..1_000).step_by(2).collect(),
+        ),
+        (
+            "model vendor contains arm",
+            model("claude-3-5-sonnet%_"),
+            (502..1_001).step_by(2).collect(),
+        ),
+        (
+            "status class",
+            RequestEventStreamFilters {
+                status_class: Some(StatusClass::FiveXx),
+                ..Default::default()
+            },
+            (501..1_000).collect(),
+        ),
+        (
+            "errors include failing status or any non-NULL error code",
+            RequestEventStreamFilters {
+                errors_only: true,
+                ..Default::default()
+            },
+            (501..1_001).collect(),
+        ),
+        (
+            "effective messages exclude renewal source and historical NULL kind",
+            RequestEventStreamFilters {
+                event_kind: Some(RequestEventKind::Messages),
+                ..Default::default()
+            },
+            (501..999).collect(),
+        ),
+        (
+            "effective renewal uses source precedence or stored kind",
+            RequestEventStreamFilters {
+                event_kind: Some(RequestEventKind::Renewal),
+                ..Default::default()
+            },
+            vec![1_000, 1_001],
+        ),
+        (
+            "historical NULL kind is unclassified",
+            RequestEventStreamFilters {
+                event_kind: Some(RequestEventKind::Unclassified),
+                ..Default::default()
+            },
+            vec![999],
+        ),
+        (
+            "exact source_kind proxy",
+            RequestEventStreamFilters {
+                source_kind: Some("proxy".to_owned()),
+                ..Default::default()
+            },
+            (0..999).chain([1_000]).collect(),
+        ),
+        (
+            "exact source_kind renewal",
+            RequestEventStreamFilters {
+                source_kind: Some("renewal".to_owned()),
+                ..Default::default()
+            },
+            vec![1_001],
+        ),
+        (
+            "exclude source renewal preserves NULL and proxy-stored renewal",
+            RequestEventStreamFilters {
+                exclude_renewal: true,
+                ..Default::default()
+            },
+            (0..1_001).collect(),
+        ),
+        (
+            "event kind and source kind are conjunctive",
+            RequestEventStreamFilters {
+                event_kind: Some(RequestEventKind::Renewal),
+                source_kind: Some("proxy".to_owned()),
+                ..Default::default()
+            },
+            vec![1_000],
+        ),
+        (
+            "renewal source conflicts with exclude renewal",
+            RequestEventStreamFilters {
+                source_kind: Some("renewal".to_owned()),
+                exclude_renewal: true,
+                ..Default::default()
+            },
+            Vec::new(),
+        ),
+        (
+            "raw Default preserves renewal rows",
+            RequestEventStreamFilters::default(),
+            (0..1_002).collect(),
+        ),
+        (
+            "combined matcher fields are conjunctive",
+            RequestEventStreamFilters {
+                principal_id: Some("cursor-principal".to_owned()),
+                thread_id: Some("cursor-thread".to_owned()),
+                model: Some("  SoNnEt%_  ".to_owned()),
+                upstream_id: Some(Uuid::from_u128(7)),
+                status_class: Some(StatusClass::FiveXx),
+                errors_only: true,
+                event_kind: Some(RequestEventKind::Messages),
+                source_kind: None,
+                exclude_renewal: false,
+            },
+            (502..999).collect(),
+        ),
+    ];
+    for (name, filters, expected) in cases {
+        let mut page_after = after;
+        for expected_page in expected.chunks(500) {
+            let rows = storage
+                .query_request_events_between_cursors(page_after, hi, 500, &filters)
+                .await?;
+            assert_cursor_rows(&rows, &expected_rows, expected_page, name);
+            page_after = rows.last().expect("nonempty filtered page").0;
+        }
+        let exhausted = storage
+            .query_request_events_between_cursors(page_after, hi, 500, &filters)
+            .await?;
+        assert_cursor_rows(&exhausted, &expected_rows, &[], name);
+    }
+
+    // A successful first page does not justify stopping at the next raw gap.
+    // limit=1 must cross another nonmatching window on continuation.
+    let gap_filter = model("cursor-gap");
+    let first = storage
+        .query_request_events_between_cursors(after, hi, 1, &gap_filter)
+        .await?;
+    assert_cursor_rows(&first, &expected_rows, &[501], "limit=1 first match");
+    let second = storage
+        .query_request_events_between_cursors(first[0].0, hi, 1, &gap_filter)
+        .await?;
+    assert_cursor_rows(
+        &second,
+        &expected_rows,
+        &[1_001],
+        "limit=1 continuation crosses a sparse gap",
+    );
+    let exhausted = storage
+        .query_request_events_between_cursors(second[0].0, hi, 1, &gap_filter)
+        .await?;
+    assert_cursor_rows(&exhausted, &expected_rows, &[], "limit=1 exhausted");
+
+    Ok(())
+}
+
+fn cursor_event(index: usize) -> RequestEvent {
+    RequestEvent {
+        // Deliberately descending timestamps: cursor pages order by append,
+        // not the reverse-chronological list ordering.
+        ts: 2_000_000 - index as u64,
+        ts_ms: Some((2_000_000 - index as u64) * 1_000),
+        event_id: Some(format!("cursor-event-{index:04}")),
+        source_kind: Some("proxy".to_owned()),
+        event_kind: Some(RequestEventKind::Messages),
+        principal_id: Some("cursor-principal".to_owned()),
+        thread_id: Some("cursor-thread".to_owned()),
+        upstream_id: Some(Uuid::from_u128(7)),
+        model: Some(
+            if index == 501 {
+                "cursor-gap-first"
+            } else if index == 1001 {
+                "cursor-gap-last"
+            } else if index.is_multiple_of(2) {
+                "CLAUDE-3-5-SONNET%_-20241022"
+            } else {
+                "SONNET%_-local"
+            }
+            .to_owned(),
+        ),
+        status: 503,
+        ..Default::default()
+    }
+}
+
+fn assert_cursor_rows(
+    rows: &[(u64, RequestEvent)],
+    expected_rows: &[(u64, String)],
+    expected_indices: &[usize],
+    name: &str,
+) {
+    let actual = rows
+        .iter()
+        .map(|(cursor, event)| (*cursor, event.event_id.as_deref().expect("stored event ID")))
+        .collect::<Vec<_>>();
+    let expected = expected_indices
+        .iter()
+        .map(|&index| (expected_rows[index].0, expected_rows[index].1.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "{name}");
 }
 
 async fn with_fixture<B, F, Fut>(backend: Arc<B>, scenario: F) -> Result<()>
