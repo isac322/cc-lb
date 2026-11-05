@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
+- Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
 
 ## [2.2.1] - 2026-11-04
 

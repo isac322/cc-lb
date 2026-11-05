@@ -125,10 +125,16 @@ pub(super) fn next_warmup_evaluation_after_success(
             .filter_map(|reset| i64::try_from(reset).ok())
             .filter(|reset| *reset > now_unix_secs)
             .min();
-        let snapshot_reset = snapshot
-            .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
-            .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs));
-        match response_reset.into_iter().chain(snapshot_reset).min() {
+        // Response observations describe the completed request and supersede
+        // older cached state, including when no future reset was returned.
+        let target_reset = if response_present {
+            response_reset
+        } else {
+            snapshot
+                .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
+                .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs))
+        };
+        match target_reset {
             Some(reset) => {
                 earliest_reset =
                     Some(earliest_reset.map_or(reset, |current: i64| current.min(reset)));

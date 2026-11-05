@@ -384,6 +384,163 @@ fn success_with_stale_five_hour_snapshot_uses_short_cadence() {
     );
 }
 
+#[test]
+fn success_with_expired_or_missing_five_hour_reset_is_bounded_by_five_hours() {
+    for reset in [Some(NOW_UNIX_SECS - 1), None] {
+        let snapshots = [
+            quota_snapshot(
+                SubscriptionQuotaWindow::FiveHour,
+                SubscriptionQuotaDataState::Fresh,
+                Some(0.2),
+                Some(SubscriptionQuotaStatus::Allowed),
+                reset,
+            ),
+            quota_snapshot(
+                SubscriptionQuotaWindow::SevenDay,
+                SubscriptionQuotaDataState::Fresh,
+                Some(0.2),
+                Some(SubscriptionQuotaStatus::Allowed),
+                Some(NOW_UNIX_SECS + SEVEN_DAYS),
+            ),
+        ];
+        let observations = [UnifiedQuotaObservation {
+            window: SubscriptionQuotaWindow::SevenDay,
+            resets_at_unix_secs: u64::try_from(NOW_UNIX_SECS + SEVEN_DAYS).ok(),
+            ..UnifiedQuotaObservation::default()
+        }];
+        assert_eq!(
+            next_warmup_evaluation_after_success(&snapshots, &observations, NOW_UNIX_SECS),
+            NOW_UNIX_SECS + FIVE_HOURS,
+        );
+    }
+}
+
+#[test]
+fn weekly_only_success_preserves_absence_after_the_sample_becomes_old() {
+    let snapshots = [
+        quota_snapshot_with_observed_at(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Absent,
+            None,
+            None,
+            None,
+            NOW_UNIX_MILLIS - 604_800_000,
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + SEVEN_DAYS),
+        ),
+    ];
+    let observations = [UnifiedQuotaObservation {
+        window: SubscriptionQuotaWindow::SevenDay,
+        resets_at_unix_secs: u64::try_from(NOW_UNIX_SECS + SEVEN_DAYS).ok(),
+        ..UnifiedQuotaObservation::default()
+    }];
+    assert_eq!(
+        next_warmup_evaluation_after_success(&snapshots, &observations, NOW_UNIX_SECS),
+        NOW_UNIX_SECS + SEVEN_DAYS,
+    );
+}
+
+#[test]
+fn success_response_reset_overrides_the_older_snapshot_reset() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + 1_000),
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Absent,
+            None,
+            None,
+            None,
+        ),
+    ];
+    for (reset, expected) in [
+        (Some(NOW_UNIX_SECS + 5_000), NOW_UNIX_SECS + 5_000),
+        (None, NOW_UNIX_SECS + FIVE_HOURS),
+        (Some(NOW_UNIX_SECS - 1), NOW_UNIX_SECS + FIVE_HOURS),
+    ] {
+        let observations = [UnifiedQuotaObservation {
+            window: SubscriptionQuotaWindow::FiveHour,
+            resets_at_unix_secs: reset.and_then(|reset| u64::try_from(reset).ok()),
+            ..UnifiedQuotaObservation::default()
+        }];
+        assert_eq!(
+            next_warmup_evaluation_after_success(&snapshots, &observations, NOW_UNIX_SECS),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn latest_absent_five_hour_sample_overrides_older_stale_sample_for_weekly_cadence() {
+    use crate::subscription_quota_cache::SubscriptionQuotaCache;
+    use cc_lb_storage_api::{
+        SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    };
+
+    let upstream_id = uuid::Uuid::new_v4();
+    let cache = SubscriptionQuotaCache::new();
+    let mut sample = SubscriptionQuotaSample {
+        upstream_id,
+        window: SubscriptionQuotaWindow::FiveHour,
+        source: SubscriptionQuotaSource::Header,
+        sample_kind: SubscriptionQuotaSampleKind::Sample,
+        observed_at_unix_millis: NOW_UNIX_MILLIS - 600_000,
+        sample_id: uuid::Uuid::new_v4(),
+        utilization: Some(0.2),
+        status: Some(SubscriptionQuotaStatus::Allowed),
+        resets_at_unix_secs: u64::try_from(NOW_UNIX_SECS + FIVE_HOURS).ok(),
+        surpassed_threshold: None,
+        representative_claim: None,
+        fallback_percentage: None,
+        fallback_available: None,
+        overage_in_use: None,
+        overage_period_monthly_utilization: None,
+        upgrade_paths: None,
+        disabled_reason: None,
+        extra_usage_enabled: None,
+        extra_usage_monthly_limit: None,
+        extra_usage_used_credits: None,
+        ingested_at_unix_millis: NOW_UNIX_MILLIS,
+    };
+    cache.upsert_observation(upstream_id, &sample);
+    sample.source = SubscriptionQuotaSource::Api;
+    sample.sample_kind = SubscriptionQuotaSampleKind::Absent;
+    sample.observed_at_unix_millis = NOW_UNIX_MILLIS - 500_000;
+    sample.utilization = None;
+    sample.status = None;
+    sample.resets_at_unix_secs = None;
+    cache.upsert_observation(upstream_id, &sample);
+
+    let snapshots = cache.snapshot_for_upstream(upstream_id, NOW_UNIX_MILLIS, 180);
+    assert_eq!(
+        snapshots
+            .iter()
+            .find(|snapshot| snapshot.window == "5h")
+            .unwrap()
+            .state,
+        SubscriptionQuotaDataState::Absent,
+    );
+    let observations = [UnifiedQuotaObservation {
+        window: SubscriptionQuotaWindow::SevenDay,
+        resets_at_unix_secs: u64::try_from(NOW_UNIX_SECS + SEVEN_DAYS).ok(),
+        ..UnifiedQuotaObservation::default()
+    }];
+    assert_eq!(
+        next_warmup_evaluation_after_success(&snapshots, &observations, NOW_UNIX_SECS),
+        NOW_UNIX_SECS + SEVEN_DAYS,
+    );
+}
+
 fn quota_snapshot(
     window: SubscriptionQuotaWindow,
     state: SubscriptionQuotaDataState,

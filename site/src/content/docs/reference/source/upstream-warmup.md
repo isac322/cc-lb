@@ -87,7 +87,9 @@ Warm-up targets the five-hour and seven-day windows independently.
 
 Warm-up ignores explicitly absent targets. It sends a request when any fresh target is idle. Otherwise, a known active target skips the request until the earliest known reset, even when another target is stale or missing. If no target is known active, unknown samples allow the normal warm-up request. All scheduled evaluations retain the post-reset guard and stable jitter.
 
-After a successful request, the scheduler uses the earliest future target reset reported by the response or a fresh snapshot. If a present target still has no known future reset, the next evaluation is also bounded by the shortest present window's normal cadence: five hours for accounts with a five-hour target, or seven days for weekly-only accounts.
+After a successful request, each response-present window supersedes its older cached snapshot, including when the response omits a future reset. For targets not reported by that response, the scheduler uses fresh snapshot resets. It selects the earliest known future reset, bounded by the shortest present window's normal cadence when any target still has no known future reset: five hours for accounts with a five-hour target, or seven days for weekly-only accounts.
+
+Presence follows the latest selected sample kind, not its age: an `Absent` sample remains absent after its freshness interval expires, so an older stale five-hour sample cannot restore the five-hour cadence. A newer actual sample or a window reported by the successful response establishes presence again. Stale actual samples and unobserved targets are unknown, not evidence of structural absence; without an explicit `Absent` sample, their cadence remains conservative.
 
 If the local usage cache or a warm-up response shows a fresh seven-day window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
 
