@@ -160,14 +160,15 @@ impl RequestEventStore for PostgresStorage {
             builder.push(" AND thread_id = ");
             builder.push_bind(thread_id);
         }
+        // C collation keeps lower() ASCII-only, matching `model_filter_matches`.
         if let Some([prefix_pattern, contains_pattern]) = filters
             .model
             .as_deref()
             .and_then(model_filter_like_patterns)
         {
-            builder.push(" AND (lower(model) LIKE ");
+            builder.push(" AND (lower(model COLLATE \"C\") LIKE ");
             builder.push_bind(prefix_pattern);
-            builder.push(" ESCAPE '\\' OR lower(model) LIKE ");
+            builder.push(" ESCAPE '\\' OR lower(model COLLATE \"C\") LIKE ");
             builder.push_bind(contains_pattern);
             builder.push(" ESCAPE '\\')");
         }

@@ -12,7 +12,7 @@ use crate::harness::{ConformanceBackend, ConformanceFixture};
 pub async fn request_event_list_projects_rows_and_preserves_detail<B: ConformanceBackend>(
     backend: Arc<B>,
 ) -> Result<()> {
-    with_fixture(backend, |storage| async move {
+    with_fixture(Arc::clone(&backend), |storage| async move {
         let upstream_id = Uuid::from_u128(7);
         let other_upstream_id = Uuid::from_u128(8);
 
@@ -181,7 +181,8 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             .await?;
         assert!(third.is_empty());
 
-        assert_cursor_pages_filter_before_limit(storage.as_ref()).await?;
+        assert_cursor_pages_filter_before_limit(backend.as_ref(), storage.as_ref()).await?;
+        assert_cursor_model_filter_preserves_ascii_case(backend.as_ref(), storage.as_ref()).await?;
 
         Ok(())
     })
@@ -316,8 +317,9 @@ pub async fn request_event_list_model_filter_matches_case_insensitive_prefix<
     .await
 }
 
-async fn assert_cursor_pages_filter_before_limit<S: RequestEventStore + ?Sized>(
-    storage: &S,
+async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
+    backend: &B,
+    storage: &B::Storage,
 ) -> Result<()> {
     const PREFIX_LEN: usize = 501;
     const MATCH_LEN: usize = 501;
@@ -361,6 +363,7 @@ async fn assert_cursor_pages_filter_before_limit<S: RequestEventStore + ?Sized>(
         outside_cursor,
         outside.event_id.expect("outside-fence event ID"),
     ));
+    backend.wait_for_events_visible_for_rollup(storage).await?;
 
     // Default is the raw tail-poller contract, not the admin list default:
     // both a stored renewal kind and an authoritative renewal source survive.
@@ -578,6 +581,97 @@ async fn assert_cursor_pages_filter_before_limit<S: RequestEventStore + ?Sized>(
         .query_request_events_between_cursors(second[0].0, hi, 1, &gap_filter)
         .await?;
     assert_cursor_rows(&exhausted, &expected_rows, &[], "limit=1 exhausted");
+
+    Ok(())
+}
+
+async fn assert_cursor_model_filter_preserves_ascii_case<B: ConformanceBackend>(
+    backend: &B,
+    storage: &B::Storage,
+) -> Result<()> {
+    let after = storage.current_request_event_cursor().await?;
+    let mut expected_rows = Vec::new();
+    for (index, model) in ["Éclair", "ÉCLAIR-preview", "éclair"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut event = cursor_event(2_000 + index);
+        event.model = Some(model.to_owned());
+        let cursor = storage.append_request_event(&event).await?;
+        expected_rows.push((cursor, event.event_id.expect("ASCII-case fixture event ID")));
+    }
+    let hi = expected_rows.last().expect("ASCII-case high fence").0;
+    backend.wait_for_events_visible_for_rollup(storage).await?;
+    for (needle, expected, name) in [
+        (
+            "Éclair",
+            vec![0, 1],
+            "exact non-ASCII identity preserves ASCII-insensitive prefix matching",
+        ),
+        (
+            "ÉCLAIR",
+            vec![0, 1],
+            "ASCII case changes do not fold distinct non-ASCII characters",
+        ),
+        (
+            "éclair",
+            vec![2],
+            "lowercase non-ASCII needle excludes uppercase non-ASCII models",
+        ),
+    ] {
+        let filters = RequestEventStreamFilters {
+            model: Some(needle.to_owned()),
+            ..Default::default()
+        };
+        let rows = storage
+            .query_request_events_between_cursors(after, hi, 500, &filters)
+            .await?;
+        assert_cursor_rows(&rows, &expected_rows, &expected, name);
+    }
+
+    const PREFIX_LEN: usize = 501;
+    let after = storage.current_request_event_cursor().await?;
+    let mut expected_rows = Vec::with_capacity(PREFIX_LEN + 1);
+    for index in 0..=PREFIX_LEN {
+        let mut event = cursor_event(3_000 + index);
+        event.model = Some(
+            if index < PREFIX_LEN {
+                "Éclair-nonmatch"
+            } else {
+                "éClAiR-match"
+            }
+            .to_owned(),
+        );
+        let cursor = storage.append_request_event(&event).await?;
+        expected_rows.push((
+            cursor,
+            event.event_id.expect("non-ASCII gap fixture event ID"),
+        ));
+    }
+    let hi = expected_rows.last().expect("non-ASCII gap high fence").0;
+    backend.wait_for_events_visible_for_rollup(storage).await?;
+    let filters = RequestEventStreamFilters {
+        model: Some("éclair".to_owned()),
+        ..Default::default()
+    };
+    let rows = storage
+        .query_request_events_between_cursors(after, hi, 500, &filters)
+        .await?;
+    assert_cursor_rows(
+        &rows,
+        &expected_rows,
+        &[PREFIX_LEN],
+        "501 Unicode-fold false positives do not consume the matching cap",
+    );
+    let exhausted = storage
+        .query_request_events_between_cursors(rows[0].0, hi, 500, &filters)
+        .await?;
+    assert_cursor_rows(
+        &exhausted,
+        &expected_rows,
+        &[],
+        "non-ASCII gap continuation is exhausted",
+    );
 
     Ok(())
 }
