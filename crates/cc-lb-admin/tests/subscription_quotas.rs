@@ -666,6 +666,305 @@ async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows
     );
 }
 
+#[tokio::test]
+async fn subscription_quota_anthropic_absent_five_hour_is_excluded_from_pool_aggregate() {
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    let absent_upstream = create_oauth_upstream(&server, "anthropic-ultra").await;
+    let sampled_upstream = create_oauth_upstream(&server, "anthropic-pro").await;
+    // Older header checkpoints must not resurrect a provider-absent window.
+    server
+        .storage
+        .record_subscription_quota_samples(&[quota_observation(
+            absent_upstream,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
+            700,
+            SubscriptionQuotaSource::Header,
+            0.90,
+            Some(SubscriptionQuotaStatus::AllowedWarning),
+        )])
+        .await
+        .unwrap();
+    server
+        .storage
+        .record_subscription_quota_samples(&[
+            quota_absent_observation(
+                absent_upstream,
+                CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+                701,
+                SubscriptionQuotaSource::Api,
+            ),
+            quota_observation(
+                sampled_upstream,
+                CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+                702,
+                SubscriptionQuotaSource::Api,
+                0.40,
+                Some(SubscriptionQuotaStatus::Allowed),
+            ),
+        ])
+        .await
+        .unwrap();
+
+    let (status, _, body) = server
+        .client
+        .get("/admin/v1/subscription-quotas/aggregate?windows=5h")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["upstream_count"], 2);
+    assert_eq!(body["windows"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["windows"][0]["window"], "5h");
+    assert_eq!(body["windows"][0]["eligible_upstreams"], 1);
+    assert_eq!(body["windows"][0]["contributing_upstreams"], 1);
+    assert_close(body["windows"][0]["utilization"].as_f64(), 0.40);
+    assert_eq!(
+        body["windows"][0]["provider_lots"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        body["windows"][0]["provider_lots"][0]["upstream_id"],
+        sampled_upstream.to_string()
+    );
+    let aggregate = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+        server.storage.as_ref(),
+        &server.dynamic_view,
+        None,
+        vec![SubscriptionQuotaWindow::FiveHour],
+        cc_lb_storage_api::SubscriptionQuotaSourceMerge::Merged,
+        1_800,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
+    )
+    .await
+    .unwrap();
+    let snapshots = cc_lb_admin::subscription_quotas::pool_quota_snapshots_from_aggregate(
+        &aggregate,
+        CHECKPOINT_TEST_NOW_UNIX_SECS as i64,
+        CHECKPOINT_TEST_NOW_UNIX_SECS as i64 * 1_000,
+    );
+    let snapshot = snapshots.first().expect("one eligible pooled window");
+    assert_eq!(snapshot.eligible_upstreams, 1);
+    assert_eq!(snapshot.contributing_upstreams, 1);
+    assert_eq!(snapshot.missing_observation_upstreams, 0);
+    assert_eq!(snapshot.utilization, Some(0.40));
+}
+
+#[tokio::test]
+async fn subscription_quota_anthropic_all_absent_five_hour_drops_from_pool_outputs() {
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    let first = create_oauth_upstream(&server, "anthropic-ultra-a").await;
+    let second = create_oauth_upstream(&server, "anthropic-ultra-b").await;
+    server
+        .storage
+        .record_subscription_quota_samples(&[
+            quota_absent_observation(
+                first,
+                CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+                703,
+                SubscriptionQuotaSource::Api,
+            ),
+            quota_absent_observation(
+                second,
+                CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+                704,
+                SubscriptionQuotaSource::Api,
+            ),
+        ])
+        .await
+        .unwrap();
+    let mut weekly = quota_observation(
+        first,
+        CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+        705,
+        SubscriptionQuotaSource::Api,
+        0.60,
+        Some(SubscriptionQuotaStatus::Allowed),
+    );
+    weekly.window = SubscriptionQuotaWindow::SevenDay;
+    server
+        .storage
+        .record_subscription_quota_samples(&[weekly])
+        .await
+        .unwrap();
+
+    let (status, _, aggregate) = server
+        .client
+        .get("/admin/v1/subscription-quotas/aggregate?windows=5h,7d")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        aggregate["windows"]
+            .as_array()
+            .expect("aggregate windows")
+            .iter()
+            .all(|window| window["window"] != "5h")
+    );
+    assert_eq!(aggregate["windows"].as_array().map(Vec::len), Some(1));
+    assert_eq!(aggregate["windows"][0]["window"], "7d");
+    assert_close(aggregate["windows"][0]["utilization"].as_f64(), 0.60);
+    let oauth = cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+        server.storage.as_ref(),
+        &server.dynamic_view,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
+    )
+    .await
+    .unwrap();
+    assert!(oauth.five_hour.is_none());
+    assert!(oauth.seven_day.is_some());
+
+    let (status, _, history) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/pool-history?windows=5h,7d&since_unix_secs={}&until_unix_secs={}",
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+            CHECKPOINT_TEST_NOW_UNIX_SECS,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        history["windows"]
+            .as_array()
+            .expect("pool history windows")
+            .iter()
+            .all(|window| window["window"] != "5h")
+    );
+}
+
+#[tokio::test]
+async fn subscription_quota_five_hour_absence_honors_requested_source() {
+    struct CachedQuota(Uuid, cc_lb_domain::SubscriptionQuotaCandidateSnapshot);
+    impl cc_lb_control::SubscriptionQuotaCacheLike for CachedQuota {
+        fn upsert_observation(&self, _record: &SubscriptionQuotaSample) {
+            panic!("read-only cache fixture");
+        }
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+            if upstream_id == self.0 {
+                vec![self.1.clone()]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+    let now = CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600;
+    let server =
+        admin_test_common::spawn_admin_server_with_clock(Arc::new(TestClock::new_at_secs(now)))
+            .await;
+    let upstream = create_oauth_upstream(&server, "source-specific-absence").await;
+    server
+        .storage
+        .record_subscription_quota_samples(&[
+            quota_observation_with_reset(
+                upstream,
+                now - 120,
+                800,
+                SubscriptionQuotaSource::Header,
+                0.40,
+                now + 3_600,
+            ),
+            quota_absent_observation(upstream, now - 60, 801, SubscriptionQuotaSource::Api),
+        ])
+        .await
+        .unwrap();
+    server
+        .storage
+        .append_request_event(&usage_event(
+            now - 180,
+            "source-specific-usage",
+            upstream,
+            "source-specific-absence",
+            250,
+        ))
+        .await
+        .unwrap();
+    server.storage.rollup_usage_once().await.unwrap();
+
+    for newer_header in [false, true] {
+        if newer_header {
+            server
+                .storage
+                .record_subscription_quota_samples(&[quota_observation_with_reset(
+                    upstream,
+                    now - 30,
+                    802,
+                    SubscriptionQuotaSource::Header,
+                    0.50,
+                    now + 3_600,
+                )])
+                .await
+                .unwrap();
+        }
+        for cached in [false, true] {
+            let cache: Arc<dyn cc_lb_control::SubscriptionQuotaCacheLike> = if cached {
+                let snapshot = serde_json::from_value(json!({
+                    "window": "5h",
+                    "state": if newer_header { "fresh" } else { "absent" },
+                    "source": if newer_header { "header" } else { "api" },
+                    "utilization": newer_header.then_some(0.50),
+                    "resets_at_unix_secs": newer_header.then_some(now + 3_600),
+                    "observed_at_unix_millis": (now - if newer_header { 30 } else { 60 }) * 1_000,
+                    "max_staleness_secs": 1_800,
+                }))
+                .expect("merged quota cache fixture");
+                Arc::new(CachedQuota(upstream, snapshot))
+            } else {
+                Arc::new(cc_lb_control::NoopSubscriptionQuotaCache)
+            };
+            let next = cc_lb_control::DynamicViewBuilder::from_view(&server.dynamic_view.load())
+                .subscription_quota_cache(cache)
+                .build();
+            server.dynamic_view.store(next);
+            for source in ["header", "api", "merged"] {
+                let (status, _, body) = server
+                    .client
+                    .get(&format!(
+                        "/admin/v1/subscription-quotas/aggregate?windows=5h&source={source}"
+                    ))
+                    .await;
+                assert_eq!(status, StatusCode::OK);
+                let windows = body["windows"].as_array().expect("aggregate windows");
+                if source == "api" || (source == "merged" && !newer_header) {
+                    assert!(
+                        windows.is_empty(),
+                        "source={source}, newer_header={newer_header}"
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    windows.len(),
+                    1,
+                    "source={source}, newer_header={newer_header}"
+                );
+                let window = &windows[0];
+                assert_eq!(window["eligible_upstreams"], 1);
+                assert_eq!(window["contributing_upstreams"], 1);
+                assert_eq!(window["used_tokens"], 250);
+                assert_close(
+                    window["utilization"].as_f64(),
+                    if newer_header { 0.50 } else { 0.40 },
+                );
+                let lots = window["provider_lots"].as_array().expect("provider lots");
+                assert_eq!(lots.len(), 1);
+                assert_eq!(
+                    lots[0]["source"],
+                    if source == "merged" {
+                        "merged"
+                    } else {
+                        "header"
+                    }
+                );
+                assert_close(
+                    lots[0]["capacity_estimate_tokens"].as_f64(),
+                    if newer_header { 500.0 } else { 625.0 },
+                );
+            }
+        }
+    }
+}
+
 async fn create_oauth_upstream(server: &admin_test_common::SpawnedAdminServer, name: &str) -> Uuid {
     let (status, _, body) = server
         .client
@@ -680,6 +979,26 @@ async fn create_oauth_upstream(server: &admin_test_common::SpawnedAdminServer, n
         .expect("created upstream has id")
         .parse()
         .expect("created upstream id is uuid")
+}
+
+fn quota_absent_observation(
+    upstream_id: Uuid,
+    observed_at_unix_secs: u64,
+    sample_seed: u128,
+    source: SubscriptionQuotaSource,
+) -> SubscriptionQuotaSample {
+    let mut sample = quota_observation(
+        upstream_id,
+        observed_at_unix_secs,
+        sample_seed,
+        source,
+        0.0,
+        None,
+    );
+    sample.sample_kind = SubscriptionQuotaSampleKind::Absent;
+    sample.utilization = None;
+    sample.resets_at_unix_secs = None;
+    sample
 }
 
 fn checkpoint_record(record: SubscriptionQuotaSample) -> SubscriptionQuotaCheckpointRecord {

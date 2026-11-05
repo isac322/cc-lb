@@ -776,6 +776,95 @@ fn absent_optional_scoped_windows_are_noop() {
 }
 
 #[test]
+fn absent_five_hour_is_known_base_like_a_healthy_five_hour_window() {
+    let weekly = fresh(WINDOW_SEVEN_DAY)
+        .util(0.1)
+        .status("allowed")
+        .reset_at(T0_SECS + 2 * 86_400)
+        .build();
+    let without_five_hour = oauth_at_t0(
+        "without-five-hour",
+        1,
+        vec![absent(WINDOW_FIVE_HOUR).build(), weekly.clone()],
+    );
+    let with_five_hour = oauth_at_t0(
+        "with-five-hour",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.1)
+                .status("allowed")
+                .reset_at(T0_SECS + 600)
+                .build(),
+            weekly,
+        ],
+    );
+    let config = FilterConfig::default();
+    let Some(without) = assess_candidate(&without_five_hour, 0, BASE_WINDOWS.as_slice(), &config)
+    else {
+        panic!("explicitly absent five-hour window must remain eligible");
+    };
+    let Some(with) = assess_candidate(&with_five_hour, 1, BASE_WINDOWS.as_slice(), &config) else {
+        panic!("healthy five-hour control must remain eligible");
+    };
+    assert_eq!(without.tier, Tier::KnownBase);
+    assert_eq!(without.tier, with.tier);
+    assert_eq!(without.quota_urgency_5h, 0.0);
+    assert!(with.quota_urgency_5h > 0.0);
+    assert_eq!(without.five_hour_pressure_raw, 0.0);
+    assert!(without.quota_urgency_combined < with.quota_urgency_combined);
+    assert!(!subscription_hard_blocked(
+        MODEL_AGNOSTIC,
+        &without_five_hour
+    ));
+    for candidate in [&without_five_hour, &with_five_hour] {
+        let output = filter_for_model(&[candidate.clone(), api_key("fallback", 3)], MODEL_AGNOSTIC);
+        assert_eq!(output.kept_upstream_ids, vec![candidate.upstream_id]);
+    }
+    let output = filter_for_model(&[with_five_hour.clone(), without_five_hour], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![with_five_hour.upstream_id]);
+}
+
+#[test]
+fn absent_five_hour_does_not_bypass_exhausted_weekly_windows() {
+    for (model, exhausted_window) in [
+        (MODEL_AGNOSTIC, WINDOW_SEVEN_DAY),
+        (FABLE_MODEL, WINDOW_SEVEN_DAY_FABLE),
+        (SONNET_MODEL, WINDOW_SEVEN_DAY_SONNET),
+        (OPUS_MODEL, WINDOW_SEVEN_DAY_OPUS),
+    ] {
+        let mut quotas = vec![
+            absent(WINDOW_FIVE_HOUR).build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(if exhausted_window == WINDOW_SEVEN_DAY {
+                    1.0
+                } else {
+                    0.1
+                })
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                .build(),
+        ];
+        if exhausted_window != WINDOW_SEVEN_DAY {
+            quotas.push(
+                fresh(exhausted_window)
+                    .util(1.0)
+                    .status("rejected")
+                    .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                    .build(),
+            );
+        }
+        let candidate = oauth_at_t0("weekly-exhausted", 1, quotas);
+        assert!(
+            subscription_hard_blocked(model, &candidate),
+            "absent five-hour window must not bypass {exhausted_window}"
+        );
+        let fallback = api_key("fallback", 2);
+        let output = filter_for_model(&[candidate, fallback.clone()], model);
+        assert_eq!(output.kept_upstream_ids, vec![fallback.upstream_id]);
+    }
+}
+
+#[test]
 fn unobserved_optional_scoped_window_remains_partial_base() {
     let candidate = oauth_with(
         "unobserved-opus",

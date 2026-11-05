@@ -37,6 +37,13 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
     sqlite_storage.initialize().await?;
     let sqlite_pool = SqlitePool::connect(&sqlite_url).await?;
     let upstream_id = Uuid::from_u128(7);
+    let absent = absent_sample(upstream_id, 150_000, 6, SubscriptionQuotaSource::Api);
+    postgres_storage
+        .record_subscription_quota_samples(std::slice::from_ref(&absent))
+        .await?;
+    sqlite_storage
+        .record_subscription_quota_samples(&[absent])
+        .await?;
     let checkpoints = vec![
         checkpoint(upstream_id, 30_000, 2, SubscriptionQuotaSource::Header, 0.2),
         checkpoint(upstream_id, 30_000, 1, SubscriptionQuotaSource::Header, 0.1),
@@ -109,6 +116,9 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
             .list_subscription_quota_provider_lots(lot_query.clone())
             .await?,
         postgres_storage
+            .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+            .await?,
+        postgres_storage
             .sum_usage_tokens_for_intervals(&intervals)
             .await?,
     ))?;
@@ -120,12 +130,55 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
             .list_subscription_quota_provider_lots(lot_query)
             .await?,
         sqlite_storage
+            .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+            .await?,
+        sqlite_storage
             .sum_usage_tokens_for_intervals(&intervals)
             .await?,
     ))?;
     assert_eq!(postgres_bytes, sqlite_bytes);
+    let latest = postgres_storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+        .await?;
+    assert_eq!(latest.len(), 1);
+    assert!(latest.first().is_some_and(|sample| {
+        sample.sample_kind == SubscriptionQuotaSampleKind::Absent
+            && sample.utilization.is_none()
+            && sample.resets_at_unix_secs.is_none()
+    }));
     sqlite_pool.close().await;
     postgres.drop_schema().await
+}
+
+fn absent_sample(
+    upstream_id: Uuid,
+    observed_at_unix_millis: u64,
+    sample_id: u128,
+    source: SubscriptionQuotaSource,
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
+        upstream_id,
+        window: SubscriptionQuotaWindow::FiveHour,
+        source,
+        sample_kind: SubscriptionQuotaSampleKind::Absent,
+        observed_at_unix_millis,
+        sample_id: Uuid::from_u128(sample_id),
+        utilization: None,
+        status: None,
+        resets_at_unix_secs: None,
+        surpassed_threshold: None,
+        representative_claim: None,
+        fallback_percentage: None,
+        fallback_available: None,
+        overage_in_use: None,
+        overage_period_monthly_utilization: None,
+        upgrade_paths: None,
+        disabled_reason: None,
+        extra_usage_enabled: None,
+        extra_usage_monthly_limit: None,
+        extra_usage_used_credits: None,
+        ingested_at_unix_millis: observed_at_unix_millis,
+    }
 }
 
 fn checkpoint(
