@@ -63,9 +63,9 @@ impl StreamCompletionOwner {
         }
     }
 
-    fn observe_emitted(&mut self, bytes: &Bytes) {
+    fn observe_emitted(&mut self, bytes: &Bytes, max_pending_sse_bytes: usize) {
         if let Some(response) = self.response.as_mut() {
-            response.observe_emitted(bytes);
+            response.observe_emitted(bytes, max_pending_sse_bytes);
         }
     }
 
@@ -179,9 +179,13 @@ impl DownstreamStreamDropGuard {
         }
     }
 
-    pub(crate) fn observe_keepalive_emitted(&mut self, bytes: &Bytes) {
+    pub(crate) fn observe_keepalive_emitted(
+        &mut self,
+        bytes: &Bytes,
+        max_pending_sse_bytes: usize,
+    ) {
         if let Some(owner) = self.keepalive_completion.as_mut() {
-            owner.observe_emitted(bytes);
+            owner.observe_emitted(bytes, max_pending_sse_bytes);
         }
     }
 

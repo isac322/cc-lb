@@ -6482,7 +6482,10 @@ impl Lifecycle {
                                                 transformed_output_started = true;
                                                 if downstream_drop_guard.has_keepalive_completion() {
                                                     downstream_drop_guard
-                                                        .observe_keepalive_emitted(&bytes);
+                                                        .observe_keepalive_emitted(
+                                                            &bytes,
+                                                            incomplete_sse_event_budget_bytes,
+                                                        );
                                                 }
                                                 bytes
                                             }
@@ -6527,7 +6530,10 @@ impl Lifecycle {
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
-                                                    downstream_drop_guard.observe_keepalive_emitted(&raw);
+                                                    downstream_drop_guard.observe_keepalive_emitted(
+                                                        &raw,
+                                                        incomplete_sse_event_budget_bytes,
+                                                    );
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
                                                 }
@@ -6574,7 +6580,10 @@ impl Lifecycle {
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
-                                                    downstream_drop_guard.observe_keepalive_emitted(&raw);
+                                                    downstream_drop_guard.observe_keepalive_emitted(
+                                                        &raw,
+                                                        incomplete_sse_event_budget_bytes,
+                                                    );
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
                                                 }
@@ -6744,7 +6753,10 @@ impl Lifecycle {
                                     keepalive_raw_passthrough_active = true;
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
-                                        downstream_drop_guard.observe_keepalive_emitted(&raw);
+                                        downstream_drop_guard.observe_keepalive_emitted(
+                                            &raw,
+                                            incomplete_sse_event_budget_bytes,
+                                        );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
@@ -6756,7 +6768,10 @@ impl Lifecycle {
                                     if upstream_is_sse && downstream_stream_is_identity {
                                         if keepalive_raw_passthrough_active {
                                             downstream_drop_guard
-                                                .observe_keepalive_emitted(&data);
+                                                .observe_keepalive_emitted(
+                                                    &data,
+                                                    incomplete_sse_event_budget_bytes,
+                                                );
                                         }
                                         downstream_sse_boundary.observe(&data);
                                     }
@@ -7113,7 +7128,10 @@ impl Lifecycle {
                                         SseTransformOutcome::Emit(bytes) => {
                                             if downstream_drop_guard.has_keepalive_completion() {
                                                 downstream_drop_guard
-                                                    .observe_keepalive_emitted(&bytes);
+                                                    .observe_keepalive_emitted(
+                                                        &bytes,
+                                                        incomplete_sse_event_budget_bytes,
+                                                    );
                                             }
                                             bytes
                                         }
@@ -7221,7 +7239,10 @@ impl Lifecycle {
                                 } else {
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
-                                        downstream_drop_guard.observe_keepalive_emitted(&raw);
+                                        downstream_drop_guard.observe_keepalive_emitted(
+                                            &raw,
+                                            incomplete_sse_event_budget_bytes,
+                                        );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }

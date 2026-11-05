@@ -714,10 +714,14 @@ pub(crate) struct StreamingKeepaliveResponse {
     content_blocks: Vec<Value>,
     stop_reason: Option<String>,
     pending_sse_bytes: Vec<u8>,
+    sse_observation_disabled: bool,
 }
 
 impl StreamingKeepaliveResponse {
-    pub(crate) fn observe_emitted(&mut self, bytes: &[u8]) {
+    pub(crate) fn observe_emitted(&mut self, bytes: &[u8], max_pending_sse_bytes: usize) {
+        if self.sse_observation_disabled {
+            return;
+        }
         if self.pending_sse_bytes.is_empty() {
             let mut offset = 0;
             while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
@@ -726,11 +730,21 @@ impl StreamingKeepaliveResponse {
                 offset = end;
             }
             if offset < bytes.len() {
-                self.pending_sse_bytes.extend_from_slice(&bytes[offset..]);
+                let pending = &bytes[offset..];
+                if pending.len() > max_pending_sse_bytes {
+                    self.sse_observation_disabled = true;
+                } else {
+                    self.pending_sse_bytes.extend_from_slice(pending);
+                }
             }
             return;
         }
 
+        if self.pending_sse_bytes.len().saturating_add(bytes.len()) > max_pending_sse_bytes {
+            self.pending_sse_bytes.clear();
+            self.sse_observation_disabled = true;
+            return;
+        }
         self.pending_sse_bytes.extend_from_slice(bytes);
         let mut offset = 0;
         while let Some(relative_end) =
@@ -1310,8 +1324,9 @@ mod tests {
               event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"question\"}}\n\n\
               event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"ask\"}}\n\n\
               event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            1024,
         );
-        response.observe_emitted(b"");
+        response.observe_emitted(b"", 1024);
         let value = response.into_value().expect("emitted message");
         assert_eq!(
             value["content"],
@@ -1328,10 +1343,12 @@ mod tests {
         response.observe_emitted(
             b"event: message_start\ndata: {\"message\":{\"content\":[]}}\n\n\
               event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"que",
+            1024,
         );
         response.observe_emitted(
             b"stion\"}}\n\n\
               event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            1024,
         );
 
         let value = response
@@ -1339,6 +1356,16 @@ mod tests {
             .expect("partial emitted event reassembled");
         assert_eq!(value["content"][0]["name"], "question");
         assert_eq!(value["stop_reason"], "tool_use");
+    }
+
+    #[test]
+    fn emitted_sse_partial_buffer_disables_observation_at_budget() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe_emitted(b"data: ", 4);
+        response.observe_emitted(b"xxxxx", 4);
+
+        assert!(response.sse_observation_disabled);
+        assert!(response.pending_sse_bytes.is_empty());
     }
 
     #[test]
