@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, type Page, type Response, test } from '@playwright/test';
@@ -25,6 +25,21 @@ const token = /^QA_ADMIN_TOKEN=(.+)$/m.exec(credentials)?.[1];
 if (!token) throw new Error('fixture credentials are missing the admin token');
 const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
 const qaDir = path.dirname(fileURLToPath(import.meta.url));
+const referenceConsolePath = process.env.DETAIL_CONSOLE_BASELINE;
+const captureConsolePath =
+  manifest.mode === 'old' ? process.env.DETAIL_CAPTURE_CONSOLE_BASELINE : undefined;
+const referenceConsole = referenceConsolePath
+  ? JSON.parse(readFileSync(referenceConsolePath, 'utf8')) as {
+      console_errors: string[];
+      provenance?: Record<string, unknown>;
+    }
+  : undefined;
+
+function sortedMultiset(values: string[]): string[] {
+  return [...values].sort();
+}
+if (process.env.DETAIL_CAPTURE_CONSOLE_BASELINE && manifest.mode !== 'old')
+  throw new Error('DETAIL_CAPTURE_CONSOLE_BASELINE is only valid for old mode');
 type Kind = 'keepalive' | 'event';
 type Transport = keyof typeof manifest.origins;
 
@@ -53,6 +68,35 @@ function matchesDetail(response: Response, kind: Kind, id: string): boolean {
 
 function broken(transport: Transport, id: string): boolean {
   return manifest.mode === 'old' && transport !== 'direct' && id.includes('/');
+}
+function enforceConsoleOracle(
+  transport: Transport,
+  consoleErrors: string[],
+): Record<string, unknown> {
+  const referenceProvenance = referenceConsole?.provenance ?? null;
+  if (manifest.mode === 'old' && transport !== 'direct')
+    return { mode: 'capture-only', reference_provenance: referenceProvenance };
+  if (referenceConsole !== undefined && (manifest.mode === 'new' || transport === 'direct')) {
+    expect(sortedMultiset(consoleErrors)).toEqual(sortedMultiset(referenceConsole.console_errors));
+  } else if (captureConsolePath === undefined) {
+    expect(consoleErrors).toEqual([]);
+  }
+  if (captureConsolePath !== undefined && transport === 'direct') {
+    writeFileSync(
+      captureConsolePath,
+      `${JSON.stringify({
+        console_errors: consoleErrors,
+        provenance: {
+          source: 'DETAIL_CAPTURE_CONSOLE_BASELINE',
+          mode: manifest.mode,
+          origin: transport,
+          manifest_path: manifestPath,
+        },
+      }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+  }
+  return { mode: referenceConsole ? 'reference' : 'native-empty', reference_provenance: referenceProvenance };
 }
 
 function identifierSnapshot(): unknown {
@@ -118,9 +162,11 @@ test('QA-08 HTTP detail matrix preserves exact IDs and bodies across path-only p
 for (const transport of ['direct', 'forward', 'redirect'] as const) {
   test(`QA-24/25/26 ${transport}: all keepalive states and event drawers use real-server detail`, async ({ page, request }, testInfo) => {
     const origin = manifest.origins[transport];
+    const unhandledPageErrors: string[] = [];
     const consoleErrors: string[] = [];
     const detailResponses: Array<{ kind: Kind; id: string; status: number; body: unknown }> = [];
-    page.on('pageerror', (error) => consoleErrors.push(error.message));
+    let consoleOracle: Record<string, unknown> = { mode: 'pending' };
+    page.on('pageerror', (error) => unhandledPageErrors.push(error.message));
     try {
       await signIn(page, origin);
       page.on('console', (message) => {
@@ -202,10 +248,22 @@ for (const transport of ['direct', 'forward', 'redirect'] as const) {
         }
         detailResponses.push({ kind: 'event', id, status: response.status(), body: response.status() === 200 ? await response.json() : await response.text() });
       }
-      if (manifest.mode === 'new' || transport === 'direct') expect(consoleErrors).toEqual([]);
-    } finally {
+      expect(unhandledPageErrors).toEqual([]);
       expect(identifierSnapshot()).toEqual(manifest.db_snapshot_before);
-      await testInfo.attach(`${transport}-drawer-evidence.json`, { body: JSON.stringify({ mode: manifest.mode, detailResponses, consoleErrors }, null, 2), contentType: 'application/json' });
+      consoleOracle = enforceConsoleOracle(transport, consoleErrors);
+    } finally {
+      await testInfo.attach(`${transport}-drawer-evidence.json`, {
+        body: JSON.stringify({
+          mode: manifest.mode,
+          detailResponses,
+          pageErrors: unhandledPageErrors,
+          consoleErrors,
+          referenceProvenance: referenceConsole?.provenance ?? null,
+          consoleOracle,
+        }, null, 2),
+        contentType: 'application/json',
+      });
+      expect(identifierSnapshot()).toEqual(manifest.db_snapshot_before);
     }
   });
 }

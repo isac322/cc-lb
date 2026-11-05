@@ -43,7 +43,10 @@ export default defineConfig({
   forbidOnly: true,
   retries: 0,
   workers: 1,
-  reporter: [['line']],
+  reporter: [
+    ['line'],
+    ['json', { outputFile: path.join(evidenceDir, 'report.json') }],
+  ],
   timeout: 120_000,
   expect: { timeout: 15_000 },
   use: {
