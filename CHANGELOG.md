@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 
 - OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
 
+### Changed
+
+- Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows, warms weekly-only Claude accounts through their seven-day window, waits for the earliest reset when all present windows are active, and defers until reset when the weekly window is exhausted.
+
 ## [2.2.1] - 2026-11-04
 
 ### Fixed

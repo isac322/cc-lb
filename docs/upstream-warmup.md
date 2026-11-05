@@ -4,7 +4,7 @@ This document describes the operator reference for the upstream warm-up system i
 
 ## What it does
 
-Anthropic OAuth upstreams require periodic activity to keep their five-hour rate limit reset windows active. If an upstream remains idle for too long, the reset window closes, which can lead to unexpected rate limits when traffic resumes. This warm-up system automatically sends minimal requests to keep these windows ticking. It ensures that your upstreams are always ready to handle incoming requests without artificial delays.
+Anthropic OAuth upstreams require periodic activity to keep their reported quota windows active. Warm-up targets the five-hour and seven-day windows, and it automatically skips a target that the account reports as absent. Weekly-only Claude accounts therefore warm their seven-day window instead of being treated as unknown.
 
 Warm-up is opt-out for `anthropic_oauth`: `warmup_enabled` defaults to `true` for OAuth upstreams created through `POST /admin/v1/upstreams` and through the OAuth flow. Other upstream kinds default to `false`. Only `anthropic_oauth` upstreams that hold OAuth credentials are ever scheduled, so the flag is inert until an upstream completes OAuth.
 
@@ -85,9 +85,11 @@ The warm-up system logs its activity using tracing events. All events use the `w
 
 ## Quota-aware scheduling
 
-Warm-up distinguishes the five-hour active window from seven-day quota exhaustion.
+Warm-up targets the five-hour and seven-day windows independently.
 
-If the local usage cache already shows a fresh active five-hour window, the warm-up attempt is skipped as `WindowAlreadyActive`; no provider request is sent. If a warm-up request or fresh usage cache shows the seven-day window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
+If a target window is explicitly absent, warm-up ignores it. If any present target is idle or unknown, the scheduler sends a warm-up request. If every present target is active, it skips the request and schedules the next evaluation at the earliest target reset, with the existing post-reset guard and stable jitter. An account with no present targets remains unknown and follows the normal fallback evaluation cadence.
+
+If the local usage cache or a warm-up response shows a fresh seven-day window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
 
 Seven-day exhaustion does not stamp the upstream as successfully warmed. Instead, the scheduler enqueues the next warm-up after the seven-day reset at `reset + 30..59s`, using the idempotency key `adaptive:warmup:{upstream_id}:{reset}`. The 30-second guard lets Anthropic roll the window before cc-lb retries; the stable jitter avoids a thundering herd across upstreams.
 
@@ -113,7 +115,7 @@ A crash between dispatch and DB write can cause one extra `max_tokens=1` Haiku c
 
 ## Cost
 
-Each warm-up is one `max_tokens=1` request to `claude-haiku-4-5-20251001`. At one per 5h per opted-in upstream, expected cost is negligible (less than $0.01/upstream/day).
+Each warm-up is one `max_tokens=1` request to `claude-haiku-4-5-20251001`. Accounts with a present five-hour window warm at most once per five-hour reset; weekly-only accounts warm at most once per seven-day reset. Expected cost remains negligible.
 
 ## Wave-0 outcomes
 

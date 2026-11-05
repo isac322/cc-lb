@@ -134,11 +134,36 @@ fn assert_429(observations: &[UnifiedQuotaObservation], expected: ExpectedAttemp
         observations,
         None,
         SCHEDULED_FOR,
+        SCHEDULED_FOR,
         None,
     );
 
     assert_eq!(fields.outcome, expected.outcome);
     assert_eq!(fields.cycle_key, expected.cycle_key);
+}
+
+#[test]
+fn success_with_only_seven_day_headers_advances_weekly_only_account() {
+    let observations = [quota_observation(
+        SubscriptionQuotaWindow::SevenDay,
+        SEVEN_DAY_RESET,
+        Some(SubscriptionQuotaStatus::Allowed),
+        Some(0.01),
+    )];
+    let fields = response_attempt_fields(
+        StatusCode::OK,
+        &observations,
+        Some(SCHEDULED_FOR),
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+
+    assert_eq!(
+        fields.outcome,
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced)
+    );
+    assert_eq!(fields.cycle_key, Some(SEVEN_DAY_RESET));
 }
 
 fn quota_observation(

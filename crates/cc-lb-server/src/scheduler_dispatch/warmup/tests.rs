@@ -1,11 +1,13 @@
 use super::*;
 use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
+use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
 use super::scheduling::POST_RESET_GUARD_SECS;
 
 const NOW_UNIX_SECS: i64 = 1_782_000_000;
 const NOW_UNIX_MILLIS: u64 = 1_782_000_000_000;
+const SEVEN_DAYS: i64 = 7 * 24 * 60 * 60;
 
 #[test]
 fn next_warmup_task_schedules_after_reset_guard_and_jitter() {
@@ -126,13 +128,22 @@ fn quota_preflight_prefers_seven_day_over_five_hour_snapshot() {
 
 #[test]
 fn quota_preflight_reports_active_window_for_fresh_five_hour_snapshot() {
-    let snapshots = [quota_snapshot(
-        SubscriptionQuotaWindow::FiveHour,
-        SubscriptionQuotaDataState::Fresh,
-        Some(0.2),
-        Some(SubscriptionQuotaStatus::Allowed),
-        Some(1_782_018_000),
-    )];
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(1_782_018_000),
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Absent,
+            None,
+            None,
+            None,
+        ),
+    ];
 
     assert_eq!(
         quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
@@ -200,12 +211,125 @@ fn quota_preflight_ignores_five_hour_snapshot_older_than_three_minutes() {
     );
 }
 
+#[test]
+fn weekly_only_anthropic_account_warms_on_seven_day_window() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Absent,
+            None,
+            None,
+            None,
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS),
+        ),
+    ];
+
+    assert_eq!(
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::SendWarmup
+    );
+    assert_eq!(
+        next_warmup_evaluation_after_success(&snapshots, &[], NOW_UNIX_SECS),
+        NOW_UNIX_SECS + SEVEN_DAYS
+    );
+}
+
+#[test]
+fn both_active_targets_skip_until_earliest_reset() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + 2_000),
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + 1_000),
+        ),
+    ];
+
+    assert_eq!(
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::ActiveWindow {
+            cycle_key: NOW_UNIX_SECS + 1_000
+        }
+    );
+}
+
+#[test]
+fn exhausted_weekly_window_skips_until_reset() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Absent,
+            None,
+            None,
+            None,
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(1.0),
+            Some(SubscriptionQuotaStatus::Rejected),
+            Some(NOW_UNIX_SECS + 5_000),
+        ),
+    ];
+
+    assert_eq!(
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::SevenDayQuotaExhausted {
+            cycle_key: NOW_UNIX_SECS + 5_000
+        }
+    );
+}
+
+#[test]
+fn success_uses_earliest_future_reset_from_response_or_snapshot() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + 2_000),
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(NOW_UNIX_SECS + 3_000),
+        ),
+    ];
+    let observations = [UnifiedQuotaObservation {
+        window: SubscriptionQuotaWindow::SevenDay,
+        resets_at_unix_secs: u64::try_from(NOW_UNIX_SECS + 1_000).ok(),
+        ..UnifiedQuotaObservation::default()
+    }];
+
+    assert_eq!(
+        next_warmup_evaluation_after_success(&snapshots, &observations, NOW_UNIX_SECS),
+        NOW_UNIX_SECS + 1_000
+    );
+}
+
 fn quota_snapshot(
     window: SubscriptionQuotaWindow,
     state: SubscriptionQuotaDataState,
     utilization: Option<f64>,
     status: Option<SubscriptionQuotaStatus>,
-    resets_at_unix_secs: Option<u64>,
+    resets_at_unix_secs: Option<i64>,
 ) -> SubscriptionQuotaCandidateSnapshot {
     quota_snapshot_with_observed_at(
         window,
@@ -222,7 +346,7 @@ fn quota_snapshot_with_observed_at(
     state: SubscriptionQuotaDataState,
     utilization: Option<f64>,
     status: Option<SubscriptionQuotaStatus>,
-    resets_at_unix_secs: Option<u64>,
+    resets_at_unix_secs: Option<i64>,
     observed_at_unix_millis: u64,
 ) -> SubscriptionQuotaCandidateSnapshot {
     SubscriptionQuotaCandidateSnapshot {
@@ -231,7 +355,7 @@ fn quota_snapshot_with_observed_at(
         source: Some("test".to_owned()),
         utilization,
         status: status.map(|value| value.as_str().to_owned()),
-        resets_at_unix_secs,
+        resets_at_unix_secs: resets_at_unix_secs.and_then(|value| u64::try_from(value).ok()),
         surpassed_threshold: None,
         representative_claim: None,
         disabled_reason: None,
