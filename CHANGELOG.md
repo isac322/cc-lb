@@ -20,6 +20,11 @@ All notable changes to this project will be documented in this file.
 ### Security
 
 - OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
+- PostgreSQL storage, startup preflight, and scheduler connections now preserve the URL's `sslmode` or `ssl-mode` when the corresponding pool `sslmode` is omitted, instead of silently replacing it with `prefer`. Explicit pool modes still override the URL; the scheduler resolves its mode independently of the storage pool. ([#1053](https://github.com/isac322/cc-lb/issues/1053))
+
+### Upgrade notes
+
+- Strict PostgreSQL URL TLS modes now apply when the corresponding pool `sslmode` is omitted. Connections may fail until the database and client TLS configuration satisfy that policy. Remove redundant `prefer` settings from `storage.pool.sslmode` and `scheduler.separate_pool.sslmode` to inherit the URL; explicit `prefer` or `disable` continues to override strict URL modes.
 
 ## [2.2.1] - 2026-11-04
 
