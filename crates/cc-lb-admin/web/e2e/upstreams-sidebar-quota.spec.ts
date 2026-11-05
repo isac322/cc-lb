@@ -371,4 +371,3 @@ test.describe('Upstreams Sidebar Quota', () => {
     }
   });
 });
-
