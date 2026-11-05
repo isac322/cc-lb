@@ -118,7 +118,7 @@ function WarmupHelpHover() {
   return (
     <HelpIcon
       label="Warm-up help"
-      text="Warm-up sends a tiny background Anthropic request when idle time would otherwise stall the next 5h window. Returning users land in an active window instead of starting one late."
+      text="Warm-up sends a tiny background Anthropic request during idle time so the next quota window is ready when traffic resumes. Returning users land in an active window instead of starting one late."
     />
   );
 }
@@ -493,7 +493,7 @@ function WarmupCardMinimalInner({
         tabIndex={-1}
         className="outline-none"
         title={headerTitle}
-        description="Starts the next 5h window during idle gaps."
+        description="Prepares the next quota window during idle gaps."
         action={headerActions}
       >
         <div className="space-y-4">

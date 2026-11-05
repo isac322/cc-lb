@@ -144,7 +144,7 @@ pub(super) fn next_warmup_evaluation_after_success(
     }
 
     let fallback =
-        now_unix_secs.saturating_add(shortest_present_duration.unwrap_or(FIVE_HOUR_WINDOW_SECS));
+        now_unix_secs.saturating_add(shortest_present_duration.unwrap_or(SEVEN_DAY_WINDOW_SECS));
     match earliest_reset {
         Some(reset) if unknown_target => reset.min(fallback),
         Some(reset) => reset,
@@ -172,7 +172,9 @@ fn quota_window_duration_secs(window: SubscriptionQuotaWindow) -> i64 {
         | SubscriptionQuotaWindow::SevenDaySonnet
         | SubscriptionQuotaWindow::SevenDayOpus
         | SubscriptionQuotaWindow::SevenDayFable => SEVEN_DAY_WINDOW_SECS,
-        _ => FIVE_HOUR_WINDOW_SECS,
+        SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => {
+            unreachable!("unsupported warmup quota window: {window:?}")
+        }
     }
 }
 

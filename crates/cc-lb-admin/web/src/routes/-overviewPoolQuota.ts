@@ -5,35 +5,54 @@ export type PoolQuotaWindow = (typeof POOL_QUOTA_WINDOWS)[number];
 /** One history bucket, as pool utilization per window (0-100 used). */
 export type PoolQuotaChartRow = {
   unix: number;
-  '5h': number | null;
-  '7d': number | null;
-  '7d_fable': number | null;
-};
+} & Partial<Record<PoolQuotaWindow, number | null>>;
 /** Latest pool utilization per window (0-100 used), for legends. */
-export type PoolQuotaLatest = Omit<PoolQuotaChartRow, 'unix'>;
+export type PoolQuotaLatest = Record<PoolQuotaWindow, number | null>;
+
+/**
+ * Windows represented by the sparse aggregate/history responses. Unknown
+ * provider windows are ignored so callers can keep using the shared window
+ * labels and colors.
+ */
+export function poolQuotaWindowsPresent(
+  history: readonly PoolHistoryWindowResponse[] | undefined,
+  aggregate?: AggregateResponse,
+): PoolQuotaWindow[] {
+  const returned = new Set<string>();
+  for (const entry of history ?? []) returned.add(entry.window);
+  for (const entry of aggregate?.windows ?? []) returned.add(entry.window);
+  return POOL_QUOTA_WINDOWS.filter((window) => returned.has(window));
+}
 
 /**
  * Pool history as used percent: each bucket plots the pool utilization,
  * clamped to 0-100 so an over-limit reading pins to the top of the plot
- * instead of leaving it.
+ * instead of leaving it. Rows stay sparse: a window absent from the response
+ * never becomes a null-valued chart series.
  */
 export function buildPoolQuotaChartData(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
 ): PoolQuotaChartRow[] {
-  const buckets = new Map<number, Omit<PoolQuotaChartRow, 'unix'>>();
-  for (const window of POOL_QUOTA_WINDOWS) {
+  const returnedWindows = poolQuotaWindowsPresent(windows);
+  const buckets = new Map<
+    number,
+    Partial<Record<PoolQuotaWindow, number | null>>
+  >();
+  for (const window of returnedWindows) {
     const series =
       windows?.find((entry) => entry.window === window)?.series ?? [];
     for (const point of series) {
-      const row = buckets.get(point.snapshot_at_unix_secs) ?? {
-        '5h': null,
-        '7d': null,
-        '7d_fable': null,
-      };
-      const used = point.utilization_percent;
-      if (used != null && Number.isFinite(used)) {
-        row[window] = Math.min(100, Math.max(0, used));
+      const row = buckets.get(point.snapshot_at_unix_secs) ?? {};
+      if (!buckets.has(point.snapshot_at_unix_secs)) {
+        for (const returnedWindow of returnedWindows) {
+          row[returnedWindow] = null;
+        }
       }
+      const used = point.utilization_percent;
+      row[window] =
+        used != null && Number.isFinite(used)
+          ? Math.min(100, Math.max(0, used))
+          : null;
       buckets.set(point.snapshot_at_unix_secs, row);
     }
   }
