@@ -17,6 +17,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
     let config = Config::default();
     AdminState {
         config_path: None,
+        build: admin_test_common::test_build_info(),
         startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: None,

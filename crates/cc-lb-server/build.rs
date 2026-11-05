@@ -16,6 +16,10 @@ fn main() {
         "CC_LB_TARGET",
         std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_owned()),
     );
+    emit(
+        "CC_LB_PROFILE",
+        std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned()),
+    );
 }
 
 fn emit(name: &str, value: String) {
