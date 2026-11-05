@@ -55,6 +55,8 @@ mod metrics_endpoint_reachable;
 mod middleware_order;
 #[path = "migration_api_key_details_upgrade.rs"]
 mod migration_api_key_details_upgrade;
+#[path = "migration_compatibility.rs"]
+mod migration_compatibility;
 #[path = "missing_aead_key_fatal.rs"]
 mod missing_aead_key_fatal;
 #[path = "multi_instance_storage_tail.rs"]
