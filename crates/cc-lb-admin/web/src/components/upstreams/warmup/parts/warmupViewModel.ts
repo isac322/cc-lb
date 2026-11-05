@@ -62,7 +62,7 @@ export function formatResultNarrative(
   }
 }
 
-/** Did this warm-up actually start a fresh 5h window? + idle context. */
+/** Did this warm-up actually start a fresh quota window? + idle context. */
 export function formatFreshnessLine(
   attempt: WarmupAttempt | null | undefined,
 ): string {
@@ -72,10 +72,10 @@ export function formatFreshnessLine(
       if (attempt.reason === 'cycle_advanced') {
         const idle = attempt.idle_secs_since_prev_window;
         if (idle != null && idle > 0)
-          return `Started a new 5h window — idle ${formatDuration(idle)} before warm-up`;
-        return 'Started a new 5h window';
+          return `Started a new quota window — idle ${formatDuration(idle)} before warm-up`;
+        return 'Started a new quota window';
       }
-      return 'Window was already active — no new cycle started';
+      return 'Quota window was already active — no new cycle started';
     }
     case 'transient_failure':
     case 'permanent_failure':

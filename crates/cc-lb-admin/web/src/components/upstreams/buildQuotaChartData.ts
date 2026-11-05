@@ -1,4 +1,4 @@
-import type { SeriesResponseItem } from '../../lib/api';
+import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
 import { WINDOW_DURATION_SECS } from '../../lib/colors';
 
 export type ChartRow = { ts: string; unix: number } & Record<
@@ -10,7 +10,11 @@ export type ChartMarker = { ts: number; kind: string; window: string };
 export function buildQuotaChartData(
   seriesData: readonly SeriesResponseItem[] | undefined,
   selectedLatestWindows:
-    | readonly { window: string; resets_at_unix_secs?: number | null }[]
+    | readonly {
+        window: string;
+        state?: QuotaSnapshot['state'];
+        resets_at_unix_secs?: number | null;
+      }[]
     | undefined,
   range: '1h' | '6h' | '24h' | '7d',
 ) {
@@ -55,6 +59,7 @@ export function buildQuotaChartData(
 
   if (selectedLatestWindows) {
     for (const snap of selectedLatestWindows) {
+      if (snap.state === 'absent' || snap.state === 'unobserved') continue;
       const duration = WINDOW_DURATION_SECS[snap.window];
       if (snap.resets_at_unix_secs && duration) {
         markers.push({

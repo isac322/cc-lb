@@ -799,6 +799,82 @@ describe('Overview pool quota usage', () => {
     );
   });
 
+  it('omits the absent 5h window from the pool legend and chart', () => {
+    const returnedWindows: Record<string, true> = {
+      '7d': true,
+      '7d_fable': true,
+    };
+    const aggregate = aggregateResponse(POOL_HISTORY_NOW, 40);
+    aggregate.windows = aggregate.windows.filter(
+      (entry) => returnedWindows[entry.window] === true,
+    );
+    const history = poolHistoryResponse(POOL_HISTORY_NOW, 40);
+    history.windows = history.windows.filter(
+      (entry) => returnedWindows[entry.window] === true,
+    );
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: history,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    const card = screen.getByTestId('pool-quota-card');
+    expect(
+      Array.from(
+        card.querySelectorAll('[data-testid="pool-quota-legend-slot"]'),
+        (slot) => slot.getAttribute('data-window'),
+      ),
+    ).toEqual(['7d', '7d_fable']);
+    expect(card.textContent).not.toContain('No reading');
+    expect(screen.queryByTestId('pool-quota-area-5h')).toBeNull();
+    expect(screen.queryByTestId('pool-quota-fill-5h')).toBeNull();
+    expect(rechartsMock.data.every((row) => !('5h' in row))).toBe(true);
+  });
+
+  it('keeps 5h in a mixed sparse-window pool response', () => {
+    const returnedWindows: Record<string, true> = { '5h': true, '7d': true };
+    const aggregate = aggregateResponse(POOL_HISTORY_NOW, 40);
+    aggregate.windows = aggregate.windows.filter(
+      (entry) => returnedWindows[entry.window] === true,
+    );
+    const history = poolHistoryResponse(POOL_HISTORY_NOW, 40);
+    history.windows = history.windows.filter(
+      (entry) => returnedWindows[entry.window] === true,
+    );
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: history,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    const card = screen.getByTestId('pool-quota-card');
+    expect(
+      Array.from(
+        card.querySelectorAll('[data-testid="pool-quota-legend-slot"]'),
+        (slot) => slot.getAttribute('data-window'),
+      ),
+    ).toEqual(['5h', '7d']);
+    expect(within(card).getByTestId('pool-quota-area-5h')).toBeDefined();
+    expect(screen.queryByTestId('pool-quota-area-7d_fable')).toBeNull();
+    expect(rechartsMock.data.every((row) => !('7d_fable' in row))).toBe(true);
+  });
+
   it('fills each window in its window color and paints every stroke above every fill', () => {
     mockResolvedKpiQueries();
     vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
@@ -1260,10 +1336,8 @@ describe('Overview loading geometry', () => {
     const legendSlots = resolvedCard.querySelectorAll(
       '[data-testid="pool-quota-legend-slot"]',
     );
-    expect(legendSlots).toHaveLength(3);
-    for (const slot of legendSlots) {
-      expect(slot.textContent).toContain('No reading');
-    }
+    expect(legendSlots).toHaveLength(0);
+    expect(resolvedCard.textContent).not.toContain('No reading');
     expect(screen.getByTestId('pool-quota-chart-slot')).toBe(pendingChartSlot);
     expect(resolvedCard.querySelectorAll('.skeleton')).toHaveLength(0);
     expect(resolvedCard.textContent).toContain(

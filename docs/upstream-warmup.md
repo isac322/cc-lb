@@ -4,7 +4,7 @@ This document describes the operator reference for the upstream warm-up system i
 
 ## What it does
 
-Anthropic OAuth upstreams require periodic activity to keep their reported quota windows active. Warm-up targets the five-hour and seven-day windows, and it automatically skips a target that the account reports as absent. Weekly-only Claude accounts therefore warm their seven-day window instead of being treated as unknown.
+Anthropic OAuth upstreams require periodic activity to keep their reported quota windows active. Warm-up targets the five-hour and seven-day windows, and it automatically skips a target that the account reports as absent. Weekly-only Claude accounts never use a five-hour cadence; they warm their seven-day window instead.
 
 Warm-up is opt-out for `anthropic_oauth`: `warmup_enabled` defaults to `true` for OAuth upstreams created through `POST /admin/v1/upstreams` and through the OAuth flow. Other upstream kinds default to `false`. Only `anthropic_oauth` upstreams that hold OAuth credentials are ever scheduled, so the flag is inert until an upstream completes OAuth.
 
@@ -85,13 +85,11 @@ The warm-up system logs its activity using tracing events. All events use the `w
 
 ## Quota-aware scheduling
 
-Warm-up targets the five-hour and seven-day windows independently.
-
-Warm-up ignores explicitly absent targets. It sends a request when any fresh target is idle. Otherwise, a known active target skips the request until the earliest known reset, even when another target is stale or missing. If no target is known active, unknown samples allow the normal warm-up request. All scheduled evaluations retain the post-reset guard and stable jitter.
+Warm-up evaluates each reported five-hour and seven-day target independently. Weekly-only accounts have no five-hour target and never use a five-hour cadence. Warm-up ignores explicitly absent targets. It sends a request when any fresh target is idle. Otherwise, a known active target skips the request until the earliest known reset, even when another target is stale or missing. If no target is known active, unknown samples allow the normal warm-up request. When no target provides a known future reset, the all-target fallback is seven days for weekly-only accounts; the five-hour fallback applies only to accounts with a reported five-hour target. All scheduled evaluations retain the post-reset guard and stable jitter.
 
 After a successful request, each response-present window supersedes its older cached snapshot, including when the response omits a future reset. For targets not reported by that response, the scheduler uses fresh snapshot resets. It selects the earliest known future reset, bounded by the shortest present window's normal cadence when any target still has no known future reset: five hours for accounts with a five-hour target, or seven days for weekly-only accounts.
 
-Presence follows the latest selected sample kind, not its age: an `Absent` sample remains absent after its freshness interval expires, so an older stale five-hour sample cannot restore the five-hour cadence. A newer actual sample or a window reported by the successful response establishes presence again. Stale actual samples and unobserved targets are unknown, not evidence of structural absence; without an explicit `Absent` sample, their cadence remains conservative.
+Presence follows the latest selected sample kind, not its age: an `Absent` sample remains absent after its freshness interval expires, so an older stale five-hour sample cannot restore the five-hour cadence. A newer actual sample or a window reported by the successful response establishes presence again. `Unobserved` targets and `Stale` actual samples remain distinct unknown states, not evidence of structural absence; without an explicit `Absent` sample, their cadence remains conservative. Missing response headers alone never establish absence.
 
 If the local usage cache or a warm-up response shows a fresh seven-day window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
 

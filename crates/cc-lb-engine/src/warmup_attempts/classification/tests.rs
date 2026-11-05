@@ -1,7 +1,9 @@
 use super::*;
 use cc_lb_quota::rate_limit_headers::UnifiedQuotaObservation;
-use cc_lb_storage_api::SubscriptionQuotaStatus;
-
+use cc_lb_storage_api::{
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+};
 const SCHEDULED_FOR: i64 = 1_782_412_800;
 const FIVE_HOUR_RESET: i64 = 1_782_430_800;
 const SEVEN_DAY_RESET: i64 = 1_783_017_600;
@@ -164,6 +166,98 @@ fn success_with_only_seven_day_headers_advances_weekly_only_account() {
         WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced)
     );
     assert_eq!(fields.cycle_key, Some(SEVEN_DAY_RESET));
+}
+
+#[test]
+fn idle_uses_five_hour_reset_for_normal_account() {
+    let latest = [
+        quota_sample(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaSampleKind::Sample,
+            20,
+            Some(FIVE_HOUR_RESET),
+        ),
+        quota_sample(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaSampleKind::Sample,
+            10,
+            Some(SEVEN_DAY_RESET),
+        ),
+    ];
+
+    assert_eq!(
+        super::super::idle_secs_since_prev_window_from_latest(&latest, SEVEN_DAY_RESET),
+        Some(SEVEN_DAY_RESET - FIVE_HOUR_RESET)
+    );
+}
+
+#[test]
+fn idle_uses_seven_day_reset_only_for_explicitly_absent_five_hour() {
+    let latest = [
+        quota_sample(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaSampleKind::Absent,
+            20,
+            None,
+        ),
+        quota_sample(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaSampleKind::Sample,
+            10,
+            Some(SEVEN_DAY_RESET),
+        ),
+    ];
+
+    assert_eq!(
+        super::super::idle_secs_since_prev_window_from_latest(&latest, SEVEN_DAY_RESET + 100),
+        Some(100)
+    );
+}
+
+#[test]
+fn idle_does_not_use_seven_day_reset_for_unobserved_five_hour() {
+    let latest = [quota_sample(
+        SubscriptionQuotaWindow::SevenDay,
+        SubscriptionQuotaSampleKind::Sample,
+        10,
+        Some(SEVEN_DAY_RESET),
+    )];
+
+    assert_eq!(
+        super::super::idle_secs_since_prev_window_from_latest(&latest, SEVEN_DAY_RESET + 100),
+        None
+    );
+}
+
+fn quota_sample(
+    window: SubscriptionQuotaWindow,
+    sample_kind: SubscriptionQuotaSampleKind,
+    observed_at_unix_millis: u64,
+    resets_at_unix_secs: Option<i64>,
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
+        upstream_id: uuid::Uuid::new_v4(),
+        window,
+        source: SubscriptionQuotaSource::Api,
+        sample_kind,
+        observed_at_unix_millis,
+        sample_id: uuid::Uuid::new_v4(),
+        utilization: None,
+        status: None,
+        resets_at_unix_secs: resets_at_unix_secs.and_then(|value| u64::try_from(value).ok()),
+        surpassed_threshold: None,
+        representative_claim: None,
+        fallback_percentage: None,
+        fallback_available: None,
+        overage_in_use: None,
+        overage_period_monthly_utilization: None,
+        upgrade_paths: None,
+        disabled_reason: None,
+        extra_usage_enabled: None,
+        extra_usage_monthly_limit: None,
+        extra_usage_used_credits: None,
+        ingested_at_unix_millis: observed_at_unix_millis,
+    }
 }
 
 fn quota_observation(
