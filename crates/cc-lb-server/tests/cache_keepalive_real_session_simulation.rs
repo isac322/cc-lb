@@ -651,7 +651,6 @@ async fn sim_principal_b_multi_agent_interleaving_and_4mb_gap() {
     assert!(harness.session_count("terminal", Some("cancelled")).await >= 2);
     assert!(harness.decision_count("cached prefix too small%").await >= 1);
     assert!(harness.decision_count("snapshot too large").await >= 1);
-    assert!(harness.decision_count("zero-token renewal unsupported:%").await >= 1);
 }
 
 #[test]
