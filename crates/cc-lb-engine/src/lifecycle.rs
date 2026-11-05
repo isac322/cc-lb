@@ -2444,15 +2444,31 @@ fn sse_bytes_may_carry_anthropic_provider_state(bytes: &[u8]) -> bool {
 fn sse_event_completes_response(
     capability: ProviderCapability,
     event: &usage_parser::ParsedSseEvent<'_>,
-    anthropic_message_stop: bool,
+    _anthropic_message_stop: bool,
 ) -> bool {
     match capability {
         ProviderCapability::AnthropicMessages => {
-            anthropic_message_stop || event.event_name() == Some(b"message_stop")
+            event
+                .value()
+                .ok()
+                .flatten()
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str)
+                == Some("message_stop")
         }
         ProviderCapability::OpenaiResponses => {
-            event.event_type() == Some("response.completed")
-                || event.event_name() == Some(b"response.completed")
+            event
+                .value()
+                .ok()
+                .flatten()
+                .is_some_and(|_| event.event_name() == Some(b"response.completed"))
+                || event
+                    .value()
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("response.completed")
         }
         ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => false,
     }
@@ -2476,15 +2492,21 @@ fn observe_sse_terminal_event(
     message_stop_at: &mut Option<Instant>,
     now: impl FnOnce() -> Instant,
 ) {
-    // Event-name fallback must not enable semantic completion or #663 warnings.
+    // OpenAI Responses identifies terminal events by event name even when
+    // the payload omits its redundant `type`; Anthropic keeps JSON-type-only
+    // semantics so a named `message_stop` cannot complete malformed data.
+    let event_name_terminal = capability == ProviderCapability::OpenaiResponses
+        && event.event_name() == Some(b"response.completed")
+        && event.value().ok().flatten().is_some();
     let semantic_event_type = event
         .value()
         .ok()
         .flatten()
         .and_then(|value| value.get("type"))
         .and_then(serde_json::Value::as_str);
-    *semantic_message_stop_seen |= semantic_terminal_event_type(capability)
-        .is_some_and(|terminal| semantic_event_type == Some(terminal));
+    *semantic_message_stop_seen |= event_name_terminal
+        || semantic_terminal_event_type(capability)
+            .is_some_and(|terminal| semantic_event_type == Some(terminal));
     if event.event_name() == Some(b"message_stop")
         || (usage_message_stop && message_stop_at.is_none())
     {
@@ -4430,6 +4452,17 @@ impl Lifecycle {
                         routed = next;
                         continue;
                     }
+                    if unauthorized.body.is_none() {
+                        // A proxy-generated body is not an upstream response:
+                        // do not pass it through the custom response hook.
+                        let mut response = response_from_collected(unauthorized);
+                        self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        if let Some(o) = observer.as_ref() {
+                            o.set_upstream_error(response.status(), UpstreamErrorCode::Upstream5xx);
+                            o.finish();
+                        }
+                        return Ok(response);
+                    }
                     return Ok(self.relay_unauthorized(
                         unauthorized,
                         signer.as_ref(),
@@ -4486,6 +4519,22 @@ impl Lifecycle {
                     drop(response);
                     routed = next;
                     continue;
+                }
+                if response.status() == StatusCode::UNAUTHORIZED {
+                    // A refreshed attempt has the same terminal-body contract
+                    // as the original 401: never transform a generated error
+                    // or forward a body that could not be collected completely.
+                    let unauthorized = collect_error_response(response).await;
+                    if unauthorized.body.is_none() {
+                        let mut response = response_from_collected(unauthorized);
+                        self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        if let Some(o) = observer.as_ref() {
+                            o.set_upstream_error(response.status(), UpstreamErrorCode::Upstream5xx);
+                            o.finish();
+                        }
+                        return Ok(response);
+                    }
+                    response = response_from_collected(unauthorized);
                 }
             }
 
@@ -4557,6 +4606,9 @@ impl Lifecycle {
             .finish_success_response(
                 response,
                 signer,
+                active_limit
+                    .as_ref()
+                    .is_some_and(|active_limit| active_limit.request.stream),
                 active_limit.take(),
                 reserved.map(|reserved| reserved.into_response_accounting_guard()),
                 started.elapsed(),
@@ -4723,6 +4775,7 @@ impl Lifecycle {
         &self,
         response: Response<Body>,
         signer: Arc<dyn Signer>,
+        stream_requested: bool,
         active_limit: Option<ActiveLimit>,
         response_accounting_guard: Option<ResponseAccountingGuard>,
         duration: Duration,
@@ -4736,17 +4789,19 @@ impl Lifecycle {
         dispatch_started: Instant,
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
-        let active_limit = active_limit;
-        if active_limit
-            .as_ref()
-            .is_some_and(|active_limit| active_limit.request.stream)
-            || is_sse_response(response.headers())
+        // SSE uses event transforms; other streaming or non-JSON representations
+        // relay without whole-body collection unless a buffered transform needs it.
+        let buffered_transform_required = transform_ctx.dialect.response_transform_hook().is_some();
+        let non_json_response = !is_json_response(response.headers());
+        if is_sse_response(response.headers())
+            || ((stream_requested || non_json_response) && !buffered_transform_required)
         {
             let response_status = response.status();
             let mut response = self.relay_response(
                 response,
                 signer,
                 response_status,
+                stream_requested,
                 response_accounting_guard,
                 event_ctx.clone(),
                 transform_ctx,
@@ -4771,6 +4826,13 @@ impl Lifecycle {
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
         let mut body_chunk_count: u64 = 0;
+        // Ingress caps must not reject larger ordinary JSON responses, including
+        // existing buffered hooks. Newly buffered stream/binary transforms are bounded.
+        let body_cap = if stream_requested || non_json_response {
+            body_cap_for_path(&self.config, &transform_ctx.request_path)
+        } else {
+            usize::MAX
+        };
         let mut body_collect_failed = false;
         while let Some(frame) = timed_body_frame(&mut body, &response_body_timing).await {
             match frame {
@@ -4787,6 +4849,10 @@ impl Lifecycle {
                             }
                         }
                         body_chunk_count = body_chunk_count.saturating_add(1);
+                        if data.len() > body_cap.saturating_sub(body_buf.len()) {
+                            body_collect_failed = true;
+                            break;
+                        }
                         body_buf.extend_from_slice(&data);
                     }
                 }
@@ -5612,6 +5678,7 @@ impl Lifecycle {
         response: Response<Body>,
         signer: Arc<dyn Signer>,
         status: StatusCode,
+        stream_requested: bool,
         response_accounting_guard: Option<ResponseAccountingGuard>,
         event_ctx: RequestEventContext,
         transform_ctx: ResponseTransformContext,
@@ -5632,7 +5699,9 @@ impl Lifecycle {
         let usage_decoder =
             UsageDecoder::from_headers(&parts.headers, decompression_output_budget_bytes);
         let downstream_stream_is_identity = matches!(&usage_decoder, UsageDecoder::Identity);
-        let upstream_is_sse = is_sse_response(&parts.headers);
+        let upstream_is_sse = is_sse_response(&parts.headers)
+            || (stream_requested
+                && response_affinity_context.capability == ProviderCapability::OpenaiResponses);
         let success_sse_affinity_gate = upstream_is_sse
             && status.is_success()
             && (response_affinity_context.observe_response_keys
@@ -5794,8 +5863,9 @@ impl Lifecycle {
             let mut message_stop_at: Option<Instant> = None;
             // #663: semantic stop uses the JSON `type`; legacy message-stop
             // timing still follows the event name or usage parser fallback.
-            let mut semantic_message_stop_seen = false;
             let mut prompt_cache_observations_published = false;
+            let mut semantic_message_stop_seen = false;
+            let mut semantic_completion_observed = false;
             let mut keepalive_response = crate::cache_keepalive::StreamingKeepaliveResponse::default();
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
@@ -6320,6 +6390,28 @@ impl Lifecycle {
                                     &mut message_stop_at,
                                     || now,
                                 );
+                                if !semantic_completion_observed
+                                    && sse_event_completes_response(
+                                        response_affinity_context.capability,
+                                        &parsed_event,
+                                        usage_update.message_stop,
+                                    )
+                                {
+                                    semantic_completion_observed = true;
+                                    downstream_drop_guard.mark_semantic_completion();
+                                    if let Some(o) = observer.as_ref() {
+                                        o.set_usage_counts(&usage, true);
+                                        o.emit_lifecycle(
+                                            cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source:
+                                                    cc_lb_lifecycle::UsageSource::MessageDelta,
+                                            },
+                                        );
+                                        o.set_success_status(status);
+                                    }
+                                }
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);
@@ -6912,6 +7004,27 @@ impl Lifecycle {
                                 &mut message_stop_at,
                                 Instant::now,
                             );
+                            if !semantic_completion_observed
+                                && sse_event_completes_response(
+                                    response_affinity_context.capability,
+                                    &parsed_event,
+                                    usage_update.message_stop,
+                                )
+                            {
+                                semantic_completion_observed = true;
+                                downstream_drop_guard.mark_semantic_completion();
+                                if let Some(o) = observer.as_ref() {
+                                    o.set_usage_counts(&usage, true);
+                                    o.emit_lifecycle(
+                                        cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                            event_id: o.event_id().to_owned(),
+                                            usage: to_usage_snapshot(&usage),
+                                            source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                                        },
+                                    );
+                                    o.set_success_status(status);
+                                }
+                            }
                             sse_event_count = sse_event_count.saturating_add(1);
                             if success_sse_affinity_gate || unsolicited_hold_pending {
                                 let outgoing = if sse_transform_active {
@@ -10052,6 +10165,17 @@ fn announce_attempt(
     }
 }
 
+fn is_json_response(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("application/json")
+            })
+        })
+}
+
 fn is_sse_response(headers: &HeaderMap) -> bool {
     headers
         .get(CONTENT_TYPE)
@@ -11796,6 +11920,7 @@ mod tests {
             response,
             Arc::new(TestSigner),
             StatusCode::OK,
+            false,
             None,
             event_ctx.clone(),
             transform_ctx.clone(),
@@ -11831,6 +11956,7 @@ mod tests {
             .finish_success_response(
                 upstream_response(StatusCode::OK, BUFFERED),
                 Arc::new(TestSigner),
+                false,
                 None,
                 None,
                 Duration::from_secs(90),

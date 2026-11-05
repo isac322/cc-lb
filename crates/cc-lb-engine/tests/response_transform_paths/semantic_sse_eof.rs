@@ -164,6 +164,88 @@ async fn observe(
         events,
     })
 }
+async fn observe_drop_after_terminal(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    record: UpstreamRecord,
+    request: http::Request<Bytes>,
+    terminal_marker: &'static [u8],
+) -> TestResult<Observation> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "semantic-sse-drop.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut rx = test_bus.bus.subscribe_lifecycle();
+    let lifecycle = lifecycle_with_record_and_config(
+        None,
+        None,
+        dispatcher,
+        LifecycleConfig::default(),
+        record,
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let response = handle_authenticated(&lifecycle, request).await?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut body = response.into_body();
+    let mut received = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("response frame")
+            .expect("response frame succeeds")
+            .into_data()
+            .expect("response frame is data");
+        received.extend_from_slice(&frame);
+        if received
+            .windows(terminal_marker.len())
+            .any(|window| window == terminal_marker)
+        {
+            break;
+        }
+    }
+    drop(body);
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut events = Vec::new();
+        loop {
+            let event = rx.recv().await.expect("lifecycle event delivered");
+            let terminated = matches!(event, LifecycleEvent::RequestTerminated { .. });
+            events.push(event);
+            if terminated {
+                break events;
+            }
+        }
+    })
+    .await
+    .expect("request terminates after downstream drop");
+    let mut rows = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(rows.len(), 1);
+    Ok(Observation {
+        status,
+        headers,
+        body: Bytes::from(received),
+        row: rows.remove(0),
+        events,
+    })
+}
+
+struct PendingDispatch {
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+#[async_trait]
+impl UpstreamDispatch for PendingDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let body = self.body.clone();
+        let stream = async_stream::stream! {
+            yield Ok::<Bytes, std::convert::Infallible>(body);
+            std::future::pending::<()>().await;
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.headers_mut() = self.headers.clone();
+        Ok(response)
+    }
+}
 
 async fn anthropic(
     body: Bytes,
@@ -253,6 +335,28 @@ async fn semantic_sse_eof_complete_matrix() -> TestResult {
             observed.assert_success(13, 7, true);
         }
     }
+    Ok(())
+}
+#[tokio::test]
+async fn anthropic_terminal_client_close_is_success() -> TestResult {
+    let body = Bytes::from(format!("{START}{CONTENT}{DELTA}{STOP}"));
+    let observed = observe_drop_after_terminal(
+        Arc::new(PendingDispatch {
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+        default_upstream_record(),
+        messages_request(Bytes::from_static(REQUEST)),
+        b"event: message_stop",
+    )
+    .await?;
+
+    assert_eq!(observed.status, StatusCode::OK);
+    assert_eq!(observed.row.error_code, None);
+    assert_eq!(
+        (observed.row.input_tokens, observed.row.output_tokens),
+        (Some(13), Some(7))
+    );
     Ok(())
 }
 
@@ -543,5 +647,41 @@ async fn semantic_sse_eof_non_anthropic_and_non_sse_controls() -> TestResult {
         assert_eq!(observed.body, body);
         observed.assert_success(input, output, false);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn openai_terminal_client_close_without_content_type_is_success() -> TestResult {
+    let body = Bytes::from_static(
+        b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n\
+event: response.completed\n\
+data: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"output_tokens\":7}}}\n\n",
+    );
+    let observed = observe_drop_after_terminal(
+        Arc::new(PendingDispatch {
+            headers: HeaderMap::new(),
+            body: body.clone(),
+        }),
+        upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+        http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-test","input":"hello","stream":true}"#,
+            ))?,
+        b"event: response.completed",
+    )
+    .await?;
+
+    assert_eq!(observed.status, StatusCode::OK);
+    assert_eq!(observed.row.error_code, None);
+    assert_eq!(
+        (observed.row.input_tokens, observed.row.output_tokens),
+        (Some(13), Some(7))
+    );
     Ok(())
 }

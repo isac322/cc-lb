@@ -385,6 +385,178 @@ async fn buffered_transform_rewrites_upstream_error_response() {
     assert!(body_text.contains(r#""name":"bash""#));
     assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
 }
+#[tokio::test]
+async fn stream_request_json_errors_use_buffered_transform() {
+    for limited in [false, true] {
+        for compressed in [false, true] {
+            for status in [
+                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ] {
+                let transform = Arc::new(BufferedToolNameTransform::default());
+                let sse_transform = Arc::new(UnchangedSseTransform::default());
+                let plaintext = Bytes::from_static(
+                    br#"{"error":{"type":"api_error","message":"failed","name":"Bash"}}"#,
+                );
+                let upstream_body = if compressed {
+                    gzip_bytes(&plaintext)
+                } else {
+                    plaintext.clone()
+                };
+                let lifecycle = lifecycle_with_transforms(
+                    Some(transform.clone()),
+                    Some(sse_transform.clone()),
+                    Arc::new(ChunkedDispatch {
+                        status,
+                        headers: json_headers(upstream_body.len(), compressed),
+                        chunks: vec![upstream_body.slice(..7), upstream_body.slice(7..)],
+                    }),
+                );
+                let lifecycle = if limited {
+                    with_test_limit_subject(lifecycle)
+                } else {
+                    lifecycle
+                };
+                let response = handle_authenticated(
+                    &lifecycle,
+                    messages_request(Bytes::from_static(
+                        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+                    )),
+                )
+                .await
+                .expect("lifecycle handles JSON error for streaming request");
+                let (received_status, headers, body) = collect_body(response).await;
+
+                assert_eq!(received_status, status);
+                assert_eq!(
+                    body,
+                    replace_bytes(&plaintext, br#""name":"Bash""#, br#""name":"bash""#),
+                );
+                assert_eq!(transform.seen_bodies(), vec![plaintext]);
+                assert!(sse_transform.seen_events().is_empty());
+                assert!(headers.get(CONTENT_ENCODING).is_none());
+                assert_eq!(
+                    headers.get(CONTENT_LENGTH),
+                    Some(&HeaderValue::from_str(&body.len().to_string()).expect("body length")),
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn oversized_unauthorized_stream_body_skips_transform_of_generated_error() {
+    let transform = Arc::new(UnchangedBufferedTransform::default());
+    let body = Bytes::from(vec![b'x'; 16 * 1024]);
+    let lifecycle = with_test_limit_subject(lifecycle_with_transforms(
+        Some(transform.clone()),
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::UNAUTHORIZED,
+            headers: json_headers(body.len(), false),
+            body,
+        }),
+    ));
+    let response = handle_authenticated(
+        &lifecycle,
+        messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )),
+    )
+    .await
+    .expect("lifecycle handles oversized unauthorized body");
+    let (status, _headers, body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(transform.seen_bodies().is_empty());
+    assert!(String::from_utf8_lossy(&body).contains("upstream response body could not be read"));
+}
+
+#[tokio::test]
+async fn non_sse_stream_transform_never_receives_a_capped_prefix() {
+    for body_len in [128, 129] {
+        let transform = Arc::new(UnchangedBufferedTransform::default());
+        let mut data = vec![b'x'; body_len];
+        data[0] = b'"';
+        data[body_len - 1] = b'"';
+        let body = Bytes::from(data);
+        let lifecycle = with_test_limit_subject(lifecycle_with_transforms_and_config(
+            Some(transform.clone()),
+            None,
+            Arc::new(ChunkedDispatch {
+                status: StatusCode::OK,
+                headers: json_headers(body.len(), false),
+                chunks: vec![body.slice(..64), body.slice(64..)],
+            }),
+            LifecycleConfig {
+                messages_body_cap_bytes: 128,
+                ..LifecycleConfig::default()
+            },
+        ));
+        let response = handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-test","messages":[],"stream":true}"#,
+            )),
+        )
+        .await
+        .expect("lifecycle handles bounded non-SSE stream");
+        let (status, _headers, received) = collect_body(response).await;
+
+        if body_len == 128 {
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(received, body);
+            assert_eq!(transform.seen_bodies(), vec![body]);
+        } else {
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(transform.seen_bodies().is_empty());
+            assert_ne!(received, body);
+        }
+    }
+}
+
+#[tokio::test]
+async fn ingress_cap_does_not_limit_existing_response_paths() {
+    for (stream, transform_response) in [(false, false), (false, true), (true, false)] {
+        let transform = Arc::new(UnchangedBufferedTransform::default());
+        let body = Bytes::from(format!(r#"{{"output":"{}"}}"#, "x".repeat(256)));
+        let lifecycle = lifecycle_with_transforms_and_config(
+            transform_response.then(|| transform.clone() as Arc<dyn ResponseTransformHook>),
+            None,
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers: json_headers(body.len(), false),
+                body: body.clone(),
+            }),
+            LifecycleConfig {
+                messages_body_cap_bytes: 128,
+                ..LifecycleConfig::default()
+            },
+        );
+        let response = handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from(format!(
+                r#"{{"model":"claude-test","messages":[],"stream":{stream}}}"#,
+            ))),
+        )
+        .await
+        .expect("lifecycle preserves the existing response path");
+        let (status, _headers, received) = collect_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(received, body);
+        assert_eq!(
+            transform.seen_bodies(),
+            if transform_response {
+                vec![body]
+            } else {
+                vec![]
+            },
+        );
+    }
+}
 
 #[tokio::test]
 async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
@@ -2914,6 +3086,22 @@ impl UpstreamDispatch for BodyThenFrameErrorDispatch {
         *response.headers_mut() = self.headers.clone();
         Ok(response)
     }
+}
+
+fn with_test_limit_subject(lifecycle: Lifecycle) -> Lifecycle {
+    lifecycle.with_static_limit_subject(
+        LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::SystemClock),
+        ),
+        "principal-test".to_owned(),
+        "key-test".to_owned(),
+        StoredApiKeyRecord {
+            key_hash_b64: "key-test".to_owned(),
+            status: KeyStatus::Active,
+            ..StoredApiKeyRecord::default()
+        },
+    )
 }
 
 #[derive(Default)]

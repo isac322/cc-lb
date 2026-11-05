@@ -36,6 +36,7 @@ pub(crate) struct DownstreamStreamDropGuard {
     span: Span,
     initial_upstream_status: StatusCode,
     pending_terminal: Option<(StreamTerminationOutcome, StreamTerminationCause)>,
+    semantic_completed: bool,
     finalized: bool,
     relay_start: Instant,
     body_io_timing: BodyIoTiming,
@@ -59,6 +60,7 @@ impl DownstreamStreamDropGuard {
             span,
             pending_terminal: initial_upstream_error
                 .map(|cause| (StreamTerminationOutcome::UpstreamError, cause)),
+            semantic_completed: false,
             finalized: false,
             relay_start,
             body_io_timing,
@@ -80,6 +82,12 @@ impl DownstreamStreamDropGuard {
 
     pub(crate) fn mark_proxy_error(&mut self, cause: StreamTerminationCause) {
         self.mark_error(StreamTerminationOutcome::ProxyError, cause, None);
+    }
+    /// Record that the downstream received the provider's semantic terminal
+    /// event. A later downstream close is successful unless an upstream or
+    /// proxy error was recorded first.
+    pub(crate) fn mark_semantic_completion(&mut self) {
+        self.semantic_completed = true;
     }
 
     pub(crate) fn detach_lifecycle_observer(&mut self) {
@@ -198,9 +206,26 @@ impl Drop for DownstreamStreamDropGuard {
             if let Some(observer) = self.observer.as_ref() {
                 observer.set_upstream_body_ms_if_absent(response_body_ms);
                 observer.set_finalize_ms(finalize_ms);
+                if outcome == StreamTerminationOutcome::Completed {
+                    observer.finish();
+                }
             }
             self.record_response_timings(response_body_ms, finalize_ms);
             self.record_terminal(outcome, cause);
+            return;
+        }
+        if self.semantic_completed {
+            let finalize_ms = duration_to_ms(cancellation_at.elapsed());
+            if let Some(observer) = self.observer.as_ref() {
+                observer.set_upstream_body_ms_if_absent(response_body_ms);
+                observer.set_finalize_ms(finalize_ms);
+                observer.finish();
+            }
+            self.record_response_timings(response_body_ms, finalize_ms);
+            self.record_terminal(
+                StreamTerminationOutcome::Completed,
+                StreamTerminationCause::None,
+            );
             return;
         }
         if let Some(observer) = self.observer.take()
