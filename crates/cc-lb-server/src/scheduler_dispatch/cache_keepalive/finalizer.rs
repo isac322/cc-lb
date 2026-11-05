@@ -8,8 +8,8 @@ use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow, CacheKeepaliveSessionRecord,
-    CacheKeepaliveTerminalReason,
-    CacheKeepaliveTurnRow, RequestEvent, RequestEventProjections, RequestEventStore, UpstreamStore,
+    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRow, RequestEvent, RequestEventProjections,
+    RequestEventStore, UpstreamStore,
 };
 
 use super::lifecycle::{RenewalLifecycleInput, publish_renewal_lifecycle};
