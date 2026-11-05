@@ -10,6 +10,7 @@ pub mod encrypted_field;
 pub mod error;
 pub mod service;
 
+pub use cc_lb_oauth_protocol::GeminiOAuthProfile;
 pub use encrypted_field::{AeadEncryptedField, EncryptedOAuthTokens, OAuthTokenBundle};
 pub use error::{AeadError, AeadResult};
 pub use service::AeadService;

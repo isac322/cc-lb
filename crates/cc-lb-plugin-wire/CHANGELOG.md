@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `ProviderFamily`, provider-qualified hook export names, and metadata
+  entrypoint parsing for `cc_lb.plugin.v2`. V1 layouts and fingerprints remain
+  unchanged; bare legacy keys map to Anthropic only.
+- Add V2 provider-qualified request schemas for upstream identity, quota samples, and the optional Gemini Code Assist envelope hook.
+
 ## [0.9.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-wire-v0.8.0...cc-lb-plugin-wire-v0.9.0) - 2026-10-06
 
 ### Added

@@ -32,8 +32,8 @@ use uuid::Uuid;
 use super::recheck::load_api_key_or_provider_upstream;
 use crate::AdminState;
 use crate::dashboard::{
-    DashboardBuildError, DashboardRange, DashboardUsageResponse, UsageBucket, UsageGroupBy,
-    UsageProjection, UsageSeries, auto_step, build_dashboard_usage_projected_checked,
+    DashboardBuildError, DashboardRange, DashboardUsageResponse, UsageBucket, UsageFilter,
+    UsageGroupBy, UsageProjection, UsageSeries, auto_step, build_dashboard_usage_projected_checked,
     build_window_for_step, empty_bucket, parse_range, parse_step, validate_step_for_range,
 };
 use crate::v1::upstreams::{UpstreamError, storage, upstream_base_url};
@@ -114,10 +114,14 @@ pub(crate) async fn get_upstream_usage(
                 storage,
                 range,
                 step,
-                UsageGroupBy::Model,
-                Some(record.id),
+                &UsageFilter {
+                    group_by: UsageGroupBy::Model,
+                    upstream_id: Some(record.id),
+                    principal_id: None,
+                    projection: UsageProjection::Full,
+                    provider_scope: crate::dashboard::ProviderScope::none(),
+                },
                 now_unix_secs,
-                UsageProjection::Full,
             )
             .await
             .map_err(|error| match error {

@@ -5,17 +5,16 @@ use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
     http::{
-        HeaderMap, HeaderValue, Method, Request, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
         header::{ETAG, IF_MATCH},
     },
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
-use bytes::Bytes;
 use cc_lb_aead::{AeadEncryptedField, OAuthTokenBundle};
 use cc_lb_clock::Clock;
 use cc_lb_control::AuditPayload;
-use cc_lb_control::anthropic_api_key::{RemediationErrorBody, RemediationErrorInner, WARMUP_MODEL};
+use cc_lb_control::anthropic_api_key::{RemediationErrorBody, RemediationErrorInner};
 use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
@@ -23,7 +22,7 @@ use cc_lb_control::anthropic_metadata::make_metadata_http_client;
 use cc_lb_control::subscription_metadata_hook::{
     fetch_metadata_only, store_organization_metadata, store_subscription_metadata,
 };
-use cc_lb_oauth_protocol::account_id_from_access_token;
+use cc_lb_oauth_protocol::{OAuthAccountIdentity, account_id_from_access_token};
 use cc_lb_quota::{
     UnifiedQuotaObservation, build_subscription_quota_samples, parse_anthropic_unified_headers,
 };
@@ -38,12 +37,8 @@ use cc_lb_storage_api::{
     UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupDispatchKind,
     WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
 };
-use http_body_util::Full;
-use hyper_rustls::HttpsConnectorBuilder;
-use hyper_util::client::legacy::{Client, connect::HttpConnector};
-use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -58,7 +53,7 @@ use super::api_key::preflight::{
 use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use crate::ports::{WarmupAttemptInput, WarmupAttemptResult};
 use crate::{
-    AdminState, WarmupDialectDispatchErrorKind,
+    AdminState, WarmupDialectDispatchErrorKind, WarmupNativeDispatchOutcome,
     audit::{AdminAuditEvent, record_admin_audit},
     auth::AdminIdentity,
 };
@@ -71,11 +66,8 @@ const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRE_NOW_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
+const DEFAULT_GEMINI_OAUTH_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com/";
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
-const WARMUP_MAX_TOKENS: u32 = 1;
-const WARMUP_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
-
-type WarmupHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
 fn prepare_imported_oauth_bundle(
     kind: UpstreamKind,
@@ -458,6 +450,8 @@ struct SubscriptionMetadataResponse {
     upstream_id: String,
     subscription_metadata: Option<UpstreamSubscriptionMetadataRecord>,
     organization_metadata: Option<OrganizationMetadataRecord>,
+    #[serde(flatten)]
+    account_identity: OAuthAccountIdentity,
 }
 
 #[derive(Debug, Serialize)]
@@ -798,6 +792,41 @@ impl From<PostCommitAborted> for UpstreamError {
     }
 }
 
+async fn validate_warmup_plugin(
+    storage: &dyn Storage,
+    kind: UpstreamKind,
+    plugin: Option<&UpstreamWarmupDialectPlugin>,
+) -> Result<(), UpstreamError> {
+    let Some(plugin) = plugin else {
+        return Ok(());
+    };
+    // Legacy Anthropic validation remains in storage. Other providers require
+    // their own shape export, not merely a response hook in the shape slot.
+    let hook = match kind {
+        UpstreamKind::OpenaiOauth => "shape_openai",
+        UpstreamKind::GeminiOauth => "shape_gemini",
+        _ => return Ok(()),
+    };
+    let registry = storage
+        .get_registry_entry_by_id(plugin.wasm_registry_id)
+        .await?
+        .ok_or_else(|| UpstreamError::BadRequest {
+            error: "unknown_registry_entry",
+            detail: format!("warmup plugin {} does not exist", plugin.wasm_registry_id),
+        })?;
+    if !registry
+        .supported_slots
+        .contains(&cc_lb_storage_api::PluginSlotKind::Shape)
+        || !registry.hook_metadata.contains_key(hook)
+    {
+        return Err(UpstreamError::BadRequest {
+            error: "warmup_plugin_unsupported_provider",
+            detail: format!("warmup plugin {} must export cc_lb_{hook}", registry.name),
+        });
+    }
+    Ok(())
+}
+
 async fn create_upstream(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
@@ -812,14 +841,17 @@ async fn create_upstream(
     let id = Uuid::new_v4();
     let name = body.name.clone();
     let kind = body.kind;
-    if kind != UpstreamKind::AnthropicOauth
-        && (body.warmup_enabled == Some(true) || body.warmup_dialect_plugin.is_some())
+    if !matches!(
+        kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) && (body.warmup_enabled == Some(true) || body.warmup_dialect_plugin.is_some())
     {
         return Err(UpstreamError::BadRequest {
             error: "warmup_unsupported_kind",
-            detail: "warmup is supported only for anthropic_oauth upstreams".to_owned(),
+            detail: "warmup is supported only for OAuth upstreams".to_owned(),
         });
     }
+    validate_warmup_plugin(storage, kind, body.warmup_dialect_plugin.as_ref()).await?;
     let oauth_bundle = match kind {
         UpstreamKind::GeminiOauth if body.oauth_token_bundle.is_none() => {
             if body.api_key_value.is_some() || body.workspace_id.is_some() {
@@ -1107,9 +1139,18 @@ async fn get_upstream_subscription_metadata(
             error: "invalid_upstream_id",
             detail: error.to_string(),
         })?;
-    subscription_metadata_response(storage, upstream_id)
-        .await
-        .map(Json)
+    let mut response = subscription_metadata_response(storage, upstream_id).await?;
+    if let Some(upstream) = UpstreamStore::get_by_id(storage, upstream_id).await?
+        && matches!(
+            upstream.kind,
+            UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+        )
+        && let Ok(bundle) = decrypt_oauth_bundle(&state, &upstream)
+    {
+        response.account_identity =
+            super::oauth::provider_account_identity(storage, &upstream, &bundle).await;
+    }
+    Ok(Json(response))
 }
 
 async fn refresh_upstream_subscription_metadata(
@@ -1275,7 +1316,10 @@ async fn fire_now_upstream_warmup_inner(
     upstream_id: Uuid,
     upstream: UpstreamRecord,
 ) -> Result<FireNowStage, UpstreamError> {
-    if upstream.kind != UpstreamKind::AnthropicOauth {
+    if !matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) {
         return Ok(FireNowStage::Finished(
             (
                 StatusCode::BAD_REQUEST,
@@ -1377,6 +1421,7 @@ async fn fire_now_upstream_warmup_inner(
                 outcome.status,
                 outcome.headers,
                 WarmupDispatchKind::DialectPlugin,
+                upstream.kind,
             ),
             Ok(Err(error)) => match error.kind {
                 WarmupDialectDispatchErrorKind::Transient => {
@@ -1403,73 +1448,20 @@ async fn fire_now_upstream_warmup_inner(
                 error_detail: "warmup dispatch timed out".to_owned(),
             },
         }
-    } else {
-        let bundle = match decrypt_oauth_bundle(state, &upstream) {
-            Ok(bundle) => bundle,
-            Err(error) => {
-                let _ = record_fire_now_failure(
-                    state,
-                    storage.as_ref(),
-                    &upstream,
-                    now_unix_secs,
-                    candidate_cycle_key,
-                    Some(holder.as_str()),
-                    WarmupPermanentFailureReason::CredentialDecryptFailed,
-                    WarmupDispatchKind::NotDispatched,
-                    None,
-                    Some("oauth credential decrypt failed"),
-                )
-                .await;
-                return Err(error);
-            }
-        };
-        let access_token =
-            match fresh_enough_access_token(state, storage.clone(), &upstream, bundle).await {
-                Ok(access_token) => access_token,
-                Err(error) => {
-                    let _ = record_fire_now_failure(
-                        state,
-                        storage.as_ref(),
-                        &upstream,
-                        now_unix_secs,
-                        candidate_cycle_key,
-                        Some(holder.as_str()),
-                        WarmupPermanentFailureReason::OauthRefreshFailed,
-                        WarmupDispatchKind::NotDispatched,
-                        None,
-                        Some("oauth refresh failed"),
-                    )
-                    .await;
-                    return Err(error);
-                }
-            };
-        let base_url = match upstream_base_url(&upstream) {
-            Ok(base_url) => base_url,
-            Err(error) => {
-                let _ = record_fire_now_failure(
-                    state,
-                    storage.as_ref(),
-                    &upstream,
-                    now_unix_secs,
-                    candidate_cycle_key,
-                    Some(holder.as_str()),
-                    WarmupPermanentFailureReason::RequestBuildFailed,
-                    WarmupDispatchKind::NotDispatched,
-                    None,
-                    Some("warmup base url resolution failed"),
-                )
-                .await;
-                return Err(error);
-            }
-        };
-        let client = warmup_http_client();
+    } else if let Some(dispatcher) = state.warmup_dialect_dispatcher.as_deref() {
         match tokio::time::timeout(
             Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
-            dispatch_fire_now_warmup(&client, &access_token, &base_url),
+            dispatcher.dispatch_warmup_native(&upstream),
         )
         .await
         {
-            Ok(attempt) => attempt,
+            Ok(Ok(outcome)) => fire_now_attempt_from_native_outcome(outcome),
+            Ok(Err(error)) => FireNowDispatchAttempt::PermanentFailure {
+                reason: WarmupPermanentFailureReason::RequestBuildFailed,
+                dispatch_kind: WarmupDispatchKind::NotDispatched,
+                status: StatusCode::BAD_GATEWAY,
+                error_detail: error.detail,
+            },
             Err(_) => FireNowDispatchAttempt::TransientFailure {
                 reason: WarmupTransientFailureReason::RequestTimeout,
                 dispatch_kind: WarmupDispatchKind::Http,
@@ -1477,6 +1469,8 @@ async fn fire_now_upstream_warmup_inner(
                 error_detail: "warmup dispatch timed out".to_owned(),
             },
         }
+    } else {
+        return Err(UpstreamError::WarmupUnavailable);
     };
     let record = record_warmup_attempt(
         state,
@@ -1514,9 +1508,19 @@ async fn finish_fire_now_attempt(
         record,
     }: FireNowAttempted,
 ) -> Result<Response, UpstreamError> {
-    if let FireNowDispatchAttempt::Response { headers, .. } = &dispatch_attempt {
-        record_fire_now_subscription_quota_observations(state, storage, upstream_id, headers)
-            .await?;
+    if let FireNowDispatchAttempt::Response {
+        headers,
+        observations,
+        ..
+    } = &dispatch_attempt
+    {
+        if !headers.is_empty() {
+            record_fire_now_subscription_quota_observations(state, storage, upstream_id, headers)
+                .await?;
+        } else {
+            record_fire_now_unified_quota_observations(state, storage, upstream_id, observations)
+                .await?;
+        }
     }
     let status = fire_now_attempt_status(&dispatch_attempt);
     tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, status = %status, outcome = ?record.outcome, dispatch_error = record.error_detail.as_deref(), action = "dispatch_result");
@@ -1581,70 +1585,6 @@ fn cycle_key_from_latest_observation(latest: &SubscriptionQuotaSample) -> Option
         .and_then(|resets_at| i64::try_from(resets_at).ok())
 }
 
-async fn dispatch_fire_now_warmup(
-    client: &WarmupHttpClient,
-    access_token: &str,
-    base_url: &Url,
-) -> FireNowDispatchAttempt {
-    let request = match build_fire_now_warmup_request(access_token, base_url) {
-        Ok(request) => request,
-        Err(error) => {
-            return FireNowDispatchAttempt::PermanentFailure {
-                reason: WarmupPermanentFailureReason::RequestBuildFailed,
-                dispatch_kind: WarmupDispatchKind::NotDispatched,
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                error_detail: error,
-            };
-        }
-    };
-    match client.request(request).await {
-        Ok(response) => fire_now_response_attempt(
-            response.status(),
-            response.headers().clone(),
-            WarmupDispatchKind::Http,
-        ),
-        Err(error) => FireNowDispatchAttempt::TransientFailure {
-            reason: WarmupTransientFailureReason::NetworkError,
-            dispatch_kind: WarmupDispatchKind::Http,
-            status: StatusCode::BAD_GATEWAY,
-            error_detail: error.to_string(),
-        },
-    }
-}
-
-fn build_fire_now_warmup_request(
-    access_token: &str,
-    base_url: &Url,
-) -> Result<Request<Full<Bytes>>, String> {
-    let url = base_url
-        .join("v1/messages")
-        .map_err(|error| format!("failed to build warmup URL: {error}"))?;
-    let body_bytes = warmup_body_bytes()?;
-    Request::builder()
-        .method(Method::POST)
-        .uri(url.as_str())
-        .header("authorization", format!("Bearer {access_token}"))
-        .header("content-type", "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .header("anthropic-beta", WARMUP_ANTHROPIC_BETA)
-        .body(Full::new(Bytes::from(body_bytes)))
-        .map_err(|error| format!("failed to build warmup request: {error}"))
-}
-
-fn warmup_body_bytes() -> Result<Vec<u8>, String> {
-    serde_json::to_string(&warmup_body())
-        .map(String::into_bytes)
-        .map_err(|error| format!("failed to serialize warmup body: {error}"))
-}
-
-fn warmup_body() -> Value {
-    json!({
-        "model": WARMUP_MODEL,
-        "max_tokens": WARMUP_MAX_TOKENS,
-        "messages": [{"role": "user", "content": "."}]
-    })
-}
-
 async fn record_fire_now_subscription_quota_observations(
     state: &AdminState,
     storage: &dyn Storage,
@@ -1672,6 +1612,44 @@ async fn record_fire_now_subscription_quota_observations(
     }
     Ok(())
 }
+async fn record_fire_now_unified_quota_observations(
+    state: &AdminState,
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+    observations: &[UnifiedQuotaObservation],
+) -> Result<(), UpstreamError> {
+    let observed_at_unix_millis = unix_now_millis(&*state.clock)?;
+    if let Some(quota_ingestion) = state
+        .lifecycle
+        .as_ref()
+        .and_then(|ports| ports.subscription_quota_ingestion.as_deref())
+    {
+        let observed_at = UNIX_EPOCH
+            .checked_add(Duration::from_millis(observed_at_unix_millis))
+            .ok_or_else(|| invalid_warmup_state("warmup observed timestamp overflow"))?;
+        quota_ingestion.ingest_subscription_quota_observations(
+            observations,
+            upstream_id,
+            observed_at,
+        );
+        return Ok(());
+    }
+    let records = observations
+        .iter()
+        .cloned()
+        .map(|observation| {
+            cc_lb_quota::unified_observation_to_sample(
+                upstream_id,
+                observation,
+                observed_at_unix_millis,
+            )
+        })
+        .collect::<Vec<_>>();
+    if !records.is_empty() {
+        storage.record_subscription_quota_samples(&records).await?;
+    }
+    Ok(())
+}
 
 enum FireNowDispatchAttempt {
     Response {
@@ -1679,6 +1657,7 @@ enum FireNowDispatchAttempt {
         dispatch_kind: WarmupDispatchKind,
         headers: HeaderMap,
         observations: Vec<UnifiedQuotaObservation>,
+        error_detail: Option<String>,
     },
     TransientFailure {
         reason: WarmupTransientFailureReason,
@@ -1694,17 +1673,64 @@ enum FireNowDispatchAttempt {
     },
 }
 
+fn fire_now_attempt_from_native_outcome(
+    outcome: WarmupNativeDispatchOutcome,
+) -> FireNowDispatchAttempt {
+    match outcome {
+        WarmupNativeDispatchOutcome::Response {
+            status,
+            dispatch_kind,
+            observations,
+            error_detail,
+        } => FireNowDispatchAttempt::Response {
+            status,
+            dispatch_kind,
+            headers: HeaderMap::new(),
+            observations,
+            error_detail,
+        },
+        WarmupNativeDispatchOutcome::TransientFailure {
+            dispatch_kind,
+            reason,
+            status,
+            error_detail,
+        } => FireNowDispatchAttempt::TransientFailure {
+            reason,
+            dispatch_kind,
+            status,
+            error_detail,
+        },
+        WarmupNativeDispatchOutcome::PermanentFailure {
+            dispatch_kind,
+            reason,
+            status,
+            error_detail,
+        } => FireNowDispatchAttempt::PermanentFailure {
+            reason,
+            dispatch_kind,
+            status,
+            error_detail,
+        },
+    }
+}
+
 fn fire_now_response_attempt(
     status: StatusCode,
     headers: HeaderMap,
     dispatch_kind: WarmupDispatchKind,
+    kind: UpstreamKind,
 ) -> FireNowDispatchAttempt {
-    let observations = parse_anthropic_unified_headers(&headers);
+    let observations = match kind {
+        UpstreamKind::OpenaiOauth => cc_lb_quota::parse_openai_codex_quota_headers(&headers),
+        UpstreamKind::GeminiOauth => Vec::new(),
+        _ => parse_anthropic_unified_headers(&headers),
+    };
     FireNowDispatchAttempt::Response {
         status,
         dispatch_kind,
         headers,
         observations,
+        error_detail: None,
     }
 }
 
@@ -1715,11 +1741,12 @@ fn execution_result_from_fire_now_attempt(
         FireNowDispatchAttempt::Response {
             status,
             observations,
+            error_detail,
             ..
         } => WarmupAttemptResult::Response {
             status: *status,
             observations,
-            error_detail: None,
+            error_detail: error_detail.as_deref(),
         },
         FireNowDispatchAttempt::TransientFailure {
             reason,
@@ -1845,7 +1872,8 @@ pub(super) fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, Upstre
     let default = match upstream.kind {
         UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => DEFAULT_ANTHROPIC_BASE_URL,
         UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_BASE_URL,
-        UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => DEFAULT_GEMINI_BASE_URL,
+        UpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
+        UpstreamKind::GeminiOauth => DEFAULT_GEMINI_OAUTH_BASE_URL,
     };
     Url::parse(default)
         .map_err(|error| invalid_warmup_state(&format!("invalid default warmup URL: {error}")))
@@ -1862,20 +1890,11 @@ pub(super) fn effective_base_url(
     let default = match kind {
         UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => DEFAULT_ANTHROPIC_BASE_URL,
         UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_BASE_URL,
-        UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => DEFAULT_GEMINI_BASE_URL,
+        UpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
+        UpstreamKind::GeminiOauth => DEFAULT_GEMINI_OAUTH_BASE_URL,
     };
     Url::parse(default)
         .map_err(|error| invalid_warmup_state(&format!("invalid default preflight URL: {error}")))
-}
-
-fn warmup_http_client() -> WarmupHttpClient {
-    let connector = HttpsConnectorBuilder::new()
-        .with_webpki_roots()
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-    Client::builder(TokioExecutor::new()).build(connector)
 }
 
 fn invalid_warmup_state(message: &str) -> UpstreamError {
@@ -1915,16 +1934,21 @@ async fn update_upstream(
     if let Some(base_url) = body.base_url.as_ref() {
         validate_base_url_input(base_url)?;
     }
-    if current.kind != UpstreamKind::AnthropicOauth
-        && (body.warmup_enabled == Some(true) || body.warmup_dialect_plugin.is_some())
+    if !matches!(
+        current.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) && (body.warmup_enabled == Some(true) || body.warmup_dialect_plugin.is_some())
     {
         return Err(UpstreamError::BadRequest {
             error: "warmup_unsupported_kind",
-            detail: "warmup is supported only for anthropic_oauth upstreams".to_owned(),
+            detail: "warmup is supported only for OAuth upstreams".to_owned(),
         });
     }
     if body.warmup_enabled == Some(true)
-        && current.kind == UpstreamKind::AnthropicOauth
+        && matches!(
+            current.kind,
+            UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+        )
         && current.oauth_credentials.is_none()
     {
         return Err(UpstreamError::BadRequest {
@@ -1933,6 +1957,7 @@ async fn update_upstream(
         });
     }
     let storage = storage(&state)?;
+    validate_warmup_plugin(storage, current.kind, body.warmup_dialect_plugin.as_ref()).await?;
     let imported_oauth_bundle = match current.kind {
         UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
             if body.api_key_value.is_some() {
@@ -2300,7 +2325,11 @@ async fn seed_warmup_if_toggled(
     if !toggled_on {
         return Ok(());
     }
-    if after.kind != UpstreamKind::AnthropicOauth || after.oauth_credentials.is_none() {
+    if !matches!(
+        after.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) || after.oauth_credentials.is_none()
+    {
         return Ok(());
     }
     let Some(scheduler) = state.scheduler.as_ref() else {
@@ -2675,6 +2704,9 @@ async fn subscription_metadata_response(
     };
     Ok(SubscriptionMetadataResponse {
         upstream_id: upstream_id.to_string(),
+        account_identity: super::oauth::account_identity_from_metadata(
+            subscription_metadata.as_ref(),
+        ),
         subscription_metadata,
         organization_metadata,
     })
@@ -2884,6 +2916,7 @@ mod tests {
 
     use async_trait::async_trait;
     use axum::body::{Body as AxumBody, to_bytes};
+    use axum::http::{Method, Request};
     use cc_lb_aead::{AeadEncryptedField, AeadService};
     use cc_lb_config::Config;
     use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
@@ -2898,44 +2931,13 @@ mod tests {
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
         SignerFactory, SigningCapability, UpstreamError,
     };
-    use http_body_util::BodyExt;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
 
     use super::*;
+    use serde_json::Value;
 
     type TestStorage = cc_lb_storage_sqlite::SqliteStorage;
-
-    fn fire_now_warmup_request() -> Request<Full<Bytes>> {
-        let base_url = Url::parse("https://api.anthropic.com/").expect("valid URL");
-        build_fire_now_warmup_request("test-token", &base_url).expect("request builds successfully")
-    }
-
-    async fn fire_now_warmup_body_from_request() -> Value {
-        let bytes = fire_now_warmup_request()
-            .into_body()
-            .collect()
-            .await
-            .expect("body collects")
-            .to_bytes();
-        serde_json::from_slice(&bytes).expect("valid json body")
-    }
-
-    #[test]
-    fn fire_now_request_shape_includes_minimal_headers() {
-        let request = fire_now_warmup_request();
-
-        assert_eq!(request.uri().path(), "/v1/messages");
-        assert_eq!(request.method(), Method::POST);
-        assert_eq!(
-            request.headers().get("anthropic-version"),
-            Some(&HeaderValue::from_static("2023-06-01"))
-        );
-        assert_eq!(
-            request.headers().get("anthropic-beta"),
-            Some(&HeaderValue::from_static(WARMUP_ANTHROPIC_BETA))
-        );
-    }
 
     async fn error_response_json(error: super::UpstreamError) -> (StatusCode, Value) {
         let response = error.into_response();
@@ -3006,33 +3008,6 @@ mod tests {
             assert!(!rendered.contains("SECRETVALUE"), "{rendered}");
             assert!(rendered.contains("[REDACTED]"), "{rendered}");
         }
-    }
-
-    #[tokio::test]
-    async fn fire_now_request_shape_has_no_system_or_tools_or_stream() {
-        let body = fire_now_warmup_body_from_request().await;
-
-        assert!(body.get("system").is_none());
-        assert_eq!(body.get("max_tokens"), Some(&json!(1)));
-        assert!(body.get("tools").is_none());
-        assert!(body.get("stream").is_none());
-    }
-
-    #[tokio::test]
-    async fn fire_now_request_shape_has_no_metadata() {
-        let body = fire_now_warmup_body_from_request().await;
-
-        assert!(body.get("metadata").is_none());
-    }
-
-    #[test]
-    fn fire_now_request_body_matches_locked_json_byte_for_byte() {
-        let expected = br#"{"max_tokens":1,"messages":[{"content":".","role":"user"}],"model":"claude-haiku-4-5-20251001"}"#;
-
-        assert_eq!(
-            warmup_body_bytes().expect("body serializes"),
-            expected.to_vec()
-        );
     }
 
     struct TestContext {
@@ -3151,6 +3126,62 @@ mod tests {
         }
     }
 
+    struct TestNativeDispatcher {
+        status: StatusCode,
+    }
+
+    #[async_trait]
+    impl crate::WarmupDialectDispatcher for TestNativeDispatcher {
+        async fn dispatch_warmup_with_dialect(
+            &self,
+            _runtime: &Arc<cc_lb_runtime_wasmtime::WasmtimeRuntime>,
+            _data_dir: &std::path::Path,
+            _upstream: &UpstreamRecord,
+        ) -> Result<crate::WarmupDialectDispatchOutcome, crate::WarmupDialectDispatchError>
+        {
+            Ok(crate::WarmupDialectDispatchOutcome {
+                status: self.status,
+                headers: HeaderMap::new(),
+            })
+        }
+
+        async fn dispatch_warmup_native(
+            &self,
+            upstream: &UpstreamRecord,
+        ) -> Result<WarmupNativeDispatchOutcome, crate::WarmupDialectDispatchError> {
+            assert!(matches!(
+                upstream.kind,
+                UpstreamKind::AnthropicOauth
+                    | UpstreamKind::OpenaiOauth
+                    | UpstreamKind::GeminiOauth
+            ));
+            Ok(WarmupNativeDispatchOutcome::Response {
+                status: self.status,
+                dispatch_kind: WarmupDispatchKind::Http,
+                observations: Vec::new(),
+                error_detail: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn fire_now_native_dispatches_openai_oauth_through_bridge() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let mut upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+        upstream.kind = UpstreamKind::OpenaiOauth;
+        let stage = fire_now_upstream_warmup_inner(
+            &context.state,
+            context.storage.clone(),
+            upstream.id,
+            upstream,
+        )
+        .await
+        .expect("native bridge dispatch");
+        assert!(matches!(stage, FireNowStage::Attempted(_)));
+    }
+
     #[tokio::test]
     async fn fire_now_rejects_non_oauth_400() {
         let context = test_context().await;
@@ -3177,63 +3208,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_returns_200_on_success() {
+    async fn fire_now_returns_503_without_dispatcher() {
         let context = test_context().await;
-        let (base_url, server) = spawn_warmup_server(StatusCode::OK).await;
-        let upstream = create_oauth_upstream(
-            context.storage.as_ref(),
-            context.aead.as_ref(),
-            true,
-            Some(base_url),
-        )
-        .await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "warmup_unavailable");
+    }
+
+    #[tokio::test]
+    async fn fire_now_returns_200_on_success() {
+        let context = test_context_with_dispatcher(StatusCode::OK).await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
 
         let (status, body) = fire_now_response(context.state, upstream.id).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["fired"], true);
         assert!(body["cycle_key"].as_i64().is_some());
-        server.abort();
     }
 
     #[tokio::test]
     async fn fire_now_returns_502_on_permanent_abandon() {
-        let context = test_context().await;
-        let (base_url, server) = spawn_warmup_server(StatusCode::UNAUTHORIZED).await;
-        let upstream = create_oauth_upstream(
-            context.storage.as_ref(),
-            context.aead.as_ref(),
-            true,
-            Some(base_url),
-        )
-        .await;
+        let context = test_context_with_dispatcher(StatusCode::UNAUTHORIZED).await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
 
         let (status, body) = fire_now_response(context.state, upstream.id).await;
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["fired"], false);
         assert_eq!(body["reason"], "auth_failed");
-        server.abort();
     }
 
     #[tokio::test]
     async fn fire_now_returns_503_on_transient() {
-        let context = test_context().await;
-        let (base_url, server) = spawn_warmup_server(StatusCode::INTERNAL_SERVER_ERROR).await;
-        let upstream = create_oauth_upstream(
-            context.storage.as_ref(),
-            context.aead.as_ref(),
-            true,
-            Some(base_url),
-        )
-        .await;
+        let context = test_context_with_dispatcher(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
 
         let (status, body) = fire_now_response(context.state, upstream.id).await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["fired"], false);
         assert_eq!(body["reason"], "upstream_5xx");
-        server.abort();
+    }
+
+    async fn test_context_with_dispatcher(status: StatusCode) -> TestContext {
+        let mut context = test_context().await;
+        context.state.warmup_dialect_dispatcher = Some(Arc::new(TestNativeDispatcher { status }));
+        context
     }
 
     async fn test_context() -> TestContext {
@@ -3338,6 +3368,7 @@ mod tests {
     ) -> UpstreamRecord {
         let id = Uuid::new_v4();
         let bundle = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "test-access-token".to_owned(),
             refresh_token: "test-refresh-token".to_owned(),
             expires_at_unix_secs: u64::MAX / 2,

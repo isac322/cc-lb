@@ -86,6 +86,21 @@ pub mod __private {
         ArchivedTransformSseEventRequest, FilterRequest, FilterResponse, ShapeRequest,
         ShapeResponse, TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
         TransformSseEventResult, pack_ret,
+        v2::{
+            ArchivedFilterRequest as ArchivedFilterRequestV2,
+            ArchivedShapeEnvelopeGeminiRequest as ArchivedShapeEnvelopeGeminiRequestV2,
+            ArchivedShapeRequest as ArchivedShapeRequestV2,
+            ArchivedTransformResponseRequest as ArchivedTransformResponseRequestV2,
+            ArchivedTransformSseEventRequest as ArchivedTransformSseEventRequestV2,
+            FilterRequest as FilterRequestV2, FilterResponse as FilterResponseV2,
+            ShapeEnvelopeGeminiRequest as ShapeEnvelopeGeminiRequestV2,
+            ShapeEnvelopeGeminiResponse as ShapeEnvelopeGeminiResponseV2,
+            ShapeRequest as ShapeRequestV2, ShapeResponse as ShapeResponseV2,
+            TransformResponseRequest as TransformResponseRequestV2,
+            TransformResponseResult as TransformResponseResultV2,
+            TransformSseEventRequest as TransformSseEventRequestV2,
+            TransformSseEventResult as TransformSseEventResultV2,
+        },
     };
     use rkyv::rancor::Error;
 
@@ -430,6 +445,164 @@ pub mod __private {
         let response = handler(archived);
         free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
         encode_and_pack::<TransformSseEventResult>(&response, "TransformSseEventResult")
+    }
+    #[allow(unsafe_code)]
+    pub fn run_filter_v2<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(FilterRequestV2) -> FilterResponseV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedFilterRequestV2 =
+            rkyv::access::<ArchivedFilterRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::FilterRequest) failed");
+        let owned: FilterRequestV2 = rkyv::deserialize::<FilterRequestV2, Error>(archived)
+            .expect("rkyv::deserialize(v2::FilterRequest) failed");
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        let response = handler(owned);
+        encode_and_pack::<FilterResponseV2>(&response, "v2::FilterResponse")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_filter_v2_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&ArchivedFilterRequestV2) -> FilterResponseV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedFilterRequestV2 =
+            rkyv::access::<ArchivedFilterRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::FilterRequest) failed");
+        let response = handler(archived);
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        encode_and_pack::<FilterResponseV2>(&response, "v2::FilterResponse")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_shape_v2<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(ShapeRequestV2) -> ShapeResponseV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedShapeRequestV2 =
+            rkyv::access::<ArchivedShapeRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::ShapeRequest) failed");
+        let owned: ShapeRequestV2 = rkyv::deserialize::<ShapeRequestV2, Error>(archived)
+            .expect("rkyv::deserialize(v2::ShapeRequest) failed");
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        let response = handler(owned);
+        encode_and_pack::<ShapeResponseV2>(&response, "v2::ShapeResponse")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_shape_v2_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&ArchivedShapeRequestV2) -> ShapeResponseV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedShapeRequestV2 =
+            rkyv::access::<ArchivedShapeRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::ShapeRequest) failed");
+        let response = handler(archived);
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        encode_and_pack::<ShapeResponseV2>(&response, "v2::ShapeResponse")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_transform_response_v2<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(TransformResponseRequestV2) -> TransformResponseResultV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedTransformResponseRequestV2 =
+            rkyv::access::<ArchivedTransformResponseRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::TransformResponseRequest) failed");
+        let owned: TransformResponseRequestV2 =
+            rkyv::deserialize::<TransformResponseRequestV2, Error>(archived)
+                .expect("rkyv::deserialize(v2::TransformResponseRequest) failed");
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        let response = handler(owned);
+        encode_and_pack::<TransformResponseResultV2>(&response, "v2::TransformResponseResult")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_transform_response_v2_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&ArchivedTransformResponseRequestV2) -> TransformResponseResultV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedTransformResponseRequestV2 =
+            rkyv::access::<ArchivedTransformResponseRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::TransformResponseRequest) failed");
+        let response = handler(archived);
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        encode_and_pack::<TransformResponseResultV2>(&response, "v2::TransformResponseResult")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_transform_sse_event_v2<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(TransformSseEventRequestV2) -> TransformSseEventResultV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedTransformSseEventRequestV2 =
+            rkyv::access::<ArchivedTransformSseEventRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::TransformSseEventRequest) failed");
+        let owned: TransformSseEventRequestV2 =
+            rkyv::deserialize::<TransformSseEventRequestV2, Error>(archived)
+                .expect("rkyv::deserialize(v2::TransformSseEventRequest) failed");
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        let response = handler(owned);
+        encode_and_pack::<TransformSseEventResultV2>(&response, "v2::TransformSseEventResult")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_transform_sse_event_v2_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&ArchivedTransformSseEventRequestV2) -> TransformSseEventResultV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedTransformSseEventRequestV2 =
+            rkyv::access::<ArchivedTransformSseEventRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::TransformSseEventRequest) failed");
+        let response = handler(archived);
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        encode_and_pack::<TransformSseEventResultV2>(&response, "v2::TransformSseEventResult")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_shape_envelope_gemini<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(ShapeEnvelopeGeminiRequestV2) -> ShapeEnvelopeGeminiResponseV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedShapeEnvelopeGeminiRequestV2 =
+            rkyv::access::<ArchivedShapeEnvelopeGeminiRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::ShapeEnvelopeGeminiRequest) failed");
+        let owned: ShapeEnvelopeGeminiRequestV2 =
+            rkyv::deserialize::<ShapeEnvelopeGeminiRequestV2, Error>(archived)
+                .expect("rkyv::deserialize(v2::ShapeEnvelopeGeminiRequest) failed");
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        let response = handler(owned);
+        encode_and_pack::<ShapeEnvelopeGeminiResponseV2>(
+            &response,
+            "v2::ShapeEnvelopeGeminiResponse",
+        )
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_shape_envelope_gemini_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&ArchivedShapeEnvelopeGeminiRequestV2) -> ShapeEnvelopeGeminiResponseV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedShapeEnvelopeGeminiRequestV2 =
+            rkyv::access::<ArchivedShapeEnvelopeGeminiRequestV2, Error>(in_bytes)
+                .expect("rkyv::access(v2::ShapeEnvelopeGeminiRequest) failed");
+        let response = handler(archived);
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        encode_and_pack::<ShapeEnvelopeGeminiResponseV2>(
+            &response,
+            "v2::ShapeEnvelopeGeminiResponse",
+        )
     }
 
     /// Serialize an rkyv-Serializable response, allocate a guest

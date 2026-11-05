@@ -11,15 +11,17 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadEncryptedField, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_config::{AnthropicOAuthConfig, AntigravityOAuthConfig, OpenAiOAuthConfig};
 use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_control::anthropic_metadata::make_metadata_http_client;
-use cc_lb_control::{AuditPayload, fetch_metadata_only};
+use cc_lb_control::{AuditPayload, MetadataRefreshRecords, fetch_metadata_only};
+use cc_lb_oauth_protocol::{OAuthAccountIdentity, openai_identity_from_token};
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
-use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
+use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
+use cc_lb_scheduler::worker::{AdaptiveJob, CronJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     AuditActorFields, OAuthTokensCreate, OrganizationMetadataRecord, Storage, StorageError,
@@ -41,7 +43,8 @@ use crate::audit::{AdminAuditEvent, record_admin_audit};
 use crate::auth::AdminIdentity;
 use crate::oauth_pkce::{
     HyperOAuthHttpClient, LongLivedFallbackReason, OAuthTokenError, OAuthTokenMode,
-    PkceExchangeOutcome, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
+    PkceExchangeOutcome, PkceHandshakeState, complete_pkce_flow, complete_pkce_form_flow,
+    start_pkce_flow, start_pkce_flow_without_code,
 };
 
 const PKCE_FLOW_TTL_SECS: u64 = 900;
@@ -81,30 +84,87 @@ struct UpstreamOAuthStatusResponse {
     /// `None` when there are no decryptable credentials.
     mode: Option<OAuthTokenMode>,
     can_refresh: bool,
+    #[serde(flatten)]
+    account_identity: OAuthAccountIdentity,
 }
-#[derive(Deserialize)]
-struct StartRequest {}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum OAuthProvider {
+    #[default]
+    Anthropic,
+    Openai,
+    Gemini,
+}
 
+#[derive(Deserialize)]
+struct StartRequest {
+    #[serde(default)]
+    provider: OAuthProvider,
+    #[serde(default)]
+    flow: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenAiFlow {
+    DeviceCode,
+    Browser,
+}
+
+fn parse_openai_flow(value: Option<&str>) -> Result<OpenAiFlow, ()> {
+    match value.unwrap_or("device_code") {
+        "device_code" => Ok(OpenAiFlow::DeviceCode),
+        "browser" => Ok(OpenAiFlow::Browser),
+        _ => Err(()),
+    }
+}
+
+fn unsupported_flow_response() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": "unsupported_flow" })),
+    )
+        .into_response()
+}
 // `revision` is echoed so the frontend can refresh its cached `If-Match`
 // before a cancel-cleanup DELETE. start_oauth does not currently mutate
 // the upstream, but the contract stays correct if it ever does.
 #[derive(Serialize)]
 struct StartResponse {
-    authorize_url: String,
+    authorize_url: Option<String>,
     state_token: String,
     revision: u64,
+    provider: OAuthProvider,
+    flow: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poll_interval_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at_unix_secs: Option<u64>,
 }
-
 #[derive(Serialize)]
 struct DraftStartResponse {
-    authorize_url: String,
+    authorize_url: Option<String>,
     state_token: String,
+    provider: OAuthProvider,
+    flow: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poll_interval_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at_unix_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct CompleteRequest {
     state_token: String,
-    code: String,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -130,12 +190,15 @@ struct CompleteResponse {
 struct DraftCompleteResponse {
     state_token: String,
     suggested_name: String,
-    subscription_metadata: UpstreamSubscriptionMetadataRecord,
+    subscription_metadata: Option<UpstreamSubscriptionMetadataRecord>,
     organization_metadata: Option<OrganizationMetadataRecord>,
     mode: OAuthTokenMode,
     long_lived_fallback: bool,
     fallback_reason: Option<LongLivedFallbackReason>,
     granted_expires_in_secs: Option<u64>,
+    provider: OAuthProvider,
+    #[serde(flatten)]
+    account_identity: OAuthAccountIdentity,
 }
 
 #[derive(Serialize)]
@@ -158,12 +221,30 @@ struct UpstreamStatusResponse {
     last_warmup_at_unix_secs: Option<u64>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct DeviceState {
+    device_auth_id: String,
+    user_code: String,
+    poll_interval_secs: u64,
+    expires_at_unix_secs: u64,
+    #[serde(default)]
+    authorization_code: Option<String>,
+    #[serde(default)]
+    code_verifier: Option<String>,
+    #[serde(default)]
+    pending_attempts: u32,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct InFlightPkce {
+    #[serde(default)]
+    provider: OAuthProvider,
     handshake: PkceHandshakeState,
     created_at_unix_secs: u64,
     initiated_by: AuditActorFields,
     target: PkceTarget,
+    #[serde(default)]
+    device: Option<DeviceState>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -196,7 +277,7 @@ async fn start_oauth(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
     Path(upstream_id): Path<Uuid>,
-    Json(_payload): Json<StartRequest>,
+    Json(payload): Json<StartRequest>,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
@@ -212,12 +293,64 @@ async fn start_oauth(
         }
         Err(error) => return storage_error_response(&error),
     };
-    if upstream.kind != UpstreamKind::AnthropicOauth {
+    if !matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "wrong_kind" })),
         )
             .into_response();
+    }
+    if upstream.kind == UpstreamKind::OpenaiOauth {
+        let flow = match parse_openai_flow(payload.flow.as_deref()) {
+            Ok(flow) => flow,
+            Err(()) => return unsupported_flow_response(),
+        };
+        let storage = Arc::clone(storage);
+        return match complete_after_commit(async move {
+            start_provider_oauth(
+                &state,
+                storage.as_ref(),
+                &identity,
+                upstream,
+                upstream_id,
+                Some(flow),
+            )
+            .await
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    }
+    if payload
+        .flow
+        .as_deref()
+        .is_some_and(|flow| !(upstream.kind == UpstreamKind::GeminiOauth && flow == "browser"))
+    {
+        return unsupported_flow_response();
+    }
+    if upstream.kind == UpstreamKind::GeminiOauth {
+        let storage = Arc::clone(storage);
+        return match complete_after_commit(async move {
+            start_provider_oauth(
+                &state,
+                storage.as_ref(),
+                &identity,
+                upstream,
+                upstream_id,
+                None,
+            )
+            .await
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
     }
     let upstream_revision = upstream.revision;
 
@@ -255,6 +388,7 @@ async fn start_oauth(
 
     let now = cc_lb_clock::unix_secs(state.clock.now());
     let in_flight = InFlightPkce {
+        provider: OAuthProvider::Anthropic,
         handshake: handshake_state.clone(),
         created_at_unix_secs: now,
         initiated_by: identity.audit_fields(),
@@ -263,6 +397,7 @@ async fn start_oauth(
             upstream_name: upstream.name.clone(),
             expected_revision: upstream.revision,
         },
+        device: None,
     };
     if let Err(response) =
         persist_pkce_flow(&state, storage.as_ref(), &state_token, &in_flight).await
@@ -308,9 +443,15 @@ async fn start_oauth(
         }
 
         Json(StartResponse {
-            authorize_url,
+            authorize_url: Some(authorize_url),
             state_token,
             revision: upstream_revision,
+            provider: OAuthProvider::Anthropic,
+            flow: "paste_code",
+            verification_url: None,
+            user_code: None,
+            poll_interval_secs: None,
+            expires_at_unix_secs: None,
         })
         .into_response()
     })
@@ -324,11 +465,219 @@ async fn start_oauth(
 async fn start_oauth_draft(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
-    Json(_payload): Json<StartRequest>,
+    Json(payload): Json<StartRequest>,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
     };
+    if payload.provider == OAuthProvider::Openai {
+        let flow = match parse_openai_flow(payload.flow.as_deref()) {
+            Ok(flow) => flow,
+            Err(()) => return unsupported_flow_response(),
+        };
+        let config = state.config.oauth.openai.clone().unwrap_or_default();
+        if flow == OpenAiFlow::Browser {
+            let auth_url = match AuthUrl::new(config.authorize_url.to_string()) {
+                Ok(value) => value,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            let token_url = match TokenUrl::new(config.token_url.to_string()) {
+                Ok(value) => value,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            let state_token = match encode_state(Uuid::nil()) {
+                Ok(value) => value,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            let mut handshake = start_pkce_flow_without_code(
+                ClientId::new(config.client_id.clone()),
+                auth_url,
+                token_url,
+                vec![
+                    "openid".to_owned(),
+                    "profile".to_owned(),
+                    "email".to_owned(),
+                    "offline_access".to_owned(),
+                ],
+                config.browser_redirect_uri.clone(),
+            )
+            .into_state();
+            // Keep these OpenAI Codex CLI parameters in sync with
+            // `build_authorize_url` in github.com/openai/codex:
+            // https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs#L580-L625
+            handshake
+                .authorize_url
+                .query_pairs_mut()
+                .append_pair("id_token_add_organizations", "true")
+                .append_pair("codex_cli_simplified_flow", "true")
+                .append_pair("state", &state_token);
+            let now = cc_lb_clock::unix_secs(state.clock.now());
+            let in_flight = InFlightPkce {
+                provider: OAuthProvider::Openai,
+                handshake: handshake.clone(),
+                created_at_unix_secs: now,
+                initiated_by: identity.audit_fields(),
+                target: PkceTarget::PendingDraft { completed: None },
+                device: None,
+            };
+            if let Err(response) =
+                persist_pkce_flow(&state, storage.as_ref(), &state_token, &in_flight).await
+            {
+                return response;
+            }
+            return Json(DraftStartResponse {
+                authorize_url: Some(handshake.authorize_url.to_string()),
+                state_token,
+                provider: OAuthProvider::Openai,
+                flow: "paste_code",
+                verification_url: None,
+                user_code: None,
+                poll_interval_secs: None,
+                expires_at_unix_secs: None,
+            })
+            .into_response();
+        }
+        let device =
+            match request_openai_device_code(&config, cc_lb_clock::unix_secs(state.clock.now()))
+                .await
+            {
+                Ok(device) => device,
+                Err(error) => {
+                    return (
+                        if error == "device_login_unavailable" {
+                            StatusCode::NOT_FOUND
+                        } else {
+                            StatusCode::BAD_GATEWAY
+                        },
+                        Json(json!({ "error": error })),
+                    )
+                        .into_response();
+                }
+            };
+        let auth_url = match AuthUrl::new(config.auth_url.to_string()) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let token_url = match TokenUrl::new(config.token_url.to_string()) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let handshake_state = start_pkce_flow_without_code(
+            ClientId::new(config.client_id.clone()),
+            auth_url,
+            token_url,
+            Vec::new(),
+            config.device_redirect_uri,
+        )
+        .into_state();
+        let state_token = match encode_state(Uuid::nil()) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let now = cc_lb_clock::unix_secs(state.clock.now());
+        let in_flight = InFlightPkce {
+            provider: OAuthProvider::Openai,
+            handshake: handshake_state,
+            created_at_unix_secs: now,
+            initiated_by: identity.audit_fields(),
+            target: PkceTarget::PendingDraft { completed: None },
+            device: Some(device.clone()),
+        };
+        if let Err(response) =
+            persist_pkce_flow(&state, storage.as_ref(), &state_token, &in_flight).await
+        {
+            return response;
+        }
+        return Json(DraftStartResponse {
+            authorize_url: None,
+            state_token,
+            provider: OAuthProvider::Openai,
+            flow: "device_code",
+            verification_url: Some(config.device_verification_url.to_string()),
+            user_code: Some(device.user_code),
+            poll_interval_secs: Some(device.poll_interval_secs),
+            expires_at_unix_secs: Some(device.expires_at_unix_secs),
+        })
+        .into_response();
+    }
+    if payload
+        .flow
+        .as_deref()
+        .is_some_and(|flow| payload.provider != OAuthProvider::Gemini || flow != "browser")
+    {
+        return unsupported_flow_response();
+    }
+    if payload.provider == OAuthProvider::Gemini {
+        let Some(config) = state.config.oauth.antigravity.clone() else {
+            return provider_flow_error(
+                OAuthProvider::Gemini,
+                "oauth_client_not_configured",
+                StatusCode::BAD_REQUEST,
+            );
+        };
+        if config.missing_client_credentials().is_some() {
+            return provider_flow_error(
+                OAuthProvider::Gemini,
+                "oauth_client_not_configured",
+                StatusCode::BAD_REQUEST,
+            );
+        }
+        let auth_url = match AuthUrl::new(config.authorize_url.to_string()) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let token_url = match TokenUrl::new(config.token_url.to_string()) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let scopes = config.scopes.clone();
+        let mut handshake = start_pkce_flow_without_code(
+            ClientId::new(config.client_id.clone()),
+            auth_url,
+            token_url,
+            scopes,
+            config.redirect_uri.clone(),
+        )
+        .into_state();
+        handshake
+            .authorize_url
+            .query_pairs_mut()
+            .append_pair("access_type", "offline")
+            .append_pair("prompt", "consent");
+        let state_token = match encode_state(Uuid::nil()) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        handshake
+            .authorize_url
+            .query_pairs_mut()
+            .append_pair("state", &state_token);
+        let now = cc_lb_clock::unix_secs(state.clock.now());
+        let in_flight = InFlightPkce {
+            provider: OAuthProvider::Gemini,
+            handshake: handshake.clone(),
+            created_at_unix_secs: now,
+            initiated_by: identity.audit_fields(),
+            target: PkceTarget::PendingDraft { completed: None },
+            device: None,
+        };
+        if let Err(response) =
+            persist_pkce_flow(&state, storage.as_ref(), &state_token, &in_flight).await
+        {
+            return response;
+        }
+        return Json(DraftStartResponse {
+            authorize_url: Some(handshake.authorize_url.to_string()),
+            state_token,
+            provider: OAuthProvider::Gemini,
+            flow: "browser",
+            verification_url: None,
+            user_code: None,
+            poll_interval_secs: None,
+            expires_at_unix_secs: None,
+        })
+        .into_response();
+    }
     let oauth = state
         .config
         .oauth
@@ -363,10 +712,12 @@ async fn start_oauth_draft(
 
     let now = cc_lb_clock::unix_secs(state.clock.now());
     let in_flight = InFlightPkce {
+        provider: OAuthProvider::Anthropic,
         handshake: handshake_state.clone(),
         created_at_unix_secs: now,
         initiated_by: identity.audit_fields(),
         target: PkceTarget::PendingDraft { completed: None },
+        device: None,
     };
     if let Err(response) =
         persist_pkce_flow(&state, storage.as_ref(), &state_token, &in_flight).await
@@ -405,8 +756,14 @@ async fn start_oauth_draft(
         }
 
         Json(DraftStartResponse {
-            authorize_url,
+            authorize_url: Some(authorize_url),
             state_token,
+            provider: OAuthProvider::Anthropic,
+            flow: "paste_code",
+            verification_url: None,
+            user_code: None,
+            poll_interval_secs: None,
+            expires_at_unix_secs: None,
         })
         .into_response()
     })
@@ -445,176 +802,399 @@ async fn complete_oauth_draft(
     }
     let initiated_by = in_flight.initiated_by.actor.clone();
 
-    let handshake = match in_flight.handshake.clone().into_handshake() {
-        Ok(handshake) => handshake,
-        Err(_) => {
-            return invalid_state_response(
-                "stored PKCE handshake is corrupted — restart the OAuth flow",
-            );
-        }
-    };
-    let code = normalize_oauth_code(&payload.code);
-    let PkceExchangeOutcome {
-        credentials,
-        mode,
-        long_lived_fallback,
-        fallback_reason,
-        granted_expires_in_secs,
-    } = match complete_pkce_flow(
-        handshake,
-        code,
-        payload.state_token.clone(),
-        Arc::new(HyperOAuthHttpClient::new()),
-        &*state.clock,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => return token_exchange_error_response(error),
-    };
-    if fallback_reason == Some(LongLivedFallbackReason::Clamped) {
-        tracing::warn!(
-            initiated_by = %initiated_by,
-            ?granted_expires_in_secs,
-            "oauth draft complete: provider granted a shorter token lifetime than \
-             requested; storing as a refreshing credential"
-        );
-    }
-
-    // The refresh token is stored even for long-lived credentials: it may be
-    // useful later, but it must never be used to refresh (that would revoke
-    // the 365-day access token). `mode.never_refresh()` is the single source
-    // of truth — a clamped grant is already demoted to refreshing mode by the
-    // exchange, so it is stored refreshable without a second check here.
-    let bundle = OAuthTokenBundle {
-        access_token: credentials.access_token,
-        refresh_token: credentials.refresh_token,
-        // Always the lifetime the token endpoint granted; the requested
-        // lifetime is never substituted.
-        expires_at_unix_secs: credentials.expires_at,
-        refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
-        account_id: None,
-        project_id: None,
-        scopes: credentials.scopes,
-        never_refresh: mode.never_refresh(),
-    };
-    let encrypted_tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
-        &state.aead,
-        &bundle,
-        Uuid::nil().as_bytes(),
-    ) {
-        Ok(encrypted) => encrypted,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    let version = storage
-        .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
-        .await
-        .map(|record| record.map(|record| record.value))
-        .unwrap_or(None)
-        .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
-    let user_agent = claude_code_user_agent(&version);
-    let client = make_metadata_http_client();
-    let cancel = CancellationToken::new();
-    let records = match tokio::time::timeout(
-        METADATA_REFRESH_TIMEOUT,
-        fetch_metadata_only(
-            &client,
-            Uuid::nil(),
-            &bundle.access_token,
-            &user_agent,
-            &cancel,
-            &*state.clock,
-        ),
-    )
-    .await
-    {
-        Ok(records) => records,
-        Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({ "error": "metadata_refresh_timeout" })),
-            )
-                .into_response();
-        }
-    };
-    let suggested_name = records
-        .organization_metadata_record
-        .as_ref()
-        .map(|record| suggest_name(record, record.account_email.as_deref()))
-        .unwrap_or_else(|| "OAuth Upstream".to_owned());
-    let completion = DraftCompletion {
-        encrypted_tokens,
-        subscription_metadata_record: records.subscription_metadata_record.clone(),
-        organization_metadata_record: records.organization_metadata_record.clone(),
-        fetched_at_unix_secs: cc_lb_clock::unix_secs(state.clock.now()),
-    };
-
-    let mut in_flight = in_flight;
-    match &mut in_flight.target {
-        PkceTarget::PendingDraft { completed } if completed.is_none() => {
-            *completed = Some(Box::new(completion));
-        }
-        PkceTarget::PendingDraft { .. } => {
-            return invalid_state_response("OAuth draft has already been completed");
-        }
-        PkceTarget::ExistingUpstream { .. } => {
-            return invalid_state_response("state token is for an existing upstream");
-        }
-    }
-    if let Err(response) =
-        persist_pkce_flow(&state, storage.as_ref(), &payload.state_token, &in_flight).await
-    {
-        return response;
-    }
-
-    let state_token = payload.state_token;
-    match complete_after_commit(async move {
-        if let Err(error) = record_admin_audit(
-            &state,
-            AdminAuditEvent {
-                identity: Some(&identity),
-                system_component: None,
-                action: "upstream_oauth_draft_complete",
-                route: "/admin/v1/oauth/draft/complete",
-                target_principal_id: None,
-                target_upstream: None,
-                api_key_id: None,
-                status: StatusCode::OK.as_u16(),
-                payload: Some(json!({ "initiated_by": initiated_by })),
-            },
-        )
-        .await
-        {
-            tracing::error!(
-                error = %error,
-                action = "upstream_oauth_draft_complete",
-                "admin audit write failed"
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "audit_write_failed" })),
-            )
-                .into_response();
-        }
-
-        Json(DraftCompleteResponse {
-            state_token,
-            suggested_name,
-            subscription_metadata: records.subscription_metadata_record,
-            organization_metadata: records.organization_metadata_record,
+    let provider = in_flight.provider;
+    let storage = Arc::clone(storage);
+    let response = async {
+        let (
+            credentials,
+            account_identity,
             mode,
             long_lived_fallback,
             fallback_reason,
             granted_expires_in_secs,
+        ) = if provider == OAuthProvider::Openai {
+            let config = state.config.oauth.openai.clone().unwrap_or_default();
+            let (handshake, authorization_code, redirect_uri) =
+                if let Some(device) = in_flight.device.clone() {
+                    if cc_lb_clock::unix_secs(state.clock.now()) >= device.expires_at_unix_secs {
+                        return provider_flow_error(
+                            provider,
+                            "device_code_expired",
+                            StatusCode::BAD_REQUEST,
+                        );
+                    }
+                    let poll = match poll_openai_device_code(&config, &device).await {
+                        Ok(poll) => poll,
+                        Err(error) => return oauth_provider_error_response(provider, error),
+                    };
+                    let (authorization_code, code_verifier) = match poll {
+                        OpenAiDevicePoll::Pending => {
+                            let mut pending = in_flight;
+                            if let Some(device) = pending.device.as_mut() {
+                                device.pending_attempts = device.pending_attempts.saturating_add(1);
+                            }
+                            if let Err(response) = persist_pkce_flow(
+                                &state,
+                                storage.as_ref(),
+                                &payload.state_token,
+                                &pending,
+                            )
+                            .await
+                            {
+                                return response;
+                            }
+                            return (
+                                StatusCode::ACCEPTED,
+                                Json(json!({
+                                    "status": "pending",
+                                    "poll_interval_secs": device.poll_interval_secs
+                                })),
+                            )
+                                .into_response();
+                        }
+                        OpenAiDevicePoll::SlowDown => {
+                            return provider_flow_error(
+                                provider,
+                                "slow_down",
+                                StatusCode::TOO_MANY_REQUESTS,
+                            );
+                        }
+                        OpenAiDevicePoll::Expired => {
+                            return provider_flow_error(
+                                provider,
+                                "device_code_expired",
+                                StatusCode::BAD_REQUEST,
+                            );
+                        }
+                        OpenAiDevicePoll::Denied => {
+                            return provider_flow_error(
+                                provider,
+                                "access_denied",
+                                StatusCode::BAD_REQUEST,
+                            );
+                        }
+                        OpenAiDevicePoll::Authorized {
+                            authorization_code,
+                            code_verifier,
+                        } => (authorization_code, code_verifier),
+                    };
+                    (
+                        in_flight.handshake.clone().with_verifier(code_verifier),
+                        authorization_code,
+                        config.device_redirect_uri.clone(),
+                    )
+                } else {
+                    let Some(code) = payload.code.as_deref() else {
+                        return invalid_state_response("authorization code is required");
+                    };
+                    let authorization_code =
+                        match parse_openai_browser_code(code, &payload.state_token) {
+                            Ok(code) => code,
+                            Err("state_mismatch") => {
+                                return provider_flow_error(
+                                    provider,
+                                    "state_mismatch",
+                                    StatusCode::BAD_REQUEST,
+                                );
+                            }
+                            Err(_) => {
+                                return invalid_state_response("authorization code is required");
+                            }
+                        };
+                    (
+                        in_flight.handshake.clone(),
+                        authorization_code,
+                        config.browser_redirect_uri.clone(),
+                    )
+                };
+            let (credentials, account_identity) = match complete_pkce_form_flow(
+                handshake,
+                authorization_code,
+                None,
+                redirect_uri,
+                Arc::new(HyperOAuthHttpClient::new()),
+                &*state.clock,
+            )
+            .await
+            {
+                Ok((credentials, account_identity)) => (credentials, account_identity),
+                Err(error) => {
+                    return oauth_provider_error_response(
+                        provider,
+                        ProviderCompletionError::token(error),
+                    );
+                }
+            };
+            (
+                credentials,
+                account_identity,
+                OAuthTokenMode::Refreshing,
+                false,
+                None,
+                None,
+            )
+        } else if provider == OAuthProvider::Gemini {
+            let Some(config) = state.config.oauth.antigravity.clone() else {
+                return provider_flow_error(
+                    provider,
+                    "oauth_client_not_configured",
+                    StatusCode::BAD_REQUEST,
+                );
+            };
+            if config.missing_client_credentials().is_some() {
+                return provider_flow_error(
+                    provider,
+                    "oauth_client_not_configured",
+                    StatusCode::BAD_REQUEST,
+                );
+            }
+            let Some(input) = payload.code.as_deref() else {
+                return invalid_state_response("authorization code is required");
+            };
+            let code = match parse_gemini_browser_code(
+                input,
+                &payload.state_token,
+                &config.redirect_uri,
+            ) {
+                Ok(code) => code,
+                Err("state_mismatch") => {
+                    return provider_flow_error(
+                        provider,
+                        "state_mismatch",
+                        StatusCode::BAD_REQUEST,
+                    );
+                }
+                Err(_) => return invalid_state_response("invalid authorization callback"),
+            };
+            let (credentials, account_identity) = match complete_gemini_oauth(
+                in_flight.handshake.clone(),
+                code,
+                &config,
+                &*state.clock,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => return oauth_provider_error_response(provider, error),
+            };
+            (
+                credentials,
+                account_identity,
+                OAuthTokenMode::Refreshing,
+                false,
+                None,
+                None,
+            )
+        } else {
+            let handshake = match in_flight.handshake.clone().into_handshake() {
+                Ok(handshake) => handshake,
+                Err(_) => {
+                    return invalid_state_response(
+                        "stored PKCE handshake is corrupted — restart the OAuth flow",
+                    );
+                }
+            };
+            let Some(code) = payload.code.as_deref() else {
+                return invalid_state_response("authorization code is required");
+            };
+            let code = normalize_oauth_code(code);
+            match complete_pkce_flow(
+                handshake,
+                code,
+                payload.state_token.clone(),
+                Arc::new(HyperOAuthHttpClient::new()),
+                &*state.clock,
+            )
+            .await
+            {
+                Ok(PkceExchangeOutcome {
+                    credentials,
+                    mode,
+                    long_lived_fallback,
+                    fallback_reason,
+                    granted_expires_in_secs,
+                }) => (
+                    credentials,
+                    OAuthAccountIdentity::default(),
+                    mode,
+                    long_lived_fallback,
+                    fallback_reason,
+                    granted_expires_in_secs,
+                ),
+                Err(error) => return token_exchange_error_response(error),
+            }
+        };
+        if fallback_reason == Some(LongLivedFallbackReason::Clamped) {
+            tracing::warn!(
+                initiated_by = %initiated_by,
+                ?granted_expires_in_secs,
+                "oauth draft complete: provider granted a shorter token lifetime than \
+                 requested; storing as a refreshing credential"
+            );
+        }
+
+        // The refresh token is stored even for long-lived credentials: it may be
+        // useful later, but it must never be used to refresh (that would revoke
+        // the 365-day access token). `mode.never_refresh()` is the single source
+        // of truth — a clamped grant is already demoted to refreshing mode by the
+        // exchange, so it is stored refreshable without a second check here.
+        let bundle = OAuthTokenBundle {
+            access_token: credentials.access_token,
+            refresh_token: credentials.refresh_token,
+            // Always the lifetime the token endpoint granted; the requested
+            // lifetime is never substituted.
+            expires_at_unix_secs: credentials.expires_at,
+            refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
+            account_id: account_identity
+                .account_id
+                .clone()
+                .or(account_identity.account_email.clone()),
+            project_id: account_identity.project_id.clone(),
+            oauth_profile: if provider == OAuthProvider::Gemini {
+                cc_lb_aead::GeminiOAuthProfile::Antigravity
+            } else {
+                cc_lb_aead::GeminiOAuthProfile::default()
+            },
+            scopes: credentials.scopes,
+            never_refresh: mode.never_refresh(),
+        };
+        let encrypted_tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
+            &state.aead,
+            &bundle,
+            Uuid::nil().as_bytes(),
+        ) {
+            Ok(encrypted) => encrypted,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+
+        let version = storage
+            .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
+            .await
+            .map(|record| record.map(|record| record.value))
+            .unwrap_or(None)
+            .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
+        let user_agent = claude_code_user_agent(&version);
+        let client = make_metadata_http_client();
+        let cancel = CancellationToken::new();
+        let records = if provider == OAuthProvider::Anthropic {
+            match tokio::time::timeout(
+                METADATA_REFRESH_TIMEOUT,
+                fetch_metadata_only(
+                    &client,
+                    Uuid::nil(),
+                    &bundle.access_token,
+                    &user_agent,
+                    &cancel,
+                    &*state.clock,
+                ),
+            )
+            .await
+            {
+                Ok(records) => records,
+                Err(_) => {
+                    return (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        Json(json!({ "error": "metadata_refresh_timeout" })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            provider_metadata_records(
+                Uuid::nil(),
+                &account_identity,
+                cc_lb_clock::unix_millis(state.clock.now()),
+            )
+        };
+        let suggested_name = account_identity
+            .account_email
+            .as_deref()
+            .and_then(email_local_part)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                records
+                    .organization_metadata_record
+                    .as_ref()
+                    .map(|record| suggest_name(record, record.account_email.as_deref()))
+                    .unwrap_or_else(|| "OAuth Upstream".to_owned())
+            });
+        let completion = DraftCompletion {
+            encrypted_tokens,
+            subscription_metadata_record: records.subscription_metadata_record.clone(),
+            organization_metadata_record: records.organization_metadata_record.clone(),
+            fetched_at_unix_secs: cc_lb_clock::unix_secs(state.clock.now()),
+        };
+
+        let mut in_flight = in_flight;
+        match &mut in_flight.target {
+            PkceTarget::PendingDraft { completed } if completed.is_none() => {
+                *completed = Some(Box::new(completion));
+            }
+            PkceTarget::PendingDraft { .. } => {
+                return invalid_state_response("OAuth draft has already been completed");
+            }
+            PkceTarget::ExistingUpstream { .. } => {
+                return invalid_state_response("state token is for an existing upstream");
+            }
+        }
+        if let Err(response) =
+            persist_pkce_flow(&state, storage.as_ref(), &payload.state_token, &in_flight).await
+        {
+            return response;
+        }
+
+        let state_token = payload.state_token;
+        match complete_after_commit(async move {
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: "upstream_oauth_draft_complete",
+                    route: "/admin/v1/oauth/draft/complete",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: Some(json!({ "initiated_by": initiated_by })),
+                },
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %error,
+                    action = "upstream_oauth_draft_complete",
+                    "admin audit write failed"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "audit_write_failed" })),
+                )
+                    .into_response();
+            }
+
+            Json(DraftCompleteResponse {
+                state_token,
+                suggested_name,
+                subscription_metadata: Some(records.subscription_metadata_record),
+                organization_metadata: records.organization_metadata_record,
+                mode,
+                long_lived_fallback,
+                fallback_reason,
+                granted_expires_in_secs,
+                provider: in_flight.provider,
+                account_identity,
+            })
+            .into_response()
         })
-        .into_response()
-    })
-    .await
-    {
-        Ok(response) => response,
-        Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        .await
+        {
+            Ok(response) => response,
+            Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
     }
+    .await;
+    finish_provider_completion(provider, response)
 }
 
 async fn create_upstream_from_oauth_draft(
@@ -643,19 +1223,26 @@ async fn create_upstream_from_oauth_draft(
     let draft = in_flight.and_then(|flow| match flow.target {
         PkceTarget::PendingDraft {
             completed: Some(completion),
-        } => Some((*completion, flow.initiated_by.actor)),
+        } => Some((flow.provider, *completion, flow.initiated_by.actor)),
         _ => None,
     });
-    let Some((completion, initiated_by)) = draft else {
+    let Some((provider, completion, initiated_by)) = draft else {
         return invalid_state_response("OAuth draft is missing or incomplete");
     };
     let name = payload.name.clone();
     let base_url = match payload.base_url {
         Some(base_url) => Some(base_url),
-        None => match Url::parse(DEFAULT_OAUTH_UPSTREAM_BASE_URL) {
-            Ok(base_url) => Some(base_url),
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        },
+        None => {
+            let value = match provider {
+                OAuthProvider::Anthropic => DEFAULT_OAUTH_UPSTREAM_BASE_URL,
+                OAuthProvider::Openai => "https://chatgpt.com/backend-api/codex",
+                OAuthProvider::Gemini => "https://daily-cloudcode-pa.googleapis.com",
+            };
+            match Url::parse(value) {
+                Ok(base_url) => Some(base_url),
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
     };
     // The draft tokens are sealed with the nil AAD; rebind them to the
     // preallocated upstream id before the insert so the spec row and its
@@ -698,13 +1285,19 @@ async fn create_upstream_from_oauth_draft(
         UpstreamCreate {
             id,
             name: payload.name,
-            kind: UpstreamKind::AnthropicOauth,
+            kind: match provider {
+                OAuthProvider::Anthropic => UpstreamKind::AnthropicOauth,
+                OAuthProvider::Openai => UpstreamKind::OpenaiOauth,
+                OAuthProvider::Gemini => UpstreamKind::GeminiOauth,
+            },
             base_url,
             api_key_ciphertext: None,
             oauth_tokens: Some(OAuthTokensCreate {
                 tokens,
                 never_refresh: bundle.never_refresh,
             }),
+            // All OAuth providers support scheduler-managed warmup; dialect
+            // plugins remain an explicit Anthropic-only option.
             warmup_enabled: true,
             warmup_dialect_plugin: None,
             workspace_id: None,
@@ -884,6 +1477,29 @@ async fn complete_oauth(
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(error) => return storage_error_response(&error),
     };
+    if matches!(
+        current.kind,
+        UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) {
+        let storage = Arc::clone(storage);
+        return match complete_after_commit(async move {
+            complete_provider_oauth(
+                &state,
+                storage.as_ref(),
+                &identity,
+                upstream_id,
+                current,
+                in_flight,
+                payload,
+            )
+            .await
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    }
     if current.kind != UpstreamKind::AnthropicOauth {
         return (
             StatusCode::BAD_REQUEST,
@@ -904,7 +1520,10 @@ async fn complete_oauth(
         }
     };
     // Anthropic's callback shows `<code>#<state>`; users may also paste the full callback URL.
-    let code = normalize_oauth_code(&payload.code);
+    let Some(code) = payload.code.as_deref() else {
+        return invalid_state_response("authorization code is required");
+    };
+    let code = normalize_oauth_code(code);
     let PkceExchangeOutcome {
         credentials,
         mode,
@@ -954,6 +1573,7 @@ async fn complete_oauth(
         refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
         account_id: None,
         project_id: None,
+        oauth_profile: cc_lb_aead::GeminiOAuthProfile::default(),
         scopes: credentials.scopes,
         never_refresh: mode.never_refresh(),
     };
@@ -1084,6 +1704,7 @@ async fn get_oauth_status(
             scopes: Vec::new(),
             mode: None,
             can_refresh: false,
+            account_identity: OAuthAccountIdentity::default(),
         })
         .into_response();
     }
@@ -1100,12 +1721,15 @@ async fn get_oauth_status(
             scopes: Vec::new(),
             mode: None,
             can_refresh: false,
+            account_identity: OAuthAccountIdentity::default(),
         })
         .into_response();
     };
 
     match encrypted.decrypt(state.aead.as_ref(), upstream.id.as_bytes()) {
         Ok(bundle) => {
+            let account_identity =
+                provider_account_identity(storage.as_ref(), &upstream, &bundle).await;
             let now = cc_lb_clock::unix_secs(state.clock.now());
             let status = if bundle.expires_at_unix_secs <= now {
                 "expired"
@@ -1129,6 +1753,7 @@ async fn get_oauth_status(
                 scopes: bundle.scopes,
                 mode: Some(OAuthTokenMode::from_never_refresh(bundle.never_refresh)),
                 can_refresh: !bundle.never_refresh,
+                account_identity,
             })
             .into_response()
         }
@@ -1149,10 +1774,85 @@ async fn get_oauth_status(
                 scopes: Vec::new(),
                 mode: None,
                 can_refresh: false,
+                account_identity: OAuthAccountIdentity::default(),
             })
             .into_response()
         }
     }
+}
+
+fn provider_metadata_records(
+    upstream_id: Uuid,
+    account_identity: &OAuthAccountIdentity,
+    observed_at_unix_millis: u128,
+) -> MetadataRefreshRecords {
+    MetadataRefreshRecords {
+        subscription_metadata_record: UpstreamSubscriptionMetadataRecord {
+            upstream_id,
+            organization_uuid: None,
+            organization_role: None,
+            workspace_role: None,
+            observed_at_unix_millis: i64::try_from(observed_at_unix_millis).unwrap_or(i64::MAX),
+            last_error: None,
+            raw_roles: None,
+            // Retain only display metadata, never the original ID token or provider response.
+            raw_bootstrap: Some(json!({ "oauth_account": account_identity }).to_string()),
+        },
+        organization_metadata_record: None,
+    }
+}
+
+pub(super) fn account_identity_from_metadata(
+    metadata: Option<&UpstreamSubscriptionMetadataRecord>,
+) -> OAuthAccountIdentity {
+    metadata
+        .and_then(|metadata| metadata.raw_bootstrap.as_deref())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("oauth_account").cloned())
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+pub(super) async fn provider_account_identity(
+    storage: &dyn Storage,
+    upstream: &UpstreamRecord,
+    bundle: &OAuthTokenBundle,
+) -> OAuthAccountIdentity {
+    let metadata = storage
+        .get_upstream_subscription_metadata(upstream.id)
+        .await
+        .ok()
+        .flatten();
+    let mut identity = account_identity_from_metadata(metadata.as_ref());
+    match upstream.kind {
+        UpstreamKind::OpenaiOauth => {
+            if identity.account_id.as_deref() != bundle.account_id.as_deref() {
+                identity = OAuthAccountIdentity::default();
+            }
+            let claims = openai_identity_from_token(&bundle.access_token);
+            identity.account_email = identity.account_email.or(claims.account_email);
+            identity.account_id = bundle
+                .account_id
+                .clone()
+                .or(claims.account_id)
+                .or(identity.account_id);
+            identity.plan = identity.plan.or(claims.plan);
+        }
+        UpstreamKind::GeminiOauth => {
+            if identity
+                .account_email
+                .as_deref()
+                .zip(bundle.account_id.as_deref())
+                .is_some_and(|(stored, current)| !stored.eq_ignore_ascii_case(current))
+            {
+                identity = OAuthAccountIdentity::default();
+            }
+            identity.account_email = identity.account_email.or(bundle.account_id.clone());
+            identity.project_id = bundle.project_id.clone();
+        }
+        _ => {}
+    }
+    identity
 }
 
 #[allow(clippy::result_large_err)]
@@ -1312,6 +2012,7 @@ async fn seed_oauth_reconnect_tasks(
         return Ok(());
     };
     let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
+    seed_oauth_usage_poll(state, upstream, seed_secs).await?;
     // Reconnect must not immediately refresh the token just exchanged. Seed
     // the next refresh at the same cadence used by the refresh worker. The
     // generation suffix keeps a stale task for an older credential from
@@ -1327,8 +2028,10 @@ async fn seed_oauth_reconnect_tasks(
             Err(error) => return Err(error),
         }
     }
-    if upstream.kind == UpstreamKind::AnthropicOauth
-        && upstream.warmup_enabled
+    if matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) && upstream.warmup_enabled
         && upstream.oauth_credentials.is_some()
         && upstream.deleted_at_unix_secs.is_none()
     {
@@ -1359,6 +2062,29 @@ fn oauth_reconnect_refresh_task(
     }
 }
 
+async fn seed_oauth_usage_poll(
+    state: &AdminState,
+    upstream: &UpstreamRecord,
+    seed_secs: u64,
+) -> Result<(), SchedulerError> {
+    let Some(scheduler) = state.scheduler.as_ref() else {
+        return Ok(());
+    };
+    let task = SchedulerPushTask {
+        args: CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(seed_secs)),
+        idempotency_key: Some(format!(
+            "oauth_usage_poll:connect:{}:{}",
+            upstream.id, upstream.oauth_token_generation
+        )),
+        run_at_unix_secs: Some(seed_secs),
+        max_attempts: None,
+    };
+    match scheduler.push_cron_task(task).await {
+        Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) async fn seed_oauth_bootstrap_tasks(
     state: &AdminState,
     upstream: &UpstreamRecord,
@@ -1367,6 +2093,7 @@ pub(super) async fn seed_oauth_bootstrap_tasks(
         return Ok(());
     };
     let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
+    seed_oauth_usage_poll(state, upstream, seed_secs).await?;
     // A long-lived (365-day) credential must never be refreshed: scheduling a
     // refresh would revoke the 365-day access token within seconds. Only the
     // OAuth refresh bootstrap is skipped — a long-lived upstream is otherwise
@@ -1379,8 +2106,10 @@ pub(super) async fn seed_oauth_bootstrap_tasks(
             }
         }
     }
-    if upstream.kind == UpstreamKind::AnthropicOauth
-        && upstream.warmup_enabled
+    if matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) && upstream.warmup_enabled
         && upstream.oauth_credentials.is_some()
         && upstream.deleted_at_unix_secs.is_none()
     {
@@ -1560,7 +2289,1250 @@ fn normalize_oauth_code(input: &str) -> String {
     }
     trimmed.split('#').next().unwrap_or(trimmed).to_string()
 }
+fn parse_openai_browser_code(input: &str, expected_state: &str) -> Result<String, &'static str> {
+    let trimmed = input.trim();
+    if let Ok(url) = Url::parse(trimmed) {
+        if let Some(state) = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            && state != expected_state
+        {
+            return Err("state_mismatch");
+        }
+        return url
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .map(|(_, value)| value.into_owned())
+            .filter(|code| !code.trim().is_empty())
+            .ok_or("missing_code");
+    }
+    let code = trimmed.split('#').next().unwrap_or(trimmed).trim();
+    (!code.is_empty())
+        .then(|| code.to_owned())
+        .ok_or("missing_code")
+}
 
+fn parse_gemini_browser_code(
+    input: &str,
+    expected_state: &str,
+    redirect_uri: &Url,
+) -> Result<String, &'static str> {
+    let trimmed = input.trim();
+    if let Ok(callback) = Url::parse(trimmed) {
+        if callback.origin() != redirect_uri.origin() || callback.path() != redirect_uri.path() {
+            return Err("invalid_redirect_uri");
+        }
+        let states = callback
+            .query_pairs()
+            .filter(|(key, _)| key == "state")
+            .collect::<Vec<_>>();
+        if states.len() != 1
+            || states
+                .first()
+                .is_none_or(|(_, state)| state != expected_state)
+        {
+            return Err("state_mismatch");
+        }
+        let codes = callback
+            .query_pairs()
+            .filter(|(key, _)| key == "code")
+            .collect::<Vec<_>>();
+        return codes
+            .first()
+            .filter(|_| codes.len() == 1)
+            .map(|(_, code)| code.trim().to_owned())
+            .filter(|code| !code.is_empty())
+            .ok_or("missing_code");
+    }
+    (!trimmed.is_empty() && !trimmed.chars().any(|ch| matches!(ch, '?' | '#' | '&')))
+        .then(|| trimmed.to_owned())
+        .ok_or("missing_code")
+}
+
+async fn request_openai_device_code(
+    config: &OpenAiOAuthConfig,
+    now: u64,
+) -> Result<DeviceState, &'static str> {
+    #[derive(Serialize)]
+    struct Request<'a> {
+        client_id: &'a str,
+    }
+    #[derive(Deserialize)]
+    struct Response {
+        device_auth_id: Option<String>,
+        user_code: Option<String>,
+        #[serde(default)]
+        interval: Option<serde_json::Value>,
+        #[serde(default)]
+        expires_in: Option<u64>,
+        #[serde(default)]
+        expires_at: Option<String>,
+    }
+    let response = reqwest::Client::new()
+        .post(config.device_usercode_url.clone())
+        .json(&Request {
+            client_id: &config.client_id,
+        })
+        .send()
+        .await
+        .map_err(|_| "device_login_unavailable")?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err("device_login_unavailable");
+    }
+    if !response.status().is_success() {
+        return Err("device_login_failed");
+    }
+    let body = response
+        .json::<Response>()
+        .await
+        .map_err(|_| "device_login_failed")?;
+    let device_auth_id = body.device_auth_id.ok_or("device_login_failed")?;
+    let user_code = body.user_code.ok_or("device_login_failed")?;
+    let poll_interval_secs = match body.interval {
+        Some(value) => value
+            .as_u64()
+            .or_else(|| {
+                value
+                    .as_str()
+                    .and_then(|interval| interval.parse::<u64>().ok())
+            })
+            .ok_or("device_login_failed")?,
+        None => 5,
+    }
+    .max(1);
+    let expires_at_unix_secs = match body.expires_at {
+        Some(value) => chrono::DateTime::parse_from_rfc3339(&value)
+            .ok()
+            .and_then(|value| u64::try_from(value.timestamp()).ok())
+            .ok_or("device_login_failed")?,
+        None => now.saturating_add(body.expires_in.unwrap_or(PKCE_FLOW_TTL_SECS)),
+    };
+    Ok(DeviceState {
+        device_auth_id,
+        user_code,
+        poll_interval_secs,
+        expires_at_unix_secs,
+        authorization_code: None,
+        code_verifier: None,
+        pending_attempts: 0,
+    })
+}
+
+enum OpenAiDevicePoll {
+    Pending,
+    Authorized {
+        authorization_code: String,
+        code_verifier: String,
+    },
+    Denied,
+    SlowDown,
+    Expired,
+}
+
+async fn poll_openai_device_code(
+    config: &OpenAiOAuthConfig,
+    device: &DeviceState,
+) -> Result<OpenAiDevicePoll, ProviderCompletionError> {
+    #[derive(Serialize)]
+    struct Request<'a> {
+        device_auth_id: &'a str,
+        user_code: &'a str,
+    }
+    #[derive(Deserialize)]
+    struct Response {
+        authorization_code: Option<String>,
+        code_verifier: Option<String>,
+    }
+    let response = reqwest::Client::new()
+        .post(config.device_token_url.clone())
+        .json(&Request {
+            device_auth_id: &device.device_auth_id,
+            user_code: &device.user_code,
+        })
+        .send()
+        .await
+        .map_err(|_| {
+            ProviderCompletionError::failed(
+                "device_poll",
+                "Device authorization",
+                "device_poll_failed",
+            )
+        })?;
+    let status = response.status();
+    let body = response.bytes().await.map_err(|_| {
+        ProviderCompletionError::failed("device_poll", "Device authorization", "device_poll_failed")
+    })?;
+    let error_body = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let provider_error = error_body.as_ref().and_then(|value| {
+        value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| value.get("code").and_then(serde_json::Value::as_str))
+            .filter(|code| {
+                code.len() <= 80
+                    && *code != device.device_auth_id
+                    && *code != device.user_code
+                    && code
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            })
+            .map(str::to_owned)
+    });
+    if status == StatusCode::TOO_MANY_REQUESTS || provider_error.as_deref() == Some("slow_down") {
+        return Ok(OpenAiDevicePoll::SlowDown);
+    }
+    if status == StatusCode::GONE
+        || matches!(
+            provider_error.as_deref(),
+            Some("expired_token" | "expired" | "device_code_expired")
+        )
+    {
+        return Ok(OpenAiDevicePoll::Expired);
+    }
+    if status == StatusCode::UNAUTHORIZED || provider_error.as_deref() == Some("access_denied") {
+        return Ok(OpenAiDevicePoll::Denied);
+    }
+    if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
+        return Ok(OpenAiDevicePoll::Pending);
+    }
+    if !status.is_success() {
+        let mut error = ProviderCompletionError::failed(
+            "device_poll",
+            "Device authorization",
+            "device_poll_failed",
+        );
+        error.provider_code = provider_error;
+        error.provider_status = Some(status.as_u16());
+        error.detail = format!(
+            "Device authorization was rejected (HTTP {}).",
+            status.as_u16()
+        );
+        return Err(error);
+    }
+    let body = serde_json::from_slice::<Response>(&body).map_err(|_| {
+        ProviderCompletionError::failed("device_poll", "Device authorization", "device_poll_failed")
+    })?;
+    match (body.authorization_code, body.code_verifier) {
+        (Some(authorization_code), Some(code_verifier)) => Ok(OpenAiDevicePoll::Authorized {
+            authorization_code,
+            code_verifier,
+        }),
+        _ => Ok(OpenAiDevicePoll::Pending),
+    }
+}
+
+async fn complete_gemini_oauth(
+    handshake: PkceHandshakeState,
+    code: String,
+    config: &AntigravityOAuthConfig,
+    clock: &dyn cc_lb_clock::Clock,
+) -> Result<(cc_lb_storage_api::OAuthCredentials, OAuthAccountIdentity), ProviderCompletionError> {
+    let (credentials, _) = complete_pkce_form_flow(
+        handshake,
+        code,
+        Some(&config.client_secret),
+        config.redirect_uri.clone(),
+        Arc::new(HyperOAuthHttpClient::new()),
+        clock,
+    )
+    .await
+    .map_err(ProviderCompletionError::token)?;
+    let client = reqwest::Client::new();
+    let email = gemini_account_email(&client, config, &credentials.access_token).await?;
+    let base = config.code_assist_url.as_str().trim_end_matches('/');
+    let endpoint = format!("{}/v1internal", base.trim_end_matches("/v1internal"));
+    let load = provider_completion_json(
+        client
+            .post(format!("{endpoint}:loadCodeAssist"))
+            .bearer_auth(&credentials.access_token)
+            .header(reqwest::header::USER_AGENT, &config.user_agent)
+            .json(&json!({ "metadata": { "ideType": "ANTIGRAVITY" } })),
+        "load_code_assist",
+        "loadCodeAssist",
+        &credentials.access_token,
+    )
+    .await?;
+    let current_tier = load.get("currentTier").filter(|tier| !tier.is_null());
+    if current_tier.is_none()
+        && load
+            .get("ineligibleTiers")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tiers| {
+                tiers.iter().any(|tier| {
+                    tier.get("reasonCode").and_then(serde_json::Value::as_str)
+                        == Some("VALIDATION_REQUIRED")
+                        && tier
+                            .get("validationUrl")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|url| !url.is_empty())
+                })
+            })
+    {
+        let mut error = gemini_setup_error(&load, &credentials);
+        error.code = "account_validation_required";
+        return Err(error);
+    }
+    let plan = load
+        .get("paidTier")
+        .and_then(|tier| tier.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            current_tier
+                .and_then(|tier| tier.get("id"))
+                .and_then(serde_json::Value::as_str)
+        });
+    let (project_id, plan) = if let Some(project_id) = gemini_project_from_response(&load) {
+        (project_id, plan.unwrap_or("free-tier").to_owned())
+    } else {
+        let default_tier = load
+            .get("allowedTiers")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|tiers| {
+                tiers.iter().find(|tier| {
+                    tier.get("isDefault").and_then(serde_json::Value::as_bool) == Some(true)
+                })
+            });
+        let tier_id = default_tier
+            .and_then(|tier| tier.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .or(plan)
+            .unwrap_or("free-tier");
+        let onboard_body = json!({
+            "tier_id": tier_id,
+            "metadata": { "ide_type": "ANTIGRAVITY", "ide_version": "2.24.0", "ide_name": "antigravity" }
+        });
+        let mut onboard = provider_completion_json(
+            client
+                .post(format!("{endpoint}:onboardUser"))
+                .bearer_auth(&credentials.access_token)
+                .header(reqwest::header::ACCEPT, "*/*")
+                .header(
+                    reqwest::header::USER_AGENT,
+                    format!("{} google-api-nodejs-client/10.3.0", config.user_agent),
+                )
+                .header("X-Goog-Api-Client", "gl-node/22.21.1")
+                .json(&onboard_body),
+            "onboard_user",
+            "onboardUser",
+            &credentials.access_token,
+        )
+        .await?;
+        let operation_name = onboard
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        let mut project_id = onboard
+            .get("response")
+            .and_then(gemini_project_from_response);
+        for _ in 0..5 {
+            if onboard.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
+                break;
+            }
+            let Some(name) = operation_name.as_deref() else {
+                break;
+            };
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            onboard = provider_completion_json(
+                client
+                    .get(format!("{endpoint}/{name}"))
+                    .bearer_auth(&credentials.access_token)
+                    .header(reqwest::header::USER_AGENT, &config.user_agent),
+                "onboard_user",
+                "onboardUser",
+                &credentials.access_token,
+            )
+            .await?;
+            project_id = onboard
+                .get("response")
+                .and_then(gemini_project_from_response)
+                .or(project_id);
+        }
+        (
+            project_id.ok_or_else(|| gemini_setup_error(&load, &credentials))?,
+            tier_id.to_owned(),
+        )
+    };
+    Ok((
+        credentials,
+        OAuthAccountIdentity {
+            account_email: Some(email),
+            account_id: None,
+            plan: Some(plan),
+            project_id: Some(project_id),
+        },
+    ))
+}
+
+async fn gemini_account_email(
+    client: &reqwest::Client,
+    config: &AntigravityOAuthConfig,
+    access_token: &str,
+) -> Result<String, ProviderCompletionError> {
+    provider_completion_json(
+        client
+            .get(config.userinfo_url.clone())
+            .bearer_auth(access_token)
+            .header(reqwest::header::USER_AGENT, &config.user_agent),
+        "userinfo",
+        "Google userinfo",
+        access_token,
+    )
+    .await?
+    .get("email")
+    .and_then(serde_json::Value::as_str)
+    .filter(|email| !email.trim().is_empty())
+    .map(str::to_owned)
+    .ok_or_else(|| ProviderCompletionError {
+        code: "missing_account_identity",
+        stage: "userinfo",
+        provider_code: None,
+        detail: "Google userinfo did not return an account email.".to_owned(),
+        status: StatusCode::BAD_REQUEST,
+        provider_status: None,
+    })
+}
+
+fn gemini_project_id(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    value
+        .as_str()
+        .or_else(|| value.get("id").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+fn gemini_project_from_response(value: &serde_json::Value) -> Option<String> {
+    ["cloudaicompanionProject", "projectId", "project"]
+        .iter()
+        .find_map(|key| gemini_project_id(value.get(key)))
+}
+
+fn gemini_setup_error(
+    load: &serde_json::Value,
+    credentials: &cc_lb_storage_api::OAuthCredentials,
+) -> ProviderCompletionError {
+    let mut error = ProviderCompletionError::missing_project();
+    let Some(tiers) = load
+        .get("ineligibleTiers")
+        .and_then(serde_json::Value::as_array)
+        .filter(|tiers| !tiers.is_empty())
+    else {
+        return error;
+    };
+    let reasons = tiers
+        .iter()
+        .flat_map(|tier| {
+            [
+                tier.get("reasonMessage").or_else(|| tier.get("reasonCode")),
+                tier.get("validationErrorMessage"),
+            ]
+        })
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+        .map(|reason| {
+            let mut reason = reason.to_owned();
+            for token in [&credentials.access_token, &credentials.refresh_token] {
+                if !token.is_empty() {
+                    reason = reason.replace(token, "[redacted]");
+                }
+            }
+            reason
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(240)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    error.code = "ineligible_tier";
+    error.stage = "load_code_assist";
+    error.detail = if reasons.is_empty() {
+        "Google reported that this account is ineligible for Code Assist.".to_owned()
+    } else {
+        format!("Code Assist account eligibility: {reasons}")
+    };
+    error
+}
+
+struct ProviderCompletionError {
+    code: &'static str,
+    stage: &'static str,
+    provider_code: Option<String>,
+    detail: String,
+    status: StatusCode,
+    provider_status: Option<u16>,
+}
+
+impl ProviderCompletionError {
+    fn token(error: OAuthTokenError) -> Self {
+        match error {
+            OAuthTokenError::TokenEndpoint {
+                status,
+                code,
+                description,
+            } => {
+                let reason = description.or_else(|| code.clone());
+                Self {
+                    code: "token_exchange_rejected",
+                    stage: "token_exchange",
+                    provider_code: code,
+                    detail: reason.map_or_else(
+                        || format!("Token exchange was rejected (HTTP {}).", status.as_u16()),
+                        |reason| {
+                            format!(
+                                "Token exchange was rejected (HTTP {}): {reason}",
+                                status.as_u16()
+                            )
+                        },
+                    ),
+                    status: StatusCode::BAD_REQUEST,
+                    provider_status: Some(status.as_u16()),
+                }
+            }
+            OAuthTokenError::Http { .. } => Self::failed(
+                "token_exchange",
+                "Token endpoint",
+                "token_endpoint_unreachable",
+            ),
+            OAuthTokenError::Json { .. } => {
+                Self::failed("token_exchange", "Token endpoint", "invalid_token_response")
+            }
+        }
+    }
+
+    fn failed(stage: &'static str, label: &str, code: &'static str) -> Self {
+        Self {
+            code,
+            stage,
+            provider_code: None,
+            detail: format!("{label} could not be completed."),
+            status: StatusCode::BAD_GATEWAY,
+            provider_status: None,
+        }
+    }
+
+    fn missing_project() -> Self {
+        Self {
+            code: "missing_project_id",
+            stage: "onboard_user",
+            provider_code: None,
+            detail: "Code Assist did not return a usable project ID.".to_owned(),
+            status: StatusCode::BAD_REQUEST,
+            provider_status: None,
+        }
+    }
+}
+
+async fn provider_completion_json(
+    request: reqwest::RequestBuilder,
+    stage: &'static str,
+    label: &str,
+    access_token: &str,
+) -> Result<serde_json::Value, ProviderCompletionError> {
+    let failed = || {
+        ProviderCompletionError::failed(
+            stage,
+            label,
+            match stage {
+                "userinfo" => "userinfo_failed",
+                "load_code_assist" => "load_code_assist_failed",
+                _ => "onboard_user_failed",
+            },
+        )
+    };
+    let response = request.send().await.map_err(|_| failed())?;
+    let status = response.status();
+    let body = response.bytes().await.map_err(|_| failed())?;
+    let value = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    if !status.is_success()
+        || value
+            .as_ref()
+            .is_some_and(|value| value.get("error").is_some())
+    {
+        let error_value = value.as_ref().and_then(|value| value.get("error"));
+        let provider_code = error_value
+            .and_then(|error| {
+                error
+                    .as_str()
+                    .or_else(|| error.get("status").and_then(serde_json::Value::as_str))
+            })
+            .filter(|code| {
+                code.len() <= 80
+                    && *code != access_token
+                    && code
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            })
+            .map(str::to_owned);
+        let reason = value
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .get("error_description")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                error_value
+                    .and_then(|value| value.get("message").and_then(serde_json::Value::as_str))
+            })
+            .or(provider_code.as_deref())
+            .map(|reason| {
+                reason
+                    .replace(access_token, "[redacted]")
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .take(240)
+                    .collect::<String>()
+            });
+        let mut error = failed();
+        error.detail = reason.map_or_else(
+            || format!("{label} was rejected (HTTP {}).", status.as_u16()),
+            |reason| format!("{label} was rejected (HTTP {}): {reason}", status.as_u16()),
+        );
+        error.provider_code = provider_code;
+        error.provider_status = Some(status.as_u16());
+        return Err(error);
+    }
+    value.ok_or_else(failed)
+}
+
+#[derive(Clone)]
+struct CompletionFailureLog {
+    provider: OAuthProvider,
+    stage: &'static str,
+    provider_code: Option<String>,
+    code: &'static str,
+}
+
+fn finish_provider_completion(provider: OAuthProvider, response: Response) -> Response {
+    if provider != OAuthProvider::Anthropic
+        && (response.status().is_client_error() || response.status().is_server_error())
+    {
+        let failure = response.extensions().get::<CompletionFailureLog>();
+        tracing::warn!(
+            provider = ?failure.map(|failure| failure.provider).unwrap_or(provider),
+            stage = failure.map(|failure| failure.stage).unwrap_or("completion"),
+            provider_error_code = failure.and_then(|failure| failure.provider_code.as_deref()).unwrap_or("unknown"),
+            error = failure.map(|failure| failure.code).unwrap_or("completion_failed"),
+            "OAuth completion failed"
+        );
+    }
+    response
+}
+
+fn oauth_provider_error_response(
+    provider: OAuthProvider,
+    error: ProviderCompletionError,
+) -> Response {
+    let failure = CompletionFailureLog {
+        provider,
+        stage: error.stage,
+        provider_code: error.provider_code.clone(),
+        code: error.code,
+    };
+    let mut response = (
+        error.status,
+        Json(json!({
+            "error": error.code,
+            "detail": error.detail,
+            "stage": error.stage,
+            "provider_error": error.provider_code,
+            "provider_status": error.provider_status,
+        })),
+    )
+        .into_response();
+    response.extensions_mut().insert(failure);
+    response
+}
+
+fn provider_flow_error(
+    provider: OAuthProvider,
+    code: &'static str,
+    status: StatusCode,
+) -> Response {
+    let detail = match code {
+        "oauth_client_not_configured" => {
+            "Configure oauth.antigravity.client_id and oauth.antigravity.client_secret before starting Gemini subscription OAuth."
+        }
+        "device_code_expired" => "The device code expired. Start a new connection.",
+        "access_denied" => "The provider denied this connection.",
+        "slow_down" => "Wait before checking the device connection again.",
+        "state_mismatch" => {
+            "The callback belongs to a different connection. Use the current login link."
+        }
+        "missing_existing_identity" => "The saved account identity could not be verified.",
+        "missing_account_identity" => "The provider did not return an account identity.",
+        _ => "The connection could not be completed.",
+    };
+    oauth_provider_error_response(
+        provider,
+        ProviderCompletionError {
+            code,
+            stage: if code.starts_with("device_") || matches!(code, "slow_down" | "access_denied") {
+                "device_poll"
+            } else {
+                "identity"
+            },
+            provider_code: matches!(code, "slow_down" | "access_denied").then(|| code.to_owned()),
+            detail: detail.to_owned(),
+            status,
+            provider_status: None,
+        },
+    )
+}
+async fn complete_provider_oauth(
+    state: &AdminState,
+    storage: &dyn Storage,
+    identity: &AdminIdentity,
+    upstream_id: Uuid,
+    current: UpstreamRecord,
+    in_flight: InFlightPkce,
+    payload: CompleteRequest,
+) -> Response {
+    let provider = in_flight.provider;
+    let response = async {
+        if (current.kind == UpstreamKind::OpenaiOauth
+            && in_flight.provider != OAuthProvider::Openai)
+            || (current.kind == UpstreamKind::GeminiOauth
+                && in_flight.provider != OAuthProvider::Gemini)
+        {
+            return invalid_state_response("state token provider does not match this upstream");
+        }
+        let expected_revision = match &in_flight.target {
+            PkceTarget::ExistingUpstream {
+                expected_revision, ..
+            } => *expected_revision,
+            PkceTarget::PendingDraft { .. } => {
+                return invalid_state_response("state token is for an OAuth draft");
+            }
+        };
+        if expected_revision != current.revision {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "stale_revision", "current_revision": current.revision })),
+            )
+                .into_response();
+        }
+        let (credentials, account_identity) = if current.kind == UpstreamKind::OpenaiOauth {
+            let config = state.config.oauth.openai.clone().unwrap_or_default();
+            let (handshake, authorization_code, redirect_uri) = if let Some(device) =
+                in_flight.device.clone()
+            {
+                let poll_interval_secs = Some(device.poll_interval_secs);
+                if cc_lb_clock::unix_secs(state.clock.now()) >= device.expires_at_unix_secs {
+                    return provider_flow_error(
+                        provider,
+                        "device_code_expired",
+                        StatusCode::BAD_REQUEST,
+                    );
+                }
+                let poll = match poll_openai_device_code(&config, &device).await {
+                    Ok(result) => result,
+                    Err(error) => return oauth_provider_error_response(in_flight.provider, error),
+                };
+                let (authorization_code, code_verifier) = match poll {
+                    OpenAiDevicePoll::Pending => {
+                        let mut pending = in_flight;
+                        if let Some(device) = pending.device.as_mut() {
+                            device.pending_attempts = device.pending_attempts.saturating_add(1);
+                        }
+                        if let Err(response) =
+                            persist_pkce_flow(state, storage, &payload.state_token, &pending).await
+                        {
+                            return response;
+                        }
+                        return (
+                            StatusCode::ACCEPTED,
+                            Json(json!({
+                                "status": "pending",
+                                "poll_interval_secs": poll_interval_secs
+                            })),
+                        )
+                            .into_response();
+                    }
+                    OpenAiDevicePoll::SlowDown => {
+                        return provider_flow_error(
+                            provider,
+                            "slow_down",
+                            StatusCode::TOO_MANY_REQUESTS,
+                        );
+                    }
+                    OpenAiDevicePoll::Expired => {
+                        return provider_flow_error(
+                            provider,
+                            "device_code_expired",
+                            StatusCode::BAD_REQUEST,
+                        );
+                    }
+                    OpenAiDevicePoll::Denied => {
+                        return provider_flow_error(
+                            provider,
+                            "access_denied",
+                            StatusCode::BAD_REQUEST,
+                        );
+                    }
+                    OpenAiDevicePoll::Authorized {
+                        authorization_code,
+                        code_verifier,
+                    } => (authorization_code, code_verifier),
+                };
+                (
+                    in_flight.handshake.clone().with_verifier(code_verifier),
+                    authorization_code,
+                    config.device_redirect_uri.clone(),
+                )
+            } else {
+                let Some(code) = payload.code.as_deref() else {
+                    return invalid_state_response("authorization code is required");
+                };
+                let authorization_code = match parse_openai_browser_code(code, &payload.state_token)
+                {
+                    Ok(code) => code,
+                    Err("state_mismatch") => {
+                        return provider_flow_error(
+                            provider,
+                            "state_mismatch",
+                            StatusCode::BAD_REQUEST,
+                        );
+                    }
+                    Err(_) => {
+                        return invalid_state_response("authorization code is required");
+                    }
+                };
+                (
+                    in_flight.handshake.clone(),
+                    authorization_code,
+                    config.browser_redirect_uri.clone(),
+                )
+            };
+            let (credentials, account_identity) = match complete_pkce_form_flow(
+                handshake,
+                authorization_code,
+                None,
+                redirect_uri,
+                Arc::new(HyperOAuthHttpClient::new()),
+                &*state.clock,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    return oauth_provider_error_response(
+                        in_flight.provider,
+                        ProviderCompletionError::token(error),
+                    );
+                }
+            };
+            (credentials, account_identity)
+        } else {
+            let Some(config) = state.config.oauth.antigravity.clone() else {
+                return provider_flow_error(
+                    provider,
+                    "oauth_client_not_configured",
+                    StatusCode::BAD_REQUEST,
+                );
+            };
+            if config.missing_client_credentials().is_some() {
+                return provider_flow_error(
+                    provider,
+                    "oauth_client_not_configured",
+                    StatusCode::BAD_REQUEST,
+                );
+            }
+            let Some(code) = payload.code.as_deref() else {
+                return invalid_state_response("authorization code is required");
+            };
+            let (credentials, account_identity) = match complete_gemini_oauth(
+                in_flight.handshake,
+                match parse_gemini_browser_code(code, &payload.state_token, &config.redirect_uri) {
+                    Ok(code) => code,
+                    Err("state_mismatch") => {
+                        return provider_flow_error(
+                            provider,
+                            "state_mismatch",
+                            StatusCode::BAD_REQUEST,
+                        );
+                    }
+                    Err(_) => return invalid_state_response("invalid authorization callback"),
+                },
+                &config,
+                &*state.clock,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => return oauth_provider_error_response(in_flight.provider, error),
+            };
+            (credentials, account_identity)
+        };
+        let account_id = account_identity
+            .account_id
+            .clone()
+            .or(account_identity.account_email.clone());
+        let Some(mut old_bundle) = current.oauth_credentials.as_ref().and_then(|tokens| {
+            tokens
+                .decrypt(state.aead.as_ref(), upstream_id.as_bytes())
+                .ok()
+        }) else {
+            return provider_flow_error(
+                provider,
+                "missing_existing_identity",
+                StatusCode::CONFLICT,
+            );
+        };
+        if old_bundle
+            .account_id
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            old_bundle.account_id = if current.kind == UpstreamKind::OpenaiOauth {
+                cc_lb_oauth_protocol::account_id_from_access_token(&old_bundle.access_token)
+            } else {
+                let config = state.config.oauth.antigravity.clone().unwrap_or_default();
+                gemini_account_email(&reqwest::Client::new(), &config, &old_bundle.access_token)
+                    .await
+                    .ok()
+            };
+        }
+        let Some(old_account) = old_bundle.account_id.as_deref() else {
+            return provider_flow_error(
+                provider,
+                "missing_existing_identity",
+                StatusCode::CONFLICT,
+            );
+        };
+        let Some(new_account) = account_id.filter(|value| !value.trim().is_empty()) else {
+            return provider_flow_error(
+                provider,
+                "missing_account_identity",
+                StatusCode::BAD_REQUEST,
+            );
+        };
+        if current.kind == UpstreamKind::OpenaiOauth && new_account != old_account {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "account_mismatch",
+                    "detail": "Reconnect with the same ChatGPT account as the saved upstream.",
+                    "previous_account_id": old_bundle.account_id,
+                    "account_id": new_account,
+                })),
+            )
+                .into_response();
+        }
+        if current.kind == UpstreamKind::GeminiOauth
+            && !new_account.eq_ignore_ascii_case(old_account)
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "account_mismatch",
+                    "detail": "Reconnect with the same Google account as the saved upstream.",
+                    "previous_email": old_bundle.account_id,
+                    "email": new_account,
+                })),
+            )
+                .into_response();
+        }
+        old_bundle.access_token = credentials.access_token;
+        old_bundle.refresh_token = credentials.refresh_token;
+        old_bundle.expires_at_unix_secs = credentials.expires_at;
+        old_bundle.refresh_token_expires_at_unix_secs =
+            credentials.refresh_token_expires_at_unix_secs;
+        old_bundle.account_id = Some(new_account);
+        old_bundle.project_id = account_identity.project_id.clone();
+        old_bundle.scopes = credentials.scopes;
+        old_bundle.never_refresh = false;
+        if current.kind == UpstreamKind::GeminiOauth {
+            old_bundle.oauth_profile = cc_lb_aead::GeminiOAuthProfile::Antigravity;
+        }
+        let encrypted = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
+            &state.aead,
+            &old_bundle,
+            upstream_id.as_bytes(),
+        ) {
+            Ok(value) => value,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        if let Err(response) = delete_pkce_flow(storage, &payload.state_token).await {
+            return response;
+        }
+        let updated = match storage
+            .store_oauth_tokens(
+                upstream_id,
+                current.revision,
+                encrypted,
+                old_bundle.never_refresh,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(StorageError::Conflict { .. }) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "stale_revision" })),
+                )
+                    .into_response();
+            }
+            Err(error) => return storage_error_response(&error),
+        };
+        let records = provider_metadata_records(
+            upstream_id,
+            &account_identity,
+            cc_lb_clock::unix_millis(state.clock.now()),
+        );
+        if let Err(error) = storage
+            .put_upstream_subscription_metadata(&records.subscription_metadata_record)
+            .await
+        {
+            rebuild_after_committed_failure(state, "oauth reconnect identity persistence").await;
+            return storage_error_response(&error);
+        }
+        if let Err(error) =
+            seed_oauth_reconnect_tasks(state, &updated, old_bundle.expires_at_unix_secs).await
+        {
+            rebuild_after_committed_failure(state, "oauth reconnect scheduler seeding").await;
+            return scheduler_error_response(&error);
+        }
+        let access_token_fingerprint = access_token_fingerprint(&old_bundle.access_token);
+        let audit_action = AuditPayload::UpstreamOauthComplete {
+            upstream_id: upstream_id.to_string(),
+            upstream_name: current.name.clone(),
+            expires_at_unix_secs: old_bundle.expires_at_unix_secs,
+            access_token_fingerprint: access_token_fingerprint.clone(),
+        }
+        .to_string();
+        let route = format!("/admin/v1/upstreams/{upstream_id}/oauth/complete");
+        if let Err(error) = record_admin_audit(
+            state,
+            AdminAuditEvent {
+                identity: Some(identity),
+                system_component: None,
+                action: &audit_action,
+                route: &route,
+                target_principal_id: None,
+                target_upstream: Some(&current.name),
+                api_key_id: None,
+                status: StatusCode::OK.as_u16(),
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %error, "admin audit write failed");
+            rebuild_after_audit_failure(state).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "audit_write_failed" })),
+            )
+                .into_response();
+        }
+        let mut response = Json(CompleteResponse {
+            upstream_id: updated.id,
+            expires_at_unix_secs: old_bundle.expires_at_unix_secs,
+            access_token_fingerprint,
+            mode: OAuthTokenMode::Refreshing,
+            long_lived_fallback: false,
+            fallback_reason: None,
+            granted_expires_in_secs: None,
+        })
+        .into_response();
+        add_dynamic_rebind_headers(&mut response, state).await;
+        response
+    }
+    .await;
+    finish_provider_completion(provider, response)
+}
+async fn start_provider_oauth(
+    state: &AdminState,
+    storage: &dyn Storage,
+    identity: &AdminIdentity,
+    upstream: UpstreamRecord,
+    upstream_id: Uuid,
+    requested_flow: Option<OpenAiFlow>,
+) -> Response {
+    let provider = if upstream.kind == UpstreamKind::OpenaiOauth {
+        OAuthProvider::Openai
+    } else {
+        OAuthProvider::Gemini
+    };
+    let state_token = match encode_state(upstream_id) {
+        Ok(value) => value,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let now = cc_lb_clock::unix_secs(state.clock.now());
+    let (handshake, device, verification_url) = if provider == OAuthProvider::Openai {
+        let config = state.config.oauth.openai.clone().unwrap_or_default();
+        if requested_flow == Some(OpenAiFlow::Browser) {
+            let (Ok(auth), Ok(token)) = (
+                AuthUrl::new(config.authorize_url.to_string()),
+                TokenUrl::new(config.token_url.to_string()),
+            ) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            let mut handshake = start_pkce_flow_without_code(
+                ClientId::new(config.client_id),
+                auth,
+                token,
+                vec![
+                    "openid".to_owned(),
+                    "profile".to_owned(),
+                    "email".to_owned(),
+                    "offline_access".to_owned(),
+                ],
+                config.browser_redirect_uri,
+            )
+            .into_state();
+            // Keep these OpenAI Codex CLI parameters in sync with
+            // `build_authorize_url` in github.com/openai/codex:
+            // https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs#L580-L625
+            handshake
+                .authorize_url
+                .query_pairs_mut()
+                .append_pair("id_token_add_organizations", "true")
+                .append_pair("codex_cli_simplified_flow", "true")
+                .append_pair("state", &state_token);
+            (handshake, None, None)
+        } else {
+            let device = match request_openai_device_code(&config, now).await {
+                Ok(device) => device,
+                Err(error) => {
+                    return (
+                        if error == "device_login_unavailable" {
+                            StatusCode::NOT_FOUND
+                        } else {
+                            StatusCode::BAD_GATEWAY
+                        },
+                        Json(json!({ "error": error })),
+                    )
+                        .into_response();
+                }
+            };
+            let (Ok(auth), Ok(token)) = (
+                AuthUrl::new(config.auth_url.to_string()),
+                TokenUrl::new(config.token_url.to_string()),
+            ) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            (
+                start_pkce_flow_without_code(
+                    ClientId::new(config.client_id),
+                    auth,
+                    token,
+                    Vec::new(),
+                    config.device_redirect_uri,
+                )
+                .into_state(),
+                Some(device),
+                Some(config.device_verification_url.to_string()),
+            )
+        }
+    } else {
+        let Some(config) = state.config.oauth.antigravity.clone() else {
+            return provider_flow_error(
+                provider,
+                "oauth_client_not_configured",
+                StatusCode::BAD_REQUEST,
+            );
+        };
+        if config.missing_client_credentials().is_some() {
+            return provider_flow_error(
+                provider,
+                "oauth_client_not_configured",
+                StatusCode::BAD_REQUEST,
+            );
+        }
+        let (Ok(auth), Ok(token)) = (
+            AuthUrl::new(config.authorize_url.to_string()),
+            TokenUrl::new(config.token_url.to_string()),
+        ) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let mut handshake = start_pkce_flow_without_code(
+            ClientId::new(config.client_id),
+            auth,
+            token,
+            config.scopes,
+            config.redirect_uri,
+        )
+        .into_state();
+        handshake
+            .authorize_url
+            .query_pairs_mut()
+            .append_pair("access_type", "offline")
+            .append_pair("prompt", "consent")
+            .append_pair("state", &state_token);
+        (handshake, None, None)
+    };
+    let in_flight = InFlightPkce {
+        provider,
+        handshake: handshake.clone(),
+        created_at_unix_secs: now,
+        initiated_by: identity.audit_fields(),
+        target: PkceTarget::ExistingUpstream {
+            upstream_id,
+            upstream_name: upstream.name.clone(),
+            expected_revision: upstream.revision,
+        },
+        device: device.clone(),
+    };
+    if let Err(response) = persist_pkce_flow(state, storage, &state_token, &in_flight).await {
+        return response;
+    }
+    let audit_action = AuditPayload::UpstreamOauthStart {
+        upstream_id: upstream_id.to_string(),
+        upstream_name: upstream.name.clone(),
+    }
+    .to_string();
+    let route = format!("/admin/v1/upstreams/{upstream_id}/oauth/start");
+    if record_admin_audit(
+        state,
+        AdminAuditEvent {
+            identity: Some(identity),
+            system_component: None,
+            action: &audit_action,
+            route: &route,
+            target_principal_id: None,
+            target_upstream: Some(&upstream.name),
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: None,
+        },
+    )
+    .await
+    .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "audit_write_failed" })),
+        )
+            .into_response();
+    }
+    Json(StartResponse {
+        authorize_url: device
+            .is_none()
+            .then(|| handshake.authorize_url.to_string()),
+        state_token,
+        revision: upstream.revision,
+        provider,
+        flow: if device.is_some() {
+            "device_code"
+        } else if provider == OAuthProvider::Gemini {
+            "browser"
+        } else {
+            "paste_code"
+        },
+        verification_url,
+        user_code: device.as_ref().map(|value| value.user_code.clone()),
+        poll_interval_secs: device.as_ref().map(|value| value.poll_interval_secs),
+        expires_at_unix_secs: device.map(|value| value.expires_at_unix_secs),
+    })
+    .into_response()
+}
 #[cfg(test)]
 mod tests {
     use cc_lb_storage_api::OrganizationMetadataRecord;

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 
 use axum::{
@@ -19,6 +19,7 @@ use tokio::{
 };
 
 use crate::AdminState;
+use crate::dashboard::{parse_provider_families, resolve_provider_scope};
 use crate::events::{
     BACKFILL_MAX_EVENTS, EventsError, StorageTailUpdate, StreamFilters, apply_filters_to_event,
     build_delta_events_payload, build_histogram_payload, build_recent_events_payload,
@@ -34,6 +35,7 @@ enum ResetReason {
     BackfillCap,
     BusLagged,
     StorageError,
+    PartialCap,
 }
 
 impl ResetReason {
@@ -42,6 +44,7 @@ impl ResetReason {
             Self::BackfillCap => "backfill_cap",
             Self::BusLagged => "bus_lagged",
             Self::StorageError => "storage_error",
+            Self::PartialCap => "partial_cap",
         }
     }
 }
@@ -53,7 +56,7 @@ pub async fn handle_recent_events(
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
-    let params = match parse_recent_params(&map) {
+    let mut params = match parse_recent_params(&map) {
         Ok(params) => params,
         Err(EventsError::Storage(error)) => {
             tracing::error!(%error, "parse recent params storage error");
@@ -61,6 +64,20 @@ pub async fn handle_recent_events(
         }
         Err(error) => return bad_request(error.as_str()),
     };
+    let provider_families = match parse_provider_families(map.get("providers").map(String::as_str))
+    {
+        Ok(families) => families,
+        Err(_) => return bad_request("invalid_providers"),
+    };
+    let scope =
+        match resolve_provider_scope(storage.as_ref(), provider_families.as_deref(), false).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::error!(%error, "event provider inventory failed");
+                return internal_error("storage_error");
+            }
+        };
+    params.provider_upstream_ids = scope.upstream_ids;
     match build_recent_events_payload(storage.as_ref(), &params).await {
         Ok(payload) => Json(payload).into_response(),
         Err(EventsError::Storage(error)) => {
@@ -78,7 +95,7 @@ pub async fn handle_events_histogram(
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
-    let params = match parse_histogram_params(&map) {
+    let mut params = match parse_histogram_params(&map) {
         Ok(params) => params,
         Err(EventsError::Storage(error)) => {
             tracing::error!(%error, "parse histogram params storage error");
@@ -86,6 +103,20 @@ pub async fn handle_events_histogram(
         }
         Err(error) => return bad_request(error.as_str()),
     };
+    let provider_families = match parse_provider_families(map.get("providers").map(String::as_str))
+    {
+        Ok(families) => families,
+        Err(_) => return bad_request("invalid_providers"),
+    };
+    let scope =
+        match resolve_provider_scope(storage.as_ref(), provider_families.as_deref(), false).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::error!(%error, "event provider inventory failed");
+                return internal_error("storage_error");
+            }
+        };
+    params.filters.provider_upstream_ids = scope.upstream_ids;
     match build_histogram_payload(storage.as_ref(), &params).await {
         Ok(payload) => Json(payload).into_response(),
         Err(EventsError::Storage(error)) => {
@@ -103,10 +134,24 @@ pub async fn handle_events_delta(
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
-    let query = match parse_delta_query(&map) {
+    let mut query = match parse_delta_query(&map) {
         Ok(query) => query,
         Err(error) => return bad_request(error.as_str()),
     };
+    let provider_families = match parse_provider_families(map.get("providers").map(String::as_str))
+    {
+        Ok(families) => families,
+        Err(_) => return bad_request("invalid_providers"),
+    };
+    let scope =
+        match resolve_provider_scope(storage.as_ref(), provider_families.as_deref(), false).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::error!(%error, "event provider inventory failed");
+                return internal_error("storage_error");
+            }
+        };
+    query.filters.provider_upstream_ids = scope.upstream_ids;
     match build_delta_events_payload(storage.as_ref(), &query).await {
         Ok(payload) => Json(payload).into_response(),
         Err(EventsError::Storage(error)) => {
@@ -128,10 +173,24 @@ pub async fn handle_events_stream(
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
-    let filters = match parse_stream_filters(&map) {
+    let mut filters = match parse_stream_filters(&map) {
         Ok(filters) => filters,
         Err(error) => return bad_request(error.as_str()),
     };
+    let provider_families = match parse_provider_families(map.get("providers").map(String::as_str))
+    {
+        Ok(families) => families,
+        Err(_) => return bad_request("invalid_providers"),
+    };
+    let scope =
+        match resolve_provider_scope(storage.as_ref(), provider_families.as_deref(), false).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::error!(%error, "event provider inventory failed");
+                return internal_error("storage_error");
+            }
+        };
+    filters.provider_upstream_ids = scope.upstream_ids;
 
     record_sse_reconnect();
 
@@ -156,7 +215,10 @@ pub async fn handle_events_stream(
             }
         };
         let start_cursor = last_event_id.unwrap_or(cursor_hi);
-        let mut stream_state = StreamEmitState::new(start_cursor);
+        let mut stream_state = StreamEmitState::new(
+            start_cursor,
+            filters.upstream_id.is_some() || filters.provider_upstream_ids.is_some(),
+        );
         let storage_filters = filters.storage_filters();
 
         match storage
@@ -202,7 +264,19 @@ pub async fn handle_events_stream(
                     match bus_result {
                         BusUpdateResult::Update(update) => {
                             if !apply_filters_to_update(&update, &filters) {
+                                if let RequestEventUpdate::Final(final_update) = &update
+                                    && let Some(sse) = stream_state.remove_partial_event(
+                                        &final_update.event,
+                                        stream_state.last_finalized_cursor,
+                                    )
+                                {
+                                    yield Ok::<Event, Infallible>(sse);
+                                }
                                 continue;
+                            }
+                            if stream_state.partial_cap_reached(&update) {
+                                yield Ok::<Event, Infallible>(reset_event(stream_state.last_finalized_cursor, ResetReason::PartialCap));
+                                return;
                             }
                             if let Some(sse) = stream_state.bus_event(&update) {
                                 yield Ok::<Event, Infallible>(sse);
@@ -221,6 +295,9 @@ pub async fn handle_events_stream(
                     match storage_result {
                         Ok(update) => {
                             if !apply_filters_to_event(&update.event, &filters) {
+                                if let Some(sse) = stream_state.remove_partial_event(&update.event, update.cursor) {
+                                    yield Ok::<Event, Infallible>(sse);
+                                }
                                 stream_state.advance_bookmark(update.cursor);
                                 continue;
                             }
@@ -274,15 +351,18 @@ struct StreamEmitState {
     max_emitted_cursor: u64,
     max_emitted_by_id: HashMap<String, u64>,
     emitted_order: VecDeque<String>,
+    // Only scoped streams need lifecycle retractions after an upstream failover.
+    active_partials: Option<HashSet<String>>,
 }
 
 impl StreamEmitState {
-    fn new(last_finalized_cursor: u64) -> Self {
+    fn new(last_finalized_cursor: u64, scoped: bool) -> Self {
         Self {
             last_finalized_cursor,
             max_emitted_cursor: last_finalized_cursor,
             max_emitted_by_id: HashMap::new(),
             emitted_order: VecDeque::new(),
+            active_partials: scoped.then(HashSet::new),
         }
     }
 
@@ -341,6 +421,11 @@ impl StreamEmitState {
         payload_cursor: u64,
         sse_cursor: u64,
     ) -> Option<Event> {
+        if let Some(active_partials) = self.active_partials.as_mut()
+            && let Some(event_id) = final_event_id(event)
+        {
+            active_partials.remove(event_id);
+        }
         let event_id = final_event_id(event)?.to_owned();
         let update = RequestEventUpdate::final_(event.clone(), payload_cursor);
         let sse = message_event(&update, sse_cursor)?;
@@ -352,9 +437,40 @@ impl StreamEmitState {
     // Partials are not recorded in `max_emitted_by_id`: that map dedupes
     // finals by cursor, and a partial bookmarked at a cursor that already
     // covers its own row would suppress the final queued behind it.
-    fn partial_message_event(&self, partial: &RequestEventPartial) -> Option<Event> {
+    fn partial_message_event(&mut self, partial: &RequestEventPartial) -> Option<Event> {
         let update = RequestEventUpdate::partial(partial.clone());
-        message_event(&update, self.last_finalized_cursor)
+        let sse = message_event(&update, self.last_finalized_cursor)?;
+        if let Some(active_partials) = self.active_partials.as_mut()
+            && !active_partials.contains(&partial.event_id)
+        {
+            active_partials.insert(partial.event_id.clone());
+        }
+        Some(sse)
+    }
+
+    fn partial_cap_reached(&self, update: &RequestEventUpdate) -> bool {
+        let RequestEventUpdate::Partial(partial) = update else {
+            return false;
+        };
+        self.active_partials.as_ref().is_some_and(|active| {
+            active.len() >= MAX_EMITTED_EVENT_IDS && !active.contains(&partial.event_id)
+        })
+    }
+
+    // A request is attributed to its final upstream, which can differ from the
+    // upstream in a previously emitted partial. Retract that partial without
+    // exposing the out-of-scope final payload or changing history attribution.
+    fn remove_partial_event(&mut self, event: &RequestEvent, sse_cursor: u64) -> Option<Event> {
+        let event_id = final_event_id(event)?;
+        if !self.active_partials.as_mut()?.remove(event_id) {
+            return None;
+        }
+        Some(
+            Event::default()
+                .event("remove")
+                .id(sse_id_from_cursor(sse_cursor))
+                .data(json!({ "event_id": event_id }).to_string()),
+        )
     }
 
     fn partial_is_finalized(&self, partial: &RequestEventPartial) -> bool {
@@ -430,6 +546,13 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
     }
     if let Some(upstream_id) = filters.upstream_id
         && partial.upstream_id != Some(upstream_id)
+    {
+        return false;
+    }
+    if let Some(provider_upstream_ids) = filters.provider_upstream_ids.as_ref()
+        && !partial
+            .upstream_id
+            .is_some_and(|id| provider_upstream_ids.contains(&id))
     {
         return false;
     }

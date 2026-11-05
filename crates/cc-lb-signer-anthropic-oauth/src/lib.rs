@@ -1394,6 +1394,7 @@ mod tests {
         EncryptedOAuthTokens::encrypt(
             aead,
             &OAuthTokenBundle {
+                oauth_profile: Default::default(),
                 access_token: access_token.to_owned(),
                 refresh_token: "refresh-token".to_owned(),
                 account_id: None,

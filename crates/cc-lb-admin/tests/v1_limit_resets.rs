@@ -175,6 +175,7 @@ async fn seed_oauth_upstream(server: &SpawnedAdminServer, base_url: &str) -> Ups
     .await
     .expect("create upstream");
     let bundle = OAuthTokenBundle {
+        oauth_profile: Default::default(),
         access_token: ACCESS_TOKEN.to_owned(),
         refresh_token: "sk-ant-ort01-limit-reset-test".to_owned(),
         expires_at_unix_secs: 4_000_000_000,
@@ -393,6 +394,7 @@ async fn get_limit_resets_hides_coupon_after_credential_rotation() {
     seed_identity(&server, &upstream).await;
 
     let rotated = OAuthTokenBundle {
+        oauth_profile: Default::default(),
         account_id: None,
         project_id: None,
         access_token: "sk-ant-oat01-rotated".to_owned(),

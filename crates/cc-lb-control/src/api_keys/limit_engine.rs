@@ -417,6 +417,9 @@ impl LimitEngine {
         API_KEY_USAGE_COMPACTION_BATCH_SIZE
     }
 
+    /// An empty model denotes an operation with no model (for example, a
+    /// catalog lookup). It skips only model authorization; all other admission
+    /// checks and reservations still apply.
     #[allow(clippy::too_many_arguments)]
     pub fn reserve(
         self: &Arc<Self>,
@@ -449,7 +452,7 @@ impl LimitEngine {
             return Err(RejectReason::Expired);
         }
 
-        if !view.is_model_allowed(principal_id, model) {
+        if !model.is_empty() && !view.is_model_allowed(principal_id, model) {
             return Err(RejectReason::ModelNotAllowed);
         }
 
@@ -1668,6 +1671,58 @@ mod tests {
             ..StoredApiKeyRecord::default()
         };
         (engine, view, record)
+    }
+
+    #[test]
+    fn model_less_operations_skip_only_model_authorization() {
+        let (engine, view, record) = engine_with_output_token_limit(100);
+        assert!(
+            engine
+                .reserve(&view, &record, "principal-a", "", 0, 0, Some(0))
+                .is_ok()
+        );
+        assert!(matches!(
+            engine.reserve(&view, &record, "principal-a", "unknown", 0, 0, Some(0)),
+            Err(RejectReason::ModelNotAllowed)
+        ));
+        assert!(matches!(
+            engine.reserve(&view, &record, "principal-a", "", 101, 0, Some(0)),
+            Err(RejectReason::OutputCapExceeded { .. })
+        ));
+        assert!(matches!(
+            engine.reserve(&view, &record, "missing-principal", "", 0, 0, Some(0)),
+            Err(RejectReason::PrincipalMissing)
+        ));
+    }
+
+    #[test]
+    fn model_less_operations_still_reserve_request_capacity() {
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::SystemClock),
+        );
+        let view = PrincipalView::for_tests(
+            "principal-a",
+            true,
+            vec!["claude-only".to_owned()],
+            vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 1,
+            }],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            index_hash: [9; 32],
+            ..Default::default()
+        };
+        let _reservation = engine
+            .reserve(&view, &record, "principal-a", "", 0, 0, Some(0))
+            .expect("model-less request is admitted");
+        assert!(matches!(
+            engine.reserve(&view, &record, "principal-a", "", 0, 0, Some(0)),
+            Err(RejectReason::RequestsRateLimit)
+        ));
     }
 
     #[test]

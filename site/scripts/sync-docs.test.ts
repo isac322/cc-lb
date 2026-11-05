@@ -14,11 +14,18 @@ describe('source documentation policy', () => {
   });
 
   test.each([
+    'docs/runtime-management.md',
     'docs/upstream-warmup.md',
-    'docs/scheduler.md',
     'docs/plugin-author-guide.md',
+  ])('allows implemented provider facts in provider reference sources: %s', (source) => {
+    expect(findBlockedTerm('OpenAI Responses', source)).toBeUndefined();
+    expect(findBlockedTerm('Gemini generation', source)).toBeUndefined();
+  });
+
+  test.each([
+    'docs/scheduler.md',
     'docs/consistency-contract.md',
-  ])('keeps provider claims blocked outside the runtime reference: %s', (source) => {
+  ])('keeps provider claims blocked outside provider reference sources: %s', (source) => {
     expect(findBlockedTerm('OpenAI Responses', source)).toBe('OpenAI');
     expect(findBlockedTerm('Gemini generation', source)).toBe('Gemini');
   });
@@ -148,9 +155,9 @@ describe('source documentation consumers', () => {
     expect(() => renderSourceNotes(source, runtimeSource)).toThrow('Sync filter rejected');
   });
 
-  test('does not extend the runtime provider allowlist to another source', () => {
-    const source = '## What it does\n\nOpenAI Responses\n';
-    expect(() => renderSourceNotes(source, 'docs/upstream-warmup.md'))
+  test('does not extend the provider allowlist to other sources', () => {
+    const source = '## Topology Overview\n\nOpenAI Responses\n';
+    expect(() => renderSourceNotes(source, 'docs/scheduler.md'))
       .toThrow('Sync filter rejected');
   });
 });

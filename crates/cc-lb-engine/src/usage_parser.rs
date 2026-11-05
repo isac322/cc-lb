@@ -12,6 +12,7 @@
 
 use std::borrow::Cow;
 
+use crate::provider_capability::UsageShape;
 use cc_lb_upstream::Signer;
 use serde_json::Value;
 
@@ -263,6 +264,7 @@ pub(crate) enum SseEventParseError {
 pub(crate) struct ParsedSseEvent<'a> {
     event_name: Option<&'a [u8]>,
     named_error: bool,
+    done: bool,
     value: Result<Option<Value>, SseEventParseError>,
 }
 
@@ -290,6 +292,26 @@ impl ParsedSseEvent<'_> {
             .map(Option::as_ref)
             .map_err(|error| *error)
     }
+    pub(crate) fn is_done(&self) -> bool {
+        self.done
+    }
+
+    pub(crate) fn has_finished_choices(&self) -> bool {
+        self.value()
+            .ok()
+            .flatten()
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                !choices.is_empty()
+                    && choices.iter().all(|choice| {
+                        choice
+                            .get("finish_reason")
+                            .and_then(Value::as_str)
+                            .is_some()
+                    })
+            })
+    }
 }
 
 /// Parse one complete SSE frame.
@@ -302,6 +324,7 @@ pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
             event_name: sse_event_name(raw_event),
             named_error: false,
             value: Err(SseEventParseError::InvalidData),
+            done: false,
         };
     };
     let (event_name, named_error) = scan_sse_event_metadata(text);
@@ -310,6 +333,7 @@ pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
         return ParsedSseEvent {
             event_name,
             named_error,
+            done: false,
             value: Ok(None),
         };
     };
@@ -324,6 +348,7 @@ pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
         return ParsedSseEvent {
             event_name,
             named_error,
+            done: first.trim() == "[DONE]",
             value,
         };
     };
@@ -346,6 +371,7 @@ pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
     ParsedSseEvent {
         event_name,
         named_error,
+        done: payload.trim() == "[DONE]",
         value,
     }
 }
@@ -379,13 +405,30 @@ pub(crate) fn sse_event_name(raw_event: &[u8]) -> Option<&[u8]> {
 
 /// Merge usage carried by one parsed SSE event into `usage`. Returns flags
 /// for which boundary events were observed (so callers can record timing).
+#[cfg(test)]
 pub(crate) fn accumulate_sse_usage(
     event: &ParsedSseEvent<'_>,
     usage: &mut UsageCounts,
 ) -> SseUsageUpdate {
+    accumulate_sse_usage_inner(event, usage, None)
+}
+
+pub(crate) fn accumulate_sse_usage_for_shape(
+    event: &ParsedSseEvent<'_>,
+    usage: &mut UsageCounts,
+    shape: UsageShape,
+) -> SseUsageUpdate {
+    accumulate_sse_usage_inner(event, usage, Some(shape))
+}
+
+fn accumulate_sse_usage_inner(
+    event: &ParsedSseEvent<'_>,
+    usage: &mut UsageCounts,
+    shape: Option<UsageShape>,
+) -> SseUsageUpdate {
     let mut update = SseUsageUpdate::default();
     if let Ok(Some(value)) = event.value() {
-        accumulate_sse_usage_value(value, event.event_name, usage, &mut update);
+        accumulate_sse_usage_value(value, event.event_name, usage, &mut update, shape);
     }
     update
 }
@@ -395,6 +438,7 @@ fn accumulate_sse_usage_value(
     event_name: Option<&[u8]>,
     usage: &mut UsageCounts,
     update: &mut SseUsageUpdate,
+    shape: Option<UsageShape>,
 ) {
     let event_type = value
         .get("type")
@@ -412,24 +456,7 @@ fn accumulate_sse_usage_value(
             usage.estimated_thinking_progress.saturating_add(estimated);
         usage.present = true;
     }
-    let Some(reported) = value
-        .get("usage")
-        .or_else(|| value.get("usageMetadata"))
-        .or_else(|| {
-            value
-                .get("response")
-                .and_then(|response| response.get("usage"))
-        })
-        .or_else(|| {
-            value
-                .get("response")
-                .and_then(|response| response.get("usageMetadata"))
-        })
-        .or_else(|| {
-            value
-                .get("message")
-                .and_then(|message| message.get("usage"))
-        })
+    let Some(reported) = usage_value_for_shape(value, shape).filter(|value| !value.is_null())
     else {
         return;
     };
@@ -442,6 +469,58 @@ fn accumulate_sse_usage_value(
         && let Some(tier) = service_tier_from_envelope(value)
     {
         usage.service_tier = Some(tier.to_owned());
+    }
+}
+
+fn usage_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Option<&Value> {
+    match shape {
+        Some(UsageShape::None) => None,
+        Some(UsageShape::GeminiGenerateContent) => value
+            .get("usageMetadata")
+            .or_else(|| {
+                value
+                    .get("response")
+                    .and_then(|response| response.get("usageMetadata"))
+            })
+            .or_else(|| value.get("usage")),
+        Some(UsageShape::GeminiEmbed) => value.get("usageMetadata").or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("usageMetadata"))
+        }),
+        Some(UsageShape::OpenaiResponses) => value.get("usage").or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("usage"))
+        }),
+        Some(
+            UsageShape::AnthropicMessages
+            | UsageShape::OpenaiChatCompletions
+            | UsageShape::OpenaiCompletions
+            | UsageShape::OpenaiEmbeddings,
+        ) => value.get("usage").or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+        }),
+        None => value
+            .get("usage")
+            .or_else(|| value.get("usageMetadata"))
+            .or_else(|| {
+                value
+                    .get("response")
+                    .and_then(|response| response.get("usage"))
+            })
+            .or_else(|| {
+                value
+                    .get("response")
+                    .and_then(|response| response.get("usageMetadata"))
+            })
+            .or_else(|| {
+                value
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+            }),
     }
 }
 
@@ -460,20 +539,22 @@ pub(crate) fn observe_non_stream_json_value(value: &Value) -> NonStreamObservati
     }
 }
 
+pub(crate) fn observe_non_stream_json_value_for_shape(
+    value: &Value,
+    shape: UsageShape,
+) -> NonStreamObservation {
+    NonStreamObservation {
+        usage: usage_from_value_for_shape(value, Some(shape)),
+        canonical_error: canonical_upstream_error_from_value(value),
+    }
+}
+
 fn usage_from_value(value: &Value) -> UsageCounts {
-    let Some(usage_value) = value
-        .get("usage")
-        .or_else(|| value.get("usageMetadata"))
-        .or_else(|| {
-            value
-                .get("response")
-                .and_then(|response| response.get("usage"))
-        })
-        .or_else(|| {
-            value
-                .get("response")
-                .and_then(|response| response.get("usageMetadata"))
-        })
+    usage_from_value_for_shape(value, None)
+}
+
+fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> UsageCounts {
+    let Some(usage_value) = usage_value_for_shape(value, shape).filter(|value| !value.is_null())
     else {
         return UsageCounts::default();
     };
@@ -502,7 +583,7 @@ fn service_tier_from_envelope(value: &Value) -> Option<&str> {
         })
 }
 
-fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
+pub(crate) fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
     usage
         .cache_creation_evidence
         .merge(cache_creation_evidence(reported));
@@ -515,8 +596,15 @@ fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
                 CacheTokenEvidence::from_value,
             ),
     );
-    let prompt_token_count = reported.get("promptTokenCount").and_then(Value::as_u64);
-    if prompt_token_count.is_some() {
+    let prompt_token_count = reported
+        .get("promptTokenCount")
+        .or_else(|| reported.get("prompt_tokens"))
+        .and_then(Value::as_u64);
+    if reported
+        .get("promptTokenCount")
+        .and_then(Value::as_u64)
+        .is_some()
+    {
         usage.input_includes_cached = true;
     }
     if let Some(input_tokens) = reported
@@ -527,16 +615,35 @@ fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
         usage.gross_input_tokens = Some(input_tokens);
         usage.input_tokens = input_tokens;
     }
-    if let Some(output_tokens) = reported.get("output_tokens").and_then(Value::as_u64) {
-        usage.output_tokens = output_tokens;
-    }
-    if let Some(cached_tokens) = reported
-        .get("input_tokens_details")
-        .and_then(|details| details.get("cached_tokens"))
+    if let Some(output_tokens) = reported
+        .get("output_tokens")
+        .or_else(|| reported.get("completion_tokens"))
         .and_then(Value::as_u64)
     {
+        usage.output_tokens = output_tokens;
+    }
+    let cached_tokens = reported
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .or_else(|| {
+            reported
+                .get("input_token_details")
+                .and_then(|details| details.get("cached_tokens"))
+        })
+        .or_else(|| {
+            reported
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+        })
+        .and_then(Value::as_u64);
+    if let Some(cached_tokens) = cached_tokens {
         usage.input_includes_cached = true;
         usage.cache_read_input_tokens = cached_tokens;
+        usage.cache_read_evidence.merge(if cached_tokens == 0 {
+            CacheTokenEvidence::Zero
+        } else {
+            CacheTokenEvidence::Positive
+        });
     } else if let Some(cached_tokens) = reported
         .get("cachedContentTokenCount")
         .and_then(Value::as_u64)
@@ -557,6 +664,11 @@ fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
     } else if let Some(cache_write_tokens) = reported
         .get("input_tokens_details")
         .and_then(|details| details.get("cache_write_tokens"))
+        .or_else(|| {
+            reported
+                .get("input_token_details")
+                .and_then(|details| details.get("cache_write_tokens"))
+        })
         .and_then(Value::as_u64)
         .or_else(|| {
             reported
@@ -584,6 +696,11 @@ fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
     if let Some(reasoning_tokens) = reported
         .get("output_tokens_details")
         .and_then(|details| details.get("reasoning_tokens"))
+        .or_else(|| {
+            reported
+                .get("completion_tokens_details")
+                .and_then(|details| details.get("reasoning_tokens"))
+        })
         .or_else(|| reported.get("thoughtsTokenCount"))
         .and_then(Value::as_u64)
     {
@@ -766,11 +883,11 @@ fn detect_mid_stream_error_with(
 ) -> Option<UpstreamStreamError> {
     let value = event.value().ok().flatten()?;
     let type_str = value.get("type").and_then(Value::as_str);
+    let top_level_error = value.get("error").filter(|error| !error.is_null());
     let is_response_failed = type_str == Some("response.failed")
         || event.event_name == Some(b"response.failed")
         || (value.get("object").and_then(Value::as_str) == Some("response")
             && value.get("status").and_then(Value::as_str) == Some("failed"));
-    let top_level_error = value.get("error").filter(|error| !error.is_null());
     let nested_response_error = value
         .get("response")
         .and_then(|resp| resp.get("error"))
@@ -2397,5 +2514,113 @@ mod tests {
         let body = br#"{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"1.5s"}]}}"#;
         let error = observe_http_error_body(body).expect("retry info extracted");
         assert_eq!(error.retry_after(), Some("1.5s"));
+    }
+
+    #[test]
+    fn usage_shapes_decode_openai_chat_and_completion_payloads() {
+        for shape in [
+            UsageShape::OpenaiChatCompletions,
+            UsageShape::OpenaiCompletions,
+        ] {
+            let value = serde_json::json!({
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 48,
+                    "prompt_tokens_details": {"cached_tokens": 17},
+                    "completion_tokens_details": {"reasoning_tokens": 12}
+                }
+            });
+            let usage = observe_non_stream_json_value_for_shape(&value, shape).usage;
+            assert!(usage.present);
+            assert_eq!(usage.input_tokens, 103);
+            assert_eq!(usage.gross_input_tokens, Some(120));
+            assert_eq!(usage.output_tokens, 48);
+            assert_eq!(usage.cache_read_input_tokens, 17);
+            assert_eq!(usage.thinking_tokens, 12);
+
+            let mut streamed = UsageCounts::default();
+            let event = parse_sse_event(
+                br#"data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":48,"prompt_tokens_details":{"cached_tokens":17},"completion_tokens_details":{"reasoning_tokens":12}}}
+
+"#,
+            );
+            accumulate_sse_usage_for_shape(&event, &mut streamed, shape);
+            assert_eq!(streamed, usage);
+            assert!(
+                !observe_non_stream_json_value_for_shape(
+                    &serde_json::json!({"choices":[{"message":{"content":"ok"}}]}),
+                    shape,
+                )
+                .usage
+                .present
+            );
+        }
+    }
+
+    #[test]
+    fn usage_shapes_decode_openai_embeddings_and_gemini_embed() {
+        let embeddings = serde_json::json!({
+            "object": "list",
+            "usage": {"prompt_tokens": 23, "total_tokens": 23}
+        });
+        let usage =
+            observe_non_stream_json_value_for_shape(&embeddings, UsageShape::OpenaiEmbeddings)
+                .usage;
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 23);
+        assert_eq!(usage.output_tokens, 0);
+
+        let gemini = serde_json::json!({
+            "embeddings": [{"values": [0.1, 0.2]}],
+            "usageMetadata": {"promptTokenCount": 9, "totalTokenCount": 9}
+        });
+        let usage = observe_non_stream_json_value_for_shape(&gemini, UsageShape::GeminiEmbed).usage;
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 9);
+        assert_eq!(usage.output_tokens, 0);
+
+        let embeddings_event = parse_sse_event(
+            br#"data: {"usage":{"prompt_tokens":23,"total_tokens":23}}
+
+"#,
+        );
+        let mut streamed = UsageCounts::default();
+        accumulate_sse_usage_for_shape(
+            &embeddings_event,
+            &mut streamed,
+            UsageShape::OpenaiEmbeddings,
+        );
+        assert_eq!(streamed.input_tokens, 23);
+
+        let gemini_event = parse_sse_event(
+            br#"data: {"usageMetadata":{"promptTokenCount":9,"totalTokenCount":9}}
+
+"#,
+        );
+        let mut streamed = UsageCounts::default();
+        accumulate_sse_usage_for_shape(&gemini_event, &mut streamed, UsageShape::GeminiEmbed);
+        assert_eq!(streamed.input_tokens, 9);
+
+        let missing = serde_json::json!({"embeddings": [{"values": [0.1]}]});
+        assert!(
+            !observe_non_stream_json_value_for_shape(&missing, UsageShape::GeminiEmbed)
+                .usage
+                .present
+        );
+    }
+
+    #[test]
+    fn openai_chat_sse_done_and_finished_choice_are_detectable() {
+        let done = parse_sse_event(b"data: [DONE]\n\n");
+        assert!(done.is_done());
+        assert!(!done.has_finished_choices());
+
+        let finished = parse_sse_event(
+            br#"data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}]}
+
+"#,
+        );
+        assert!(!finished.is_done());
+        assert!(finished.has_finished_choices());
     }
 }

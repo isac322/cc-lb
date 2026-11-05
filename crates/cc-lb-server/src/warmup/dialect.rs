@@ -3,29 +3,36 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
+use cc_lb_config::Config;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
+use cc_lb_plugin_wire::schema::ProviderFamily;
 use cc_lb_runtime_wasmtime::{
     RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
 };
 
+use crate::PluginManifest;
 use crate::wasm_host::WasmtimeUpstreamDialect;
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
-use cc_lb_storage_api::{PluginSlotKind, StorageError, UpstreamRecord, WasmRegistryEntry};
+use cc_lb_storage_api::{
+    PluginSlotKind, StorageError, UpstreamKind, UpstreamRecord, WasmRegistryEntry,
+};
 use cc_lb_upstream::{
     DialectShapeContext, SignerFactory, UpstreamDialect, shape_request, sign_request,
 };
 use http::{HeaderMap, Method, Request, StatusCode};
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::PluginManifest;
-use crate::dynamic_view_builder::{Stores, materialize_wasm};
+use crate::dynamic_view_builder::{Stores, materialize_wasm, upstream_identity};
 use crate::refresh::LazyRefresher;
-use crate::warmup::request::{WARMUP_MAX_TOKENS, WARMUP_MODEL, WarmupHttpClient};
+use crate::warmup::request::{
+    ProviderWarmupDispatchParams, WARMUP_MAX_TOKENS, WARMUP_MODEL, WARMUP_RESPONSE_TIMEOUT,
+    WarmupHttpClient, build_provider_warmup_request,
+};
 
 pub struct WarmupDispatchOutcome {
     pub status: StatusCode,
@@ -37,10 +44,11 @@ pub struct WarmupDialectDispatchParams<'a> {
     pub stores: &'a Stores,
     pub data_dir: &'a Path,
     pub aead: Arc<AeadService>,
-    pub lazy_refresher: Arc<LazyRefresher>,
+    pub lazy_refresher: Option<Arc<LazyRefresher>>,
     pub upstream: &'a UpstreamRecord,
     pub http: &'a WarmupHttpClient,
     pub clock: cc_lb_clock::ClockHandle,
+    pub config: &'a Config,
 }
 
 #[derive(Debug, Error)]
@@ -57,6 +65,8 @@ pub enum WarmupDispatchError {
         plugin_name: String,
         slot: PluginSlotKind,
     },
+    #[error("wasm registry entry {0} does not export the provider's warmup shape hook")]
+    RegistryUnsupportedProvider(Uuid),
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("wasm materialize failed: {0}")]
@@ -128,11 +138,115 @@ pub async fn dispatch_warmup_with_dialect(
         manifest.name.clone(),
         &wasm_bytes,
     )?;
-    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-        slot,
-        params.runtime.config_arc(),
-    ));
-    let dialect: Arc<dyn UpstreamDialect> = Arc::new(WasmtimeUpstreamDialect::new(dispatch));
+    let provider = match params.upstream.kind {
+        UpstreamKind::OpenaiOauth => ProviderFamily::Openai,
+        UpstreamKind::GeminiOauth => ProviderFamily::Gemini,
+        _ => ProviderFamily::Anthropic,
+    };
+    let mut provider_bundle = if provider != ProviderFamily::Anthropic {
+        Some(
+            params
+                .upstream
+                .oauth_credentials
+                .as_ref()
+                .ok_or_else(|| WarmupDispatchError::Signer("missing oauth credentials".to_owned()))?
+                .decrypt(params.aead.as_ref(), params.upstream.id.as_bytes())
+                .map_err(|_| WarmupDispatchError::Signer("oauth decrypt failed".to_owned()))?,
+        )
+    } else {
+        None
+    };
+    let identity = upstream_identity(params.upstream, provider_bundle.as_ref());
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, params.runtime.config_arc());
+    let native = cc_lb_engine::lifecycle::native_route_dialect(params.upstream);
+    let selected = dispatch.for_provider(provider);
+    if provider != ProviderFamily::Anthropic
+        && selected
+            .as_ref()
+            .is_none_or(|dispatch| dispatch.shape_wire_version().is_none())
+    {
+        return Err(WarmupDispatchError::RegistryUnsupportedProvider(
+            registry_entry.id,
+        ));
+    }
+    let dialect: Arc<dyn UpstreamDialect> = match selected {
+        Some(dispatch) => Arc::new(
+            WasmtimeUpstreamDialect::new(Arc::new(dispatch))
+                .with_native_request(native)
+                .with_upstream_identity(identity),
+        ),
+        None => native,
+    };
+    if provider != ProviderFamily::Anthropic {
+        let mut bundle = provider_bundle
+            .take()
+            .ok_or_else(|| WarmupDispatchError::Signer("missing oauth credentials".to_owned()))?;
+        if !bundle.never_refresh
+            && bundle.expires_at_unix_secs.saturating_sub(60)
+                <= cc_lb_clock::unix_secs(params.clock.now())
+            && let Some(refresher) = params.lazy_refresher.as_ref()
+        {
+            refresher
+                .refresh_one(params.upstream.id)
+                .await
+                .map_err(|_| {
+                    WarmupDispatchError::Signer("warmup OAuth refresh failed".to_owned())
+                })?;
+            let refreshed = params
+                .stores
+                .upstreams
+                .get_by_id(params.upstream.id)
+                .await?
+                .ok_or_else(|| {
+                    WarmupDispatchError::Signer(
+                        "upstream missing after warmup OAuth refresh".to_owned(),
+                    )
+                })?;
+            bundle = refreshed
+                .oauth_credentials
+                .as_ref()
+                .ok_or_else(|| {
+                    WarmupDispatchError::Signer(
+                        "missing oauth credentials after refresh".to_owned(),
+                    )
+                })?
+                .decrypt(params.aead.as_ref(), params.upstream.id.as_bytes())
+                .map_err(|_| WarmupDispatchError::Signer("oauth decrypt failed".to_owned()))?;
+        }
+        let (request, signer) = build_provider_warmup_request(
+            &ProviderWarmupDispatchParams {
+                http: params.http,
+                upstream: params.upstream,
+                aead: params.aead.as_ref(),
+                config: params.config,
+                clock: params.clock,
+            },
+            &bundle,
+            dialect.as_ref(),
+        )
+        .await
+        .map_err(WarmupDispatchError::Shape)?;
+        let response = tokio::time::timeout(WARMUP_RESPONSE_TIMEOUT, params.http.request(request))
+            .await
+            .map_err(|_| WarmupDispatchError::Http("warmup response timed out".to_owned()))?
+            .map_err(|error| WarmupDispatchError::Http(error.to_string()))?;
+        let outcome = WarmupDispatchOutcome {
+            status: response.status(),
+            headers: response.headers().clone(),
+        };
+        let mut body = response.into_body();
+        tokio::time::timeout(WARMUP_RESPONSE_TIMEOUT, async {
+            while let Some(frame) = body.frame().await {
+                frame.map_err(|error| {
+                    WarmupDispatchError::Http(signer.scrub_secrets(&error.to_string()).into_owned())
+                })?;
+            }
+            Ok::<(), WarmupDispatchError>(())
+        })
+        .await
+        .map_err(|_| WarmupDispatchError::Http("warmup response timed out".to_owned()))??;
+        return Ok(outcome);
+    }
 
     let body_json = json!({
         "model": WARMUP_MODEL,
@@ -165,16 +279,15 @@ pub async fn dispatch_warmup_with_dialect(
         params.clock,
     )
     .allow_disabled_upstream(true);
-    let refresh_handle: Arc<dyn LazyRefreshHandle> = params.lazy_refresher;
-    let factory_with_refresh = AnthropicOAuthSignerFactoryWithLazyRefresh::new(
-        factory,
-        refresh_handle,
-        params.upstream.id,
-    );
-    let signer = factory_with_refresh
-        .build(&upstream_api)
-        .await
-        .map_err(|error| WarmupDispatchError::Signer(error.to_string()))?;
+    let signer = if let Some(lazy_refresher) = params.lazy_refresher {
+        let refresh_handle: Arc<dyn LazyRefreshHandle> = lazy_refresher;
+        AnthropicOAuthSignerFactoryWithLazyRefresh::new(factory, refresh_handle, params.upstream.id)
+            .build(&upstream_api)
+            .await
+    } else {
+        factory.build(&upstream_api).await
+    }
+    .map_err(|error| WarmupDispatchError::Signer(error.to_string()))?;
 
     let signed = sign_request(signer.as_ref(), shaped)
         .await

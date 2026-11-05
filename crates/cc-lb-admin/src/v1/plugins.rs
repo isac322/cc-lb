@@ -12,7 +12,7 @@ use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason, PluginChainEntry,
     PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata, PluginSlotKind, PrincipalStore,
-    Storage, StorageError, WasmRegistryEntry, WasmRegistryReference,
+    Storage, StorageError, UpstreamStore, WasmRegistryEntry, WasmRegistryReference,
     WasmRegistryReferenceFingerprint, sparse_order,
 };
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,10 @@ struct RegistryEntryResponse {
     is_builtin: bool,
     metadata: Option<PluginMetadata>,
     supported_slots: Vec<String>,
+    supported_providers: Vec<String>,
+    provider_hooks: std::collections::BTreeMap<String, Vec<String>>,
+    provider_hook_credential_kinds:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -160,6 +164,16 @@ struct RegistryCascadeDeleteResponse {
 #[derive(Debug, Serialize)]
 struct ChainListResponse {
     entries: Vec<PluginChainEntry>,
+    warnings: Vec<PluginChainWarning>,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginChainWarning {
+    code: &'static str,
+    message: &'static str,
+    chain_entry_id: Uuid,
+    wasm_registry_id: Uuid,
+    unsupported_providers: Vec<String>,
 }
 
 struct PluginChainAuditMetadata {
@@ -454,9 +468,86 @@ async fn list_chain(
         .list_chain_for_principal(principal_id, query.slot)
         .await
     {
-        Ok(entries) => Json(ChainListResponse { entries }).into_response(),
+        Ok(entries) => match legacy_provider_warnings(storage, principal_id, &entries).await {
+            Ok(warnings) => Json(ChainListResponse { entries, warnings }).into_response(),
+            Err(error) => storage_error(error),
+        },
         Err(error) => storage_error(error),
     }
+}
+
+async fn legacy_provider_warnings(
+    storage: &dyn Storage,
+    principal_id: Uuid,
+    entries: &[PluginChainEntry],
+) -> Result<Vec<PluginChainWarning>, StorageError> {
+    use cc_lb_domain::Provider;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(principal) = PrincipalStore::get_by_id(storage, principal_id).await? else {
+        return Ok(Vec::new());
+    };
+    let mut non_anthropic_providers = Vec::new();
+    let mut after = None;
+    loop {
+        let upstreams = UpstreamStore::list(storage, after, DEFAULT_LIMIT).await?;
+        if upstreams.is_empty() {
+            break;
+        }
+        after = upstreams.last().map(|record| record.id);
+        for upstream in upstreams {
+            if !upstream.enabled
+                || upstream.deleted_at_unix_secs.is_some()
+                || (!principal.allowed_upstreams.is_empty()
+                    && !principal.allowed_upstreams.contains(&upstream.id))
+            {
+                continue;
+            }
+            let name = match upstream.kind.provider() {
+                Provider::Anthropic => continue,
+                Provider::Openai => "openai",
+                Provider::Gemini => "gemini",
+            };
+            if !non_anthropic_providers
+                .iter()
+                .any(|provider| provider == name)
+            {
+                non_anthropic_providers.push(name.to_owned());
+            }
+        }
+    }
+    non_anthropic_providers.sort();
+    if non_anthropic_providers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut warnings = Vec::new();
+    for entry in entries {
+        let Some(registry) = storage
+            .get_registry_entry_by_id(entry.wasm_registry_id)
+            .await?
+        else {
+            continue;
+        };
+        if registry.is_builtin {
+            continue;
+        }
+        let hooks = &registry.hook_metadata;
+        if !hooks.is_empty()
+            && hooks
+                .keys()
+                .all(|name| cc_lb_plugin_wire::schema::HookKind::parse(name).is_some())
+        {
+            warnings.push(PluginChainWarning {
+                code: "legacy_plugin_anthropic_only",
+                message: "This legacy plugin runs only for Anthropic. Add provider-qualified exports to run it for OpenAI or Gemini.",
+                chain_entry_id: entry.id,
+                wasm_registry_id: entry.wasm_registry_id,
+                unsupported_providers: non_anthropic_providers.clone(),
+            });
+        }
+    }
+    Ok(warnings)
 }
 
 async fn insert_chain(
@@ -734,7 +825,17 @@ async fn reorder_chain(
                 {
                     return response;
                 }
-                let mut response = Json(ChainListResponse { entries }).into_response();
+                let warnings = match legacy_provider_warnings(
+                    &*storage_handle,
+                    principal_id,
+                    &entries,
+                )
+                .await
+                {
+                    Ok(warnings) => warnings,
+                    Err(error) => return post_commit_storage_error(&state, error).await,
+                };
+                let mut response = Json(ChainListResponse { entries, warnings }).into_response();
                 add_dynamic_rebind_headers(&mut response, &state).await;
                 response
             })
@@ -803,7 +904,17 @@ async fn rebalance_chain(
                 {
                     return response;
                 }
-                let mut response = Json(ChainListResponse { entries }).into_response();
+                let warnings = match legacy_provider_warnings(
+                    &*storage_handle,
+                    principal_id,
+                    &entries,
+                )
+                .await
+                {
+                    Ok(warnings) => warnings,
+                    Err(error) => return post_commit_storage_error(&state, error).await,
+                };
+                let mut response = Json(ChainListResponse { entries, warnings }).into_response();
                 add_dynamic_rebind_headers(&mut response, &state).await;
                 response
             })
@@ -1066,6 +1177,16 @@ async fn registry_size_bytes(storage: &dyn Storage, sha256: [u8; 32]) -> Result<
 
 fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntryResponse {
     let supported_slots = supported_slot_strings(&entry.supported_slots);
+    let provider_hooks = if entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
+        ["anthropic", "openai", "gemini"]
+            .into_iter()
+            .map(|provider| (provider.to_owned(), vec!["filter".to_owned()]))
+            .collect()
+    } else {
+        provider_hooks(&entry.hook_metadata)
+    };
+    let supported_providers = provider_hooks.keys().cloned().collect();
+    let provider_hook_credential_kinds = provider_hook_credential_kinds(&provider_hooks);
     RegistryEntryResponse {
         id: entry.id,
         sha256_hex: hex_sha256(entry.sha256),
@@ -1084,7 +1205,66 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
         is_builtin: entry.is_builtin,
         metadata: entry.metadata,
         supported_slots,
+        supported_providers,
+        provider_hooks,
+        provider_hook_credential_kinds,
     }
+}
+
+fn provider_hook_credential_kinds(
+    provider_hooks: &std::collections::BTreeMap<String, Vec<String>>,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<String>>> {
+    provider_hooks
+        .iter()
+        .map(|(provider, hooks)| {
+            let mut by_hook = std::collections::BTreeMap::new();
+            for hook in hooks {
+                let kinds = if hook == "shape_envelope_gemini" && provider == "gemini" {
+                    vec!["gemini_oauth".to_owned()]
+                } else {
+                    match provider.as_str() {
+                        "anthropic" => {
+                            vec!["anthropic_api_key".to_owned(), "anthropic_oauth".to_owned()]
+                        }
+                        "openai" => vec!["openai_api_key".to_owned(), "openai_oauth".to_owned()],
+                        "gemini" => vec!["gemini_api_key".to_owned(), "gemini_oauth".to_owned()],
+                        _ => Vec::new(),
+                    }
+                };
+                by_hook.insert(hook.clone(), kinds);
+            }
+            (provider.clone(), by_hook)
+        })
+        .collect()
+}
+
+fn provider_hooks(
+    hooks: &std::collections::BTreeMap<String, HookMetadata>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily};
+    let mut providers: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for name in hooks.keys() {
+        let Some((hook, provider)) = HookKind::parse_entrypoint(name) else {
+            continue;
+        };
+        if let Some(provider) = provider {
+            providers
+                .entry(provider.as_str().to_owned())
+                .or_default()
+                .push(hook.as_str().to_owned());
+        } else {
+            providers
+                .entry(ProviderFamily::Anthropic.as_str().to_owned())
+                .or_default()
+                .push(hook.as_str().to_owned());
+        }
+    }
+    for hooks in providers.values_mut() {
+        hooks.sort();
+        hooks.dedup();
+    }
+    providers
 }
 
 async fn fetch_plugin_chain_audit_metadata(
@@ -1394,4 +1574,39 @@ async fn post_commit_storage_error(
 
 fn hex_sha256(sha256: [u8; 32]) -> String {
     sha256.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod provider_capability_tests {
+    use super::*;
+
+    #[test]
+    fn registry_capabilities_map_legacy_shape_to_anthropic_and_qualified_hooks_to_their_provider() {
+        let metadata = cc_lb_plugin_wire::metadata::PluginMetadata::parse(br#"{
+            "name":"test","version":"1","description":"test","usage":"test",
+            "hooks":{
+                "shape":{"wire_version":1,"description":"legacy","usage":"test","mode":"active"},
+                "transform_response_openai":{"wire_version":1,"description":"OpenAI","usage":"test","mode":"active"}
+            }
+        }"#).expect("valid metadata");
+        let providers = provider_hooks(&metadata.hooks);
+        assert_eq!(providers.get("anthropic"), Some(&vec!["shape".to_owned()]));
+        assert_eq!(
+            providers.get("openai"),
+            Some(&vec!["transform_response".to_owned()])
+        );
+        assert!(!providers.contains_key("gemini"));
+    }
+
+    #[test]
+    fn registry_capabilities_map_legacy_router_to_anthropic_only() {
+        let metadata = cc_lb_plugin_wire::metadata::PluginMetadata::parse(br#"{
+            "name":"test","version":"1","description":"test","usage":"test",
+            "hooks":{"filter":{"wire_version":1,"description":"shared","usage":"test","mode":"active"}}
+        }"#).expect("valid metadata");
+        let providers = provider_hooks(&metadata.hooks);
+        assert_eq!(providers.get("anthropic"), Some(&vec!["filter".to_owned()]));
+        assert!(!providers.contains_key("openai"));
+        assert!(!providers.contains_key("gemini"));
+    }
 }

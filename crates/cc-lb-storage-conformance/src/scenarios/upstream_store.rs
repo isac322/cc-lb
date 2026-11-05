@@ -1167,6 +1167,7 @@ async fn create_named(store: &dyn UpstreamStore, name: &str) -> Result<UpstreamR
 
 fn token_bundle(access_token: &str, refresh_token: &str) -> OAuthTokenBundle {
     OAuthTokenBundle {
+        oauth_profile: Default::default(),
         account_id: None,
         project_id: None,
         access_token: access_token.to_owned(),

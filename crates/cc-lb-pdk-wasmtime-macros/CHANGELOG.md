@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add provider-qualified handler exports and V2 metadata through
+  `provider = "anthropic"`, `"openai"`, or `"gemini"`. Reject duplicate
+  `(hook, provider)` entrypoints and emit shared wire fingerprints once.
+- Preserve the legacy macro syntax, export names, and V1 metadata. Legacy
+  entrypoints map to Anthropic only on the host.
+
 ## [0.2.0](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-macros-v0.1.2...cc-lb-pdk-wasmtime-macros-v0.2.0) - 2026-10-06
 
 ### Added

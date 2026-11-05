@@ -35,8 +35,12 @@ use cc_lb_control::{
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
 use cc_lb_domain::ReplicaIdentity;
+use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
-use cc_lb_storage_api::{Storage, UpstreamRecord};
+use cc_lb_storage_api::{
+    Storage, UpstreamRecord, WarmupDispatchKind, WarmupPermanentFailureReason,
+    WarmupTransientFailureReason,
+};
 
 use crate::ports::{RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort};
 
@@ -67,6 +71,28 @@ pub struct WarmupDialectDispatchOutcome {
     pub headers: HeaderMap,
 }
 
+#[derive(Debug)]
+pub enum WarmupNativeDispatchOutcome {
+    Response {
+        status: StatusCode,
+        dispatch_kind: WarmupDispatchKind,
+        observations: Vec<UnifiedQuotaObservation>,
+        error_detail: Option<String>,
+    },
+    TransientFailure {
+        dispatch_kind: WarmupDispatchKind,
+        reason: WarmupTransientFailureReason,
+        status: StatusCode,
+        error_detail: String,
+    },
+    PermanentFailure {
+        dispatch_kind: WarmupDispatchKind,
+        reason: WarmupPermanentFailureReason,
+        status: StatusCode,
+        error_detail: String,
+    },
+}
+
 #[async_trait]
 pub trait WarmupDialectDispatcher: Send + Sync {
     async fn dispatch_warmup_with_dialect(
@@ -75,6 +101,11 @@ pub trait WarmupDialectDispatcher: Send + Sync {
         data_dir: &Path,
         upstream: &UpstreamRecord,
     ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError>;
+
+    async fn dispatch_warmup_native(
+        &self,
+        upstream: &UpstreamRecord,
+    ) -> Result<WarmupNativeDispatchOutcome, WarmupDialectDispatchError>;
 }
 
 #[async_trait]

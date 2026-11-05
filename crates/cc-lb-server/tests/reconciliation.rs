@@ -148,6 +148,7 @@ async fn initial_holder(
 ) -> Arc<DynamicViewHolder> {
     let view = build_dynamic_view(
         stores,
+        None,
         Arc::new(AeadService::from_master_key([25; 32])),
         None,
         0,
@@ -184,6 +185,7 @@ fn reconciler(
         Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
         Arc::new(cc_lb_clock::SystemClock),
+        None,
     ))
 }
 

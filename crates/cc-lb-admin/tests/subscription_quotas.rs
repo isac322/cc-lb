@@ -666,6 +666,165 @@ async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows
     );
 }
 
+struct AllWindowsCache;
+
+impl cc_lb_control::SubscriptionQuotaCacheLike for AllWindowsCache {
+    fn upsert_observation(&self, _record: &SubscriptionQuotaSample) {}
+
+    fn snapshot_for_upstream(
+        &self,
+        _upstream_id: Uuid,
+        _now_unix_millis: u64,
+        max_staleness_secs: u64,
+    ) -> Vec<cc_lb_domain::SubscriptionQuotaCandidateSnapshot> {
+        SubscriptionQuotaWindow::all()
+            .iter()
+            .map(|window| {
+                serde_json::from_value(json!({
+                    "window": window.as_str(),
+                    "state": "unobserved",
+                    "max_staleness_secs": max_staleness_secs,
+                }))
+                .expect("unobserved snapshot")
+            })
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn provider_quotas_list_all_oauth_kinds_and_scope_series() {
+    use cc_lb_storage_api::{UpstreamCreate, UpstreamStore, upstream::UpstreamKind};
+
+    let server = admin_test_common::spawn_admin_server().await;
+    let claude = create_oauth_upstream(&server, "provider-claude").await;
+    let mut ids = vec![claude];
+    for (name, kind) in [
+        ("provider-codex", UpstreamKind::OpenaiOauth),
+        ("provider-gemini", UpstreamKind::GeminiOauth),
+    ] {
+        let record = UpstreamStore::create(
+            server.storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: name.to_owned(),
+                kind,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("create provider fixture");
+        ids.push(record.id);
+    }
+    let view = cc_lb_control::DynamicViewBuilder::from_view(&server.dynamic_view.load())
+        .subscription_quota_cache(Arc::new(AllWindowsCache))
+        .build();
+    server.dynamic_view.store(view);
+    let (status, _, latest) = server
+        .client
+        .get("/admin/v1/subscription-quotas/latest")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(latest["upstreams"].as_array().expect("upstreams").len(), 3);
+    for upstream in latest["upstreams"].as_array().expect("upstreams") {
+        let windows = upstream["windows"]
+            .as_array()
+            .expect("windows")
+            .iter()
+            .map(|window| window["window"].as_str().expect("window"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = match upstream["upstream_name"].as_str().expect("name") {
+            "provider-claude" => std::collections::BTreeSet::from([
+                "5h",
+                "7d",
+                "7d_sonnet",
+                "7d_opus",
+                "7d_fable",
+                "overage",
+                "unified",
+            ]),
+            "provider-codex" => std::collections::BTreeSet::from(["5h", "7d"]),
+            "provider-gemini" => std::collections::BTreeSet::from([
+                "gemini_5h",
+                "gemini_7d",
+                "third_party_5h",
+                "third_party_7d",
+            ]),
+            other => panic!("unexpected fixture {other}"),
+        };
+        assert_eq!(windows, expected);
+    }
+
+    let mut records = Vec::new();
+    for (index, upstream) in ids.iter().enumerate() {
+        for (offset, window) in [
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::GeminiFiveHour,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut sample = quota_observation(
+                *upstream,
+                120,
+                (index * 2 + offset + 1) as u128,
+                SubscriptionQuotaSource::Api,
+                0.25,
+                Some(SubscriptionQuotaStatus::Allowed),
+            );
+            sample.window = window;
+            records.push(checkpoint_record(sample));
+        }
+    }
+    server
+        .storage
+        .put_subscription_quota_checkpoints(&records)
+        .await
+        .expect("seed quota checkpoints");
+    let (status, _, body) = server.client.get(
+        "/admin/v1/subscription-quotas/series?since_unix_secs=60&until_unix_secs=180&bucket_secs=60"
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let series = body["series"].as_array().expect("series");
+    let pairs = series
+        .iter()
+        .map(|item| {
+            (
+                item["upstream_name"].as_str().expect("name"),
+                item["window"].as_str().expect("window"),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        pairs,
+        std::collections::BTreeSet::from([
+            ("provider-claude", "5h"),
+            ("provider-codex", "5h"),
+            ("provider-gemini", "gemini_5h"),
+        ])
+    );
+    let (status, _, aggregate) = server
+        .client
+        .get("/admin/v1/subscription-quotas/aggregate")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(aggregate["upstream_count"], 1);
+    for endpoint in ["aggregate", "pool-history"] {
+        let (status, _, _) = server
+            .client
+            .get(&format!(
+                "/admin/v1/subscription-quotas/{endpoint}?windows=gemini_5h"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
 #[tokio::test]
 async fn subscription_quota_anthropic_absent_five_hour_is_excluded_from_pool_aggregate() {
     let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
@@ -965,6 +1124,268 @@ async fn subscription_quota_five_hour_absence_honors_requested_source() {
     }
 }
 
+#[tokio::test]
+async fn subscription_quota_openai_pool_uses_equal_mean_and_provider_isolation() {
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    let openai_a = create_kind_oauth_upstream(&server, "openai-a", "openai_oauth").await;
+    let openai_b = create_kind_oauth_upstream(&server, "openai-b", "openai_oauth").await;
+    let claude = create_oauth_upstream(&server, "claude-isolated").await;
+
+    let mut openai_a_five = quota_observation(
+        openai_a,
+        CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+        101,
+        SubscriptionQuotaSource::Api,
+        0.20,
+        Some(SubscriptionQuotaStatus::Allowed),
+    );
+    openai_a_five.window = SubscriptionQuotaWindow::FiveHour;
+    let mut openai_a_seven = openai_a_five.clone();
+    openai_a_seven.sample_id = Uuid::from_u128(102);
+    openai_a_seven.window = SubscriptionQuotaWindow::SevenDay;
+    openai_a_seven.utilization = Some(0.40);
+    let mut openai_b_seven = openai_a_five.clone();
+    openai_b_seven.sample_id = Uuid::from_u128(103);
+    openai_b_seven.upstream_id = openai_b;
+    openai_b_seven.window = SubscriptionQuotaWindow::SevenDay;
+    openai_b_seven.utilization = Some(0.20);
+    let mut claude_five = openai_a_five.clone();
+    claude_five.sample_id = Uuid::from_u128(104);
+    claude_five.upstream_id = claude;
+    claude_five.utilization = Some(0.99);
+
+    server
+        .storage
+        .record_subscription_quota_samples(&[
+            openai_a_five,
+            openai_a_seven,
+            openai_b_seven,
+            claude_five,
+        ])
+        .await
+        .unwrap();
+
+    let (status, _, body) = server
+        .client
+        .get("/admin/v1/subscription-quotas/aggregate?provider=openai&windows=5h,7d&source=api")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["weighting"], "equal");
+    assert_eq!(body["upstream_count"], 2);
+    assert_close(body["windows"][0]["utilization"].as_f64(), 0.20);
+    assert_close(body["windows"][1]["utilization"].as_f64(), 0.30);
+    assert_eq!(
+        body["windows"][1]["provider_lots"]
+            .as_array()
+            .expect("openai provider lots")
+            .len(),
+        2
+    );
+    assert!(
+        body["windows"]
+            .as_array()
+            .expect("openai windows")
+            .iter()
+            .flat_map(|window| window["provider_lots"].as_array().into_iter().flatten())
+            .all(|lot| lot["upstream_name"] != "claude-isolated")
+    );
+    let (status, _, history) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/pool-history?provider=openai&windows=5h,7d&since_unix_secs={}&until_unix_secs={}&series_projection=chart",
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
+            CHECKPOINT_TEST_NOW_UNIX_SECS,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history["weighting"], "equal");
+    assert!(
+        history["windows"]
+            .as_array()
+            .expect("openai history windows")
+            .iter()
+            .all(|window| window["series"]
+                .as_array()
+                .is_some_and(|series| !series.is_empty()))
+    );
+    assert!(
+        history["windows"][0]["series"]
+            .as_array()
+            .expect("openai 5h history")
+            .iter()
+            .any(|point| {
+                point["utilization_percent"]
+                    .as_f64()
+                    .is_some_and(|value| (value - 20.0).abs() < 1e-9)
+            })
+    );
+    assert!(
+        history["windows"][1]["series"]
+            .as_array()
+            .expect("openai 7d history")
+            .iter()
+            .any(|point| {
+                point["utilization_percent"]
+                    .as_f64()
+                    .is_some_and(|value| (value - 30.0).abs() < 1e-9)
+            })
+    );
+    assert!(
+        history["windows"]
+            .as_array()
+            .expect("openai history windows")
+            .iter()
+            .flat_map(|window| window["series"].as_array().into_iter().flatten())
+            .all(|point| point["utilization_percent"] != 99.0)
+    );
+}
+
+#[tokio::test]
+async fn subscription_quota_gemini_pool_uses_equal_mean() {
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    let gemini_a = create_kind_oauth_upstream(&server, "gemini-a", "gemini_oauth").await;
+    let gemini_b = create_kind_oauth_upstream(&server, "gemini-b", "gemini_oauth").await;
+    let mut gemini_a_5h = quota_observation(
+        gemini_a,
+        CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+        111,
+        SubscriptionQuotaSource::Api,
+        0.20,
+        Some(SubscriptionQuotaStatus::Allowed),
+    );
+    gemini_a_5h.window = SubscriptionQuotaWindow::GeminiFiveHour;
+    let mut gemini_b_5h = gemini_a_5h.clone();
+    gemini_b_5h.sample_id = Uuid::from_u128(112);
+    gemini_b_5h.upstream_id = gemini_b;
+    gemini_b_5h.utilization = Some(0.80);
+    let mut gemini_a_7d = gemini_a_5h.clone();
+    gemini_a_7d.sample_id = Uuid::from_u128(113);
+    gemini_a_7d.window = SubscriptionQuotaWindow::GeminiSevenDay;
+    gemini_a_7d.utilization = Some(0.40);
+    let mut gemini_b_7d = gemini_a_7d.clone();
+    gemini_b_7d.sample_id = Uuid::from_u128(114);
+    gemini_b_7d.upstream_id = gemini_b;
+    gemini_b_7d.utilization = Some(0.60);
+    let mut third_party_5h = gemini_a_5h.clone();
+    third_party_5h.sample_id = Uuid::from_u128(115);
+    third_party_5h.window = SubscriptionQuotaWindow::ThirdPartyFiveHour;
+    third_party_5h.utilization = Some(0.60);
+    let mut third_party_7d = gemini_a_7d.clone();
+    third_party_7d.sample_id = Uuid::from_u128(116);
+    third_party_7d.window = SubscriptionQuotaWindow::ThirdPartySevenDay;
+    third_party_7d.utilization = Some(0.70);
+
+    server
+        .storage
+        .record_subscription_quota_samples(&[
+            gemini_a_5h,
+            gemini_b_5h,
+            gemini_a_7d,
+            gemini_b_7d,
+            third_party_5h,
+            third_party_7d,
+        ])
+        .await
+        .unwrap();
+
+    let (status, _, body) = server
+        .client
+        .get("/admin/v1/subscription-quotas/aggregate?provider=gemini")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["weighting"], "equal");
+    assert_eq!(body["upstream_count"], 2);
+    assert_eq!(body["windows"].as_array().map(Vec::len), Some(4));
+    assert_close(body["windows"][0]["utilization"].as_f64(), 0.50);
+    assert_close(body["windows"][1]["utilization"].as_f64(), 0.50);
+    assert_close(body["windows"][2]["utilization"].as_f64(), 0.60);
+    assert_close(body["windows"][3]["utilization"].as_f64(), 0.70);
+    for (index, expected_reset) in [
+        CHECKPOINT_TEST_NOW_UNIX_SECS + 18_000,
+        CHECKPOINT_TEST_NOW_UNIX_SECS + 489_600,
+        CHECKPOINT_TEST_NOW_UNIX_SECS + 18_000,
+        CHECKPOINT_TEST_NOW_UNIX_SECS + 489_600,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            body["windows"][index]["cc_window_reset_unix_secs"],
+            expected_reset
+        );
+    }
+    let (status, _, history) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/pool-history?provider=gemini&since_unix_secs={}&until_unix_secs={}&series_projection=chart",
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 120,
+            CHECKPOINT_TEST_NOW_UNIX_SECS,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history["weighting"], "equal");
+    assert_eq!(history["windows"].as_array().map(Vec::len), Some(4));
+    assert_eq!(history["windows"][0]["window"], "gemini_5h");
+    assert_eq!(history["windows"][1]["window"], "gemini_7d");
+    assert_eq!(history["windows"][2]["window"], "third_party_5h");
+    assert_eq!(history["windows"][3]["window"], "third_party_7d");
+    for (index, expected_utilization) in [(0, 50.0), (1, 50.0), (2, 60.0), (3, 70.0)] {
+        assert!(
+            history["windows"][index]["series"]
+                .as_array()
+                .expect("Gemini history")
+                .iter()
+                .any(|point| point["utilization_percent"] == expected_utilization),
+            "window index {index} has no expected utilization"
+        );
+    }
+}
+
+#[tokio::test]
+async fn subscription_quota_pool_rejects_unknown_and_cross_provider_windows() {
+    let server = admin_test_common::spawn_admin_server().await;
+    for path in [
+        "/admin/v1/subscription-quotas/aggregate?provider=wat",
+        "/admin/v1/subscription-quotas/aggregate?provider=openai&windows=gemini_5h",
+        "/admin/v1/subscription-quotas/pool-history?provider=gemini&windows=5h",
+    ] {
+        let (status, _, _) = server.client.get(path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "path={path}");
+    }
+}
+
+async fn create_kind_oauth_upstream(
+    server: &admin_test_common::SpawnedAdminServer,
+    name: &str,
+    kind: &str,
+) -> Uuid {
+    use cc_lb_storage_api::{UpstreamCreate, UpstreamStore, upstream::UpstreamKind};
+
+    let kind = match kind {
+        "openai_oauth" => UpstreamKind::OpenaiOauth,
+        "gemini_oauth" => UpstreamKind::GeminiOauth,
+        other => panic!("unexpected provider fixture kind: {other}"),
+    };
+    UpstreamStore::create(
+        server.storage.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            kind,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("create provider fixture")
+    .id
+}
+
 async fn create_oauth_upstream(server: &admin_test_common::SpawnedAdminServer, name: &str) -> Uuid {
     let (status, _, body) = server
         .client
@@ -1170,4 +1591,52 @@ fn assert_close(actual: Option<f64>, expected: f64) {
         (actual - expected).abs() <= 1e-9,
         "expected {expected}, got {actual}"
     );
+}
+
+#[tokio::test]
+async fn subscription_quota_anthropic_five_hour_absence_is_not_unknown_and_is_reversible() {
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    let upstream = create_oauth_upstream(&server, "anthropic-changing-window").await;
+    let path = format!(
+        "/admin/v1/subscription-quotas/aggregate?upstream_ids={upstream}&windows=5h&max_staleness_secs=0"
+    );
+    // Never observed is unknown, not an absent quota.
+    let (status, _, unknown) = server.client.get(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unknown["windows"].as_array().map(Vec::len), Some(1));
+
+    server
+        .storage
+        .record_subscription_quota_samples(&[quota_absent_observation(
+            upstream,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 60,
+            710,
+            SubscriptionQuotaSource::Api,
+        )])
+        .await
+        .unwrap();
+    // Explicit absence remains authoritative when its observation ages.
+    let (status, _, absent) = server.client.get(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(absent["windows"].as_array().map(Vec::len), Some(0));
+
+    server
+        .storage
+        .record_subscription_quota_samples(&[quota_observation(
+            upstream,
+            CHECKPOINT_TEST_NOW_UNIX_SECS - 30,
+            711,
+            SubscriptionQuotaSource::Api,
+            0.0,
+            Some(SubscriptionQuotaStatus::Allowed),
+        )])
+        .await
+        .unwrap();
+    // A returned sample, including a stale 0%, restores normal 5h behavior.
+    let (status, _, restored) = server.client.get(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restored["windows"].as_array().map(Vec::len), Some(1));
+    assert_eq!(restored["windows"][0]["eligible_upstreams"], 1);
+    assert_close(restored["windows"][0]["utilization"].as_f64(), 0.0);
+    assert_eq!(restored["windows"][0]["stale_upstreams"], 1);
 }

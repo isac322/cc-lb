@@ -1,9 +1,13 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use cc_lb_domain::{Principal, Upstream};
 use http::{HeaderMap, Method};
 use url::Url;
 
-use crate::{DialectError, DialectShapeContext, Signer, SignerError, UpstreamDialect};
+use crate::{
+    DialectError, DialectShapeContext, GeminiEnvelopeHook, Signer, SignerError, UpstreamDialect,
+};
 
 /// Request produced by an upstream dialect before credentials are applied.
 #[derive(Clone, Debug)]
@@ -12,6 +16,7 @@ pub struct ShapedRequest {
     method: Method,
     headers: HeaderMap,
     body: Bytes,
+    gemini_envelope_hook: Option<Arc<dyn GeminiEnvelopeHook>>,
     _seal: crate::private::Seal,
 }
 
@@ -55,6 +60,18 @@ impl ShapedRequest {
     pub fn set_body(&mut self, body: Bytes) {
         self.body = body;
     }
+
+    /// Attaches a prebound final Code Assist envelope hook.
+    ///
+    /// Signers for other providers ignore this capability.
+    pub fn set_gemini_envelope_hook(&mut self, hook: Arc<dyn GeminiEnvelopeHook>) {
+        self.gemini_envelope_hook = Some(hook);
+    }
+
+    /// Takes the optional hook so the signer can invoke it without cloning it.
+    pub fn take_gemini_envelope_hook(&mut self) -> Option<Arc<dyn GeminiEnvelopeHook>> {
+        self.gemini_envelope_hook.take()
+    }
 }
 
 /// Dialect-facing capability used to construct shaped requests.
@@ -77,6 +94,7 @@ impl ShapedRequestBuilder {
             method,
             headers,
             body,
+            gemini_envelope_hook: None,
             _seal: crate::private::Seal,
         }
     }
@@ -163,6 +181,46 @@ pub async fn sign_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnchangedEnvelope;
+
+    impl GeminiEnvelopeHook for UnchangedEnvelope {
+        fn shape_envelope_gemini(
+            &self,
+            _request: crate::GeminiEnvelopeRequest<'_>,
+        ) -> Result<crate::GeminiEnvelopeResult, SignerError> {
+            Ok(crate::GeminiEnvelopeResult::default())
+        }
+    }
+
+    #[test]
+    fn envelope_hook_is_optional_shared_by_clones_and_taken_once() {
+        let mut builder = ShapedRequestBuilder {
+            _seal: crate::private::Seal,
+        };
+        let mut shaped = builder.shaped_request(
+            "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
+                .parse()
+                .expect("URL"),
+            Method::POST,
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+        );
+        assert!(shaped.take_gemini_envelope_hook().is_none());
+        let hook: Arc<dyn GeminiEnvelopeHook> = Arc::new(UnchangedEnvelope);
+        shaped.set_gemini_envelope_hook(Arc::clone(&hook));
+        let mut cloned = shaped.clone();
+        assert!(Arc::ptr_eq(
+            &hook,
+            &cloned.take_gemini_envelope_hook().expect("cloned hook")
+        ));
+        assert!(cloned.take_gemini_envelope_hook().is_none());
+        assert!(Arc::ptr_eq(
+            &hook,
+            &shaped.take_gemini_envelope_hook().expect("original hook")
+        ));
+        assert!(shaped.take_gemini_envelope_hook().is_none());
+    }
 
     #[test]
     fn shaped_request_accessors_and_mutators_preserve_parts() {

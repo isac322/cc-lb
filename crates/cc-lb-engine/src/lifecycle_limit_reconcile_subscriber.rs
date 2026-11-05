@@ -285,7 +285,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::ParseCompleted {
             result: Ok(info), ..
         } => {
-            partial.websocket = info.method == "GET" && info.path == "/v1/responses";
+            partial.websocket = info.method == "GET"
+                && (matches!(info.path.as_str(), "/v1/responses" | "/v1/realtime")
+                    || info.path.starts_with("/ws/"));
         }
         LifecycleEvent::LimitDecision {
             decision: cc_lb_lifecycle::LimitDecisionKind::Reserved { reservation_id, .. },

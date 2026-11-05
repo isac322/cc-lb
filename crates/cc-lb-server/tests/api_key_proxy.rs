@@ -142,6 +142,7 @@ impl ProxyHarness {
                 refresh_token: "oauth-refresh".to_owned(),
                 account_id: None,
                 project_id: None,
+                oauth_profile: Default::default(),
                 expires_at_unix_secs: u64::MAX / 2,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
@@ -207,6 +208,7 @@ impl ProxyHarness {
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("wasm runtime"));
         let view = build_dynamic_view(
             &stores,
+            None,
             self.aead.clone(),
             None,
             0,

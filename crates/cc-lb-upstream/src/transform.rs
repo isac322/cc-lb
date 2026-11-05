@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use cc_lb_domain::{Principal, Upstream};
 use http::{HeaderMap, Method, StatusCode};
+use url::Url;
 
 use crate::ResponseTransformError;
 
@@ -105,4 +106,39 @@ pub trait SseEventTransformHook: Send + Sync {
         &self,
         request: TransformSseEventRequest,
     ) -> Result<TransformSseEventResult, ResponseTransformError>;
+}
+
+/// Final Code Assist envelope, before the signer applies stored credentials.
+#[derive(Clone, Copy, Debug)]
+pub struct GeminiEnvelopeRequest<'a> {
+    /// Host-owned destination. Envelope hooks cannot replace this URL.
+    pub url: &'a Url,
+    /// Request headers before signer-owned credential replacement.
+    pub headers: &'a HeaderMap,
+    /// Serialized Code Assist envelope after native request wrapping.
+    pub envelope_body: &'a Bytes,
+}
+
+/// Optional replacements for a final Code Assist envelope.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GeminiEnvelopeResult {
+    /// Replacement serialized envelope, or `None` to preserve the original.
+    pub envelope_body: Option<Bytes>,
+    /// Replacement headers, or `None` to preserve the original.
+    pub headers: Option<HeaderMap>,
+}
+
+/// Optional hook invoked after Code Assist wrapping and before signing.
+pub trait GeminiEnvelopeHook: Send + Sync {
+    /// Replaces envelope parts without changing the host-owned destination.
+    fn shape_envelope_gemini(
+        &self,
+        request: GeminiEnvelopeRequest<'_>,
+    ) -> Result<GeminiEnvelopeResult, crate::SignerError>;
+}
+
+impl std::fmt::Debug for dyn GeminiEnvelopeHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GeminiEnvelopeHook")
+    }
 }

@@ -14,6 +14,18 @@ fn record(
         .expect("quota window record")
 }
 
+fn assert_utilization(
+    records: &[SubscriptionQuotaSample],
+    window: SubscriptionQuotaWindow,
+    expected: f64,
+) {
+    let utilization = record(records, window).utilization;
+    assert!(
+        utilization.is_some_and(|actual| (actual - expected).abs() < 1e-12),
+        "{window:?}: expected {expected}, got {utilization:?}"
+    );
+}
+
 fn sample_windows(records: &[SubscriptionQuotaSample]) -> Vec<SubscriptionQuotaWindow> {
     records
         .iter()
@@ -248,4 +260,353 @@ fn absent_or_null_cedar_ember_block_yields_none() {
         assert_eq!(five_hour_utilization(&cache), Some(0.1));
         assert!(cedar_ember.is_none());
     }
+}
+
+#[test]
+fn codex_api_response_maps_team_windows_by_duration() {
+    let value = serde_json::json!({
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 42.5,
+                "limit_window_seconds": 18000,
+                "reset_at": 1_800_000_300
+            },
+            "secondary_window": {
+                "used_percent": 66.0,
+                "limit_window_seconds": 604800,
+                "reset_at": 1_800_600_000
+            }
+        }
+    });
+    let records = records_from_openai_api(Uuid::nil(), &value, 1_700_000_000_000);
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|record| record.sample_kind == SubscriptionQuotaSampleKind::Sample)
+    );
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::FiveHour).utilization,
+        Some(0.425)
+    );
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::SevenDay).utilization,
+        Some(0.66)
+    );
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::FiveHour).resets_at_unix_secs,
+        Some(1_800_000_300)
+    );
+}
+
+#[test]
+fn codex_api_response_maps_pro_primary_to_seven_day_and_marks_five_hour_absent() {
+    let value = serde_json::json!({
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 12.5,
+                "limit_window_seconds": 604800,
+                "reset_at": 1_800_000_300
+            },
+            "secondary_window": null
+        }
+    });
+    let records = records_from_openai_api(Uuid::nil(), &value, 1_700_000_000_000);
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::SevenDay).sample_kind,
+        SubscriptionQuotaSampleKind::Sample
+    );
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::SevenDay).utilization,
+        Some(0.125)
+    );
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::FiveHour).sample_kind,
+        SubscriptionQuotaSampleKind::Absent
+    );
+}
+
+#[test]
+fn malformed_openai_usage_body_emits_no_observations() {
+    let cache = SubscriptionQuotaCache::new();
+    let (sink, mut receiver) = SubscriptionQuotaSink::new();
+    let result = observe_provider_usage_body(
+        ProviderUsageContext {
+            upstream_id: Uuid::nil(),
+            kind: UpstreamKind::OpenaiOauth,
+            profile: GeminiOAuthProfile::Antigravity,
+            project_id: None,
+        },
+        b"{not-json",
+        1_700_000_000_000,
+        &sink,
+        &cache,
+    );
+    assert!(result.is_err());
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn codex_api_response_drops_unknown_window_duration() {
+    let value = serde_json::json!({
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 12.5,
+                "limit_window_seconds": 3600,
+                "reset_at": 1_800_000_300
+            }
+        }
+    });
+    let records = records_from_openai_api(Uuid::nil(), &value, 1_700_000_000_000);
+    assert!(records.is_empty());
+}
+
+#[test]
+fn gemini_summary_response_maps_both_groups_and_windows() {
+    let value = serde_json::json!({
+        "groups": [
+            {
+                "displayName": "Gemini models",
+                "buckets": [
+                    {
+                        "bucketId": "gemini-5h",
+                        "window": "5h",
+                        "remainingFraction": 0.75,
+                        "resetTime": "2026-11-01T13:00:00Z"
+                    },
+                    {
+                        "bucketId": "gemini-weekly",
+                        "window": "weekly",
+                        "remainingFraction": 0.5,
+                        "resetTime": "2026-11-07T12:00:00Z"
+                    }
+                ]
+            },
+            {
+                "displayName": "Claude and GPT-OSS models",
+                "buckets": [
+                    {
+                        "bucketId": "3p-5h",
+                        "window": "5h",
+                        "remainingFraction": 0.9,
+                        "resetTime": "2026-11-01T14:00:00Z"
+                    },
+                    {
+                        "bucketId": "3p-weekly",
+                        "window": "weekly",
+                        "remainingFraction": 0.4,
+                        "resetTime": "2026-11-07T15:00:00Z"
+                    }
+                ]
+            }
+        ]
+    });
+    let value = serde_json::json!({ "summary": value });
+    let records = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+    assert_utilization(&records, SubscriptionQuotaWindow::GeminiFiveHour, 0.25);
+    assert_utilization(&records, SubscriptionQuotaWindow::GeminiSevenDay, 0.5);
+    assert_utilization(&records, SubscriptionQuotaWindow::ThirdPartyFiveHour, 0.1);
+    assert_utilization(&records, SubscriptionQuotaWindow::ThirdPartySevenDay, 0.6);
+}
+
+#[test]
+fn gemini_summary_disabled_bucket_is_absent_not_exhausted() {
+    let value = serde_json::json!({
+        "groups": [{
+            "displayName": "Claude and GPT-OSS models",
+            "buckets": [{
+                "bucketId": "3p-5h",
+                "window": "5h",
+                "disabled": true,
+                "remainingFraction": 0.0,
+                "resetTime": "2026-11-01T13:00:00Z"
+            }, {
+                "bucketId": "3p-weekly",
+                "window": "weekly",
+                "remainingFraction": 0.14,
+                "resetTime": "2026-11-07T15:00:00Z"
+            }]
+        }]
+    });
+    let value = serde_json::json!({ "summary": value });
+    let records = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+    let five_hour = record(&records, SubscriptionQuotaWindow::ThirdPartyFiveHour);
+    assert_eq!(five_hour.sample_kind, SubscriptionQuotaSampleKind::Absent);
+    assert!(five_hour.utilization.is_none());
+    assert_utilization(&records, SubscriptionQuotaWindow::ThirdPartySevenDay, 0.86);
+}
+
+#[test]
+fn gemini_summary_only_disabled_group_falls_back_to_legacy_quota() {
+    let value = serde_json::json!({
+        "summary": {
+            "groups": [{
+                "displayName": "Gemini models",
+                "buckets": [{
+                    "bucketId": "gemini-5h",
+                    "window": "5h",
+                    "disabled": true,
+                    "remainingFraction": 0.0,
+                    "resetTime": "2026-11-01T13:00:00Z"
+                }]
+            }]
+        },
+        "fallback": {
+            "gemini": {
+                "buckets": [{
+                    "modelId": "gemini-2.5-pro",
+                    "remainingFraction": 0.7,
+                    "resetTime": "2026-11-01T13:00:00Z"
+                }]
+            }
+        }
+    });
+    let records = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+    assert_utilization(&records, SubscriptionQuotaWindow::GeminiFiveHour, 0.3);
+}
+
+#[test]
+fn missing_gemini_summary_group_falls_back_and_classifies_by_reset_distance() {
+    let value = serde_json::json!({
+        "summary": {
+            "groups": [{
+                "displayName": "Claude and GPT-OSS models",
+                "buckets": [{
+                    "bucketId": "3p-weekly",
+                    "window": "weekly",
+                    "remainingFraction": 0.14,
+                    "resetTime": "2026-11-07T15:00:00Z"
+                }]
+            }]
+        },
+        "fallback": {
+            "gemini": {
+                "buckets": [{
+                    "modelId": "gemini-2.5-pro",
+                    "remainingFraction": 0.7,
+                    "resetTime": "2026-11-01T13:00:00Z"
+                }]
+            }
+        }
+    });
+    let records = records_from_gemini_api(Uuid::nil(), None, &value, 1_793_527_200_000);
+    assert_utilization(&records, SubscriptionQuotaWindow::GeminiFiveHour, 0.3);
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::GeminiSevenDay).sample_kind,
+        SubscriptionQuotaSampleKind::Absent
+    );
+    assert_utilization(&records, SubscriptionQuotaWindow::ThirdPartySevenDay, 0.86);
+}
+
+#[test]
+fn antigravity_summary_response_maps_shared_windows_and_resets()
+-> Result<(), Box<dyn std::error::Error>> {
+    let summary = serde_json::json!({
+        "groups": [
+            {
+                "buckets": [
+                    {
+                        "bucketId": "gemini-weekly",
+                        "displayName": "Weekly Limit Remaining",
+                        "window": "weekly",
+                        "resetTime": "2026-11-07T10:43:23Z",
+                        "remainingFraction": 0.60002846
+                    },
+                    {
+                        "bucketId": "gemini-5h",
+                        "displayName": "Five Hour Limit Remaining",
+                        "window": "5h",
+                        "resetTime": "2026-11-03T04:51:56Z",
+                        "remainingFraction": 0.9899967
+                    }
+                ],
+                "displayName": "Gemini Models",
+                "description": "Models within this group: Gemini Flash, Gemini Pro"
+            },
+            {
+                "buckets": [
+                    {
+                        "bucketId": "3p-weekly",
+                        "displayName": "Weekly Limit Remaining",
+                        "window": "weekly",
+                        "resetTime": "2026-11-06T03:58:24Z",
+                        "remainingFraction": 0.9889606
+                    },
+                    {
+                        "bucketId": "3p-5h",
+                        "displayName": "Five Hour Limit Remaining",
+                        "window": "5h",
+                        "resetTime": "2026-11-03T05:35:57Z",
+                        "remainingFraction": 1
+                    }
+                ],
+                "displayName": "Claude and GPT models",
+                "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS"
+            }
+        ]
+    });
+    let body = serde_json::to_vec(&serde_json::json!({ "summary": summary }))?;
+    let observed_at_unix_millis = 1_793_664_000_000;
+    let cache = SubscriptionQuotaCache::new();
+    let (sink, _rx) = SubscriptionQuotaSink::new();
+    observe_provider_usage_body(
+        ProviderUsageContext {
+            upstream_id: Uuid::nil(),
+            kind: UpstreamKind::GeminiOauth,
+            profile: GeminiOAuthProfile::Antigravity,
+            project_id: Some("test-project"),
+        },
+        &body,
+        observed_at_unix_millis,
+        &sink,
+        &cache,
+    )?;
+    let snapshots = cache.snapshot_for_upstream(Uuid::nil(), observed_at_unix_millis, 60);
+    assert_eq!(
+        snapshots
+            .iter()
+            .filter(|snapshot| snapshot.observed_at_unix_millis.is_some())
+            .count(),
+        4
+    );
+    for (window, remaining, reset_time) in [
+        (
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            0.9899967,
+            "2026-11-03T04:51:56Z",
+        ),
+        (
+            SubscriptionQuotaWindow::GeminiSevenDay,
+            0.60002846,
+            "2026-11-07T10:43:23Z",
+        ),
+        (
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            1.0,
+            "2026-11-03T05:35:57Z",
+        ),
+        (
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            0.9889606,
+            "2026-11-06T03:58:24Z",
+        ),
+    ] {
+        let snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.window == window.as_str())
+            .ok_or("missing quota window")?;
+        let expected_utilization = 1.0 - remaining;
+        assert!(
+            snapshot
+                .utilization
+                .is_some_and(|actual| (actual - expected_utilization).abs() < 1e-12),
+            "{window:?}: expected {expected_utilization}, got {:?}",
+            snapshot.utilization
+        );
+        let expected_reset =
+            u64::try_from(chrono::DateTime::parse_from_rfc3339(reset_time)?.timestamp())?;
+        assert_eq!(snapshot.resets_at_unix_secs, Some(expected_reset));
+    }
+    Ok(())
 }

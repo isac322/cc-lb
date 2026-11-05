@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_clock::Clock;
 use cc_lb_oauth_protocol::{
-    ExistingTokenParts, parse_token_endpoint_response, refreshed_token_parts,
+    ExistingTokenParts, OAuthAccountIdentity, openai_identity_from_token,
+    parse_token_endpoint_response, refreshed_token_parts,
 };
 use cc_lb_storage_api::OAuthCredentials;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -107,8 +108,12 @@ impl PkceHandshakeState {
             verifier: SecretString::new(self.verifier.into_boxed_str()),
         })
     }
-}
 
+    pub(crate) fn with_verifier(mut self, verifier: String) -> Self {
+        self.verifier = verifier;
+        self
+    }
+}
 impl fmt::Debug for PkceHandshake {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -130,6 +135,41 @@ pub(crate) fn start_pkce_flow(
     scopes: Vec<String>,
     redirect_uri: Url,
 ) -> PkceHandshake {
+    start_pkce_flow_with_code(
+        client_id,
+        authorize_endpoint,
+        token_endpoint,
+        scopes,
+        redirect_uri,
+        true,
+    )
+}
+
+pub(crate) fn start_pkce_flow_without_code(
+    client_id: ClientId,
+    authorize_endpoint: AuthUrl,
+    token_endpoint: TokenUrl,
+    scopes: Vec<String>,
+    redirect_uri: Url,
+) -> PkceHandshake {
+    start_pkce_flow_with_code(
+        client_id,
+        authorize_endpoint,
+        token_endpoint,
+        scopes,
+        redirect_uri,
+        false,
+    )
+}
+
+fn start_pkce_flow_with_code(
+    client_id: ClientId,
+    authorize_endpoint: AuthUrl,
+    token_endpoint: TokenUrl,
+    scopes: Vec<String>,
+    redirect_uri: Url,
+    include_code: bool,
+) -> PkceHandshake {
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let authorize_url = authorize_url(
         authorize_endpoint.url().clone(),
@@ -137,6 +177,7 @@ pub(crate) fn start_pkce_flow(
         &scopes,
         &redirect_uri,
         &challenge,
+        include_code,
     );
     tracing::debug!(
         verifier_len = verifier.secret().len(),
@@ -254,6 +295,112 @@ pub(crate) async fn complete_pkce_flow(
     }
 }
 
+/// Exchanges a provider authorization code using the standard form-encoded
+/// OAuth token contract (used by OpenAI and Gemini).
+///
+/// The caller supplies the redirect URI used by the selected flow. OpenAI's
+/// device-code and browser fallback flows intentionally use different
+/// redirect URIs, while both reuse the stored PKCE verifier.
+pub(crate) async fn complete_pkce_form_flow(
+    handshake_state: PkceHandshakeState,
+    auth_code: String,
+    client_secret: Option<&str>,
+    redirect_uri: Url,
+    http: Arc<dyn OAuthHttpClient>,
+    clock: &dyn Clock,
+) -> Result<(OAuthCredentials, OAuthAccountIdentity), OAuthTokenError> {
+    let handshake = handshake_state
+        .into_handshake()
+        .map_err(|error| OAuthTokenError::Json {
+            reason: error.to_string(),
+        })?;
+    let form_body = {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.append_pair("grant_type", "authorization_code");
+        serializer.append_pair("code", &auth_code);
+        serializer.append_pair("redirect_uri", redirect_uri.as_str());
+        serializer.append_pair("client_id", handshake.client_id.as_str());
+        serializer.append_pair("code_verifier", handshake.verifier.expose_secret());
+        if let Some(secret) = client_secret {
+            serializer.append_pair("client_secret", secret);
+        }
+        serializer.finish()
+    };
+    let now_epoch_secs = cc_lb_clock::unix_secs(clock.now());
+    let response = http
+        .post_token(OAuthTokenRequest {
+            endpoint: handshake.token_endpoint.url().clone(),
+            form_body: SecretString::new(form_body.into_boxed_str()),
+            content_type: "application/x-www-form-urlencoded",
+        })
+        .await
+        .map_err(|source| OAuthTokenError::Http {
+            reason: source.to_string(),
+        })?;
+    if !response.status.is_success() {
+        let (code, description) = parse_oauth_error_body(&response.body);
+        let code = code.filter(|value| {
+            value.len() <= 80
+                && value != &auth_code
+                && value != handshake.verifier.expose_secret()
+                && client_secret != Some(value.as_str())
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        });
+        let description = description.map(|value| {
+            let mut value = value
+                .replace(&auth_code, "[redacted]")
+                .replace(handshake.verifier.expose_secret(), "[redacted]");
+            if let Some(secret) = client_secret.filter(|secret| !secret.is_empty()) {
+                value = value.replace(secret, "[redacted]");
+            }
+            value
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(240)
+                .collect()
+        });
+        return Err(OAuthTokenError::TokenEndpoint {
+            status: response.status,
+            code,
+            description,
+        });
+    }
+    let parsed =
+        parse_token_endpoint_response(&response.body).map_err(|source| OAuthTokenError::Json {
+            reason: source.to_string(),
+        })?;
+    let mut identity = parsed
+        .id_token
+        .as_deref()
+        .map(openai_identity_from_token)
+        .unwrap_or_default();
+    let access_identity = openai_identity_from_token(&parsed.access_token);
+    identity.account_id = parsed.account_id.clone().or(identity.account_id);
+    identity.account_email = identity.account_email.or(access_identity.account_email);
+    identity.plan = identity.plan.or(access_identity.plan);
+    let refreshed = refreshed_token_parts(
+        ExistingTokenParts {
+            refresh_token: String::new(),
+            refresh_token_expires_at_unix_secs: None,
+            scopes: Vec::new(),
+        },
+        parsed,
+        now_epoch_secs,
+    );
+    Ok((
+        OAuthCredentials {
+            access_token: refreshed.access_token,
+            refresh_token: refreshed.refresh_token,
+            expires_at: refreshed.expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
+            scopes: refreshed.scopes,
+        },
+        identity,
+    ))
+}
+
 /// `true` when the granted access-token lifetime is long enough to justify
 /// never-refreshing mode. Anthropic anchors refresh tokens to a 30-day
 /// window, so a grant at or below [`cc_lb_config::LONG_LIVED_MIN_GRANT_SECS`]
@@ -305,10 +452,13 @@ fn authorize_url(
     scopes: &[String],
     redirect_uri: &Url,
     challenge: &PkceCodeChallenge,
+    include_code: bool,
 ) -> Url {
     {
         let mut query = endpoint.query_pairs_mut();
-        query.append_pair("code", "true");
+        if include_code {
+            query.append_pair("code", "true");
+        }
         query.append_pair("client_id", client_id.as_str());
         query.append_pair("response_type", "code");
         query.append_pair("redirect_uri", redirect_uri.as_str());
@@ -325,6 +475,7 @@ fn authorize_url(
 pub(crate) struct OAuthTokenRequest {
     endpoint: Url,
     form_body: SecretString,
+    content_type: &'static str,
 }
 
 impl fmt::Debug for OAuthTokenRequest {
@@ -418,7 +569,7 @@ impl OAuthHttpClient for HyperOAuthHttpClient {
             }
         })?;
         let http_request = Request::post(request.endpoint.as_str())
-            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, request.content_type)
             .header(CONTENT_LENGTH, content_length)
             .body(Full::new(Bytes::from(body)))
             .map_err(|source| OAuthHttpError::RequestBuild {
@@ -480,6 +631,7 @@ async fn exchange_pkce_code(
         .post_token(OAuthTokenRequest {
             endpoint: token_url.clone(),
             form_body: body,
+            content_type: "application/json",
         })
         .await
         .map_err(|source| OAuthTokenError::Http {

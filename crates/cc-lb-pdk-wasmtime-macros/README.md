@@ -13,19 +13,32 @@ use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
 Annotate one inline module with the plugin's name, version, description, and
 usage text. The complete `accept-all` example below includes this metadata.
 
-The macro emits allocator exports, one hook export per handler, one
-`cc_lb.schema.<hook>.vN` custom section per handler, and the consolidated
-`cc_lb.plugin.v1` metadata section.
+The macro emits allocator exports, one hook export per handler, one schema
+custom section per distinct `(hook, wire)` pair, and one metadata section.
+Legacy-only modules emit `cc_lb.plugin.v1`; modules with any provider-qualified
+handler emit `cc_lb.plugin.v2`.
 
 ## `#[handler]`
 
-Annotate each hook function with a hook kind, wire version, description, and
-usage text inside the plugin module, as shown in the complete example below.
+Annotate each hook function with a hook kind, optional provider, wire version,
+description, and usage text inside the plugin module. For example,
+`#[handler(shape, provider = "openai", wire = 1, description = "...", usage = "...")]`
+selects the OpenAI request-shaping entrypoint.
 
-Supported hook kinds are `filter` and `shape`, plus the shape-owned
-response-transform hooks. The PDK accepts `wire = 1` for every hook. Add `view`
-when the handler wants an archived zero-copy request reference instead of an
-owned request.
+The provider selects exports such as `cc_lb_shape_openai`; the Rust function
+name remains author-controlled. Omitting `provider` preserves the legacy
+unqualified export, which the host maps to Anthropic only.
+
+Supported providers are `anthropic`, `openai`, and `gemini`. Duplicate
+`(hook, provider)` entries are rejected, including legacy plus qualified
+Anthropic entries. Legacy entries may coexist with qualified OpenAI or Gemini
+entries.
+
+Supported hook kinds are `filter`, `shape`, `transform_response`, and
+`transform_sse_event`. Provider-qualified hooks are independent; omit hooks
+your plugin does not support. The PDK accepts `wire = 1` for every hook. Add
+`view` when the handler wants an archived zero-copy request reference instead
+of an owned request.
 
 ## Minimal Complete Example
 
@@ -50,6 +63,7 @@ mod accept_all {
 
     #[handler(
         filter,
+        provider = "openai",
         wire = 1,
         description = "Accepts all candidates.",
         usage = "No configuration required.",

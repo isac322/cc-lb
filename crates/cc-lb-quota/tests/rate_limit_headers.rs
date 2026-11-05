@@ -12,6 +12,8 @@ pub(crate) fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
     headers
 }
 
+#[path = "rate_limit_headers/codex.rs"]
+mod codex;
 #[path = "rate_limit_headers/standard.rs"]
 mod standard;
 #[path = "rate_limit_headers/unified_top_level.rs"]

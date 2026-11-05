@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventListItem, RequestEventListQuery, StatusClass, StorageResult,
-    model_filter_like_patterns,
+    RequestEvent, RequestEventListItem, RequestEventListQuery, StatusClass, StorageError,
+    StorageResult, model_filter_like_patterns,
 };
 use sqlx::FromRow;
 
@@ -95,6 +95,7 @@ const LIST_REQUEST_EVENTS_SQL_FILTERS: &str = "\
   AND (?3 IS NULL OR principal_id = ?3) \
   AND (?4 IS NULL OR lower(model) LIKE ?4 ESCAPE '\\' OR lower(model) LIKE ?16 ESCAPE '\\') \
   AND (?5 IS NULL OR upstream_id = ?5) \
+  AND (?17 IS NULL OR upstream_id IN (SELECT CAST(value AS TEXT) FROM json_each(?17))) \
   AND (?13 IS NULL OR thread_id = ?13) \
   AND (?6 IS NULL OR list_status BETWEEN ?6 AND ?7) \
   AND (?15 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
@@ -243,6 +244,15 @@ fn bind_list_query<'q>(
         .map_or([None, None], |[prefix, contains]| {
             [Some(prefix), Some(contains)]
         });
+    let provider_upstream_ids_json = query
+        .filters
+        .provider_upstream_ids
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| StorageError::Fatal {
+            message: format!("request event provider filter serialization failed: {error}"),
+        })?;
     Ok(sqlx::query_as::<_, ListRow>(sql)
         .bind(u64_to_i64(
             query.since_unix_secs,
@@ -268,9 +278,10 @@ fn bind_list_query<'q>(
         .bind(query.filters.event_kind.map(|kind| kind.as_str()))
         .bind(i64::from(query.filters.errors_only))
         // Parameter `?16`: second arm of the model-pattern disjunction.
-        .bind(model_contains_pattern))
+        .bind(model_contains_pattern)
+        // Parameter `?17`: provider-qualified upstream ids as a JSON array.
+        .bind(provider_upstream_ids_json))
 }
-
 fn list_request_events_sql(query: &RequestEventListQuery) -> &'static str {
     static SQL: std::sync::LazyLock<[[String; 2]; 2]> = std::sync::LazyLock::new(|| {
         [

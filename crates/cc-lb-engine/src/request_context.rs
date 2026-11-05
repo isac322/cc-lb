@@ -1,8 +1,12 @@
 use bytes::Bytes;
-use cc_lb_domain::{CacheBreakpoint, CachePricingSummary};
+use cc_lb_domain::{CacheBreakpoint, CachePricingSummary, Provider};
 use cc_lb_routing::RoutingContext;
 use cc_lb_upstream::DialectShapeContext;
 use http::{HeaderMap, Method};
+
+/// Provider selected by a provider-prefixed proxy route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderScope(pub Provider);
 
 /// Parsed downstream request data passed into plugins.
 #[derive(Clone, Debug)]
@@ -21,6 +25,8 @@ pub struct RequestContext {
     pub downstream_headers: HeaderMap,
     /// Downstream HTTP method.
     pub method: Method,
+    /// Provider selected by a prefixed proxy route, if any.
+    pub provider_scope: Option<Provider>,
     /// Downstream request path, such as `/v1/messages`.
     pub path: String,
     /// Raw downstream query string without the leading `?`.
@@ -78,6 +84,7 @@ pub struct ParsedRequestBuilder {
     requested_service_tier: Option<String>,
     downstream_headers: HeaderMap,
     method: Method,
+    provider_scope: Option<Provider>,
     path: String,
     query: Option<String>,
     body_bytes: Bytes,
@@ -95,6 +102,7 @@ impl ParsedRequestBuilder {
             requested_service_tier: None,
             downstream_headers: HeaderMap::new(),
             method: Method::GET,
+            provider_scope: None,
             path: String::new(),
             query: None,
             body_bytes: Bytes::new(),
@@ -131,6 +139,11 @@ impl ParsedRequestBuilder {
     /// Sets the downstream HTTP method.
     pub fn method(mut self, method: Method) -> Self {
         self.method = method;
+        self
+    }
+    /// Sets the provider selected by a prefixed proxy route.
+    pub fn provider_scope(mut self, provider_scope: Option<Provider>) -> Self {
+        self.provider_scope = provider_scope;
         self
     }
 
@@ -178,6 +191,7 @@ impl ParsedRequestBuilder {
             requested_service_tier: self.requested_service_tier,
             downstream_headers: self.downstream_headers,
             method: self.method,
+            provider_scope: self.provider_scope,
             path: self.path,
             query: self.query,
             body_bytes: self.body_bytes,

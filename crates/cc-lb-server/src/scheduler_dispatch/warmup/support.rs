@@ -20,10 +20,11 @@ pub(super) fn execution_result_from_dispatch_attempt(
         WarmupDispatchResult::Response {
             status,
             observations,
+            error_detail,
         } => WarmupAttemptExecutionResult::Response {
             status: *status,
             observations,
-            error_detail: None,
+            error_detail: error_detail.as_deref(),
         },
         WarmupDispatchResult::TransientFailure {
             reason,

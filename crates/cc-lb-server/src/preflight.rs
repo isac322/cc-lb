@@ -3,11 +3,13 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
 use cc_lb_config::{Config, DEFAULT_SQLITE_PATH, StorageConfig, TlsConfig};
+use cc_lb_oauth_protocol::GeminiOAuthProfile;
 use cc_lb_storage_api::{
     PluginChainEntry, PluginSlotKind, PrincipalRecord, StorageError as ApiStorageError,
-    UpstreamRecord, WasmRegistryEntry,
+    UpstreamKind, UpstreamRecord, WasmRegistryEntry,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -58,11 +60,14 @@ pub enum PreflightError {
 pub async fn run_preflight(
     stores: &Stores,
     data_dir: &Path,
+    config: &Config,
+    aead: &AeadService,
 ) -> Result<PreflightReport, PreflightError> {
     let mut report = PreflightReport::default();
 
     let upstreams = list_upstreams(stores).await?;
     report.upstream_count = upstreams.len();
+    warn_missing_antigravity_credentials(&upstreams, config, aead);
 
     let principals = list_principals(stores).await?;
     report.principal_count = principals.len();
@@ -147,6 +152,32 @@ async fn run_inner(
         verify_tls(tls_config)?;
     }
     Ok(report)
+}
+
+fn warn_missing_antigravity_credentials(
+    upstreams: &[UpstreamRecord],
+    config: &Config,
+    aead: &AeadService,
+) {
+    let has_antigravity_upstream = upstreams.iter().any(|upstream| {
+        upstream.kind == UpstreamKind::GeminiOauth
+            && upstream
+                .oauth_credentials
+                .as_ref()
+                .and_then(|tokens| tokens.decrypt(aead, upstream.id.as_bytes()).ok())
+                .is_some_and(|bundle| bundle.oauth_profile == GeminiOAuthProfile::Antigravity)
+    });
+    if has_antigravity_upstream
+        && config
+            .oauth
+            .antigravity
+            .as_ref()
+            .is_none_or(|config| config.missing_client_credentials().is_some())
+    {
+        tracing::warn!(
+            "Antigravity-profile Gemini upstreams exist but oauth.antigravity.client_id and oauth.antigravity.client_secret are not fully configured"
+        );
+    }
 }
 
 async fn list_upstreams(stores: &Stores) -> Result<Vec<UpstreamRecord>, PreflightError> {

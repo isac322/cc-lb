@@ -293,6 +293,7 @@ fn principal_view(limits: Vec<Limit>) -> Arc<PrincipalView> {
         user_filters: vec![Arc::new(SubscriptionPreferenceFilter::new())],
         terminal: TerminalStrategy::FirstPick,
         instantiation_error: None,
+        provider_filters: None,
     });
     Arc::new(PrincipalView::for_tests(
         PRINCIPAL,

@@ -212,6 +212,58 @@ fn parse_unified_field(value: &str) -> Option<UnifiedQuotaField> {
     }
 }
 
+/// Parse the Codex/ChatGPT OAuth quota headers documented by the Codex CLI.
+///
+/// The meter slot (`primary` or `secondary`) does not identify the window:
+/// Codex reports the duration separately. Only the stable five-hour and
+/// seven-day durations are stored.
+pub fn parse_openai_codex_quota_headers(headers: &http::HeaderMap) -> Vec<UnifiedQuotaObservation> {
+    let mut observations = Vec::new();
+    for prefix in ["primary", "secondary"] {
+        let used = headers
+            .get(format!("x-codex-{prefix}-used-percent"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite());
+        let reset = headers
+            .get(format!("x-codex-{prefix}-reset-at"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .and_then(|value| u64::try_from(value).ok());
+        let minutes = headers
+            .get(format!("x-codex-{prefix}-window-minutes"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<i64>().ok());
+        let Some(window) = (match minutes {
+            Some(300) => Some(SubscriptionQuotaWindow::FiveHour),
+            Some(10_080) => Some(SubscriptionQuotaWindow::SevenDay),
+            _ => None,
+        }) else {
+            continue;
+        };
+        if used.is_none() && reset.is_none() {
+            continue;
+        }
+        let utilization = used.map(|value| clamp_utilization_fraction(value / 100.0));
+        let status = utilization.map(|value| {
+            if value >= 1.0 {
+                SubscriptionQuotaStatus::Rejected
+            } else {
+                SubscriptionQuotaStatus::Allowed
+            }
+        });
+        observations.push(UnifiedQuotaObservation {
+            window,
+            utilization,
+            status,
+            resets_at_unix_secs: reset,
+            representative_claim: Some(format!("Codex {prefix} meter")),
+            ..UnifiedQuotaObservation::default()
+        });
+    }
+    observations
+}
+
 fn subscription_quota_window_order(window: SubscriptionQuotaWindow) -> u8 {
     match window {
         SubscriptionQuotaWindow::Unified => 0,
@@ -220,7 +272,11 @@ fn subscription_quota_window_order(window: SubscriptionQuotaWindow) -> u8 {
         SubscriptionQuotaWindow::SevenDayOpus => 3,
         SubscriptionQuotaWindow::SevenDayFable => 4,
         SubscriptionQuotaWindow::SevenDay => 5,
-        SubscriptionQuotaWindow::Overage => 6,
+        SubscriptionQuotaWindow::GeminiFiveHour => 6,
+        SubscriptionQuotaWindow::GeminiSevenDay => 7,
+        SubscriptionQuotaWindow::ThirdPartyFiveHour => 8,
+        SubscriptionQuotaWindow::ThirdPartySevenDay => 9,
+        SubscriptionQuotaWindow::Overage => 10,
     }
 }
 

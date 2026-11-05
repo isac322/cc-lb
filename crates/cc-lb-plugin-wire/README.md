@@ -27,18 +27,29 @@ filter hooks that need `FilterRequest::service_tier`.
 
 - `Filter` maps to the `cc_lb_filter` export.
 - `Shape` maps to the `cc_lb_shape` export.
+- `TransformResponse` maps to `cc_lb_transform_response`.
+- `TransformSseEvent` maps to `cc_lb_transform_sse_event`.
+
+`ProviderFamily` names the supported provider selectors:
+`anthropic`, `openai`, and `gemini`. `HookKind::qualified_export_name` maps a
+hook and provider to exports such as `cc_lb_shape_openai`.
+`HookKind::parse_entrypoint` parses bare legacy metadata keys and qualified
+keys such as `shape_openai`; bare keys are Anthropic-only.
 
 `WireSchema` exposes a canonical descriptor and BLAKE3 fingerprint for a hook
-wire type. This crate's build script generates the impl for every wire type from
-its canonical descriptor, and `#[cc_lb_plugin]` embeds the fingerprint of each
-handler's request type in the plugin. Any field addition, removal, rename,
+wire type. This crate's build script generates the impl for every wire type
+from its canonical descriptor, and `#[cc_lb_plugin]` embeds the fingerprint
+once per distinct hook and wire version. Any field addition, removal, rename,
 reorder, or type edit changes the descriptor and fingerprint. Plugin authors do
 not manage hashes manually.
 
 ## PluginMetadata Schema
 
-The host expects one `cc_lb.plugin.v1` metadata section in each upload. PDK
-macros generate that section from plugin and handler attributes.
+The host accepts one metadata section in each upload:
+`cc_lb.plugin.v1` for legacy-only artifacts or `cc_lb.plugin.v2` when any
+provider-qualified handler is present. PDK macros generate that section from
+plugin and handler attributes. V2 hook keys use the form `shape_openai`; bare
+keys remain valid for mixed legacy artifacts and map to Anthropic only.
 
 Top-level metadata contains:
 

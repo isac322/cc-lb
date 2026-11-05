@@ -365,6 +365,7 @@ impl Fixture {
         self.store_bundle(
             upstream,
             OAuthTokenBundle {
+                oauth_profile: Default::default(),
                 access_token: "sk-ant-oat01-expired-seed".to_owned(),
                 refresh_token: "sk-ant-ort01-expired-seed".to_owned(),
                 expires_at_unix_secs: expired_at,
@@ -1514,6 +1515,7 @@ async fn oauth_status_reports_refreshing_mode_and_refresh_token_expiry() {
         .store_bundle(
             &upstream,
             OAuthTokenBundle {
+                oauth_profile: Default::default(),
                 access_token: "sk-ant-oat01-refreshing".to_owned(),
                 refresh_token: "sk-ant-ort01-refreshing".to_owned(),
                 expires_at_unix_secs: now_unix_secs(fixture.clock.as_ref()) + 3600,
@@ -1552,6 +1554,7 @@ async fn oauth_status_supports_openai_and_gemini_oauth_modes() {
             .store_bundle(
                 &refreshing,
                 OAuthTokenBundle {
+                    oauth_profile: Default::default(),
                     access_token: format!("provider-access-{index}"),
                     refresh_token: format!("provider-refresh-{index}"),
                     expires_at_unix_secs: TEST_NOW_UNIX_SECS + 3_600,
@@ -1580,6 +1583,7 @@ async fn oauth_status_supports_openai_and_gemini_oauth_modes() {
             .store_bundle(
                 &never_refresh,
                 OAuthTokenBundle {
+                    oauth_profile: Default::default(),
                     access_token: format!("provider-long-lived-{index}"),
                     refresh_token: String::new(),
                     expires_at_unix_secs: TEST_NOW_UNIX_SECS + 86_400,

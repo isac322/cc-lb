@@ -16,14 +16,30 @@ use serde::{Deserialize, Serialize};
 pub enum RequestEventKind {
     /// `POST /v1/messages` exactly.
     Messages,
-    /// `POST /v1/messages/count_tokens` exactly.
+    /// Anthropic token counting and OpenAI Responses input-token counting.
     CountTokens,
-    /// `POST /v1/responses` exactly.
+    /// OpenAI Responses generation and compaction.
     OpenaiResponses,
     /// Gemini `generateContent` and `streamGenerateContent` model actions.
     GeminiGenerateContent,
     /// Gemini `countTokens` model action.
     GeminiCountTokens,
+    /// Chat-completion operations, including Gemini's OpenAI-compatible API.
+    ChatCompletions,
+    /// Legacy text completions (Anthropic or OpenAI).
+    Completions,
+    /// Embeddings, including native Gemini model actions.
+    Embeddings,
+    /// OpenAI moderation requests.
+    Moderations,
+    /// Stateless audio generation and transcription operations.
+    Audio,
+    /// Stateless image generation, editing, and variation operations.
+    Images,
+    /// Codex search and memory summarization.
+    CodexAuxiliary,
+    /// Gemini synchronous prediction.
+    GeminiPredict,
     /// `/v1/models` and `/v1/models/{id}`.
     Models,
     /// `/v1/files`, `/v1/files/{id}`, and `/v1/files/{id}/content`.
@@ -44,6 +60,14 @@ impl RequestEventKind {
             Self::OpenaiResponses => "openai_responses",
             Self::GeminiGenerateContent => "gemini_generate_content",
             Self::GeminiCountTokens => "gemini_count_tokens",
+            Self::ChatCompletions => "chat_completions",
+            Self::Completions => "completions",
+            Self::Embeddings => "embeddings",
+            Self::Moderations => "moderations",
+            Self::Audio => "audio",
+            Self::Images => "images",
+            Self::CodexAuxiliary => "codex_auxiliary",
+            Self::GeminiPredict => "gemini_predict",
             Self::Models => "models",
             Self::Files => "files",
             Self::Other => "other",
@@ -52,16 +76,39 @@ impl RequestEventKind {
         }
     }
 
-    /// Classify an ingress request path. Exact-segment matching only:
-    /// Message and Responses endpoints match exactly. Gemini model actions
-    /// require a non-empty, single-segment model name. `/v1/models` and
-    /// `/v1/files` match themselves and slash-separated descendants; every
-    /// other path, including prefix lookalikes, is [`Self::Other`].
+    /// Classify endpoint families without model ids or other high-cardinality
+    /// values. Provider prefixes are normalized to the engine's canonical path.
     pub fn from_path(path: &str) -> Self {
+        let path = ["/anthropic", "/openai", "/gemini"]
+            .iter()
+            .find_map(|prefix| {
+                path.strip_prefix(prefix)
+                    .filter(|rest| rest.starts_with('/'))
+            })
+            .unwrap_or(path);
         match path {
             "/v1/messages" => Self::Messages,
-            "/v1/messages/count_tokens" => Self::CountTokens,
-            "/v1/responses" => Self::OpenaiResponses,
+            "/v1/messages/count_tokens" | "/v1/responses/input_tokens" => Self::CountTokens,
+            "/v1/responses" | "/v1/responses/compact" => Self::OpenaiResponses,
+            "/v1/chat/completions" | "/v1beta/openai/chat/completions" => Self::ChatCompletions,
+            "/v1/complete" | "/v1/completions" => Self::Completions,
+            "/v1/embeddings" | "/v1beta/openai/embeddings" => Self::Embeddings,
+            "/v1/moderations" => Self::Moderations,
+            "/v1/audio/speech" | "/v1/audio/transcriptions" | "/v1/audio/translations" => {
+                Self::Audio
+            }
+            "/v1/images/generations"
+            | "/v1/images/edits"
+            | "/v1/images/variations"
+            | "/v1beta/openai/images/generations" => Self::Images,
+            "/v1/alpha/search" | "/v1/memories/trace_summarize" => Self::CodexAuxiliary,
+            p if p == "/v1beta/models"
+                || p.starts_with("/v1beta/models/") && !p.contains(':')
+                || p == "/v1beta/openai/models"
+                || p.starts_with("/v1beta/openai/models/") =>
+            {
+                Self::Models
+            }
             p if p.starts_with("/v1beta/models/") => {
                 let Some((model, action)) = p
                     .strip_prefix("/v1beta/models/")
@@ -75,6 +122,8 @@ impl RequestEventKind {
                 match action {
                     "generateContent" | "streamGenerateContent" => Self::GeminiGenerateContent,
                     "countTokens" => Self::GeminiCountTokens,
+                    "embedContent" | "batchEmbedContents" => Self::Embeddings,
+                    "predict" => Self::GeminiPredict,
                     _ => Self::Other,
                 }
             }
@@ -124,6 +173,14 @@ impl FromStr for RequestEventKind {
             "openai_responses" => Ok(Self::OpenaiResponses),
             "gemini_generate_content" => Ok(Self::GeminiGenerateContent),
             "gemini_count_tokens" => Ok(Self::GeminiCountTokens),
+            "chat_completions" => Ok(Self::ChatCompletions),
+            "completions" => Ok(Self::Completions),
+            "embeddings" => Ok(Self::Embeddings),
+            "moderations" => Ok(Self::Moderations),
+            "audio" => Ok(Self::Audio),
+            "images" => Ok(Self::Images),
+            "codex_auxiliary" => Ok(Self::CodexAuxiliary),
+            "gemini_predict" => Ok(Self::GeminiPredict),
             "models" => Ok(Self::Models),
             "files" => Ok(Self::Files),
             "other" => Ok(Self::Other),
@@ -182,6 +239,60 @@ mod tests {
     }
 
     #[test]
+    fn new_endpoint_families_have_bounded_labels_with_or_without_prefix() {
+        for (path, expected) in [
+            (
+                "/openai/v1/responses/compact",
+                RequestEventKind::OpenaiResponses,
+            ),
+            (
+                "/openai/v1/responses/input_tokens",
+                RequestEventKind::CountTokens,
+            ),
+            (
+                "/openai/v1/chat/completions",
+                RequestEventKind::ChatCompletions,
+            ),
+            ("/anthropic/v1/complete", RequestEventKind::Completions),
+            ("/openai/v1/embeddings", RequestEventKind::Embeddings),
+            ("/openai/v1/moderations", RequestEventKind::Moderations),
+            ("/openai/v1/audio/transcriptions", RequestEventKind::Audio),
+            ("/openai/v1/images/edits", RequestEventKind::Images),
+            ("/openai/v1/alpha/search", RequestEventKind::CodexAuxiliary),
+            (
+                "/gemini/v1beta/models/embed-model:embedContent",
+                RequestEventKind::Embeddings,
+            ),
+            (
+                "/gemini/v1beta/models/imagen:predict",
+                RequestEventKind::GeminiPredict,
+            ),
+            ("/gemini/v1beta/models/gemini", RequestEventKind::Models),
+            ("/gemini/v1beta/openai/models", RequestEventKind::Models),
+            (
+                "/gemini/v1beta/openai/chat/completions",
+                RequestEventKind::ChatCompletions,
+            ),
+            (
+                "/gemini/v1beta/openai/embeddings",
+                RequestEventKind::Embeddings,
+            ),
+            (
+                "/gemini/v1beta/openai/images/generations",
+                RequestEventKind::Images,
+            ),
+        ] {
+            assert_eq!(RequestEventKind::from_path(path), expected, "{path}");
+            let canonical = &path[path[1..].find('/').expect("provider prefix") + 1..];
+            assert_eq!(
+                RequestEventKind::from_path(canonical),
+                expected,
+                "{canonical}"
+            );
+        }
+    }
+
+    #[test]
     fn from_path_matches_models_and_files_descendants() {
         assert_eq!(
             RequestEventKind::from_path("/v1/models"),
@@ -222,7 +333,6 @@ mod tests {
             "/v1beta/models/gemini-2.5-pro:streamGenerateContent/",
             "/v1beta/models/gemini-2.5-pro:countTokens/extra",
             "/v1beta/models/gemini-2.5-pro:generateContents",
-            "/v1beta/models/gemini-2.5-pro",
             "/v1beta/modelsx/gemini-2.5-pro:generateContent",
             "/v1beta/model/gemini-2.5-pro:countTokens",
             "/v1",
@@ -284,6 +394,14 @@ mod tests {
             RequestEventKind::OpenaiResponses,
             RequestEventKind::GeminiGenerateContent,
             RequestEventKind::GeminiCountTokens,
+            RequestEventKind::ChatCompletions,
+            RequestEventKind::Completions,
+            RequestEventKind::Embeddings,
+            RequestEventKind::Moderations,
+            RequestEventKind::Audio,
+            RequestEventKind::Images,
+            RequestEventKind::CodexAuxiliary,
+            RequestEventKind::GeminiPredict,
             RequestEventKind::Models,
             RequestEventKind::Files,
             RequestEventKind::Other,

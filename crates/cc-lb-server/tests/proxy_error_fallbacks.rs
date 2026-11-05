@@ -157,6 +157,7 @@ async fn readyz_with_oauth(
     let tokens = EncryptedOAuthTokens::encrypt(
         &credential_key,
         &OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "oauth-access".to_owned(),
             refresh_token: "oauth-refresh".to_owned(),
             expires_at_unix_secs: u64::MAX / 2,

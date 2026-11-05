@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 use crate::AdminState;
 use crate::dashboard::{
-    DashboardBuildError, DashboardUsageResponse, UsageProjection, auto_step,
-    build_dashboard_summary, build_dashboard_usage_projected_checked, build_window_for_step,
-    parse_group_by, parse_range, parse_step, parse_usage_projection, validate_step_for_range,
+    DashboardBuildError, DashboardUsageResponse, UsageFilter, UsageProjection, auto_step,
+    build_dashboard_summary_filtered, build_dashboard_usage_projected_checked,
+    build_window_for_step, parse_group_by, parse_provider_families, parse_range, parse_step,
+    parse_usage_projection, resolve_provider_scope, validate_step_for_range,
 };
 use crate::response_cache::{
     PRINCIPAL_TOTALS_CACHE_TTL, ShortTtlSingleFlightCache, apply_private_revalidation,
@@ -25,6 +26,8 @@ use crate::response_cache::{
 #[derive(Debug, Deserialize)]
 pub(crate) struct SummaryQuery {
     range: String,
+    #[serde(default)]
+    providers: Option<String>,
 }
 
 pub(crate) async fn handle_dashboard_summary(
@@ -39,14 +42,27 @@ pub(crate) async fn handle_dashboard_summary(
         Ok(range) => range,
         Err(_) => return bad_request("invalid_range"),
     };
+    let provider_families = match parse_provider_families(query.providers.as_deref()) {
+        Ok(families) => families,
+        Err(_) => return bad_request("invalid_providers"),
+    };
+    let provider_scope =
+        match resolve_provider_scope(storage.as_ref(), provider_families.as_deref(), false).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::error!(%error, "dashboard provider inventory failed");
+                return internal_error("storage_error");
+            }
+        };
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let (_, window_end_unix_secs) = build_window_for_step(range, auto_step(range), now_unix_secs);
     let etag = dashboard_checkpoint(storage.as_ref())
         .await
         .map(|checkpoint| {
             format!(
-                "W/\"dashboard:summary:{}:{checkpoint}:{window_end_unix_secs}\"",
-                range.as_str()
+                "W/\"dashboard:summary:{}:{}:{checkpoint}:{window_end_unix_secs}\"",
+                range.as_str(),
+                query.providers.as_deref().unwrap_or("all")
             )
         });
     if let Some(etag) = &etag
@@ -54,7 +70,9 @@ pub(crate) async fn handle_dashboard_summary(
     {
         return not_modified_response(etag);
     }
-    match build_dashboard_summary(storage.as_ref(), range, now_unix_secs).await {
+    match build_dashboard_summary_filtered(storage.as_ref(), range, now_unix_secs, &provider_scope)
+        .await
+    {
         Ok(response) => apply_private_revalidation(Json(response).into_response(), etag.as_deref()),
         Err(error) => {
             tracing::error!(%error, "dashboard summary failed");
@@ -73,7 +91,11 @@ pub(crate) struct UsageQuery {
     #[serde(default)]
     upstream_id: Option<String>,
     #[serde(default)]
+    principal_id: Option<String>,
+    #[serde(default)]
     projection: Option<String>,
+    #[serde(default)]
+    providers: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -82,7 +104,9 @@ struct PrincipalTotalsCacheKey {
     step: &'static str,
     group_by: &'static str,
     upstream_id: Option<Uuid>,
+    principal_id: Option<String>,
     projection: &'static str,
+    providers: Option<String>,
     window_start_unix_secs: u64,
     window_end_unix_secs: u64,
 }
@@ -137,6 +161,30 @@ pub(crate) async fn handle_dashboard_usage(
         Ok(projection) => projection,
         Err(_) => return bad_request("invalid_projection"),
     };
+    let provider_families = match parse_provider_families(query.providers.as_deref()) {
+        Ok(families) => families,
+        Err(_) => return bad_request("invalid_providers"),
+    };
+    let provider_scope = match resolve_provider_scope(
+        storage.as_ref(),
+        provider_families.as_deref(),
+        group_by == crate::dashboard::UsageGroupBy::Provider,
+    )
+    .await
+    {
+        Ok(scope) => scope,
+        Err(error) => {
+            tracing::error!(%error, "dashboard provider inventory failed");
+            return internal_error("storage_error");
+        }
+    };
+    let usage_filter = UsageFilter {
+        group_by,
+        upstream_id,
+        principal_id: query.principal_id.clone(),
+        projection,
+        provider_scope,
+    };
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let (window_start_unix_secs, window_end_unix_secs) =
         build_window_for_step(range, step, now_unix_secs);
@@ -144,29 +192,30 @@ pub(crate) async fn handle_dashboard_usage(
         UsageProjection::Full => "full",
         UsageProjection::Totals => "totals",
     };
-    if group_by == crate::dashboard::UsageGroupBy::Principal
-        && projection == UsageProjection::Totals
+    if usage_filter.group_by == crate::dashboard::UsageGroupBy::Principal
+        && usage_filter.projection == UsageProjection::Totals
     {
         let cache_key = PrincipalTotalsCacheKey {
             range: range.as_str(),
             step: step.as_str(),
-            group_by: group_by.as_str(),
-            upstream_id,
+            group_by: usage_filter.group_by.as_str(),
+            upstream_id: usage_filter.upstream_id,
+            principal_id: usage_filter.principal_id.clone(),
             projection: projection_name,
+            providers: query.providers.clone(),
             window_start_unix_secs,
             window_end_unix_secs,
         };
         let storage_for_build = Arc::clone(storage);
+        let usage_filter_for_build = usage_filter.clone();
         let result = PRINCIPAL_TOTALS_CACHE
             .get_or_build(storage, cache_key, async move {
                 build_dashboard_usage_projected_checked(
                     storage_for_build.as_ref(),
                     range,
                     step,
-                    group_by,
-                    upstream_id,
+                    &usage_filter_for_build,
                     now_unix_secs,
-                    projection,
                 )
                 .await
             })
@@ -178,19 +227,25 @@ pub(crate) async fn handle_dashboard_usage(
             Err(error) => dashboard_usage_error(error.as_ref()),
         };
     }
-    let etag = if group_by == crate::dashboard::UsageGroupBy::Principal {
+    let etag = if usage_filter.group_by == crate::dashboard::UsageGroupBy::Principal {
         None
     } else {
         dashboard_checkpoint(storage.as_ref())
             .await
             .map(|checkpoint| {
                 format!(
-                    "W/\"dashboard:usage:{}:{}:{}:{}:{projection_name}:{checkpoint}:{window_end_unix_secs}\"",
+                    "W/\"dashboard:usage:{}:{}:{}:{}:{}:{}:{projection_name}:{checkpoint}:{window_end_unix_secs}\"",
                     range.as_str(),
                     step.as_str(),
                     group_by.as_str(),
                     upstream_id
                         .map(|value| value.to_string())
+                        .unwrap_or_else(|| "all".to_owned()),
+                    query.providers.as_deref().unwrap_or("all"),
+                    query
+                        .principal_id
+                        .as_deref()
+                        .map(hex::encode)
                         .unwrap_or_else(|| "all".to_owned()),
                 )
             })
@@ -204,10 +259,8 @@ pub(crate) async fn handle_dashboard_usage(
         storage.as_ref(),
         range,
         step,
-        group_by,
-        upstream_id,
+        &usage_filter,
         now_unix_secs,
-        projection,
     )
     .await
     {

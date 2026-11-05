@@ -313,6 +313,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
                 thread_id: Some("thread-a".to_owned()),
                 model: Some("claude-sonnet-4-5".to_owned()),
                 upstream_id: Some(upstream_id),
+                provider_upstream_ids: None,
                 status_class: Some(StatusClass::TwoXx),
                 errors_only: false,
                 event_kind: None,

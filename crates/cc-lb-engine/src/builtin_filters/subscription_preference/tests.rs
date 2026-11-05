@@ -26,6 +26,7 @@ mod cost_first;
 mod fable_pressure;
 mod fable_resetless;
 mod fable_uniform_classification;
+mod provider_quota_rules;
 mod weekly_pace_gate;
 
 const SONNET_MODEL: &str = "claude-sonnet-4-5-20250929";
@@ -98,7 +99,13 @@ fn openai_only_candidates_prefer_oauth() {
     assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
     assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
     assert!(output.per_candidate_reasons.is_empty());
-    assert!(output.subscription_preference.is_none());
+    assert_eq!(
+        output
+            .subscription_preference
+            .expect("tier trace")
+            .chosen_tier,
+        cc_lb_domain::SubscriptionTier::UnknownProbe
+    );
 }
 
 #[test]
@@ -112,7 +119,13 @@ fn gemini_only_candidates_prefer_oauth() {
     assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
     assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
     assert!(output.per_candidate_reasons.is_empty());
-    assert!(output.subscription_preference.is_none());
+    assert_eq!(
+        output
+            .subscription_preference
+            .expect("tier trace")
+            .chosen_tier,
+        cc_lb_domain::SubscriptionTier::UnknownProbe
+    );
 }
 
 #[test]
@@ -121,61 +134,6 @@ fn single_non_anthropic_candidate_is_preserved() {
     let output = filter_for_model(std::slice::from_ref(&pinned), "gpt-5");
     assert_eq!(output.kept_upstream_ids, vec![pinned.upstream_id]);
     assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-#[test]
-fn non_anthropic_oauth_ranks_by_cache_reads_before_upstream_id() {
-    for (kind, model) in [
-        (UpstreamKind::OpenaiOauth, "gpt-5"),
-        (UpstreamKind::GeminiOauth, "gemini-2.5-pro"),
-    ] {
-        let uncached = other_provider("uncached", 1, kind);
-        let cached = with_live_cache(other_provider("cached", 2, kind), 100);
-        let more_cached = with_live_cache(other_provider("more-cached", 3, kind), 200);
-        for candidates in [
-            vec![uncached.clone(), cached.clone(), more_cached.clone()],
-            vec![more_cached.clone(), cached.clone(), uncached.clone()],
-        ] {
-            let output = filter_for_model(&candidates, model);
-            assert_eq!(output.kept_upstream_ids, vec![more_cached.upstream_id]);
-            assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-            assert!(output.per_candidate_reasons.is_empty());
-            assert!(output.subscription_preference.is_none());
-        }
-    }
-}
-
-#[test]
-fn non_anthropic_oauth_cache_ties_choose_lowest_upstream_id() {
-    for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
-        for read_tokens in [0, 100] {
-            let low_id = with_live_cache(other_provider("low-id", 1, kind), read_tokens);
-            let high_id = with_live_cache(other_provider("high-id", 2, kind), read_tokens);
-            for candidates in [
-                vec![high_id.clone(), low_id.clone()],
-                vec![low_id.clone(), high_id.clone()],
-            ] {
-                let output = filter_for_model(&candidates, MODEL_AGNOSTIC);
-                assert_eq!(output.kept_upstream_ids, vec![low_id.upstream_id]);
-            }
-        }
-    }
-}
-
-#[test]
-fn non_anthropic_oauth_missing_cache_score_ties_with_zero_reads() {
-    let missing = other_provider("missing", 1, UpstreamKind::OpenaiOauth);
-    let zero = with_live_cache(other_provider("zero", 2, UpstreamKind::GeminiOauth), 0);
-    let output = filter_for_model(&[zero, missing.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![missing.upstream_id]);
-}
-
-#[test]
-fn openai_and_gemini_oauth_share_cache_ranking() {
-    let openai = with_live_cache(other_provider("openai", 1, UpstreamKind::OpenaiOauth), 100);
-    let gemini = with_live_cache(other_provider("gemini", 2, UpstreamKind::GeminiOauth), 200);
-    let output = filter_for_model(&[openai, gemini.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![gemini.upstream_id]);
 }
 
 #[test]
@@ -817,11 +775,15 @@ fn absent_five_hour_is_known_base_like_a_healthy_five_hour_window() {
         MODEL_AGNOSTIC,
         &without_five_hour
     ));
+
     for candidate in [&without_five_hour, &with_five_hour] {
         let output = filter_for_model(&[candidate.clone(), api_key("fallback", 3)], MODEL_AGNOSTIC);
         assert_eq!(output.kept_upstream_ids, vec![candidate.upstream_id]);
     }
     let output = filter_for_model(&[with_five_hour.clone(), without_five_hour], MODEL_AGNOSTIC);
+    // Positive pressure is intentionally preferred: the present 5h account
+    // has capacity that will expire sooner, so routing uses it before the
+    // 7d-only account whose absence of 5h pressure is not a negative signal.
     assert_eq!(output.kept_upstream_ids, vec![with_five_hour.upstream_id]);
 }
 
@@ -862,6 +824,126 @@ fn absent_five_hour_does_not_bypass_exhausted_weekly_windows() {
         let output = filter_for_model(&[candidate, fallback.clone()], model);
         assert_eq!(output.kept_upstream_ids, vec![fallback.upstream_id]);
     }
+}
+
+#[test]
+fn unobserved_or_stale_five_hour_is_not_explicit_absence() {
+    let cases = [
+        None,
+        Some(missing(WINDOW_FIVE_HOUR).build()),
+        Some(
+            stale(WINDOW_FIVE_HOUR)
+                .util(0.1)
+                .status("allowed")
+                .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+                .build(),
+        ),
+        Some(
+            stale(WINDOW_FIVE_HOUR)
+                .util(1.0)
+                .status("rejected")
+                .reset_at(T0_SECS - 1)
+                .build(),
+        ),
+    ];
+    for five_hour in cases {
+        let mut quotas = vec![
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.1)
+                .status("allowed")
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                .build(),
+        ];
+        quotas.extend(five_hour);
+        let candidate = oauth_at_t0("unknown-five-hour", 1, quotas);
+        let Some(assessment) = assess_candidate(
+            &candidate,
+            0,
+            BASE_WINDOWS.as_slice(),
+            &FilterConfig::default(),
+        ) else {
+            panic!("unknown five-hour window with healthy weekly quota stays eligible");
+        };
+        assert_eq!(assessment.tier, Tier::PartialBase);
+        assert_eq!(assessment.quota_urgency_5h, 0.0);
+        assert!(!subscription_hard_blocked(MODEL_AGNOSTIC, &candidate));
+        let output = filter_for_model(&[candidate.clone(), api_key("fallback", 2)], MODEL_AGNOSTIC);
+        assert_eq!(output.kept_upstream_ids, vec![candidate.upstream_id]);
+    }
+}
+
+#[test]
+fn stale_exhausted_five_hour_keeps_existing_blocking_rules() {
+    for reset_at in [None, Some(T0_SECS + FIVE_HOUR_RESET_SECS)] {
+        let mut five_hour = stale(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build();
+        five_hour.resets_at_unix_secs = reset_at;
+        let candidate = oauth_at_t0(
+            "stale-exhausted-five-hour",
+            1,
+            vec![
+                five_hour,
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.1)
+                    .status("allowed")
+                    .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                    .build(),
+            ],
+        );
+        assert!(subscription_hard_blocked(MODEL_AGNOSTIC, &candidate));
+        let fallback = api_key("fallback", 2);
+        let output = filter_for_model(&[candidate, fallback.clone()], MODEL_AGNOSTIC);
+        assert_eq!(output.kept_upstream_ids, vec![fallback.upstream_id]);
+    }
+}
+
+#[test]
+fn five_hour_sample_returning_after_absence_restores_pressure_and_exhaustion() {
+    let weekly = fresh(WINDOW_SEVEN_DAY)
+        .util(0.1)
+        .status("allowed")
+        .reset_at(T0_SECS + 2 * 86_400)
+        .build();
+    let mut candidate = oauth_at_t0(
+        "changing-five-hour",
+        1,
+        vec![absent(WINDOW_FIVE_HOUR).build(), weekly.clone()],
+    );
+    assert!(!subscription_hard_blocked(MODEL_AGNOSTIC, &candidate));
+
+    candidate.subscription_quotas = vec![
+        fresh(WINDOW_FIVE_HOUR)
+            .util(1.0)
+            .status("rejected")
+            .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+            .build(),
+        weekly.clone(),
+    ];
+    assert!(subscription_hard_blocked(MODEL_AGNOSTIC, &candidate));
+    let fallback = api_key("fallback", 2);
+    let output = filter_for_model(&[candidate.clone(), fallback.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![fallback.upstream_id]);
+
+    candidate.subscription_quotas = vec![
+        fresh(WINDOW_FIVE_HOUR)
+            .util(0.1)
+            .status("allowed")
+            .reset_at(T0_SECS + 600)
+            .build(),
+        weekly,
+    ];
+    let Some(assessment) = assess_candidate(
+        &candidate,
+        0,
+        BASE_WINDOWS.as_slice(),
+        &FilterConfig::default(),
+    ) else {
+        panic!("returning healthy five-hour sample must be eligible");
+    };
+    assert_eq!(assessment.tier, Tier::KnownBase);
+    assert!(assessment.quota_urgency_5h > 0.0);
+    assert!(assessment.five_hour_pressure_raw > 0.0);
+    let output = filter_for_model(&[candidate.clone(), fallback], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![candidate.upstream_id]);
 }
 
 #[test]

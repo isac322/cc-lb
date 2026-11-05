@@ -27,12 +27,10 @@ pub(crate) enum UpstreamAffinityExtractionError {
 
 /// Provider label stored with every affinity key derived for `capability`.
 pub(crate) const fn affinity_provider(capability: ProviderCapability) -> &'static str {
-    match capability {
-        ProviderCapability::AnthropicMessages => ANTHROPIC_PROVIDER,
-        ProviderCapability::OpenaiResponses => OPENAI_PROVIDER,
-        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => {
-            GEMINI_PROVIDER
-        }
+    match capability.provider() {
+        cc_lb_domain::Provider::Anthropic => ANTHROPIC_PROVIDER,
+        cc_lb_domain::Provider::Openai => OPENAI_PROVIDER,
+        cc_lb_domain::Provider::Gemini => GEMINI_PROVIDER,
     }
 }
 
@@ -66,10 +64,8 @@ pub(crate) fn request_observes_response_affinity(
         // send `store: false` and still pin the follow-up to the owning
         // account (encrypted reasoning items are account-scoped), so the id
         // is observed regardless of `store`.
-        ProviderCapability::OpenaiResponses => true,
-        // generateContent never creates `cachedContents`; `thoughtSignature`
-        // is forwarded without affinity.
-        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => false,
+        ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact => true,
+        _ => false,
     }
 }
 
@@ -83,7 +79,9 @@ pub(crate) fn extract_request_affinity_keys(
     let mut collector = KeyCollector::new(capability, principal_id);
     match capability {
         ProviderCapability::AnthropicMessages => collector.anthropic_message(value)?,
-        ProviderCapability::OpenaiResponses => {
+        ProviderCapability::OpenaiResponses
+        | ProviderCapability::OpenaiResponsesInputTokens
+        | ProviderCapability::OpenaiResponsesCompact => {
             if let Some(object) = value.as_object() {
                 collector.reference(
                     UpstreamAffinityKind::OpenaiResponseId,
@@ -98,6 +96,7 @@ pub(crate) fn extract_request_affinity_keys(
         ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => {
             extract_gemini_cached_content(value, &mut collector)?;
         }
+        _ => {}
     }
     Ok(collector.keys)
 }
@@ -111,8 +110,10 @@ pub(crate) fn extract_response_affinity_keys(
     let mut collector = KeyCollector::new(capability, principal_id);
     match capability {
         ProviderCapability::AnthropicMessages => collector.anthropic_message(value)?,
-        ProviderCapability::OpenaiResponses => collector.openai_response(value)?,
-        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => {}
+        ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact => {
+            collector.openai_response(value)?;
+        }
+        _ => {}
     }
     Ok(collector.keys)
 }
@@ -123,9 +124,11 @@ pub(crate) fn extract_response_affinity_keys_from_sse_event(
     event: &ParsedSseEvent<'_>,
     principal_id: &str,
 ) -> Result<Vec<UpstreamAffinityKey>, UpstreamAffinityExtractionError> {
-    if matches!(
+    if !matches!(
         capability,
-        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens
+        ProviderCapability::AnthropicMessages
+            | ProviderCapability::OpenaiResponses
+            | ProviderCapability::OpenaiResponsesCompact
     ) {
         return Ok(Vec::new());
     }
@@ -151,9 +154,10 @@ pub(crate) fn extract_response_affinity_keys_from_sse_event(
                 value.get("delta").and_then(|delta| delta.get("container")),
             )?;
         }
-        (ProviderCapability::OpenaiResponses, Some(event_type))
-            if event_type.starts_with(OPENAI_RESPONSE_EVENT_PREFIX) =>
-        {
+        (
+            ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact,
+            Some(event_type),
+        ) if event_type.starts_with(OPENAI_RESPONSE_EVENT_PREFIX) => {
             if let Some(response) = value.get("response") {
                 collector.openai_response(response)?;
             }
@@ -412,6 +416,40 @@ mod tests {
             keys[0].value_sha256,
             <[u8; 32]>::from(Sha256::digest(b"opaque-nested"))
         );
+    }
+
+    #[test]
+    fn compact_and_input_token_operations_reuse_response_owner_affinity() {
+        let body =
+            serde_json::json!({"previous_response_id":"resp-owner", "conversation":"conv-owner"});
+        let expected =
+            extract_request_affinity_keys(ProviderCapability::OpenaiResponses, &body, "principal")
+                .expect("response affinity");
+        for capability in [
+            ProviderCapability::OpenaiResponsesCompact,
+            ProviderCapability::OpenaiResponsesInputTokens,
+        ] {
+            let actual = extract_request_affinity_keys(capability, &body, "principal")
+                .expect("operation affinity");
+            assert_eq!(actual, expected);
+        }
+        let response = serde_json::json!({"id":"resp-compact"});
+        let keys = extract_response_affinity_keys(
+            ProviderCapability::OpenaiResponsesCompact,
+            &response,
+            "principal",
+        )
+        .expect("compact response affinity");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].kind, UpstreamAffinityKind::OpenaiResponseId);
+        assert!(request_observes_response_affinity(
+            ProviderCapability::OpenaiResponsesCompact,
+            &body
+        ));
+        assert!(!request_observes_response_affinity(
+            ProviderCapability::OpenaiResponsesInputTokens,
+            &body
+        ));
     }
 
     #[test]

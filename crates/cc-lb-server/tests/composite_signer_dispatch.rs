@@ -593,6 +593,7 @@ impl Fixture {
                         refresh_token: tokens.refresh_token,
                         account_id: None,
                         project_id: None,
+                        oauth_profile: Default::default(),
                         expires_at_unix_secs: expires_at,
                         refresh_token_expires_at_unix_secs: None,
                         scopes: vec!["messages".to_owned()],
@@ -673,6 +674,7 @@ impl Fixture {
         let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
         let view = build_dynamic_view(
             self.stores.as_ref(),
+            None,
             self.aead.clone(),
             None,
             0,

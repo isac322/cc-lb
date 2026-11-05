@@ -13,7 +13,10 @@ use axum::http::{Request, StatusCode, header};
 use cc_lb_admin::ports::{
     SubscriptionQuotaIngestionPort, WarmupAttemptInput, WarmupAttemptOutcomeSnapshot, WarmupPort,
 };
-use cc_lb_admin::{AdminPorts, AdminState, DynamicViewRebinder, router};
+use cc_lb_admin::{
+    AdminPorts, AdminState, DynamicViewRebinder, WarmupDialectDispatchOutcome,
+    WarmupDialectDispatcher, WarmupNativeDispatchOutcome, router,
+};
 use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_clock::Clock;
 use cc_lb_config::Config;
@@ -23,7 +26,7 @@ use cc_lb_domain::Upstream;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AuditQueryScope, AuditStore, UpstreamCreate, UpstreamStore, WarmupAttemptOutcome,
-    WarmupSuccessReason,
+    WarmupDispatchKind, WarmupSuccessReason,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
@@ -32,10 +35,7 @@ use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tower::ServiceExt;
-use url::Url;
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::admin_test_common;
 
@@ -118,6 +118,37 @@ impl Clock for GateClock {
         SystemTime::now()
     }
 }
+struct PostCommitWarmupDispatcher;
+
+#[async_trait]
+impl WarmupDialectDispatcher for PostCommitWarmupDispatcher {
+    async fn dispatch_warmup_with_dialect(
+        &self,
+        _runtime: &Arc<cc_lb_runtime_wasmtime::WasmtimeRuntime>,
+        _data_dir: &std::path::Path,
+        _upstream: &cc_lb_storage_api::UpstreamRecord,
+    ) -> Result<WarmupDialectDispatchOutcome, cc_lb_admin::WarmupDialectDispatchError> {
+        Ok(WarmupDialectDispatchOutcome {
+            status: StatusCode::OK,
+            headers: axum::http::HeaderMap::new(),
+        })
+    }
+
+    async fn dispatch_warmup_native(
+        &self,
+        _upstream: &cc_lb_storage_api::UpstreamRecord,
+    ) -> Result<WarmupNativeDispatchOutcome, cc_lb_admin::WarmupDialectDispatchError> {
+        Ok(WarmupNativeDispatchOutcome::Response {
+            status: StatusCode::OK,
+            dispatch_kind: WarmupDispatchKind::Http,
+            observations: vec![cc_lb_quota::UnifiedQuotaObservation {
+                utilization: Some(0.1),
+                ..Default::default()
+            }],
+            error_detail: None,
+        })
+    }
+}
 
 struct Harness {
     _dir: tempfile::TempDir,
@@ -128,7 +159,7 @@ struct Harness {
 }
 
 async fn harness(clock: Arc<dyn Clock>) -> Harness {
-    harness_with(clock, None, None).await
+    harness_with(clock, None, None, None).await
 }
 
 /// Builds the admin app. With `audit_inserted`, the app's storage reports
@@ -139,6 +170,7 @@ async fn harness_with(
     clock: Arc<dyn Clock>,
     lifecycle: Option<AdminPorts>,
     audit_inserted: Option<UnboundedSender<()>>,
+    warmup_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
 ) -> Harness {
     let dir = tempfile::tempdir().expect("temp admin dir");
     let initialized =
@@ -178,7 +210,7 @@ async fn harness_with(
         lazy_refresher: None,
         runtime: None,
         data_dir: None,
-        warmup_dialect_dispatcher: None,
+        warmup_dialect_dispatcher: warmup_dispatcher,
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
@@ -553,16 +585,29 @@ impl SubscriptionQuotaIngestionPort for GatedQuotaIngestion {
             .recv()
             .expect("test releases the gate");
     }
+    fn ingest_subscription_quota_observations(
+        &self,
+        _observations: &[cc_lb_quota::UnifiedQuotaObservation],
+        _upstream_id: Uuid,
+        _observed_at: SystemTime,
+    ) {
+        self.reached.send(()).expect("test awaits the gate");
+        self.release
+            .lock()
+            .expect("gate receiver lock")
+            .recv()
+            .expect("test releases the gate");
+    }
 }
 
-async fn seed_warmup_oauth_upstream(storage: &SqliteStorage, base_url: &str) -> Uuid {
+async fn seed_warmup_oauth_upstream(storage: &SqliteStorage) -> Uuid {
     let upstream = UpstreamStore::create(
         storage,
         UpstreamCreate {
             id: Uuid::new_v4(),
             name: "post-commit-fire-now".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
-            base_url: Some(Url::parse(base_url).expect("base url parses")),
+            base_url: None,
             api_key_ciphertext: None,
             oauth_tokens: None,
             warmup_enabled: true,
@@ -574,6 +619,7 @@ async fn seed_warmup_oauth_upstream(storage: &SqliteStorage, base_url: &str) -> 
     .await
     .expect("create upstream");
     let bundle = OAuthTokenBundle {
+        oauth_profile: Default::default(),
         access_token: "sk-ant-oat01-post-commit".to_owned(),
         refresh_token: "sk-ant-ort01-post-commit".to_owned(),
         expires_at_unix_secs: 4_000_000_000,
@@ -598,12 +644,6 @@ async fn seed_warmup_oauth_upstream(storage: &SqliteStorage, base_url: &str) -> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fire_now_completes_persistence_and_audit_after_request_is_dropped() {
-    let provider = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-        .mount(&provider)
-        .await;
     let (reached_tx, mut reached) = unbounded_channel();
     let (release, release_rx) = mpsc::channel();
     let ports = AdminPorts {
@@ -619,9 +659,10 @@ async fn fire_now_completes_persistence_and_audit_after_request_is_dropped() {
         Arc::new(cc_lb_clock::SystemClock),
         Some(ports),
         Some(audit_inserted_tx),
+        Some(Arc::new(PostCommitWarmupDispatcher)),
     )
     .await;
-    let id = seed_warmup_oauth_upstream(&harness.storage, &provider.uri()).await;
+    let id = seed_warmup_oauth_upstream(&harness.storage).await;
 
     let request = tokio::spawn(harness.app.clone().oneshot(admin_request(
         "POST",

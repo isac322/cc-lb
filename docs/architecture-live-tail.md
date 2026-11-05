@@ -55,9 +55,24 @@ graph TB
     PollerB -->|"StorageTailUpdate { cursor, event }"| SSEHandlerB
 
     %% Client Delivery
-    SSEHandlerA -->|"adjacent-tagged SSE frames<br/>event: message | reset | heartbeat | cursor<br/>id: &lt;cursor&gt;"| ClientA
-    SSEHandlerB -->|"adjacent-tagged SSE frames<br/>event: message | reset | heartbeat | cursor<br/>id: &lt;cursor&gt;"| ClientB
+    SSEHandlerA -->|"adjacent-tagged SSE frames<br/>event: message | remove | reset | heartbeat | cursor<br/>id: &lt;cursor&gt;"| ClientA
+    SSEHandlerB -->|"adjacent-tagged SSE frames<br/>event: message | remove | reset | heartbeat | cursor<br/>id: &lt;cursor&gt;"| ClientB
 ```
+
+## Scoped request lifecycles
+
+Upstream and provider filters apply to each request snapshot. A request can start
+on upstream A and finish on B after failover. If a stream emitted its partial but
+the final falls outside that stream's scope, it sends `event: remove` with
+`{"event_id":"..."}` instead of the out-of-scope final. Clients remove only that
+partial and remember its identity to reject late partials. History remains
+attributed to the final upstream; unfiltered streams keep their existing frames.
+
+Retractions from the request bus retain the last durable bookmark. Storage-tail
+retractions carry the committed cursor. Tracking is connection-local and bounded
+to 10,000 active partials; exceeding that limit sends `reset` with reason
+`partial_cap`. On scoped reconnects, clients discard retained partials because
+filtered history cannot replay completions that moved outside the scope.
 
 ## Sequence Diagram: Full Request Lifecycle
 

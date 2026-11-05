@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
@@ -36,18 +37,25 @@ use cc_lb_control::{
     },
     spawn_audit_writer,
 };
+use cc_lb_engine::realtime_websocket::{
+    RealtimeUsage, RealtimeWebSocketKind, RealtimeWebSocketSession, RealtimeWebSocketTarget,
+    gemini_setup_model,
+};
 use cc_lb_engine::responses_websocket::{
     ResponsesWebSocketGateway, WebSocketDispatch, WebSocketError,
 };
 use cc_lb_engine::{
     BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
     BulkheadRuntimeConfig, CircuitBreakerDispatch, DrainController, HopByHopStripLayer, Lifecycle,
-    LifecycleConfig, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, UpstreamDispatch,
-    UpstreamRateLimitSink, anthropic_error_response, cache_keepalive::AnthropicKeepaliveDispatcher,
-    make_default_dispatcher, start_subscription_quota_writer, start_upstream_rate_limit_writer,
+    LifecycleConfig, ProviderScope, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
+    UpstreamDispatch, UpstreamRateLimitSink, anthropic_error_response,
+    cache_keepalive::AnthropicKeepaliveDispatcher, make_default_dispatcher,
+    provider_scope_error_response, start_subscription_quota_writer,
+    start_upstream_rate_limit_writer,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
+use cc_lb_signer_anthropic_oauth::LazyRefreshHandle as _;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     ManagedKeyStore, MetaStore, RuntimeChangeNotifier, Storage, UpstreamRecord,
@@ -96,7 +104,7 @@ use cc_lb_admin::auth::{AdminAuthenticator, build_providers};
 use cc_lb_admin::{
     AdminPorts, AdminState, DynamicViewRebinder, StartupConfigOverrides,
     WarmupDialectDispatchError, WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome,
-    WarmupDialectDispatcher,
+    WarmupDialectDispatcher, WarmupNativeDispatchOutcome,
 };
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
@@ -119,7 +127,7 @@ struct RequestBodyCaps {
 
 impl RequestBodyCaps {
     fn for_path(self, path: &str) -> usize {
-        if path.starts_with("/v1/files") {
+        if path.starts_with("/v1/files") || cc_lb_engine::lifecycle::is_multipart_operation(path) {
             self.files
         } else {
             self.messages
@@ -1086,7 +1094,7 @@ async fn build_app_with_storage_inner(
         .as_ref()
         .map(|identity| identity.id);
     if let Some(startup_preflight) = startup_preflight {
-        let report = preflight::run_preflight(&stores, &data_dir).await?;
+        let report = preflight::run_preflight(&stores, &data_dir, &config, aead.as_ref()).await?;
         print_preflight_report(&report);
         if startup_preflight.strict_preflight && !report.warnings.is_empty() {
             eprintln!(
@@ -1107,6 +1115,7 @@ async fn build_app_with_storage_inner(
                 crate::refresh::LazyRefresherDeps {
                     stores: stores.clone(),
                     aead: aead.clone(),
+                    google_config: Arc::new(config.clone()),
                     oauth_cfg: oauth_cfg.clone(),
                     clock: clock.clone(),
                 },
@@ -1121,6 +1130,7 @@ async fn build_app_with_storage_inner(
                     stores: stores.clone(),
                     aead: aead.clone(),
                     oauth_cfg: oauth_cfg.clone(),
+                    google_config: Arc::new(config.clone()),
                     clock: clock.clone(),
                 },
                 replica_id: identity.id,
@@ -1135,6 +1145,7 @@ async fn build_app_with_storage_inner(
         });
     let initial_view = build_dynamic_view(
         &stores,
+        config.oauth.antigravity.as_ref(),
         aead.clone(),
         lazy_refresher.clone(),
         0,
@@ -1166,6 +1177,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         clock: clock.clone(),
+        antigravity_config: config.oauth.antigravity.clone(),
     }));
     let notify_rx = notify_listener.subscribe_with_retry().await;
     let notifier_task = {
@@ -1487,6 +1499,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         clock: clock.clone(),
+        antigravity_config: config.oauth.antigravity.clone(),
     });
     let signals = signal::install(
         drain_controller.clone(),
@@ -1700,6 +1713,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         clock: clock.clone(),
+        antigravity_config: config.oauth.antigravity.clone(),
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
@@ -1743,6 +1757,7 @@ async fn build_app_with_storage_inner(
                 aead: aead.clone(),
                 lazy_refresher,
                 clock: clock.clone(),
+                config: admin_config.clone(),
             }) as Arc<dyn WarmupDialectDispatcher>
         }),
         dynamic_view: dynamic_view.clone(),
@@ -1848,6 +1863,7 @@ struct ServerWarmupDialectDispatcher {
     aead: Arc<AeadService>,
     lazy_refresher: Arc<LazyRefresher>,
     clock: ClockHandle,
+    config: Arc<Config>,
 }
 
 struct ServerMetadataRefreshEnqueue {
@@ -1896,10 +1912,11 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
                 stores: self.stores.as_ref(),
                 data_dir,
                 aead: self.aead.clone(),
-                lazy_refresher: self.lazy_refresher.clone(),
+                lazy_refresher: Some(self.lazy_refresher.clone()),
                 upstream,
                 http: &http,
                 clock: self.clock.clone(),
+                config: self.config.as_ref(),
             },
         )
         .await
@@ -1909,6 +1926,109 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
             status: outcome.status,
             headers: outcome.headers,
         })
+    }
+
+    async fn dispatch_warmup_native(
+        &self,
+        upstream: &cc_lb_storage_api::UpstreamRecord,
+    ) -> Result<WarmupNativeDispatchOutcome, WarmupDialectDispatchError> {
+        use crate::warmup::request::{
+            ProviderWarmupDispatchParams, WarmupRequestAttempt, dispatch_provider_warmup_attempt,
+        };
+        use cc_lb_storage_api::{
+            WarmupDispatchKind, WarmupPermanentFailureReason, WarmupTransientFailureReason,
+        };
+
+        let needs_refresh = !upstream.oauth_never_refresh
+            && upstream
+                .oauth_credentials
+                .as_ref()
+                .is_some_and(|credentials| {
+                    credentials
+                        .decrypt(self.aead.as_ref(), upstream.id.as_bytes())
+                        .is_ok_and(|bundle| {
+                            bundle.expires_at_unix_secs.saturating_sub(60)
+                                <= cc_lb_clock::unix_secs(self.clock.now())
+                        })
+                });
+        let refreshed_upstream = if needs_refresh {
+            if self.lazy_refresher.refresh_one(upstream.id).await.is_err() {
+                return Ok(WarmupNativeDispatchOutcome::PermanentFailure {
+                    dispatch_kind: WarmupDispatchKind::NotDispatched,
+                    reason: WarmupPermanentFailureReason::OauthRefreshFailed,
+                    status: StatusCode::BAD_GATEWAY,
+                    error_detail: "warmup OAuth refresh failed".to_owned(),
+                });
+            }
+            Some(
+                self.stores
+                    .upstreams
+                    .get_by_id(upstream.id)
+                    .await
+                    .map_err(|error| {
+                        WarmupDialectDispatchError::new(
+                            WarmupDialectDispatchErrorKind::Transient,
+                            error.to_string(),
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        WarmupDialectDispatchError::new(
+                            WarmupDialectDispatchErrorKind::Permanent,
+                            "upstream missing after warmup OAuth refresh",
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        let upstream = refreshed_upstream.as_ref().unwrap_or(upstream);
+        let http = warmup_dialect_http_client();
+        Ok(
+            match dispatch_provider_warmup_attempt(ProviderWarmupDispatchParams {
+                http: &http,
+                upstream,
+                aead: self.aead.as_ref(),
+                config: self.config.as_ref(),
+                clock: self.clock.clone(),
+            })
+            .await
+            {
+                WarmupRequestAttempt::Response {
+                    status,
+                    observations,
+                    error_detail,
+                } => WarmupNativeDispatchOutcome::Response {
+                    status,
+                    dispatch_kind: WarmupDispatchKind::Http,
+                    observations,
+                    error_detail,
+                },
+                WarmupRequestAttempt::CredentialDecryptFailed { error } => {
+                    WarmupNativeDispatchOutcome::PermanentFailure {
+                        dispatch_kind: WarmupDispatchKind::NotDispatched,
+                        reason: WarmupPermanentFailureReason::CredentialDecryptFailed,
+                        status: StatusCode::BAD_GATEWAY,
+                        error_detail: error,
+                    }
+                }
+                WarmupRequestAttempt::RequestBuildFailed { error } => {
+                    WarmupNativeDispatchOutcome::PermanentFailure {
+                        dispatch_kind: WarmupDispatchKind::NotDispatched,
+                        reason: WarmupPermanentFailureReason::RequestBuildFailed,
+                        status: StatusCode::BAD_GATEWAY,
+                        error_detail: error,
+                    }
+                }
+                WarmupRequestAttempt::NetworkError { error } => {
+                    WarmupNativeDispatchOutcome::TransientFailure {
+                        dispatch_kind: WarmupDispatchKind::Http,
+                        reason: WarmupTransientFailureReason::NetworkError,
+                        status: StatusCode::BAD_GATEWAY,
+                        error_detail: error,
+                    }
+                }
+            },
+        )
     }
 }
 
@@ -1933,6 +2053,7 @@ fn map_warmup_dialect_error(
         crate::warmup::dialect::WarmupDispatchError::MissingPlugin
         | crate::warmup::dialect::WarmupDispatchError::RegistryNotFound(_)
         | crate::warmup::dialect::WarmupDispatchError::RegistryUnsupportedSlot { .. }
+        | crate::warmup::dialect::WarmupDispatchError::RegistryUnsupportedProvider(_)
         | crate::warmup::dialect::WarmupDispatchError::Materialize(_)
         | crate::warmup::dialect::WarmupDispatchError::Register(_)
         | crate::warmup::dialect::WarmupDispatchError::BodySerialize(_)
@@ -1957,6 +2078,7 @@ struct ServerDynamicViewRebinder {
     prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
     clock: ClockHandle,
+    antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
 }
 
 #[async_trait]
@@ -1967,6 +2089,7 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
     ) -> anyhow::Result<Arc<DynamicView>> {
         Ok(build_dynamic_view(
             &self.stores,
+            self.antigravity_config.as_ref(),
             self.aead.clone(),
             self.lazy_refresher.clone(),
             current_generation,
@@ -1995,6 +2118,7 @@ struct ReconcilerParams {
     prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
     clock: ClockHandle,
+    antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
 }
 
 fn spawn_reconciler(params: ReconcilerParams) {
@@ -2011,6 +2135,7 @@ fn spawn_reconciler(params: ReconcilerParams) {
         params.prompt_cache_observation_sink,
         params.subscription_quota_routing_max_staleness_secs,
         params.clock,
+        params.antigravity_config,
     ));
     tokio::spawn(reconciler.run());
 }
@@ -2363,34 +2488,65 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
 }
 
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
-    let request_ids = RequestIdState::default();
-    let drain_controller = state.drain_controller.clone();
-    // request_id runs first so lifecycle_middleware can read the assigned id;
-    // lifecycle runs before the drain gate so drain rejections can hand their
-    // terminal classification back through the response extensions.
-    let outer_sb = ServiceBuilder::new()
-        .layer(middleware::from_fn_with_state(
-            request_ids,
-            request_id_middleware,
-        ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            lifecycle_middleware,
-        ))
-        .layer(middleware::from_fn_with_state(
-            drain_controller,
-            cc_lb_engine::proxy_drain_middleware,
-        ))
-        .layer(HopByHopStripLayer::new())
-        .layer(cc_lb_observability::trace_layer().make_span_with(
-            cc_lb_observability::ProxyMakeSpan::with_route_template(proxy_route_template),
-        ));
+    let websocket_routes = Router::new()
+        .route("/v1/responses", get(responses_websocket_handler))
+        .nest(
+            "/openai",
+            Router::new()
+                .route("/v1/responses", get(responses_websocket_handler))
+                .route("/v1/realtime", get(openai_realtime_websocket_handler))
+                .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
+        )
+        .nest(
+            "/gemini",
+            Router::new()
+                .route("/ws/{*path}", get(gemini_live_websocket_handler))
+                .layer(Extension(ProviderScope(cc_lb_domain::Provider::Gemini))),
+        )
+        .with_state(state.clone());
+    Router::new()
+        .merge(scoped_proxy_routes(state.clone(), timeout_secs, None, true))
+        .nest(
+            "/anthropic",
+            scoped_proxy_routes(
+                state.clone(),
+                timeout_secs,
+                Some(cc_lb_domain::Provider::Anthropic),
+                true,
+            ),
+        )
+        .nest(
+            "/openai",
+            scoped_proxy_routes(
+                state.clone(),
+                timeout_secs,
+                Some(cc_lb_domain::Provider::Openai),
+                false,
+            ),
+        )
+        .nest(
+            "/gemini",
+            scoped_proxy_routes(
+                state,
+                timeout_secs,
+                Some(cc_lb_domain::Provider::Gemini),
+                false,
+            ),
+        )
+        .merge(websocket_routes)
+}
 
+fn scoped_proxy_routes(
+    state: ProxyState,
+    timeout_secs: u64,
+    provider: Option<cc_lb_domain::Provider>,
+    include_oauth_usage: bool,
+) -> Router {
     let inner_sb = ServiceBuilder::new()
         .layer(crate::chaos::ChaosLayer::from_env())
         .layer(HandleErrorLayer::new(timeout_error))
         .timeout(Duration::from_secs(timeout_secs.max(1)));
-    let routes = Router::new()
+    let mut routes = Router::new()
         .route("/v1/messages", post(lifecycle_handler))
         .route("/v1/messages/count_tokens", post(lifecycle_handler))
         .route("/v1/responses", post(lifecycle_handler))
@@ -2402,48 +2558,83 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             get(lifecycle_handler).delete(lifecycle_handler),
         )
         .route("/v1/files/{id}/content", get(lifecycle_handler))
-        .route("/api/oauth/usage", get(oauth_usage_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
-        .route("/v1beta/{*path}", any(lifecycle_handler))
-        .with_state(state.clone())
-        .layer(inner_sb);
-
-    let websocket_routes = Router::new()
-        // This route intentionally lives outside `outer_sb`: the hop-by-hop
-        // layer must not remove the HTTP Upgrade handshake headers.
-        .route("/v1/responses", get(responses_websocket_handler))
-        .with_state(state);
-
-    let protected_routes = Router::new()
+        .route("/v1beta/{*path}", any(lifecycle_handler));
+    if include_oauth_usage {
+        routes = routes.route("/api/oauth/usage", get(oauth_usage_handler));
+    }
+    let routes = routes.with_state(state.clone()).layer(inner_sb);
+    let outer_sb = ServiceBuilder::new()
+        .layer(middleware::from_fn_with_state(
+            RequestIdState::default(),
+            request_id_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            lifecycle_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.drain_controller.clone(),
+            cc_lb_engine::proxy_drain_middleware,
+        ))
+        .layer(HopByHopStripLayer::new())
+        .layer(cc_lb_observability::trace_layer().make_span_with(
+            cc_lb_observability::ProxyMakeSpan::with_route_template(proxy_route_template),
+        ));
+    let protected = Router::new()
         .merge(routes)
         .fallback(proxy_not_found)
         .method_not_allowed_fallback(proxy_method_not_allowed)
         .layer(outer_sb);
-
-    Router::new()
-        .merge(websocket_routes)
-        .merge(protected_routes)
+    match provider {
+        Some(provider) => protected.layer(Extension(ProviderScope(provider))),
+        None => protected,
+    }
 }
 
-async fn proxy_not_found(_request: Request<Body>) -> Response<Body> {
-    let mut response = anthropic_error_response(
-        StatusCode::NOT_FOUND,
-        "not_found",
-        "requested proxy path was not found",
-    );
+async fn proxy_not_found(request: Request<Body>) -> Response<Body> {
+    let mut response = match request
+        .extensions()
+        .get::<ProviderScope>()
+        .map(|scope| scope.0)
+    {
+        Some(provider) => provider_scope_error_response(
+            provider,
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "requested proxy path was not found",
+        ),
+        None => anthropic_error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "requested proxy path was not found",
+        ),
+    };
     response
         .extensions_mut()
         .insert(TerminalClassification::ROUTE_NOT_FOUND);
     response
 }
 
-async fn proxy_method_not_allowed(_request: Request<Body>) -> Response<Body> {
-    let mut response = anthropic_error_response(
-        StatusCode::METHOD_NOT_ALLOWED,
-        "not_found",
-        "method is not allowed for this proxy path",
-    );
+async fn proxy_method_not_allowed(request: Request<Body>) -> Response<Body> {
+    let mut response = match request
+        .extensions()
+        .get::<ProviderScope>()
+        .map(|scope| scope.0)
+    {
+        Some(provider) => provider_scope_error_response(
+            provider,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "not_found",
+            "method is not allowed for this proxy path",
+        ),
+        None => anthropic_error_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "not_found",
+            "method is not allowed for this proxy path",
+        ),
+    };
     response
         .extensions_mut()
         .insert(TerminalClassification::METHOD_NOT_ALLOWED);
@@ -2580,6 +2771,10 @@ async fn timeout_error(error: tower::BoxError) -> Response<Body> {
     }
     response
 }
+
+#[path = "app_realtime_websocket.rs"]
+mod realtime_websocket;
+use realtime_websocket::{gemini_live_websocket_handler, openai_realtime_websocket_handler};
 
 async fn responses_websocket_handler(
     State(state): State<ProxyState>,
@@ -2792,16 +2987,29 @@ async fn send_responses_dispatch(
         connection.upstream_id,
         &connection.upstream_name,
     );
-    let frame = UpstreamMessage::Text(
-        dispatch
-            .frame
-            .try_into()
-            .expect("admitted client JSON is UTF-8"),
-    );
     if let Err(error) = gateway.validate_send(dispatch.turn_id).await {
         let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
         return (ready, vec![error]);
     }
+    let frame = match gateway.frame_for_send(&dispatch) {
+        Ok(frame) => match String::from_utf8(frame.to_vec()) {
+            Ok(frame) => UpstreamMessage::Text(frame.into()),
+            Err(_) => {
+                let error = WebSocketError::new(
+                    502,
+                    "response_transform_error",
+                    "Shape plugin returned a non-UTF-8 WebSocket frame",
+                )
+                .with_stream(dispatch.stream_id.clone());
+                let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+                return (ready, vec![error]);
+            }
+        },
+        Err(error) => {
+            let ready = gateway.fail_dispatch(dispatch.turn_id, &error).await;
+            return (ready, vec![error]);
+        }
+    };
     // After the first write is attempted, failure may have reached the
     // provider. Never retry or replay it on a different connection.
     if connection.sink.send(frame).await.is_err() {
@@ -3084,14 +3292,23 @@ async fn relay_responses_websocket(
                             }
                             match gateway.provider_message(connection_id, &bytes).await {
                                 Ok(result) => {
-                                    if result.forward {
+                                    if let Some(frames) = result.frames {
+                                        for frame in frames {
+                                            let message = Message::Text(
+                                                frame.try_into().expect("transformed event is UTF-8"),
+                                            );
+                                            if downstream_sink.send(message).await.is_err() {
+                                                break 'relay;
+                                            }
+                                        }
+                                    } else if result.forward {
                                         let message = if text {
                                             Message::Text(bytes.try_into().expect("provider text is UTF-8"))
                                         } else {
                                             Message::Binary(bytes)
                                         };
                                         if downstream_sink.send(message).await.is_err() {
-                                            break;
+                                            break 'relay;
                                         }
                                     }
                                     for error in result.errors {
@@ -3526,6 +3743,14 @@ async fn lifecycle_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
+    if let Some(scope) = request.extensions().get::<ProviderScope>().copied() {
+        let provider = match scope.0 {
+            cc_lb_domain::Provider::Anthropic => "anthropic",
+            cc_lb_domain::Provider::Openai => "openai",
+            cc_lb_domain::Provider::Gemini => "gemini",
+        };
+        tracing::Span::current().record("cc_lb.provider_scope", provider);
+    }
     let ctx: Option<cc_lb_engine::LifecycleContext> = state.lifecycle.event_bus().map(|bus| {
         let request_id = request
             .headers()
@@ -3692,6 +3917,9 @@ fn dispatcher(
 
 #[cfg(test)]
 mod tests {
+    mod realtime_websocket_tests {
+        include!("app_realtime_websocket_tests.rs");
+    }
     use std::collections::{BTreeMap, HashMap};
     use std::convert::Infallible;
     use std::io;
@@ -4418,6 +4646,14 @@ mod tests {
         assert_eq!(caps.for_path("/v1/messages"), 3);
         assert_eq!(caps.for_path("/v1/files"), 7);
         assert_eq!(caps.for_path("/v1/files/id/content"), 7);
+        for path in [
+            "/v1/audio/transcriptions",
+            "/v1/audio/translations",
+            "/v1/images/edits",
+            "/v1/images/variations",
+        ] {
+            assert_eq!(caps.for_path(path), 7, "{path}");
+        }
         assert_eq!(caps.for_path("/v1/models"), 3);
     }
 
@@ -5044,7 +5280,21 @@ mod tests {
         records: Vec<UpstreamRecord>,
         terminal: TerminalStrategy,
     ) -> Router {
-        websocket_test_router_with_drain(records, terminal, DrainController::new()).await
+        websocket_test_router_with_allowed_models(records, terminal, vec!["*".to_owned()]).await
+    }
+
+    async fn websocket_test_router_with_allowed_models(
+        records: Vec<UpstreamRecord>,
+        terminal: TerminalStrategy,
+        allowed_models: Vec<String>,
+    ) -> Router {
+        websocket_test_router_with_drain_and_allowed_models(
+            records,
+            terminal,
+            DrainController::new(),
+            allowed_models,
+        )
+        .await
     }
 
     async fn websocket_test_router_with_drain(
@@ -5052,11 +5302,27 @@ mod tests {
         terminal: TerminalStrategy,
         drain_controller: DrainController,
     ) -> Router {
-        websocket_test_router_with_signer(
+        websocket_test_router_with_drain_and_allowed_models(
+            records,
+            terminal,
+            drain_controller,
+            vec!["*".to_owned()],
+        )
+        .await
+    }
+
+    async fn websocket_test_router_with_drain_and_allowed_models(
+        records: Vec<UpstreamRecord>,
+        terminal: TerminalStrategy,
+        drain_controller: DrainController,
+        allowed_models: Vec<String>,
+    ) -> Router {
+        websocket_test_router_with_signer_and_allowed_models(
             records,
             terminal,
             drain_controller,
             Arc::new(WebSocketTestSignerFactory),
+            allowed_models,
         )
         .await
     }
@@ -5067,12 +5333,30 @@ mod tests {
         drain_controller: DrainController,
         signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
     ) -> Router {
+        websocket_test_router_with_signer_and_allowed_models(
+            records,
+            terminal,
+            drain_controller,
+            signer_factory,
+            vec!["*".to_owned()],
+        )
+        .await
+    }
+
+    async fn websocket_test_router_with_signer_and_allowed_models(
+        records: Vec<UpstreamRecord>,
+        terminal: TerminalStrategy,
+        drain_controller: DrainController,
+        signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
+        allowed_models: Vec<String>,
+    ) -> Router {
         let state = websocket_test_state(
             records,
             terminal,
             drain_controller,
             signer_factory,
             Arc::new(FixtureKeyStore),
+            allowed_models,
         )
         .await;
         proxy_router(state, 30)
@@ -5084,6 +5368,7 @@ mod tests {
         drain_controller: DrainController,
         signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
         managed_key_store: Arc<dyn ManagedKeyStore>,
+        allowed_models: Vec<String>,
     ) -> ProxyState {
         let clock: ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let storage: Arc<dyn Storage> = Arc::new(
@@ -5098,7 +5383,7 @@ mod tests {
         let principal_view = Arc::new(PrincipalView::for_tests(
             TEST_PRINCIPAL,
             true,
-            vec!["*".to_owned()],
+            allowed_models,
             Vec::new(),
             HashMap::from([(
                 TEST_PRINCIPAL.to_owned(),
@@ -5107,6 +5392,7 @@ mod tests {
                         user_filters: Vec::new(),
                         terminal,
                         instantiation_error: None,
+                        provider_filters: None,
                     })),
                     DialectCache::Inherit,
                 ),
@@ -5240,6 +5526,7 @@ mod tests {
                 drain_controller.clone(),
                 Arc::new(WebSocketTestSignerFactory),
                 Arc::new(FixtureKeyStore),
+                vec!["*".to_owned()],
             )
             .await;
             let concurrency = Arc::new(KeyConcurrencyManager::new());
@@ -5469,6 +5756,7 @@ mod tests {
             Arc::new(CountingFixtureKeyStore {
                 lookups: lookups.clone(),
             }),
+            vec!["*".to_owned()],
         )
         .await;
         let bus = Arc::new(cc_lb_control::InMemoryBus::new());

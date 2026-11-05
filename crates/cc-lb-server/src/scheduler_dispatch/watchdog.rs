@@ -69,7 +69,12 @@ impl WatchdogUpstreamFilter {
         }
         match self {
             Self::Warmup => {
-                upstream.kind == UpstreamKind::AnthropicOauth && upstream.warmup_enabled
+                matches!(
+                    upstream.kind,
+                    UpstreamKind::AnthropicOauth
+                        | UpstreamKind::OpenaiOauth
+                        | UpstreamKind::GeminiOauth
+                ) && upstream.warmup_enabled
             }
             Self::OAuth => {
                 matches!(
@@ -81,8 +86,12 @@ impl WatchdogUpstreamFilter {
                     && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
             }
             Self::OAuthUsagePoll => {
-                upstream.kind == UpstreamKind::AnthropicOauth
-                    && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+                matches!(
+                    upstream.kind,
+                    UpstreamKind::AnthropicOauth
+                        | UpstreamKind::OpenaiOauth
+                        | UpstreamKind::GeminiOauth
+                ) && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
             }
         }
     }
