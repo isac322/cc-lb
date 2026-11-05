@@ -313,7 +313,8 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions
              SET enqueue_state = 'running', running_since_unix_secs = $1, updated_at = $1
-             WHERE session_key_hash = $2 AND generation = $3 AND status = 'active' AND enqueue_state = 'enqueued'",
+             WHERE session_key_hash = $2 AND generation = $3 AND status = 'active'
+               AND (enqueue_state = 'enqueued' OR (enqueue_state = 'pending' AND octet_length(encrypted_payload) > 0))",
         )
         .bind(now_unix_secs)
         .bind(session_key_hash)
@@ -378,12 +379,13 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         let updated_at = u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?;
         let generation = u64_to_i64(request.generation, "cache keepalive generation")?;
         let current_job_key = cache_keepalive_job_key(&request.session_key_hash, next_generation);
-        let result = if let Some(encrypted_payload) = request.encrypted_payload.as_deref() {
+        let row = if let Some(encrypted_payload) = request.encrypted_payload.as_deref() {
             sqlx::query(
                 "UPDATE cache_keepalive_sessions SET generation = $1, refresh_count = refresh_count + 1,
                  cache_anchor_at = $2, run_at = $3, status = 'active', enqueue_state = 'pending', running_since_unix_secs = NULL,
                  current_job_key = $4, encrypted_payload = $5, terminal_reason = NULL, error = NULL, expires_at = $6, updated_at = $7
-                 WHERE session_key_hash = $8 AND generation = $9 AND status = 'active'",
+                 WHERE session_key_hash = $8 AND generation = $9 AND status = 'active'
+                 RETURNING *",
             )
             .bind(next_generation_db)
             .bind(cache_anchor_at)
@@ -394,7 +396,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             .bind(updated_at)
             .bind(&request.session_key_hash)
             .bind(generation)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_error)?
         } else {
@@ -402,7 +404,8 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 "UPDATE cache_keepalive_sessions SET generation = $1, refresh_count = refresh_count + 1,
                  cache_anchor_at = $2, run_at = $3, status = 'active', enqueue_state = 'pending', running_since_unix_secs = NULL,
                  current_job_key = $4, terminal_reason = NULL, error = NULL, expires_at = $5, updated_at = $6
-                 WHERE session_key_hash = $7 AND generation = $8 AND status = 'active'",
+                 WHERE session_key_hash = $7 AND generation = $8 AND status = 'active'
+                 RETURNING *",
             )
             .bind(next_generation_db)
             .bind(cache_anchor_at)
@@ -412,15 +415,11 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             .bind(updated_at)
             .bind(&request.session_key_hash)
             .bind(generation)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_error)?
         };
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
-        self.get_cache_keepalive_session(&request.session_key_hash)
-            .await
+        row.map(row_to_record).transpose()
     }
 
     async fn mark_cache_keepalive_terminal(

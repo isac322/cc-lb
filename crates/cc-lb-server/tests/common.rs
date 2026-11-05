@@ -736,6 +736,16 @@ pub async fn http_get(addr: SocketAddr, path: &str) -> std::io::Result<RawRespon
     .await
 }
 
+pub async fn admin_get(addr: SocketAddr, path: &str, token: &str) -> std::io::Result<RawResponse> {
+    raw_http(
+        addr,
+        &format!(
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await
+}
+
 pub async fn proxy_get(
     addr: SocketAddr,
     path: &str,

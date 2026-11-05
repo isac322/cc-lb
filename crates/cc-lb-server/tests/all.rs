@@ -15,8 +15,6 @@ mod api_key_proxy;
 mod api_key_secret_hygiene;
 #[path = "bad_postgres_url_fatal.rs"]
 mod bad_postgres_url_fatal;
-#[path = "build_metadata_present.rs"]
-mod build_metadata_present;
 #[path = "cache_keepalive_failure_observability.rs"]
 mod cache_keepalive_failure_observability;
 #[path = "cache_keepalive_real_session_simulation.rs"]
@@ -73,6 +71,8 @@ mod oauth_refresh;
 mod oauth_usage_proxy;
 #[path = "observation_failure_isolation.rs"]
 mod observation_failure_isolation;
+#[path = "postgres_tls.rs"]
+mod postgres_tls;
 #[path = "preflight.rs"]
 mod preflight;
 #[path = "preflight_common.rs"]

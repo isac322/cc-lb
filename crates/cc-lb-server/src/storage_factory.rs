@@ -270,8 +270,11 @@ impl WalSizeProbe {
     }
 }
 
-pub async fn probe_postgres_connection(url: &str) -> Result<(), StorageFactoryError> {
-    probe_postgres_connection_impl(url).await
+pub async fn probe_postgres_connection(
+    url: &str,
+    pool_config: &cc_lb_config::PostgresPoolConfig,
+) -> Result<(), StorageFactoryError> {
+    probe_postgres_connection_impl(url, pool_config).await
 }
 
 #[cfg(feature = "postgres")]
@@ -350,7 +353,10 @@ async fn open_postgres(
 }
 
 #[cfg(not(feature = "postgres"))]
-async fn probe_postgres_connection_impl(_url: &str) -> Result<(), StorageFactoryError> {
+async fn probe_postgres_connection_impl(
+    _url: &str,
+    _pool_config: &cc_lb_config::PostgresPoolConfig,
+) -> Result<(), StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
     })
@@ -407,19 +413,13 @@ async fn open_postgres_pool(
     url: &str,
     pool_config: &cc_lb_config::PostgresPoolConfig,
 ) -> Result<sqlx::PgPool, StorageFactoryError> {
-    use std::str::FromStr;
     use std::time::Duration;
 
     use sqlx::AssertSqlSafe;
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::postgres::PgPoolOptions;
 
     let statement_timeout_ms = pool_config.statement_timeout_secs * 1000;
-    let ssl_mode = parse_ssl_mode(&pool_config.sslmode)?;
-    let connect_options =
-        PgConnectOptions::from_str(url).map_err(|error| StorageFactoryError::ConnectionFailed {
-            message: host_only(url) + ": " + &error.to_string(),
-        })?;
-    let connect_options = connect_options.ssl_mode(ssl_mode);
+    let connect_options = postgres_connect_options(url, pool_config.sslmode.as_deref())?;
 
     PgPoolOptions::new()
         .max_connections(pool_config.max_connections)
@@ -446,6 +446,37 @@ async fn open_postgres_pool(
 }
 
 #[cfg(feature = "postgres")]
+pub(crate) fn postgres_connect_options(
+    url: &str,
+    sslmode: Option<&str>,
+) -> Result<sqlx::postgres::PgConnectOptions, StorageFactoryError> {
+    use sqlx::ConnectOptions;
+    use sqlx::postgres::{PgConnectOptions, PgSslMode};
+
+    let explicit_ssl_mode = sslmode.map(parse_ssl_mode).transpose()?;
+    let parsed_url =
+        url::Url::parse(url).map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        })?;
+    let options = PgConnectOptions::from_url(&parsed_url).map_err(|error| {
+        StorageFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        }
+    })?;
+    if let Some(ssl_mode) = explicit_ssl_mode {
+        return Ok(options.ssl_mode(ssl_mode));
+    }
+    if parsed_url
+        .query_pairs()
+        .any(|(key, _)| matches!(key.as_ref(), "sslmode" | "ssl-mode"))
+    {
+        return Ok(options);
+    }
+    // Preserve the application's default even when PGSSLMODE is set.
+    Ok(options.ssl_mode(PgSslMode::Prefer))
+}
+
+#[cfg(feature = "postgres")]
 fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, StorageFactoryError> {
     use sqlx::postgres::PgSslMode;
     match value.to_ascii_lowercase().as_str() {
@@ -465,14 +496,18 @@ fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, StorageFacto
 }
 
 #[cfg(feature = "postgres")]
-async fn probe_postgres_connection_impl(url: &str) -> Result<(), StorageFactoryError> {
+async fn probe_postgres_connection_impl(
+    url: &str,
+    pool_config: &cc_lb_config::PostgresPoolConfig,
+) -> Result<(), StorageFactoryError> {
     use std::time::Duration;
 
     use sqlx::Connection;
     use tokio::time::timeout;
 
+    let connect_options = postgres_connect_options(url, pool_config.sslmode.as_deref())?;
     let probe = async {
-        let mut connection = sqlx::PgConnection::connect(url).await?;
+        let mut connection = sqlx::PgConnection::connect_with(&connect_options).await?;
         sqlx::query("SELECT 1").execute(&mut connection).await?;
         Ok::<(), sqlx::Error>(())
     };

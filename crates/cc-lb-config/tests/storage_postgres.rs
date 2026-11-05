@@ -21,7 +21,75 @@ fn test_postgres_url_missing_host() {
 }
 
 #[test]
-fn test_postgres_pool_defaults() {
+fn test_postgres_pool_omitted_sslmode_stays_omitted_when_serialized() {
+    let config = Config::from_stored_toml(
+        r#"[storage]
+kind = "postgres"
+url = "postgres://localhost/db"
+"#,
+    )
+    .unwrap();
+
+    let json = serde_json::to_value(&config).unwrap();
+    let pool = json["storage"]["pool"]
+        .as_object()
+        .expect("serialized postgres pool");
+    assert!(
+        !pool.contains_key("sslmode"),
+        "omitted sslmode must not materialize in JSON: {json}"
+    );
+
+    let serialized_toml = toml::to_string_pretty(&config).unwrap();
+    let reparsed_toml: toml::Value = toml::from_str(&serialized_toml).unwrap();
+    let pool = reparsed_toml["storage"]["pool"]
+        .as_table()
+        .expect("serialized postgres pool");
+    assert!(
+        !pool.contains_key("sslmode"),
+        "omitted sslmode must not materialize in TOML: {serialized_toml}"
+    );
+
+    let reparsed = Config::from_stored_toml(&serialized_toml).unwrap();
+    let reparsed_json = serde_json::to_value(reparsed).unwrap();
+    assert!(
+        !reparsed_json["storage"]["pool"]
+            .as_object()
+            .unwrap()
+            .contains_key("sslmode")
+    );
+}
+
+#[test]
+fn test_postgres_pool_explicit_sslmode_values_survive_roundtrip() {
+    for sslmode in [
+        "disable",
+        "prefer",
+        "require",
+        "verify-ca",
+        "verify_ca",
+        "verify-full",
+        "verify_full",
+    ] {
+        let raw_toml = format!(
+            r#"[storage]
+kind = "postgres"
+url = "postgres://localhost/db"
+
+[storage.pool]
+sslmode = "{sslmode}"
+"#
+        );
+        let config = Config::from_stored_toml(&raw_toml).unwrap();
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let reparsed = Config::from_stored_toml(&serialized).unwrap();
+        let json = serde_json::to_value(reparsed).unwrap();
+
+        assert_eq!(json["storage"]["pool"]["sslmode"], sslmode);
+    }
+}
+
+#[test]
+fn test_postgres_pool_defaults_are_usable() {
     let pool = PostgresPoolConfig::default();
 
     assert_eq!(pool.max_connections, 10);
@@ -31,7 +99,6 @@ fn test_postgres_pool_defaults() {
     assert_eq!(pool.max_lifetime_secs, 1800);
     assert_eq!(pool.statement_timeout_secs, 30);
     assert!(pool.test_before_acquire);
-    assert_eq!(pool.sslmode, "prefer");
 }
 
 #[test]

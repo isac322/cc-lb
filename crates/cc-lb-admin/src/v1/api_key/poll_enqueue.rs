@@ -126,6 +126,12 @@ mod tests {
             .build();
         let state = AdminState {
             config_path: None,
+            build: crate::AdminBuildInfo {
+                git_sha: "test-git-sha",
+                rustc: "test-rustc",
+                profile: "test-profile",
+                target: "test-target",
+            },
             startup_config_overrides: Default::default(),
             storage: None,
             key_store: None,
