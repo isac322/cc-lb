@@ -32,6 +32,20 @@ Use SQLite for local or bounded single-node operation. Use Postgres when multipl
 
 After changing scheduler or affinity retention settings, restart the server so all workers use the same startup policy.
 
+## PostgreSQL TLS
+
+Storage and scheduler connections use `storage.url`, but resolve TLS mode independently. Storage connections, including startup preflight, use `storage.pool.sslmode`. The scheduler uses `scheduler.separate_pool.sslmode`; it does not inherit `storage.pool.sslmode`.
+
+For each pool, TLS mode follows this precedence:
+
+1. An explicit pool `sslmode` overrides the URL mode.
+2. If the pool setting is omitted, the URL's `sslmode` or `ssl-mode` query parameter applies.
+3. If neither specifies a mode, cc-lb uses `prefer`, even when `PGSSLMODE` is set.
+
+Omit each pool's `sslmode` to inherit the URL policy. An explicit `prefer` or `disable` intentionally overrides even a strict URL mode such as `require`, `verify-ca`, or `verify-full`; remove a redundant `prefer` when the URL should control TLS.
+
+After upgrading, a strict URL mode takes effect wherever the pool setting is omitted. Connections that previously relied on the implicit `prefer` fallback may fail until the database and client TLS configuration satisfy that policy.
+
 ## Upstream affinity
 
 Learned upstream affinity bindings are retained for 7 days from their last successful binding by default. Ordinary replay reads do not refresh the timestamp, so bindings older than `ttl_days` fail closed with `503` and are purged.

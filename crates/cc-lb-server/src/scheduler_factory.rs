@@ -158,15 +158,24 @@ async fn open_postgres(
     scheduler: &SchedulerConfig,
     _clock: cc_lb_clock::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
-    use std::str::FromStr as _;
     use std::time::Duration;
 
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::postgres::PgPoolOptions;
 
-    let ssl_mode = parse_ssl_mode(&scheduler.separate_pool.sslmode)?;
-    let connect_options = PgConnectOptions::from_str(url)
-        .map_err(|error| connection_error_with_host(url, error))?
-        .ssl_mode(ssl_mode);
+    let connect_options = crate::storage_factory::postgres_connect_options(
+        url,
+        scheduler.separate_pool.sslmode.as_deref(),
+    )
+    .map_err(|error| {
+        use crate::storage_factory::StorageFactoryError;
+
+        let message = match error {
+            StorageFactoryError::ConnectionFailed { message }
+            | StorageFactoryError::InitFailed { message } => message,
+            error => error.to_string(),
+        };
+        SchedulerFactoryError::ConnectionFailed { message }
+    })?;
     let statement_timeout_ms = scheduler.separate_pool.statement_timeout_secs * 1000;
     let pool = PgPoolOptions::new()
         .max_connections(scheduler.separate_pool.max_connections)
@@ -377,22 +386,6 @@ fn migration_error(error: impl std::fmt::Display) -> SchedulerFactoryError {
 fn connection_error_with_host(url: &str, error: sqlx::Error) -> SchedulerFactoryError {
     SchedulerFactoryError::ConnectionFailed {
         message: host_only(url) + ": " + &error.to_string(),
-    }
-}
-
-#[cfg(feature = "postgres")]
-fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, SchedulerFactoryError> {
-    use sqlx::postgres::PgSslMode;
-    match value.to_ascii_lowercase().as_str() {
-        "disable" => Ok(PgSslMode::Disable),
-        "allow" => Ok(PgSslMode::Allow),
-        "prefer" => Ok(PgSslMode::Prefer),
-        "require" => Ok(PgSslMode::Require),
-        "verify-ca" | "verify_ca" => Ok(PgSslMode::VerifyCa),
-        "verify-full" | "verify_full" => Ok(PgSslMode::VerifyFull),
-        other => Err(SchedulerFactoryError::ConnectionFailed {
-            message: format!("unknown postgres sslmode '{other}'"),
-        }),
     }
 }
 

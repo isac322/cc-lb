@@ -127,9 +127,11 @@ async fn run_inner(
             env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
         decode_master_key(key_name, &key_hex)?;
         match &cfg.storage {
-            StorageConfig::Postgres { url, .. } => storage_factory::probe_postgres_connection(url)
-                .await
-                .map_err(|error| PreflightError::Storage(error.to_string()))?,
+            StorageConfig::Postgres { url, pool } => {
+                storage_factory::probe_postgres_connection(url, pool)
+                    .await
+                    .map_err(|error| PreflightError::Storage(error.to_string()))?;
+            }
             StorageConfig::Sqlite { path } => validate_sqlite_path(path)?,
         }
         storage_factory::open_storage(&cfg.storage, clock)

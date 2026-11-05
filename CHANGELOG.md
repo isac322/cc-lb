@@ -6,21 +6,27 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
 - Admin detail lookups now use `GET /admin/v1/principals/{principal_id}/cache-keepalive/detail?id=<encoded ID>` and `GET /admin/v1/events/detail?id=<encoded ID>`. The old per-ID path routes are removed; migrate direct scripts and API clients using `URLSearchParams` or an equivalent query encoder, passing the original ID without pre-encoding it. Composite IDs, authentication, principal scoping, and response shapes are unchanged. Event-detail audit entries now use the static `/admin/v1/events/detail` route and retain the original ID in `payload.event_id`. ([#1052](https://github.com/isac322/cc-lb/issues/1052))
+- Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
 
 ### Fixed
 
+- Keep-alive session, decision, and renewal-event detail lookups no longer return route-level 404 errors behind path-normalizing reverse proxies when IDs contain `/`. Detail IDs travel in query values encoded once. ([#1052](https://github.com/isac322/cc-lb/issues/1052))
 - Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent. Source-filtered aggregates determine absence only from the requested source. Limit-reset nudges for absent 5-hour windows recompute `at_limit` even when the provider omits the exhausted-window list.
 - Cache keep-alive rescheduling now returns its own updated session snapshot on SQLite and PostgreSQL, and SQLite real-request replacement captures its result before commit. Concurrent completions can no longer make stale work enqueue or overwrite a newer generation's payload. ([#1042](https://github.com/isac322/cc-lb/issues/1042))
 - Streaming requests that receive non-SSE bodies now run the buffered response transform once over the complete, bounded body; oversized bodies return the existing 502 collection error without invoking the hook, while ordinary JSON responses remain outside the ingress cap.
 - Client closes after Anthropic `message_stop` or OpenAI Responses `response.completed` now finalize streams with observed usage and limit reconciliation instead of 499 cancellations. Abnormal Anthropic stops retain refusal or context-window classification, while upstream and proxy errors keep precedence. OpenAI Responses streams are recognized as SSE when the upstream omits `Content-Type`.
 - Mid-stream `error: null` fields no longer classify OpenAI Responses completion events as provider errors.
-- Keep-alive session, decision, and renewal-event detail lookups no longer return route-level 404 errors behind path-normalizing reverse proxies when IDs contain `/`. Detail IDs travel in query values encoded once. ([#1052](https://github.com/isac322/cc-lb/issues/1052))
+- Cache keep-alive turn claims now accept a published `pending` session once its encrypted payload is stored, preventing a due worker from acknowledging the job `Done` as a no-op before the producer's post-publish `enqueued` mark completes.
 
 ### Security
 
 - OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
+- PostgreSQL storage, startup preflight, and scheduler connections now preserve the URL's `sslmode` or `ssl-mode` when the corresponding pool `sslmode` is omitted, instead of silently replacing it with `prefer`. Explicit pool modes still override the URL; the scheduler resolves its mode independently of the storage pool. ([#1053](https://github.com/isac322/cc-lb/issues/1053))
+
+### Upgrade notes
+
+- Strict PostgreSQL URL TLS modes now apply when the corresponding pool `sslmode` is omitted. Connections may fail until the database and client TLS configuration satisfy that policy. Remove redundant `prefer` settings from `storage.pool.sslmode` and `scheduler.separate_pool.sslmode` to inherit the URL; explicit `prefer` or `disable` continues to override strict URL modes.
 
 ## [2.2.1] - 2026-11-04
 
