@@ -168,8 +168,35 @@ describe('buildHistoricalFilters', () => {
   it('lists messages when the URL names no kind and every kind for all', () => {
     expect(buildHistoricalFilters({})).toEqual({ event_kind: 'messages' });
     expect(buildLiveFilters({})).toEqual({ event_kind: 'messages' });
-    expect(buildHistoricalFilters({ event_kind: 'all' })).toEqual({});
-    expect(buildLiveFilters({ event_kind: 'all' })).toEqual({});
+    expect(buildHistoricalFilters({ event_kind: 'all' })).toEqual({
+      source_kind: 'all',
+    });
+    expect(buildLiveFilters({ event_kind: 'all' })).toEqual({
+      source_kind: 'all',
+    });
+  });
+
+  it('keeps All kinds and errors through bounded history and an open live query', () => {
+    const filters = {
+      event_kind: 'all' as const,
+      status: 'errors' as const,
+      since_unix_secs: 100,
+      until_unix_secs: 200,
+    };
+    expect(buildHistoricalFilters(filters)).toEqual({
+      source_kind: 'all',
+      status_class: 'errors',
+      since_unix_secs: '100',
+      until_unix_secs: '200',
+    });
+    expect(buildLiveFilters(filters)).toEqual({ source_kind: 'all' });
+    expect(
+      buildHistoricalFilters({ ...filters, until_unix_secs: undefined }),
+    ).toEqual({
+      source_kind: 'all',
+      status_class: 'errors',
+      since_unix_secs: '100',
+    });
   });
 });
 

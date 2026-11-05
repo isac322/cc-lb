@@ -1,11 +1,14 @@
 use cc_lb_clock::unix_secs;
-use cc_lb_engine::cache_keepalive::{RenewalFinalization, RenewalUsage, RequestSnapshot};
+use cc_lb_engine::cache_keepalive::{
+    RenewalFinalization, RenewalUsage, RequestSnapshot, SessionKey,
+};
 use cc_lb_pricing::{ComputedCostBreakdown, virtual_cost_micros_full_with_context};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow, CacheKeepaliveSessionRecord,
+    CacheKeepaliveTerminalReason,
     CacheKeepaliveTurnRow, RequestEvent, RequestEventProjections, RequestEventStore, UpstreamStore,
 };
 
@@ -20,6 +23,7 @@ impl SchedulerDispatch {
         snapshot: &RequestSnapshot,
         finalization: RenewalFinalization,
         hit_miss: &str,
+        authorized_after_dispatch: bool,
     ) -> SchedulerResult<()> {
         let source_ref_id = format!("{}:{}", job.session_key_hash, job.generation);
         let event_id = format!("renewal:{source_ref_id}");
@@ -45,10 +49,12 @@ impl SchedulerDispatch {
         .unwrap_or_else(ComputedCostBreakdown::unknown);
         let ts = unix_secs(self.clock.now());
         let duration_ms = duration_ms(finalization.duration);
+        let thread_id = SessionKey::extract_thread_id(&record.session_key_hash);
         let event = renewal_request_event(RenewalRequestEventInput {
             event_id: &event_id,
             source_ref_id: &source_ref_id,
             record,
+            thread_id: thread_id.as_deref(),
             upstream: &upstream,
             model,
             usage: &finalization.usage,
@@ -64,6 +70,7 @@ impl SchedulerDispatch {
             usage: &finalization.usage,
             cost_micros: cost.total_micros,
             hit_miss,
+            authorized_after_dispatch,
             generation: job.generation,
             ts,
         });
@@ -120,6 +127,7 @@ impl SchedulerDispatch {
                 event_id: &event_id,
                 source_ref_id: &source_ref_id,
                 record,
+                thread_id,
                 upstream: &upstream,
                 model,
                 usage: &finalization.usage,
@@ -137,6 +145,7 @@ struct RenewalRequestEventInput<'a> {
     event_id: &'a str,
     source_ref_id: &'a str,
     record: &'a CacheKeepaliveSessionRecord,
+    thread_id: Option<&'a str>,
     upstream: &'a UpstreamRecord,
     model: &'a str,
     usage: &'a RenewalUsage,
@@ -153,6 +162,7 @@ struct RenewalProjectionInput<'a> {
     usage: &'a RenewalUsage,
     cost_micros: i64,
     hit_miss: &'a str,
+    authorized_after_dispatch: bool,
     generation: u64,
     ts: u64,
 }
@@ -179,6 +189,7 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
         upstream_id: Some(input.upstream.id),
         upstream_name: Some(input.upstream.name.clone()),
         model: Some(input.model.to_owned()),
+        thread_id: input.thread_id.map(ToOwned::to_owned),
         status: input.status,
         input_tokens: Some(input.usage.input_tokens),
         output_tokens: Some(input.usage.output_tokens),
@@ -232,13 +243,19 @@ fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProject
             principal_id: input.record.principal_id.clone(),
             session_key_hash: Some(input.record.session_key_hash.clone()),
             upstream_id: input.record.upstream_id,
-            decision: if input.hit_miss == "hit" {
+            decision: if input.hit_miss == "hit" && input.authorized_after_dispatch {
                 "reschedule"
             } else {
                 "terminal"
             }
             .to_owned(),
-            reason: cache_keepalive_renewal_reason(input.hit_miss),
+            reason: if input.authorized_after_dispatch {
+                cache_keepalive_renewal_reason(input.hit_miss)
+            } else {
+                CacheKeepaliveTerminalReason::Cancelled
+                    .display_reason()
+                    .to_owned()
+            },
             error: None,
             generation: input.generation,
             ttl: input.record.ttl,

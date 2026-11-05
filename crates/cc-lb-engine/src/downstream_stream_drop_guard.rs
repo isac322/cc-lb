@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use cc_lb_observability::UNRESOLVED_ATTRIBUTION_LABEL;
 use http::StatusCode;
 use metrics::SharedString;
@@ -7,10 +8,14 @@ use tracing::Span;
 
 use crate::attempt_rail::ResponseAccountingGuard;
 use crate::body_io_timing::BodyIoTiming;
+use crate::cache_keepalive::{
+    LifecycleKeepalive, LifecycleKeepaliveContext, StreamingKeepaliveResponse,
+};
 use crate::terminal_observer::{
     LifecycleContext, StreamErrorClassification, StreamTerminationCause, StreamTerminationOutcome,
     UpstreamErrorCode, numeric_attribute,
 };
+use crate::usage_parser::ParsedSseEvent;
 
 const CLIENT_CLOSED_STATUS: u16 = 499;
 
@@ -31,6 +36,83 @@ impl StreamTerminationAttribution {
     }
 }
 
+struct StreamCompletionOwner {
+    keepalive: LifecycleKeepalive,
+    context: LifecycleKeepaliveContext,
+    response: Option<StreamingKeepaliveResponse>,
+    cache_anchor_at: Instant,
+    runtime: tokio::runtime::Handle,
+    cached_tokens: u64,
+}
+
+impl StreamCompletionOwner {
+    fn new(keepalive: LifecycleKeepalive, context: LifecycleKeepaliveContext) -> Self {
+        Self {
+            cache_anchor_at: context.request_dispatched_at,
+            runtime: tokio::runtime::Handle::current(),
+            keepalive,
+            context,
+            response: Some(StreamingKeepaliveResponse::default()),
+            cached_tokens: 0,
+        }
+    }
+
+    fn observe(&mut self, event: &ParsedSseEvent<'_>) {
+        if let Some(response) = self.response.as_mut() {
+            response.observe(event);
+        }
+    }
+
+    fn observe_emitted(&mut self, bytes: &Bytes, max_pending_sse_bytes: usize) {
+        if let Some(response) = self.response.as_mut() {
+            response.observe_emitted(bytes, max_pending_sse_bytes);
+        }
+    }
+
+    fn set_cache_anchor_at(&mut self, at: Instant) {
+        self.cache_anchor_at = at;
+    }
+
+    fn set_cached_tokens(&mut self, cached_tokens: u64) {
+        self.cached_tokens = cached_tokens;
+    }
+
+    fn complete(&mut self) {
+        let Some(response) = self
+            .response
+            .take()
+            .and_then(StreamingKeepaliveResponse::into_value)
+        else {
+            return;
+        };
+        let runtime = self.runtime.clone();
+        if tokio::runtime::Handle::try_current().is_err() {
+            let _entered = runtime.enter();
+            self.dispatch_completion(&response);
+        } else {
+            self.dispatch_completion(&response);
+        }
+    }
+
+    fn dispatch_completion(&mut self, response: &serde_json::Value) {
+        let context = &mut self.context;
+        self.keepalive.on_response_completed(
+            response,
+            &context.principal,
+            std::mem::take(&mut context.accounting_key_id),
+            &context.cache_metadata,
+            context.upstream_id,
+            std::mem::take(&mut context.shaped_body),
+            std::mem::take(&mut context.original_body),
+            &context.downstream_headers,
+            self.cache_anchor_at.elapsed(),
+            self.cached_tokens,
+        );
+    }
+}
+
+/// Completion state shared by the normal EOF rail and the downstream-drop rail.
+/// Its response snapshot is consumed at most once.
 pub(crate) struct DownstreamStreamDropGuard {
     observer: Option<LifecycleContext>,
     timing_observer: Option<LifecycleContext>,
@@ -40,10 +122,12 @@ pub(crate) struct DownstreamStreamDropGuard {
     semantic_completed: bool,
     response_accounting_guard: Option<ResponseAccountingGuard>,
     abnormal_stop: Option<(String, String)>,
+    abnormal_stop_recorded: bool,
     finalized: bool,
     relay_start: Instant,
     body_io_timing: BodyIoTiming,
     attribution: StreamTerminationAttribution,
+    keepalive_completion: Option<StreamCompletionOwner>,
 }
 
 impl DownstreamStreamDropGuard {
@@ -66,10 +150,66 @@ impl DownstreamStreamDropGuard {
             semantic_completed: false,
             response_accounting_guard: None,
             abnormal_stop: None,
+            abnormal_stop_recorded: false,
             finalized: false,
             relay_start,
             body_io_timing,
             attribution,
+            keepalive_completion: None,
+        }
+    }
+
+    pub(crate) fn with_keepalive_completion(
+        mut self,
+        keepalive: LifecycleKeepalive,
+        context: Option<LifecycleKeepaliveContext>,
+    ) -> Self {
+        self.keepalive_completion =
+            context.map(|context| StreamCompletionOwner::new(keepalive, context));
+        self
+    }
+
+    pub(crate) fn has_keepalive_completion(&self) -> bool {
+        self.keepalive_completion.is_some()
+    }
+
+    pub(crate) fn observe_keepalive(&mut self, event: &ParsedSseEvent<'_>) {
+        if let Some(owner) = self.keepalive_completion.as_mut() {
+            owner.observe(event);
+        }
+    }
+
+    pub(crate) fn observe_keepalive_emitted(
+        &mut self,
+        bytes: &Bytes,
+        max_pending_sse_bytes: usize,
+    ) {
+        if let Some(owner) = self.keepalive_completion.as_mut() {
+            owner.observe_emitted(bytes, max_pending_sse_bytes);
+        }
+    }
+
+    pub(crate) fn set_keepalive_anchor_at(&mut self, at: Instant) {
+        if let Some(owner) = self.keepalive_completion.as_mut() {
+            owner.set_cache_anchor_at(at);
+        }
+    }
+
+    pub(crate) fn set_keepalive_cached_tokens(&mut self, cached_tokens: u64) {
+        if let Some(owner) = self.keepalive_completion.as_mut() {
+            owner.set_cached_tokens(cached_tokens);
+        }
+    }
+
+    pub(crate) fn complete_keepalive(&mut self) {
+        if self.pending_terminal.is_some()
+            || self.abnormal_stop.is_some()
+            || self.abnormal_stop_recorded
+        {
+            return;
+        }
+        if let Some(owner) = self.keepalive_completion.as_mut() {
+            owner.complete();
         }
     }
 
@@ -105,6 +245,7 @@ impl DownstreamStreamDropGuard {
         let Some((error_type, error_message)) = self.abnormal_stop.take() else {
             return false;
         };
+        self.abnormal_stop_recorded = true;
         let code = if error_type == "refusal" {
             UpstreamErrorCode::Refusal
         } else {
@@ -272,6 +413,7 @@ impl Drop for DownstreamStreamDropGuard {
             // Leave the reservation alive before RequestTerminated is
             // published; the subscriber reconciles success or refunds an
             // abnormal stop. Pre-terminal cancellation retains RAII refund.
+            let complete_keepalive = self.abnormal_stop.is_none() && !self.abnormal_stop_recorded;
             self.handoff_response_accounting();
             let finalize_ms = duration_to_ms(cancellation_at.elapsed());
             if let Some(observer) = self.observer.take() {
@@ -279,6 +421,9 @@ impl Drop for DownstreamStreamDropGuard {
                 observer.set_upstream_body_ms_if_absent(response_body_ms);
                 observer.set_finalize_ms(finalize_ms);
                 observer.finish();
+            }
+            if complete_keepalive {
+                self.complete_keepalive();
             }
             self.record_response_timings(response_body_ms, finalize_ms);
             self.record_terminal(

@@ -469,6 +469,7 @@ async fn fixture() -> Fixture {
     let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let state = AdminState {
         config_path: None,
+        build: cc_lb_server::build_meta::BuildMeta::current().admin_build_info(),
         startup_config_overrides: Default::default(),
         storage: Some(storage.clone() as Arc<dyn StorageTrait>),
         key_store: None,

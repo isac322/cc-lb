@@ -121,7 +121,14 @@ impl SchedulerDispatch {
                 KeepaliveDispatchContext::new(reservation, source_ref_id),
             )
             .await;
-        if !self.cache_keepalive_still_authorized(&record) {
+        let authorized_after_dispatch = self.cache_keepalive_still_authorized(&record);
+        // Completed responses still own real usage after authorization is revoked.
+        if !authorized_after_dispatch
+            && matches!(
+                &outcome,
+                DispatchOutcome::UnsupportedProvider(_) | DispatchOutcome::Error(_)
+            )
+        {
             self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled, None)
                 .await?;
             return Ok(JobOutcome::Done);
@@ -138,8 +145,18 @@ impl SchedulerDispatch {
                     &snapshot,
                     finalization,
                     "hit",
+                    authorized_after_dispatch,
                 )
                 .await?;
+                if !authorized_after_dispatch {
+                    self.mark_cache_keepalive_terminal(
+                        &job,
+                        CacheKeepaliveTerminalReason::Cancelled,
+                        None,
+                    )
+                    .await?;
+                    return Ok(JobOutcome::Done);
+                }
                 self.reschedule_cache_keepalive_hit(
                     job,
                     record,
@@ -156,11 +173,16 @@ impl SchedulerDispatch {
                     &snapshot,
                     finalization,
                     "miss",
+                    authorized_after_dispatch,
                 )
                 .await?;
                 self.mark_cache_keepalive_terminal(
                     &job,
-                    CacheKeepaliveTerminalReason::CacheMiss,
+                    if authorized_after_dispatch {
+                        CacheKeepaliveTerminalReason::CacheMiss
+                    } else {
+                        CacheKeepaliveTerminalReason::Cancelled
+                    },
                     None,
                 )
                 .await?;
@@ -278,9 +300,26 @@ impl SchedulerDispatch {
             return Ok(JobOutcome::Done);
         }
 
+        let lead_secs = match record.ttl {
+            cc_lb_storage_api::CacheTtl::Ttl5m => record
+                .config_snapshot
+                .as_ref()
+                .map_or(30, |config| config.refresh_lead_time_5m_secs),
+            cc_lb_storage_api::CacheTtl::Ttl1h => record
+                .config_snapshot
+                .as_ref()
+                .map_or(300, |config| config.refresh_lead_time_1h_secs),
+        };
+        // The prior job may contain a delay shortened by the real response's age.
+        // Every successful renewal starts a fresh cadence from its own anchor.
+        let refresh_delay_secs = record
+            .ttl
+            .as_secs()
+            .saturating_sub(u64::from(lead_secs))
+            .max(1);
         let cache_anchor_at_unix_secs = now.saturating_sub(cache_anchor_age.as_secs());
         let run_at_unix_secs = cache_anchor_at_unix_secs
-            .saturating_add(job.refresh_delay_secs)
+            .saturating_add(refresh_delay_secs)
             .max(now.saturating_add(1));
         let encrypted_payload = if needs_payload_rewrite {
             let payload_generation =
@@ -308,7 +347,8 @@ impl SchedulerDispatch {
                 generation: job.generation,
                 cache_anchor_at_unix_secs,
                 run_at_unix_secs,
-                expires_at_unix_secs: cache_anchor_at_unix_secs.saturating_add(job.ttl.as_secs()),
+                expires_at_unix_secs: cache_anchor_at_unix_secs
+                    .saturating_add(record.ttl.as_secs()),
                 encrypted_payload,
                 now_unix_secs: now,
             },
@@ -327,7 +367,7 @@ impl SchedulerDispatch {
             ttl: updated.ttl,
             cache_anchor_at_unix_secs: updated.cache_anchor_at_unix_secs,
             expires_at_unix_secs: updated.expires_at_unix_secs,
-            refresh_delay_secs: job.refresh_delay_secs,
+            refresh_delay_secs,
             max_refreshes: job.max_refreshes,
             max_total_duration_secs: job.max_total_duration_secs,
             traceparent: job.traceparent,

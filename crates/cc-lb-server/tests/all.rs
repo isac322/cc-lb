@@ -15,8 +15,6 @@ mod api_key_proxy;
 mod api_key_secret_hygiene;
 #[path = "bad_postgres_url_fatal.rs"]
 mod bad_postgres_url_fatal;
-#[path = "build_metadata_present.rs"]
-mod build_metadata_present;
 #[path = "cache_keepalive_failure_observability.rs"]
 mod cache_keepalive_failure_observability;
 #[path = "cache_keepalive_real_session_simulation.rs"]
@@ -57,6 +55,8 @@ mod metrics_endpoint_reachable;
 mod middleware_order;
 #[path = "migration_api_key_details_upgrade.rs"]
 mod migration_api_key_details_upgrade;
+#[path = "migration_compatibility.rs"]
+mod migration_compatibility;
 #[path = "missing_aead_key_fatal.rs"]
 mod missing_aead_key_fatal;
 #[path = "multi_instance_storage_tail.rs"]

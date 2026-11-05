@@ -73,6 +73,80 @@ async fn enqueue_persists_session_payload_and_apalis_job() {
 }
 
 #[tokio::test]
+async fn enqueue_preserves_anchor_adjusted_initial_delay_for_both_ttls_and_saturation() {
+    for (ttl, age, expected_delay) in [
+        (CacheTtl::Ttl5m, 120, 150),
+        (CacheTtl::Ttl1h, 120, 3_180),
+        (CacheTtl::Ttl5m, 280, 1),
+    ] {
+        let fixture = Fixture::new().await;
+        let backend = crate::scheduler_factory::open_scheduler_storage(
+            &StorageConfig::Sqlite {
+                path: fixture.sqlite_path.clone(),
+            },
+            &SchedulerConfig::default(),
+            Arc::new(SystemClock),
+        )
+        .await
+        .expect("open scheduler storage");
+        let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+            storage: fixture.storage.clone(),
+            pusher: Arc::new(backend.backend.clone()),
+            aead: fixture.aead.clone(),
+            clock: Arc::new(SystemClock),
+        });
+        let mut request = enqueue_request();
+        let config = cc_lb_storage_api::CacheKeepaliveConfig {
+            enabled: true,
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 3,
+            max_total_duration_secs: 7_200,
+            snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
+            classifier: Default::default(),
+        };
+        request.snapshot.ttl = ttl;
+        request.cache_anchor_age = std::time::Duration::from_secs(age);
+        request.params =
+            ScheduleParams::from_cache_anchor_age(&config, ttl, request.cache_anchor_age);
+        enqueuer
+            .enqueue_cache_keepalive(request)
+            .await
+            .expect("enqueue initial renewal");
+        let record = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load session")
+            .expect("session exists");
+        let jobs = backend
+            .backend
+            .list_keepalive_tasks(&Filter {
+                status: Some(TaskStatus::Pending),
+                page: 1,
+                page_size: Some(10),
+            })
+            .await
+            .expect("list jobs");
+        assert_eq!(jobs.len(), 1);
+        let AdaptiveJob::CacheKeepalive(job) = &jobs[0].args else {
+            panic!("expected a cache keepalive job");
+        };
+        assert_eq!(job.refresh_delay_secs, expected_delay, "{ttl:?}, age={age}");
+        assert_eq!(
+            record.run_at_unix_secs - record.cache_anchor_at_unix_secs,
+            age + expected_delay
+        );
+        assert_eq!(jobs[0].run_at_unix_secs, record.run_at_unix_secs);
+        assert_eq!(
+            record.expires_at_unix_secs - record.cache_anchor_at_unix_secs,
+            ttl.as_secs()
+        );
+    }
+}
+
+#[tokio::test]
 async fn enqueue_failure_terminalizes_committed_pending_session() {
     let fixture = Fixture::new().await;
     let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {

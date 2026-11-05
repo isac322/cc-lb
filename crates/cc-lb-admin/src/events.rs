@@ -14,12 +14,10 @@ pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
 pub const MAX_RECENT_EVENTS_LIMIT: usize = 500;
 pub const MAX_HISTOGRAM_BUCKETS: u64 = 240;
 
-/// Upper bound on how many events a single reconnect may replay from storage.
+/// Upper bound on matching durable events replayed by one reconnect.
 ///
-/// Chosen to comfortably cover the largest expected live-tail gap
-/// (browser-throttled tab returning after several minutes on a busy proxy)
-/// while keeping the per-connect storage scan bounded. Clients dedup by
-/// `event_id` so mild overshoot is harmless.
+/// Filters apply before this limit, so storage may scan more raw rows. Reaching
+/// the limit emits a reset at the last delivered cursor for safe continuation.
 pub const BACKFILL_MAX_EVENTS: usize = 500;
 pub const DEFAULT_STORAGE_TAIL_CAPACITY: usize = 4096;
 
@@ -280,13 +278,18 @@ pub async fn build_delta_events_payload(
             &query.filters.storage_filters(),
         )
         .await?;
-    let next_cursor = rows
-        .last()
-        .map(|(cursor, _)| *cursor)
-        .unwrap_or(query.since_cursor);
     let exhausted = rows.len() < query.limit;
-    let mut events: Vec<_> = rows.into_iter().map(|(_, event)| event).collect();
-    events.retain(|event| apply_filters_to_event(event, &query.filters));
+    let mut next_cursor = query.since_cursor;
+    let mut events = Vec::with_capacity(rows.len());
+    for (cursor, event) in rows {
+        if apply_filters_to_event(&event, &query.filters) {
+            next_cursor = cursor;
+            events.push(event);
+        }
+    }
+    if exhausted {
+        next_cursor = query.since_cursor.max(cursor_hi);
+    }
     Ok(EventsDeltaPayload {
         events,
         next_cursor,
@@ -461,6 +464,12 @@ impl StreamFilters {
             status_class: self.status_class,
             errors_only: self.errors_only,
             event_kind: self.event_kind,
+            source_kind: self
+                .source_kind
+                .as_ref()
+                .filter(|source_kind| source_kind.as_str() != "all")
+                .cloned(),
+            exclude_renewal: self.source_kind.is_none() && self.event_kind.is_none(),
         }
     }
 }

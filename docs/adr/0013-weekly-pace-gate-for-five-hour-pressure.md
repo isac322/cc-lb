@@ -135,3 +135,25 @@ plan changes.
 `subscription_preference/tests/weekly_pace_gate.rs` covers the incident shape,
 the exact pace boundary, unusable weekly fallbacks, model-scoped keep-only
 behavior, and the raw five-hour tiebreak.
+
+## Addendum: optional five-hour windows (2026-11-05)
+
+Some plans report only a shared seven-day window. The five-hour window is
+optional, so the gate distinguishes an explicit provider-confirmed absence from
+missing or outdated five-hour data. This addendum clarifies the accepted
+decision without changing the schema or API:
+
+- An explicit `Absent` five-hour sample contributes no five-hour pressure and
+  does not trigger the `5h snapshot unusable` fallback. It cannot create
+  five-hour pressure when the plan has no five-hour window.
+- `Unobserved` means that no five-hour observation exists. `Stale` means that a
+  previously observed actual sample is no longer fresh. They remain distinct
+  from `Absent` and conservative: neither state proves that the plan is
+  weekly-only, so the existing unusable-five-hour fallback remains in effect.
+- Other fallback conditions, including an unusable shared weekly snapshot, are
+  evaluated independently. They do not turn an explicit `Absent` five-hour
+  sample into a five-hour pressure signal.
+
+Weekly-only plans therefore route on their reported weekly windows. Plans that
+report a five-hour window retain the weekly pace gate and the historical
+conservative behavior for `Unobserved` and `Stale` observations.

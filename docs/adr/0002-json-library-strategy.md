@@ -23,9 +23,10 @@ Faster alternatives evaluated:
 
 ## Decision
 
-Adopt **sonic-rs for hot-path *parsing only*** (`from_slice`, `from_str`).
-Everything else — the `Value` AST type, `serde_json::Map`, `json!`
-macro, `to_vec`/`to_string` serialization — stays on `serde_json`.
+Adopt **sonic-rs for hot-path parsing** (`from_slice`, `from_str`).
+The default `Value` AST type, `serde_json::Map`, `json!` macro, and
+`to_vec`/`to_string` serialization stay on `serde_json`, with the narrow
+wire-body exception below.
 
 Rationale for the split:
 
@@ -33,12 +34,10 @@ Rationale for the split:
    `DigestBlockSerializer`, and `PrefixSerializer` in
    `crates/cc-lb-engine/src/prompt_cache_simulator.rs` serialize block-hash
    inputs and prefix token-count inputs with `serde_json`; block bytes then
-   feed BLAKE3.
-   `serde_json` (without the `preserve_order` feature) uses `BTreeMap`, so
-   object keys are emitted in sorted order regardless of insertion order.
-   `sonic_rs::Object` preserves insertion order. Swapping serialization
-   would silently change cache-affinity routing keys. Keeping `serde_json`
-   on this path preserves the canonical bytes.
+   feed BLAKE3. `serde_json` (without the `preserve_order` feature) uses
+   `BTreeMap`, so object keys are emitted in sorted order. The prompt-cache
+   hash serializers intentionally keep this canonical representation; the
+   wire-body snapshot exception below does not alter it.
 2. **Frameworks forcing `serde_json`.** `sqlx` (the `json` feature)
    encodes/decodes JSON columns through `serde_json::Value`. `schemars`
    generates schemas as `serde_json::Value`. Neither has a `sonic_rs`
@@ -53,6 +52,25 @@ Rationale for the split:
 5. **Test infrastructure.** `insta` snapshot testing, `serde_json::json!`
    macro in test fixtures, and `serde_json::to_value` / `to_string_pretty`
    for assertions all stay on `serde_json`. No perf pressure.
+
+### Keep-alive snapshot wire-body exception
+
+`cache_keepalive::RequestSnapshot` preserves the shaped request's JSON object
+key order when capturing, trimming uncached messages, shaping a renewal, and
+restoring persisted bodies. It uses sonic-rs only to validate and inspect the
+body, then uses `sonic_rs::to_object_iter` and `sonic_rs::to_array_iter` with
+`LazyValue::as_raw_str` to copy each unchanged value's original JSON span.
+Only retained `messages`/`content` arrays and the required `max_tokens`/`stream`
+edits are reconstructed. Wrapper whitespace and key-escape spelling may be
+re-encoded, but nested value bytes and their key order are not sorted through a
+mutable JSON object.
+
+This exception applies only to snapshot wire bodies. Routing hashes in
+`prompt_cache_simulator.rs` keep their existing `serde_json::to_writer`
+canonical bytes. Do not enable workspace-wide `serde_json/preserve_order`
+or migrate the public plugin AST to implement this exception. Preserving
+wire-body key order does not establish a provider cache hit or measured cost
+savings.
 
 ## Migration Scope
 
@@ -107,11 +125,12 @@ remain.
 
 ## Rules for future contributors
 
-1. **Do not swap `serde_json::to_vec` / `to_string` for
-   `sonic_rs::to_vec` / `to_string`** in any file that feeds a hash,
-   cache key, or bytes-on-the-wire comparison. The default `serde_json`
-   dependency here has no `preserve_order` feature, so its output is
-   sorted; `sonic_rs::Object` is insertion-ordered.
+1. **Keep `serde_json` serialization on hash and cache-key paths.**
+   The default dependency has no `preserve_order` feature, so its output is
+   sorted. Keep existing serializers for canonical hash bytes and for
+   bytes-on-the-wire comparisons unless the path is the keep-alive snapshot
+   exception above. That exception preserves unchanged raw JSON spans rather
+   than relying on a mutable ordered object.
 2. **Do not migrate parse sites in structs that use
    `#[serde(flatten)]`.** sonic-rs will reject them at runtime.
 3. **New hot-path JSON parsing** (per-request, per-SSE-event) should use

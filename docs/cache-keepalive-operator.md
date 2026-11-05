@@ -12,13 +12,13 @@ Design references:
 
 ## Scope and provider gating
 
-v1 fires keep-alives only against **direct Anthropic OAuth upstreams**.
-`AnthropicApiKey` is disabled until storage-backed keep-alive signing lands;
-downstream proxy keys are never replayed to Anthropic. All other upstream kinds
-are skipped at fire time and the session is cancelled with `reason=upstream_gone`:
+Keep-alive fires only against **direct Anthropic OAuth upstreams**.
+`AnthropicApiKey` is unsupported; downstream proxy keys are never replayed
+to Anthropic. An existing, enabled upstream of any unsupported kind terminates
+the session with `terminal_reason=unsupported_provider`.
 
-- **Bedrock, Vertex:** `max_tokens: 0` behavior is unverified.
-- **OpenRouter:** schema requires `max_tokens >= 1`.
+A missing, disabled, or deleted upstream instead produces
+`terminal_reason=dispatch_error` with `error="upstream gone"`.
 
 For an enabled cache-keepalive principal, no snapshot or schedule is created
 for requests with no `cache_control` breakpoint, except that a
@@ -48,6 +48,17 @@ real response writes a new generation and enqueues a lightweight
 generation before dispatch and again through conditional post-dispatch updates,
 so old queued/running work becomes a stale no-op.
 
+An authenticated, non-auxiliary, keep-alive-eligible real request retires the
+matching active generation before upstream dispatch. Its queued renewal cannot
+fire while that real request waits for response headers or streams its response.
+If the real request fails, cc-lb does not resume the old snapshot. A later
+eligible response classified as `AgentInTurn` can establish a new generation;
+completion-sequence fencing prevents an older completion from replacing it.
+
+The proxy waits for the cancellation attempt before dispatch. Storage errors
+are logged and do not fail the proxy request; a queued renewal can still run
+if cancellation cannot be persisted.
+
 Scheduling is anchored to cache creation / response begin:
 
 - Streaming responses use the Anthropic `message_start` event timestamp.
@@ -57,11 +68,13 @@ Scheduling is anchored to cache creation / response begin:
   and 30-second lead, the job fires 270 seconds after `message_start`, not 270
   seconds after final response completion.
 
-Successful keepalive processing preserves the original duration anchor. When
-session caps permit another renewal, rescheduling increments `refresh_count`
-and enqueues the next generation using the existing synthetic
-response-begin/cache anchor. A final capped renewal does not increment
-`refresh_count`. New real requests reset `refresh_count` and `first_scheduled_at`.
+The initial schedule subtracts the existing cache anchor age. After a
+cache-hit renewal, the next schedule uses the full configured `ttl - lead_time`
+interval from the synthetic response's cache anchor; it does not reuse the
+initial shortened delay. Session caps retain the original duration anchor.
+When another renewal is permitted, rescheduling increments `refresh_count`.
+A final capped renewal does not increment `refresh_count`. New real requests
+reset `refresh_count` and `first_scheduled_at`.
 
 An eligible successful read-only renewal attempts observation publication
 through the existing bounded, nonblocking best-effort sink. The shared decoder
@@ -119,6 +132,12 @@ when the breakpoint ends on an assistant turn. If only `system` or `tools`
 contains an explicit breakpoint, the request history is reduced to a minimal
 user turn.
 
+Snapshot capture, trimming, renewal shaping, and persistence preserve the
+shaped request's JSON object key order. Renewal shaping changes `max_tokens`
+and removes `stream`; it does not sort prompt objects. This wire-body rule is
+separate from cc-lb's canonical, sorted-key serialization for routing hashes.
+Preserving order does not guarantee a provider cache hit or a particular cost.
+
 SQLite is supported for local development, CI, and bounded single-node use.
 Production multi-replica / HA deployments should use Postgres so Apalis claims
 and the generation fence are visible to every replica. Redis is a no-go for this
@@ -166,12 +185,20 @@ does not become a live Scheduled or Renewed row, and `error` is displayed
 alongside the terminal base state.
 
 
+Renewal request events retain the originating `thread_id` for thread-scoped
+sessions, including agent-scoped sessions, so thread-filtered event queries
+include those renewals. Prefix-only sessions have no thread attribution.
+
 ## Payload format upgrades
 
 The framed payload format stores the captured body as raw bytes before optional
 compression. Existing legacy and v2 JSON payloads remain readable and migrate
 once on their next successful renewal. Later renewals reuse the migrated
 ciphertext.
+
+An existing snapshot retains the key order of its stored body; an upgrade cannot
+recover ordering already lost by an older writer. A new eligible real request
+captures a fresh snapshot in that request's shaped-body order.
 
 Drain and stop all old workers and request-serving replicas before starting any
 new writer. Old binaries cannot read the new format. Mixed-version operation is
@@ -203,67 +230,67 @@ Cline, Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
 `submit_and_exit`, `finish`, `plan_mode_respond`, `act_mode_respond`,
 `report_bug`.
 
+Tool-name matching is case-sensitive and uses the client-facing response after
+any public response transform, in both SSE and buffered JSON paths. Provider
+usage accounting, error detection, and affinity extraction use the original
+upstream response.
+
 ## Rollout phases
 
 1. **Phase 0 — default off.** Ship the code with every principal's
    `cache_keepalive` unset. Behavior unchanged for all existing traffic.
 2. **Phase 1 — internal opt-in.** Enable on one staging principal with
    `max_refreshes_per_session = 2`, `max_total_duration_secs = 600`.
-   Confirm the metric counters below move and no unexpected 400s appear
-   in the upstream error logs.
-3. **Phase 2 — production canary.** Enable on one production principal
-   with defaults. Watch `cc_lb_cache_keepalive_fired_total{result="miss"}`
-   and the `cc_lb_cache_keepalive_cancelled_total{reason=…}` distribution
-   for one week. False-positive fires (miss + AgentInTurn) cost roughly
-   the input-token price of one prefix per fire.
-4. **Phase 3 — general availability.** Enable on remaining principals as
+   Confirm classifier decisions and durable renewal records appear, and check
+   the upstream error logs for unexpected 400s.
+3. **Phase 2: production canary.** Enable on one production principal
+   with defaults. Review renewal outcomes, usage, and cost estimates in the
+   principal's Cache keepalive view and renewal request events for one week.
+   Use the cancellation counter below for its documented completion-path
+   reasons, not as a count of all terminal sessions.
+4. **Phase 3: general availability.** Enable on remaining principals as
    operators opt in. GA assumes durable SQLite/Postgres storage is enabled;
    the old no-DB-persistence and cross-replica non-goals apply only to the
-   pre-Apalis prototype. Keep an eye on
-   `cc_lb_cache_keepalive_active_sessions` per principal for capacity planning.
+   pre-Apalis prototype. Use durable session records for capacity planning.
 
 ## Metrics
 
-Prometheus surface:
+The keep-alive Prometheus surface contains two counters:
 
-- `cc_lb_cache_keepalive_scheduled_total{principal_id, ttl}` — a keep-alive
-  fire was queued. `ttl` is `"5m"` or `"1h"`.
-- `cc_lb_cache_keepalive_fired_total{principal_id, ttl, result}` — a
-  keep-alive fire was dispatched. `result` is `"hit"` (cache read
-  observed), `"miss"` (no cache read), `"error"` (transport / 4xx / 5xx),
-  `"stale"`, `"noop"`, or `"decrypt_failed"`.
-- `cc_lb_cache_keepalive_cancelled_total{principal_id, reason}` — a
-  session was torn down. `reason` values:
-  - `user_turn_detected` — the classifier decided the user is now up.
-  - `snapshot_too_large` — shaped body exceeded `snapshot_max_bytes`.
-  - `cached_prefix_too_small` — the completed response reported fewer than
+- `cc_lb_cache_keepalive_cancelled_total{principal_id, reason}` counts the
+  latest real-response completion's cancellation paths listed below.
+  `principal_id` is the principal's id. It is not a count of all durable
+  terminal transitions, and an increment does not prove an active session
+  existed or that a storage cancellation succeeded.
+  - `user_turn_detected`: a response-derived compaction boundary with no
+    current cache breakpoint. Ordinary `UserTurn` and `Ambiguous` classifier
+    decisions do not increment this cancellation counter.
+  - `snapshot_too_large`: the captured, trimmed shaped body exceeded the
+    principal's `snapshot_max_bytes`.
+  - `cached_prefix_too_small`: an `AgentInTurn` response reported fewer than
     `min_cache_tokens` cached input tokens.
-  - `zero_token_renewal_unsupported` — the latest request uses enabled
+  - `zero_token_renewal_unsupported`: the shaped request uses enabled
     thinking, `output_config.format`, or a forced `tool_choice`, which a
     `max_tokens: 0` renewal cannot send.
-- `cc_lb_cache_keepalive_classifier_decisions_total{decision, source}` —
-  every classifier verdict. `decision` is `"user_turn"`, `"agent_in_turn"`,
-  or `"ambiguous"`. `source` is always `"heuristic"`. Not labelled by
-  `principal_id` — aggregate over the whole process.
-- `cc_lb_cache_keepalive_active_sessions{principal_id}` — gauge of
-  currently-scheduled sessions.
+- `cc_lb_cache_keepalive_classifier_decisions_total{decision, source}` counts
+  heuristic classifier invocations. `decision` is `"user_turn"`,
+  `"agent_in_turn"`, or `"ambiguous"`; `source` is always `"heuristic"`.
+  There is no `principal_id` label, so the counter aggregates the whole process.
+  Normal `UserTurn` and `Ambiguous` decisions appear here even though their
+  cancellation paths do not increment `cancelled_total`.
 
-Interpretation shortcuts:
+Counters may be absent from `/metrics` until their first increment. There is
+no keep-alive scheduling counter, fire-result counter, or active-session gauge.
+Use the principal's Cache keepalive view or
+`GET /admin/v1/principals/{principal_id}/cache-keepalive` for durable session
+activity, and renewal request events for completed usage and cost estimates.
 
-- Steady growth in `active_sessions` without matching
-  `cancelled_total{reason=user_turn_detected}` = the classifier is over-firing.
-  Add tool names to `extra_wait_for_user_tools` or lower
-  `max_refreshes_per_session`.
-- `fired_total{result=miss}` spiking = requests are being evicted between
-  the last read and the keep-alive fire. Verify the principal's traffic
-  fits within the configured `refresh_lead_time_5m_secs` /
-  `refresh_lead_time_1h_secs` (fires must land inside the TTL window,
-  not after).
-- `fired_total{result=error}` spiking = an unsupported upstream kind,
-  upstream outage, or provider error. Investigate the upstream error log.
-- `cancelled_total{reason=snapshot_too_large}` = a principal's shaped
-  request bodies are above 8 MiB. Raise `snapshot_max_bytes` on that
-  principal, or accept that these sessions are not tracked.
+For classifier tuning, compare `user_turn`, `agent_in_turn`, and `ambiguous`
+decisions with actual response tool names before changing
+`extra_wait_for_user_tools`. These aggregate counters cannot identify a
+particular principal's misclassification. For `snapshot_too_large`, compare the
+trimmed body size with that principal's configured cap (8 MiB by default)
+before raising `snapshot_max_bytes`.
 
 ## Runbook: enable for a principal
 
@@ -305,16 +332,17 @@ curl -sS -X PATCH \
   | jq '.cache_keepalive'
 ```
 
-`null` clears the config entirely. New real requests from this principal
-stop tracking immediately. Sessions that were already scheduled before
-the clear will still fire until they naturally exit via
-`max_refreshes_per_session`, `max_total_duration_secs`, an
-upstream/miss error, or a subsequent real request classified as
-`UserTurn`. The
-`cc_lb_cache_keepalive_active_sessions{principal_id=...}` gauge drains
-proportionally as sessions exit; expect it to reach zero within
-`max_total_duration_secs` in the worst case, and much faster in
-practice.
+`null` clears the config entirely. Setting `enabled: false` also disables
+tracking. Once the serving principal view reflects the update, new real
+requests stop tracking and queued sessions are cancelled when the worker
+claims them, before upstream dispatch. Queued rows need not disappear
+immediately; their durable session ends with `terminal_reason=cancelled`.
+
+Disabling does not abort a renewal already dispatched upstream. If it completes
+as a cache hit or miss, cc-lb retains its request event, keep-alive turn, usage,
+and cost accounting, reconciles the reservation once, then marks the session
+cancelled without enqueueing another job. `Error` and `UnsupportedProvider`
+outcomes retain the RAII reservation-refund path.
 
 Cleanup removes expired sessions, terminal keepalive Apalis rows, and stale
 old `Pending` keepalive rows. It never deletes `Queued` or `Running` rows;
@@ -373,20 +401,22 @@ Checks, in order:
    `output_config.format`, or a forced `tool_choice` is not tracked, and an
    active session is cancelled with `reason="zero_token_renewal_unsupported"`:
    Anthropic rejects those fields on a `max_tokens: 0` renewal.
-5. `cc_lb_cache_keepalive_active_sessions{principal_id=<id>}` shows the
-   session? If zero, either the classifier is deciding `user_turn` on
-   every response (check
-   `cc_lb_cache_keepalive_classifier_decisions_total{decision="user_turn"}`
-   spike) or the snapshot capture is failing (check
-   `cc_lb_cache_keepalive_cancelled_total{reason="snapshot_too_large"}`).
-6. `cc_lb_cache_keepalive_fired_total{result="miss"}` present? A miss
-   means the fire reached Anthropic but Anthropic did not report a
-   cache read. Common cause: the shape plugin has changed and the
-   snapshot no longer matches the cache key. Re-establish the session
-   with a fresh real request.
-7. `cc_lb_cache_keepalive_cancelled_total{reason="upstream_gone"}`?
-   Almost always means the upstream is not a direct Anthropic upstream.
-   Bedrock / Vertex / OpenRouter are provider-gated in v1.
+5. Inspect the principal's Cache keepalive view for its latest decision and
+   session status. Normal `UserTurn` and `Ambiguous` decisions stop renewal;
+   the classifier counter is process-wide, not a per-session diagnostic.
+   Check `snapshot_too_large` and the configured size cap if capture failed.
+6. Does the latest durable renewal turn report a miss? A miss means the
+   request reached Anthropic but Anthropic did not report a cache read.
+   Compare the shaped request's prompt blocks and breakpoints with the
+   snapshot, and check whether the fire landed within the TTL window.
+   A fresh real request can establish a new snapshot; no local counter
+   proves the provider cache is warm.
+7. Inspect the session's terminal reason and stored error.
+   `unsupported_provider` means an existing, enabled upstream is not a
+   supported direct Anthropic OAuth kind. `dispatch_error` with
+   `error="upstream gone"` means the upstream is missing, disabled, or deleted.
+   Other `dispatch_error` messages describe reservation, transport, or provider
+   failures; inspect the stored error and upstream logs.
 
 If none of the above explains it, capture a request and response body
 alongside the admin-config output and file an issue.

@@ -4260,6 +4260,7 @@ impl Lifecycle {
         let mut first_dispatch: Option<(Instant, u64)> = None;
         let mut attempt_timings = AttemptTimings::default();
         let mut keepalive_shaped_body = None;
+        let mut keepalive_request_dispatched_at = None;
         let (mut response, dispatch_started, dispatch_unix_secs, signer) = loop {
             // A failed-over upstream is announced before its signer is built,
             // so a terminal failure here never reports the previous upstream's
@@ -4401,6 +4402,8 @@ impl Lifecycle {
                     return Ok(response);
                 }
             };
+            cache_metadata.cache_breakpoints = routed.cache_bundle.request_breakpoints.clone();
+            cache_metadata.cache_prefix_hash = routed.cache_bundle.cache_prefix_hash.clone();
 
             let (dispatch_started, dispatch_unix_secs) = *first_dispatch
                 .get_or_insert_with(|| (Instant::now(), unix_now_ms(&*self.clock) / 1000));
@@ -4415,6 +4418,7 @@ impl Lifecycle {
             }
             let mut response = match self
                 .run_upstream_attempt(
+                    auth,
                     reserved.as_ref(),
                     &ctx,
                     &principal,
@@ -4423,6 +4427,8 @@ impl Lifecycle {
                     observer.as_ref(),
                     &mut attempt_timings,
                     &mut keepalive_shaped_body,
+                    &cache_metadata,
+                    &mut keepalive_request_dispatched_at,
                 )
                 .await
             {
@@ -4492,6 +4498,7 @@ impl Lifecycle {
                 );
                 response = match self
                     .run_upstream_attempt(
+                        auth,
                         reserved.as_ref(),
                         &ctx,
                         &principal,
@@ -4500,6 +4507,8 @@ impl Lifecycle {
                         observer.as_ref(),
                         &mut attempt_timings,
                         &mut keepalive_shaped_body,
+                        &cache_metadata,
+                        &mut keepalive_request_dispatched_at,
                     )
                     .await
                 {
@@ -4572,8 +4581,6 @@ impl Lifecycle {
             &routed.cache_bundle.cacheable_breakpoint_prefix_keys,
             routed.selected_cache_match.take(),
         );
-        cache_metadata.cache_breakpoints = routed.cache_bundle.request_breakpoints.clone();
-        cache_metadata.cache_prefix_hash = routed.cache_bundle.cache_prefix_hash.clone();
         cache_metadata.cache_control_message_indices = routed
             .cache_bundle
             .request_breakpoints
@@ -4599,6 +4606,7 @@ impl Lifecycle {
                 shaped_body,
                 original_body: ctx.body_bytes.clone(),
                 downstream_headers: ctx.downstream_headers.clone(),
+                request_dispatched_at: keepalive_request_dispatched_at.unwrap_or(dispatch_started),
             }
         });
         let response_affinity_context = ResponseAffinityContext {
@@ -5007,6 +5015,8 @@ impl Lifecycle {
             );
         }
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
+        let mut keepalive_transformed_json = None;
+        let mut keepalive_body_replaced = false;
         if !body_collect_failed
             && let (Some(hook), Some(semantic_body)) = (
                 transform_ctx.dialect.response_transform_hook(),
@@ -5025,6 +5035,15 @@ impl Lifecycle {
                 body: semantic_body.clone(),
             }) {
                 Ok(result) => {
+                    if keepalive_completion.is_some()
+                        && let cc_lb_upstream::TransformResponseResult::Replace {
+                            body: Some(body),
+                            ..
+                        } = &result
+                    {
+                        keepalive_body_replaced = true;
+                        keepalive_transformed_json = sonic_rs::from_slice::<Value>(body).ok();
+                    }
                     let transformed = apply_buffered_transform_result(
                         parts.status,
                         std::mem::take(&mut parts.headers),
@@ -5088,9 +5107,14 @@ impl Lifecycle {
             }
         }
         let client_status = parts.status;
+        let keepalive_response_json = if keepalive_body_replaced {
+            keepalive_transformed_json.as_ref()
+        } else {
+            response_body_json.as_ref()
+        };
         if !affinity_bind_failed
             && let (Some(context), Some(response_json)) =
-                (keepalive_completion, response_body_json.as_ref())
+                (keepalive_completion, keepalive_response_json)
         {
             self.cache_keepalive.on_response_completed(
                 response_json,
@@ -5101,7 +5125,9 @@ impl Lifecycle {
                 context.shaped_body,
                 context.original_body,
                 &context.downstream_headers,
-                first_body_chunk_at.map_or(duration, |anchor| anchor.elapsed()),
+                first_body_chunk_at
+                    .unwrap_or(context.request_dispatched_at)
+                    .elapsed(),
                 usage
                     .cache_read_input_tokens
                     .saturating_add(usage.cache_creation_input_tokens),
@@ -5268,6 +5294,7 @@ impl Lifecycle {
     #[allow(clippy::too_many_arguments)]
     async fn run_upstream_attempt(
         &self,
+        authenticated: &crate::authn_rail::Authenticated,
         reserved: Option<&Reserved>,
         ctx: &RequestContext,
         principal: &Principal,
@@ -5276,6 +5303,8 @@ impl Lifecycle {
         observer: Option<&LifecycleContext>,
         attempt_timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
+        cache_metadata: &RequestCacheMetadata,
+        keepalive_request_dispatched_at: &mut Option<Instant>,
     ) -> Result<Response<Body>, AttemptFailure> {
         let attempt_scope = match reserved {
             Some(reserved) => reserved.begin_attempt(),
@@ -5283,6 +5312,7 @@ impl Lifecycle {
         };
         let response = self
             .attempt(
+                authenticated,
                 self.dispatcher.as_ref(),
                 attempt_scope,
                 ctx,
@@ -5294,6 +5324,8 @@ impl Lifecycle {
                 observer,
                 attempt_timings,
                 shaped_body_out,
+                cache_metadata,
+                keepalive_request_dispatched_at,
             )
             .await?;
         if let Some(o) = observer {
@@ -5467,6 +5499,7 @@ impl Lifecycle {
     )]
     async fn attempt(
         &self,
+        authenticated: &crate::authn_rail::Authenticated,
         dispatcher: &dyn UpstreamDispatch,
         attempt_scope: Scoped<'_>,
         ctx: &RequestContext,
@@ -5478,6 +5511,8 @@ impl Lifecycle {
         observer: Option<&LifecycleContext>,
         timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
+        cache_metadata: &RequestCacheMetadata,
+        keepalive_request_dispatched_at: &mut Option<Instant>,
     ) -> Result<Response<Body>, AttemptFailure> {
         tracing::Span::current().record(
             "cc_lb.upstream.id",
@@ -5564,6 +5599,13 @@ impl Lifecycle {
             body_bytes = signed.body_len(),
             "about to dispatch signed request"
         );
+
+        if keepalive_request_dispatched_at.is_none() {
+            self.cache_keepalive
+                .on_request_started(authenticated, principal, cache_metadata)
+                .await;
+            *keepalive_request_dispatched_at = Some(Instant::now());
+        }
 
         let dispatch_start = Instant::now();
         let stage_timings_carrier = Arc::new(Mutex::new(RequestStageTimings::default()));
@@ -5785,7 +5827,8 @@ impl Lifecycle {
                 event_ctx.requested_model.as_deref(),
             ),
         )
-        .with_response_accounting_guard(response_accounting_guard);
+        .with_response_accounting_guard(response_accounting_guard)
+        .with_keepalive_completion(keepalive, keepalive_completion);
         let completion_observer = Arc::clone(&self.completion_observer);
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
         let stream_body_io_timing = response_body_timing.clone();
@@ -5828,7 +5871,6 @@ impl Lifecycle {
             let mut prompt_cache_observations_published = false;
             let mut semantic_message_stop_seen = false;
             let mut semantic_completion_observed = false;
-            let mut keepalive_response = crate::cache_keepalive::StreamingKeepaliveResponse::default();
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
@@ -5851,6 +5893,7 @@ impl Lifecycle {
             let mut upstream_error_body_decode_failed = false;
             let mut parse_sse_events_active = parse_sse_events;
             let mut raw_before_transform_output: Vec<Bytes> = Vec::new();
+            let mut keepalive_raw_passthrough_active = false;
             // Downstream bytes produced from the final upstream frame of a
             // Content-Length body. A client stops polling once the declared
             // length is satisfied, so these bytes are yielded only after the
@@ -6096,6 +6139,7 @@ impl Lifecycle {
                                         }
                                         debug_assert!(downstream_stream_is_identity);
                                         sse_transform_active = false;
+                                        keepalive_raw_passthrough_active = true;
                                         raw_passthrough_current_chunk = true;
                                     }
                                 }
@@ -6110,6 +6154,11 @@ impl Lifecycle {
                                 let parsed_event = parse_sse_event(&raw);
                                 let usage_update =
                                     accumulate_sse_usage(&parsed_event, &mut usage);
+                                downstream_drop_guard.set_keepalive_cached_tokens(
+                                    usage
+                                        .cache_read_input_tokens
+                                        .saturating_add(usage.cache_creation_input_tokens),
+                                );
                                 if let Some(err) =
                                     usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                                 {
@@ -6286,10 +6335,15 @@ impl Lifecycle {
                                     );
                                     break 'upstream;
                                 }
-                                keepalive_response.observe(&parsed_event);
+                                if !sse_transform_active
+                                    && downstream_drop_guard.has_keepalive_completion()
+                                {
+                                    downstream_drop_guard.observe_keepalive(&parsed_event);
+                                }
                                 match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
                                         message_start_at = Some(now);
+                                        downstream_drop_guard.set_keepalive_anchor_at(now);
                                     }
                                     Some(b"content_block_start")
                                         if content_block_start_at.is_none() =>
@@ -6316,6 +6370,7 @@ impl Lifecycle {
                                 if usage_update.message_start_usage {
                                     if message_start_at.is_none() {
                                         message_start_at = Some(now);
+                                        downstream_drop_guard.set_keepalive_anchor_at(now);
                                     }
                                     if status == StatusCode::OK
                                         && !prompt_cache_observations_published
@@ -6425,6 +6480,13 @@ impl Lifecycle {
                                             SseTransformOutcome::Emit(bytes) => {
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
+                                                if downstream_drop_guard.has_keepalive_completion() {
+                                                    downstream_drop_guard
+                                                        .observe_keepalive_emitted(
+                                                            &bytes,
+                                                            incomplete_sse_event_budget_bytes,
+                                                        );
+                                                }
                                                 bytes
                                             }
                                             SseTransformOutcome::Drop => {
@@ -6464,9 +6526,14 @@ impl Lifecycle {
                                                 parse_sse_events_active = false;
                                                 buffer.clear();
                                                 sse_transform_active = false;
+                                                keepalive_raw_passthrough_active = true;
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
+                                                    downstream_drop_guard.observe_keepalive_emitted(
+                                                        &raw,
+                                                        incomplete_sse_event_budget_bytes,
+                                                    );
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
                                                 }
@@ -6509,9 +6576,14 @@ impl Lifecycle {
                                                 parse_sse_events_active = false;
                                                 buffer.clear();
                                                 sse_transform_active = false;
+                                                keepalive_raw_passthrough_active = true;
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
+                                                    downstream_drop_guard.observe_keepalive_emitted(
+                                                        &raw,
+                                                        incomplete_sse_event_budget_bytes,
+                                                    );
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
                                                 }
@@ -6535,6 +6607,7 @@ impl Lifecycle {
                                         break 'upstream;
                                     } else {
                                         sse_transform_active = false;
+                                        keepalive_raw_passthrough_active = true;
                                         raw_passthrough_current_chunk = true;
                                         Bytes::new()
                                     };
@@ -6677,8 +6750,13 @@ impl Lifecycle {
                                         break 'upstream;
                                     }
                                     sse_transform_active = false;
+                                    keepalive_raw_passthrough_active = true;
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
+                                        downstream_drop_guard.observe_keepalive_emitted(
+                                            &raw,
+                                            incomplete_sse_event_budget_bytes,
+                                        );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
@@ -6688,6 +6766,13 @@ impl Lifecycle {
                                 if !success_sse_affinity_gate && !hold_unsolicited_chunk {
                                     // Chunk fanout stays inline — high-volume, not bus-worthy.
                                     if upstream_is_sse && downstream_stream_is_identity {
+                                        if keepalive_raw_passthrough_active {
+                                            downstream_drop_guard
+                                                .observe_keepalive_emitted(
+                                                    &data,
+                                                    incomplete_sse_event_budget_bytes,
+                                                );
+                                        }
                                         downstream_sse_boundary.observe(&data);
                                     }
                                     batch_index = batch_index.saturating_add(1);
@@ -6818,6 +6903,11 @@ impl Lifecycle {
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
                             let usage_update = accumulate_sse_usage(&parsed_event, &mut usage);
+                            downstream_drop_guard.set_keepalive_cached_tokens(
+                                usage
+                                    .cache_read_input_tokens
+                                    .saturating_add(usage.cache_creation_input_tokens),
+                            );
                             let mut affinity_persist_failed = false;
                             let affinity_binding = if success_sse_affinity_gate {
                                 let response_keys = match
@@ -6933,7 +7023,11 @@ impl Lifecycle {
                                 }
                                 break;
                             }
-                            keepalive_response.observe(&parsed_event);
+                            if !sse_transform_active
+                                && downstream_drop_guard.has_keepalive_completion()
+                            {
+                                downstream_drop_guard.observe_keepalive(&parsed_event);
+                            }
                             if let Some(err) =
                                 usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                             {
@@ -7031,7 +7125,16 @@ impl Lifecycle {
                                         response_headers,
                                         raw.clone(),
                                     ) {
-                                        SseTransformOutcome::Emit(bytes) => bytes,
+                                        SseTransformOutcome::Emit(bytes) => {
+                                            if downstream_drop_guard.has_keepalive_completion() {
+                                                downstream_drop_guard
+                                                    .observe_keepalive_emitted(
+                                                        &bytes,
+                                                        incomplete_sse_event_budget_bytes,
+                                                    );
+                                            }
+                                            bytes
+                                        }
                                         SseTransformOutcome::Drop => continue,
                                         SseTransformOutcome::FailOpen
                                         | SseTransformOutcome::Error(_) => {
@@ -7136,6 +7239,10 @@ impl Lifecycle {
                                 } else {
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
+                                        downstream_drop_guard.observe_keepalive_emitted(
+                                            &raw,
+                                            incomplete_sse_event_budget_bytes,
+                                        );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
@@ -7402,25 +7509,6 @@ impl Lifecycle {
             downstream_drop_guard.detach_lifecycle_observer();
             stream_body_io_timing.stop();
             let response_body_completed_at = Instant::now();
-            if stream_affinity_error.is_none()
-                && let Some(context) = keepalive_completion
-                && let Some(response_json) = keepalive_response.into_value()
-            {
-                keepalive.on_response_completed(
-                    &response_json,
-                    &context.principal,
-                    context.accounting_key_id,
-                    &context.cache_metadata,
-                    context.upstream_id,
-                    context.shaped_body,
-                    context.original_body,
-                    &context.downstream_headers,
-                    message_start_at.map_or(relay_start.elapsed(), |anchor| anchor.elapsed()),
-                    usage
-                        .cache_read_input_tokens
-                        .saturating_add(usage.cache_creation_input_tokens),
-                );
-            }
             let elapsed_ms = |to: Option<Instant>| {
                 to.map(|t| duration_to_ms(t.saturating_duration_since(relay_start)))
             };
@@ -7577,6 +7665,7 @@ impl Lifecycle {
             } else {
                 duration_to_ms(response_body_completed_at.elapsed())
             };
+            downstream_drop_guard.complete_keepalive();
             // Mandatory lifecycle, accounting, affinity, and termination work is complete.
             // Only best-effort latency logging crosses this bounded boundary.
             let stream_latency = StreamLatency {

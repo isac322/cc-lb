@@ -52,6 +52,11 @@ describe('QuotaWindowRow', () => {
     const marker = row.querySelector<HTMLElement>('[data-slot="pace-marker"]');
     expect(marker?.style.left).toBe('80%');
   });
+  it('keeps a stale 5h reading visible', () => {
+    const row = renderRow(snap({ window: '5h', state: 'stale' }));
+    expect(row.textContent).toContain('42% used');
+    expect(screen.getByRole('meter')).not.toBeNull();
+  });
 
   it('paces a 7d window over seven days', () => {
     const row = renderRow(
@@ -144,5 +149,38 @@ describe('QuotaWindowRow', () => {
       </QuotaWindowRows>,
     );
     expect(screen.queryByRole('listitem')).toBeNull();
+  });
+  it('omits an explicitly absent 5h window without a row, meter, or placeholder', () => {
+    render(
+      <QuotaWindowRows>
+        <QuotaWindowRow
+          snap={snap({
+            window: '5h',
+            state: 'absent',
+            utilization: null,
+            resets_at_unix_secs: null,
+          })}
+          nowUnixSecs={NOW}
+        />
+      </QuotaWindowRows>,
+    );
+    expect(screen.queryByRole('listitem')).toBeNull();
+    expect(screen.queryByRole('meter')).toBeNull();
+    expect(screen.queryByText('No reading')).toBeNull();
+  });
+
+  it('keeps the normal unobserved placeholder for a 5h window', () => {
+    const row = renderRow(
+      snap({
+        window: '5h',
+        state: 'unobserved',
+        utilization: null,
+        resets_at_unix_secs: null,
+      }),
+    );
+    expect(row.textContent).toContain('No reading');
+    expect(screen.getByRole('meter').getAttribute('aria-valuetext')).toBe(
+      'No reading',
+    );
   });
 });

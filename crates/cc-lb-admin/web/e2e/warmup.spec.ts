@@ -1,4 +1,5 @@
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Page, type Request, test } from '@playwright/test';
+import type { AuthSession, QuotaSnapshot } from '../src/lib/api';
 import { COPY } from '../src/lib/copy/warmup';
 
 type WarmupPlugin = { wasm_registry_id: string; config: Record<string, unknown> } | null;
@@ -30,6 +31,87 @@ type PluginFixture = {
   metadata: null;
   supported_slots: string[];
 };
+
+type WarmupAttemptFixture = {
+  id: string;
+  upstream_id: string;
+  attempted_at_unix_secs: number;
+  completed_at_unix_secs: number | null;
+  scheduled_for_unix_secs: number;
+  trigger: 'scheduled' | 'manual';
+  status: 'success' | 'skipped' | 'transient_failure' | 'permanent_failure';
+  reason: string;
+  dispatch_kind: 'not_dispatched' | 'http' | 'dialect_plugin' | null;
+  http_status: number | null;
+  cycle_key: number | null;
+  expected_cycle_key: number | null;
+  idle_secs_since_prev_window: number | null;
+  replica_id: string | null;
+  lease_holder: string | null;
+  upstream_spec_revision: number;
+  dialect_plugin_snapshot: {
+    wasm_registry_id: string;
+    config: Record<string, unknown>;
+  } | null;
+  error_detail: string | null;
+};
+
+type WarmupSummaryFixture = {
+  upstream_id: string;
+  last_attempt: WarmupAttemptFixture | null;
+  recent_attempts: WarmupAttemptFixture[];
+  next_scheduled_at_unix_secs: number | null;
+  recent_summary_7d: {
+    success: number;
+    skipped: number;
+    transient_failure: number;
+    permanent_failure: number;
+  };
+  dialect_plugin: WarmupAttemptFixture['dialect_plugin_snapshot'];
+};
+
+function warmupAttempt(upstream: UpstreamFixture): WarmupAttemptFixture {
+  const attemptedAt = Math.floor(Date.now() / 1000) - 20 * 60;
+  return {
+    id: `${upstream.id}-attempt-1`,
+    upstream_id: upstream.id,
+    attempted_at_unix_secs: attemptedAt,
+    completed_at_unix_secs: attemptedAt + 1,
+    scheduled_for_unix_secs: attemptedAt,
+    trigger: 'scheduled',
+    status: 'success',
+    reason: 'cycle_advanced',
+    dispatch_kind: 'http',
+    http_status: 200,
+    cycle_key: attemptedAt,
+    expected_cycle_key: attemptedAt,
+    idle_secs_since_prev_window: 300,
+    replica_id: 'e2e-replica',
+    lease_holder: 'e2e-replica',
+    upstream_spec_revision: upstream.spec_revision,
+    dialect_plugin_snapshot: upstream.warmup_dialect_plugin
+      ? { ...upstream.warmup_dialect_plugin }
+      : null,
+    error_detail: null,
+  };
+}
+
+function warmupSummary(upstream: UpstreamFixture): WarmupSummaryFixture {
+  const attempt = warmupAttempt(upstream);
+  return {
+    upstream_id: upstream.id,
+    last_attempt: attempt,
+    recent_attempts: [attempt],
+    next_scheduled_at_unix_secs: Math.floor(Date.now() / 1000) + 3600,
+    recent_summary_7d: {
+      success: 1,
+      skipped: 0,
+      transient_failure: 0,
+      permanent_failure: 0,
+    },
+    dialect_plugin: attempt.dialect_plugin_snapshot,
+  };
+}
 
 const specRevision = 4;
 
@@ -109,13 +191,16 @@ async function installAppFixtures(
   options: {
     upstreams?: UpstreamFixture[];
     plugins?: PluginFixture[];
-    onPatch?: (request: import('@playwright/test').Request, upstream: UpstreamFixture) => Promise<{ status: number; body: unknown }> | { status: number; body: unknown } | null;
-    onDelete?: (request: import('@playwright/test').Request, upstream: UpstreamFixture) => Promise<{ status: number; body: unknown }> | { status: number; body: unknown } | null;
-    onFireNow?: (request: import('@playwright/test').Request) => Promise<{ status: number; body: unknown }> | { status: number; body: unknown };
+    latestWindows?: QuotaSnapshot[];
+    warmupAttempts?: WarmupAttemptFixture[];
+    onPatch?: (request: Request, upstream: UpstreamFixture) => Promise<{ status: number; body: unknown }> | { status: number; body: unknown } | null;
+    onDelete?: (request: Request, upstream: UpstreamFixture) => Promise<{ status: number; body: unknown }> | { status: number; body: unknown } | null;
+    onFireNow?: (request: Request) => Promise<{ status: number; body: unknown }> | { status: number; body: unknown };
   } = {},
 ) {
   const upstreams = options.upstreams ?? [oauthHealthy(), oauthDisabled(), apiKeyUpstream()];
   const plugins = options.plugins ?? [shapePlugin('anthropic-shape-v2'), routerPlugin()];
+  const warmupAttempts = options.warmupAttempts ?? [warmupAttempt(upstreams[0])];
   let warmupAttemptRequests = 0;
 
   await page.addInitScript(() => {
@@ -135,6 +220,18 @@ async function installAppFixtures(
         body: JSON.stringify(body),
       });
 
+    if (pathname === '/admin/v1/auth/session' && method === 'GET') {
+      return json(200, {
+        authority: 'e2e',
+        subject: 'e2e-operator',
+        kind: 'human',
+        provider_id: 'e2e',
+        email: null,
+        display_name: 'E2E operator',
+        expires_at_unix_secs: Math.floor(Date.now() / 1000) + 3600,
+        auth_mode: 'static_token',
+      } satisfies AuthSession);
+    }
     if (pathname === '/admin/v1/upstreams' && method === 'GET') {
       return json(200, { upstreams });
     }
@@ -147,6 +244,11 @@ async function installAppFixtures(
     if (upstreamMatch && method === 'GET') {
       const upstream = upstreams.find((candidate) => candidate.id === upstreamMatch[1]);
       return upstream ? json(200, upstream, { etag: `"${upstream.spec_revision}"` }) : json(404, { error: 'not_found' });
+    }
+    const warmupSummaryMatch = pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup$/);
+    if (warmupSummaryMatch && method === 'GET') {
+      const upstream = upstreams.find((candidate) => candidate.id === warmupSummaryMatch[1]);
+      return upstream ? json(200, warmupSummary(upstream)) : json(404, { error: 'not_found' });
     }
     if (upstreamMatch && method === 'PATCH') {
       const upstream = upstreams.find((candidate) => candidate.id === upstreamMatch[1]);
@@ -176,7 +278,7 @@ async function installAppFixtures(
       method === 'GET'
     ) {
       warmupAttemptRequests += 1;
-      return json(200, { attempts: [], next_cursor: null });
+      return json(200, { attempts: warmupAttempts, next_cursor: null });
     }
     if (pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/oauth\/status$/)) {
       return json(200, {
@@ -217,7 +319,13 @@ async function installAppFixtures(
       return json(200, { events: [], observed: true, count: 0, limit: 5 });
     }
     if (pathname === '/admin/v1/subscription-quotas/latest') {
-      return json(200, { now_unix_secs: Math.floor(Date.now() / 1000), max_staleness_secs: 300, upstreams: [] });
+      return json(200, {
+        now_unix_secs: Math.floor(Date.now() / 1000),
+        max_staleness_secs: 300,
+        upstreams: options.latestWindows
+          ? [{ upstream_id: 'oauth-healthy', windows: options.latestWindows }]
+          : [],
+      });
     }
     if (pathname === '/admin/v1/subscription-quotas/series') {
       return json(200, { since_unix_secs: 0, until_unix_secs: 0, bucket_secs: 60, source: 'merged', series: [] });
@@ -236,8 +344,9 @@ async function openUpstreams(page: Page, selectedId = 'oauth-healthy') {
 
 async function confirmFireNow(page: Page) {
   await page.getByTestId('warmup-fire-now').click();
-  await expect(page.getByRole('dialog')).toBeVisible();
-  await page.getByRole('button', { name: 'Fire now' }).click();
+  const dialog = page.getByRole('alertdialog', { name: COPY.confirmFireTitle });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: COPY.confirmFireConfirmLabel, exact: true }).click();
 }
 
 async function noSeriousA11yViolations(page: Page) {
@@ -261,11 +370,60 @@ test.describe('WarmupCard', () => {
     await openUpstreams(page);
 
     await expect(page.getByTestId('warmup-card')).toBeVisible();
-    await expect(page.getByTestId('warmup-switch')).toHaveAttribute('aria-checked', 'true');
-    await expect(page.getByTestId('warmup-last')).toHaveText(/\d+ (minutes?|hours?|days?) ago/);
-    await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
+    await expect(page.getByTestId('warmup-switch')).toBeChecked();
+    await expect(page.getByTestId('warmup-last')).toContainText('Success');
+    await expect(page.getByTestId('warmup-last')).toContainText(/\d+[mhd] ago/);
+    await expect(page.getByTestId('warmup-plugin-select')).toContainText('anthropic-shape-v2');
     await expect(page.getByTestId('warmup-fire-now')).toBeEnabled();
     await page.screenshot({ path: testInfo.outputPath('scenario-1-steady-state.png'), fullPage: true });
+  });
+
+  test('Scenario 1a: Weekly-only warmup card, help, and confirmation use neutral quota-window copy', async ({ page }) => {
+    const now = Math.floor(Date.now() / 1000);
+    const baseSnap = {
+      status: null,
+      resets_at_unix_secs: now + 7 * 24 * 3600,
+      surpassed_threshold: null,
+      representative_claim: null,
+      disabled_reason: null,
+      extra_usage_enabled: null,
+      extra_usage_monthly_limit: null,
+      extra_usage_used_credits: null,
+      age_secs: 0,
+      source: 'api' as const,
+      observed_at_unix_millis: now * 1000,
+    };
+    await installAppFixtures(page, {
+      upstreams: [oauthHealthy()],
+      latestWindows: [
+        { ...baseSnap, window: '5h', state: 'absent', utilization: null, resets_at_unix_secs: null },
+        { ...baseSnap, window: '7d', state: 'fresh', utilization: 0.2 },
+      ],
+    });
+    await openUpstreams(page);
+    const quota = page.getByTestId('quota-snapshot-grid');
+    await expect(quota.getByRole('meter', { name: '7d', exact: true })).toBeVisible();
+    await expect(quota.getByRole('meter', { name: '5h', exact: true })).toHaveCount(0);
+
+    const fiveHourWording = /\b(?:5[-\s]*(?:h|hours?)|five[- ]hours?)\b/i;
+    const card = page.getByTestId('warmup-card');
+    await expect(card.getByText('Prepares the next quota window during idle gaps.', { exact: true })).toBeVisible();
+    await expect(card).not.toContainText(fiveHourWording);
+    await card.getByLabel('Warm-up help', { exact: true }).hover();
+    const help = page.getByText(/^Warm-up sends a tiny background Anthropic request during idle time/);
+    await expect(help).toBeVisible();
+    await expect(help).toContainText('the next quota window');
+    await expect(help).not.toContainText(fiveHourWording);
+
+    await card.getByRole('button', { name: COPY.fireNowButtonLabel, exact: true }).click();
+    const dialog = page.getByRole('alertdialog', { name: COPY.confirmFireTitle });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText(COPY.confirmFireBody.replace('{upstreamName}', 'oauth-healthy'), { exact: true })).toBeVisible();
+    await expect(dialog).toContainText('current quota window');
+    await expect(dialog).not.toContainText(fiveHourWording);
+    await dialog.getByRole('button', { name: COPY.confirmFireConfirmLabel, exact: true }).click();
+    await expect(page.getByText(COPY.fireSuccess, { exact: true })).toBeVisible();
+    expect(COPY.fireSuccess).not.toMatch(fiveHourWording);
   });
 
   test('Scenario 1b: History data loads only after opening the drawer', async ({
@@ -290,8 +448,7 @@ test.describe('WarmupCard', () => {
     await expect(page.getByTestId('warmup-fire-now')).toBeDisabled();
     await page.screenshot({ path: testInfo.outputPath('scenario-2-fire-success.png'), fullPage: true });
     await expect(page.getByText(COPY.fireSuccess)).toBeVisible();
-    await page.waitForTimeout(1100);
-    await expect(page.getByTestId('warmup-fire-now')).toBeEnabled();
+    await expect(page.getByTestId('warmup-fire-now')).toBeEnabled({ timeout: 2_000 });
   });
 
   test('Scenario 3: Fire-now 202 lease_held inline panel', async ({ page }, testInfo) => {
@@ -308,8 +465,7 @@ test.describe('WarmupCard', () => {
     await expect(panel).toContainText('Try again in ~30 seconds');
     await expect(page.locator('[data-sonner-toast][data-type="error"]')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('scenario-3-lease-held.png'), fullPage: true });
-    await page.waitForTimeout(10500);
-    await expect(panel).toHaveCount(0);
+    await expect(panel).toHaveCount(0, { timeout: 12_000 });
   });
 
   for (const reason of ['auth_failed', 'forbidden', 'bad_request', 'not_found', 'dialect_plugin_failed'] as const) {
@@ -354,12 +510,13 @@ test.describe('WarmupCard', () => {
       },
     });
     await openUpstreams(page);
-    await page.getByTestId('warmup-plugin-select').selectOption('anthropic-shape-v2');
+    await page.getByTestId('warmup-plugin-select').click();
+    await page.getByRole('option', { name: 'anthropic-shape-v2', exact: true }).click();
 
     await expect.poll(() => patchBody).toEqual({ warmup_dialect_plugin: { wasm_registry_id: 'anthropic-shape-v2', config: {} } });
     expect(ifMatch).toBe(`W/"${specRevision}"`);
     await testInfo.attach('scenario-6-patch-body.json', { body: JSON.stringify(patchBody, null, 2), contentType: 'application/json' });
-    await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
+    await expect(page.getByTestId('warmup-plugin-select')).toContainText('anthropic-shape-v2');
     await expect(page.getByText(COPY.dialectPluginSaveSuccess)).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('scenario-6-plugin-save.png'), fullPage: true });
   });
@@ -380,11 +537,13 @@ test.describe('WarmupCard', () => {
     });
     await openUpstreams(page);
     await page.getByTestId('warmup-plugin-clear').click();
-    await page.getByRole('button', { name: 'Clear' }).click();
+    const dialog = page.getByRole('alertdialog', { name: COPY.confirmClearPluginTitle });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: COPY.confirmClearPluginConfirmLabel, exact: true }).click();
 
     await expect.poll(() => deleteUrl).toBe('/admin/v1/upstreams/oauth-healthy/warmup-dialect-plugin');
     expect(ifMatch).toBe(`W/"${specRevision}"`);
-    await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('');
+    await expect(page.getByTestId('warmup-plugin-select')).toContainText(COPY.defaultPluginOption);
     await expect(page.getByTestId('warmup-plugin-clear')).toHaveCount(0);
     await expect(page.getByText(COPY.dialectPluginClearSuccess)).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('scenario-7-plugin-clear.png'), fullPage: true });
@@ -402,11 +561,13 @@ test.describe('WarmupCard', () => {
       },
     });
     await openUpstreams(page);
-    await page.getByTestId('warmup-plugin-select').selectOption('anthropic-shape-v2');
+    await page.getByTestId('warmup-plugin-select').click();
+    await page.getByRole('option', { name: 'anthropic-shape-v2', exact: true }).click();
 
     await expect(page.getByTestId('warmup-stale-hint')).toHaveText(COPY.staleRevisionHint);
-    await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
-    await page.getByTestId('warmup-plugin-select').selectOption('anthropic-shape-v2');
+    await expect(page.getByTestId('warmup-plugin-select')).toContainText('anthropic-shape-v2');
+    await page.getByTestId('warmup-plugin-select').click();
+    await page.getByRole('option', { name: 'anthropic-shape-v2', exact: true }).click();
     await expect.poll(() => attempts).toBe(2);
     await expect(page.getByTestId('warmup-stale-hint')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('scenario-8-stale-revision.png'), fullPage: true });
@@ -430,7 +591,7 @@ test.describe('WarmupCard', () => {
     await openUpstreams(page, 'oauth-paused-stale');
 
     await expect(page.getByTestId('warmup-card')).toBeVisible();
-    await expect(page.getByTestId('warmup-switch')).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId('warmup-switch')).toBeChecked();
     await expect(page.getByTestId('warmup-fire-now')).toBeVisible();
     await expect(page.getByTestId('warmup-enable-btn')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('scenario-9-warmup-only-while-disabled.png'), fullPage: true });
@@ -452,7 +613,8 @@ test.describe('WarmupCard', () => {
     });
     await openUpstreams(page);
 
-    await expect(page.getByTestId('warmup-plugin-select').locator('option', { hasText: COPY.unknownPluginTemplate.replace('{id}', 'ghost-plugin') })).toHaveCount(1);
+    await page.getByTestId('warmup-plugin-select').click();
+    await expect(page.getByRole('option', { name: COPY.unknownPluginTemplate.replace('{id}', 'ghost-plugin'), exact: true })).toHaveCount(1);
     await expect(page.getByTestId('warmup-plugin-clear')).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('scenario-11-unknown-plugin.png'), fullPage: true });
   });
@@ -483,7 +645,8 @@ test.describe('WarmupCard', () => {
     expect(focusOrder).toEqual(expectedOrder);
 
     await page.getByTestId('warmup-fire-now').click();
-    await expect(page.getByRole('button', { name: 'Fire now' })).toBeFocused();
+    const dialog = page.getByRole('alertdialog', { name: COPY.confirmFireTitle });
+    await expect(dialog.getByRole('button', { name: COPY.confirmFireConfirmLabel, exact: true })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('warmup-fire-now')).toBeFocused();
     const violations = await noSeriousA11yViolations(page);

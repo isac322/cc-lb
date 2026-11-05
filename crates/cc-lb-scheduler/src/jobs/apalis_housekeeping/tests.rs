@@ -9,26 +9,30 @@ use super::{
 
 #[cfg(feature = "sqlite")]
 mod sqlite {
-    use apalis_sqlite::SqliteStorage;
-    use sqlx::SqlitePool;
+    use std::sync::Arc;
 
     use super::{
         ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
         ApalisHousekeepingJobResult, DAY_SECS, HOUSEKEEPING_REPEAT_COUNT, NOW_SECS,
         cache_keepalive_jobs, expected_job_ids, expected_result, jobs, sessions, workers,
     };
+    use apalis_sqlite::SqliteStorage as ApalisSqliteStorage;
+    use cc_lb_clock::SystemClock;
+    use cc_lb_storage_sqlite::SqliteStorage as CacheKeepaliveSqliteStorage;
+    use sqlx::SqlitePool;
 
     #[tokio::test]
     async fn prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
-        SqliteStorage::setup(&pool).await?;
+        ApalisSqliteStorage::setup(&pool).await?;
         create_cache_keepalive_sessions_table(&pool).await?;
         seed_sqlite(&pool).await?;
         seed_sqlite_cache_keepalive_cleanup(&pool).await?;
+        let store = CacheKeepaliveSqliteStorage::new(pool.clone(), Arc::new(SystemClock));
 
         let result =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(1))
-                .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+                .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
                 .await;
 
         assert_eq!(result, expected_result());
@@ -48,7 +52,8 @@ mod sqlite {
     async fn retains_two_day_old_failed_jobs_for_thirty_day_dlq_retention()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
-        SqliteStorage::setup(&pool).await?;
+        ApalisSqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
         let old_done_at = i64::try_from(NOW_SECS - (2 * DAY_SECS))?;
         for (id, status) in [
             ("two-day-old-done", "Done"),
@@ -67,9 +72,10 @@ mod sqlite {
             .await?;
         }
 
+        let store = storage(&pool);
         let result =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(30))
-                .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+                .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
                 .await;
         assert!(matches!(
             result,
@@ -90,17 +96,18 @@ mod sqlite {
     #[tokio::test]
     async fn remains_successful_across_repeated_runs() -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
-        SqliteStorage::setup(&pool).await?;
+        ApalisSqliteStorage::setup(&pool).await?;
         create_cache_keepalive_sessions_table(&pool).await?;
         seed_sqlite(&pool).await?;
         seed_sqlite_cache_keepalive_cleanup(&pool).await?;
 
+        let store = storage(&pool);
         let handler = ApalisHousekeepingJobHandler::new(pool, ApalisHousekeepingConfig::new(1));
         for _ in 0..HOUSEKEEPING_REPEAT_COUNT {
             assert!(
                 matches!(
                     handler
-                        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+                        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
                         .await,
                     ApalisHousekeepingJobResult::Done { .. }
                 ),
@@ -114,12 +121,14 @@ mod sqlite {
     async fn reaps_stale_running_locks_and_leaves_fresh_locks_alone()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
-        SqliteStorage::setup(&pool).await?;
+        ApalisSqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
         seed_stale_lock_scenario(&pool).await?;
 
+        let store = storage(&pool);
         let config = ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120);
         let result = ApalisHousekeepingJobHandler::new(pool.clone(), config)
-            .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+            .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
             .await;
 
         match result {
@@ -167,15 +176,16 @@ mod sqlite {
     async fn terminalizes_stale_running_keepalive_sessions_without_reenqueuing_jobs()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
-        SqliteStorage::setup(&pool).await?;
+        ApalisSqliteStorage::setup(&pool).await?;
         create_cache_keepalive_sessions_table(&pool).await?;
         seed_running_keepalive_sessions(&pool).await?;
 
+        let store = storage(&pool);
         let result = ApalisHousekeepingJobHandler::new(
             pool.clone(),
             ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
         )
-        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
         .await;
 
         match result {
@@ -238,6 +248,283 @@ mod sqlite {
         assert!(lock_at.is_none());
         Ok(())
     }
+    #[tokio::test]
+    async fn saturates_cutoff_when_now_precedes_retention_threshold()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = SqlitePool::connect(":memory:").await?;
+        ApalisSqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
+        sqlx::query(
+            "INSERT INTO Workers
+             (id, worker_type, storage_name, layers, last_seen, started_at)
+             VALUES ('worker-at-zero', 'housekeeping', 'default', '', 0, 0)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO Jobs (job, id, job_type, status, run_at, done_at)
+             VALUES (X'', 'done-at-zero', 'housekeeping', 'Done', 0, 0)",
+        )
+        .execute(&pool)
+        .await?;
+
+        let result =
+            ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(1))
+                .handle(ApalisHousekeepingJob::default(), 1, &storage(&pool))
+                .await;
+
+        assert_eq!(
+            result,
+            ApalisHousekeepingJobResult::Done {
+                workers_removed: 0,
+                jobs_removed: 0,
+                stale_locks_reaped: 0,
+                cache_keepalive_sessions_removed: 0,
+                cache_keepalive_jobs_removed: 0,
+                cutoff_unix_secs: 0,
+            }
+        );
+        assert_eq!(ids(&pool, "Workers").await?, vec!["worker-at-zero"]);
+        assert_eq!(ids(&pool, "Jobs").await?, vec!["done-at-zero"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kills_orphan_stale_keepalive_job_when_no_session_is_recovered()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = SqlitePool::connect(":memory:").await?;
+        ApalisSqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
+        sqlx::query(
+            "INSERT INTO Workers
+             (id, worker_type, storage_name, layers, last_seen, started_at)
+             VALUES ('worker-live', 'housekeeping', 'default', '', ?1, ?1)",
+        )
+        .bind(i64::try_from(NOW_SECS)?)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO Jobs
+             (job, id, job_type, status, run_at, lock_by, lock_at, idempotency_key)
+             VALUES (X'', 'orphan-stale-keepalive', 'adaptive', 'Running', ?1, 'worker-live', ?2,
+                     'cache_keepalive:orphan:1')",
+        )
+        .bind(i64::try_from(NOW_SECS)?)
+        .bind(i64::try_from(NOW_SECS - 300)?)
+        .execute(&pool)
+        .await?;
+
+        let result = ApalisHousekeepingJobHandler::new(
+            pool.clone(),
+            ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
+        )
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &storage(&pool))
+        .await;
+
+        match result {
+            ApalisHousekeepingJobResult::Done {
+                stale_locks_reaped,
+                cache_keepalive_sessions_removed,
+                cache_keepalive_jobs_removed,
+                ..
+            } => {
+                assert_eq!(stale_locks_reaped, 0);
+                assert_eq!(cache_keepalive_sessions_removed, 0);
+                assert_eq!(cache_keepalive_jobs_removed, 0);
+            }
+            other => panic!("expected completed housekeeping, got {other:?}"),
+        }
+        let (status, done_at, lock_by, lock_at, last_result): (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT status, done_at, lock_by, lock_at, last_result
+             FROM Jobs WHERE id = 'orphan-stale-keepalive'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(status, "Killed");
+        assert_eq!(done_at, Some(i64::try_from(NOW_SECS)?));
+        assert!(lock_by.is_none());
+        assert!(lock_at.is_none());
+        assert!(
+            last_result
+                .as_deref()
+                .is_some_and(|result| result.contains("cc-lb housekeeping"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn returns_retry_for_malformed_scheduler_jobs_or_workers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let malformed_jobs_pool = SqlitePool::connect(":memory:").await?;
+        sqlx::query("CREATE TABLE Jobs (id TEXT PRIMARY KEY)")
+            .execute(&malformed_jobs_pool)
+            .await?;
+        let malformed_jobs_result = ApalisHousekeepingJobHandler::new(
+            malformed_jobs_pool.clone(),
+            ApalisHousekeepingConfig::new(1),
+        )
+        .handle(
+            ApalisHousekeepingJob::default(),
+            NOW_SECS,
+            &storage(&malformed_jobs_pool),
+        )
+        .await;
+        assert!(
+            matches!(
+                malformed_jobs_result,
+                ApalisHousekeepingJobResult::Retry { .. }
+            ),
+            "malformed Jobs schema must return Retry, got {malformed_jobs_result:?}"
+        );
+
+        let malformed_workers_pool = SqlitePool::connect(":memory:").await?;
+        ApalisSqliteStorage::setup(&malformed_workers_pool).await?;
+        create_cache_keepalive_sessions_table(&malformed_workers_pool).await?;
+        sqlx::query("DROP TABLE Workers")
+            .execute(&malformed_workers_pool)
+            .await?;
+        sqlx::query("CREATE TABLE Workers (id TEXT PRIMARY KEY)")
+            .execute(&malformed_workers_pool)
+            .await?;
+        let malformed_workers_result = ApalisHousekeepingJobHandler::new(
+            malformed_workers_pool.clone(),
+            ApalisHousekeepingConfig::new(1),
+        )
+        .handle(
+            ApalisHousekeepingJob::default(),
+            NOW_SECS,
+            &storage(&malformed_workers_pool),
+        )
+        .await;
+        assert!(
+            matches!(
+                malformed_workers_result,
+                ApalisHousekeepingJobResult::Retry { .. }
+            ),
+            "malformed Workers schema must return Retry, got {malformed_workers_result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn counts_overlapping_keepalive_cleanup_and_removes_deleted_order_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = SqlitePool::connect(":memory:").await?;
+        ApalisSqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
+        for (session_key_hash, enqueue_state, expires_at, updated_at, running_since) in [
+            (
+                "stale-running-expired",
+                "running",
+                NOW_SECS - 1,
+                NOW_SECS,
+                Some(NOW_SECS - 300),
+            ),
+            (
+                "stale-pending-expired",
+                "pending",
+                NOW_SECS - 1,
+                NOW_SECS - 3_700,
+                None,
+            ),
+            (
+                "live-running",
+                "running",
+                NOW_SECS + DAY_SECS,
+                NOW_SECS,
+                Some(NOW_SECS - 10),
+            ),
+            (
+                "live-pending",
+                "pending",
+                NOW_SECS + DAY_SECS,
+                NOW_SECS - 10,
+                None,
+            ),
+        ] {
+            insert_cache_keepalive_session(
+                &pool,
+                session_key_hash,
+                enqueue_state,
+                expires_at,
+                updated_at,
+                running_since,
+            )
+            .await?;
+            sqlx::query("INSERT INTO meta_v1 (key, value) VALUES (?1, ?2)")
+                .bind(format!("keepalive_order:{session_key_hash}"))
+                .bind("1:1")
+                .execute(&pool)
+                .await?;
+        }
+        sqlx::query("INSERT INTO meta_v1 (key, value) VALUES ('unrelated-meta', 'keep')")
+            .execute(&pool)
+            .await?;
+
+        let result = ApalisHousekeepingJobHandler::new(
+            pool.clone(),
+            ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
+        )
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &storage(&pool))
+        .await;
+
+        match result {
+            ApalisHousekeepingJobResult::Done {
+                cache_keepalive_sessions_removed,
+                cache_keepalive_jobs_removed,
+                ..
+            } => {
+                assert_eq!(cache_keepalive_sessions_removed, 3);
+                assert_eq!(cache_keepalive_jobs_removed, 0);
+            }
+            other => panic!("expected completed housekeeping, got {other:?}"),
+        }
+        assert_eq!(
+            session_hashes(&pool).await?,
+            vec!["live-pending", "live-running"]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT key FROM meta_v1 ORDER BY key")
+                .fetch_all(&pool)
+                .await?,
+            vec![
+                "keepalive_order:live-pending",
+                "keepalive_order:live-running",
+                "unrelated-meta",
+            ]
+        );
+        Ok(())
+    }
+
+    async fn insert_cache_keepalive_session(
+        pool: &SqlitePool,
+        session_key_hash: &str,
+        enqueue_state: &str,
+        expires_at: u64,
+        updated_at: u64,
+        running_since: Option<u64>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_sessions
+             (session_key_hash, status, enqueue_state, expires_at, updated_at,
+              running_since_unix_secs, encrypted_payload)
+             VALUES (?1, 'active', ?2, ?3, ?4, ?5, X'0102')",
+        )
+        .bind(session_key_hash)
+        .bind(enqueue_state)
+        .bind(i64::try_from(expires_at).expect("test timestamp fits i64"))
+        .bind(i64::try_from(updated_at).expect("test timestamp fits i64"))
+        .bind(running_since.map(|value| i64::try_from(value).expect("test timestamp fits i64")))
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
 
     async fn seed_sqlite(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         for (id, last_seen) in workers() {
@@ -279,6 +566,9 @@ mod sqlite {
         )
         .execute(pool)
         .await?;
+        sqlx::query("CREATE TABLE meta_v1 (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
@@ -372,6 +662,10 @@ mod sqlite {
         Ok(())
     }
 
+    fn storage(pool: &SqlitePool) -> CacheKeepaliveSqliteStorage {
+        CacheKeepaliveSqliteStorage::new(pool.clone(), Arc::new(SystemClock))
+    }
+
     async fn ids(pool: &SqlitePool, table: &str) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
             "SELECT id FROM {table} ORDER BY id"
@@ -391,9 +685,11 @@ mod sqlite {
 
 #[cfg(feature = "postgres")]
 mod postgres {
-    use std::str::FromStr as _;
+    use std::{str::FromStr as _, sync::Arc};
 
     use apalis_postgres::PostgresStorage;
+    use cc_lb_clock::SystemClock;
+    use cc_lb_storage_postgres::PostgresStorage as CacheKeepalivePostgresStorage;
     use chrono::{DateTime, Utc};
     use sqlx::{
         PgPool,
@@ -453,9 +749,10 @@ mod postgres {
         create_cache_keepalive_sessions_table(pool).await?;
         seed_postgres(pool).await?;
         seed_postgres_cache_keepalive_cleanup(pool).await?;
+        let store = storage(pool);
         let result =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(1))
-                .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+                .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
                 .await;
         assert_eq!(result, expected_result());
         assert_eq!(
@@ -469,13 +766,14 @@ mod postgres {
         );
         assert_postgres_stale_running_keepalive_recovery(pool).await?;
         assert_postgres_stale_running_lock_recovery(pool).await?;
+        let store = storage(pool);
         let handler =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(30));
         for _ in 0..HOUSEKEEPING_REPEAT_COUNT {
             assert!(
                 matches!(
                     handler
-                        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+                        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
                         .await,
                     super::ApalisHousekeepingJobResult::Done { .. }
                 ),
@@ -515,11 +813,12 @@ mod postgres {
         .execute(pool)
         .await?;
 
+        let store = storage(pool);
         let result = ApalisHousekeepingJobHandler::new(
             pool.clone(),
             ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
         )
-        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
         .await;
         match result {
             super::ApalisHousekeepingJobResult::Done {
@@ -596,11 +895,12 @@ mod postgres {
         .execute(pool)
         .await?;
 
+        let store = storage(pool);
         let result = ApalisHousekeepingJobHandler::new(
             pool.clone(),
             ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
         )
-        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS, &store)
         .await;
         match result {
             super::ApalisHousekeepingJobResult::Done {
@@ -667,6 +967,9 @@ mod postgres {
         )
         .execute(pool)
         .await?;
+        sqlx::query("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
@@ -715,6 +1018,10 @@ mod postgres {
         )
         .fetch_all(pool)
         .await
+    }
+
+    fn storage(pool: &PgPool) -> CacheKeepalivePostgresStorage {
+        CacheKeepalivePostgresStorage::new(pool.clone(), Arc::new(SystemClock))
     }
 
     fn is_safe_database_url(url: &str) -> bool {

@@ -29,7 +29,7 @@ Useful overrides are `CC_LB_LOAD_RPS`, `CC_LB_LOAD_DURATION_SECS`, `CC_LB_LOAD_S
 - Actual RPS must stay within 5% of the configured target.
 - `sse_storage_tail_lag_ms` p95 must be at most 1000 ms and max at most 5000 ms when the storage-tail histogram is present.
 - `cc_lb_dropped_events_total{reason=~"lifecycle_.*_full"}` must remain 0.
-- `sse_reset_events_sent_total{reason=~"bus_lagged|storage_error"}` must remain 0. Reset frames tagged `backfill_cap` are recorded but do NOT fail the run — they are the healthy system response when a reconnecting SSE client is more than 500 events behind (aggressive reconnect churn or long disconnect). The client picks up from head plus a REST delta backfill per the live-tail redesign plan §3.9.
+- `sse_reset_events_sent_total{reason=~"bus_lagged|storage_error"}` must remain 0. Reset frames tagged `backfill_cap` are recorded but do NOT fail the run — they are the healthy system response when a reconnecting SSE replay reaches 500 matching events (aggressive reconnect churn or long disconnect). The client resumes from the last emitted cursor and uses REST delta backfill to recover the remaining matching events.
 - RSS slope thresholds are profile-scaled to account for backend-driven RSS growth:
   - `smoke`: not enforced (90 second run — allocator warmup dominates).
   - `soak` (100 rps × 15 min): at most 3 MiB/min. Accounts for SQLite WAL/page cache growth at sustained write load.
@@ -53,7 +53,7 @@ Key fields:
 ## Failure Diagnosis
 
 - High storage-tail lag: inspect storage read pressure, SQLite lock contention, and storage-tail poll cadence. Check `sse_storage_tail_backlog_rows` and `sse_storage_tail_polls_total` in the metrics JSONL.
-- Reset events: inspect `sse_reset_events_sent_total{reason=...}`. `bus_lagged` points at broadcast receiver pressure, `storage_error` points at storage query/tail failures, and `backfill_cap` means reconnect churn generated more than the backfill cap.
+- Reset events: inspect `sse_reset_events_sent_total{reason=...}`. `bus_lagged` points at broadcast receiver pressure, `storage_error` points at storage query/tail failures, and `backfill_cap` means reconnect replay reached the 500-matching-event cap.
 - Dropped lifecycle events: inspect `cc_lb_dropped_events_total{reason=...}`. Any `lifecycle_*_full` reason indicates bounded queue pressure in the lifecycle pipeline.
 - RSS drift: run the `leak` profile and compare `rss_slope_mib_per_min` after the first few minutes. If the slope stays positive, inspect SSE subscriber state and assembler partial retention.
 

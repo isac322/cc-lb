@@ -159,16 +159,6 @@ impl RenewalAccountingScenario {
         self.finalize(session, finalization, bus).await
     }
 
-    pub(crate) async fn disable_after_dispatch(
-        &self,
-        session: &CacheKeepaliveSessionRecord,
-        finalization: RenewalFinalization,
-    ) {
-        self.terminalize(session, CacheKeepaliveTerminalReason::Cancelled)
-            .await;
-        drop(finalization);
-    }
-
     pub(crate) async fn terminalize(
         &self,
         session: &CacheKeepaliveSessionRecord,

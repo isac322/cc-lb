@@ -217,11 +217,9 @@ const ROW_WINDOWS = [
   ['7d', '7d'],
   ['7d_fable', 'Fable'],
 ] as const;
-// Row quota facts read as three fixed columns (5h, 7d, Fable) so every row
-// puts each window's label and figure at the same x: a constant label and a
-// right-aligned figure slot wide enough for "100%". A missing window keeps
-// its (invisible) cell so the columns never shift.
-const ROW_FACTS_CLASS = 'grid grid-cols-[repeat(3,auto)] gap-x-2.5';
+// Facts share fixed columns across the fleet. Keep empty cells aligned in
+// mixed fleets, but drop 5h when every OAuth row explicitly reports it absent.
+const ROW_FACTS_CLASS = 'grid gap-x-2.5';
 const ROW_FACT_CLASS = 'grid grid-cols-[auto_4.5ch] items-baseline gap-x-1';
 /** Windows whose utilization counts toward a row's peak. */
 const PEAK_WINDOWS: ReadonlySet<string> = new Set([
@@ -347,6 +345,14 @@ function UpstreamsPage() {
   // 7-day spend in one place; the DetailView polls /latest with the same
   // key, so TanStack dedups it into one request.
   const upstreamUsage = useUpstreamUsageData();
+  const showFiveHourFacts = upstreamUsage.rows.some(
+    (row) =>
+      row.upstream.kind === 'anthropic_oauth' &&
+      row.windows.find((snap) => snap.window === '5h')?.state !== 'absent',
+  );
+  const rowWindows = ROW_WINDOWS.filter(
+    ([windowName]) => windowName !== '5h' || showFiveHourFacts,
+  );
 
   // One dialog serves every entry point: "Add upstream" (header, empty state,
   // and the ?action=new deep link used by the command palette) and
@@ -502,14 +508,17 @@ function UpstreamsPage() {
           const { upstream } = row;
           const oauth = upstream.kind === 'anthropic_oauth';
           const quotaPending = oauth && upstreamUsage.quotaPending;
+          const fiveHourAbsent = row.windows.some(
+            (snap) => snap.window === '5h' && snap.state === 'absent',
+          );
           const peakSnap = oauth ? peakSnapshot(row) : null;
           const peak =
             peakSnap?.utilization == null ? null : peakSnap.utilization * 100;
           const problem = rowProblem(row);
           const facts = oauth
-            ? ROW_WINDOWS.flatMap(([windowName, label]) => {
+            ? rowWindows.flatMap(([windowName, label]) => {
                 const snap = row.windows.find((s) => s.window === windowName);
-                return snap?.utilization == null
+                return snap?.state === 'absent' || snap?.utilization == null
                   ? []
                   : [
                       {
@@ -579,12 +588,32 @@ function UpstreamsPage() {
             ),
             captionTrailing: quotaPending ? (
               <Skeleton as="span" className="inline-block h-3 w-24" />
-            ) : facts.length ? (
+            ) : oauth &&
+              (facts.length > 0 || (showFiveHourFacts && fiveHourAbsent)) ? (
               <span
-                className={ROW_FACTS_CLASS}
+                className={cx(
+                  ROW_FACTS_CLASS,
+                  showFiveHourFacts
+                    ? 'grid-cols-[repeat(3,auto)]'
+                    : 'grid-cols-[repeat(2,auto)]',
+                )}
                 data-testid="upstream-row-quota"
               >
-                {ROW_WINDOWS.map(([windowName, label]) => {
+                {rowWindows.map(([windowName, label]) => {
+                  if (windowName === '5h' && fiveHourAbsent) {
+                    return (
+                      <span
+                        key={windowName}
+                        className={ROW_FACT_CLASS}
+                        data-window={windowName}
+                      >
+                        <span className="sr-only">No 5h window</span>
+                        <span aria-hidden="true" className="invisible">
+                          {label}
+                        </span>
+                      </span>
+                    );
+                  }
                   const fact = facts.find((f) => f.window === windowName);
                   const severity = fact?.severity ?? 'none';
                   return (

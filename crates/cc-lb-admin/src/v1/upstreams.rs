@@ -3248,6 +3248,12 @@ mod tests {
         let aead = Arc::new(AeadService::from_master_key([8; 32]));
         let state = AdminState {
             config_path: None,
+            build: crate::AdminBuildInfo {
+                git_sha: "test-git-sha",
+                rustc: "test-rustc",
+                profile: "test-profile",
+                target: "test-target",
+            },
             startup_config_overrides: Default::default(),
             storage: Some(storage.clone()),
             key_store: None,

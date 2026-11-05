@@ -1,9 +1,9 @@
-// The Overview's upstream usage table: Upstream | 5h | 7d | 7d (Fable), each
-// window cell reading what is USED ("N% used" + UsageMeter + reset caption),
-// like the utilization Claude reports. Rows sort by their most-used window
-// (problems first, API-key and disabled upstreams last) and link to the
+// The Overview's upstream usage table shows the subscription windows reported
+// by the fleet. Each window reads what is USED ("N% used" + UsageMeter + reset
+// caption), like the utilization Claude reports. Rows sort by their most-used
+// window (problems first, API-key and disabled upstreams last) and link to the
 // upstream. Below the container's wide breakpoint a row stacks: the name
-// line, then the three window cells side by side, each repeating its label.
+// line, then the available window cells, each repeating its label.
 import { Link } from '@tanstack/react-router';
 import { type ReactNode, useId, useMemo, useState } from 'react';
 import type {
@@ -37,7 +37,7 @@ import { PaceLegend, UsageMeter } from '../ui/UsageMeter';
 import { QUOTA_WINDOW_ORDER } from './quotaWindowVisibility';
 import { type UpstreamHealth, upstreamHealth } from './upstreamHealth';
 
-/** The three windows every row reads, in column order. */
+/** Subscription windows supported by the table, in column order. */
 const USAGE_WINDOWS = ['5h', '7d', '7d_fable'] as const;
 type UsageWindow = (typeof USAGE_WINDOWS)[number];
 
@@ -246,6 +246,7 @@ export function rowMaxUsedPct(row: UpstreamUsageRow): number | null {
   let max: number | null = null;
   for (const snap of row.windows) {
     if (!(USAGE_WINDOWS as readonly string[]).includes(snap.window)) continue;
+    if (snap.state === 'absent') continue;
     if (snap.utilization == null || !Number.isFinite(snap.utilization)) {
       continue;
     }
@@ -321,6 +322,18 @@ function WindowCell({
   nowUnixSecs: number;
   timeZone: string;
 }) {
+  // Keep the desktop column aligned without presenting absent quota as an
+  // unknown reading. Stacked rows omit the cell entirely.
+  if (snap?.state === 'absent') {
+    return (
+      <div
+        aria-hidden="true"
+        className="hidden @4xl:block"
+        data-testid="usage-absent-cell"
+        data-window={windowName}
+      />
+    );
+  }
   const label = WINDOW_LABELS[windowName];
   const used =
     snap?.utilization == null || !Number.isFinite(snap.utilization)
@@ -338,7 +351,7 @@ function WindowCell({
   // Narrow containers (phones) read one line per window above its meter:
   //   [label] [N% used]            [resets in …]
   //   [meter ─────────────────────────────────]
-  // From @xl the three windows sit side by side, each a small column.
+  // From @xl the available windows sit side by side, each a small column.
   return (
     <div
       className={WINDOW_CELL_CLASS}
@@ -443,11 +456,22 @@ function NameCell({ row }: { row: UpstreamUsageRow }) {
   );
 }
 
-// Narrow: the name, then one line per window. @xl: the three windows side
-// by side under the name. @4xl: one table row with a header above.
+// Narrow: the name, then one line per available window. @xl: windows side
+// by side under the name. @4xl: one aligned table row with a header above.
 const ROW_GRID =
-  'grid gap-x-6 gap-y-3 grid-cols-1 @xl:grid-cols-3 ' +
-  '@4xl:grid-cols-[minmax(12rem,1.4fr)_repeat(3,minmax(0,1fr))] @4xl:items-center @4xl:gap-y-0';
+  'grid grid-cols-1 gap-x-6 gap-y-3 @4xl:items-center @4xl:gap-y-0';
+const WINDOW_GRID_CLASS: Record<number, string> = {
+  0: '@xl:grid-cols-1 @4xl:grid-cols-[minmax(12rem,1.4fr)_minmax(0,1fr)]',
+  1: '@xl:grid-cols-1 @4xl:grid-cols-[minmax(12rem,1.4fr)_minmax(0,1fr)]',
+  2: '@xl:grid-cols-2 @4xl:grid-cols-[minmax(12rem,1.4fr)_repeat(2,minmax(0,1fr))]',
+  3: '@xl:grid-cols-3 @4xl:grid-cols-[minmax(12rem,1.4fr)_repeat(3,minmax(0,1fr))]',
+};
+const NO_QUOTA_SPAN_CLASS: Record<number, string> = {
+  0: '@4xl:col-span-1',
+  1: '@4xl:col-span-1',
+  2: '@4xl:col-span-2',
+  3: '@4xl:col-span-3',
+};
 
 // Stacked rows keep the section's own edge so names align with its heading;
 // the table row insets its cells like other tables.
@@ -458,11 +482,13 @@ const ROW_CLASS =
 function RowBody({
   row,
   pending,
+  visibleWindows,
   nowUnixSecs,
   timeZone,
 }: {
   row: UpstreamUsageRow;
   pending: boolean;
+  visibleWindows: readonly UsageWindow[];
   nowUnixSecs: number;
   timeZone: string;
 }) {
@@ -472,7 +498,7 @@ function RowBody({
         <NameCell row={row} />
       </div>
       {row.upstream.kind === 'anthropic_oauth' ? (
-        USAGE_WINDOWS.map((w) => (
+        visibleWindows.map((w) => (
           <WindowCell
             key={w}
             nowUnixSecs={nowUnixSecs}
@@ -484,7 +510,10 @@ function RowBody({
         ))
       ) : (
         <span
-          className="col-span-full text-body-sm text-text-muted @4xl:col-span-3"
+          className={cx(
+            'col-span-full text-body-sm text-text-muted',
+            NO_QUOTA_SPAN_CLASS[visibleWindows.length],
+          )}
           data-testid="usage-no-quota"
         >
           No subscription quota
@@ -524,6 +553,18 @@ export function UpstreamUsageTable({
   const [expanded, setExpanded] = useState(false);
   const listId = useId();
   const sorted = useMemo(() => sortUpstreamRowsByUsage(data.rows), [data.rows]);
+  const visibleWindows = data.quotaPending
+    ? USAGE_WINDOWS
+    : USAGE_WINDOWS.filter((windowName) =>
+        data.rows.some(
+          (row) =>
+            row.upstream.kind === 'anthropic_oauth' &&
+            row.windows.some(
+              (snap) => snap.window === windowName && snap.state !== 'absent',
+            ),
+        ),
+      );
+  const windowGridClass = WINDOW_GRID_CLASS[visibleWindows.length];
 
   if (data.isLoading) {
     return (
@@ -534,6 +575,7 @@ export function UpstreamUsageTable({
             className={cx(
               ROW_CLASS,
               ROW_GRID,
+              WINDOW_GRID_CLASS[USAGE_WINDOWS.length],
               'border-t border-row first:border-t-0',
             )}
             data-testid="upstream-list-loading-row"
@@ -568,10 +610,11 @@ export function UpstreamUsageTable({
         className={cx(
           'hidden border-b border-row px-3 pb-2 text-label text-text-faint @4xl:grid',
           ROW_GRID,
+          windowGridClass,
         )}
       >
         <span>Upstream</span>
-        {USAGE_WINDOWS.map((w) => (
+        {visibleWindows.map((w) => (
           <span key={w}>{WINDOW_LABELS[w]}</span>
         ))}
       </div>
@@ -583,7 +626,12 @@ export function UpstreamUsageTable({
             data-testid="upstream-usage-row"
           >
             <Link
-              className={cx(ROW_CLASS, ROW_GRID, 'hover:bg-overlay-2')}
+              className={cx(
+                ROW_CLASS,
+                ROW_GRID,
+                windowGridClass,
+                'hover:bg-overlay-2',
+              )}
               search={{ selectedId: row.upstream.id }}
               title={row.runtimeError ?? undefined}
               to="/upstreams"
@@ -593,6 +641,7 @@ export function UpstreamUsageTable({
                 pending={data.quotaPending}
                 row={row}
                 timeZone={timeZone}
+                visibleWindows={visibleWindows}
               />
             </Link>
           </li>

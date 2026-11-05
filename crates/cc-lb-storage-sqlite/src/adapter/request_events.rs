@@ -140,12 +140,44 @@ impl RequestEventStore for SqliteStorage {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "SELECT {REQUEST_EVENT_COLUMNS} FROM request_events_v1 \
-                     WHERE id > ? AND id <= ? ORDER BY id ASC LIMIT ?"
+                     WHERE id > ?1 AND id <= ?2 \
+                       AND (?3 IS NULL OR principal_id = ?3) \
+                       AND (?4 IS NULL OR thread_id = ?4) \
+                       AND (?5 IS NULL OR lower(model) LIKE ?5 ESCAPE '\\' \
+                            OR lower(model) LIKE ?6 ESCAPE '\\') \
+                       AND (?7 IS NULL OR upstream_id = ?7) \
+                       AND (?8 IS NULL OR list_status BETWEEN ?8 AND ?9) \
+                       AND (?10 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
+                       AND (?11 IS NULL OR CASE \
+                            WHEN source_kind = 'renewal' THEN 'renewal' \
+                            ELSE COALESCE(event_kind, 'unclassified') END = ?11) \
+                       AND (?12 IS NULL OR source_kind = ?12) \
+                       AND (?13 = 0 OR source_kind IS NULL OR source_kind <> 'renewal') \
+                     ORDER BY id ASC LIMIT ?14"
             )
         });
+        let (status_min, status_max) = filters
+            .status_class
+            .map(request_event_list_sql::status_class_range)
+            .map_or((None, None), |(min, max)| (Some(min), Some(max)));
+        let model_patterns = filters
+            .model
+            .as_deref()
+            .and_then(model_filter_like_patterns);
         let rows = sqlx::query(SQL.as_str())
             .bind(u64_to_i64(after, "request event cursor after")?)
             .bind(u64_to_i64(until, "request event cursor until")?)
+            .bind(filters.principal_id.as_deref())
+            .bind(filters.thread_id.as_deref())
+            .bind(model_patterns.as_ref().map(|patterns| patterns[0].as_str()))
+            .bind(model_patterns.as_ref().map(|patterns| patterns[1].as_str()))
+            .bind(filters.upstream_id.map(|id| id.to_string()))
+            .bind(status_min)
+            .bind(status_max)
+            .bind(i64::from(filters.errors_only))
+            .bind(filters.event_kind.map(|kind| kind.as_str()))
+            .bind(filters.source_kind.as_deref())
+            .bind(i64::from(filters.exclude_renewal))
             .bind(usize_to_i64(limit.min(500), "request event cursor limit")?)
             .fetch_all(self.pool())
             .await
@@ -158,10 +190,6 @@ impl RequestEventStore for SqliteStorage {
                     "request event cursor",
                 )?;
                 Ok((cursor, row_to_request_event(&row)?))
-            })
-            .filter(|result| match result {
-                Ok((_, event)) => request_event_matches_filters(event, filters),
-                Err(_) => true,
             })
             .collect()
     }
@@ -1316,46 +1344,6 @@ fn storage_ts_ms(event: &RequestEvent) -> StorageResult<u64> {
         field: "request_event.ts_ms".to_owned(),
         reason: "must be set".to_owned(),
     })
-}
-
-fn request_event_matches_filters(
-    event: &RequestEvent,
-    filters: &RequestEventStreamFilters,
-) -> bool {
-    if let Some(principal_id) = filters.principal_id.as_deref()
-        && event.principal_id.as_deref() != Some(principal_id)
-    {
-        return false;
-    }
-    if let Some(thread_id) = filters.thread_id.as_deref()
-        && event.thread_id.as_deref() != Some(thread_id)
-    {
-        return false;
-    }
-    if let Some(model) = filters.model.as_deref()
-        && !model_filter_matches(model, event.model.as_deref())
-    {
-        return false;
-    }
-    if let Some(upstream_id) = filters.upstream_id
-        && event.upstream_id != Some(upstream_id)
-    {
-        return false;
-    }
-    if let Some(status_class) = filters.status_class
-        && !status_class.matches(event.status)
-    {
-        return false;
-    }
-    if filters.errors_only && event.status < 400 && event.error_code.is_none() {
-        return false;
-    }
-    if let Some(event_kind) = filters.event_kind
-        && RequestEventKind::effective(event.source_kind.as_deref(), event.event_kind) != event_kind
-    {
-        return false;
-    }
-    true
 }
 
 fn seconds_to_millis(value: u64, field: &str) -> StorageResult<i64> {

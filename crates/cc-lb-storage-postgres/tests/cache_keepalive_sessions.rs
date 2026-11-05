@@ -41,7 +41,16 @@ async fn run_conformance(url: &str) -> Result<()> {
     conditional_enqueue_terminal_and_purge_are_generation_safe(&storage).await?;
     terminal_error_is_truncated_and_resets_running_enqueue_state(&storage).await?;
     mark_latest_terminal_only_mutates_active_latest_session(&storage).await?;
+    recover_stale_running_requires_active_running_strictly_old_lease_and_scrubs_payload(&storage)
+        .await?;
     purge_stale_pending_keeps_enqueued_work(&storage).await?;
+    recover_stale_running_rejects_overflow_without_mutation(&storage).await?;
+    purge_expired_uses_a_strict_cutoff_boundary(&storage).await?;
+    purge_stale_pending_uses_strict_cutoff_and_state_predicates(&storage).await?;
+    concurrent_recovery_counts_once_and_replacement_reschedule_preserve_latest_active_payload(
+        &storage,
+    )
+    .await?;
     concurrent_replace_from_real_request_bumps_each_generation(&storage).await?;
     concurrent_hit_reschedule_allows_only_one_generation_cas(&storage).await?;
     concurrent_claim_allows_exactly_one_enqueued_generation_winner(&storage).await?;
@@ -418,7 +427,119 @@ async fn mark_latest_terminal_only_mutates_active_latest_session(
     Ok(())
 }
 
+async fn recover_stale_running_requires_active_running_strictly_old_lease_and_scrubs_payload(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let cutoff = 200;
+    let now = 500;
+    let mut before = Vec::new();
+
+    for (key, status, enqueue_state, lease) in [
+        ("stale-running", "active", "running", Some(199_i64)),
+        ("exact-cutoff", "active", "running", Some(200)),
+        ("fresh-running", "active", "running", Some(201)),
+        ("null-lease", "active", "running", None),
+        ("pending", "active", "pending", Some(199)),
+        ("enqueued", "active", "enqueued", Some(199)),
+        ("terminal", "terminal", "running", Some(199)),
+    ] {
+        let mut request = replace_request(key, b"ciphertext", 100);
+        request.accounting_key_id = Some(format!("accounting-{key}"));
+        storage.replace_from_real_request(&request).await?;
+        request.now_unix_secs = 101;
+        storage.replace_from_real_request(&request).await?;
+
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = $1, enqueue_state = $2, running_since_unix_secs = $3, error = $4
+             WHERE session_key_hash = $5",
+        )
+        .bind(status)
+        .bind(enqueue_state)
+        .bind(lease)
+        .bind("previous error")
+        .bind(key)
+        .execute(storage.pool())
+        .await?;
+        before.push(
+            storage
+                .get_cache_keepalive_session(key)
+                .await?
+                .expect("seeded session exists"),
+        );
+    }
+
+    let affected = storage
+        .recover_cache_keepalive_stale_running(cutoff, now)
+        .await?;
+    assert!(
+        affected >= 1,
+        "the seeded stale running session must be recovered"
+    );
+
+    let mut expected = before.remove(0);
+    let recovered = storage
+        .get_cache_keepalive_session(&expected.session_key_hash)
+        .await?
+        .expect("recovered session remains persisted");
+    assert_eq!(recovered.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        recovered.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Stale)
+    );
+    assert_eq!(recovered.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert_eq!(
+        recovered.error.as_deref(),
+        Some("keepalive renewal timed out while running")
+    );
+    assert_eq!(recovered.running_since_unix_secs, None);
+    assert!(recovered.encrypted_payload.is_empty());
+    assert_eq!(recovered.updated_at_unix_secs, now);
+    assert_eq!(recovered.generation, expected.generation);
+    assert_eq!(recovered.current_job_key, expected.current_job_key);
+
+    expected.status = CacheKeepaliveSessionStatus::Terminal;
+    expected.terminal_reason = Some(CacheKeepaliveTerminalReason::Stale);
+    expected.enqueue_state = CacheKeepaliveEnqueueState::Pending;
+    expected.error = Some("keepalive renewal timed out while running".to_owned());
+    expected.running_since_unix_secs = None;
+    expected.encrypted_payload.clear();
+    expected.updated_at_unix_secs = now;
+    assert_eq!(recovered, expected, "unrelated session fields must survive");
+
+    for control in before {
+        let persisted = storage
+            .get_cache_keepalive_session(&control.session_key_hash)
+            .await?
+            .expect("noncandidate remains persisted");
+        assert_eq!(
+            persisted, control,
+            "noncandidates must retain their payload, identity, and all other fields"
+        );
+    }
+    storage
+        .recover_cache_keepalive_stale_running(cutoff, now + 1)
+        .await?;
+
+    for key in [
+        "stale-running",
+        "exact-cutoff",
+        "fresh-running",
+        "null-lease",
+        "pending",
+        "enqueued",
+        "terminal",
+    ] {
+        sqlx::query("DELETE FROM cache_keepalive_sessions WHERE session_key_hash = $1")
+            .bind(key)
+            .execute(storage.pool())
+            .await?;
+    }
+    Ok(())
+}
+
 async fn purge_stale_pending_keeps_enqueued_work(storage: &PostgresStorage) -> Result<()> {
+    delete_sessions(storage, &["stale-pending", "old-enqueued"]).await?;
     let pending = storage
         .replace_from_real_request(&replace_request("stale-pending", b"ciphertext", 100))
         .await?;
@@ -434,7 +555,10 @@ async fn purge_stale_pending_keeps_enqueued_work(storage: &PostgresStorage) -> R
     let removed = storage.purge_cache_keepalive_stale_pending(112).await?;
 
     assert_eq!(pending.enqueue_state, CacheKeepaliveEnqueueState::Pending);
-    assert_eq!(removed, 1);
+    assert!(
+        removed >= 1,
+        "the seeded stale pending session must be purged"
+    );
     assert!(
         storage
             .get_cache_keepalive_session("stale-pending")
@@ -447,7 +571,307 @@ async fn purge_stale_pending_keeps_enqueued_work(storage: &PostgresStorage) -> R
             .await?
             .is_some()
     );
+    delete_sessions(storage, &["stale-pending", "old-enqueued"]).await
+}
+
+async fn delete_sessions(storage: &PostgresStorage, keys: &[&str]) -> Result<()> {
+    for key in keys {
+        sqlx::query("DELETE FROM cache_keepalive_sessions WHERE session_key_hash = $1")
+            .bind(key)
+            .execute(storage.pool())
+            .await?;
+    }
     Ok(())
+}
+
+async fn recover_stale_running_rejects_overflow_without_mutation(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "adapter-overflow";
+    delete_sessions(storage, &[key]).await?;
+    let record = storage
+        .replace_from_real_request(&replace_request(key, b"overflow", 100))
+        .await?;
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued(key, record.generation, 110)
+            .await?
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn(key, record.generation, 150)
+            .await?
+    );
+    let before = storage
+        .get_cache_keepalive_session(key)
+        .await?
+        .expect("running session exists");
+
+    for (cutoff, now) in [(200, u64::MAX), (u64::MAX, 500)] {
+        assert!(
+            storage
+                .recover_cache_keepalive_stale_running(cutoff, now)
+                .await
+                .is_err(),
+            "out-of-range recovery timestamp must be rejected"
+        );
+        assert_eq!(
+            storage
+                .get_cache_keepalive_session(key)
+                .await?
+                .expect("session remains"),
+            before,
+            "overflow rejection must not mutate persisted state"
+        );
+    }
+    delete_sessions(storage, &[key]).await
+}
+
+async fn purge_expired_uses_a_strict_cutoff_boundary(storage: &PostgresStorage) -> Result<()> {
+    let keys = [
+        "adapter-expired-before",
+        "adapter-expired-exact",
+        "adapter-expired-future",
+    ];
+    delete_sessions(storage, &keys).await?;
+    for (key, now) in [
+        ("adapter-expired-before", 99),
+        ("adapter-expired-exact", 100),
+        ("adapter-expired-future", 101),
+    ] {
+        storage
+            .replace_from_real_request(&replace_request(key, b"expiry", now))
+            .await?;
+    }
+
+    let removed = storage.purge_cache_keepalive_expired(400).await?;
+    assert!(
+        removed >= 1,
+        "the seeded before-cutoff session must be purged"
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session(keys[0])
+            .await?
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session(keys[1])
+            .await?
+            .is_some(),
+        "expiry equal to cutoff must not be purged"
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session(keys[2])
+            .await?
+            .is_some()
+    );
+    let removed = storage.purge_cache_keepalive_expired(401).await?;
+    assert!(
+        removed >= 1,
+        "the seeded exact-cutoff session must be purged after advancing the cutoff"
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session(keys[1])
+            .await?
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session(keys[2])
+            .await?
+            .is_some()
+    );
+    delete_sessions(storage, &keys).await
+}
+
+async fn purge_stale_pending_uses_strict_cutoff_and_state_predicates(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let keys = [
+        "adapter-pending-stale",
+        "adapter-pending-exact",
+        "adapter-running-old",
+        "adapter-terminal-old",
+        "adapter-enqueued-old",
+    ];
+    delete_sessions(storage, &keys).await?;
+    for key in keys {
+        storage
+            .replace_from_real_request(&replace_request(key, b"pending", 100))
+            .await?;
+    }
+    for (key, status, enqueue_state, lease, updated_at) in [
+        ("adapter-pending-stale", "active", "pending", None, 199_i64),
+        ("adapter-pending-exact", "active", "pending", None, 200_i64),
+        (
+            "adapter-running-old",
+            "active",
+            "running",
+            Some(199_i64),
+            199_i64,
+        ),
+        ("adapter-terminal-old", "terminal", "pending", None, 199_i64),
+        ("adapter-enqueued-old", "active", "enqueued", None, 199_i64),
+    ] {
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = $1, enqueue_state = $2, running_since_unix_secs = $3, updated_at = $4
+             WHERE session_key_hash = $5",
+        )
+        .bind(status)
+        .bind(enqueue_state)
+        .bind(lease)
+        .bind(updated_at)
+        .bind(key)
+        .execute(storage.pool())
+        .await?;
+    }
+
+    let removed = storage.purge_cache_keepalive_stale_pending(200).await?;
+    assert!(
+        removed >= 1,
+        "the seeded stale pending session must be purged"
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session(keys[0])
+            .await?
+            .is_none()
+    );
+    for (key, expected_status, expected_enqueue_state) in [
+        (
+            "adapter-pending-exact",
+            CacheKeepaliveSessionStatus::Active,
+            CacheKeepaliveEnqueueState::Pending,
+        ),
+        (
+            "adapter-running-old",
+            CacheKeepaliveSessionStatus::Active,
+            CacheKeepaliveEnqueueState::Running,
+        ),
+        (
+            "adapter-terminal-old",
+            CacheKeepaliveSessionStatus::Terminal,
+            CacheKeepaliveEnqueueState::Pending,
+        ),
+        (
+            "adapter-enqueued-old",
+            CacheKeepaliveSessionStatus::Active,
+            CacheKeepaliveEnqueueState::Enqueued,
+        ),
+    ] {
+        let persisted = storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("excluded state remains persisted");
+        assert_eq!(persisted.status, expected_status);
+        assert_eq!(persisted.enqueue_state, expected_enqueue_state);
+    }
+    delete_sessions(storage, &keys).await
+}
+
+async fn concurrent_recovery_counts_once_and_replacement_reschedule_preserve_latest_active_payload(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "adapter-concurrent-recovery";
+    let latest_key = "adapter-latest-before-recovery";
+    delete_sessions(storage, &[key, latest_key]).await?;
+    let storage = Arc::new(storage.clone());
+    let running = storage
+        .replace_from_real_request(&replace_request(key, b"concurrent-running", 100))
+        .await?;
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued(key, running.generation, 110)
+            .await?
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn(key, running.generation, 150)
+            .await?
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let first = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            storage
+                .recover_cache_keepalive_stale_running(200, 500)
+                .await
+        }
+    });
+    let second = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            storage
+                .recover_cache_keepalive_stale_running(200, 500)
+                .await
+        }
+    });
+    let (first, second) = tokio::try_join!(first, second)?;
+    let first = first?;
+    let second = second?;
+    assert!(
+        first + second >= 1,
+        "the seeded stale running session must be recovered"
+    );
+    let recovered = storage
+        .get_cache_keepalive_session(key)
+        .await?
+        .expect("recovered concurrent session exists");
+    assert_eq!(recovered.status, CacheKeepaliveSessionStatus::Terminal);
+    assert!(recovered.encrypted_payload.is_empty());
+
+    let previous = storage
+        .replace_from_real_request(&replace_request(latest_key, b"previous-generation", 100))
+        .await?;
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued(latest_key, previous.generation, 110)
+            .await?
+    );
+    assert!(
+        storage
+            .claim_cache_keepalive_turn(latest_key, previous.generation, 150)
+            .await?
+    );
+    let latest = storage
+        .replace_from_real_request(&replace_request(latest_key, b"latest-before-recovery", 600))
+        .await?;
+    let refreshed = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: latest_key.to_owned(),
+            generation: latest.generation,
+            cache_anchor_at_unix_secs: 650,
+            run_at_unix_secs: 920,
+            expires_at_unix_secs: 950,
+            encrypted_payload: Some(b"latest-rescheduled-payload".to_vec()),
+            now_unix_secs: 650,
+        })
+        .await?
+        .expect("latest active generation remains");
+    assert_eq!(refreshed.generation, latest.generation + 1);
+    assert_eq!(refreshed.encrypted_payload, b"latest-rescheduled-payload");
+    assert_eq!(refreshed.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(refreshed.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    storage
+        .recover_cache_keepalive_stale_running(700, 800)
+        .await?;
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(latest_key)
+            .await?
+            .expect("latest exists"),
+        refreshed
+    );
+    delete_sessions(&storage, &[key, latest_key]).await
 }
 
 async fn concurrent_replace_from_real_request_bumps_each_generation(

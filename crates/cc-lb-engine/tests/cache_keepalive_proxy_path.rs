@@ -10,7 +10,7 @@ use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason,
 };
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_storage_api::CacheTtl;
@@ -24,10 +24,17 @@ use fixtures::{
     AgentTurnDispatch, RecordingSignerFactory, principal_with_keepalive, settle, upstream_record,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum KeepaliveOperation {
+    Enqueued(String),
+    Cancelled(String, CancelReason),
+}
+
 #[derive(Default)]
 struct RecordingEnqueuer {
     enqueued: Mutex<Vec<CacheKeepaliveEnqueueRequest>>,
     cancelled: Mutex<Vec<CacheKeepaliveCancelRequest>>,
+    operations: Mutex<Vec<KeepaliveOperation>>,
 }
 
 impl RecordingEnqueuer {
@@ -35,8 +42,12 @@ impl RecordingEnqueuer {
         self.enqueued.lock().expect("enqueued lock").clone()
     }
 
-    fn cancelled_count(&self) -> usize {
-        self.cancelled.lock().expect("cancelled lock").len()
+    fn cancelled(&self) -> Vec<CacheKeepaliveCancelRequest> {
+        self.cancelled.lock().expect("cancelled lock").clone()
+    }
+
+    fn operations(&self) -> Vec<KeepaliveOperation> {
+        self.operations.lock().expect("operations lock").clone()
     }
 }
 
@@ -46,6 +57,12 @@ impl CacheKeepaliveEnqueuer for RecordingEnqueuer {
         &self,
         request: CacheKeepaliveEnqueueRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.operations
+            .lock()
+            .expect("operations lock")
+            .push(KeepaliveOperation::Enqueued(
+                request.session_key_hash.clone(),
+            ));
         self.enqueued.lock().expect("enqueued lock").push(request);
         Ok(())
     }
@@ -54,6 +71,13 @@ impl CacheKeepaliveEnqueuer for RecordingEnqueuer {
         &self,
         request: CacheKeepaliveCancelRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
+        self.operations
+            .lock()
+            .expect("operations lock")
+            .push(KeepaliveOperation::Cancelled(
+                request.session_key_hash.clone(),
+                request.reason,
+            ));
         self.cancelled.lock().expect("cancelled lock").push(request);
         Ok(())
     }
@@ -212,9 +236,29 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
 
     let enqueued = enqueuer.enqueued();
     assert_eq!(enqueued.len(), 1);
-    assert_eq!(enqueuer.cancelled_count(), 0);
     let enqueue = &enqueued[0];
     assert!(!enqueue.session_key_hash.is_empty());
+    let cancellations = enqueuer.cancelled();
+    assert!(
+        cancellations.iter().any(
+            |request| request.session_key_hash == enqueue.session_key_hash
+                && request.reason.as_str() == "new_request"
+        ),
+        "the real dispatch must fence its matching cache-prefix generation"
+    );
+    assert!(
+        cancellations
+            .iter()
+            .all(|request| request.reason.as_str() == "new_request"),
+        "an agent completion must not cancel keepalive as a user turn or another terminal outcome"
+    );
+    assert_eq!(
+        enqueuer.operations().last(),
+        Some(&KeepaliveOperation::Enqueued(
+            enqueue.session_key_hash.clone()
+        )),
+        "the dispatch fence must precede the final active completion enqueue"
+    );
     assert_eq!(enqueue.accounting_key_id.as_deref(), Some(managed_key_id()));
     let snapshot = &enqueue.snapshot;
     assert_eq!(snapshot.upstream_id, upstream_id);
@@ -317,6 +361,10 @@ async fn official_header_only_completion_is_not_tracked_but_custom_literal_is() 
     assert!(
         official_enqueuer.enqueued().is_empty(),
         "an official billing-header block alone has zero effective breakpoints"
+    );
+    assert!(
+        official_enqueuer.cancelled().is_empty(),
+        "an official header-only request must not fence any keepalive generation"
     );
 
     let custom_enqueuer = Arc::new(RecordingEnqueuer::default());

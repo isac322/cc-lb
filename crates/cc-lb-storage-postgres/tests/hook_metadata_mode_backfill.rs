@@ -20,8 +20,7 @@ const CURRENT_HOOKS: &str =
 
 #[test]
 fn hook_metadata_mode_backfill() {
-    let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
-        eprintln!("skip: CI_POSTGRES_URL not set");
+    let Some(url) = postgres_url_for_test() else {
         return;
     };
 
@@ -32,8 +31,7 @@ fn hook_metadata_mode_backfill() {
 }
 #[test]
 fn upstream_kind_migration() {
-    let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
-        eprintln!("skip: CI_POSTGRES_URL not set");
+    let Some(url) = postgres_url_for_test() else {
         return;
     };
 
@@ -41,6 +39,21 @@ fn upstream_kind_migration() {
         .expect("tokio runtime")
         .block_on(async move { run_upstream_kind_migration(&url).await })
         .expect("upstream kind migration test");
+}
+
+fn postgres_url_for_test() -> Option<String> {
+    match std::env::var("CI_POSTGRES_URL") {
+        Ok(url) => Some(url),
+        Err(error)
+            if std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some() =>
+        {
+            panic!("CI_POSTGRES_URL is required in CI/GitHub Actions: {error}");
+        }
+        Err(_) => {
+            eprintln!("skip: CI_POSTGRES_URL not set outside CI/GitHub Actions");
+            None
+        }
+    }
 }
 
 async fn run_upstream_kind_migration(url: &str) -> Result<()> {
@@ -371,6 +384,32 @@ async fn run_test(url: &str) -> Result<()> {
         listed.iter().any(|entry| entry.id == LEGACY_ID),
         "legacy entry is listed"
     );
+
+    // A fresh storage instance must decode the backfilled row and leave the
+    // already-current row byte-for-byte unchanged.
+    let restarted = PostgresStorage::new(
+        fixture.pool.clone(),
+        std::sync::Arc::new(cc_lb_clock::SystemClock),
+    );
+    restarted.initialize().await?;
+    let restarted_legacy = restarted
+        .get_registry_entry_by_id(LEGACY_ID)
+        .await?
+        .expect("legacy registry entry after restart");
+    assert_eq!(
+        restarted_legacy.hook_metadata["filter"].mode,
+        HookMode::Active
+    );
+    assert_eq!(
+        restarted_legacy.hook_metadata["filter"].usage,
+        "called by router"
+    );
+    let restarted_current_text: String =
+        sqlx::query_scalar("SELECT hook_metadata FROM wasm_registry_v2 WHERE id = $1")
+            .bind(CURRENT_ID)
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(restarted_current_text, CURRENT_HOOKS);
 
     fixture.drop_schema().await
 }

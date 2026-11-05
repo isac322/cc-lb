@@ -524,6 +524,32 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn recover_cache_keepalive_stale_running(
+        &self,
+        stale_running_cutoff_unix_secs: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<u64> {
+        let result = sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = 'terminal', terminal_reason = 'stale', enqueue_state = 'pending',
+                 error = 'keepalive renewal timed out while running',
+                 running_since_unix_secs = NULL, encrypted_payload = X'', updated_at = ?
+             WHERE status = 'active'
+               AND enqueue_state = 'running'
+               AND running_since_unix_secs IS NOT NULL
+               AND running_since_unix_secs < ?",
+        )
+        .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
+        .bind(u64_to_i64(
+            stale_running_cutoff_unix_secs,
+            "cache keepalive stale running cutoff",
+        )?)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
+    }
+
     async fn purge_cache_keepalive_expired(&self, cutoff_unix_secs: u64) -> StorageResult<u64> {
         let result = sqlx::query("DELETE FROM cache_keepalive_sessions WHERE expires_at < ?")
             .bind(u64_to_i64(

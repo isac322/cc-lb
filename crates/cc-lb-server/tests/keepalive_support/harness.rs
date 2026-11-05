@@ -16,9 +16,9 @@ use cc_lb_storage_api::upstream::{
     OAuthTokensCreate, UpstreamCreate, UpstreamKind, UpstreamUpdate,
 };
 use cc_lb_storage_api::{
-    CacheKeepaliveConfig, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
-    ManagedKeyStore, MetaStore, PrincipalStore, RequestEvent, RequestEventStore, Storage,
-    UpstreamStore,
+    CacheKeepaliveConfig, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionRecord,
+    CacheKeepaliveTurnRecord, ManagedKeyStore, MetaStore, PrincipalStore, RequestEvent,
+    RequestEventStore, Storage, UpstreamStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use reqwest::{Client, Response};
@@ -709,6 +709,50 @@ impl Harness {
         .ok()
         .flatten()
     }
+    pub async fn wait_for_single_enqueued_session(&self) -> (String, u64) {
+        #[cfg(feature = "postgres")]
+        let StorageBackend::Sqlite(storage) = &self.storage else {
+            panic!("single-session regression seam is SQLite-only");
+        };
+        #[cfg(not(feature = "postgres"))]
+        let StorageBackend::Sqlite(storage) = &self.storage;
+        tokio::time::timeout(DISPATCH_WAIT, async {
+            loop {
+                let sessions = sqlx::query_as::<_, (String, i64)>(
+                    "SELECT session_key_hash, generation FROM cache_keepalive_sessions \
+                     WHERE status = 'active' AND enqueue_state = 'enqueued'",
+                )
+                .fetch_all(storage.pool())
+                .await
+                .expect("read single enqueued session");
+                assert!(
+                    sessions.len() <= 1,
+                    "expected one isolated real-request session"
+                );
+                if let Some((hash, generation)) = sessions.into_iter().next() {
+                    return (
+                        hash,
+                        u64::try_from(generation).expect("nonnegative generation"),
+                    );
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("real completion must enqueue its session")
+    }
+
+    pub async fn read_session_record(&self, hash: &str) -> CacheKeepaliveSessionRecord {
+        CacheKeepaliveSessionReadStore::get_cache_keepalive_session_for_principal(
+            self.storage.as_storage(),
+            &self.principal_id.to_string(),
+            hash,
+        )
+        .await
+        .expect("read durable session record")
+        .expect("real request session exists")
+    }
+
     pub async fn read_session(&self, hash: &str) -> Option<SessionRow> {
         type Row = (String, Option<String>, String, Option<String>);
         match &self.storage {

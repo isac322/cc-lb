@@ -14,6 +14,7 @@ use crate::{
     middleware::TraceparentCarrier,
     worker::CACHE_KEEPALIVE_QUEUE,
 };
+use cc_lb_storage_api::CacheKeepaliveSessionStore;
 
 pub const APALIS_WORKER_RETENTION_SECS: u64 = 3_600;
 pub const APALIS_HOUSEKEEPING_RETRY_DELAY: Duration = Duration::from_secs(60);
@@ -22,7 +23,6 @@ const CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX: &str = "cache_keepalive:%";
 const SECONDS_PER_DAY: u64 = 86_400;
 const STALE_LOCK_LAST_RESULT: &str =
     "{\"Err\":\"Re-enqueued by cc-lb housekeeping: stale Running lock exceeded threshold.\"}";
-const STALE_KEEPALIVE_SESSION_ERROR: &str = "keepalive renewal timed out while running";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ApalisHousekeepingJob {
@@ -113,19 +113,24 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         &self,
         job: ApalisHousekeepingJob,
         now_unix_secs: u64,
+        store: &dyn CacheKeepaliveSessionStore,
     ) -> ApalisHousekeepingJobResult {
         log_traceparent(job.traceparent.as_deref());
-        finish(self.prune(now_unix_secs).await)
+        finish(self.prune(now_unix_secs, store).await)
     }
 
-    async fn prune(&self, now_unix_secs: u64) -> Result<ApalisHousekeepingJobStats> {
+    async fn prune(
+        &self,
+        now_unix_secs: u64,
+        store: &dyn CacheKeepaliveSessionStore,
+    ) -> Result<ApalisHousekeepingJobStats> {
         let worker_cutoff = now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS);
         let done_job_cutoff =
             retention_cutoff(now_unix_secs, self.config.dlq_retention_days.min(1));
         let job_cutoff = retention_cutoff(now_unix_secs, self.config.dlq_retention_days);
         let reaped = self.reap_stale_locks(now_unix_secs).await?;
         let cache_keepalive_sessions_removed = self
-            .prune_cache_keepalive_sessions(now_unix_secs, worker_cutoff)
+            .prune_cache_keepalive_sessions(now_unix_secs, worker_cutoff, store)
             .await?;
         let workers_removed = self.prune_stale_workers(worker_cutoff).await?;
         let jobs_removed = sqlx::query(
@@ -182,28 +187,22 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         &self,
         now_unix_secs: u64,
         stale_pending_cutoff: u64,
+        store: &dyn CacheKeepaliveSessionStore,
     ) -> Result<u64> {
         let stale_running_cutoff =
             now_unix_secs.saturating_sub(self.config.stale_lock_threshold_secs);
-        let recovered = sqlx::query(
-            "UPDATE cache_keepalive_sessions
-             SET status = 'terminal', terminal_reason = 'stale', enqueue_state = 'pending',
-                 error = ?3, running_since_unix_secs = NULL, encrypted_payload = X'', updated_at = ?1
-             WHERE status = 'active'
-               AND enqueue_state = 'running'
-               AND running_since_unix_secs IS NOT NULL
-               AND running_since_unix_secs < ?2",
-        )
-        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
-        .bind(unix_i64(stale_running_cutoff, "stale_running_cutoff")?)
-        .bind(STALE_KEEPALIVE_SESSION_ERROR)
-        .execute(&self.pool)
-        .await;
-        let recovered = match recovered {
-            Ok(result) => result.rows_affected(),
-            Err(error) if is_missing_cache_keepalive_table(&error) => return Ok(0),
-            Err(error) => return Err(error.into()),
-        };
+        let recovered = store
+            .recover_cache_keepalive_stale_running(stale_running_cutoff, now_unix_secs)
+            .await
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        let stale_pending = store
+            .purge_cache_keepalive_stale_pending(stale_pending_cutoff)
+            .await
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        let expired = store
+            .purge_cache_keepalive_expired(now_unix_secs)
+            .await
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
         sqlx::query(
             "UPDATE Jobs
              SET status = 'Killed', done_at = ?1, lock_by = NULL, lock_at = NULL, last_result = ?3
@@ -221,20 +220,9 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
         .execute(&self.pool)
         .await?;
-        let removed = sqlx::query(
-            "DELETE FROM cache_keepalive_sessions
-             WHERE expires_at < ?1
-                OR (status = 'active' AND enqueue_state = 'pending' AND updated_at < ?2)",
-        )
-        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
-        .bind(unix_i64(stale_pending_cutoff, "stale_pending_cutoff")?)
-        .execute(&self.pool)
-        .await;
-        match removed {
-            Ok(result) => Ok(recovered.saturating_add(result.rows_affected())),
-            Err(error) if is_missing_cache_keepalive_table(&error) => Ok(0),
-            Err(error) => Err(error.into()),
-        }
+        Ok(recovered
+            .saturating_add(stale_pending)
+            .saturating_add(expired))
     }
 
     async fn prune_cache_keepalive_jobs(&self, cutoff_unix_secs: u64) -> Result<u64> {
@@ -321,12 +309,17 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         &self,
         job: ApalisHousekeepingJob,
         now_unix_secs: u64,
+        store: &dyn CacheKeepaliveSessionStore,
     ) -> ApalisHousekeepingJobResult {
         log_traceparent(job.traceparent.as_deref());
-        finish(self.prune(now_unix_secs).await)
+        finish(self.prune(now_unix_secs, store).await)
     }
 
-    async fn prune(&self, now_unix_secs: u64) -> Result<ApalisHousekeepingJobStats> {
+    async fn prune(
+        &self,
+        now_unix_secs: u64,
+        store: &dyn CacheKeepaliveSessionStore,
+    ) -> Result<ApalisHousekeepingJobStats> {
         let worker_cutoff = now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS);
         let worker_cutoff_timestamp = utc_timestamp(worker_cutoff, "worker_cutoff")?;
         let done_job_cutoff =
@@ -336,7 +329,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         let job_cutoff_timestamp = utc_timestamp(job_cutoff, "job_cutoff")?;
         let reaped = self.reap_stale_locks(now_unix_secs).await?;
         let cache_keepalive_sessions_removed = self
-            .prune_cache_keepalive_sessions(now_unix_secs, worker_cutoff)
+            .prune_cache_keepalive_sessions(now_unix_secs, worker_cutoff, store)
             .await?;
         let workers_removed = self.prune_stale_workers(worker_cutoff_timestamp).await?;
         let jobs_removed = sqlx::query(
@@ -392,28 +385,22 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         &self,
         now_unix_secs: u64,
         stale_pending_cutoff: u64,
+        store: &dyn CacheKeepaliveSessionStore,
     ) -> Result<u64> {
         let stale_running_cutoff =
             now_unix_secs.saturating_sub(self.config.stale_lock_threshold_secs);
-        let recovered = sqlx::query(
-            "UPDATE cache_keepalive_sessions
-             SET status = 'terminal', terminal_reason = 'stale', enqueue_state = 'pending',
-                 error = $3, running_since_unix_secs = NULL, encrypted_payload = ''::bytea, updated_at = $1
-             WHERE status = 'active'
-               AND enqueue_state = 'running'
-               AND running_since_unix_secs IS NOT NULL
-               AND running_since_unix_secs < $2",
-        )
-        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
-        .bind(unix_i64(stale_running_cutoff, "stale_running_cutoff")?)
-        .bind(STALE_KEEPALIVE_SESSION_ERROR)
-        .execute(&self.pool)
-        .await;
-        let recovered = match recovered {
-            Ok(result) => result.rows_affected(),
-            Err(error) if is_missing_cache_keepalive_table(&error) => return Ok(0),
-            Err(error) => return Err(error.into()),
-        };
+        let recovered = store
+            .recover_cache_keepalive_stale_running(stale_running_cutoff, now_unix_secs)
+            .await
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        let stale_pending = store
+            .purge_cache_keepalive_stale_pending(stale_pending_cutoff)
+            .await
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        let expired = store
+            .purge_cache_keepalive_expired(now_unix_secs)
+            .await
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
         sqlx::query(
             "UPDATE apalis.jobs
              SET status = 'Killed', done_at = $1, lock_by = NULL, lock_at = NULL, last_result = $3::jsonb
@@ -431,20 +418,9 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
         .execute(&self.pool)
         .await?;
-        let removed = sqlx::query(
-            "DELETE FROM cache_keepalive_sessions
-             WHERE expires_at < $1
-                OR (status = 'active' AND enqueue_state = 'pending' AND updated_at < $2)",
-        )
-        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
-        .bind(unix_i64(stale_pending_cutoff, "stale_pending_cutoff")?)
-        .execute(&self.pool)
-        .await;
-        match removed {
-            Ok(result) => Ok(recovered.saturating_add(result.rows_affected())),
-            Err(error) if is_missing_cache_keepalive_table(&error) => Ok(0),
-            Err(error) => Err(error.into()),
-        }
+        Ok(recovered
+            .saturating_add(stale_pending)
+            .saturating_add(expired))
     }
 
     async fn prune_cache_keepalive_jobs(&self, cutoff_unix_secs: u64) -> Result<u64> {
@@ -582,16 +558,6 @@ fn log_reaped_rows(rows: &[StaleLockRow], threshold_secs: u64, now_unix_secs: u6
 
 fn unix_i64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} exceeds i64::MAX")))
-}
-
-fn is_missing_cache_keepalive_table(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(database) => database
-            .code()
-            .as_deref()
-            .is_some_and(|code| code == "42P01" || code == "1" || code == "101"),
-        _ => error.to_string().contains("cache_keepalive_sessions"),
-    }
 }
 
 #[cfg(feature = "postgres")]

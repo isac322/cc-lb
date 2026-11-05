@@ -316,6 +316,8 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
                 status_class: Some(StatusClass::TwoXx),
                 errors_only: false,
                 event_kind: None,
+                source_kind: None,
+                exclude_renewal: false,
             },
         )
         .await
@@ -347,6 +349,74 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
         .await
         .expect("filtered cursor backfill");
     assert!(filtered.is_empty());
+}
+
+#[tokio::test]
+async fn request_event_list_uses_inclusive_ts_window_and_legacy_list_ts_order() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir
+            .path()
+            .join("request-events-list-range.sqlite")
+            .display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+    storage.initialize().await.expect("initialize sqlite");
+
+    for (request_id, ts, list_ts_ms) in [
+        ("outside-low", 99_i64, 9_000_000_i64),
+        ("inside-low-boundary", 100, 2_000_000),
+        ("inside-high-boundary", 102, 1),
+        ("outside-high", 103, 0),
+    ] {
+        sqlx::query(
+            "INSERT INTO request_events_v1 \
+             (request_id, ts, event_id, principal_id, key_id, model, \
+              list_ts_ms, list_event_key, list_status, list_duration_ms) \
+             VALUES (?, ?, ?, ?, 'range-key', 'claude-sonnet-4-5', ?, ?, 200, 1)",
+        )
+        .bind(request_id)
+        .bind(ts)
+        .bind(format!("0193a7b8-1234-7e2f-9012-range-{request_id}"))
+        .bind("range-principal")
+        .bind(list_ts_ms)
+        .bind(request_id)
+        .execute(storage.pool())
+        .await
+        .expect("insert list range control");
+    }
+
+    let bounded = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: 100,
+            until_unix_secs: 102,
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("list inclusive range");
+    assert_eq!(
+        bounded
+            .iter()
+            .map(|event| event.request_id.as_str())
+            .collect::<Vec<_>>(),
+        ["inside-low-boundary", "inside-high-boundary"]
+    );
+
+    let future = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: 104,
+            until_unix_secs: 105,
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("list future range");
+    assert!(future.is_empty());
 }
 
 #[tokio::test]

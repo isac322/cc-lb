@@ -103,6 +103,11 @@ pub trait RequestEventStore: Send + Sync {
         })
     }
 
+    /// Returns at most `min(limit, 500)` matching rows in `(after, until]`,
+    /// ordered by ascending durable cursor. Cursor filters apply before the
+    /// limit, so a shorter page exhausts the matching rows within that range
+    /// and the backend's durable cursor horizon. Default filters include every
+    /// source kind, including renewals.
     async fn query_request_events_between_cursors(
         &self,
         after: u64,
