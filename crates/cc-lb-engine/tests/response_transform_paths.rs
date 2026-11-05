@@ -3379,6 +3379,7 @@ fn lifecycle_with_options(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lifecycle_with_options_and_keepalive(
     response_transform: Option<Arc<dyn ResponseTransformHook>>,
     sse_transform: Option<Arc<dyn SseEventTransformHook>>,

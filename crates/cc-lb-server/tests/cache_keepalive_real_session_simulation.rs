@@ -619,14 +619,14 @@ async fn sim_principal_b_multi_agent_interleaving_and_4mb_gap() {
         )
         .await;
     assert_eq!(oversized["stop_reason"], "tool_use");
-    // Dispatch cancellation precedes detached completion classification; its
-    // terminal row alone cannot acknowledge the oversized snapshot decision.
+    // Adaptive thinking and output_config hit the earlier zero-token eligibility
+    // guard, so the oversized body never reaches snapshot capture.
     assert_eq!(
         harness
             .wait_for_not_tracked_reason(&parent_session_key_hash, Duration::from_secs(4))
             .await
             .as_deref(),
-        Some("snapshot too large"),
+        Some("zero-token renewal unsupported: enabled thinking"),
         "the oversized parent completion must persist its own not-tracked reason"
     );
     harness.wait_for_session_count("cancelled", 2).await;
@@ -650,7 +650,8 @@ async fn sim_principal_b_multi_agent_interleaving_and_4mb_gap() {
     );
     assert!(harness.session_count("terminal", Some("cancelled")).await >= 2);
     assert!(harness.decision_count("cached prefix too small%").await >= 1);
-    assert!(harness.decision_count("snapshot too large").await >= 1);
+    assert_eq!(harness.decision_count("snapshot too large").await, 0);
+    assert!(harness.decision_count("zero-token renewal unsupported:%").await >= 1);
 }
 
 #[test]
