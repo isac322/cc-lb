@@ -45,7 +45,11 @@ async fn cache_keepalive_disabled_principal_and_empty_status_return_empty_rows_w
     let empty: Value = serde_json::from_slice(&raw).expect("empty response JSON");
     assert_eq!(summary["rows"], json!([]));
     assert_eq!(empty["rows"], json!([]));
-    assert_eq!(summary["summary"]["renewing_now"], 0);
+    assert_eq!(summary["summary"]["total_spent"], 0.0);
+    assert!(summary["summary"]["total_avoided"].is_null());
+    assert_eq!(summary["summary"]["evidence_status"], "none");
+    assert_eq!(summary["summary"]["unknown_cycles"], 0);
+    assert!(summary["summary"]["retained_from_ms"].is_null());
     let (status, _headers, principal, _raw) = authed_json(
         app(state),
         "GET",

@@ -1,5 +1,5 @@
 import { AlertCircle } from 'lucide-react';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type {
   CacheKeepaliveHorizon,
   CacheKeepaliveRow,
@@ -83,6 +83,7 @@ const STATE_LABEL: Record<CacheKeepaliveState, string> = {
 };
 
 function formatMoney(val: number) {
+  if (val < 0) return `−$${Math.abs(val).toFixed(2)}`;
   return `$${val.toFixed(2)}`;
 }
 
@@ -107,33 +108,40 @@ function OverviewStrip({
   onHorizonChange: (h: CacheKeepaliveHorizon) => void;
   showHorizon: boolean;
 }) {
-  const label = horizon === 'all' ? 'All time:' : `Last ${horizon}:`;
   return (
     <div className="px-4 pt-3 pb-2 shrink-0 flex items-center justify-between gap-3 flex-wrap">
       <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap min-w-0">
-        <span className="text-caption text-text-muted">{label}</span>
+        <span className="text-caption text-text-muted">
+          Retained history:
+        </span>
         {isLoading ? (
           <>
             <Skeleton className="h-5 w-32" />
             <Skeleton className="h-4 w-52" />
           </>
-        ) : (
+        ) : summary ? (
           <>
             <span className="text-body font-medium text-text tabular-nums">
-              {(summary?.renewals_fired ?? 0).toLocaleString('en-US')} renewals
-              fired
+              {summary.retained_successful_hits.toLocaleString('en-US')}{' '}
+              renewal{summary.retained_successful_hits === 1 ? '' : 's'} fired
             </span>
-            {/* Phones put the secondary facts on their own line, so the
-                separator that joins them to the headline drops too. */}
             <span className="text-caption text-text-faint tabular-nums max-sm:basis-full">
               <span aria-hidden="true" className="max-sm:hidden">
                 ·{' '}
               </span>
-              {summary ? formatMoney(summary.cost_saved) : '$0.00'} saved ·{' '}
-              {(summary?.sessions_last_5m ?? 0).toLocaleString('en-US')}{' '}
-              sessions tracked
+              {summary.cost_saved === null
+                ? 'net saved —'
+                : `${formatMoney(summary.cost_saved)} net saved`}{' '}
+              · spent {formatMoney(summary.total_spent)} · avoided{' '}
+              {summary.total_avoided === null
+                ? '—'
+                : formatMoney(summary.total_avoided)}{' '}
+              · {summary.sessions_last_5m.toLocaleString('en-US')} session
+              {summary.sessions_last_5m === 1 ? '' : 's'} (last 5m)
             </span>
           </>
+        ) : (
+          <span className="text-caption text-text-faint">No summary available</span>
         )}
       </div>
       {showHorizon ? (
@@ -159,7 +167,8 @@ function SessionListRow({
   onSelect: () => void;
 }) {
   const isError = row.error != null;
-  const showTicks = row.state !== 'scheduled' && row.state !== 'not_tracked';
+  const showTicks =
+    row.is_active && row.state !== 'scheduled' && row.state !== 'not_tracked';
   // Attempt ticks are a small meter: brand fill for a renewed session, ink
   // for any other state (the state badge carries the meaning).
   const tickColor = row.state === 'renewed' ? 'bg-accent' : 'bg-text-muted';
@@ -213,14 +222,16 @@ function SessionListRow({
           <span
             className={cx(
               'col-start-2 row-start-1 justify-self-end text-caption tabular-nums sm:col-start-3',
-              row.net_pnl > 0
-                ? 'text-success-text'
-                : row.net_pnl < 0
-                  ? 'text-danger-text'
-                  : 'text-text-muted',
+              row.net_pnl === null
+                ? 'text-text-faint'
+                : row.net_pnl > 0
+                  ? 'text-success-text'
+                  : row.net_pnl < 0
+                    ? 'text-danger-text'
+                    : 'text-text-muted',
             )}
           >
-            {row.state === 'not_tracked' ? '$0.00' : formatNetPnl(row.net_pnl)}
+            {row.net_pnl === null ? '—' : formatNetPnl(row.net_pnl)}
           </span>
           <span className="col-start-2 row-start-2 justify-self-end text-caption tabular-nums text-text-muted sm:col-start-4 sm:row-start-1">
             {row.relative_time ? (
@@ -377,6 +388,12 @@ export function CacheKeepaliveSessionsDrawer({
   const [selected, setSelected] = useState<CacheKeepaliveRow | null>(null);
   const [listElement, setListElement] = useState<HTMLUListElement | null>(null);
 
+  useEffect(() => {
+    setSelected(null);
+    setFilter('all');
+    setHorizon('24h');
+  }, [principal.id]);
+
   const enabled = principal.cache_keepalive?.enabled ?? false;
   // The status filter is hidden while keepalive is off, so a stale choice
   // must not keep narrowing the list the operator can no longer see filtered.
@@ -430,7 +447,19 @@ export function CacheKeepaliveSessionsDrawer({
           onHorizonChange={setHorizon}
           showHorizon={enabled}
         />
-
+        {query.isError && query.data ? (
+          <div
+            className="flex items-center justify-between gap-3 border-b border-subtle bg-danger/8 px-4 py-2 text-caption"
+            role="alert"
+          >
+            <span className="text-danger-text">
+              Could not refresh sessions. Showing the last successful read.
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => query.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
         {enabled ? (
           <div className="px-4 pt-1 pb-3 border-b border-subtle shrink-0">
             <Select
@@ -472,6 +501,22 @@ export function CacheKeepaliveSessionsDrawer({
             >
               {query.isLoading ? (
                 <SessionListSkeleton />
+              ) : query.isError && !query.data ? (
+                <div
+                  className="flex min-h-[340px] flex-col items-center justify-center gap-3 px-4 text-center"
+                  role="alert"
+                >
+                  <p className="text-body text-danger-text">
+                    Unable to load cache keepalive sessions.
+                  </p>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => query.refetch()}
+                  >
+                    Retry sessions
+                  </Button>
+                </div>
               ) : !enabled && allRows.length === 0 ? (
                 <EmptyState title="No sessions recorded" />
               ) : allRows.length === 0 ? (

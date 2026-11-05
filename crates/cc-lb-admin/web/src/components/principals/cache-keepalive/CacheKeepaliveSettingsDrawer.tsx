@@ -5,6 +5,7 @@ import { ApiError } from '../../../lib/api';
 import {
   type Principal,
   usePrincipalWritePending,
+  usePrincipals,
   useUpdatePrincipalCacheKeepalive,
 } from '../../../lib/queries';
 import {
@@ -29,11 +30,11 @@ interface Props {
 
 interface CacheKeepaliveDraftSnapshot {
   enabled: boolean;
-  lead5m: number;
-  lead1h: number;
-  maxRenewals: number;
-  maxDuration: number;
-  snapshotBytes: number;
+  lead5m: number | null;
+  lead1h: number | null;
+  maxRenewals: number | null;
+  maxDuration: number | null;
+  snapshotBytes: number | null;
   extraTools: string[];
   treatAmbiguous: boolean;
 }
@@ -58,12 +59,13 @@ export function CacheKeepaliveSettingsDrawer({
   principal,
 }: Props) {
   const updateMutation = useUpdatePrincipalCacheKeepalive();
+  const principalsQuery = usePrincipals(false);
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const saving = updateMutation.isPending;
-  // Any same-principal record write bumps the revision this drawer would
-  // submit, so every edit control follows the shared principal write lock: the
-  // draft fieldset locks the whole region and each control repeats `disabled`
-  // so its own state never depends on fieldset inheritance.
+  const [conflict, setConflict] = useState(false);
+  const [conflictPrincipal, setConflictPrincipal] =
+    useState<Principal | null>(null);
+  const editingBasePrincipalRef = useRef(principal);
   const busy = saving || principalWritePending;
 
   // A save in flight owns the drawer: backdrop clicks, Escape and the X control
@@ -75,11 +77,11 @@ export function CacheKeepaliveSettingsDrawer({
   };
 
   const [enabled, setEnabled] = useState(false);
-  const [lead5m, setLead5m] = useState(30);
-  const [lead1h, setLead1h] = useState(300);
-  const [maxRenewals, setMaxRenewals] = useState(12);
-  const [maxDuration, setMaxDuration] = useState(14400);
-  const [snapshotBytes, setSnapshotBytes] = useState(8_388_608);
+  const [lead5m, setLead5m] = useState<number | null>(30);
+  const [lead1h, setLead1h] = useState<number | null>(300);
+  const [maxRenewals, setMaxRenewals] = useState<number | null>(12);
+  const [maxDuration, setMaxDuration] = useState<number | null>(14400);
+  const [snapshotBytes, setSnapshotBytes] = useState<number | null>(8_388_608);
   const [extraTools, setExtraTools] = useState<string[]>([]);
   const [treatAmbiguous, setTreatAmbiguous] = useState(false);
   const [newTool, setNewTool] = useState('');
@@ -96,8 +98,11 @@ export function CacheKeepaliveSettingsDrawer({
     if (!open) return;
 
     const snapshot = getDraftSnapshot(principal);
+    editingBasePrincipalRef.current = principal;
     initialDraftRef.current = snapshot;
     setEditingRevision(principal.revision);
+    setConflict(false);
+    setConflictPrincipal(null);
     setEnabled(snapshot.enabled);
     setLead5m(snapshot.lead5m);
     setLead1h(snapshot.lead1h);
@@ -123,20 +128,92 @@ export function CacheKeepaliveSettingsDrawer({
     setTreatAmbiguous(snapshot.treatAmbiguous);
     setNewTool('');
   };
+  const latestPrincipal =
+    conflictPrincipal ??
+    principalsQuery.data?.principals.find((item) => item.id === principal.id);
+
+  const applyLatestPrincipal = (
+    latest: Principal,
+    preserveDraft: boolean,
+  ) => {
+    const initial = initialDraftRef.current;
+    const server = getDraftSnapshot(latest);
+    const current = {
+      enabled,
+      lead5m,
+      lead1h,
+      maxRenewals,
+      maxDuration,
+      snapshotBytes,
+      extraTools,
+      treatAmbiguous,
+    };
+    const next = preserveDraft && initial
+      ? {
+          enabled: current.enabled !== initial.enabled ? current.enabled : server.enabled,
+          lead5m: current.lead5m !== initial.lead5m ? current.lead5m : server.lead5m,
+          lead1h: current.lead1h !== initial.lead1h ? current.lead1h : server.lead1h,
+          maxRenewals:
+            current.maxRenewals !== initial.maxRenewals
+              ? current.maxRenewals
+              : server.maxRenewals,
+          maxDuration:
+            current.maxDuration !== initial.maxDuration
+              ? current.maxDuration
+              : server.maxDuration,
+          snapshotBytes:
+            current.snapshotBytes !== initial.snapshotBytes
+              ? current.snapshotBytes
+              : server.snapshotBytes,
+          extraTools:
+            current.extraTools.join('\u0000') !== initial.extraTools.join('\u0000')
+              ? current.extraTools
+              : server.extraTools,
+          treatAmbiguous:
+            current.treatAmbiguous !== initial.treatAmbiguous
+              ? current.treatAmbiguous
+              : server.treatAmbiguous,
+        }
+      : server;
+
+    editingBasePrincipalRef.current = latest;
+    setEditingRevision(latest.revision);
+    setEnabled(next.enabled);
+    setLead5m(next.lead5m);
+    setLead1h(next.lead1h);
+    setMaxRenewals(next.maxRenewals);
+    setMaxDuration(next.maxDuration);
+    setSnapshotBytes(next.snapshotBytes);
+    setExtraTools(next.extraTools);
+    setTreatAmbiguous(next.treatAmbiguous);
+    if (!preserveDraft) initialDraftRef.current = server;
+    setConflict(false);
+    setConflictPrincipal(null);
+  };
+
+  const refreshLatestPrincipal = async () => {
+    const result = await principalsQuery.refetch();
+    const latest = result.data?.principals.find(
+      (item) => item.id === principal.id,
+    );
+    if (latest) setConflictPrincipal(latest);
+  };
+
+  const resetToLatest = () => {
+    if (latestPrincipal) applyLatestPrincipal(latestPrincipal, false);
+  };
 
   const handleSave = () => {
-    if (busy) return;
+    if (busy || conflict) return;
     if (
-      !Number.isFinite(lead5m) ||
-      lead5m < 0 ||
-      !Number.isFinite(lead1h) ||
-      lead1h < 0 ||
-      !Number.isFinite(maxRenewals) ||
-      maxRenewals < 0 ||
-      !Number.isFinite(maxDuration) ||
-      maxDuration < 0 ||
-      !Number.isFinite(snapshotBytes) ||
-      snapshotBytes < 0
+      lead5m === null ||
+      lead1h === null ||
+      maxRenewals === null ||
+      maxDuration === null ||
+      snapshotBytes === null ||
+      ![lead5m, lead1h, maxRenewals, maxDuration, snapshotBytes].every(
+        (value) => Number.isFinite(value) && value >= 0,
+      )
     ) {
       toast.error('Numeric fields must be valid non-negative numbers');
       return;
@@ -154,7 +231,8 @@ export function CacheKeepaliveSettingsDrawer({
           max_total_duration_secs: maxDuration,
           snapshot_max_bytes: snapshotBytes,
           min_cache_tokens:
-            principal.cache_keepalive?.min_cache_tokens ?? 10_000,
+            editingBasePrincipalRef.current.cache_keepalive?.min_cache_tokens ??
+            10_000,
           classifier: {
             extra_wait_for_user_tools: extraTools,
             treat_end_turn_as_ambiguous: treatAmbiguous,
@@ -174,8 +252,10 @@ export function CacheKeepaliveSettingsDrawer({
                 (error.code === 'stale_revision' ||
                   error.code === 'storage_conflict')))
           ) {
+            setConflict(true);
+            void refreshLatestPrincipal();
             toast.error(
-              'Principal was modified by another user. Please refresh and try again.',
+              'Principal was modified by another user. Review the latest revision before saving again.',
             );
           } else {
             toast.error(
@@ -227,7 +307,7 @@ export function CacheKeepaliveSettingsDrawer({
           <Button
             variant="primary"
             loading={saving}
-            disabled={busy}
+            disabled={busy || conflict}
             onClick={handleSave}
           >
             {saving ? 'Saving...' : 'Save changes'}
@@ -241,6 +321,39 @@ export function CacheKeepaliveSettingsDrawer({
         data-testid="cache-keepalive-settings-form"
         disabled={busy}
       >
+        {conflict ? (
+          <div
+            className="flex flex-col gap-2 rounded-sm bg-warn/10 p-3 text-body-sm"
+            role="alert"
+          >
+            <p className="text-warn-text">
+              This principal changed while you were editing. Your edits are
+              preserved; choose how to recover before saving.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={!latestPrincipal}
+                onClick={() => {
+                  if (latestPrincipal) {
+                    applyLatestPrincipal(latestPrincipal, true);
+                  }
+                }}
+              >
+                Use latest revision
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!latestPrincipal}
+                onClick={resetToLatest}
+              >
+                Reset to latest config
+              </Button>
+            </div>
+          </div>
+        ) : null}
         <ToggleSwitch
           role="switch"
           label="Cache keepalive enabled"
@@ -261,8 +374,8 @@ export function CacheKeepaliveSettingsDrawer({
               <input
                 type="number"
                 min={0}
-                value={lead5m}
-                onChange={(e) => setLead5m(Number(e.target.value))}
+                value={lead5m ?? ''}
+                onChange={(e) => setLead5m(parseDraftNumber(e.target.value))}
                 disabled={busy}
                 className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               />
@@ -275,8 +388,8 @@ export function CacheKeepaliveSettingsDrawer({
               <input
                 type="number"
                 min={0}
-                value={lead1h}
-                onChange={(e) => setLead1h(Number(e.target.value))}
+                value={lead1h ?? ''}
+                onChange={(e) => setLead1h(parseDraftNumber(e.target.value))}
                 disabled={busy}
                 className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               />
@@ -286,8 +399,10 @@ export function CacheKeepaliveSettingsDrawer({
               <input
                 type="number"
                 min={0}
-                value={maxRenewals}
-                onChange={(e) => setMaxRenewals(Number(e.target.value))}
+                value={maxRenewals ?? ''}
+                onChange={(e) =>
+                  setMaxRenewals(parseDraftNumber(e.target.value))
+                }
                 disabled={busy}
                 className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               />
@@ -300,8 +415,10 @@ export function CacheKeepaliveSettingsDrawer({
               <input
                 type="number"
                 min={0}
-                value={maxDuration}
-                onChange={(e) => setMaxDuration(Number(e.target.value))}
+                value={maxDuration ?? ''}
+                onChange={(e) =>
+                  setMaxDuration(parseDraftNumber(e.target.value))
+                }
                 disabled={busy}
                 className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               />
@@ -314,8 +431,10 @@ export function CacheKeepaliveSettingsDrawer({
               <input
                 type="number"
                 min={0}
-                value={snapshotBytes}
-                onChange={(e) => setSnapshotBytes(Number(e.target.value))}
+                value={snapshotBytes ?? ''}
+                onChange={(e) =>
+                  setSnapshotBytes(parseDraftNumber(e.target.value))
+                }
                 disabled={busy}
                 className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               />
@@ -405,17 +524,20 @@ export function CacheKeepaliveSettingsDrawer({
   );
 }
 
-function formatSecs(secs: number): string {
-  if (!Number.isFinite(secs) || secs < 0) return '—';
+function formatSecs(secs: number | null): string {
+  if (secs === null || !Number.isFinite(secs) || secs < 0) return '—';
   if (secs >= 3600 && secs % 3600 === 0) return `${secs / 3600}h`;
   if (secs >= 60 && secs % 60 === 0) return `${secs / 60}m`;
   return `${secs}s`;
 }
 
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+function formatBytes(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes) || bytes < 0) return '—';
   if (bytes >= 1024 * 1024 && bytes % (1024 * 1024) === 0)
     return `${bytes / (1024 * 1024)} MiB`;
   if (bytes >= 1024 && bytes % 1024 === 0) return `${bytes / 1024} KiB`;
   return `${bytes.toLocaleString('en-US')} B`;
+}
+function parseDraftNumber(value: string): number | null {
+  return value.trim() === '' ? null : Number(value);
 }

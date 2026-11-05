@@ -3,12 +3,34 @@ use uuid::Uuid;
 use crate::{CacheKeepaliveConfigSnapshot, CacheTtl};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheKeepaliveEvidenceRow {
+    pub evidence_id: String,
+    pub cycle_id: Option<Uuid>,
+    pub evidence_kind: String,
+    pub request_start_ms: u64,
+    pub prefix_fingerprint: Option<String>,
+    pub prefix_hash: Option<String>,
+    pub prefix_policy_version: Option<String>,
+    pub prefix_schema_version: Option<String>,
+    pub principal_id: String,
+    pub upstream_id: Uuid,
+    pub model: String,
+    pub ttl: CacheTtl,
+    pub hit_miss: Option<String>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cost_micros: Option<i64>,
+    pub request_ref: Option<String>,
+    pub event_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheKeepaliveTurnRow {
     pub source_ref_id: String,
     pub session_key_hash: String,
     pub principal_id: String,
     pub accounting_key_id: Option<String>,
     pub upstream_id: Uuid,
+    pub cycle_id: Option<Uuid>,
     pub model: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -41,4 +63,5 @@ pub struct CacheKeepaliveDecisionRow {
 pub struct RequestEventProjections {
     pub turn: Option<CacheKeepaliveTurnRow>,
     pub decision: CacheKeepaliveDecisionRow,
+    pub evidence: Vec<CacheKeepaliveEvidenceRow>,
 }

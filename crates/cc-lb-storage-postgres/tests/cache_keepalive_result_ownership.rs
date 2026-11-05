@@ -465,6 +465,7 @@ fn replacement_request(
         principal_id: principal_id.to_owned(),
         accounting_key_id: Some(accounting_key_id.to_owned()),
         upstream_id: Uuid::from_u128(upstream_id),
+        cycle_id: Uuid::nil(),
         cache_anchor_at_unix_secs: now,
         ttl: CacheTtl::Ttl5m,
         run_at_unix_secs: now + 270,

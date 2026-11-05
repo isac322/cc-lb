@@ -4,10 +4,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_clock::{ClockHandle, unix_secs};
+use cc_lb_clock::{ClockHandle, unix_millis, unix_secs};
 use cc_lb_control::dynamic_view::DynamicViewHolder;
-use cc_lb_domain::{CacheBreakpoint, CacheBreakpointSource, PrefixBytes, TtlClass};
-use cc_lb_domain::{Principal, PrincipalKind, Upstream};
+use cc_lb_domain::{
+    CacheBreakpoint, CacheBreakpointSource, PrefixBytes, Principal, PrincipalKind, TtlClass,
+    Upstream,
+};
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
@@ -151,36 +153,43 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
         let observation_plan = keepalive_observation_plan(&keepalive_body, &upstream);
 
         let dispatch_started = Instant::now();
-        let (dispatch_result, accounting_guard, dispatch_anchor_unix_secs) = match context
-            .into_reservation()
-        {
-            Some(reservation) => {
-                let reserved = AttemptIntent::from_reservation(reservation).into_reserved();
-                let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
-                    Ok(signed) => signed,
-                    Err(error) => return DispatchOutcome::Error(error.to_string()),
-                };
-                let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
-                (
-                    tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
-                    reserved.into_response_accounting_guard(),
-                    dispatch_anchor_unix_secs,
-                )
-            }
-            None => {
-                let reserved = AttemptIntent::observe_only().into_reserved();
-                let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
-                    Ok(signed) => signed,
-                    Err(error) => return DispatchOutcome::Error(error.to_string()),
-                };
-                let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
-                (
-                    tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
-                    reserved.into_response_accounting_guard(),
-                    dispatch_anchor_unix_secs,
-                )
-            }
-        };
+        let (dispatch_result, accounting_guard, dispatch_anchor_unix_secs, dispatch_start_ms) =
+            match context.into_reservation() {
+                Some(reservation) => {
+                    let reserved = AttemptIntent::from_reservation(reservation).into_reserved();
+                    let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await
+                    {
+                        Ok(signed) => signed,
+                        Err(error) => return DispatchOutcome::Error(error.to_string()),
+                    };
+                    let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
+                    let dispatch_start_ms =
+                        unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
+                    (
+                        tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
+                        reserved.into_response_accounting_guard(),
+                        dispatch_anchor_unix_secs,
+                        dispatch_start_ms,
+                    )
+                }
+                None => {
+                    let reserved = AttemptIntent::observe_only().into_reserved();
+                    let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await
+                    {
+                        Ok(signed) => signed,
+                        Err(error) => return DispatchOutcome::Error(error.to_string()),
+                    };
+                    let dispatch_anchor_unix_secs = unix_secs(self.clock.now());
+                    let dispatch_start_ms =
+                        unix_millis(self.clock.now()).try_into().unwrap_or(u64::MAX);
+                    (
+                        tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
+                        reserved.into_response_accounting_guard(),
+                        dispatch_anchor_unix_secs,
+                        dispatch_start_ms,
+                    )
+                }
+            };
 
         match dispatch_result {
             Ok(Ok((StatusCode::OK, headers, body, cache_anchor_age))) => {
@@ -188,6 +197,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                     &body,
                     cache_anchor_age,
                     dispatch_started.elapsed(),
+                    dispatch_start_ms,
                     accounting_guard,
                 );
                 if let DispatchOutcome::CacheHit { .. } = &outcome
@@ -457,6 +467,7 @@ fn classify_success_body(
     body: &[u8],
     cache_anchor_age: Duration,
     duration: Duration,
+    request_start_ms: u64,
     accounting_guard: ResponseAccountingGuard,
 ) -> DispatchOutcome {
     match sonic_rs::from_slice::<KeepaliveResponseBody>(body) {
@@ -477,6 +488,7 @@ fn classify_success_body(
                 },
                 status: StatusCode::OK.as_u16(),
                 duration,
+                request_start_ms,
                 accounting_guard,
             };
             if finalization.usage.cache_read_input_tokens > 0 {

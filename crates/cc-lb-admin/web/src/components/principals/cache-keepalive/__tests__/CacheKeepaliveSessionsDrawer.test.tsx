@@ -37,6 +37,18 @@ const mockPrincipal: queries.Principal = {
     },
   },
 };
+const summaryBase = {
+  renewing_now: 1,
+  sessions_last_5m: 2,
+  renewals_fired: 3,
+  retained_successful_hits: 17,
+  cost_saved: 4.56,
+  total_spent: 4.18,
+  total_avoided: 16.65,
+  evidence_status: 'observed' as const,
+  unknown_cycles: 0,
+  retained_from_ms: 1_699_395_200_000,
+};
 
 function renderWithProviders(ui: React.ReactElement) {
   const queryClient = new QueryClient({
@@ -67,6 +79,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         pages: [
           {
             summary: {
+              ...summaryBase,
               renewing_now: 1,
               sessions_last_5m: 2,
               renewals_fired: 3,
@@ -75,6 +88,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
             rows: cacheKeepaliveRows.map((r) => ({
               ...r,
               net_pnl: r.netPnl,
+              is_active: r.state === 'renewed' || r.state === 'scheduled',
               max_attempts: r.maxAttempts,
               last_message_at_ms: 1234567890,
               session_key_hash: r.id,
@@ -94,6 +108,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         id: 'a1f39c2b7e04',
         last_message_at_ms: 1234567890,
         state: 'renewed',
+        is_active: true,
         ttl: '5m',
         attempts: 8,
         max_attempts: 12,
@@ -106,7 +121,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         renewal_tokens: 20000,
         total_avoided: 0.15,
         total_spent: 0.048,
-        total_renewals: 8,
+        total_renewals_current_cycle: 8,
         is_last_pending: false,
         turns: [
           {
@@ -184,6 +199,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         pages: [
           {
             summary: {
+              ...summaryBase,
               renewing_now: 1,
               sessions_last_5m: 2,
               renewals_fired: 3,
@@ -192,6 +208,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
             rows: cacheKeepaliveRows.map((r) => ({
               ...r,
               net_pnl: r.netPnl,
+              is_active: r.state === 'renewed' || r.state === 'scheduled',
               max_attempts: r.maxAttempts,
               last_message_at_ms: 1234567890,
               session_key_hash: r.id,
@@ -211,6 +228,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         id: 'a1f39c2b7e04',
         last_message_at_ms: 1234567890,
         state: 'renewed',
+        is_active: true,
         ttl: '5m',
         attempts: 8,
         max_attempts: 12,
@@ -223,7 +241,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         renewal_tokens: 20000,
         total_avoided: 0.15,
         total_spent: 0.048,
-        total_renewals: 8,
+        total_renewals_current_cycle: 8,
         is_last_pending: false,
         turns: [
           {
@@ -366,7 +384,10 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(listContainer?.className).toContain('max-[960px]:hidden');
     expect(screen.getByTestId('session-detail-error')).toBeDefined();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+    const backActions = screen.getAllByRole('button', {
+      name: 'Back to sessions',
+    });
+    fireEvent.click(backActions[backActions.length - 1]!);
 
     expect(screen.queryByTestId('session-detail-error')).toBeNull();
     expect(listContainer?.className).toContain('flex-1');
@@ -398,7 +419,42 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     ).toBe('false');
     expect(range.getByRole('radio', { name: 'All' })).toBeDefined();
 
-    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDefined();
+    expect(screen.getByText('Retained history:')).toBeDefined();
+    expect(screen.getByText('17 renewals fired')).toBeDefined();
+  });
+  it('uses singular session grammar for a one-session five-minute count', () => {
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+      data: {
+        pages: [
+          {
+            summary: {
+              ...summaryBase,
+              retained_successful_hits: 1,
+              sessions_last_5m: 1,
+            },
+            rows: [],
+            next_cursor: null,
+          },
+        ],
+      },
+      isLoading: false,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    expect(
+      screen.getByTestId('cache-keepalive-sessions-body').textContent,
+    ).toContain('1 session (last 5m)');
+    expect(screen.getByText('1 renewal fired')).toBeDefined();
   });
 
   it('lists every status in the status filter', async () => {
@@ -460,14 +516,10 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    // Renewed row has 8/12 ticks
-    expect(screen.getAllByText('8/12')[0]).toBeDefined();
-    // Capped row has 12/12 ticks
-    expect(screen.getAllByText('12/12')[0]).toBeDefined();
-    // Expired row has 8/12 ticks
-    expect(screen.getAllByText('8/12')[1]).toBeDefined();
-
-    // Scheduled and Not tracked should not have ticks
+    // Only the active renewed row exposes attempt progress. Terminal rows are
+    // intentionally not live/pending and therefore do not render ticks.
+    expect(screen.getAllByText('8/12')).toHaveLength(1);
+    expect(screen.queryByText('12/12')).toBeNull();
     expect(screen.queryByText('0/12')).toBeNull();
   });
 
@@ -529,6 +581,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         pages: [
           {
             summary: {
+              ...summaryBase,
               renewing_now: 1,
               sessions_last_5m: 2,
               renewals_fired: 3,
@@ -537,6 +590,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
             rows: cacheKeepaliveRows.map((r) => ({
               ...r,
               net_pnl: r.netPnl,
+              is_active: r.state === 'renewed' || r.state === 'scheduled',
               max_attempts: r.maxAttempts,
               last_message_at_ms: 1234567890,
               session_key_hash: r.id,
@@ -568,6 +622,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         pages: [
           {
             summary: {
+              ...summaryBase,
               renewing_now: 0,
               sessions_last_5m: 0,
               renewals_fired: 0,
@@ -612,6 +667,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         pages: [
           {
             summary: {
+              ...summaryBase,
               renewing_now: 0,
               sessions_last_5m: 0,
               renewals_fired: 0,
@@ -648,6 +704,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         pages: [
           {
             summary: {
+              ...summaryBase,
               renewing_now: 0,
               sessions_last_5m: 0,
               renewals_fired: 0,
@@ -695,6 +752,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         pages: [
           {
             summary: {
+              ...summaryBase,
               renewing_now: 1,
               sessions_last_5m: 2,
               renewals_fired: 3,
@@ -703,6 +761,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
             rows: cacheKeepaliveRows.map((r) => ({
               ...r,
               net_pnl: r.netPnl,
+              is_active: r.state === 'renewed' || r.state === 'scheduled',
               max_attempts: r.maxAttempts,
               last_message_at_ms: 1234567890,
               session_key_hash: r.id,
@@ -745,6 +804,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
             pages: [
               {
                 summary: {
+                  ...summaryBase,
                   renewing_now: 1,
                   sessions_last_5m: 2,
                   renewals_fired: 3,
@@ -882,6 +942,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         pages: [
           {
             summary: {
+              ...summaryBase,
               renewing_now: 1,
               sessions_last_5m: 2,
               renewals_fired: 3,
@@ -905,6 +966,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
               ...cacheKeepaliveRows.map((r) => ({
                 ...r,
                 net_pnl: r.netPnl,
+                is_active: r.state === 'renewed' || r.state === 'scheduled',
                 max_attempts: r.maxAttempts,
                 last_message_at_ms: 1234567890,
                 session_key_hash: r.id,
@@ -936,5 +998,99 @@ describe('CacheKeepaliveSessionsDrawer', () => {
 
     const newRow = screen.getByText('new-session').closest('li');
     expect(newRow?.style.transition).toBe('');
+  });
+  it('does not present a failed initial read as an empty session list', () => {
+    const refetch = vi.fn();
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new Error('unavailable'),
+      refetch,
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Unable to load cache keepalive sessions.',
+    );
+    expect(screen.queryByText('No sessions')).toBeNull();
+    expect(screen.queryByText('0 renewals fired')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry sessions' }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+  it('clears the selected session when the principal identity changes', () => {
+    const principalB = {
+      ...mockPrincipal,
+      id: 'p-456',
+      name: 'Other Principal',
+    };
+    let activePrincipal = 'p-123';
+    vi.mocked(queries.useCacheKeepaliveSessions).mockImplementation(
+      (principalId) =>
+        ({
+          data: {
+            pages: [
+              {
+                summary: {
+                  ...summaryBase,
+                  renewing_now: 1,
+                  sessions_last_5m: 2,
+                  renewals_fired: 3,
+                  cost_saved: 4.56,
+                },
+                rows: [
+                  {
+                    ...cacheKeepaliveApiRows[0],
+                    id: principalId === 'p-123' ? 'session-a' : 'session-b',
+                  },
+                ],
+                next_cursor: null,
+              },
+            ],
+          },
+          isLoading: false,
+          hasNextPage: false,
+          isFetchingNextPage: false,
+          fetchNextPage: vi.fn(),
+        }) as never,
+    );
+
+    const { rerender } = renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+    fireEvent.click(screen.getByText('session-a'));
+    expect(screen.getByText('Session detail')).toBeDefined();
+
+    activePrincipal = principalB.id;
+    rerender(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <CacheKeepaliveSessionsDrawer
+          open={true}
+          onOpenChange={() => {}}
+          principal={principalB}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByText('Session detail')).toBeNull();
+    expect(screen.getByText('session-b')).toBeDefined();
+    expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenLastCalledWith(
+      activePrincipal,
+      { horizon: '24h', status: undefined, error: undefined },
+      true,
+    );
   });
 });

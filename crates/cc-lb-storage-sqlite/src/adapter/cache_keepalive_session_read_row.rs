@@ -83,6 +83,15 @@ pub(crate) fn turn_from_row(row: SqliteRow) -> StorageResult<CacheKeepaliveTurnR
             &row.try_get::<String, _>("upstream_id")
                 .map_err(map_sqlx_error)?,
         )?,
+        cycle_id: row
+            .try_get::<Option<String>, _>("cycle_id")
+            .map_err(map_sqlx_error)?
+            .map(|value| {
+                uuid::Uuid::parse_str(&value).map_err(|error| StorageError::Corrupted {
+                    message: format!("invalid cache keepalive turn cycle_id: {error}"),
+                })
+            })
+            .transpose()?,
         model: row.try_get("model").map_err(map_sqlx_error)?,
         input_tokens: i64_to_u64(
             row.try_get("input_tokens").map_err(map_sqlx_error)?,

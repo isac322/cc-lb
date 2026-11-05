@@ -235,6 +235,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   );
 
   const formatMoney = (val: number) => {
+    if (val < 0) return `−$${Math.abs(val).toFixed(2)}`;
     return `$${val.toFixed(2)}`;
   };
 
@@ -254,19 +255,53 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
           >
             Off. Turn on to renew the prompt-cache TTL for idle sessions.
           </p>
+        ) : summaryQ.isError && !summary ? (
+          <div
+            className="flex items-center justify-between gap-3 rounded-sm bg-danger/8 px-3 py-2 text-body"
+            role="alert"
+          >
+            <span className="text-danger-text">
+              Unable to load cache keepalive summary.
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => summaryQ.refetch()}
+            >
+              Retry summary
+            </Button>
+          </div>
         ) : (
-          // Readout row: 1px rules between readouts, none before the first
-          // readout of each visual row (2-up on phones, 4-up from md).
-          <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4 *:border-l *:border-subtle *:px-5 *:odd:border-l-0 *:odd:pl-0 md:*:nth-3:border-l md:*:nth-3:pl-5">
+          <>
+            {summaryQ.isError && summary ? (
+              <div
+                className="mb-3 flex items-center justify-between gap-3 rounded-sm bg-danger/8 px-3 py-2 text-caption"
+                role="alert"
+              >
+                <span className="text-danger-text">
+                  Refresh failed. Showing the last successful summary.
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => summaryQ.refetch()}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : null}
+            <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4 *:border-l *:border-subtle *:px-5 *:odd:border-l-0 *:odd:pl-0 md:*:nth-3:border-l md:*:nth-3:pl-5">
             <MetricTile
               label="Renewing now"
               isLoading={summaryQ.isLoading}
               value={
                 summaryQ.isLoading
                   ? undefined
-                  : (summary?.renewing_now ?? 0).toLocaleString('en-US')
+                  : summary
+                    ? summary.renewing_now.toLocaleString('en-US')
+                    : '—'
               }
-              subtext="scheduled or mid-renewal"
+              subtext="current scheduled or mid-renewal"
             />
             <MetricTile
               label="Sessions (last 5m)"
@@ -274,9 +309,11 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
               value={
                 summaryQ.isLoading
                   ? undefined
-                  : (summary?.sessions_last_5m ?? 0).toLocaleString('en-US')
+                  : summary
+                    ? summary.sessions_last_5m.toLocaleString('en-US')
+                    : '—'
               }
-              subtext="seen in last 5 min"
+              subtext="seen in last five minutes"
             />
             <MetricTile
               label="Renewals fired"
@@ -284,9 +321,11 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
               value={
                 summaryQ.isLoading
                   ? undefined
-                  : (summary?.renewals_fired ?? 0).toLocaleString('en-US')
+                  : summary
+                    ? summary.retained_successful_hits.toLocaleString('en-US')
+                    : '—'
               }
-              subtext="all-time"
+              subtext="retained history"
             />
             <MetricTile
               label="Cost saved"
@@ -294,13 +333,18 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
               value={
                 summaryQ.isLoading
                   ? undefined
-                  : summary
-                    ? formatMoney(summary.cost_saved)
-                    : '$0.00'
+                  : summary?.cost_saved === null || !summary
+                    ? '—'
+                    : formatMoney(summary.cost_saved)
               }
-              subtext="net, after renewal spend"
+              subtext={
+                summary?.evidence_status === 'unknown'
+                  ? 'unknown evidence coverage'
+                  : 'net, after renewal spend'
+              }
             />
           </div>
+          </>
         )}
       </DetailSection>
 

@@ -92,6 +92,7 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
                 principal_id: request.principal_id.clone(),
                 accounting_key_id: request.accounting_key_id.clone(),
                 upstream_id: request.snapshot.upstream_id,
+                cycle_id: request.cycle_id,
                 cache_anchor_at_unix_secs,
                 ttl: request.snapshot.ttl,
                 run_at_unix_secs,

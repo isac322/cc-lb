@@ -29,6 +29,7 @@ pub struct CacheKeepaliveEnqueueRequest {
     pub session_key_hash: String,
     pub principal_id: String,
     pub accounting_key_id: Option<String>,
+    pub cycle_id: Uuid,
     pub cache_anchor_age: Duration,
     pub expected_generation: Option<u64>,
     pub params: super::ScheduleParams,
@@ -465,6 +466,8 @@ impl LifecycleKeepalive {
                 return;
             }
         };
+        let (fingerprint, hash, policy, schema) = cache_prefix_evidence(cache_metadata);
+        let snapshot = snapshot.with_prefix_evidence(fingerprint, hash, policy, schema);
         let classifier = HeuristicClassifier::new(&config.classifier);
         match classifier.classify(request_json, response_body_json) {
             super::TurnDecision::AgentInTurn => {
@@ -512,6 +515,7 @@ impl LifecycleKeepalive {
                         session_key_hash,
                         principal_id: principal.id.clone(),
                         accounting_key_id: Some(accounting_key_id),
+                        cycle_id: Uuid::new_v4(),
                         cache_anchor_age,
                         expected_generation,
                         params,
@@ -782,6 +786,42 @@ fn is_keepalive_eligible_request_kind(request_kind: Option<&str>) -> bool {
                 | "side"
                 | "look_at"
         )
+    )
+}
+const CACHE_PREFIX_POLICY_VERSION: &str = "prompt-cache-policy-v1";
+const CACHE_PREFIX_SCHEMA_VERSION: &str = "request-cache-breakpoint-v1";
+
+fn cache_prefix_evidence(
+    metadata: &RequestCacheMetadata,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    if metadata.cache_breakpoints.is_empty() {
+        return (None, None, None, None);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(CACHE_PREFIX_SCHEMA_VERSION.as_bytes());
+    for breakpoint in &metadata.cache_breakpoints {
+        hasher.update(breakpoint.block_index.to_le_bytes());
+        hasher.update(breakpoint.path.as_bytes());
+        hasher.update(breakpoint.prefix_hash.as_bytes());
+        if let Some(ttl) = breakpoint.ttl.as_deref() {
+            hasher.update(ttl.as_bytes());
+        }
+    }
+    let fingerprint = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    (
+        Some(fingerprint),
+        metadata.cache_prefix_hash.clone(),
+        Some(CACHE_PREFIX_POLICY_VERSION.to_owned()),
+        Some(CACHE_PREFIX_SCHEMA_VERSION.to_owned()),
     )
 }
 

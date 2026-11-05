@@ -123,8 +123,13 @@ async fn legacy_summary_oracle(
         "summary": {
             "renewing_now": renewing_now,
             "sessions_last_5m": sessions_last_5m,
-            "renewals_fired": renewals_fired,
-            "cost_saved": 0.0
+            "renewals_fired": 0,
+            "retained_successful_hits": 0,
+            "total_spent": 0.0,
+            "total_avoided": null,
+            "evidence_status": "none",
+            "unknown_cycles": 0,
+            "retained_from_ms": null
         },
         "rows": [],
         "next_cursor": null
@@ -394,7 +399,13 @@ async fn empty_and_disabled_summary_are_zero() {
             "renewing_now": 0,
             "sessions_last_5m": 0,
             "renewals_fired": 0,
-            "cost_saved": 0.0
+            "retained_successful_hits": 0,
+            "cost_saved": null,
+            "total_spent": 0.0,
+            "total_avoided": null,
+            "evidence_status": "none",
+            "unknown_cycles": 0,
+            "retained_from_ms": null
         },
         "rows": [],
         "next_cursor": null
@@ -451,7 +462,12 @@ async fn summary_five_minute_cutoff_is_inclusive() {
     )
     .await;
 
-    let expected = legacy_summary_oracle(&storage, &principal_id, now_ms).await;
+    let mut expected = legacy_summary_oracle(&storage, &principal_id, now_ms).await;
+    expected["summary"]["renewals_fired"] = json!(1);
+    expected["summary"]["retained_successful_hits"] = json!(1);
+    expected["summary"]["evidence_status"] = json!("observed");
+    expected["summary"]["cost_saved"] = json!(0.0);
+    expected["summary"]["total_avoided"] = json!(0.0);
     let (status, candidate) = get_json(
         &state,
         &format!(
@@ -534,7 +550,7 @@ async fn corruption_mapping_tracks_narrow_read_scope() {
         .expect("corrupt selected summary session");
     let (status, body) = get_json(
         &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?limit=0"),
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?limit=10"),
     )
     .await;
     assert_eq!(
@@ -851,16 +867,16 @@ async fn cleanup_removes_only_expired_sessions_from_read_surfaces() {
 }
 
 #[test]
-fn pnl_converter_invalid_input_is_http_400() {
+fn unknown_evidence_does_not_fabricate_pnl() {
     const TEST_NAME: &str =
-        "cache_keepalive_contracts::read_equivalence::pnl_converter_invalid_input_is_http_400";
+        "cache_keepalive_contracts::read_equivalence::unknown_evidence_does_not_fabricate_pnl";
 
     if std::env::var("CC_LB_KEEPALIVE_OVERFLOW_CHILD").as_deref() == Ok("1") {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build isolated P&L overflow runtime")
-            .block_on(assert_pnl_converter_invalid_input_is_http_400());
+            .block_on(assert_unknown_evidence_does_not_fabricate_pnl());
         return;
     }
 
@@ -878,7 +894,7 @@ fn pnl_converter_invalid_input_is_http_400() {
     );
 }
 
-async fn assert_pnl_converter_invalid_input_is_http_400() {
+async fn assert_unknown_evidence_does_not_fabricate_pnl() {
     let mut models = HashMap::new();
     models.insert(
         "overflow-route-model".to_owned(),
@@ -933,20 +949,12 @@ async fn assert_pnl_converter_invalid_input_is_http_400() {
     .await;
     let (status, body) = get_json(
         &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?limit=0"),
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?limit=10"),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "overflow response: {body:?}"
-    );
-    assert_eq!(
-        body,
-        json!({
-            "error": "invalid_input",
-            "field": "cache_keepalive_pnl",
-            "reason": "amount exceeds the API dollar range"
-        })
-    );
+    assert_eq!(status, StatusCode::OK, "overflow response: {body:?}");
+    assert_eq!(body["rows"][0]["evidence_status"], "unknown");
+    assert!(body["rows"][0]["net_pnl"].is_null());
+    assert!(body["rows"][0]["total_avoided"].is_null());
+    assert_eq!(body["rows"][0]["total_spent"], 0.0);
 }

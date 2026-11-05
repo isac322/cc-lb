@@ -422,9 +422,10 @@ export function useUpstreams() {
     POLLING_INTERVALS.UPSTREAMS_MS,
   );
 }
-export function usePrincipals() {
+export function usePrincipals(enabled = true) {
   return useQuery({
     queryKey: qk.principals,
+    enabled,
     queryFn: () => getJson<PrincipalListResp>('/admin/v1/principals'),
   });
 }
@@ -1872,6 +1873,8 @@ export function useCacheKeepaliveSessions(
   return useInfiniteQuery({
     queryKey: qk.cacheKeepaliveSessions(principalId, filters),
     enabled: enabled && Boolean(principalId),
+    meta: { inlineError: true },
+    placeholderData: undefined,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       getCacheKeepaliveSessions(principalId, { ...filters, cursor: pageParam }),
@@ -1888,6 +1891,8 @@ export function useCacheKeepaliveSummary(principalId: string) {
     {
       queryKey: qk.cacheKeepaliveSummary(principalId),
       enabled: Boolean(principalId),
+      meta: { inlineError: true },
+      placeholderData: undefined,
       queryFn: () => getCacheKeepaliveSessions(principalId, { limit: 0 }),
       select: (response) => response.summary,
     },
@@ -1899,13 +1904,28 @@ export function useCacheKeepaliveSessionDetail(
   principalId: string,
   sessionId: string | null,
 ) {
-  return usePolledData(
-    {
-      queryKey: qk.cacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
-      enabled: Boolean(principalId) && Boolean(sessionId),
-      queryFn: () =>
-        getCacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
-    },
-    POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
-  );
+  const visibility = useVisibility();
+  const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
+  const isMissing = (error: unknown) =>
+    error instanceof ApiError && error.status === 404;
+
+  return useQuery({
+    queryKey: qk.cacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
+    enabled: (query) =>
+      Boolean(principalId) &&
+      Boolean(sessionId) &&
+      !isMissing(query.state.error),
+    meta: { inlineError: true },
+    placeholderData: undefined,
+    retry: (failureCount, error) => !isMissing(error) && failureCount < 1,
+    refetchOnMount: (query) => !isMissing(query.state.error),
+    refetchOnWindowFocus: (query) => !isMissing(query.state.error),
+    refetchOnReconnect: (query) => !isMissing(query.state.error),
+    refetchInterval: (query) =>
+      isHidden || isMissing(query.state.error)
+        ? false
+        : POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
+    queryFn: () =>
+      getCacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
+  });
 }

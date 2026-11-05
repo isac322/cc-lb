@@ -162,6 +162,7 @@ fn renewal_projections(
             principal_id: input.session.principal_id.clone(),
             accounting_key_id: input.session.accounting_key_id.clone(),
             upstream_id: input.session.upstream_id,
+            cycle_id: input.session.cycle_id,
             model: "claude-test".to_owned(),
             input_tokens: input.finalization.usage.input_tokens,
             output_tokens: input.finalization.usage.output_tokens,
@@ -187,5 +188,6 @@ fn renewal_projections(
             last_message_at_ms: 1_003_000,
             ts: 1_003,
         },
+        evidence: Vec::new(),
     }
 }

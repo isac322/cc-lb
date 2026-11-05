@@ -14,7 +14,8 @@ use cc_lb_request_log::{
     RequestDiagnostics, RequestDiagnosticsRecord, RequestDiagnosticsSource, RequestEventKind,
     RequestEventPartial, RequestEventUpdate,
 };
-use cc_lb_storage_api::{RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{CacheKeepaliveEvidenceRow, RequestEvent, RequestEventStore};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -733,7 +734,7 @@ async fn write_finalized_rows(
     is_orphan: bool,
 ) {
     let mut row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
-    // Diagnostic fields exist only in the log; every DB and bus reader sees the same row.
+    let evidence = follow_up_evidence(&row);
     let mut diagnostics = RequestDiagnostics::take_from(&mut row);
     if let Some(route) = partial.route.as_ref() {
         if let Some(cache_breakpoints) = route.cache_breakpoints.clone() {
@@ -759,7 +760,14 @@ async fn write_finalized_rows(
     let mut attempts: u32 = 0;
     let cursor = loop {
         attempts += 1;
-        match storage.append_request_event(&row).await {
+        let append_result = if let Some(evidence) = evidence.as_ref() {
+            storage
+                .append_request_event_with_evidence(&row, evidence)
+                .await
+        } else {
+            storage.append_request_event(&row).await
+        };
+        match append_result {
             Ok(cursor) => {
                 writer.breaker.record_success();
                 break cursor;
@@ -811,6 +819,55 @@ async fn write_finalized_rows(
         "written"
     };
     metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome).increment(1);
+}
+fn follow_up_evidence(row: &RequestEvent) -> Option<CacheKeepaliveEvidenceRow> {
+    let cache_read_input_tokens = row.cache_read_input_tokens?;
+    if cache_read_input_tokens == 0 || row.cache_breakpoints.is_empty() {
+        return None;
+    }
+    let principal_id = row.principal_id.clone()?;
+    let upstream_id = row.upstream_id?;
+    let model = row.model.clone()?;
+    let request_start_ms = row.ts_ms?;
+    let breakpoint = row.cache_breakpoints.last()?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"request-cache-breakpoint-v1");
+    for breakpoint in &row.cache_breakpoints {
+        hasher.update(breakpoint.block_index.to_le_bytes());
+        hasher.update(breakpoint.path.as_bytes());
+        hasher.update(breakpoint.prefix_hash.as_bytes());
+        if let Some(ttl) = breakpoint.ttl.as_deref() {
+            hasher.update(ttl.as_bytes());
+        }
+    }
+    Some(CacheKeepaliveEvidenceRow {
+        evidence_id: format!(
+            "follow-up-evidence:{}",
+            row.event_id.as_deref().unwrap_or(&row.request_id)
+        ),
+        cycle_id: None,
+        evidence_kind: "follow_up".to_owned(),
+        request_start_ms,
+        prefix_fingerprint: Some(
+            hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        ),
+        prefix_hash: Some(breakpoint.prefix_hash.clone()),
+        prefix_policy_version: Some("prompt-cache-policy-v1".to_owned()),
+        prefix_schema_version: Some("request-cache-breakpoint-v1".to_owned()),
+        principal_id,
+        upstream_id,
+        model,
+        ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(breakpoint.ttl.as_deref()),
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(cache_read_input_tokens),
+        cost_micros: row.cost_usd_micros,
+        request_ref: Some(row.request_id.clone()),
+        event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
+    })
 }
 
 async fn flush_expired_terminations(

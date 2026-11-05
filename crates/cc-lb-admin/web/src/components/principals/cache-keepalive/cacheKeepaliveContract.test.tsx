@@ -15,9 +15,9 @@ test('freezes Cache keepalive card, drawer, settings, money, and animation contr
     tooltip:
       'Keeps the Anthropic prompt cache warm by renewing its TTL — fires a tiny synthetic request just before the prompt cache expires so the next real request still hits a warm cache.',
     metrics: [
-      ['Renewing now', 'scheduled or mid-renewal'],
-      ['Sessions (last 5m)', 'seen in last 5 min'],
-      ['Renewals fired', 'all-time'],
+      ['Renewing now', 'current scheduled or mid-renewal'],
+      ['Sessions (last 5m)', 'seen in last five minutes'],
+      ['Renewals fired', 'retained history'],
       ['Cost saved', 'net, after renewal spend'],
     ],
     caption: 'Renews the prompt-cache TTL during idle gaps.',

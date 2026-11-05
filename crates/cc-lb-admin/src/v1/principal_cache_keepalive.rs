@@ -11,15 +11,15 @@ use axum::{
 use cc_lb_storage_api::{CacheKeepaliveSessionReadStore, PrincipalStore, Storage, StorageError};
 use serde::Deserialize;
 
-use crate::AdminState;
-
 use self::{
     query::parse_query,
     view::{
         CacheKeepaliveViewContext, FIVE_MINUTES_MS, detail_for_item, list_upstream_names,
-        load_activity_batch, row_for_item, summary_for_items,
+        load_activity_batch, row_for_item,
     },
 };
+use crate::AdminState;
+use crate::cache_keepalive_view::economics::rates_from_catalog;
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -69,16 +69,6 @@ async fn list_cache_keepalive(
         now_ms,
         max_attempts,
     };
-    let summary_input = match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_input(
-        storage,
-        &principal_id,
-        now_ms.saturating_sub(FIVE_MINUTES_MS),
-    )
-    .await
-    {
-        Ok(input) => input,
-        Err(error) => return storage_error(error),
-    };
     let page = if query.limit == 0 {
         None
     } else {
@@ -89,26 +79,51 @@ async fn list_cache_keepalive(
             Err(error) => return storage_error(error),
         }
     };
-    let activity_items = summary_input
-        .sessions
-        .iter()
-        .chain(page.as_ref().into_iter().flat_map(|page| page.rows.iter()));
-    let activity_batch = match load_activity_batch(storage, &principal_id, activity_items).await {
-        Ok(batch) => batch,
+    let aggregate = match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_aggregate(
+        storage,
+        &principal_id,
+        now_ms.saturating_sub(FIVE_MINUTES_MS),
+    )
+    .await
+    {
+        Ok(aggregate) => aggregate,
         Err(error) => return storage_error(error),
     };
-    let mut summary = match summary_for_items(
-        context.catalog,
-        context.now_ms,
-        &summary_input.sessions,
-        &activity_batch,
-    ) {
-        Ok(summary) => summary,
-        Err(error) => return storage_error(error),
+    let mut avoided_micros = 0_i64;
+    let mut pricing_complete = true;
+    for group in &aggregate.groups {
+        let Some(rates) = rates_from_catalog(
+            cc_lb_pricing::global_catalog().as_ref(),
+            &group.model,
+            group.ttl,
+        ) else {
+            pricing_complete = false;
+            continue;
+        };
+        let group_avoided = (u128::from(group.avoided_cache_read_tokens)
+            .saturating_mul(u128::from(rates.avoided_create_micros_per_million))
+            / 1_000_000)
+            .min(i64::MAX as u128) as i64;
+        avoided_micros = avoided_micros.saturating_add(group_avoided);
+    }
+    let economics_complete = pricing_complete && aggregate.evidence_status == "observed";
+    let total_spent = aggregate.total_spent_micros as f64 / 1_000_000.0;
+    let total_avoided = economics_complete.then(|| avoided_micros as f64 / 1_000_000.0);
+    let cost_saved = economics_complete.then(|| {
+        (avoided_micros.saturating_sub(aggregate.total_spent_micros)) as f64 / 1_000_000.0
+    });
+    let summary = view::CacheKeepaliveSummaryResponse {
+        renewing_now: aggregate.renewing_now,
+        sessions_last_5m: aggregate.sessions_last_5m,
+        renewals_fired: aggregate.successful_hits,
+        retained_successful_hits: aggregate.successful_hits,
+        cost_saved,
+        total_spent,
+        total_avoided,
+        evidence_status: aggregate.evidence_status,
+        unknown_cycles: aggregate.unknown_cycles,
+        retained_from_ms: aggregate.retained_from_ms,
     };
-    summary.sessions_last_5m = summary
-        .sessions_last_5m
-        .saturating_add(summary_input.recent_decisions);
     let Some(page) = page else {
         return Json(view::CacheKeepaliveListResponse {
             summary,
@@ -116,6 +131,10 @@ async fn list_cache_keepalive(
             next_cursor: None,
         })
         .into_response();
+    };
+    let activity_batch = match load_activity_batch(storage, &principal_id, page.rows.iter()).await {
+        Ok(batch) => batch,
+        Err(error) => return storage_error(error),
     };
     let upstream_names = match list_upstream_names(storage, &page.rows).await {
         Ok(upstream_names) => upstream_names,

@@ -81,6 +81,7 @@ pub struct RenewalFinalization {
     pub usage: RenewalUsage,
     pub status: u16,
     pub duration: Duration,
+    pub request_start_ms: u64,
     pub accounting_guard: ResponseAccountingGuard,
 }
 

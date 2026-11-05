@@ -50,8 +50,8 @@ fn request(
         principal_id: PRINCIPAL_ID.to_owned(),
         accounting_key_id: None,
         upstream_id: UPSTREAM_ID,
+        cycle_id: uuid::Uuid::nil(),
         cache_anchor_at_unix_secs: now_unix_secs,
-        ttl: CacheTtl::Ttl5m,
         run_at_unix_secs: now_unix_secs + 270,
         expires_at_unix_secs: now_unix_secs + 300,
         encrypted_payload: vec![1],
@@ -98,6 +98,7 @@ fn decision_projection(
             last_message_at_ms: ts * 1_000,
             ts,
         },
+        evidence: Vec::new(),
     }
 }
 
@@ -109,6 +110,7 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
             principal_id: PRINCIPAL_ID.to_owned(),
             accounting_key_id: None,
             upstream_id: UPSTREAM_ID,
+            cycle_id: None,
             model: "claude-sonnet-4-5".to_owned(),
             input_tokens: 100,
             output_tokens: 20,
@@ -134,6 +136,7 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
             last_message_at_ms: ts * 1_000,
             ts,
         },
+        evidence: Vec::new(),
     }
 }
 
@@ -150,6 +153,7 @@ fn batched_turn_projection(
             principal_id: principal_id.to_owned(),
             accounting_key_id: Some("accounting-key".to_owned()),
             upstream_id: UPSTREAM_ID,
+            cycle_id: None,
             model: "claude-opus-4-1".to_owned(),
             input_tokens: 101,
             output_tokens: 23,
@@ -175,6 +179,7 @@ fn batched_turn_projection(
             last_message_at_ms: ts * 1_000,
             ts,
         },
+        evidence: Vec::new(),
     }
 }
 
@@ -635,6 +640,7 @@ async fn batches_turn_reads_with_deduplication_principal_isolation_and_canonical
             principal_id: PRINCIPAL_ID.to_owned(),
             accounting_key_id: Some("accounting-key".to_owned()),
             upstream_id: UPSTREAM_ID,
+            cycle_id: None,
             model: "claude-opus-4-1".to_owned(),
             input_tokens: 101,
             output_tokens: 23,

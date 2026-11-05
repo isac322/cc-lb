@@ -64,6 +64,7 @@ describe('CacheKeepaliveCard', () => {
         renewing_now: 1,
         sessions_last_5m: 2,
         renewals_fired: 3,
+        retained_successful_hits: 3,
         cost_saved: 4.56,
       },
     } as unknown as ReturnType<typeof queries.useCacheKeepaliveSummary>);
@@ -98,6 +99,7 @@ describe('CacheKeepaliveCard', () => {
         renewing_now: 1000,
         sessions_last_5m: 2000,
         renewals_fired: 3182,
+        retained_successful_hits: 3182,
         cost_saved: 4.56,
       },
     } as unknown as ReturnType<typeof queries.useCacheKeepaliveSummary>);
@@ -111,15 +113,15 @@ describe('CacheKeepaliveCard', () => {
     ).toBeDefined();
 
     expect(screen.getByText('Renewing now')).toBeDefined();
-    expect(screen.getByText('scheduled or mid-renewal')).toBeDefined();
+    expect(screen.getByText('current scheduled or mid-renewal')).toBeDefined();
     expect(screen.getByText('1,000')).toBeDefined();
 
     expect(screen.getByText('Sessions (last 5m)')).toBeDefined();
-    expect(screen.getByText('seen in last 5 min')).toBeDefined();
+    expect(screen.getByText('seen in last five minutes')).toBeDefined();
     expect(screen.getByText('2,000')).toBeDefined();
 
     expect(screen.getByText('Renewals fired')).toBeDefined();
-    expect(screen.getByText('all-time')).toBeDefined();
+    expect(screen.getByText('retained history')).toBeDefined();
     expect(screen.getByText('3,182')).toBeDefined();
 
     expect(screen.getByText('Cost saved')).toBeDefined();
@@ -269,6 +271,7 @@ describe('CacheKeepaliveCard', () => {
         renewing_now: 99,
         sessions_last_5m: 2,
         renewals_fired: 3,
+        retained_successful_hits: 3,
         cost_saved: 4.56,
       },
     } as unknown as ReturnType<typeof queries.useCacheKeepaliveSummary>);
@@ -306,6 +309,7 @@ describe('CacheKeepaliveCard', () => {
         renewing_now: 99,
         sessions_last_5m: 2,
         renewals_fired: 3,
+        retained_successful_hits: 3,
         cost_saved: 4.56,
       },
     } as unknown as ReturnType<typeof queries.useCacheKeepaliveSummary>);
@@ -323,5 +327,77 @@ describe('CacheKeepaliveCard', () => {
     const renewingNow = screen.getByText('99');
     expect(renewingNow.className).not.toContain('flash-text-active');
     expect(renewingNow.style.animation).toBe('');
+  });
+  it('shows an inline retry surface when the summary cannot be loaded', () => {
+    const refetch = vi.fn();
+    vi.mocked(queries.useCacheKeepaliveSummary).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new Error('summary unavailable'),
+      refetch,
+    } as unknown as ReturnType<typeof queries.useCacheKeepaliveSummary>);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Unable to load cache keepalive summary.',
+    );
+    const retry = screen.getByRole('button', { name: 'Retry summary' });
+    fireEvent.click(retry);
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('formats negative retained savings with a typographic minus', () => {
+    vi.mocked(queries.useCacheKeepaliveSummary).mockReturnValue({
+      data: {
+        renewing_now: 1,
+        sessions_last_5m: 2,
+        renewals_fired: 3,
+        retained_successful_hits: 0,
+        cost_saved: -4.04,
+        total_spent: 4.04,
+        total_avoided: 0,
+        evidence_status: 'observed',
+        unknown_cycles: 0,
+        retained_from_ms: null,
+      },
+      isLoading: false,
+      isError: false,
+    } as never);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+
+    expect(screen.getByText('−$4.04')).toBeDefined();
+    expect(screen.queryByText('$-4.04')).toBeNull();
+  });
+
+  it('keeps the last summary visible with an inline stale refresh error', () => {
+    const refetch = vi.fn();
+    vi.mocked(queries.useCacheKeepaliveSummary).mockReturnValue({
+      data: {
+        renewing_now: 7,
+        sessions_last_5m: 1,
+        renewals_fired: 9,
+        retained_successful_hits: 9,
+        cost_saved: 2.5,
+        total_spent: 1,
+        total_avoided: 3.5,
+        evidence_status: 'observed',
+        unknown_cycles: 0,
+        retained_from_ms: null,
+      },
+      isLoading: false,
+      isError: true,
+      refetch,
+    } as never);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+
+    expect(
+      screen.getByText('Refresh failed. Showing the last successful summary.'),
+    ).toBeDefined();
+    expect(screen.getByText('7')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(refetch).toHaveBeenCalledTimes(1);
   });
 });

@@ -75,7 +75,12 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
     assert!(body["summary"]["renewing_now"].is_number());
     assert!(body["summary"]["sessions_last_5m"].is_number());
     assert!(body["summary"]["renewals_fired"].is_number());
-    assert!(body["summary"]["cost_saved"].is_number());
+    assert_eq!(body["summary"]["cost_saved"], -0.0432);
+    assert_eq!(body["summary"]["total_spent"], 0.0432);
+    assert_eq!(body["summary"]["total_avoided"], 0.0);
+    assert_eq!(body["summary"]["evidence_status"], "observed");
+    assert_eq!(body["summary"]["unknown_cycles"], 0);
+    assert!(body["summary"]["retained_from_ms"].is_null());
     assert_eq!(body["rows"], serde_json::json!([]));
     assert!(body["next_cursor"].is_null());
 }
@@ -105,6 +110,7 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
             principal_id: principal_id.clone(),
             accounting_key_id: None,
             upstream_id: upstream.id,
+            cycle_id: uuid::Uuid::nil(),
             cache_anchor_at_unix_secs: NOW_UNIX_SECS,
             ttl: CacheTtl::Ttl5m,
             run_at_unix_secs: NOW_UNIX_SECS + 270,
@@ -181,7 +187,7 @@ async fn cache_keepalive_detail_returns_frozen_multi_turn_fields() {
         "renewal_tokens",
         "total_avoided",
         "total_spent",
-        "total_renewals",
+        "total_renewals_current_cycle",
         "is_last_pending",
         "turns",
         "config_snapshot",
@@ -335,5 +341,5 @@ async fn cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malfor
 
     // Then: detail exposes its raw record without fabricating renewal activity.
     assert_eq!(detail["raw_record"]["principal_id"], principal_id);
-    assert_eq!(detail["total_renewals"], 0);
+    assert_eq!(detail["total_renewals_current_cycle"], 0);
 }

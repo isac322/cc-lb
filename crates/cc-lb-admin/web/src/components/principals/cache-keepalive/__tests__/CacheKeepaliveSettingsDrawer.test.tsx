@@ -8,7 +8,7 @@ import {
   within,
 } from '@testing-library/react';
 import { useState } from 'react';
-import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -50,7 +50,9 @@ const mockPrincipalEmpty: queries.Principal = {
   ...mockPrincipal,
   cache_keepalive: null,
 };
-
+function freshPrincipal(): queries.Principal {
+  return structuredClone(mockPrincipal);
+}
 function renderWithProviders(ui: React.ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -62,6 +64,11 @@ function renderWithProviders(ui: React.ReactElement) {
 
 describe('CacheKeepaliveSettingsDrawer', () => {
   let mutateMock: Mock;
+  afterEach(() => {
+    cleanup();
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
 
   beforeEach(() => {
     mutateMock = vi.fn();
@@ -137,7 +144,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       <CacheKeepaliveSettingsDrawer
         open={true}
         onOpenChange={() => {}}
-        principal={mockPrincipal}
+        principal={freshPrincipal()}
       />,
     );
 
@@ -193,7 +200,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       <CacheKeepaliveSettingsDrawer
         open={true}
         onOpenChange={() => {}}
-        principal={mockPrincipal}
+        principal={freshPrincipal()}
       />,
     );
 
@@ -403,8 +410,71 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     expect(inputs[0].value).toBe('77');
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalledWith(
-      'Principal was modified by another user. Please refresh and try again.',
+      'Principal was modified by another user. Review the latest revision before saving again.',
     );
+  });
+  it('merges latest server config into preserved edits before retrying a conflict', async () => {
+    const latestPrincipal: queries.Principal = {
+      ...mockPrincipal,
+      revision: 43,
+      cache_keepalive: {
+        ...mockPrincipal.cache_keepalive!,
+        refresh_lead_time_1h_secs: 301,
+      },
+    };
+    const refetch = vi.fn().mockResolvedValue({
+      data: { principals: [latestPrincipal] },
+    });
+    vi.spyOn(queries, 'usePrincipals').mockReturnValue({
+      data: { principals: [latestPrincipal] },
+      refetch,
+    } as never);
+    mutateMock
+      .mockImplementationOnce(
+        (_vars: unknown, options: { onError: (error: Error) => void }) => {
+          options.onError(
+            new ApiError(
+              409,
+              'stale_revision',
+              { error: 'stale_revision' },
+              'stale revision',
+            ),
+          );
+        },
+      )
+      .mockImplementationOnce(() => undefined);
+
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const inputs = screen.getAllByRole('spinbutton') as HTMLInputElement[];
+    fireEvent.change(inputs[0], { target: { value: '77' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => {
+      const useLatest = screen.getByRole('button', {
+        name: 'Use latest revision',
+      });
+      expect(useLatest.hasAttribute('disabled')).toBe(false);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Use latest revision' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(mutateMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        expected_revision: 43,
+        cache_keepalive: expect.objectContaining({
+          refresh_lead_time_5m_secs: 77,
+          refresh_lead_time_1h_secs: 301,
+        }),
+      }),
+      expect.any(Object),
+    );
+    vi.mocked(queries.usePrincipals).mockRestore();
   });
 
   it.each([
@@ -428,7 +498,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     expect(toast.error).toHaveBeenCalledWith(
-      'Principal was modified by another user. Please refresh and try again.',
+      'Principal was modified by another user. Review the latest revision before saving again.',
     );
   });
 
@@ -477,6 +547,31 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     expect(mutateMock).not.toHaveBeenCalled();
   });
 
+  it('keeps blank numeric drafts distinct from intentional zero', () => {
+    cleanup();
+    mutateMock.mockReset();
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const dialog = screen.getByRole('dialog', {
+      name: 'Cache keepalive settings',
+    });
+    const input = within(dialog).getAllByLabelText(
+      'Renewal lead time · 5m TTL',
+    )[0] as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '' } });
+    expect(input.value).toBe('');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+    expect(mutateMock).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(
+      'Numeric fields must be valid non-negative numbers',
+    );
+  });
   it('locks every control and retains the drawer while saving', () => {
     cleanup();
     const onOpenChange = vi.fn();

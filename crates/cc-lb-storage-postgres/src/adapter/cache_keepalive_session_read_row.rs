@@ -75,6 +75,7 @@ pub(crate) fn turn_from_row(row: PgRow) -> StorageResult<CacheKeepaliveTurnRecor
         principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
         accounting_key_id: row.try_get("accounting_key_id").map_err(map_sqlx_error)?,
         upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
+        cycle_id: row.try_get("cycle_id").map_err(map_sqlx_error)?,
         model: row.try_get("model").map_err(map_sqlx_error)?,
         input_tokens: i64_to_u64(
             row.try_get("input_tokens").map_err(map_sqlx_error)?,

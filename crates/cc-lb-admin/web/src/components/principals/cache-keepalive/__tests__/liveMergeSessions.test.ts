@@ -9,6 +9,7 @@ describe('mergeLiveSessions', () => {
   ): CacheKeepaliveRow => ({
     id,
     state,
+    is_active: state === 'renewed' || state === 'scheduled',
     last_message_at_ms: 0,
     ttl: null,
     attempts: null,
@@ -18,6 +19,9 @@ describe('mergeLiveSessions', () => {
     upstream: null,
     error: null,
     net_pnl: 0,
+    total_spent: 0,
+    total_avoided: null,
+    evidence_status: 'none',
     session_key_hash: 'hash',
   });
 

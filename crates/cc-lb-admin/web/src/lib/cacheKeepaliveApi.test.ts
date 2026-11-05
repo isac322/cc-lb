@@ -28,7 +28,13 @@ describe('CacheKeepaliveSummarySchema', () => {
       renewing_now: 2,
       sessions_last_5m: 5,
       renewals_fired: 128,
+      retained_successful_hits: 96,
       cost_saved: 12.47,
+      total_spent: 4.18,
+      total_avoided: 16.65,
+      evidence_status: 'observed',
+      unknown_cycles: 0,
+      retained_from_ms: 1_699_395_200_000,
     });
   });
 

@@ -298,6 +298,7 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
             },
             status: 200,
             duration: Duration::from_millis(7),
+            request_start_ms: 0,
             accounting_guard,
         })),
     });

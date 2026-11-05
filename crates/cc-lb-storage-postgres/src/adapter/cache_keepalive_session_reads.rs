@@ -5,7 +5,7 @@ use cc_lb_storage_api::{
     CacheKeepaliveSessionReadStore, CacheKeepaliveSummaryInput, CacheKeepaliveTurnRecord,
     StorageError, StorageResult,
 };
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{Postgres, QueryBuilder, Row};
 
 use super::{
     PostgresStorage,
@@ -32,7 +32,7 @@ SELECT \
     NULL::TEXT AS decision, \
     CASE terminal_reason \
         WHEN 'max_refreshes' THEN 'max renewals reached' \
-        WHEN 'max_duration' THEN 'max duration reached (4h)' \
+        WHEN 'max_duration' THEN 'max duration reached' \
         WHEN 'expired' THEN 'TTL expired before follow-up' \
         WHEN 'dispatch_error' THEN 'renewal dispatch unavailable' \
         ELSE display_reason \
@@ -81,6 +81,7 @@ SELECT
     principal_id,
     accounting_key_id,
     upstream_id,
+    cycle_id,
     model,
     input_tokens,
     output_tokens,
@@ -126,10 +127,12 @@ fn push_session_filter(builder: &mut QueryBuilder<Postgres>, filter: CacheKeepal
             builder.push(" AND status = 'active' AND refresh_count = 0");
         }
         CacheKeepaliveSessionFilter::Capped => {
-            builder.push(" AND terminal_reason IN ('max_refreshes', 'max_duration')");
+            builder.push(
+                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss')",
+            );
         }
         CacheKeepaliveSessionFilter::Expired => {
-            builder.push(" AND terminal_reason = 'expired'");
+            builder.push(" AND terminal_reason IN ('expired', 'cache_miss')");
         }
         CacheKeepaliveSessionFilter::NotTracked => unreachable!("session branch is omitted"),
     }
@@ -451,7 +454,209 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         source_ref_id: &str,
     ) -> StorageResult<Option<CacheKeepaliveDecisionRecord>> {
         let row = sqlx::query("SELECT * FROM cache_keepalive_decisions WHERE principal_id = $1 AND source_ref_id = $2")
-            .bind(principal_id).bind(source_ref_id).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
+            .bind(principal_id)
+            .bind(source_ref_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
         row.map(decision_from_row).transpose()
     }
+
+    async fn list_cache_keepalive_evidence(
+        &self,
+        principal_id: &str,
+    ) -> StorageResult<Vec<cc_lb_storage_api::CacheKeepaliveEvidenceRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM cache_keepalive_evidence WHERE principal_id = $1 ORDER BY request_start_ms ASC, evidence_id ASC",
+        )
+        .bind(principal_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter().map(postgres_evidence_from_row).collect()
+    }
+
+    async fn read_cache_keepalive_summary_aggregate(
+        &self,
+        principal_id: &str,
+        cutoff_ms: u64,
+    ) -> StorageResult<cc_lb_storage_api::CacheKeepaliveSummaryAggregate> {
+        let cutoff_ms = query_u64_to_i64(
+            cutoff_ms,
+            "cache_keepalive_summary_cutoff_ms",
+            "value exceeds i64::MAX",
+        )?;
+        let row = sqlx::query(
+            "SELECT
+                (SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = $1 AND status = 'active') AS renewing_now,
+                ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = $2 AND last_message_at_ms >= $3)
+                 + (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = $4 AND last_message_at_ms >= $5 AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id))) AS sessions_last_5m,
+                (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = $6 AND last_message_at_ms >= $7 AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id)) AS recent_decisions,
+                (SELECT COALESCE(SUM(cost_micros), 0) FROM cache_keepalive_turns WHERE principal_id = $8) AS total_spent_micros,
+                (SELECT COUNT(*) FROM cache_keepalive_turns WHERE principal_id = $9 AND lower(hit_miss) = 'hit') AS successful_hits,
+                COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND (cycle_id IS NULL OR prefix_fingerprint IS NULL OR prefix_hash IS NULL OR prefix_policy_version IS NULL OR prefix_schema_version IS NULL) THEN 1 ELSE 0 END), 0) AS unknown_cycles,
+                MIN(request_start_ms) AS retained_from_ms
+             FROM cache_keepalive_evidence
+             WHERE principal_id = $10",
+        )
+        .bind(principal_id)
+        .bind(principal_id)
+        .bind(cutoff_ms)
+        .bind(principal_id)
+        .bind(cutoff_ms)
+        .bind(principal_id)
+        .bind(cutoff_ms)
+        .bind(principal_id)
+        .bind(principal_id)
+        .bind(principal_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        let unknown_cycles: u64 = row
+            .try_get::<i64, _>("unknown_cycles")
+            .map_err(map_sqlx_error)?
+            .try_into()
+            .map_err(|_| StorageError::Corrupted {
+                message: "negative cache keepalive unknown cycle count".to_owned(),
+            })?;
+        let successful_hits: u64 = row
+            .try_get::<i64, _>("successful_hits")
+            .map_err(map_sqlx_error)?
+            .try_into()
+            .map_err(|_| StorageError::Corrupted {
+                message: "negative cache keepalive successful hit count".to_owned(),
+            })?;
+        let group_rows = sqlx::query(
+            "WITH ranked AS (
+                SELECT e.*, ROW_NUMBER() OVER (PARTITION BY cycle_id ORDER BY request_start_ms, evidence_id) AS rn
+                FROM cache_keepalive_evidence e
+                WHERE e.principal_id = $1 AND e.evidence_kind = 'renewal' AND e.cycle_id IS NOT NULL
+             )
+             SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0) AS avoided_cache_read_tokens
+             FROM ranked r
+             WHERE r.rn = 1
+               AND EXISTS (
+                   SELECT 1 FROM cache_keepalive_evidence f
+                   WHERE f.principal_id = r.principal_id
+                     AND f.evidence_kind = 'follow_up'
+                     AND COALESCE(f.cache_read_input_tokens, 0) > 0
+                     AND f.prefix_fingerprint = r.prefix_fingerprint
+                     AND f.prefix_hash = r.prefix_hash
+                     AND f.request_start_ms > r.request_start_ms
+                     AND f.request_start_ms <= r.request_start_ms + CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+               )
+             GROUP BY r.model, r.ttl
+             ORDER BY r.model, r.ttl",
+        )
+        .bind(principal_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        let groups = group_rows
+            .into_iter()
+            .map(|row| {
+                Ok(cc_lb_storage_api::CacheKeepaliveSummaryGroup {
+                    model: row.try_get("model").map_err(map_sqlx_error)?,
+                    ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(Some(
+                        &row.try_get::<String, _>("ttl").map_err(map_sqlx_error)?,
+                    )),
+                    avoided_cache_read_tokens: u64::try_from(
+                        row.try_get::<i64, _>("avoided_cache_read_tokens")
+                            .map_err(map_sqlx_error)?,
+                    )
+                    .map_err(|_| StorageError::Corrupted {
+                        message: "negative cache keepalive avoided token count".to_owned(),
+                    })?,
+                })
+            })
+            .collect::<StorageResult<Vec<_>>>()?;
+        Ok(cc_lb_storage_api::CacheKeepaliveSummaryAggregate {
+            renewing_now: row
+                .try_get::<i64, _>("renewing_now")
+                .map_err(map_sqlx_error)?
+                .try_into()
+                .map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive renewing_now".to_owned(),
+                })?,
+            sessions_last_5m: row
+                .try_get::<i64, _>("sessions_last_5m")
+                .map_err(map_sqlx_error)?
+                .try_into()
+                .map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive sessions_last_5m".to_owned(),
+                })?,
+            recent_decisions: row
+                .try_get::<i64, _>("recent_decisions")
+                .map_err(map_sqlx_error)?
+                .try_into()
+                .map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive recent decisions".to_owned(),
+                })?,
+            total_spent_micros: row.try_get("total_spent_micros").map_err(map_sqlx_error)?,
+            successful_hits,
+            unknown_cycles,
+            retained_from_ms: row
+                .try_get::<Option<i64>, _>("retained_from_ms")
+                .map_err(map_sqlx_error)?
+                .map(|value| {
+                    u64::try_from(value).map_err(|_| StorageError::Corrupted {
+                        message: "negative cache keepalive retained_from_ms".to_owned(),
+                    })
+                })
+                .transpose()?,
+            evidence_status: if unknown_cycles > 0 {
+                "unknown".to_owned()
+            } else if successful_hits > 0 {
+                "observed".to_owned()
+            } else {
+                "none".to_owned()
+            },
+            groups,
+        })
+    }
+}
+
+fn postgres_evidence_from_row(
+    row: sqlx::postgres::PgRow,
+) -> StorageResult<cc_lb_storage_api::CacheKeepaliveEvidenceRecord> {
+    use sqlx::Row;
+    Ok(cc_lb_storage_api::CacheKeepaliveEvidenceRecord {
+        evidence_id: row.try_get("evidence_id").map_err(map_sqlx_error)?,
+        cycle_id: row.try_get("cycle_id").map_err(map_sqlx_error)?,
+        evidence_kind: row.try_get("evidence_kind").map_err(map_sqlx_error)?,
+        request_start_ms: u64::try_from(
+            row.try_get::<i64, _>("request_start_ms")
+                .map_err(map_sqlx_error)?,
+        )
+        .map_err(|_| StorageError::Corrupted {
+            message: "negative cache keepalive evidence request_start_ms".to_owned(),
+        })?,
+        prefix_fingerprint: row.try_get("prefix_fingerprint").map_err(map_sqlx_error)?,
+        prefix_hash: row.try_get("prefix_hash").map_err(map_sqlx_error)?,
+        prefix_policy_version: row
+            .try_get("prefix_policy_version")
+            .map_err(map_sqlx_error)?,
+        prefix_schema_version: row
+            .try_get("prefix_schema_version")
+            .map_err(map_sqlx_error)?,
+        principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
+        upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
+        model: row.try_get("model").map_err(map_sqlx_error)?,
+        ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(Some(
+            &row.try_get::<String, _>("ttl").map_err(map_sqlx_error)?,
+        )),
+        hit_miss: row.try_get("hit_miss").map_err(map_sqlx_error)?,
+        cache_read_input_tokens: row
+            .try_get::<Option<i64>, _>("cache_read_input_tokens")
+            .map_err(map_sqlx_error)?
+            .map(|value| {
+                u64::try_from(value).map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive evidence cache_read_input_tokens".to_owned(),
+                })
+            })
+            .transpose()?,
+        cost_micros: row.try_get("cost_micros").map_err(map_sqlx_error)?,
+        request_ref: row.try_get("request_ref").map_err(map_sqlx_error)?,
+        event_ref: row.try_get("event_ref").map_err(map_sqlx_error)?,
+    })
 }

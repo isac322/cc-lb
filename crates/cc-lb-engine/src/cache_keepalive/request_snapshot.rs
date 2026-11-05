@@ -33,6 +33,10 @@ pub struct RequestSnapshot {
     pub body: Bytes,
     pub upstream_id: Uuid,
     pub ttl: CacheTtl,
+    pub(crate) prefix_fingerprint: Option<String>,
+    pub(crate) prefix_hash: Option<String>,
+    pub(crate) prefix_policy_version: Option<String>,
+    pub(crate) prefix_schema_version: Option<String>,
     keepalive_body: Bytes,
     keepalive_model: String,
 }
@@ -45,6 +49,14 @@ pub struct PersistedRequestSnapshot {
     pub body: Vec<u8>,
     pub upstream_id: Uuid,
     pub ttl: CacheTtl,
+    #[serde(default)]
+    pub prefix_fingerprint: Option<String>,
+    #[serde(default)]
+    pub prefix_hash: Option<String>,
+    #[serde(default)]
+    pub prefix_policy_version: Option<String>,
+    #[serde(default)]
+    pub prefix_schema_version: Option<String>,
 }
 
 impl fmt::Debug for PersistedRequestSnapshot {
@@ -135,13 +147,46 @@ impl RequestSnapshot {
             body,
             upstream_id,
             ttl,
+            prefix_fingerprint: None,
+            prefix_hash: None,
+            prefix_policy_version: None,
+            prefix_schema_version: None,
             keepalive_body: Bytes::from(keepalive_body),
             keepalive_model,
         })
     }
+    pub(crate) fn with_prefix_evidence(
+        mut self,
+        prefix_fingerprint: Option<String>,
+        prefix_hash: Option<String>,
+        prefix_policy_version: Option<String>,
+        prefix_schema_version: Option<String>,
+    ) -> Self {
+        self.prefix_fingerprint = prefix_fingerprint;
+        self.prefix_hash = prefix_hash;
+        self.prefix_policy_version = prefix_policy_version;
+        self.prefix_schema_version = prefix_schema_version;
+        self
+    }
 
     pub fn keepalive_model(&self) -> &str {
         &self.keepalive_model
+    }
+
+    pub fn prefix_fingerprint(&self) -> Option<&str> {
+        self.prefix_fingerprint.as_deref()
+    }
+
+    pub fn prefix_hash(&self) -> Option<&str> {
+        self.prefix_hash.as_deref()
+    }
+
+    pub fn prefix_policy_version(&self) -> Option<&str> {
+        self.prefix_policy_version.as_deref()
+    }
+
+    pub fn prefix_schema_version(&self) -> Option<&str> {
+        self.prefix_schema_version.as_deref()
     }
 
     pub fn build_keepalive_body(&self) -> Result<Bytes, SnapshotError> {
@@ -163,6 +208,10 @@ impl RequestSnapshot {
             body: self.body.to_vec(),
             upstream_id: self.upstream_id,
             ttl: self.ttl,
+            prefix_fingerprint: self.prefix_fingerprint.clone(),
+            prefix_hash: self.prefix_hash.clone(),
+            prefix_policy_version: self.prefix_policy_version.clone(),
+            prefix_schema_version: self.prefix_schema_version.clone(),
         }
     }
 
@@ -180,7 +229,11 @@ impl RequestSnapshot {
                 HeaderValue::from_bytes(&header.value).map_err(|_| SnapshotError::InvalidHeader)?;
             headers.insert(name, value);
         }
-        Self::capture(
+        let prefix_fingerprint = persisted.prefix_fingerprint;
+        let prefix_hash = persisted.prefix_hash;
+        let prefix_policy_version = persisted.prefix_policy_version;
+        let prefix_schema_version = persisted.prefix_schema_version;
+        let snapshot = Self::capture(
             url,
             method,
             headers,
@@ -188,7 +241,13 @@ impl RequestSnapshot {
             persisted.upstream_id,
             persisted.ttl,
             usize::MAX,
-        )
+        )?;
+        Ok(snapshot.with_prefix_evidence(
+            prefix_fingerprint,
+            prefix_hash,
+            prefix_policy_version,
+            prefix_schema_version,
+        ))
     }
 }
 
@@ -896,8 +955,11 @@ mod tests {
             body: b"plaintext prompt".to_vec(),
             upstream_id: Uuid::from_u128(7),
             ttl: CacheTtl::Ttl5m,
+            prefix_fingerprint: None,
+            prefix_hash: None,
+            prefix_policy_version: None,
+            prefix_schema_version: None,
         };
-
         let debug = format!("{snapshot:?}");
 
         assert!(!debug.contains("plaintext prompt"));

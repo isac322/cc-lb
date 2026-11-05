@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
-    RequestEventExportPage, RequestEventHistogramBucket, RequestEventHistogramQuery,
-    RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem,
-    RequestEventListQuery, RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery,
-    RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
-    StorageResult, model_filter_like_patterns, model_filter_matches,
-    normalize_usage_rollup_dimension,
+    CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow, CacheKeepaliveProjectionStore,
+    CacheKeepaliveTurnRow, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
+    RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
+    RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
+    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
+    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
+    model_filter_matches, normalize_usage_rollup_dimension,
 };
 use sqlx::{AssertSqlSafe, Row};
 use std::{collections::BTreeMap, time::Instant};
@@ -60,6 +60,25 @@ impl RequestEventStore for SqliteStorage {
             insert_keepalive_turn_in_tx(&mut tx, turn).await?;
         }
         insert_keepalive_decision_in_tx(&mut tx, &projections.decision).await?;
+        for evidence in &projections.evidence {
+            insert_keepalive_evidence_in_tx(&mut tx, evidence).await?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        i64_to_u64(id, "request event cursor")
+    }
+    async fn append_request_event_with_evidence(
+        &self,
+        event: &RequestEvent,
+        evidence: &CacheKeepaliveEvidenceRow,
+    ) -> StorageResult<u64> {
+        let event_id = storage_event_id(event)?;
+        let mut tx = self.begin_immediate().await?;
+        let inserted_id = insert_request_event_in_tx(&mut tx, event, event_id).await?;
+        let id = match inserted_id {
+            Some(id) => id,
+            None => select_existing_event_id_in_tx(&mut tx, event_id).await?,
+        };
+        insert_keepalive_evidence_in_tx(&mut tx, evidence).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(id, "request event cursor")
     }
@@ -1156,8 +1175,8 @@ async fn insert_keepalive_turn_in_tx(
 ) -> StorageResult<()> {
     sqlx::query(
         "INSERT INTO cache_keepalive_turns \
-         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(source_ref_id) DO NOTHING",
     )
     .bind(&row.source_ref_id)
@@ -1165,6 +1184,7 @@ async fn insert_keepalive_turn_in_tx(
     .bind(&row.principal_id)
     .bind(row.accounting_key_id.as_deref())
     .bind(row.upstream_id.to_string())
+    .bind(row.cycle_id.map(|id| id.to_string()))
     .bind(&row.model)
     .bind(u64_to_i64(row.input_tokens, "cache keepalive input_tokens")?)
     .bind(u64_to_i64(row.output_tokens, "cache keepalive output_tokens")?)
@@ -1223,6 +1243,51 @@ async fn insert_keepalive_decision_in_tx(
         "cache keepalive decision last_message_at_ms",
     )?)
     .bind(u64_to_i64(row.ts, "cache keepalive decision ts")?)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn insert_keepalive_evidence_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    row: &CacheKeepaliveEvidenceRow,
+) -> StorageResult<()> {
+    sqlx::query(
+        "INSERT INTO cache_keepalive_evidence \
+         (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint, prefix_hash, prefix_policy_version, prefix_schema_version,
+          principal_id, upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros, request_ref, event_ref, created_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(evidence_id) DO NOTHING",
+    )
+    .bind(&row.evidence_id)
+    .bind(row.cycle_id.map(|id| id.to_string()))
+    .bind(&row.evidence_kind)
+    .bind(u64_to_i64(
+        row.request_start_ms,
+        "cache keepalive evidence request_start_ms",
+    )?)
+    .bind(row.prefix_fingerprint.as_deref())
+    .bind(row.prefix_hash.as_deref())
+    .bind(row.prefix_policy_version.as_deref())
+    .bind(row.prefix_schema_version.as_deref())
+    .bind(&row.principal_id)
+    .bind(row.upstream_id.to_string())
+    .bind(&row.model)
+    .bind(cache_keepalive_ttl_to_db(row.ttl))
+    .bind(row.hit_miss.as_deref())
+    .bind(
+        row.cache_read_input_tokens
+            .map(|value| u64_to_i64(value, "cache keepalive evidence cache_read_input_tokens"))
+            .transpose()?,
+    )
+    .bind(row.cost_micros)
+    .bind(row.request_ref.as_deref())
+    .bind(row.event_ref.as_deref())
+    .bind(u64_to_i64(
+        row.request_start_ms,
+        "cache keepalive evidence created_at_ms",
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;

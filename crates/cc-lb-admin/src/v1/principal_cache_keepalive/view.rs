@@ -5,10 +5,12 @@ mod wire;
 
 use crate::cache_keepalive_view::{CacheKeepaliveActivitySource, derive_activity_view};
 use cc_lb_pricing::PriceCatalog;
+#[cfg(test)]
+use cc_lb_storage_api::CacheKeepaliveSessionStatus;
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem,
-    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
-    CacheKeepaliveTurnRecord, Storage, StorageError, StorageResult, UpstreamStore,
+    CacheKeepaliveEvidenceRecord, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem,
+    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionRecord, CacheKeepaliveTurnRecord, Storage,
+    StorageError, StorageResult, UpstreamStore,
 };
 use uuid::Uuid;
 
@@ -35,10 +37,14 @@ struct LoadedActivity {
 
 pub(crate) struct CacheKeepaliveActivityBatch {
     turns_by_session: HashMap<String, Vec<CacheKeepaliveTurnRecord>>,
+    evidence: Vec<CacheKeepaliveEvidenceRecord>,
 }
 
 impl CacheKeepaliveActivityBatch {
-    pub(crate) fn from_turns(turns: Vec<CacheKeepaliveTurnRecord>) -> Self {
+    pub(crate) fn from_turns(
+        turns: Vec<CacheKeepaliveTurnRecord>,
+        evidence: Vec<CacheKeepaliveEvidenceRecord>,
+    ) -> Self {
         let mut turns_by_session: HashMap<String, Vec<CacheKeepaliveTurnRecord>> = HashMap::new();
         for turn in turns {
             turns_by_session
@@ -46,7 +52,10 @@ impl CacheKeepaliveActivityBatch {
                 .or_default()
                 .push(turn);
         }
-        Self { turns_by_session }
+        Self {
+            turns_by_session,
+            evidence,
+        }
     }
 
     fn turns_for_item(
@@ -96,9 +105,12 @@ pub(super) async fn load_activity_batch<'a>(
         &session_key_hashes,
     )
     .await?;
-    Ok(CacheKeepaliveActivityBatch::from_turns(turns))
+    let evidence =
+        CacheKeepaliveSessionReadStore::list_cache_keepalive_evidence(storage, principal_id)
+            .await?;
+    Ok(CacheKeepaliveActivityBatch::from_turns(turns, evidence))
 }
-
+#[cfg(test)]
 pub(crate) fn summary_for_items(
     catalog: &PriceCatalog,
     now_ms: u64,
@@ -108,8 +120,18 @@ pub(crate) fn summary_for_items(
     let mut renewing_now = 0_u64;
     let mut sessions_last_5m = 0_u64;
     let mut renewals_fired = 0_u64;
+    let mut total_spent_micros = 0_i64;
+    let mut total_avoided_micros = 0_i64;
     let mut cost_saved_micros = 0_i64;
+    let mut unknown_cycles = 0_u64;
+    let mut evidence_status = "none";
     let cutoff = now_ms.saturating_sub(FIVE_MINUTES_MS);
+    let mut retained_from_ms: Option<u64> = None;
+    for evidence in &batch.evidence {
+        retained_from_ms = Some(retained_from_ms.map_or(evidence.request_start_ms, |value| {
+            value.min(evidence.request_start_ms)
+        }));
+    }
     for item in items {
         if item.last_message_at_ms >= cutoff {
             sessions_last_5m = sessions_last_5m.saturating_add(1);
@@ -117,18 +139,44 @@ pub(crate) fn summary_for_items(
         if matches!(item.status, Some(CacheKeepaliveSessionStatus::Active)) {
             renewing_now = renewing_now.saturating_add(1);
         }
-        renewals_fired = renewals_fired.saturating_add(u64::from(item.refresh_count.unwrap_or(0)));
-        // Summary P&L depends only on list items and turns; never load encrypted sessions.
         let activity = activity_for_item(catalog, now_ms, item, None, batch)?;
+        total_spent_micros = total_spent_micros.saturating_add(activity.total_spent_micros);
+        unknown_cycles = unknown_cycles.saturating_add(activity.unknown_cycles);
+        if activity.evidence_status == "unknown" {
+            evidence_status = "unknown";
+        } else if activity.evidence_status == "pending" && evidence_status != "unknown" {
+            evidence_status = "pending";
+        } else if activity.evidence_status == "observed" && evidence_status == "none" {
+            evidence_status = "observed";
+        }
+        let turns = batch.turns_for_item(item)?;
+        renewals_fired = renewals_fired.saturating_add(
+            turns
+                .iter()
+                .filter(|turn| turn.hit_miss.eq_ignore_ascii_case("hit"))
+                .count() as u64,
+        );
         if let Some(pnl) = activity.pnl {
             cost_saved_micros = cost_saved_micros.saturating_add(pnl.net_micros);
+            total_avoided_micros = total_avoided_micros.saturating_add(pnl.avoided_micros);
         }
     }
+    let economics_known = evidence_status == "observed";
     Ok(CacheKeepaliveSummaryResponse {
         renewing_now,
         sessions_last_5m,
         renewals_fired,
-        cost_saved: dollars_from_micros(cost_saved_micros)?,
+        retained_successful_hits: renewals_fired,
+        cost_saved: economics_known
+            .then(|| dollars_from_micros(cost_saved_micros))
+            .transpose()?,
+        total_spent: dollars_from_micros(total_spent_micros)?,
+        total_avoided: economics_known
+            .then(|| dollars_from_micros(total_avoided_micros))
+            .transpose()?,
+        evidence_status: evidence_status.to_owned(),
+        unknown_cycles,
+        retained_from_ms,
     })
 }
 
@@ -177,8 +225,7 @@ pub(super) async fn detail_for_item(
         .await?
         .map(|upstream| upstream.name);
     let row = row_from_activity(context.max_attempts, item, &loaded.activity, upstream)?;
-    let total_avoided = loaded.activity.pnl.map_or(0, |pnl| pnl.avoided_micros);
-    let total_spent = loaded.activity.pnl.map_or(0, |pnl| pnl.spent_micros);
+    let economics_known = loaded.activity.evidence_status == "observed";
     let renewal_tokens = loaded.activity.turns.iter().fold(0_u64, |total, turn| {
         total.saturating_add(turn.renewal_tokens)
     });
@@ -187,25 +234,32 @@ pub(super) async fn detail_for_item(
         .turns
         .into_iter()
         .map(|turn| {
+            let followed_up = economics_known.then_some(turn.followed_up);
             Ok(CacheKeepaliveTurnResponse {
                 turn_number: turn.turn_number,
                 renewals: turn.renewals,
-                followed_up: turn.followed_up,
+                followed_up,
+                evidence_status: if followed_up.is_some() {
+                    "observed".to_owned()
+                } else {
+                    loaded.activity.evidence_status.clone()
+                },
                 label: turn.action.to_owned(),
                 time_ms: turn.time_ms,
-                pnl: turn
-                    .pnl
-                    .map(|pnl| dollars_from_micros(pnl.net_micros))
-                    .transpose()?,
+                pnl: if economics_known {
+                    turn.pnl
+                        .map(|pnl| dollars_from_micros(pnl.net_micros))
+                        .transpose()?
+                } else {
+                    None
+                },
                 pending: turn.pending,
             })
         })
         .collect::<StorageResult<Vec<_>>>()?;
     Ok(CacheKeepaliveDetailResponse {
         renewal_tokens,
-        total_avoided: dollars_from_micros(total_avoided)?,
-        total_spent: dollars_from_micros(total_spent)?,
-        total_renewals: loaded.activity.total_renewals,
+        total_renewals_current_cycle: loaded.activity.total_renewals,
         is_last_pending: loaded.activity.is_last_pending,
         config_snapshot: item.config_snapshot.as_ref().map(config_snapshot),
         raw_record: raw_record(item, loaded.session.as_ref()),
@@ -234,7 +288,18 @@ pub(crate) fn row_from_activity(
         generation: item.generation,
         upstream,
         error: item.error.clone(),
-        net_pnl: dollars_from_micros(activity.pnl.map_or(0, |pnl| pnl.net_micros))?,
+        is_active: activity.is_active,
+        net_pnl: activity
+            .pnl
+            .filter(|_| activity.evidence_status == "observed")
+            .map(|pnl| dollars_from_micros(pnl.net_micros))
+            .transpose()?,
+        total_spent: dollars_from_micros(activity.total_spent_micros)?,
+        total_avoided: activity
+            .total_avoided_micros
+            .map(dollars_from_micros)
+            .transpose()?,
+        evidence_status: activity.evidence_status.clone(),
         session_key_hash: item
             .session_key_hash
             .clone()
@@ -254,6 +319,7 @@ pub(crate) fn activity_for_item(
             item,
             session,
             turns: batch.turns_for_item(item)?,
+            evidence: &batch.evidence,
             now_ms,
         },
         catalog,
@@ -290,11 +356,17 @@ async fn load_detail_activity(
         }
         CacheKeepaliveSessionEntrySource::Decision => (None, Vec::new()),
     };
+    let evidence = CacheKeepaliveSessionReadStore::list_cache_keepalive_evidence(
+        context.storage,
+        &item.principal_id,
+    )
+    .await?;
     let activity = derive_activity_view(
         CacheKeepaliveActivitySource {
             item,
             session: session.as_ref(),
             turns: &turns,
+            evidence: &evidence,
             now_ms: context.now_ms,
         },
         context.catalog,

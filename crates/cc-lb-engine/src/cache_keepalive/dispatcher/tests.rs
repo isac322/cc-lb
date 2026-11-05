@@ -254,6 +254,7 @@ fn classifies_successful_cache_read_as_hit() {
         body,
         Duration::from_secs(2),
         Duration::from_millis(50),
+        0,
         accounting_guard(),
     );
 
@@ -281,6 +282,7 @@ fn classifies_zero_cache_read_as_miss() {
         body,
         Duration::ZERO,
         Duration::from_millis(25),
+        0,
         accounting_guard(),
     );
 
@@ -317,6 +319,7 @@ fn nested_anthropic_cache_creation_preserves_one_hour_accounting() {
         body,
         Duration::ZERO,
         Duration::from_millis(1),
+        0,
         accounting_guard(),
     );
     let finalization = match outcome {
@@ -424,6 +427,7 @@ fn classifies_cache_creation_with_canonical_ttl_split() {
             body.as_bytes(),
             Duration::ZERO,
             Duration::from_millis(25),
+            0,
             accounting_guard(),
         );
         let finalization = match outcome {
@@ -472,6 +476,7 @@ fn classifies_null_usage_as_zero_usage_miss() {
         br#"{"content":[],"stop_reason":"max_tokens","usage":null}"#,
         Duration::ZERO,
         Duration::from_millis(10),
+        0,
         accounting_guard(),
     );
     let finalization = match outcome {
@@ -503,6 +508,7 @@ fn classifies_mixed_cache_read_and_creation_as_hit() {
         body,
         Duration::from_secs(2),
         Duration::from_millis(50),
+        0,
         accounting_guard(),
     );
     let finalization = match outcome {
@@ -568,6 +574,7 @@ fn rejects_malformed_success_usage_without_relaxing_flat_counters() {
             body.as_bytes(),
             Duration::ZERO,
             Duration::from_millis(1),
+            0,
             accounting_guard(),
         );
         assert!(matches!(outcome, DispatchOutcome::Error(_)), "{name}");
@@ -582,6 +589,7 @@ fn classifies_missing_usage_as_miss() {
         body,
         Duration::ZERO,
         Duration::from_millis(10),
+        0,
         accounting_guard(),
     );
 
