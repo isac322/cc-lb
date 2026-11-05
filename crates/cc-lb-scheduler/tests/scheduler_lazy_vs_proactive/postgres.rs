@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
@@ -8,10 +7,6 @@ use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParam
 use cc_lb_storage_api::MetaStore;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ImageExt, runners::AsyncRunner},
-};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -25,7 +20,20 @@ use super::worker::{OAuthWorkerProbe, OAuthWorkerState, spawn_oauth_worker};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {
-    with_postgres_container(run_postgres_race).await
+    let url = std::env::var("CI_POSTGRES_URL").map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "postgres lazy/proactive race test requires CI_POSTGRES_URL for the prepared PostgreSQL service",
+        )
+    })?;
+    if url.trim().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "postgres lazy/proactive race test requires a non-empty CI_POSTGRES_URL for the prepared PostgreSQL service",
+        )
+        .into());
+    }
+    run_postgres_race(url).await
 }
 
 async fn run_postgres_race(url: String) -> TestResult<()> {
@@ -155,40 +163,4 @@ async fn postgres_metadata_count(pool: &sqlx::PgPool, upstream_id: Uuid) -> Test
     .bind(upstream_id.to_string())
     .fetch_one(pool)
     .await?)
-}
-
-async fn with_postgres_container<F, Fut>(run: F) -> TestResult<()>
-where
-    F: FnOnce(String) -> Fut,
-    Fut: Future<Output = TestResult<()>>,
-{
-    let docker_host = match std::env::var("DOCKER_HOST") {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!(
-                "SKIP: DOCKER_HOST not set for lazy/proactive race test; expected DOCKER_HOST=tcp://localhost:2375 ({error})"
-            );
-            return Ok(());
-        }
-    };
-    let container = match Postgres::default().with_tag("18-alpine").start().await {
-        Ok(container) => container,
-        Err(error) => {
-            eprintln!(
-                "SKIP: could not start postgres testcontainer using DOCKER_HOST={docker_host}: {error}"
-            );
-            return Ok(());
-        }
-    };
-    let port = match container.get_host_port_ipv4(5432).await {
-        Ok(port) => port,
-        Err(error) => {
-            eprintln!("SKIP: could not read postgres testcontainer port: {error}");
-            return Ok(());
-        }
-    };
-    run(format!(
-        "postgres://postgres:postgres@127.0.0.1:{port}/postgres"
-    ))
-    .await
 }
