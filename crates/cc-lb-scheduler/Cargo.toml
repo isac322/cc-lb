@@ -64,7 +64,6 @@ http.workspace = true
 metrics-exporter-prometheus.workspace = true
 proptest = { workspace = true }
 tempfile.workspace = true
-testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 tracing-subscriber = { workspace = true }
 url.workspace = true
