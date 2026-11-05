@@ -2474,6 +2474,19 @@ fn sse_event_completes_response(
     }
 }
 
+/// Transforms can drop or rewrite the upstream terminal event. Only their
+/// complete emitted terminal frames authorize successful downstream closure.
+fn transformed_sse_completes_response(capability: ProviderCapability, mut bytes: &[u8]) -> bool {
+    while let Some(end) = usage_parser::find_sse_event_end(bytes) {
+        let event = parse_sse_event(&bytes[..end]);
+        if sse_event_completes_response(capability, &event, false) {
+            return true;
+        }
+        bytes = &bytes[end..];
+    }
+    false
+}
+
 /// JSON `type` of the provider's terminal success SSE event, used by the #663
 /// accept-with-warning path. Gemini streams have no terminal event.
 const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<&'static str> {
@@ -4606,9 +4619,7 @@ impl Lifecycle {
             .finish_success_response(
                 response,
                 signer,
-                active_limit
-                    .as_ref()
-                    .is_some_and(|active_limit| active_limit.request.stream),
+                body_view.stream(),
                 active_limit.take(),
                 reserved.map(|reserved| reserved.into_response_accounting_guard()),
                 started.elapsed(),
@@ -4789,12 +4800,14 @@ impl Lifecycle {
         dispatch_started: Instant,
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
-        // SSE uses event transforms; other streaming or non-JSON representations
-        // relay without whole-body collection unless a buffered transform needs it.
+        // Keep ordinary responses buffered regardless of their Content-Type.
+        // Only streaming requests without a buffered hook bypass collection.
         let buffered_transform_required = transform_ctx.dialect.response_transform_hook().is_some();
-        let non_json_response = !is_json_response(response.headers());
-        if is_sse_response(response.headers())
-            || ((stream_requested || non_json_response) && !buffered_transform_required)
+        if is_sse_response(
+            response.headers(),
+            stream_requested,
+            response_affinity_context.capability,
+        ) || (stream_requested && !buffered_transform_required)
         {
             let response_status = response.status();
             let mut response = self.relay_response(
@@ -4826,9 +4839,9 @@ impl Lifecycle {
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
         let mut body_chunk_count: u64 = 0;
-        // Ingress caps must not reject larger ordinary JSON responses, including
-        // existing buffered hooks. Newly buffered stream/binary transforms are bounded.
-        let body_cap = if stream_requested || non_json_response {
+        // Preserve the existing uncapped ordinary response path. Only newly
+        // buffered streaming transforms reuse the request path's body cap.
+        let body_cap = if stream_requested {
             body_cap_for_path(&self.config, &transform_ctx.request_path)
         } else {
             usize::MAX
@@ -5699,9 +5712,11 @@ impl Lifecycle {
         let usage_decoder =
             UsageDecoder::from_headers(&parts.headers, decompression_output_budget_bytes);
         let downstream_stream_is_identity = matches!(&usage_decoder, UsageDecoder::Identity);
-        let upstream_is_sse = is_sse_response(&parts.headers)
-            || (stream_requested
-                && response_affinity_context.capability == ProviderCapability::OpenaiResponses);
+        let upstream_is_sse = is_sse_response(
+            &parts.headers,
+            stream_requested,
+            response_affinity_context.capability,
+        );
         let success_sse_affinity_gate = upstream_is_sse
             && status.is_success()
             && (response_affinity_context.observe_response_keys
@@ -5918,6 +5933,7 @@ impl Lifecycle {
                             let defer_terminal_raw_chunk =
                                 response_has_content_length && body.is_end_stream();
                             let mut raw_passthrough_current_chunk = false;
+                            let mut raw_chunk_completes_response = false;
                             let now = Instant::now();
                             if first_chunk_at.is_none() {
                                 first_chunk_at = Some(now);
@@ -6390,15 +6406,14 @@ impl Lifecycle {
                                     &mut message_stop_at,
                                     || now,
                                 );
-                                if !semantic_completion_observed
-                                    && sse_event_completes_response(
-                                        response_affinity_context.capability,
-                                        &parsed_event,
-                                        usage_update.message_stop,
-                                    )
-                                {
+                                let event_completes_response = sse_event_completes_response(
+                                    response_affinity_context.capability,
+                                    &parsed_event,
+                                    usage_update.message_stop,
+                                );
+                                raw_chunk_completes_response |= event_completes_response;
+                                if !semantic_completion_observed && event_completes_response {
                                     semantic_completion_observed = true;
-                                    downstream_drop_guard.mark_semantic_completion();
                                     if let Some(o) = observer.as_ref() {
                                         o.set_usage_counts(&usage, true);
                                         o.emit_lifecycle(
@@ -6582,6 +6597,14 @@ impl Lifecycle {
                                         break;
                                     }
                                     batch_index = batch_index.saturating_add(1);
+                                    if event_completes_response
+                                        && transformed_sse_completes_response(
+                                            response_affinity_context.capability,
+                                            &outgoing,
+                                        )
+                                    {
+                                        downstream_drop_guard.mark_semantic_completion();
+                                    }
                                     yield Ok::<Bytes, Infallible>(outgoing);
                                 } else if success_sse_affinity_gate {
                                     downstream_sse_boundary.observe(&raw);
@@ -6589,6 +6612,9 @@ impl Lifecycle {
                                     if defer_terminal_raw_chunk {
                                         deferred_terminal_chunks.push(raw);
                                     } else {
+                                        if event_completes_response {
+                                            downstream_drop_guard.mark_semantic_completion();
+                                        }
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
                                 } else if hold_unsolicited_chunk {
@@ -6603,6 +6629,9 @@ impl Lifecycle {
                                         if defer_terminal_raw_chunk {
                                             deferred_terminal_chunks.push(outgoing);
                                         } else {
+                                            if event_completes_response {
+                                                downstream_drop_guard.mark_semantic_completion();
+                                            }
                                             yield Ok::<Bytes, Infallible>(outgoing);
                                         }
                                     }
@@ -6721,6 +6750,9 @@ impl Lifecycle {
                                         debug_assert!(deferred_terminal_chunks.is_empty());
                                         deferred_terminal_chunks.push(data);
                                     } else {
+                                        if raw_chunk_completes_response {
+                                            downstream_drop_guard.mark_semantic_completion();
+                                        }
                                         yield Ok::<Bytes, Infallible>(data);
                                     }
                                     if unsolicited_sse_affinity_hold_eligible {
@@ -7004,15 +7036,13 @@ impl Lifecycle {
                                 &mut message_stop_at,
                                 Instant::now,
                             );
-                            if !semantic_completion_observed
-                                && sse_event_completes_response(
-                                    response_affinity_context.capability,
-                                    &parsed_event,
-                                    usage_update.message_stop,
-                                )
-                            {
+                            let event_completes_response = sse_event_completes_response(
+                                response_affinity_context.capability,
+                                &parsed_event,
+                                usage_update.message_stop,
+                            );
+                            if !semantic_completion_observed && event_completes_response {
                                 semantic_completion_observed = true;
-                                downstream_drop_guard.mark_semantic_completion();
                                 if let Some(o) = observer.as_ref() {
                                     o.set_usage_counts(&usage, true);
                                     o.emit_lifecycle(
@@ -7092,6 +7122,15 @@ impl Lifecycle {
                                 };
                                 downstream_sse_boundary.observe(&outgoing);
                                 batch_index = batch_index.saturating_add(1);
+                                if event_completes_response
+                                    && (!sse_transform_active
+                                        || transformed_sse_completes_response(
+                                            response_affinity_context.capability,
+                                            &outgoing,
+                                        ))
+                                {
+                                    downstream_drop_guard.mark_semantic_completion();
+                                }
                                 yield Ok::<Bytes, Infallible>(outgoing);
                             }
                         }
@@ -10165,18 +10204,16 @@ fn announce_attempt(
     }
 }
 
-fn is_json_response(headers: &HeaderMap) -> bool {
-    headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value.split(';').next().is_some_and(|media_type| {
-                media_type.trim().eq_ignore_ascii_case("application/json")
-            })
-        })
-}
-
-fn is_sse_response(headers: &HeaderMap) -> bool {
+fn is_sse_response(
+    headers: &HeaderMap,
+    stream_requested: bool,
+    capability: ProviderCapability,
+) -> bool {
+    if !headers.contains_key(CONTENT_TYPE) {
+        // ChatGPT's Responses backend can omit this header. An explicit
+        // Content-Type, including JSON errors, always keeps its own semantics.
+        return stream_requested && capability == ProviderCapability::OpenaiResponses;
+    }
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())

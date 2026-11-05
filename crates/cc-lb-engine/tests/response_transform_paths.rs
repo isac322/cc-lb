@@ -476,13 +476,13 @@ async fn oversized_unauthorized_stream_body_skips_transform_of_generated_error()
 
 #[tokio::test]
 async fn non_sse_stream_transform_never_receives_a_capped_prefix() {
-    for body_len in [128, 129] {
+    for (body_len, limited) in [(128, false), (129, false), (128, true), (129, true)] {
         let transform = Arc::new(UnchangedBufferedTransform::default());
         let mut data = vec![b'x'; body_len];
         data[0] = b'"';
         data[body_len - 1] = b'"';
         let body = Bytes::from(data);
-        let lifecycle = with_test_limit_subject(lifecycle_with_transforms_and_config(
+        let lifecycle = lifecycle_with_transforms_and_config(
             Some(transform.clone()),
             None,
             Arc::new(ChunkedDispatch {
@@ -494,7 +494,12 @@ async fn non_sse_stream_transform_never_receives_a_capped_prefix() {
                 messages_body_cap_bytes: 128,
                 ..LifecycleConfig::default()
             },
-        ));
+        );
+        let lifecycle = if limited {
+            with_test_limit_subject(lifecycle)
+        } else {
+            lifecycle
+        };
         let response = handle_authenticated(
             &lifecycle,
             messages_request(Bytes::from_static(
