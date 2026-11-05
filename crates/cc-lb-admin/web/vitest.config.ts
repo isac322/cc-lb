@@ -14,6 +14,7 @@ export default defineConfig({
             'src/components/ui/latency/**/*.test.ts',
             'src/routes/**/*.test.ts',
             'src/components/upstreams/**/*.test.ts',
+            'src/overview/**/*.test.ts',
             'src/components/principals/cache-keepalive/__tests__/liveMergeSessions.test.ts',
           ],
           exclude: ['src/lib/hooks/__tests__/**'],
@@ -29,6 +30,7 @@ export default defineConfig({
             'src/lib/**/*.test.tsx',
             'src/components/__tests__/**/*.test.tsx',
             'src/components/**/*.test.tsx',
+            'src/overview/**/*.test.tsx',
             // Route-adjacent tests use the TanStack `-` prefix (e.g. `-plugins.test.tsx`).
             'src/routes/**/-*.test.tsx',
           ],

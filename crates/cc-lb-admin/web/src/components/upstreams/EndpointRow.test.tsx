@@ -83,14 +83,17 @@ describe('EndpointRow default', () => {
       for (const kind of ['api_key', 'oauth'] as const) {
         const view = render(
           <EndpointRow
-            upstream={{ ...upstream, base_url: base }}
+            upstream={{
+              ...upstream,
+              kind: kind === 'oauth' ? 'anthropic_oauth' : 'anthropic_api_key',
+              base_url: base,
+            }}
             kind={kind}
           />,
         );
         const row = screen.getByTestId('upstream-endpoint-row');
         expect(row.textContent).toContain('Endpoint');
         expect(row.textContent).toContain('Anthropic (default)');
-        expect(row.textContent).not.toContain('https://api.anthropic.com');
         expect(
           screen.getByRole('button', { name: 'Change endpoint' }),
         ).toBeDefined();
@@ -99,6 +102,30 @@ describe('EndpointRow default', () => {
         ).toBeNull();
         view.unmount();
       }
+    },
+  );
+
+  test.each([
+    ['openai_api_key', 'OpenAI', 'https://api.openai.com'],
+    ['openai_oauth', 'OpenAI', 'https://chatgpt.com/backend-api/codex'],
+    ['gemini_api_key', 'Gemini', 'https://generativelanguage.googleapis.com'],
+    [
+      'gemini_oauth',
+      'Gemini',
+      'https://cloudcode-pa.googleapis.com/v1internal',
+    ],
+  ] as const)(
+    'shows the native default endpoint for %s',
+    (kind, provider, _endpoint) => {
+      render(
+        <EndpointRow
+          upstream={{ ...upstream, kind, base_url: null }}
+          kind={kind.endsWith('_oauth') ? 'oauth' : 'api_key'}
+        />,
+      );
+      const row = screen.getByTestId('upstream-endpoint-row');
+      expect(row.textContent).toContain(`${provider} (default)`);
+      expect(row.textContent).not.toContain('Anthropic');
     },
   );
 

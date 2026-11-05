@@ -264,7 +264,13 @@ function renderDialog(target: UpstreamConnectTarget) {
 function openApiKeyStep() {
   const rendered = renderDialog({ mode: 'create' });
   fireEvent.click(
-    within(rendered.dialog).getByRole('radio', { name: /Anthropic API key/ }),
+    within(rendered.dialog).getByRole('button', { name: /Anthropic/ }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('radio', { name: /API key/ }),
   );
   fireEvent.click(
     within(rendered.dialog).getByRole('button', { name: 'Continue' }),
@@ -347,28 +353,120 @@ function expectOneArrow(el: HTMLElement) {
   expect((el.textContent ?? '').split('→').length - 1).toBe(1);
 }
 
+describe('provider selection and imported credentials', () => {
+  test('selects a provider before choosing its credential type', () => {
+    const { dialog } = renderDialog({ mode: 'create' });
+    expect(within(dialog).getByText('Choose provider')).toBeDefined();
+    expect(
+      within(dialog).getAllByRole('button', {
+        name: /Anthropic|OpenAI|Gemini/,
+      }),
+    ).toHaveLength(3);
+    expect(within(dialog).queryAllByRole('radio')).toHaveLength(0);
+    expect(dialog.textContent).not.toContain('API key');
+    expect(dialog.textContent).not.toContain('Subscription');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Gemini/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    expect(
+      within(dialog).getByText('Google AI Pro/Ultra via Gemini/Antigravity'),
+    ).toBeDefined();
+    expect(within(dialog).getByText('Google AI Studio')).toBeDefined();
+    expect(
+      within(dialog).getByRole('radio', { name: /API key/ }),
+    ).toBeDefined();
+    expect(
+      within(dialog).getByRole('radio', { name: /Subscription/ }),
+    ).toBeDefined();
+
+    fireEvent.click(within(dialog).getByRole('radio', { name: /API key/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Back' }));
+    expect(
+      within(dialog)
+        .getByRole('button', { name: /Gemini/ })
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    expect(
+      within(dialog)
+        .getByRole('radio', { name: /API key/ })
+        .getAttribute('aria-checked'),
+    ).toBe('true');
+  });
+
+  test('creates an OpenAI API-key upstream through the real create endpoint', async () => {
+    const created = upstream({
+      id: 'created-openai-api-key',
+      name: 'OpenAI production',
+      kind: 'openai_api_key',
+    });
+    route = (call) =>
+      call.method === 'POST' && call.path === UPSTREAMS
+        ? { status: 200, body: created }
+        : { status: 404, body: {} };
+    const { dialog, onCreated } = renderDialog({ mode: 'create' });
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    fireEvent.click(within(dialog).getByRole('radio', { name: /API key/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    fireEvent.change(within(dialog).getByLabelText('Upstream name'), {
+      target: { value: 'OpenAI production' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('API key'), {
+      target: { value: 'openai-test-key' },
+    });
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Add upstream' }),
+    );
+
+    await act(async () => {});
+    const create = calls.find(
+      (call) => call.method === 'POST' && call.path === UPSTREAMS,
+    );
+    expect(create?.body).toEqual({
+      name: 'OpenAI production',
+      kind: 'openai_api_key',
+      api_key_value: 'openai-test-key',
+    });
+    expect(onCreated).toHaveBeenCalledWith(created);
+  });
+});
+
 // ─── Kind step and rail ──────────────────────────────────────────────────────
 
 describe('kind step and rail (UI-D-01, UI-D-02, UI-D-03, UI-AY-03)', () => {
-  test('UI-D-01: two kind cards; choosing API key goes to Key', () => {
+  test('UI-D-01: provider then two kind cards; choosing API key goes to Key', () => {
     const { dialog } = renderDialog({ mode: 'create' });
+    expect(within(dialog).getByText('Choose provider')).toBeDefined();
+    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
     const radios = within(dialog).getAllByRole('radio');
     expect(radios).toHaveLength(2);
     const subscription = within(dialog)
-      .getByText('Claude subscription')
+      .getByText('Subscription')
       .closest('label');
-    expect(subscription?.textContent).toContain('Recommended');
-    expect(railTitles(dialog)[0]).toBe('Connection');
-    expect(currentStep(dialog)).toBe('Connection');
+    expect(subscription?.textContent).not.toContain('Recommended');
+    expect(railTitles(dialog)).toEqual([
+      'Provider',
+      'Connect',
+      'Sign in',
+      'Paste code',
+      'Name & save',
+    ]);
+    expect(currentStep(dialog)).toBe('Connect');
     expect(primaryButtons(dialog).map((b) => b.textContent)).toEqual([
       'Continue',
     ]);
 
-    fireEvent.click(
-      within(dialog).getByRole('radio', { name: /Anthropic API key/ }),
-    );
+    fireEvent.click(within(dialog).getByRole('radio', { name: /API key/ }));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-    expect(railTitles(dialog)).toEqual(['Connection', 'Key', 'Name & save']);
+    expect(railTitles(dialog)).toEqual([
+      'Provider',
+      'Connect',
+      'Key',
+      'Name & save',
+    ]);
     expect(currentStep(dialog)).toBe('Key');
   });
 
@@ -377,14 +475,19 @@ describe('kind step and rail (UI-D-01, UI-D-02, UI-D-03, UI-AY-03)', () => {
     const ol = within(dialog).getByRole('list', { name: 'Steps' });
     expect(ol.tagName).toBe('OL');
     expect(ol.querySelectorAll('[aria-current="step"]')).toHaveLength(1);
-    const [done, current, upcoming] = railItems(dialog);
-    expect(done?.textContent).toContain('(done)');
+    const items = railItems(dialog);
+    const current = items.find(
+      (item) => item.getAttribute('aria-current') === 'step',
+    );
+    const done = items.filter((item) => item.textContent?.includes('(done)'));
+    const upcoming = items.filter((item) =>
+      item.textContent?.includes('(upcoming)'),
+    );
+    expect(done.length).toBeGreaterThan(0);
     expect(current?.textContent).toContain('(current)');
-    expect(upcoming?.textContent).toContain('(upcoming)');
+    expect(upcoming.length).toBeGreaterThan(0);
     expect(current?.querySelector('.bg-selected')).not.toBeNull();
-    expect(done?.querySelector('.bg-selected')).toBeNull();
-    // The narrow-screen step line is re-read whole on every change, so a
-    // screen reader says "Step 2 of 3 · Key", not just the changed parts.
+    expect(done[0]?.querySelector('.bg-selected')).toBeNull();
     const line = within(dialog).getByText(/^Step \d+ of \d+$/).parentElement;
     expect(line?.getAttribute('aria-live')).toBe('polite');
     expect(line?.getAttribute('aria-atomic')).toBe('true');
@@ -398,7 +501,8 @@ describe('kind step and rail (UI-D-01, UI-D-02, UI-D-03, UI-AY-03)', () => {
       within(dialog).getByRole('button', { name: "Don't have a key?" }),
     );
     expect(railTitles(dialog)).toEqual([
-      'Connection',
+      'Provider',
+      'Connect',
       'Create the key',
       'Key',
       'Name & save',
@@ -414,14 +518,16 @@ describe('kind step and rail (UI-D-01, UI-D-02, UI-D-03, UI-AY-03)', () => {
     route = () => ({ status: 200, body: ORG_LIST });
     const org = openApiKeyStep();
     expect(railTitles(org.dialog)).toEqual([
-      'Connection',
+      'Provider',
+      'Connect',
       'Key',
       'Name & save',
     ]);
     await paste(org.dialog, KEY);
     await within(org.dialog).findByText('Pick a workspace');
     expect(railTitles(org.dialog)).toEqual([
-      'Connection',
+      'Provider',
+      'Connect',
       'Key',
       'Workspace',
       'Name & save',
@@ -429,7 +535,7 @@ describe('kind step and rail (UI-D-01, UI-D-02, UI-D-03, UI-AY-03)', () => {
     expect(currentStep(org.dialog)).toBe('Workspace');
     cleanup();
 
-    // Replace: no Connection, the last step reads Save.
+    // Replace: no provider or kind selection, the last step reads Save.
     const replace = renderDialog({ mode: 'replace', upstream: upstream() });
     expect(railTitles(replace.dialog)).toEqual(['Key', 'Save']);
     expect(currentStep(replace.dialog)).toBe('Key');
@@ -567,7 +673,8 @@ describe('key step (UI-D-06…11, UI-D-22, UI-D-27, UI-D-29, UI-D-31, UI-D-32)',
       );
     });
     expect(railTitles(dialog)).toEqual([
-      'Connection',
+      'Provider',
+      'Connect',
       'Sign in',
       'Paste code',
       'Name & save',
@@ -588,63 +695,53 @@ describe('key step (UI-D-06…11, UI-D-22, UI-D-27, UI-D-29, UI-D-31, UI-D-32)',
   });
 
   test('UI-D-11: exactly one help path per key state', async () => {
-    const helpPaths = (dialog: HTMLElement) => ({
-      dontHave:
-        within(dialog).queryByRole('button', { name: "Don't have a key?" }) !==
-        null,
-      howTo:
-        within(dialog).queryByRole('button', {
-          name: 'How to create a key',
-        }) !== null,
-    });
+    const helpPaths = (dialog: HTMLElement) =>
+      within(dialog)
+        .queryAllByRole('button', {
+          name: /^(Don't have a key\?|How to create a key)$/,
+        })
+        .map((button) => button.textContent);
 
-    const empty = openApiKeyStep();
-    expect(helpPaths(empty.dialog)).toEqual({ dontHave: true, howTo: false });
-    cleanup();
+    // Stay in the key step while editing, as an operator does. Reopening the
+    // full provider/kind wizard for every key state only repeats UI-D-01.
+    const { dialog } = openApiKeyStep();
+    expect(helpPaths(dialog)).toEqual(["Don't have a key?"]);
 
     for (const key of [ADMIN_KEY, ENTERPRISE_KEY]) {
-      const gated = openApiKeyStep();
-      await paste(gated.dialog, key);
-      expect(helpPaths(gated.dialog)).toEqual({ dontHave: false, howTo: true });
-      cleanup();
+      await paste(dialog, key);
+      expect(helpPaths(dialog)).toEqual(['How to create a key']);
     }
 
-    const oat = openApiKeyStep();
-    await paste(oat.dialog, OAT_KEY);
-    expect(helpPaths(oat.dialog)).toEqual({ dontHave: true, howTo: false });
-    cleanup();
+    await paste(dialog, OAT_KEY);
+    expect(helpPaths(dialog)).toEqual(["Don't have a key?"]);
+    expect(calls).toHaveLength(0);
 
     route = () => ({ status: 200, body: rejected('key_invalid') });
-    const invalid = openApiKeyStep();
-    await paste(invalid.dialog, KEY);
-    await within(invalid.dialog).findByText(
+    await paste(dialog, KEY);
+    await within(dialog).findByText(
       "Anthropic rejected this key — check for a typo, or it's expired or deleted.",
     );
-    expect(helpPaths(invalid.dialog)).toEqual({ dontHave: false, howTo: true });
-    cleanup();
+    expect(helpPaths(dialog)).toEqual(['How to create a key']);
 
-    const custom = openApiKeyStep();
     fireEvent.click(
-      within(custom.dialog).getByRole('button', {
+      within(dialog).getByRole('button', {
         name: 'Use a custom endpoint',
       }),
     );
-    fireEvent.change(
-      within(custom.dialog).getByRole('textbox', { name: /Base URL/ }),
-      {
-        target: { value: 'https://proxy.example.com' },
-      },
-    );
-    await paste(custom.dialog, KEY);
-    await within(custom.dialog).findByText('Your endpoint rejected this key.');
-    expect(helpPaths(custom.dialog)).toEqual({ dontHave: false, howTo: false });
-    cleanup();
+    const baseUrl = within(dialog).getByRole('textbox', { name: /Base URL/ });
+    fireEvent.change(baseUrl, {
+      target: { value: 'https://proxy.example.com' },
+    });
+    await paste(dialog, KEY);
+    await within(dialog).findByText('Your endpoint rejected this key.');
+    expect(helpPaths(dialog)).toEqual([]);
 
+    fireEvent.change(baseUrl, { target: { value: '' } });
     route = () => ({ status: 200, body: UNREACHABLE });
-    const down = openApiKeyStep();
-    await paste(down.dialog, KEY);
-    await within(down.dialog).findByText(/Couldn't reach Anthropic/);
-    expect(helpPaths(down.dialog)).toEqual({ dontHave: true, howTo: false });
+    await paste(dialog, KEY);
+    await within(dialog).findByText(/Couldn't reach Anthropic/);
+    expect(helpPaths(dialog)).toEqual(["Don't have a key?"]);
+    expect(preflightCalls()).toHaveLength(3);
   });
 
   test('UI-D-27 / UI-AY-04 / UI-CP-08: custom endpoint disclosure', async () => {

@@ -20,6 +20,11 @@ vi.mock('../../lib/queries', async () => {
     useDeletePlugin: vi.fn(),
     usePatchPlugin: vi.fn(),
     usePluginReferences: vi.fn(),
+    useUpstreams: vi.fn(() => ({
+      data: { upstreams: [] },
+      isLoading: false,
+      isPending: false,
+    })),
   };
 });
 

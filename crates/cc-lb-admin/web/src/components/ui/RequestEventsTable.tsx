@@ -6,10 +6,13 @@ import {
   requestOutcomeTone,
   STATUS_TONE_TEXT_CLASS,
 } from '../../lib/format';
+import { requestModelLabel } from '../../lib/logRows';
+import { PROVIDER_LABELS, type ProviderFamily } from '../../lib/providers';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { serviceTierBadgeText } from '../../lib/reasoningTier';
 import { CostCell } from './CostCell';
 import { LatencyCell } from './latency/LatencyCell';
+import { ProviderLogo } from './ProviderLogo';
 import { Badge, cx, EmptyState, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestEventDrawer } from './RequestEventDrawer';
@@ -221,6 +224,14 @@ interface RequestEventsTableProps {
   /** Heading level of the empty-state title; match the surrounding outline. */
   emptyHeadingLevel?: 2 | 3 | 4;
   liveFlashIds?: Set<string>;
+  showProviderLogo?: boolean;
+  /**
+   * Model cells lead with the provider mark by default. Detail views can
+   * suppress it when the surrounding upstream identity already supplies it.
+   * Optional inventory-derived provider identity stays outside the table to
+   * avoid coupling isolated request feeds to the upstream query.
+   */
+  providerByUpstream?: ReadonlyMap<string, ProviderFamily>;
   columns?: {
     principal?: boolean;
     upstream?: boolean;
@@ -247,6 +258,8 @@ interface RequestEventRowProps {
   eventKey: string;
   principalName: string;
   upstreamName: string;
+  provider: ProviderFamily;
+  showProviderLogo: boolean;
   showPrincipal: boolean;
   showUpstream: boolean;
   showSession: boolean;
@@ -259,11 +272,32 @@ interface RequestEventRowProps {
   fit: ColumnFit;
 }
 
+function providerForEvent(
+  event: RequestEventWithPhase,
+  providerByUpstream?: ReadonlyMap<string, ProviderFamily>,
+): ProviderFamily {
+  const upstreamProvider =
+    event.upstream_id == null
+      ? undefined
+      : providerByUpstream?.get(event.upstream_id);
+  if (upstreamProvider != null) return upstreamProvider;
+  if (event.event_kind === 'openai_responses') return 'openai';
+  if (
+    event.event_kind === 'gemini_generate_content' ||
+    event.event_kind === 'gemini_count_tokens'
+  ) {
+    return 'gemini';
+  }
+  return 'anthropic';
+}
+
 const RequestEventRow = memo(function RequestEventRow({
   event,
   eventKey,
   principalName,
   upstreamName,
+  provider,
+  showProviderLogo,
   showPrincipal,
   showUpstream,
   showSession,
@@ -374,7 +408,7 @@ const RequestEventRow = memo(function RequestEventRow({
       {showUpstream && (
         <td
           className={cx(
-            'px-3 py-2 whitespace-nowrap truncate max-w-[160px]',
+            'px-3 py-2 whitespace-nowrap truncate max-w-[160px] @max-[46rem]/events:max-w-none! @max-[46rem]/events:line-clamp-2 @max-[46rem]/events:whitespace-normal @max-[46rem]/events:break-words',
             MOBILE_CELL,
             showPrincipal
               ? MOBILE_AT.upstreamAfterPrincipal
@@ -402,7 +436,9 @@ const RequestEventRow = memo(function RequestEventRow({
       )}
       <td
         className={cx(
-          'px-3 py-2 whitespace-nowrap',
+          showProviderLogo
+            ? 'px-1! py-2 w-10 max-w-10 overflow-hidden whitespace-nowrap'
+            : 'px-3 py-2 whitespace-nowrap',
           MOBILE_CELL,
           MOBILE_AT.kind,
           fit.band.cell,
@@ -417,18 +453,31 @@ const RequestEventRow = memo(function RequestEventRow({
           MOBILE_CELL,
           MOBILE_AT.model,
           fit.model,
+          showProviderLogo && '@min-[60rem]/events:max-w-28!',
           fit.band.cell,
           fit.band.model,
         )}
       >
-        <span className="flex items-center gap-2 min-w-0 @max-[46rem]/events:justify-end">
+        <span
+          className={cx(
+            'flex min-w-0 max-w-full items-center gap-2 overflow-hidden @max-[46rem]/events:justify-end',
+            showProviderLogo && '@min-[60rem]/events:w-22',
+          )}
+        >
+          {showProviderLogo ? (
+            <ProviderLogo
+              className="shrink-0 text-text-muted"
+              provider={provider}
+              title={`${PROVIDER_LABELS[provider]} provider`}
+            />
+          ) : null}
           {event.model != null ? (
             <span
-              className="truncate font-mono text-data"
+              className="min-w-0 truncate font-mono text-data"
               title={event.model}
               aria-label={event.model}
             >
-              {event.model.replace(/^claude-/, '')}
+              {requestModelLabel(event.model, provider)}
             </span>
           ) : (
             <span className="font-mono text-data">{DASH}</span>
@@ -514,12 +563,14 @@ export const RequestEventsTable = memo(function RequestEventsTable({
   emptyAction,
   emptyHeadingLevel,
   liveFlashIds,
+  showProviderLogo = true,
   columns,
   sentinelRef,
   loadingMore,
   hasMore,
   minWidthClass,
   className,
+  providerByUpstream,
   onAnchorRange,
 }: RequestEventsTableProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -547,8 +598,19 @@ export const RequestEventsTable = memo(function RequestEventsTable({
     ...(showSession
       ? [{ label: 'Session', skeleton: 'max-w-40', className: fit.session }]
       : []),
-    { label: 'Kind', skeleton: 'max-w-12' },
-    { label: 'Model', skeleton: 'max-w-24', className: fit.model },
+    {
+      label: 'Kind',
+      skeleton: 'max-w-12',
+      className: showProviderLogo ? 'w-10 max-w-10 px-1' : undefined,
+    },
+    {
+      label: 'Model',
+      skeleton: 'max-w-24',
+      className: cx(
+        fit.model,
+        showProviderLogo && '@min-[60rem]/events:max-w-28!',
+      ),
+    },
     { label: 'Status', numeric: true, skeleton: 'max-w-12 ml-auto' },
     { label: 'Latency', numeric: true, skeleton: 'max-w-16 ml-auto' },
     ...(showTokens
@@ -645,6 +707,8 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                       DASH
                     }
                     upstreamName={event.upstream_name ?? DASH}
+                    provider={providerForEvent(event, providerByUpstream)}
+                    showProviderLogo={showProviderLogo}
                     showPrincipal={showPrincipal}
                     showUpstream={showUpstream}
                     showSession={showSession}
@@ -690,6 +754,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
             ? (principalNameMap.get(selected.principal_id) ?? null)
             : null
         }
+        providerByUpstream={providerByUpstream}
         onClose={() => setSelectedId(null)}
       />
     </>

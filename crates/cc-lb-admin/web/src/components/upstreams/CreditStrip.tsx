@@ -108,7 +108,6 @@ export function CreditStrip({
   const billing = <ConsoleLink href={CONSOLE_BILLING_URL}>Billing</ConsoleLink>;
   const stop = month?.billing_stop ?? null;
   const tokens = month ? splitNum(month.tokens) : null;
-
   const skeletonValue = (
     <Skeleton as="span" className="inline-block h-5 w-16" />
   );

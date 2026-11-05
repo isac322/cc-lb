@@ -58,6 +58,7 @@ vi.mock('../lib/queries', async () => {
     useIssueKey: vi.fn(),
     useRevokeKey: vi.fn(),
     useUsage: vi.fn(),
+    useUpstreams: vi.fn(),
   };
 });
 
@@ -77,6 +78,22 @@ const principal: queries.Principal = {
   allowed_upstreams: [],
   default_limits: [],
   cache_keepalive: null,
+};
+
+const keepaliveUpstream: queries.Upstream = {
+  id: 'upstream-anthropic',
+  name: 'Anthropic',
+  kind: 'anthropic_oauth',
+  enabled: true,
+  base_url: null,
+  spec_revision: 1,
+  warmup_enabled: false,
+  warmup_dialect_plugin: null,
+  status: {
+    last_apply_error: null,
+    last_apply_at_unix_secs: null,
+    last_warmup_at_unix_secs: null,
+  },
 };
 
 function withProviders(ui: React.ReactElement) {
@@ -170,6 +187,11 @@ beforeEach(() => {
   window.localStorage.clear();
   navigateMock.mockReset();
   queryClient.clear();
+  vi.mocked(queries.useUpstreams).mockReturnValue({
+    data: { upstreams: [keepaliveUpstream] },
+    isLoading: false,
+    isPending: false,
+  } as never);
   Object.assign(Route, { useSearch: () => ({}) });
   vi.mocked(queries.usePrincipals).mockReturnValue({
     data: { principals: [] },
@@ -353,6 +375,7 @@ test('principal detail reads keepalive to access with every section expanded', (
   );
   expect(sectionTitles).toEqual([
     'Cache keepalive',
+    'Provider consumption',
     'Recent requests',
     'Router',
     'Shape',
@@ -365,6 +388,24 @@ test('principal detail reads keepalive to access with every section expanded', (
   expect(cardNamed('Shape').getByText('None')).toBeDefined();
 });
 
+test.each(['openai_api_key', 'gemini_oauth'] as const)(
+  'principal detail hides unsupported keepalive for a %s installation',
+  (kind) => {
+    vi.mocked(queries.useUpstreams).mockReturnValue({
+      data: { upstreams: [{ ...keepaliveUpstream, kind }] },
+      isLoading: false,
+      isPending: false,
+    } as never);
+    renderPrincipalDetail();
+    expect(
+      screen.queryByRole('heading', { name: 'Cache keepalive' }),
+    ).toBeNull();
+    expect(
+      screen.getByRole('heading', { name: 'Recent requests' }),
+    ).toBeDefined();
+  },
+);
+
 test('recent requests scope the shared feed and preserve container-fit columns', () => {
   vi.mocked(requestEventsFeed.useRequestEventsFeed).mockReturnValue(
     feedState({ loading: true }),
@@ -376,7 +417,7 @@ test('recent requests scope the shared feed and preserve container-fit columns',
   expect(requestEventsFeed.useRequestEventsFeed).toHaveBeenCalledWith({
     filters: {
       principal_id: principal.id,
-      event_kind: 'messages',
+      event_kind: 'generation',
     },
     mode: 'infinite',
     initialHistoryLimit: 500,

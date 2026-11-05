@@ -1,27 +1,22 @@
-// Where an upstream sends requests, as one settings row shared by both kinds:
-// Access row 1 on API-key panes, the Credential footer on OAuth panes. The
-// effective endpoint is always shown — `Anthropic (default)` or the custom
-// URL — with a quiet `Change` that swaps the row into its inline editor.
-// Anthropic's own URL is the default and is never stored as a custom value.
+// Show the effective provider endpoint (defaults included), with one inline editor.
 
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import {
+  isDefaultProviderEndpoint,
+  PROVIDER_LABELS,
+  providerOf,
+} from '../../lib/providers';
 import { type Upstream, useUpdateUpstream } from '../../lib/queries';
 import { undoToast } from '../../lib/undoToast';
 import { DetailRow } from '../ui/DetailPane';
 import { Button, cx, INPUT_SM_CLASS } from '../ui/primitives';
-import { isAnthropicBaseUrl } from './connect/apiKeyCopy';
 import { QUIET_LINK_CLASS } from './connect/parts';
 import { errorMessage } from './connect/useOAuthConnectSession';
 import { isStaleRevision, STALE_EDITOR_MESSAGE } from './staleRevision';
 
 const CLEAR_UNCONFIRMED =
   'Server did not confirm the switch to the default endpoint; the custom URL may still be set.';
-
-const HINT: Record<'api_key' | 'oauth', string> = {
-  api_key: 'Requests and key checks go here instead of Anthropic.',
-  oauth: 'Requests go here instead of Anthropic.',
-};
 
 export function EndpointRow({
   upstream,
@@ -39,14 +34,19 @@ export function EndpointRow({
   onEditingChange?: (editing: boolean) => void;
 }) {
   const [ownEditing, setOwnEditing] = useState(false);
+  const provider = PROVIDER_LABELS[providerOf(upstream.kind)];
+  const hint =
+    kind === 'api_key'
+      ? `Requests and key checks go here instead of ${provider}.`
+      : `Requests go here instead of ${provider}.`;
   const editing = editingProp ?? ownEditing;
   const setEditing = (next: boolean) => {
     setOwnEditing(next);
     onEditingChange?.(next);
   };
-  // Older rows may store Anthropic's own URL; that is still the default.
   const custom =
-    upstream.base_url != null && !isAnthropicBaseUrl(upstream.base_url);
+    upstream.base_url != null &&
+    !isDefaultProviderEndpoint(upstream.kind, upstream.base_url);
   const customUrl = custom ? (upstream.base_url ?? '') : '';
   const [baseUrl, setBaseUrl] = useState(customUrl);
   // Value and revision captured when editing began. Save intent is judged
@@ -92,7 +92,7 @@ export function EndpointRow({
         toast.error(`Undo failed: ${errorMessage(e)}`);
       });
 
-  /** Switch back to Anthropic; undo restores the custom URL. */
+  /** Switch back to the provider default; undo restores the custom URL. */
   const switchToDefault = () => {
     const previous = custom ? upstream.base_url : null;
     update.mutate(
@@ -123,8 +123,8 @@ export function EndpointRow({
 
   const save = () => {
     if (trimmed === '' || unchanged || update.isPending) return;
-    // Anthropic's own URL is the default, never stored as a custom value.
-    if (isAnthropicBaseUrl(trimmed)) {
+    // A provider's own endpoint is a default, never stored as a custom value.
+    if (isDefaultProviderEndpoint(upstream.kind, trimmed)) {
       switchToDefault();
       return;
     }
@@ -198,7 +198,7 @@ export function EndpointRow({
               if (e.key === 'Enter') save();
             }}
           />
-          <span className="text-caption text-text-faint">{HINT[kind]}</span>
+          <span className="text-caption text-text-faint">{hint}</span>
           {update.error ? (
             <span role="alert" className="text-caption text-danger-text">
               {isStaleRevision(update.error)
@@ -233,13 +233,14 @@ export function EndpointRow({
             {upstream.base_url}
           </span>
           <span className="mt-0.5 block text-caption text-text-faint">
-            {HINT[kind]}
+            {hint}
           </span>
         </>
       ) : (
-        <>
-          Anthropic<span className="text-text-muted"> (default)</span>
-        </>
+        <span>
+          {provider}
+          <span className="text-text-muted"> (default)</span>
+        </span>
       )}
     </DetailRow>
   );

@@ -117,7 +117,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                       <Server className="w-4 h-4 text-text-faint" />
                       <span className="min-w-0 truncate">{u.name}</span>
                       <span className="ml-auto shrink-0 text-caption text-text-faint">
-                        <UpstreamPlanCaption upstream={u} />
+                        <UpstreamPlanCaption
+                          showCredentialIcon={false}
+                          upstream={u}
+                        />
                       </span>
                     </Command.Item>
                   ))

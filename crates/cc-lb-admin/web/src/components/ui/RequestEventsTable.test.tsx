@@ -603,6 +603,33 @@ describe('RequestEventsTable', () => {
     },
   );
 
+  it('keeps the provider logo inside the bounded model column', () => {
+    const model = 'gemini-3.1-pro-preview-long-model-identifier';
+    const { container } = render(
+      <RequestEventsTable
+        events={[
+          {
+            event_id: 'bounded-model',
+            request_id: 'bounded-model-request',
+            status: 200,
+            duration_ms: 100,
+            ts: 1718553120,
+            event_kind: 'gemini_generate_content',
+            model,
+            _phase: 'final',
+          },
+        ]}
+        principalNameMap={principalNameMap}
+      />,
+    );
+    const modelText = container.querySelector(`span[title="${model}"]`);
+    expect(modelText?.className).toContain('min-w-0');
+    expect(modelText?.className).toContain('truncate');
+    const modelCell = modelText?.closest('td');
+    expect(modelCell?.className).toContain('@min-[60rem]/events:max-w-28!');
+    expect(modelCell?.querySelector('svg')).not.toBeNull();
+  });
+
   describe('Cost Tooltip', () => {
     it('shows positive cost categories and keeps the authoritative total', async () => {
       const user = userEvent.setup();

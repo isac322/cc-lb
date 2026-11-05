@@ -95,6 +95,7 @@
   --color-warn-text: var(--color-warn-text);
   --color-danger-text: var(--color-danger-text);
   --color-hover-bg: var(--color-hover-bg);
+  --color-row-hover-solid: var(--color-row-hover-solid);
   --color-selected: var(--color-selected);
   --color-overlay-1: var(--color-overlay-1);
   --color-overlay-2: var(--color-overlay-2);
@@ -193,6 +194,9 @@
     --color-scrollbar: #2f3033;
     --color-scrollbar-hover: #6a6c6f;
     --color-hover-bg: rgb(255 255 255 / 0.04);
+    /* `hover-bg` composited on the ground as one opaque fill, for rows whose
+       sticky cells must hide content scrolled underneath. */
+    --color-row-hover-solid: color-mix(in srgb, var(--color-bg), rgb(255 255 255) 4%);
     /* Selected row / nav item: a neutral fill a clear step above hover. */
     --color-selected: rgb(255 255 255 / 0.08);
     --color-overlay-1: rgb(255 255 255 / 0.02);
@@ -269,6 +273,7 @@
     --color-scrollbar: #cacccf;
     --color-scrollbar-hover: #7e8084;
     --color-hover-bg: rgb(24 25 28 / 0.04);
+    --color-row-hover-solid: color-mix(in srgb, var(--color-bg), rgb(24 25 28) 4%);
     --color-selected: rgb(24 25 28 / 0.07);
     --color-overlay-1: rgb(24 25 28 / 0.02);
     --color-overlay-2: rgb(24 25 28 / 0.03);
@@ -336,6 +341,7 @@
       --color-scrollbar: #cacccf;
       --color-scrollbar-hover: #7e8084;
       --color-hover-bg: rgb(24 25 28 / 0.04);
+      --color-row-hover-solid: color-mix(in srgb, var(--color-bg), rgb(24 25 28) 4%);
       --color-selected: rgb(24 25 28 / 0.07);
       --color-overlay-1: rgb(24 25 28 / 0.02);
       --color-overlay-2: rgb(24 25 28 / 0.03);

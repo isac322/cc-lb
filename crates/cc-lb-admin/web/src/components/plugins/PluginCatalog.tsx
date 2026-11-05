@@ -1,7 +1,11 @@
 import { Copy, Trash2 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { useGcPlugins, usePluginRegistry } from '../../lib/queries';
+import {
+  useGcPlugins,
+  usePluginRegistry,
+  useUpstreams,
+} from '../../lib/queries';
 import { useCopyButton } from '../../lib/useCopyButton';
 import {
   Badge,
@@ -26,6 +30,7 @@ import {
   TableHeadCell,
 } from '../ui/Table';
 import { PluginDeleteDialog } from './PluginDeleteDialog';
+import { pluginDescription } from './PluginDetailUnderstand';
 import { SLOTS } from './slots/model';
 
 const PLUGIN_COLUMN_WIDTHS = [
@@ -59,6 +64,12 @@ export function PluginCatalog({
 }) {
   const reg = usePluginRegistry();
   const gc = useGcPlugins();
+  const upstreams = useUpstreams();
+  const hasAnthropicOauth =
+    upstreams.data === undefined ||
+    upstreams.data.upstreams.some(
+      (upstream) => upstream.kind === 'anthropic_oauth',
+    );
   const { copy } = useCopyButton();
   const entries = reg.data?.entries ?? [];
   const unusedRegisteredCount = entries.filter(
@@ -163,7 +174,7 @@ export function PluginCatalog({
                   )
                   .join(', ') || 'Unknown slot',
                 p.version ? `v${p.version}` : null,
-                p.description ?? p.label,
+                pluginDescription(p, hasAnthropicOauth),
               ]
                 .filter(Boolean)
                 .join(' · ');
@@ -245,7 +256,7 @@ export function PluginCatalog({
                   const subline = [
                     p.version ? `v${p.version}` : null,
                     p.label,
-                    p.description,
+                    pluginDescription(p, hasAnthropicOauth),
                   ]
                     .filter(Boolean)
                     .join(' · ');

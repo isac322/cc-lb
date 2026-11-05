@@ -12,8 +12,16 @@ import {
   RequestEventUpdateSchema,
 } from './api';
 import { getAdminToken } from './auth';
+import {
+  type ProviderQueryOptions,
+  useProviderFilters,
+} from './previewControls';
 import { qk } from './queries';
-import { type LiveEventMap, upsertLiveEvent } from './upsertReducer';
+import {
+  type LiveEventMap,
+  removeLivePartial,
+  upsertLiveEvent,
+} from './upsertReducer';
 import { useVisibility } from './visibilityManager';
 
 export type ConnectionStatus =
@@ -39,8 +47,19 @@ export interface LiveEventStreamState {
   forceReconnect: () => void;
 }
 
+export interface LiveEventStreamFilters
+  extends Record<string, string | undefined> {
+  readonly principal_id?: string;
+  readonly upstream_id?: string;
+  readonly thread_id?: string;
+  readonly model?: string;
+  readonly status_class?: string;
+  readonly event_kind?: string;
+  readonly providers?: string;
+}
 export type LiveEventStreamOptions = {
   readonly enabled?: boolean;
+  readonly providers?: ProviderQueryOptions['providers'];
   /**
    * Stream cursor to resume from on a fresh connection (mount or filter
    * change) when no cursor has been observed yet. Pass the `cursor`
@@ -55,10 +74,14 @@ export type LiveEventStreamOptions = {
 const PERMANENT_FAILURE_THRESHOLD_MS = 300_000;
 
 export function useLiveEventStream(
-  filters: Record<string, string | undefined>,
+  inputFilters: LiveEventStreamFilters,
   options: LiveEventStreamOptions = {},
 ): LiveEventStreamState {
-  const enabled = options.enabled ?? true;
+  const filters = useProviderFilters(
+    inputFilters,
+    options.providers,
+  ) as LiveEventStreamFilters;
+  const enabled = (options.enabled ?? true) && filters.providers !== '';
   const filterKey = JSON.stringify(filters);
   const visibility = useVisibility();
   const pauseReason = !enabled
@@ -122,12 +145,43 @@ export function useLiveEventStream(
     const client = clientRef.current;
     clientRef.current = null;
     client?.close();
+    flushVersionUpdate();
   };
 
-  // Version counter published on every successful upsert so downstream
-  // useMemo deps re-run when the mutated Map ref changes contents.
+  // Mutable event maps are updated immediately; publish at most one revision
+  // per coalescing window so large streams do not reconcile the feed for every
+  // partial frame.
   const [version, setVersion] = useState(0);
-  const forceUpdate = () => setVersion((t) => t + 1);
+  const versionFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const versionDirtyRef = useRef(false);
+  const flushVersionUpdate = () => {
+    if (versionFlushTimeoutRef.current !== null) {
+      clearTimeout(versionFlushTimeoutRef.current);
+      versionFlushTimeoutRef.current = null;
+    }
+    if (!versionDirtyRef.current) return;
+    versionDirtyRef.current = false;
+    setVersion((t) => t + 1);
+  };
+  const scheduleVersionUpdate = () => {
+    versionDirtyRef.current = true;
+    if (versionFlushTimeoutRef.current !== null) return;
+    versionFlushTimeoutRef.current = setTimeout(() => {
+      versionFlushTimeoutRef.current = null;
+      if (!versionDirtyRef.current) return;
+      versionDirtyRef.current = false;
+      setVersion((t) => t + 1);
+    }, 200);
+  };
+  const discardVersionUpdate = () => {
+    if (versionFlushTimeoutRef.current !== null) {
+      clearTimeout(versionFlushTimeoutRef.current);
+      versionFlushTimeoutRef.current = null;
+    }
+    versionDirtyRef.current = false;
+  };
 
   const updateStatus = (newStatus: ConnectionStatus) => {
     if (statusRef.current === newStatus) return;
@@ -172,7 +226,7 @@ export function useLiveEventStream(
           }
         }
       }
-      if (changed) forceUpdate();
+      if (changed) scheduleVersionUpdate();
     }, 30_000);
     return () => clearInterval(interval);
   }, []);
@@ -260,7 +314,7 @@ export function useLiveEventStream(
             changed = true;
           }
         }
-        if (changed) forceUpdate();
+        if (changed) scheduleVersionUpdate();
         lastCursorRef.current = res.next_cursor.toString();
       } catch (error) {
         if (!isCurrentConnection()) return;
@@ -286,6 +340,18 @@ export function useLiveEventStream(
         lastCursorRef.current ?? seedCursorRef.current ?? undefined,
       onConnect: () => {
         if (!isCurrentConnection()) return;
+        // The server tracks admitted partials per connection. A completion
+        // outside this scope cannot be replayed by the filtered delta query.
+        if (connectionFilters.upstream_id || connectionFilters.providers) {
+          let changed = false;
+          for (const [id, entry] of eventsMapRef.current) {
+            if (entry.phase === 'partial') {
+              eventsMapRef.current.delete(id);
+              changed = true;
+            }
+          }
+          if (changed) flushVersionUpdate();
+        }
         updateStatus('connecting');
         setError(null);
         resetFailureBookkeeping();
@@ -321,7 +387,9 @@ export function useLiveEventStream(
       },
       onMessage: (msg) => {
         if (!isCurrentConnection()) return;
-        if (handleMessage(msg)) forceUpdate();
+        if (!handleMessage(msg)) return;
+        if (msg.event === 'reset') flushVersionUpdate();
+        else scheduleVersionUpdate();
       },
     });
   };
@@ -362,6 +430,25 @@ export function useLiveEventStream(
       return false;
     }
 
+    if (msg.event === 'remove') {
+      if (
+        typeof raw !== 'object' ||
+        raw === null ||
+        !('event_id' in raw) ||
+        typeof raw.event_id !== 'string' ||
+        raw.event_id.length === 0
+      ) {
+        malformedFrameCountRef.current += 1;
+        return false;
+      }
+      if (msg.id) lastCursorRef.current = msg.id;
+      return removeLivePartial(
+        eventsMapRef.current,
+        tombstonesRef.current,
+        raw.event_id,
+      );
+    }
+
     const parsed = RequestEventUpdateSchema.safeParse(raw);
     if (!parsed.success) {
       malformedFrameCountRef.current += 1;
@@ -397,7 +484,7 @@ export function useLiveEventStream(
       finalizedIdsRef.current.clear();
       tombstonesRef.current.clear();
       lastCursorRef.current = null;
-      forceUpdate();
+      setVersion((t) => t + 1);
     }
 
     if (pauseReason !== 'active') {
@@ -448,6 +535,7 @@ export function useLiveEventStream(
     return () => {
       window.removeEventListener('cclb:auth-required', handleAuthRequired);
       clearReconnectTimeout();
+      discardVersionUpdate();
       closeCurrentConnection();
     };
   }, []);
@@ -463,7 +551,10 @@ export function useLiveEventStream(
   };
 
   return {
-    eventsMap: eventsMapRef.current,
+    // Effects close the previous transport; never expose its rows during the
+    // intervening render after a provider/filter change.
+    eventsMap:
+      filterKeyRef.current === filterKey ? eventsMapRef.current : new Map(),
     version,
     status,
     get lastActivityAt() {

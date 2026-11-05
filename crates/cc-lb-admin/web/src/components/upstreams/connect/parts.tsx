@@ -23,7 +23,12 @@ import {
   useState,
 } from 'react';
 import { toast } from 'sonner';
-import type { ApiKeyOrgCapability } from '../../../lib/api';
+import type {
+  ApiKeyOrgCapability,
+  DraftCompleteResponse,
+  OAuthProvider,
+} from '../../../lib/api';
+import { PROVIDER_LABELS } from '../../../lib/providers';
 import {
   Badge,
   Button,
@@ -97,6 +102,104 @@ export function SignInLink({
       <ExternalLink strokeWidth={1.75} />
       {label}
     </a>
+  );
+}
+
+export function DeviceCodePanel({
+  session,
+  label = 'Sign in with ChatGPT',
+}: {
+  session: OAuthConnectSession;
+  label?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  if (!session.userCode) return null;
+  return (
+    <div className="flex flex-col gap-3">
+      <SignInLink
+        session={{ ...session, authorizeUrl: session.verificationUrl }}
+        label={label}
+        size="lg"
+        className="w-full sm:w-auto"
+      />
+      <div className="flex flex-col gap-1.5">
+        <span className="text-label text-text-muted">Your one-time code</span>
+        <div className="flex items-center gap-2">
+          <code className="min-w-0 flex-1 rounded-sm border border-subtle bg-bg px-3 py-2 text-center font-mono text-lg tracking-[0.12em] text-text">
+            {session.userCode}
+          </code>
+          <Button
+            type="button"
+            onClick={() => {
+              void copyText(session.userCode ?? '').then((ok) => {
+                if (ok) setCopied(true);
+                else toast.error('Could not copy the sign-in code.');
+              });
+            }}
+          >
+            {copied ? (
+              <Check className="w-3.5 h-3.5" />
+            ) : (
+              <Copy className="w-3.5 h-3.5" />
+            )}
+            {copied ? 'Copied' : 'Copy'}
+          </Button>
+        </div>
+      </div>
+      <p
+        className={cx(
+          'text-body-sm',
+          session.completeError ? 'text-danger-text' : 'text-text-muted',
+        )}
+        role="status"
+        aria-live="polite"
+      >
+        {session.completeError
+          ? friendlyCompleteError(session.completeError)
+          : session.polling
+            ? 'Waiting for sign-in…'
+            : 'Open the link and enter the code to continue.'}
+      </p>
+      {session.provider === 'openai' ? (
+        <button
+          type="button"
+          onClick={() => void session.startBrowser()}
+          className="w-fit text-caption text-text-faint underline underline-offset-2 hover:text-text max-md:min-h-10"
+        >
+          Device sign-in turned off by your workspace? Use browser sign-in
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+export function BrowserSignInPanel({
+  session,
+  onOpened,
+}: {
+  session: OAuthConnectSession;
+  onOpened?: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <SignInLink
+        session={session}
+        label={
+          session.provider === 'gemini'
+            ? 'Sign in with Google'
+            : 'Sign in with ChatGPT'
+        }
+        size="lg"
+        className="w-full sm:w-auto"
+        onOpened={onOpened}
+      />
+      <p className="text-body-sm text-text-muted">
+        After you approve, the tab lands on a page that won&apos;t load (
+        {session.provider === 'gemini' ? 'localhost:51121' : 'localhost:1455'}).
+        Copy the full address from that tab&apos;s address bar and paste it
+        here.
+      </p>
+    </div>
   );
 }
 
@@ -269,7 +372,7 @@ export function CodePasteField({
     const p = parseOAuthPaste(raw);
     if (p.kind !== 'code') return;
     if (matchPasteToSession(p, session.oauthState) === 'other_session') return;
-    onSubmit(p.code);
+    onSubmit(p.source === 'callback_url' ? raw.trim() : p.code);
   };
 
   const onPaste = (e: ClipboardEvent<HTMLInputElement>) => {
@@ -299,8 +402,9 @@ export function CodePasteField({
   } else if (match === 'other_session') {
     feedback = (
       <span className="text-warn-text">
-        This code is from a different or older sign-in. Use the link above again
-        and copy the new code.
+        {session.provider === 'gemini'
+          ? 'This code is from a different or older sign-in. Open the sign-in page again and copy the new address.'
+          : 'This code is from a different or older sign-in. Use the link above again and copy the new code.'}
       </span>
     );
   } else if (parsed.kind === 'code') {
@@ -362,13 +466,16 @@ export function CodePasteField({
 }
 
 export function friendlyCompleteError(message: string): string {
+  if (/state_mismatch/i.test(message)) {
+    return `This callback belongs to a different sign-in. Copy the address from the latest sign-in tab. ${message}`;
+  }
   if (/expired|already used|restart/i.test(message)) {
-    return 'This sign-in expired or was already used. Get a new link and try again.';
+    return `This sign-in expired or was already used. Get a new link and try again. ${message}`;
   }
   if (/invalid_grant|invalid code|authorization code/i.test(message)) {
-    return 'Claude did not accept this code. It may be mistyped or already used — sign in again for a fresh one.';
+    return `${message}. Sign in again for a fresh code.`;
   }
-  return `Connection failed: ${message}`;
+  return `Connection failed: ${message || 'Please try signing in again.'}`;
 }
 
 // ─── Account card ────────────────────────────────────────────────────────────
@@ -394,7 +501,7 @@ export function AccountCard({
       {label ? (
         <div className={cx('mb-1.5 text-label', labelTone)}>{label}</div>
       ) : null}
-      {account && (account.email || account.displayName) ? (
+      {account ? (
         <div className="flex items-center gap-3 min-w-0">
           <div className="h-8 w-8 shrink-0 rounded-full bg-overlay-4 text-text flex items-center justify-center text-body-sm font-medium">
             {(account.displayName ?? account.email ?? '?')
@@ -403,10 +510,26 @@ export function AccountCard({
           </div>
           <div className="min-w-0">
             <div className="text-body-sm text-text truncate">
-              {account.email ?? account.displayName}
+              {account.email ??
+                account.displayName ??
+                account.accountUuid ??
+                account.projectId ??
+                'Connected account'}
             </div>
-            <div className="text-caption text-text-faint truncate">
-              {[account.organizationName, planLabel(account)]
+            <div
+              className={cx(
+                'text-caption text-text-faint',
+                account.plan || account.projectId ? 'break-all' : 'truncate',
+              )}
+            >
+              {[
+                account.organizationName,
+                planLabel(account),
+                account.projectId ? `Project: ${account.projectId}` : null,
+                account.plan && account.accountUuid
+                  ? `Workspace: ${account.accountUuid}`
+                  : null,
+              ]
                 .filter(Boolean)
                 .join(' · ') || 'Claude account'}
             </div>
@@ -421,7 +544,57 @@ export function AccountCard({
   );
 }
 
+function oauthPlanLabel(
+  provider: OAuthProvider,
+  plan: string | null | undefined,
+): string {
+  const normalized = plan?.trim();
+  if (!normalized) return PROVIDER_LABELS[provider];
+  const title = normalized
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return `${PROVIDER_LABELS[provider]} ${title}`;
+}
+
+/** Matches Anthropic's compact account-plan suggestion for every provider. */
+export function oauthNameSuggestion(
+  provider: OAuthProvider,
+  draft: DraftCompleteResponse,
+): string {
+  if (provider === 'anthropic' && draft.suggested_name.trim()) {
+    return draft.suggested_name.trim();
+  }
+  const organization = draft.organization_metadata?.organization_name?.trim();
+  const email =
+    draft.account_email?.trim() ??
+    draft.organization_metadata?.account_email?.trim();
+  const emailLocalPart = email?.split('@', 1)[0]?.trim();
+  const plan = oauthPlanLabel(
+    provider,
+    draft.plan ??
+      draft.organization_metadata?.rate_limit_tier ??
+      draft.organization_metadata?.organization_type,
+  );
+  if (provider === 'gemini') {
+    return (
+      [email, plan].filter(Boolean).join(' · ') || draft.suggested_name.trim()
+    );
+  }
+  const parts = [
+    plan,
+    organization && !organization.endsWith("'s Organization")
+      ? organization
+      : null,
+    emailLocalPart,
+  ].filter((value): value is string => Boolean(value));
+  return parts.join(' · ') || draft.suggested_name.trim() || 'OAuth Upstream';
+}
+
 export function planLabel(account: AccountIdentity): string | null {
+  if (account.plan)
+    return account.plan
+      .replace(/[_-]/g, ' ')
+      .replace(/\b\w/g, (letter) => letter.toUpperCase());
   const type = account.organizationType;
   if (!type) return null;
   if (/max/i.test(type)) return 'Claude Max';

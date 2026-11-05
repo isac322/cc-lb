@@ -10,6 +10,44 @@ import {
 const CODE = 'aB3xK9_qR2-mN7pQwZ';
 
 describe('parseOAuthPaste', () => {
+  test('accepts Google authorization codes containing a slash', () => {
+    const googleCode = `4/0AVGzR1${'a'.repeat(60)}`;
+    expect(parseOAuthPaste(googleCode)).toEqual({
+      kind: 'code',
+      code: googleCode,
+      state: null,
+      source: 'bare_code',
+    });
+  });
+
+  test('extracts a Google localhost callback URL and retains its state', () => {
+    const googleCode = `4/0AVGzR1${'a'.repeat(60)}`;
+    const parsed = parseOAuthPaste(
+      `http://localhost:51121/oauth-callback?code=${encodeURIComponent(googleCode)}&state=google-state`,
+    );
+    expect(parsed).toEqual({
+      kind: 'code',
+      code: googleCode,
+      state: 'google-state',
+      source: 'callback_url',
+    });
+    expect(matchPasteToSession(parsed, 'google-state')).toBe('match');
+    expect(matchPasteToSession(parsed, 'older-state')).toBe('other_session');
+  });
+
+  test('extracts an OpenAI localhost callback URL without changing its code', () => {
+    const openAiCode = 'ac_test-code_123';
+    expect(
+      parseOAuthPaste(
+        `http://localhost:1455/auth/callback?code=${openAiCode}&scope=openid+profile+email+offline_access&state=state-token`,
+      ),
+    ).toEqual({
+      kind: 'code',
+      code: openAiCode,
+      state: 'state-token',
+      source: 'callback_url',
+    });
+  });
   test('empty and whitespace-only input is empty', () => {
     expect(parseOAuthPaste('')).toEqual({ kind: 'empty' });
     expect(parseOAuthPaste('   \n\t ')).toEqual({ kind: 'empty' });

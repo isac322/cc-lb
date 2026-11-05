@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { PluginEntry } from '../../lib/queries';
+import { type PluginEntry, useUpstreams } from '../../lib/queries';
 import { Badge, Card, Section } from '../ui/primitives';
 import {
   EmptyValue,
@@ -15,6 +15,16 @@ const SLOT_DESCRIPTIONS: Record<string, string> = {
   shape:
     'Modifies requests before they are sent and responses before they are returned.',
 };
+
+export function pluginDescription(
+  plugin: PluginEntry,
+  hasAnthropicOauth: boolean,
+): string | null {
+  if (plugin.name === 'subscription-preference' && !hasAnthropicOauth) {
+    return 'Prefer OAuth upstreams when available; quota health is not checked.';
+  }
+  return plugin.description ?? plugin.label;
+}
 
 function getSlotForHook(hookName: string): string {
   if (hookName === 'filter') return 'Router';
@@ -38,6 +48,12 @@ function Detail({ label, children }: { label: string; children: ReactNode }) {
 }
 
 export function PluginDetailUnderstand({ plugin }: { plugin: PluginEntry }) {
+  const upstreams = useUpstreams();
+  const hasAnthropicOauth =
+    upstreams.data === undefined ||
+    upstreams.data.upstreams.some(
+      (upstream) => upstream.kind === 'anthropic_oauth',
+    );
   const hooks = plugin.hook_metadata
     ? Object.entries(plugin.hook_metadata)
     : [];
@@ -47,7 +63,7 @@ export function PluginDetailUnderstand({ plugin }: { plugin: PluginEntry }) {
         <div>
           <dl className="space-y-5">
             <Detail label="Description">
-              {plugin.description || (
+              {pluginDescription(plugin, hasAnthropicOauth) || (
                 <span className="text-text-faint">
                   No description provided.
                 </span>

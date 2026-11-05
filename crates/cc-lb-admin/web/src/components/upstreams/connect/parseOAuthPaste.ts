@@ -10,15 +10,16 @@ export type ParsedOAuthPaste =
   | {
       kind: 'code';
       code: string;
-      /** The `state` echoed back by Anthropic, when the paste carried one. */
+      /** The OAuth state echoed by the provider, when the paste carried one. */
       state: string | null;
       source: 'callback_url' | 'code_with_state' | 'bare_code';
     };
 
-// Authorization codes are URL-safe tokens; anything with whitespace inside or
-// shorter than this is a mis-copy (a word, a truncated selection).
+// Authorization codes use provider-safe token characters; Google may include
+// a slash. Anything with whitespace inside or shorter than this is a mis-copy
+// (a word, a truncated selection).
 const MIN_CODE_LENGTH = 16;
-const CODE_PATTERN = /^[A-Za-z0-9._~-]+$/;
+const CODE_PATTERN = /^[A-Za-z0-9._~/-]+$/;
 
 export function parseOAuthPaste(input: string): ParsedOAuthPaste {
   const trimmed = input.trim();
@@ -36,7 +37,7 @@ export function parseOAuthPaste(input: string): ParsedOAuthPaste {
       return {
         kind: 'invalid',
         reason:
-          'This link has no authorization code. Copy the code shown after you click Authorize.',
+          'This link has no authorization code. Copy the full address after approving access.',
       };
     }
     return finish(code, url.searchParams.get('state'), 'callback_url');

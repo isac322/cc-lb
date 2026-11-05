@@ -145,6 +145,21 @@ describe('selectVisibleGraphWindows', () => {
     });
     expect(result).toEqual([]);
   });
+  it('hides an absent Anthropic 5h chart window even when older series data is in range', () => {
+    const result = selectVisibleGraphWindows({
+      latestWindows: [
+        snap({
+          window: '5h',
+          state: 'absent',
+          observed_at_unix_millis: 1_500_000,
+          utilization: null,
+        }),
+      ],
+      series: [series('5h', [1200])],
+      sinceUnixSecs,
+    });
+    expect(result).toEqual([]);
+  });
 
   it('applies the same gate to the default 5h and 7d windows', () => {
     const result = selectVisibleGraphWindows({
@@ -265,6 +280,81 @@ describe('selectQuotaCardSnapshots', () => {
       ]),
     ).toEqual(['5h']);
   });
+  it('hides an absent OpenAI 5h window while keeping its 7d window', () => {
+    expect(
+      windowsOf([
+        snap({ window: '5h', state: 'absent', utilization: null }),
+        snap({ window: '7d', utilization: 0.4 }),
+      ]),
+    ).toEqual(['7d']);
+  });
+  it('hides an absent Anthropic 5h card while keeping its weekly windows', () => {
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: [
+          snap({ window: '5h', state: 'absent', utilization: null }),
+          snap({ window: '7d', utilization: 0.4 }),
+          snap({ window: '7d_fable', utilization: 0.2 }),
+        ],
+        provider: 'anthropic',
+      }).map((window) => window.window),
+    ).toEqual(['7d', '7d_fable']);
+  });
+
+  it('shows an Anthropic 5h card again after a sample returns', () => {
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: [
+          snap({ window: '5h', state: 'fresh', utilization: 0.42 }),
+          snap({ window: '7d', utilization: 0.4 }),
+        ],
+        provider: 'anthropic',
+      }).map((window) => window.window),
+    ).toEqual(['5h', '7d']);
+  });
+
+  it('keeps stale and unobserved Anthropic 5h cards visible', () => {
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: [
+          snap({ window: '5h', state: 'stale', utilization: 0.42 }),
+        ],
+        provider: 'anthropic',
+      }).map((window) => window.window),
+    ).toEqual(['5h']);
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows: [
+          snap({ window: '5h', state: 'unobserved', utilization: null }),
+        ],
+        provider: 'anthropic',
+      }).map((window) => window.window),
+    ).toEqual(['5h']);
+  });
+
+  it('hides unobserved provider windows while preserving Anthropic placeholders', () => {
+    const latestWindows = [
+      snap({ window: '5h', state: 'unobserved' }),
+      snap({ window: '7d', state: 'unobserved' }),
+      snap({ window: 'gemini_5h', state: 'unobserved' }),
+    ];
+    expect(
+      selectQuotaCardSnapshots({ latestWindows, provider: 'openai' }).map(
+        (window) => window.window,
+      ),
+    ).toEqual([]);
+    expect(
+      selectQuotaCardSnapshots({ latestWindows, provider: 'gemini' }).map(
+        (window) => window.window,
+      ),
+    ).toEqual([]);
+    expect(
+      selectQuotaCardSnapshots({
+        latestWindows,
+        provider: 'anthropic',
+      }).map((window) => window.window),
+    ).toEqual(['5h', '7d']);
+  });
 
   it('omits an explicitly absent 5h window while retaining unobserved 5h', () => {
     expect(
@@ -312,6 +402,25 @@ describe('selectQuotaCardSnapshots', () => {
         snap({ window: '5h' }),
       ]),
     ).toEqual(['5h', '7d', '7d_fable', '7d_sonnet', '7d_opus', 'overage']);
+  });
+  it('places Gemini model windows after the shared windows', () => {
+    expect(
+      windowsOf([
+        snap({ window: 'third_party_7d' }),
+        snap({ window: 'third_party_5h' }),
+        snap({ window: 'gemini_7d' }),
+        snap({ window: 'gemini_5h' }),
+        snap({ window: '7d' }),
+        snap({ window: '5h' }),
+      ]),
+    ).toEqual([
+      '5h',
+      '7d',
+      'gemini_5h',
+      'gemini_7d',
+      'third_party_5h',
+      'third_party_7d',
+    ]);
   });
 });
 

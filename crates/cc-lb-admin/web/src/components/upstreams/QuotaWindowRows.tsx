@@ -1,14 +1,12 @@
 // The detail pane's Quota list: one compact row per window the API reports.
-// Rows share one grid (CSS subgrid), so the columns line up across windows.
-// From a 40rem wide section every window is one line:
-//   [swatch + name] [meter, flexible] [N% used] [reset]
-// Narrower (phones), each row reads in two lines:
-//   [swatch + name]              [N% used]
-//   [meter, flexible]            [reset]
+// Every row participates in one shared block grid:
+//   [label] [meter, flexible] [reset prefix] [reset value] [reset suffix]
+// Reset parts are content-sized so the meter absorbs the spare width.
+// The label can truncate on narrow viewports; reset values stay on one line.
 import type { ReactNode } from 'react';
-import type { QuotaSnapshot } from '../../lib/api';
-import { WINDOW_LABELS } from '../../lib/api';
+import { type QuotaSnapshot, windowLabel } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
+import { useLocale } from '../../lib/locale';
 import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
@@ -16,46 +14,53 @@ import {
   quotaSeverity,
 } from '../../lib/quotaSeverity';
 import { cx, Hint, Skeleton } from '../ui/primitives';
-import { ResetCountdown } from '../ui/RelativeTime';
+import { ResetCountdownParts } from '../ui/RelativeTime';
 import { UsageMeter } from '../ui/UsageMeter';
 import { isOverageActive } from './quotaWindowVisibility';
 
 const ROWS_CLASS =
-  'grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 divide-y divide-border-row @[40rem]:grid-cols-[auto_minmax(0,1fr)_auto_auto] @[40rem]:gap-x-6';
+  'grid grid-cols-[minmax(0,max-content)_minmax(0,1fr)_max-content_max-content_max-content] divide-y divide-border-row';
 const ROW_CLASS =
   'col-span-full grid grid-cols-subgrid items-center gap-y-1.5 py-2.5 first:pt-0 last:pb-0 @[40rem]:gap-y-1 @[40rem]:py-2';
-// Narrow placement is explicit (name/used on line 1, meter/facts on line 2);
-// from 40rem every cell takes its own column on one line.
-const NAME_CELL_CLASS =
-  'col-start-1 row-start-1 flex min-w-0 items-center gap-2';
+const NAME_CELL_CLASS = 'col-start-1 min-w-0 flex items-center gap-2';
 const METER_CELL_CLASS =
-  'col-start-1 row-start-2 @[40rem]:col-start-2 @[40rem]:row-start-1';
-const USED_CELL_CLASS =
-  'col-start-2 row-start-1 text-right text-body tabular-nums @[40rem]:col-start-3';
-const FACTS_CELL_CLASS =
-  'col-start-2 row-start-2 flex min-w-0 flex-wrap items-center justify-end gap-x-2 text-right text-body-sm tabular-nums text-text-muted @[40rem]:col-start-4 @[40rem]:row-start-1 @[40rem]:justify-start @[40rem]:text-left';
+  'col-start-2 ml-3 min-w-0 flex items-center gap-3 @[40rem]:ml-6';
+const USED_CELL_CLASS = 'shrink-0 text-right text-body tabular-nums';
+const RESET_PREFIX_CELL_CLASS =
+  'col-start-3 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
+const RESET_VALUE_CELL_CLASS =
+  'col-start-4 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
+const RESET_VALUE_KO_CELL_CLASS =
+  'col-start-4 min-w-0 whitespace-nowrap text-right text-body-sm tabular-nums text-text-muted';
+const RESET_SUFFIX_CELL_CLASS =
+  'col-start-5 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
+const RESET_STATUS_CELL_CLASS =
+  'col-start-3 col-span-3 min-w-0 whitespace-nowrap text-left text-body-sm tabular-nums text-text-muted';
+const RESET_GAP_CLASS = 'ml-3 @[40rem]:ml-6';
 const HINT_TRIGGER_CLASS =
   'cursor-help border-b border-dashed border-text-faint/60';
 
-/** Display name of a quota window (`7d (Fable)`, `Extra usage`, …). */
-export function windowLabel(window: string): string {
-  return window in WINDOW_LABELS
-    ? WINDOW_LABELS[window as keyof typeof WINDOW_LABELS]
-    : window;
-}
+/** Compact quota label; callers use the same helper for all surfaces. */
+export { windowLabel };
 
-function WindowName({ window }: { window: string }) {
+function WindowName({
+  window,
+  label,
+  longLabel,
+}: {
+  window: string;
+  label: string;
+  longLabel: string;
+}) {
   return (
-    <span className={NAME_CELL_CLASS}>
+    <span className={NAME_CELL_CLASS} title={longLabel}>
       <span
         aria-hidden="true"
         data-slot="window-swatch"
         className="size-2.5 shrink-0 rounded-xs"
         style={{ backgroundColor: getWindowColor(window).stroke }}
       />
-      <span className="truncate text-title-card text-text">
-        {windowLabel(window)}
-      </span>
+      <span className="truncate text-title-card text-text">{label}</span>
     </span>
   );
 }
@@ -70,14 +75,20 @@ function usd(minorUnits: number): string {
 export function QuotaWindowRow({
   snap,
   nowUnixSecs,
+  label,
 }: {
   snap: QuotaSnapshot;
   nowUnixSecs: number;
+  label?: string;
 }) {
+  const { effective: locale } = useLocale();
+  const korean = locale.toLowerCase().startsWith('ko');
   // `unified` is not a renderable SubscriptionQuotaWindow, but the wire can
   // still report it (routing/overage) — the row never renders either way.
   const windowName: string = snap.window;
   if (windowName === 'unified' || snap.state === 'absent') return null;
+  const displayLabel = label ?? windowLabel(windowName);
+  const longLabel = windowLabel(windowName, { long: true });
   const isOverage = snap.window === 'overage';
   const unobserved = snap.state === 'unobserved';
   if (isOverage && !isOverageActive(snap)) return null;
@@ -141,51 +152,114 @@ export function QuotaWindowRow({
         </span>
       </Hint>,
     );
-  if (
+  const resetTime =
     (started || isOverage) &&
     snap.resets_at_unix_secs != null &&
     snap.resets_at_unix_secs > nowUnixSecs
-  )
-    facts.push(
-      <ResetCountdown
-        key="reset"
-        compact
-        ts={snap.resets_at_unix_secs * 1000}
-      />,
+      ? snap.resets_at_unix_secs * 1000
+      : null;
+
+  const resetParts = (
+    <ResetCountdownParts
+      ts={resetTime}
+      compact
+      renderParts={(parts) => (
+        <>
+          <span
+            data-slot="window-reset-prefix"
+            className={cx(
+              RESET_PREFIX_CELL_CLASS,
+              parts.prefix ? RESET_GAP_CLASS : null,
+            )}
+          >
+            {parts.prefix}
+            {parts.prefix ? ' ' : null}
+          </span>
+          <span
+            data-slot="window-reset-value"
+            className={cx(
+              korean ? RESET_VALUE_KO_CELL_CLASS : RESET_VALUE_CELL_CLASS,
+              RESET_GAP_CLASS,
+            )}
+          >
+            {parts.value}
+            {parts.suffix ? ' ' : null}
+          </span>
+          <span
+            data-slot="window-reset-suffix"
+            className={cx(
+              RESET_SUFFIX_CELL_CLASS,
+              parts.suffix ? RESET_GAP_CLASS : null,
+            )}
+          >
+            {parts.suffix}
+          </span>
+        </>
+      )}
+    />
+  );
+
+  const resetStatus =
+    resetTime != null ? (
+      resetParts
+    ) : facts.length > 0 ? (
+      <ResetStatusCells facts={facts} />
+    ) : (
+      <EmptyResetCells />
     );
 
   return (
     <div role="listitem" data-window={snap.window} className={ROW_CLASS}>
-      <WindowName window={snap.window} />
+      <WindowName
+        window={snap.window}
+        label={displayLabel}
+        longLabel={longLabel}
+      />
       <div className={METER_CELL_CLASS}>
         <UsageMeter
-          label={windowLabel(snap.window)}
+          className="min-w-0 flex-1"
+          label={longLabel}
           pacePct={pacePct}
           usedPct={usedPct}
         />
+        <span className={USED_CELL_CLASS}>{used}</span>
       </div>
-      <span className={USED_CELL_CLASS}>{used}</span>
-      <FactsCell facts={facts} />
+      {resetStatus}
     </div>
   );
 }
 
-/** The muted, ` · `-separated facts cell shared by every row kind. */
-function FactsCell({ facts }: { facts: ReactNode[] }) {
-  if (!facts.length) return null;
+function EmptyResetCells() {
   return (
-    <span data-slot="window-facts" className={FACTS_CELL_CLASS}>
-      {facts.map((fact, index) => (
-        <span key={index} className="inline-flex items-center gap-x-2">
-          {index > 0 ? (
-            <span aria-hidden="true" className="text-text-faint">
-              ·
-            </span>
-          ) : null}
-          {fact}
-        </span>
-      ))}
-    </span>
+    <>
+      <span
+        data-slot="window-reset-prefix"
+        className={RESET_PREFIX_CELL_CLASS}
+      />
+      <span data-slot="window-reset-value" className={RESET_VALUE_CELL_CLASS} />
+      <span
+        data-slot="window-reset-suffix"
+        className={RESET_SUFFIX_CELL_CLASS}
+      />
+    </>
+  );
+}
+
+function ResetStatusCells({ facts }: { facts: ReactNode[] }) {
+  return (
+    <>
+      <span
+        className={cx(RESET_STATUS_CELL_CLASS, RESET_GAP_CLASS)}
+        data-slot="window-facts"
+      >
+        {facts}
+      </span>
+      <span data-slot="window-reset-value" className={RESET_VALUE_CELL_CLASS} />
+      <span
+        data-slot="window-reset-suffix"
+        className={RESET_SUFFIX_CELL_CLASS}
+      />
+    </>
   );
 }
 
@@ -215,20 +289,31 @@ export function QuotaWindowRowSkeleton() {
           />
         </span>
       </span>
-      <Skeleton
-        as="span"
-        className={cx(METER_CELL_CLASS, 'block h-1 w-full')}
-      />
-      <span className={cx(USED_CELL_CLASS, 'block')}>
+      <div className={METER_CELL_CLASS}>
+        <Skeleton as="span" className="block h-1 min-w-0 flex-1" />
+        <span className={USED_CELL_CLASS}>
+          <Skeleton
+            as="span"
+            className="inline-block h-[0.75em] w-16 align-middle"
+          />
+        </span>
+      </div>
+      <span className={cx(RESET_PREFIX_CELL_CLASS, RESET_GAP_CLASS, 'block')}>
         <Skeleton
           as="span"
-          className="inline-block h-[0.75em] w-16 align-middle"
+          className="inline-block h-[0.75em] w-14 align-middle"
         />
       </span>
-      <span className={cx(FACTS_CELL_CLASS, 'block')}>
+      <span className={cx(RESET_VALUE_CELL_CLASS, RESET_GAP_CLASS, 'block')}>
         <Skeleton
           as="span"
-          className="inline-block h-[0.75em] w-20 align-middle"
+          className="inline-block h-[0.75em] w-10 align-middle"
+        />
+      </span>
+      <span className={cx(RESET_SUFFIX_CELL_CLASS, RESET_GAP_CLASS, 'block')}>
+        <Skeleton
+          as="span"
+          className="inline-block h-[0.75em] w-14 align-middle"
         />
       </span>
     </div>

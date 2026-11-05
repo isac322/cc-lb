@@ -1020,8 +1020,8 @@ export interface SegmentedOption<T extends string | number> {
 
 /** Desktop outer height 32 (md) / 28 (sm); 40px segments below `md` for touch. */
 const SEGMENT_SIZES = {
-  sm: 'h-10 md:h-[1.375rem] px-2 text-xs',
-  md: 'h-10 md:h-[1.625rem] px-2.5 text-[0.8125rem]',
+  sm: 'h-10 max-md:min-w-10 md:h-[1.375rem] px-2 text-xs',
+  md: 'h-10 max-md:min-w-10 md:h-[1.625rem] px-2.5 text-[0.8125rem]',
 } as const;
 
 /**

@@ -53,6 +53,7 @@ import {
   TableRow,
 } from '../components/ui/Table';
 import { TimeRangeBounds } from '../components/ui/TimeRangeBounds';
+import { useDesign } from '../designs/registry';
 import { eventTime } from '../lib/api';
 import { httpStatusTextClass } from '../lib/format';
 import { useLocale, useTimezone } from '../lib/locale';
@@ -231,6 +232,7 @@ function changedFieldsSummary(parsed: ParsedAction): string | null {
 }
 
 function AuditPage() {
+  const { SystemWideNotice } = useDesign();
   const filters = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const principals = usePrincipals();
@@ -453,6 +455,7 @@ function AuditPage() {
     // `lg:` variants so they reliably win over FullPage's base classes; below
     // `lg` the viewport is already narrower than 90rem.
     <FullPage className="lg:max-w-[90rem] lg:px-10">
+      {SystemWideNotice ? <SystemWideNotice /> : null}
       <PageHeader
         title="Audit trail"
         description="Admin API actions, newest first. Open an entry for its recorded details."

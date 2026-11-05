@@ -727,7 +727,9 @@ describe('logs polling surfaces', () => {
       expect(
         screen.getAllByTestId('logs-row').map((row) => row.textContent),
       ).toEqual(['live-new', 'historical-new', 'duplicate', 'historical-old']);
-      expect(screen.getByText('4 requests — live tailing')).toBeDefined();
+      expect(
+        screen.getByText('Loaded 4 requests — live tailing'),
+      ).toBeDefined();
 
       fireEvent.click(screen.getByRole('button', { name: 'Export' }));
       expect(anchorClick).toHaveBeenCalledOnce();

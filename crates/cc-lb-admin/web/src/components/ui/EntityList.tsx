@@ -92,6 +92,8 @@ export function useEntityListView<T, F extends string, S extends string>(
 
 export interface EntityListRowContent {
   name: string;
+  /** Optional leading mark, such as a provider logo. */
+  leading?: ReactNode;
   /** Disabled items read muted until selected. */
   muted?: boolean;
   /** Right of the name: one tabular figure. */
@@ -99,8 +101,12 @@ export interface EntityListRowContent {
   caption: ReactNode;
   /** Right of the caption: compact tabular facts. */
   captionTrailing?: ReactNode;
+  /** Put wider fact grids below the caption rather than compressing its text. */
+  captionTrailingBelow?: boolean;
   /** Full value for the truncated line(s); defaults to the name. */
   title?: string;
+  /** Additional screen-reader-only state copy. */
+  srOnly?: ReactNode;
 }
 
 export interface EntityListToolbarProps<F extends string, S extends string> {
@@ -119,6 +125,10 @@ export interface EntityListProps<T, F extends string, S extends string> {
   /** The count line under the title; `null` while loading. */
   countLine: ReactNode | null;
   action: ReactNode;
+  /** Optional provider facet or installation context above the list toolbar. */
+  header?: ReactNode;
+  /** Render a group label when it changes; caller supplies already-grouped rows. */
+  groupLabel?: (item: T) => string;
   loading: boolean;
   /** Every item, before search and filter. */
   totalCount: number;
@@ -237,6 +247,8 @@ export function EntityList<T, F extends string, S extends string>({
   noun,
   countLine,
   action,
+  header,
+  groupLabel,
   loading,
   totalCount,
   result,
@@ -255,7 +267,7 @@ export function EntityList<T, F extends string, S extends string>({
   // highlight and Enter opens the detail. From md they move the selection.
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const { visible, narrowed } = result;
-  const ids = useMemo(() => visible.map(getId), [visible, getId]);
+  const ids = useMemo(() => visible.map(getId), [getId, visible]);
 
   const scrollToRow = useCallback((id: string) => {
     rowRefs.current.get(id)?.scrollIntoView?.({ block: 'nearest' });
@@ -328,6 +340,7 @@ export function EntityList<T, F extends string, S extends string>({
           }
           actions={action}
         />
+        {header}
         {showToolbar ? <Toolbar noun={noun} toolbar={toolbar} /> : null}
       </div>
       {showToolbar && narrowed ? (
@@ -383,13 +396,22 @@ export function EntityList<T, F extends string, S extends string>({
             }}
             className="flex flex-col gap-0.5 rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
           >
-            {visible.map((item) => {
+            {visible.map((item, index) => {
               const id = getId(item);
               const row = renderRow(item);
               const selected = id === selectedId;
               const highlighted = id === highlightId && !selected;
+              const group = groupLabel?.(item);
+              const startsGroup =
+                group !== undefined &&
+                (index === 0 || groupLabel?.(visible[index - 1]) !== group);
               return (
                 <li key={id}>
+                  {startsGroup ? (
+                    <h2 className="px-3 pb-1 pt-4 text-label text-text-muted">
+                      {group}
+                    </h2>
+                  ) : null}
                   <button
                     ref={(node) => {
                       if (node) rowRefs.current.set(id, node);
@@ -412,17 +434,24 @@ export function EntityList<T, F extends string, S extends string>({
                     )}
                   >
                     <span className="flex min-w-0 items-baseline justify-between gap-3">
-                      <span
-                        className={cx(
-                          'min-w-0 truncate text-body',
-                          selected
-                            ? 'font-medium text-text'
-                            : row.muted
-                              ? 'text-text-muted'
-                              : 'text-text',
-                        )}
-                      >
-                        {row.name}
+                      <span className="flex min-w-0 items-center gap-2">
+                        {row.leading != null ? (
+                          <span className="shrink-0 text-text-muted">
+                            {row.leading}
+                          </span>
+                        ) : null}
+                        <span
+                          className={cx(
+                            'min-w-0 truncate text-body',
+                            selected
+                              ? 'font-medium text-text'
+                              : row.muted
+                                ? 'text-text-muted'
+                                : 'text-text',
+                          )}
+                        >
+                          {row.name}
+                        </span>
                       </span>
                       {row.trailing != null ? (
                         <span className="shrink-0 text-body tabular-nums">
@@ -430,8 +459,20 @@ export function EntityList<T, F extends string, S extends string>({
                         </span>
                       ) : null}
                     </span>
-                    <span className="flex min-w-0 items-center justify-between gap-3 text-caption">
-                      <span className="flex min-w-0 items-center gap-1.5 truncate text-text-faint">
+                    <span
+                      className={cx(
+                        'flex min-w-0 text-caption',
+                        row.captionTrailingBelow
+                          ? 'flex-col items-stretch gap-1'
+                          : 'items-center justify-between gap-3',
+                      )}
+                    >
+                      <span
+                        className={cx(
+                          'flex min-w-0 items-center gap-1.5 truncate text-text-faint',
+                          row.captionTrailingBelow && 'shrink-0',
+                        )}
+                      >
                         {row.caption}
                       </span>
                       {row.captionTrailing != null ? (
@@ -440,6 +481,9 @@ export function EntityList<T, F extends string, S extends string>({
                         </span>
                       ) : null}
                     </span>
+                    {row.srOnly != null ? (
+                      <span className="sr-only">{row.srOnly}</span>
+                    ) : null}
                   </button>
                 </li>
               );

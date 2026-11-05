@@ -308,3 +308,269 @@ describe('classifyOAuthReconnect — refreshing credentials', () => {
     });
   });
 });
+
+describe('classifyOAuthReconnect — provider-specific renewal', () => {
+  it.each(['openai_oauth', 'gemini_oauth'])(
+    'does not apply the Anthropic yearly deadline to %s',
+    (kind) => {
+      expect(
+        classifyOAuthReconnect(
+          oauthStatus({
+            kind,
+            mode: 'long_lived_365d',
+            expires_at_unix_secs: NOW + DAY,
+            refresh_token_expires_at_unix_secs: null,
+          }),
+          null,
+          NOW,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it('does not invent an OpenAI refresh deadline from an access-token lifetime', () => {
+    const status = oauthStatus({
+      kind: 'openai_oauth',
+      expires_at_unix_secs: NOW + 10 * DAY,
+      refresh_token_expires_at_unix_secs: null,
+    });
+    expect(classifyOAuthReconnect(status, null, NOW)).toBeNull();
+    expect(
+      classifyOAuthReconnect(
+        { ...status, expires_at_unix_secs: NOW - 1 },
+        null,
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    'refresh_token_reused',
+    'refresh_token_invalidated',
+    'invalid_grant',
+  ])('recognizes an OpenAI terminal renewal rejection: %s', (error) => {
+    const nudge = classifyOAuthReconnect(
+      oauthStatus({
+        kind: 'openai_oauth',
+        refresh_token_expires_at_unix_secs: null,
+      }),
+      error,
+      NOW,
+    );
+    expect(nudge).toMatchObject({
+      reason: 'renewal_rejected',
+      tone: 'danger',
+      actionLabel: 'Reconnect',
+      expiresAt: null,
+    });
+    expect(nudge?.description).not.toMatch(/30 days|365-day|long-lived/i);
+  });
+});
+
+describe('classifyOAuthReconnect — access-only provider imports', () => {
+  it.each(['openai_oauth', 'gemini_oauth'])(
+    '%s stays quiet while an intentionally non-refreshing token is valid',
+    (kind) => {
+      expect(
+        classifyOAuthReconnect(
+          oauthStatus({
+            kind,
+            mode: 'long_lived_365d',
+            can_refresh: false,
+            refresh_token_present: false,
+            refresh_token_expires_at_unix_secs: null,
+            expires_at_unix_secs: NOW + DAY,
+          }),
+          null,
+          NOW,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it.each(['openai_oauth', 'gemini_oauth'])(
+    '%s invents no warning for an access-only token with unknown expiry',
+    (kind) => {
+      expect(
+        classifyOAuthReconnect(
+          oauthStatus({
+            kind,
+            mode: 'long_lived_365d',
+            can_refresh: false,
+            refresh_token_present: false,
+            refresh_token_expires_at_unix_secs: null,
+            expires_at_unix_secs: null,
+          }),
+          null,
+          NOW,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it.each(['openai_oauth', 'gemini_oauth'])(
+    '%s requires reconnect once an access-only token reaches its deadline',
+    (kind) => {
+      for (const expiresAt of [NOW, NOW - DAY]) {
+        expect(
+          classifyOAuthReconnect(
+            oauthStatus({
+              kind,
+              status: 'expired',
+              mode: 'long_lived_365d',
+              can_refresh: false,
+              refresh_token_present: false,
+              refresh_token_expires_at_unix_secs: null,
+              expires_at_unix_secs: expiresAt,
+            }),
+            null,
+            NOW,
+          ),
+        ).toMatchObject({
+          reason: 'access_token_expired',
+          tone: 'danger',
+          label: 'Sign-in expired',
+          actionLabel: 'Reconnect',
+          expiresAt: null,
+        });
+      }
+    },
+  );
+
+  it.each(['openai_oauth', 'gemini_oauth'])(
+    '%s preserves rejected-sign-in recovery for an access-only token',
+    (kind) => {
+      expect(
+        classifyOAuthReconnect(
+          oauthStatus({
+            kind,
+            mode: 'long_lived_365d',
+            can_refresh: false,
+            refresh_token_present: false,
+            refresh_token_expires_at_unix_secs: null,
+            expires_at_unix_secs: NOW + DAY,
+          }),
+          'status_401',
+          NOW,
+        ),
+      ).toMatchObject({
+        reason: 'renewal_rejected',
+        tone: 'danger',
+        label: 'Sign-in rejected',
+        actionLabel: 'Reconnect',
+      });
+    },
+  );
+
+  it.each(['openai_oauth', 'gemini_oauth'])(
+    '%s still warns when a refresh-capable credential loses its refresh token',
+    (kind) => {
+      expect(
+        classifyOAuthReconnect(
+          oauthStatus({
+            kind,
+            can_refresh: true,
+            refresh_token_present: false,
+            refresh_token_expires_at_unix_secs: null,
+            expires_at_unix_secs: NOW + DAY,
+          }),
+          null,
+          NOW,
+        ),
+      ).toMatchObject({
+        reason: 'refresh_token_missing',
+        tone: 'warn',
+        label: 'Sign-in incomplete',
+        actionLabel: 'Reconnect',
+      });
+    },
+  );
+});
+
+describe('concise provider reconnect copy', () => {
+  it.each(['openai_oauth', 'gemini_oauth'])(
+    '%s keeps each actionable reason without credential mechanics',
+    (kind) => {
+      const cases: {
+        overrides: Partial<UpstreamOAuthStatusResponse>;
+        error: string | null;
+        label: string;
+        action: 'Connect' | 'Reconnect';
+        deadline: number | null;
+      }[] = [
+        {
+          overrides: { status: 'corrupted' },
+          error: null,
+          label: 'Sign-in unavailable',
+          action: 'Reconnect',
+          deadline: null,
+        },
+        {
+          overrides: { status: 'missing', has_credentials: false },
+          error: null,
+          label: 'Account not connected',
+          action: 'Connect',
+          deadline: null,
+        },
+        {
+          overrides: { refresh_token_expires_at_unix_secs: NOW - 1 },
+          error: null,
+          label: 'Sign-in expired',
+          action: 'Reconnect',
+          deadline: null,
+        },
+        {
+          overrides: {},
+          error: 'status_401',
+          label: 'Sign-in rejected',
+          action: 'Reconnect',
+          deadline: null,
+        },
+        {
+          overrides: { refresh_token_expires_at_unix_secs: NOW + DAY },
+          error: null,
+          label: 'Sign-in expires soon',
+          action: 'Reconnect',
+          deadline: NOW + DAY,
+        },
+        {
+          overrides: {
+            refresh_token_present: false,
+            refresh_token_expires_at_unix_secs: null,
+            expires_at_unix_secs: NOW - 1,
+          },
+          error: null,
+          label: 'Sign-in expired',
+          action: 'Reconnect',
+          deadline: null,
+        },
+        {
+          overrides: {
+            refresh_token_present: false,
+            refresh_token_expires_at_unix_secs: null,
+            expires_at_unix_secs: null,
+          },
+          error: null,
+          label: 'Sign-in incomplete',
+          action: 'Reconnect',
+          deadline: null,
+        },
+      ];
+      for (const { overrides, error, label, action, deadline } of cases) {
+        const nudge = classifyOAuthReconnect(
+          oauthStatus({ kind, ...overrides }),
+          error,
+          NOW,
+        );
+        expect(nudge).toMatchObject({
+          label,
+          actionLabel: action,
+          expiresAt: deadline,
+        });
+        expect(nudge?.description).not.toMatch(
+          /OAuth|refresh token|access token|renew|rotat|long-lived|365-day/i,
+        );
+      }
+    },
+  );
+});

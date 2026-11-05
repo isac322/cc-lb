@@ -1,7 +1,8 @@
 export const COPY = {
   cardTitle: 'Warmup',
-  cardSubtitle:
-    'Keep the OAuth subscription quota primed by sending a small request before quota expires.',
+  cardSubtitle: 'Prepares the next quota window during idle gaps.',
+  geminiCardSubtitle:
+    'Prepares the next Gemini models quota window during idle gaps.',
   lastCycleLabel: 'Last cycle',
   dialectPluginLabel: 'Shape plugin',
   defaultPluginOption: 'None (default request shape)',
@@ -20,11 +21,11 @@ export const COPY = {
   dialectPluginSaveSuccess: 'Shape plugin updated',
   dialectPluginClearSuccess: 'Shape plugin cleared',
   disabledEmpty:
-    'Warmup is off for this upstream. Enable to keep the subscription quota primed.',
+    'Warmup is off for this upstream. Enable to start idle subscription windows.',
   lastNull: 'Never warmed',
   confirmFireBody:
-    'This sends a real /messages request to {upstreamName} and consumes a small token. The schedule for the current quota window will be skipped.',
-  fireSuccess: 'Warmup fired — quota window primed',
+    'This sends a real request to {upstreamName} and consumes a small amount of quota. The next scheduled attempt follows the subscription window reset.',
+  fireSuccess: 'Warmup request completed',
   leaseHeldTemplate:
     'Another replica ({heldBy}) is currently priming this upstream. Try again in ~30 seconds.',
   staleRevisionHint: 'Settings changed elsewhere — re-apply your changes.',
@@ -37,7 +38,7 @@ export const COPY = {
     forbidden:
       "Warmup failed: upstream returned 403. Check the account's API scope.",
     bad_request:
-      'Warmup failed: upstream rejected the request body. Check the dialect plugin configuration.',
+      'Warmup failed: upstream rejected the request body. Check the warmup model and any shape plugin configuration.',
     not_found: 'Warmup failed: upstream returned 404. Check the base URL.',
     dialect_plugin_failed:
       'Warmup failed: the dialect plugin raised an error. Check plugin logs.',
@@ -48,7 +49,7 @@ export const COPY = {
     upstream_disabled: 'Warmup skipped: upstream is disabled.',
     upstream_deleted: 'Warmup skipped: upstream was deleted.',
     rate_limited_cycle_key_missing:
-      'Warmup failed: 429 without anthropic-ratelimit-* headers.',
+      'Warmup failed: 429 without quota reset headers.',
     upstream_5xx: 'Warmup failed: upstream returned 5xx.',
     network_error: 'Warmup failed: network error.',
     request_timeout: 'Warmup failed: request timeout.',
