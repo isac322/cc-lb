@@ -196,6 +196,7 @@ async fn admin_app(storage: Arc<dyn DynStorage>) -> axum::Router {
     let config = test_config(oauth_addr, None);
     router(AdminState {
         config_path: None,
+        build: admin_test_common::test_build_info(),
         startup_config_overrides: Default::default(),
         storage: Some(storage),
         key_store: None,

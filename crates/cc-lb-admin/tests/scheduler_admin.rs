@@ -18,7 +18,7 @@ async fn scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std:
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         status_body["schedule_version"].as_str().unwrap_or(""),
-        "unknown"
+        "test-git-sha"
     );
     let recurring = status_body["recurring_jobs"]
         .as_array()
@@ -34,6 +34,24 @@ async fn scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std:
         .expect("usage_rollup status");
     assert_eq!(rollup["last_run_status"], "Pending");
     assert!(rollup["next_run_at"].is_u64());
+
+    let (second_status, second_body) = support::authed_json(
+        support::app_with_scheduler_and_build(
+            fixture.handle.clone(),
+            cc_lb_admin::AdminBuildInfo {
+                git_sha: "second-scheduler-sha",
+                rustc: "second-rustc",
+                profile: "second-profile",
+                target: "second-target",
+            },
+        ),
+        "GET",
+        "/admin/scheduler/status",
+        &[],
+    )
+    .await?;
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(second_body["schedule_version"], "second-scheduler-sha");
 
     let (failures_status, failures_body) = support::authed_json(
         app.clone(),
