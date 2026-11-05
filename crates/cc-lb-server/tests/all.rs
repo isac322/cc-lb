@@ -73,6 +73,8 @@ mod oauth_refresh;
 mod oauth_usage_proxy;
 #[path = "observation_failure_isolation.rs"]
 mod observation_failure_isolation;
+#[path = "postgres_tls.rs"]
+mod postgres_tls;
 #[path = "preflight.rs"]
 mod preflight;
 #[path = "preflight_common.rs"]
