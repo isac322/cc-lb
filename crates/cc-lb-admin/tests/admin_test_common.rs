@@ -134,6 +134,15 @@ impl cc_lb_admin::auth::AdminAuthProvider for TestStaticTokenProvider {
     }
 }
 
+pub fn test_build_info() -> cc_lb_admin::AdminBuildInfo {
+    cc_lb_admin::AdminBuildInfo {
+        git_sha: "test-git-sha",
+        rustc: "test-rustc",
+        profile: "test-profile",
+        target: "test-target",
+    }
+}
+
 pub async fn spawn_admin_server() -> SpawnedAdminServer {
     spawn_admin_server_with_clock(system_clock()).await
 }
@@ -158,6 +167,7 @@ pub async fn spawn_admin_server_with_clock_and_auth(
     let dynamic_view = dynamic_view_holder(&config);
     let state = cc_lb_admin::AdminState {
         config_path: None,
+        build: test_build_info(),
         startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: Some(key_store(storage.clone())),

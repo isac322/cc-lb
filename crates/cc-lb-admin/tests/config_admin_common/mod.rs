@@ -113,6 +113,7 @@ pub fn test_state_with_clock(
     });
     AdminState {
         config_path: None,
+        build: crate::admin_test_common::test_build_info(),
         startup_config_overrides: Default::default(),
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,
