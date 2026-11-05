@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent. Source-filtered aggregates determine absence only from the requested source. Limit-reset nudges for absent 5-hour windows recompute `at_limit` even when the provider omits the exhausted-window list.
+- Prompt-cache keep-alive now applies cache anchor age only to the initial schedule; cache-hit renewals use the full configured TTL-minus-lead interval.
+- Disabling or clearing keep-alive now retains accounting and charges completed hit/miss renewals exactly once, then cancels without rescheduling; error and unsupported-provider outcomes retain reservation refunds.
+- Keep-alive classification now uses transformed client-facing tool names in SSE and buffered responses, while usage, provider errors, and affinity retain the original upstream response.
+- Corrected keep-alive operator guidance for emitted metrics, cancellation scope, disable behavior, and unsupported-provider versus missing-upstream terminal reasons.
+- Renewal request events now retain the originating thread id for thread-scoped sessions, including agent-scoped sessions.
+- Keep-alive snapshot capture, trimming, renewal shaping, and persistence now preserve shaped JSON object key order without changing canonical routing hashes.
+- Authenticated, non-auxiliary real requests now retire the matching active keep-alive generation before upstream dispatch, preventing queued renewals during response-header waits and streaming. Failed real requests do not resume the old snapshot. ([#1051](https://github.com/isac322/cc-lb/issues/1051))
 
 ### Security
 

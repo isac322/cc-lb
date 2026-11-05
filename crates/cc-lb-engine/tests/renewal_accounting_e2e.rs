@@ -121,25 +121,29 @@ async fn renewal_survives_full_channels() {
 }
 
 #[tokio::test]
-async fn renewal_disable_stops_cleanly() {
+async fn renewal_disable_after_completed_hit_records_accounting() {
     // Given
     let scenario = RenewalAccountingScenario::new().await;
     let session = scenario.schedule(Some("renewal-key")).await;
     assert!(scenario.claim(&session).await);
-    let finalization = scenario.dispatch(&session, true).await;
 
-    // When
+    // When: this component harness finalizes the completed hit before cancellation.
+    // The server scheduler tests cover authorization changing during dispatch.
+    scenario.dispatch_and_finalize(&session, true, None).await;
     scenario
-        .disable_after_dispatch(&session, finalization)
+        .terminalize(&session, CacheKeepaliveTerminalReason::Cancelled)
         .await;
 
     // Then
     assert_eq!(scenario.http_calls(), 1);
-    assert_eq!(scenario.row_counts().await, (0, 0, 0));
+    assert_eq!(scenario.row_counts().await, (1, 1, 1));
+    assert!(!scenario.claim(&session).await);
     assert_eq!(
         scenario.terminal_reason().await,
         Some(CacheKeepaliveTerminalReason::Cancelled)
     );
+    // This fixture has zero output tokens, so reconciliation leaves the full
+    // output-token capacity available; spent-quota coverage lives on the server.
     scenario.assert_full_capacity_available().await;
 }
 

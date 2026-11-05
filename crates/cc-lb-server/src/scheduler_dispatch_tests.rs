@@ -731,71 +731,56 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     assert_eq!(decision_count, 1);
 }
 
-#[tokio::test]
-async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finalizing() {
-    // Given
-    let fixture = Fixture::new().await;
-    let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
-    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
-    let mut request = fixture.enqueue_request();
-    request.accounting_key_id = Some(key_id.clone());
-    enqueuer
-        .enqueue_cache_keepalive(request)
-        .await
-        .expect("enqueue keepalive with an accounting key");
-    let job = fixture.pending_keepalive_job(1).await;
-    let limit_engine = LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(SystemClock),
-    );
-    fixture.disable_cache_keepalive_on_next_http_dispatch();
-    let dispatch = fixture.dispatch_with_limit_engine(pusher, limit_engine.clone());
+#[derive(Clone, Copy, Debug)]
+enum MidCycleResult {
+    Hit,
+    Miss,
+    Error,
+    SyntheticUnsupported,
+}
 
-    // When
-    let outcome = dispatch
-        .dispatch_cache_keepalive(job)
-        .await
-        .expect("disable after dispatch starts stops the renewal cleanly");
+struct UnsupportedAfterDispatch {
+    inner: Arc<dyn KeepaliveDispatcher>,
+}
 
-    // Then
-    assert!(matches!(outcome, JobOutcome::Done));
-    assert_eq!(
-        fixture.http.requests.lock().expect("requests lock").len(),
-        1,
-        "the disable hook must run after the reservation-backed upstream dispatch"
-    );
-    assert_eq!(request_event_count(&fixture).await, 0);
-    let session = fixture
-        .storage
-        .get_cache_keepalive_session("session-hash")
-        .await
-        .expect("load disabled keepalive session")
-        .expect("keepalive session exists");
-    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
-    assert_eq!(
-        session.terminal_reason,
-        Some(CacheKeepaliveTerminalReason::Cancelled)
-    );
+#[async_trait]
+impl KeepaliveDispatcher for UnsupportedAfterDispatch {
+    async fn dispatch(
+        &self,
+        snapshot: &RequestSnapshot,
+        context: KeepaliveDispatchContext,
+    ) -> DispatchOutcome {
+        // Only the outcome is synthetic: the real dispatcher owns and drops the reservation.
+        drop(self.inner.dispatch(snapshot, context).await);
+        DispatchOutcome::UnsupportedProvider("synthetic unsupported outcome".to_owned())
+    }
+}
+
+async fn assert_input_headroom(
+    fixture: &Fixture,
+    engine: &Arc<LimitEngine>,
+    key_id: &str,
+    amount: i64,
+) {
     let key = KeyStore::new(fixture.storage.clone())
-        .get("principal", &key_id)
+        .get("principal", key_id)
         .await
         .expect("load accounting key")
         .expect("accounting key exists");
     let view = fixture.dynamic_view().load();
-    let verifier = limit_engine
+    let verifier = engine
         .reserve(
             view.principal_view.as_ref(),
             &key,
             "principal",
             "claude-test",
             0,
-            4_000,
+            amount,
             None,
         )
-        .expect("dropped reservation refunds the full renewal amount before the TTL sweep");
+        .expect("expected quota headroom remains");
     assert!(
-        limit_engine
+        engine
             .reserve(
                 view.principal_view.as_ref(),
                 &key,
@@ -803,12 +788,197 @@ async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finali
                 "claude-test",
                 0,
                 1,
-                None,
+                None
             )
             .is_err(),
-        "the verifier proves the original reservation refunded exactly once"
+        "headroom must equal the expected amount exactly"
     );
     drop(verifier);
+}
+
+async fn assert_mid_cycle_accounting(clear: bool, result: MidCycleResult) {
+    install_test_pricing();
+    let fixture = Fixture::new().await;
+    match result {
+        MidCycleResult::Hit | MidCycleResult::SyntheticUnsupported => {
+            fixture.http.return_cache_hit_usage(100, 0, 10)
+        }
+        MidCycleResult::Miss => fixture.http.return_cache_hit_usage(100, 0, 0),
+        MidCycleResult::Error => fixture.http.return_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "boom"}),
+        ),
+    }
+    let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let mut request = fixture.enqueue_request();
+    request.accounting_key_id = Some(key_id.clone());
+    fixture
+        .enqueuer(Arc::clone(&pusher))
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue");
+    let job = fixture.pending_keepalive_job(1).await;
+    let limit_engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(SystemClock),
+    );
+    if clear {
+        let mut principal =
+            cc_lb_storage_api::PrincipalStore::get_by_name(fixture.storage.as_ref(), "principal")
+                .await
+                .expect("load principal")
+                .expect("principal exists");
+        principal.cache_keepalive = None;
+        let dynamic_view = fixture.dynamic_view();
+        fixture.http.run_on_next_dispatch(Arc::new(move || {
+            let current = dynamic_view.load();
+            let view = cc_lb_control::DynamicViewBuilder::from_view(&current)
+                .principal_view(Arc::new(
+                    cc_lb_control::api_keys::principal_view::PrincipalView::from_db(
+                        std::slice::from_ref(&principal),
+                        std::collections::HashMap::new(),
+                    ),
+                ))
+                .build();
+            dynamic_view.store(view);
+        }));
+    } else {
+        fixture.disable_cache_keepalive_on_next_http_dispatch();
+    }
+    let dispatch = if matches!(result, MidCycleResult::SyntheticUnsupported) {
+        let inner = Arc::new(
+            cc_lb_engine::cache_keepalive::AnthropicKeepaliveDispatcher::new(
+                fixture.dynamic_view(),
+                fixture.storage.clone(),
+                fixture.http.clone(),
+                Arc::new(SystemClock),
+            ),
+        );
+        fixture.dispatch_with_limit_engine_and_keepalive_dispatcher(
+            pusher,
+            limit_engine.clone(),
+            Arc::new(UnsupportedAfterDispatch { inner }),
+        )
+    } else {
+        fixture.dispatch_with_limit_engine(pusher, limit_engine.clone())
+    };
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job.clone())
+            .await
+            .expect("dispatch"),
+        JobOutcome::Done
+    ));
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job)
+            .await
+            .expect("redeliver"),
+        JobOutcome::Noop
+    ));
+    assert_eq!(
+        fixture.http.requests.lock().expect("requests lock").len(),
+        1
+    );
+    let completed = matches!(result, MidCycleResult::Hit | MidCycleResult::Miss);
+    assert_eq!(
+        request_event_count(&fixture).await,
+        i64::from(completed),
+        "clear={clear}, {result:?}"
+    );
+    let turns: Vec<(String, i64)> =
+        sqlx::query_as("SELECT hit_miss, cost_micros FROM cache_keepalive_turns")
+            .fetch_all(fixture.storage.pool())
+            .await
+            .expect("read turns");
+    let decisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_decisions")
+        .fetch_one(fixture.storage.pool())
+        .await
+        .expect("count decisions");
+    assert_eq!(decisions, i64::from(completed));
+    if completed {
+        let events = stored_request_events(&fixture).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].event_id.as_deref(),
+            Some("renewal:session-hash:1")
+        );
+        assert_eq!(events[0].input_tokens, Some(100));
+        let (hit_miss, cache_read, cost) = if matches!(result, MidCycleResult::Hit) {
+            ("hit", 10, 200)
+        } else {
+            ("miss", 0, 200)
+        };
+        assert_eq!(events[0].cache_read_input_tokens, Some(cache_read));
+        // The fixture prices input at $2/M and has no cache-read price.
+        // Thus 100 input tokens cost 200 micros; the 10 cached tokens add 0.
+        assert_eq!(events[0].cost_input_micros, Some(200));
+        assert_eq!(events[0].cost_cache_read_micros, Some(0));
+        assert_eq!(events[0].cost_usd_micros, Some(cost));
+        assert_eq!(turns, vec![(hit_miss.to_owned(), cost)]);
+    } else {
+        assert!(turns.is_empty());
+    }
+    let session = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        session.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+    assert_eq!(session.generation, 1);
+    let jobs = fixture
+        .backend
+        .backend
+        .list_keepalive_tasks(&cc_lb_scheduler::worker::Filter {
+            status: Some(cc_lb_scheduler::worker::TaskStatus::Pending),
+            page: 1,
+            page_size: Some(10),
+        })
+        .await
+        .expect("list jobs");
+    assert_eq!(jobs.len(), 1, "cancellation must not enqueue another job");
+    assert_input_headroom(
+        &fixture,
+        &limit_engine,
+        &key_id,
+        if completed { 3_900 } else { 4_000 },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cache_keepalive_disable_or_clear_mid_cycle_accounts_completed_hit_exactly_once() {
+    for clear in [false, true] {
+        assert_mid_cycle_accounting(clear, MidCycleResult::Hit).await;
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_disable_or_clear_mid_cycle_accounts_completed_miss_exactly_once() {
+    for clear in [false, true] {
+        assert_mid_cycle_accounting(clear, MidCycleResult::Miss).await;
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_disable_or_clear_mid_cycle_error_refunds_without_finalizing() {
+    for clear in [false, true] {
+        assert_mid_cycle_accounting(clear, MidCycleResult::Error).await;
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_disable_or_clear_mid_cycle_synthetic_unsupported_refunds_without_finalizing()
+ {
+    for clear in [false, true] {
+        assert_mid_cycle_accounting(clear, MidCycleResult::SyntheticUnsupported).await;
+    }
 }
 
 fn api_key_id(secret: &str) -> String {
@@ -912,6 +1082,313 @@ fn saturate_lifecycle_bus(fixture: &Fixture) -> Vec<tokio::sync::mpsc::Receiver<
         event_kind: None,
     });
     receivers
+}
+
+struct RenewalAnchorAge {
+    inner: Arc<dyn KeepaliveDispatcher>,
+    age: Duration,
+}
+
+#[async_trait]
+impl KeepaliveDispatcher for RenewalAnchorAge {
+    async fn dispatch(
+        &self,
+        snapshot: &RequestSnapshot,
+        context: KeepaliveDispatchContext,
+    ) -> DispatchOutcome {
+        match self.inner.dispatch(snapshot, context).await {
+            DispatchOutcome::CacheHit { finalization, .. } => DispatchOutcome::CacheHit {
+                cache_anchor_age: self.age,
+                finalization,
+            },
+            other => other,
+        }
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_hit_reschedule_uses_only_current_response_age_and_clamps_due_time() {
+    for (response_age, expected_remaining) in [(17, 253), (400, 1)] {
+        let fixture = Fixture::new().await;
+        let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+        let mut request = fixture.enqueue_request();
+        request.cache_anchor_age = Duration::from_secs(120);
+        request.params.delay = Duration::from_secs(150);
+        fixture
+            .enqueuer(Arc::clone(&pusher))
+            .enqueue_cache_keepalive(request)
+            .await
+            .expect("enqueue");
+        let inner = Arc::new(
+            cc_lb_engine::cache_keepalive::AnthropicKeepaliveDispatcher::new(
+                fixture.dynamic_view(),
+                fixture.storage.clone(),
+                fixture.http.clone(),
+                Arc::new(SystemClock),
+            ),
+        );
+        let dispatch = fixture.dispatch_with_limit_engine_and_keepalive_dispatcher(
+            pusher,
+            LimitEngine::new(
+                Arc::new(KeyConcurrencyManager::new()),
+                Arc::new(SystemClock),
+            ),
+            Arc::new(RenewalAnchorAge {
+                inner,
+                age: Duration::from_secs(response_age),
+            }),
+        );
+        let job = fixture.pending_keepalive_job(1).await;
+        assert!(matches!(
+            dispatch
+                .dispatch_cache_keepalive(job)
+                .await
+                .expect("dispatch"),
+            JobOutcome::Done
+        ));
+        let next = fixture.pending_keepalive_job(2).await;
+        assert_eq!(next.refresh_delay_secs, 270);
+        let record = fixture
+            .storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load rescheduled")
+            .expect("rescheduled exists");
+        assert_eq!(
+            record.updated_at_unix_secs - record.cache_anchor_at_unix_secs,
+            response_age
+        );
+        assert_eq!(
+            record.run_at_unix_secs - record.updated_at_unix_secs,
+            expected_remaining
+        );
+    }
+}
+
+async fn assert_renewal_cadence(
+    ttl: cc_lb_storage_api::CacheTtl,
+    age_secs: u64,
+    lead_secs: u32,
+    initial_delay: u64,
+    full_delay: u64,
+    legacy: bool,
+) {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let mut request = fixture.enqueue_request();
+    request.snapshot.ttl = ttl;
+    request.cache_anchor_age = Duration::from_secs(age_secs);
+    request.params.delay = Duration::from_secs(initial_delay);
+    match ttl {
+        cc_lb_storage_api::CacheTtl::Ttl5m => {
+            request.config_snapshot.refresh_lead_time_5m_secs = lead_secs
+        }
+        cc_lb_storage_api::CacheTtl::Ttl1h => {
+            request.config_snapshot.refresh_lead_time_1h_secs = lead_secs
+        }
+    }
+    fixture
+        .enqueuer(Arc::clone(&pusher))
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue");
+    if legacy {
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions SET config_snapshot = NULL WHERE session_key_hash = ?",
+        )
+        .bind("session-hash")
+        .execute(fixture.storage.pool())
+        .await
+        .expect("create legacy row");
+    }
+    let first_job = fixture.pending_keepalive_job(1).await;
+    assert_eq!(
+        first_job.refresh_delay_secs, initial_delay,
+        "initial anchor age remains applied"
+    );
+    let initial = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load initial")
+        .expect("initial exists");
+    assert_eq!(
+        initial.run_at_unix_secs - initial.cache_anchor_at_unix_secs,
+        age_secs + initial_delay
+    );
+    assert!(matches!(
+        fixture
+            .dispatch(pusher)
+            .dispatch_cache_keepalive(first_job)
+            .await
+            .expect("dispatch"),
+        JobOutcome::Done
+    ));
+    let next_job = fixture.pending_keepalive_job(2).await;
+    assert_eq!(
+        next_job.refresh_delay_secs, full_delay,
+        "{ttl:?}, legacy={legacy}"
+    );
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load rescheduled")
+        .expect("rescheduled exists");
+    assert_eq!(
+        record.run_at_unix_secs - record.cache_anchor_at_unix_secs,
+        full_delay
+    );
+    assert_eq!(
+        record.expires_at_unix_secs - record.cache_anchor_at_unix_secs,
+        ttl.as_secs()
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_hit_reschedule_restores_full_five_minute_cadence() {
+    assert_renewal_cadence(cc_lb_storage_api::CacheTtl::Ttl5m, 120, 30, 150, 270, false).await;
+}
+
+#[tokio::test]
+async fn cache_keepalive_hit_reschedule_restores_full_one_hour_cadence() {
+    assert_renewal_cadence(
+        cc_lb_storage_api::CacheTtl::Ttl1h,
+        120,
+        300,
+        3_180,
+        3_300,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cache_keepalive_hit_reschedule_recovers_from_saturated_initial_delay() {
+    assert_renewal_cadence(cc_lb_storage_api::CacheTtl::Ttl5m, 280, 30, 1, 270, false).await;
+}
+
+#[tokio::test]
+async fn cache_keepalive_hit_reschedule_saturates_configured_lead_time() {
+    for ttl in [
+        cc_lb_storage_api::CacheTtl::Ttl5m,
+        cc_lb_storage_api::CacheTtl::Ttl1h,
+    ] {
+        assert_renewal_cadence(ttl, 0, 7_200, 1, 1, false).await;
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_hit_reschedule_legacy_config_uses_default_lead_times() {
+    for (ttl, initial, full) in [
+        (cc_lb_storage_api::CacheTtl::Ttl5m, 150, 270),
+        (cc_lb_storage_api::CacheTtl::Ttl1h, 3_180, 3_300),
+    ] {
+        assert_renewal_cadence(ttl, 120, 17, initial, full, true).await;
+    }
+}
+
+#[tokio::test]
+async fn cache_keepalive_renewal_event_preserves_thread_in_storage_queries_and_lifecycle() {
+    use cc_lb_engine::cache_keepalive::SessionKey;
+    let principal = Uuid::from_u128(1);
+    let cases = [
+        (
+            SessionKey::from_thread_id(principal, "thread-1"),
+            Some("thread-1"),
+        ),
+        (
+            SessionKey::from_thread_and_agent(principal, "thread-1", "agent-a"),
+            Some("thread-1"),
+        ),
+        (
+            SessionKey::from_thread_id(principal, "a/agent:b"),
+            Some("a/agent:b"),
+        ),
+        (
+            SessionKey::from_thread_and_agent(principal, "a%2Fagent:b", "agent/y"),
+            Some("a%2Fagent:b"),
+        ),
+        (
+            SessionKey::from_thread_and_agent(principal, "100%/x%25", "agent%/y"),
+            Some("100%/x%25"),
+        ),
+        (
+            SessionKey::from_thread_id(principal, "スレッド-é"),
+            Some("スレッド-é"),
+        ),
+        (
+            SessionKey::from_cache_prefix_hash(principal, "prefix/with%escapes"),
+            None,
+        ),
+    ];
+    for (key, expected_thread) in cases {
+        let fixture = Fixture::new().await;
+        let bus = fixture.event_bus();
+        let mut lifecycle_rx = bus.subscribe_lifecycle();
+        let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+        let mut request = fixture.enqueue_request();
+        request.session_key_hash = key.to_string();
+        fixture
+            .enqueuer(Arc::clone(&pusher))
+            .enqueue_cache_keepalive(request)
+            .await
+            .expect("enqueue");
+        let job = fixture.pending_keepalive_job(1).await;
+        assert!(matches!(
+            fixture
+                .dispatch(pusher)
+                .dispatch_cache_keepalive(job)
+                .await
+                .expect("dispatch"),
+            JobOutcome::Done
+        ));
+        let events = stored_request_events(&fixture).await;
+        assert_eq!(events.len(), 1);
+        let cursor = fixture
+            .storage
+            .current_request_event_cursor()
+            .await
+            .expect("cursor");
+        let filtered = fixture
+            .storage
+            .query_request_events_between_cursors(
+                0,
+                cursor,
+                10,
+                &cc_lb_storage_api::RequestEventStreamFilters {
+                    thread_id: Some(expected_thread.unwrap_or("unrelated-thread").to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("thread filtered event query");
+        assert_eq!(
+            filtered.len(),
+            usize::from(expected_thread.is_some()),
+            "{key}"
+        );
+        assert_eq!(events[0].thread_id.as_deref(), expected_thread, "{key}");
+        if let Some((_, filtered_event)) = filtered.first() {
+            assert_eq!(filtered_event.event_id, events[0].event_id);
+        }
+        let mut parse_threads = Vec::new();
+        while let Ok(event) = lifecycle_rx.try_recv() {
+            if let LifecycleEvent::ParseCompleted {
+                event_id,
+                result: Ok(info),
+            } = event
+            {
+                assert_eq!(Some(event_id.as_str()), events[0].event_id.as_deref());
+                parse_threads.push(info.thread_id);
+            }
+        }
+        assert_eq!(
+            parse_threads,
+            vec![expected_thread.map(str::to_owned)],
+            "{key}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1053,13 +1530,13 @@ async fn assert_v2_json_cache_keepalive_payload_migrates_once_after_refresh(
     request.params.max_refreshes = 4;
     request.config_snapshot.max_refreshes_per_session = 4;
     let expected_snapshot = request.snapshot.to_persisted();
-    let mut expected_wire_body: Value = serde_json::from_slice(&expected_snapshot.body)?;
-    let object = expected_wire_body
-        .as_object_mut()
-        .ok_or("fixture body is not an object")?;
-    object.insert("max_tokens".to_owned(), Value::from(0));
-    object.remove("stream");
-    let expected_wire_body = serde_json::to_vec(&expected_wire_body)?;
+    // The cached system replaces the uncached message with "." before persistence.
+    // The legacy JSON envelope retains those trimmed body bytes and their key order.
+    assert_eq!(
+        expected_snapshot.body.as_slice(),
+        br#"{"model":"claude-test","max_tokens":32,"stream":true,"system":[{"type":"text","text":"cached prompt","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"."}]}"#,
+    );
+    let expected_wire_body = br#"{"model":"claude-test","max_tokens":0,"system":[{"type":"text","text":"cached prompt","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"."}]}"#;
     enqueuer.enqueue_cache_keepalive(request).await?;
     let dispatch = fixture.dispatch(Arc::clone(&pusher));
 

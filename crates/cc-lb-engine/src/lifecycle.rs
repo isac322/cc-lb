@@ -4225,6 +4225,7 @@ impl Lifecycle {
         let mut first_dispatch: Option<(Instant, u64)> = None;
         let mut attempt_timings = AttemptTimings::default();
         let mut keepalive_shaped_body = None;
+        let mut keepalive_request_dispatched_at = None;
         let (mut response, dispatch_started, dispatch_unix_secs, signer) = loop {
             // A failed-over upstream is announced before its signer is built,
             // so a terminal failure here never reports the previous upstream's
@@ -4366,6 +4367,8 @@ impl Lifecycle {
                     return Ok(response);
                 }
             };
+            cache_metadata.cache_breakpoints = routed.cache_bundle.request_breakpoints.clone();
+            cache_metadata.cache_prefix_hash = routed.cache_bundle.cache_prefix_hash.clone();
 
             let (dispatch_started, dispatch_unix_secs) = *first_dispatch
                 .get_or_insert_with(|| (Instant::now(), unix_now_ms(&*self.clock) / 1000));
@@ -4380,6 +4383,7 @@ impl Lifecycle {
             }
             let mut response = match self
                 .run_upstream_attempt(
+                    auth,
                     reserved.as_ref(),
                     &ctx,
                     &principal,
@@ -4388,6 +4392,8 @@ impl Lifecycle {
                     observer.as_ref(),
                     &mut attempt_timings,
                     &mut keepalive_shaped_body,
+                    &cache_metadata,
+                    &mut keepalive_request_dispatched_at,
                 )
                 .await
             {
@@ -4447,6 +4453,7 @@ impl Lifecycle {
                 );
                 response = match self
                     .run_upstream_attempt(
+                        auth,
                         reserved.as_ref(),
                         &ctx,
                         &principal,
@@ -4455,6 +4462,8 @@ impl Lifecycle {
                         observer.as_ref(),
                         &mut attempt_timings,
                         &mut keepalive_shaped_body,
+                        &cache_metadata,
+                        &mut keepalive_request_dispatched_at,
                     )
                     .await
                 {
@@ -4511,8 +4520,6 @@ impl Lifecycle {
             &routed.cache_bundle.cacheable_breakpoint_prefix_keys,
             routed.selected_cache_match.take(),
         );
-        cache_metadata.cache_breakpoints = routed.cache_bundle.request_breakpoints.clone();
-        cache_metadata.cache_prefix_hash = routed.cache_bundle.cache_prefix_hash.clone();
         cache_metadata.cache_control_message_indices = routed
             .cache_bundle
             .request_breakpoints
@@ -4538,6 +4545,7 @@ impl Lifecycle {
                 shaped_body,
                 original_body: ctx.body_bytes.clone(),
                 downstream_headers: ctx.downstream_headers.clone(),
+                request_dispatched_at: keepalive_request_dispatched_at.unwrap_or(dispatch_started),
             }
         });
         let response_affinity_context = ResponseAffinityContext {
@@ -4929,6 +4937,8 @@ impl Lifecycle {
             );
         }
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
+        let mut keepalive_transformed_json = None;
+        let mut keepalive_body_replaced = false;
         if !body_collect_failed
             && let (Some(hook), Some(semantic_body)) = (
                 transform_ctx.dialect.response_transform_hook(),
@@ -4947,6 +4957,15 @@ impl Lifecycle {
                 body: semantic_body.clone(),
             }) {
                 Ok(result) => {
+                    if keepalive_completion.is_some()
+                        && let cc_lb_upstream::TransformResponseResult::Replace {
+                            body: Some(body),
+                            ..
+                        } = &result
+                    {
+                        keepalive_body_replaced = true;
+                        keepalive_transformed_json = sonic_rs::from_slice::<Value>(body).ok();
+                    }
                     let transformed = apply_buffered_transform_result(
                         parts.status,
                         std::mem::take(&mut parts.headers),
@@ -5010,9 +5029,14 @@ impl Lifecycle {
             }
         }
         let client_status = parts.status;
+        let keepalive_response_json = if keepalive_body_replaced {
+            keepalive_transformed_json.as_ref()
+        } else {
+            response_body_json.as_ref()
+        };
         if !affinity_bind_failed
             && let (Some(context), Some(response_json)) =
-                (keepalive_completion, response_body_json.as_ref())
+                (keepalive_completion, keepalive_response_json)
         {
             self.cache_keepalive.on_response_completed(
                 response_json,
@@ -5023,7 +5047,9 @@ impl Lifecycle {
                 context.shaped_body,
                 context.original_body,
                 &context.downstream_headers,
-                first_body_chunk_at.map_or(duration, |anchor| anchor.elapsed()),
+                first_body_chunk_at
+                    .unwrap_or(context.request_dispatched_at)
+                    .elapsed(),
                 usage
                     .cache_read_input_tokens
                     .saturating_add(usage.cache_creation_input_tokens),
@@ -5190,6 +5216,7 @@ impl Lifecycle {
     #[allow(clippy::too_many_arguments)]
     async fn run_upstream_attempt(
         &self,
+        authenticated: &crate::authn_rail::Authenticated,
         reserved: Option<&Reserved>,
         ctx: &RequestContext,
         principal: &Principal,
@@ -5198,6 +5225,8 @@ impl Lifecycle {
         observer: Option<&LifecycleContext>,
         attempt_timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
+        cache_metadata: &RequestCacheMetadata,
+        keepalive_request_dispatched_at: &mut Option<Instant>,
     ) -> Result<Response<Body>, AttemptFailure> {
         let attempt_scope = match reserved {
             Some(reserved) => reserved.begin_attempt(),
@@ -5205,6 +5234,7 @@ impl Lifecycle {
         };
         let response = self
             .attempt(
+                authenticated,
                 self.dispatcher.as_ref(),
                 attempt_scope,
                 ctx,
@@ -5216,6 +5246,8 @@ impl Lifecycle {
                 observer,
                 attempt_timings,
                 shaped_body_out,
+                cache_metadata,
+                keepalive_request_dispatched_at,
             )
             .await?;
         if let Some(o) = observer {
@@ -5442,6 +5474,7 @@ impl Lifecycle {
     )]
     async fn attempt(
         &self,
+        authenticated: &crate::authn_rail::Authenticated,
         dispatcher: &dyn UpstreamDispatch,
         attempt_scope: Scoped<'_>,
         ctx: &RequestContext,
@@ -5453,6 +5486,8 @@ impl Lifecycle {
         observer: Option<&LifecycleContext>,
         timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
+        cache_metadata: &RequestCacheMetadata,
+        keepalive_request_dispatched_at: &mut Option<Instant>,
     ) -> Result<Response<Body>, AttemptFailure> {
         tracing::Span::current().record(
             "cc_lb.upstream.id",
@@ -5539,6 +5574,13 @@ impl Lifecycle {
             body_bytes = signed.body_len(),
             "about to dispatch signed request"
         );
+
+        if keepalive_request_dispatched_at.is_none() {
+            self.cache_keepalive
+                .on_request_started(authenticated, principal, cache_metadata)
+                .await;
+            *keepalive_request_dispatched_at = Some(Instant::now());
+        }
 
         let dispatch_start = Instant::now();
         let stage_timings_carrier = Arc::new(Mutex::new(RequestStageTimings::default()));
@@ -6255,7 +6297,9 @@ impl Lifecycle {
                                     );
                                     break 'upstream;
                                 }
-                                keepalive_response.observe(&parsed_event);
+                                if !sse_transform_active && keepalive_completion.is_some() {
+                                    keepalive_response.observe(&parsed_event);
+                                }
                                 match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
                                         message_start_at = Some(now);
@@ -6373,6 +6417,9 @@ impl Lifecycle {
                                             SseTransformOutcome::Emit(bytes) => {
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
+                                                if keepalive_completion.is_some() {
+                                                    keepalive_response.observe_emitted(&bytes);
+                                                }
                                                 bytes
                                             }
                                             SseTransformOutcome::Drop => {
@@ -6864,7 +6911,9 @@ impl Lifecycle {
                                 }
                                 break;
                             }
-                            keepalive_response.observe(&parsed_event);
+                            if !sse_transform_active && keepalive_completion.is_some() {
+                                keepalive_response.observe(&parsed_event);
+                            }
                             if let Some(err) =
                                 usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                             {
@@ -6944,7 +6993,12 @@ impl Lifecycle {
                                         response_headers,
                                         raw.clone(),
                                     ) {
-                                        SseTransformOutcome::Emit(bytes) => bytes,
+                                        SseTransformOutcome::Emit(bytes) => {
+                                            if keepalive_completion.is_some() {
+                                                keepalive_response.observe_emitted(&bytes);
+                                            }
+                                            bytes
+                                        }
                                         SseTransformOutcome::Drop => continue,
                                         SseTransformOutcome::FailOpen
                                         | SseTransformOutcome::Error(_) => {
@@ -7319,7 +7373,9 @@ impl Lifecycle {
                     context.shaped_body,
                     context.original_body,
                     &context.downstream_headers,
-                    message_start_at.map_or(relay_start.elapsed(), |anchor| anchor.elapsed()),
+                    message_start_at
+                        .unwrap_or(context.request_dispatched_at)
+                        .elapsed(),
                     usage
                         .cache_read_input_tokens
                         .saturating_add(usage.cache_creation_input_tokens),
