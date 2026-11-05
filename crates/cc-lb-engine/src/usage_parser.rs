@@ -770,18 +770,25 @@ fn detect_mid_stream_error_with(
         || event.event_name == Some(b"response.failed")
         || (value.get("object").and_then(Value::as_str) == Some("response")
             && value.get("status").and_then(Value::as_str) == Some("failed"));
-    let nested_response_error = value.get("response").and_then(|resp| resp.get("error"));
+    let top_level_error = value.get("error").filter(|error| !error.is_null());
+    let nested_response_error = value
+        .get("response")
+        .and_then(|resp| resp.get("error"))
+        .filter(|error| !error.is_null());
     if !event.named_error
         && type_str != Some("error")
-        && value.get("error").is_none()
+        && top_level_error.is_none()
         && !is_response_failed
         && nested_response_error.is_none()
     {
         return None;
     }
-    let error_source = if value.get("error").is_some() {
+    let error_source = if top_level_error.is_some() {
         value
-    } else if let Some(response_obj) = value.get("response").filter(|r| r.get("error").is_some()) {
+    } else if let Some(response_obj) = value
+        .get("response")
+        .filter(|r| r.get("error").is_some_and(|error| !error.is_null()))
+    {
         response_obj
     } else {
         value
@@ -1391,6 +1398,13 @@ mod tests {
         assert_eq!(event.event_name(), Some(b"message_delta".as_slice()));
         assert_eq!(error.error_type.as_deref(), Some("overloaded_error"));
         assert_eq!(error.error_message.as_deref(), Some("later named error"));
+    }
+    #[test]
+    fn response_completed_null_error_is_not_mid_stream_error() {
+        let raw = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null}}\n\n";
+        assert!(detect_raw_mid_stream_error(raw).is_none());
+        let top_level = b"data: {\"type\":\"response.completed\",\"error\":null}\n\n";
+        assert!(detect_raw_mid_stream_error(top_level).is_none());
     }
 
     #[test]
