@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
 
 ### Fixed
+- SQLite Apalis housekeeping now uses application storage for `cache_keepalive_sessions` while keeping Apalis `Jobs` and `Workers` in the derived scheduler SQLite file. It recovers stale running sessions, purges stale pending and expired sessions, kills stale running cache keepalive jobs, retains fresh queued/running work, and lets normal retention remove terminal rows later; no new configuration, schema, or migration is required. ([#1043](https://github.com/isac322/cc-lb/issues/1043))
 
 - Recent request-event reads use SQLite's `+ts` optimizer predicate only for `since=0` with a saturated upper bound; bounded time ranges retain their existing seekable `ts` predicates. PostgreSQL omits the redundant renewal event-kind predicate only when both source and event kind are `renewal`.
 - Logs `All kinds` now preserves `source_kind=all` through history, live, delta, and histogram requests, so keepalive renewal rows appear without sending invalid `event_kind=all`.
