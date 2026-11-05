@@ -138,9 +138,8 @@ pub(crate) fn start_pkce_flow(
         &redirect_uri,
         &challenge,
     );
-    tracing::info!(
+    tracing::debug!(
         verifier_len = verifier.secret().len(),
-        verifier_first6 = %verifier.secret().chars().take(6).collect::<String>(),
         challenge_in_url = %challenge.as_str(),
         "oauth start: generated PKCE verifier+challenge"
     );
@@ -467,24 +466,14 @@ async fn exchange_pkce_code(
         redirect_uri,
         expires_in,
     );
-    let verifier_str = code_verifier.expose_secret();
-    let verifier_challenge = {
-        use base64::Engine;
-        use sha2::{Digest, Sha256};
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(Sha256::digest(verifier_str.as_bytes()))
-    };
     tracing::info!(
         token_url = %token_url,
         client_id = %client_id,
         redirect_uri = %redirect_uri,
         code_len = auth_code.len(),
-        code_first8 = %auth_code.chars().take(8).collect::<String>(),
         code_has_hash = auth_code.contains('#'),
         state_len = state_token.len(),
-        verifier_len = verifier_str.len(),
-        verifier_first6 = %verifier_str.chars().take(6).collect::<String>(),
-        verifier_sha256_challenge = %verifier_challenge,
+        verifier_len = code_verifier.expose_secret().len(),
         "oauth complete: posting token exchange to anthropic"
     );
     let response = http
@@ -584,6 +573,133 @@ fn form_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl CapturedLogs {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.bytes.lock().expect("captured logs lock")).into_owned()
+        }
+    }
+
+    struct CapturedWriter {
+        logs: CapturedLogs,
+    }
+
+    impl Write for CapturedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.logs
+                .bytes
+                .lock()
+                .expect("captured logs lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for CapturedLogs {
+        type Writer = CapturedWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedWriter { logs: self.clone() }
+        }
+    }
+
+    #[derive(Debug)]
+    struct SuccessfulTokenExchange;
+
+    #[async_trait]
+    impl OAuthHttpClient for SuccessfulTokenExchange {
+        async fn post_token(
+            &self,
+            _request: OAuthTokenRequest,
+        ) -> Result<OAuthTokenResponse, OAuthHttpError> {
+            Ok(OAuthTokenResponse {
+                status: StatusCode::OK,
+                body: Bytes::from_static(
+                    br#"{"access_token":"access-token","refresh_token":"refresh-token","expires_in":3600}"#,
+                ),
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pkce_start_and_exchange_logs_never_include_secret_fragments() {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        start_pkce_flow(
+            ClientId::new("client-id".to_owned()),
+            AuthUrl::new("https://auth.example.test/authorize".to_owned()).unwrap(),
+            TokenUrl::new("https://auth.example.test/token".to_owned()).unwrap(),
+            vec!["user:profile".to_owned()],
+            Url::parse("http://localhost/callback").unwrap(),
+        );
+        let start_logs = logs.contents();
+
+        let auth_code = "authorization-code-secret";
+        let state_token = "state-token-secret";
+        let verifier = SecretString::new("code-verifier-secret".to_owned().into_boxed_str());
+        exchange_pkce_code(
+            &SuccessfulTokenExchange,
+            &Url::parse("https://auth.example.test/token").unwrap(),
+            "client-id",
+            auth_code,
+            state_token,
+            &verifier,
+            &Url::parse("http://localhost/callback").unwrap(),
+            1_000,
+            Some(3_600),
+        )
+        .await
+        .expect("token exchange succeeds");
+        assert!(start_logs.contains("oauth start: generated PKCE verifier+challenge"));
+        assert!(!start_logs.contains("verifier_first6"), "{start_logs}");
+        assert!(start_logs.contains("DEBUG"), "{start_logs}");
+        assert!(!start_logs.contains("INFO"), "{start_logs}");
+
+        let exchange_logs = logs.contents();
+        assert!(
+            exchange_logs.contains("oauth complete: posting token exchange to anthropic"),
+            "{exchange_logs}"
+        );
+        for context in [
+            "token_url=",
+            "client_id=",
+            "redirect_uri=",
+            "state_len=",
+            "verifier_len=",
+        ] {
+            assert!(exchange_logs.contains(context), "{exchange_logs}");
+        }
+        for secret_fragment in [
+            &auth_code[..8],
+            &state_token[..8],
+            &verifier.expose_secret()[..6],
+        ] {
+            assert!(!exchange_logs.contains(secret_fragment), "{exchange_logs}");
+        }
+        assert!(
+            !exchange_logs.contains("verifier_sha256_challenge"),
+            "{exchange_logs}"
+        );
+    }
 
     fn token_endpoint_error(
         status: StatusCode,
