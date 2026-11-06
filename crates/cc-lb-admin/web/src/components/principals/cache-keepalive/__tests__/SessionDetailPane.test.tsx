@@ -310,7 +310,7 @@ describe('SessionDetailPane', () => {
 
     expect(screen.getByText('Scheduled')).toBeDefined();
     expect(screen.getByText('Current turn · Live')).toBeDefined();
-    expect(screen.getByText('$0.000 pending')).toBeDefined();
+    expect(screen.getByText('+$0.000 pending')).toBeDefined();
   });
 
   it('renders Capped final neutral', () => {
@@ -519,6 +519,38 @@ describe('SessionDetailPane', () => {
       screen.getByText('follow-up unavailable (evidence unknown)'),
     ).toBeDefined();
     expect(screen.queryByText('no follow-up (loss)')).toBeNull();
+  });
+
+  it('keeps pending unknown P&L nullable instead of displaying zero', () => {
+    const detail = {
+      ...cacheKeepaliveRenewedDetailFixture,
+      is_active: true,
+      is_last_pending: true,
+      turns: [
+        {
+          ...cacheKeepaliveRenewedDetailFixture.turns[0],
+          pending: true,
+          pnl: null,
+          evidence_status: 'pending',
+        },
+      ],
+    };
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: detail,
+      isLoading: false,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="pending-unknown-economics"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText('— pending')).toBeDefined();
+    expect(screen.queryByText('$0.000 pending')).toBeNull();
   });
   it('uses singular wording for one current-cycle renewal', () => {
     const detail = {

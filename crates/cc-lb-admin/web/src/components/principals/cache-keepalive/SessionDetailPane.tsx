@@ -395,8 +395,8 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
               let turnPnlHtml: ReactNode;
               if (turn.pending) {
                 const pendingPnl =
-                  turn.pnl === null || turn.pnl === 0
-                    ? '$0.000 pending'
+                  turn.pnl === null
+                    ? '— pending'
                     : `${turn.pnl < 0 ? '−' : '+'}$${Math.abs(turn.pnl).toFixed(3)} pending`;
                 turnPnlHtml = (
                   <span className="text-warn-text">{pendingPnl}</span>
