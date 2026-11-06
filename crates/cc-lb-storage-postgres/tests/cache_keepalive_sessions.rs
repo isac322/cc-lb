@@ -34,6 +34,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
     storage.initialize().await?;
 
+    replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences(&storage).await?;
     replace_from_real_request_bumps_generation_and_resets_counters(&storage).await?;
     replace_roundtrips_optional_accounting_key_id(&storage).await?;
     update_payload_only_mutates_matching_pending_generation(&storage).await?;
@@ -62,6 +63,69 @@ async fn run_conformance(url: &str) -> Result<()> {
         .await?;
 
     fixture.drop_schema().await
+}
+
+async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "fenced-cycle-id";
+    let first_cycle_id = Uuid::from_u128(11);
+    let second_cycle_id = Uuid::from_u128(12);
+    let mut first_request = replace_request(key, b"fenced-first", 100);
+    first_request.cycle_id = first_cycle_id;
+
+    let first = storage
+        .replace_from_real_request_fenced(&first_request, None)
+        .await?
+        .expect("fenced fresh insert");
+    assert_eq!(first.cycle_id, first_cycle_id);
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("fenced fresh session")
+            .cycle_id,
+        first_cycle_id
+    );
+
+    let mut stale_request = replace_request(key, b"fenced-stale", 99);
+    stale_request.cycle_id = second_cycle_id;
+    assert!(
+        storage
+            .replace_from_real_request_fenced(&stale_request, None)
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("fenced session after stale request"),
+        first
+    );
+
+    let mut replacement_request = replace_request(key, b"fenced-replacement", 101);
+    replacement_request.cycle_id = second_cycle_id;
+    let replacement = storage
+        .replace_from_real_request_fenced(&replacement_request, None)
+        .await?
+        .expect("fenced newer replacement");
+    assert_eq!(replacement.generation, first.generation + 1);
+    assert_eq!(replacement.cycle_id, second_cycle_id);
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(key)
+            .await?
+            .expect("fenced replacement session")
+            .cycle_id,
+        second_cycle_id
+    );
+
+    let healthy = storage
+        .replace_from_real_request(&replace_request("fenced-healthy", b"healthy", 200))
+        .await?;
+    assert_eq!(healthy.cycle_id, Uuid::nil());
+    Ok(())
 }
 
 async fn replace_from_real_request_bumps_generation_and_resets_counters(
