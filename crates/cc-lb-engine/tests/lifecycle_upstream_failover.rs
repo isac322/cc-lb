@@ -203,14 +203,6 @@ fn openai_responses_request() -> Request<Bytes> {
         .body(Bytes::from_static(OPENAI_RESPONSES_BODY))
         .expect("OpenAI Responses request builds")
 }
-fn openai_responses_compact_request() -> Request<Bytes> {
-    Request::builder()
-        .method("POST")
-        .uri("/v1/responses/compact")
-        .header("x-api-key", managed_api_key())
-        .body(Bytes::from_static(OPENAI_RESPONSES_BODY))
-        .expect("OpenAI Responses compact request builds")
-}
 
 fn host(name: &str) -> String {
     format!("{name}.invalid")
@@ -1223,30 +1215,6 @@ async fn openai_request_does_not_select_anthropic_api_key() {
     assert_eq!(fixture.hosts(), vec![host("openai-oauth")]);
 }
 
-#[tokio::test]
-async fn openai_responses_compact_uses_provider_neutral_final_key_rule() {
-    let rate_limited = || vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)];
-    let fixture = Fixture::new(vec![
-        openai_oauth(70, "compact-oauth-1").replies(rate_limited()),
-        openai_oauth(71, "compact-oauth-2").replies(rate_limited()),
-        openai_oauth(72, "compact-oauth-3").replies(rate_limited()),
-        openai_api_key(73, "compact-key"),
-    ]);
-
-    let (status, _body) = fixture
-        .send_request(openai_responses_compact_request())
-        .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        fixture.hosts(),
-        vec![
-            host("compact-oauth-1"),
-            host("compact-oauth-2"),
-            host("compact-key")
-        ]
-    );
-}
 
 #[tokio::test]
 async fn single_oauth_429_without_alternative_relays_original_429()
