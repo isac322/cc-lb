@@ -1,8 +1,11 @@
+use std::collections::{BTreeMap, HashMap};
+
 use cc_lb_pricing::PriceCatalog;
+use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion};
 use cc_lb_storage_api::{
     CacheKeepaliveEnqueueState, CacheKeepaliveEvidenceRecord, CacheKeepaliveSessionEntrySource,
     CacheKeepaliveSessionListItem, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
-    CacheKeepaliveTurnRecord, CacheTtl,
+    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl,
 };
 use uuid::Uuid;
 
@@ -19,6 +22,7 @@ fn item(source: CacheKeepaliveSessionEntrySource) -> CacheKeepaliveSessionListIt
         source,
         session_key_hash: matches!(source, CacheKeepaliveSessionEntrySource::Session)
             .then(|| "session".to_owned()),
+        cycle_id: None,
         principal_id: "principal".to_owned(),
         upstream_id: Uuid::nil(),
         last_message_at_ms: 1_730_000_000_000,
@@ -81,6 +85,98 @@ fn session() -> CacheKeepaliveSessionRecord {
         expires_at_unix_secs: 1_730_000_300,
         created_at_unix_secs: 1_730_000_000,
         updated_at_unix_secs: 1_730_000_000,
+    }
+}
+
+fn priced_catalog() -> std::sync::Arc<PriceCatalog> {
+    let catalog = PriceCatalog::new_empty();
+    let mut models = HashMap::new();
+    models.insert(
+        "claude-sonnet-4-5".to_owned(),
+        Pricing {
+            model: "claude-sonnet-4-5".to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+            by_tier: BTreeMap::new(),
+        },
+    );
+    let mut cache_creation_per_million_usd = HashMap::new();
+    cache_creation_per_million_usd.insert(
+        "claude-sonnet-4-5".to_owned(),
+        UsdPerMillion::from_micros_usd(3_750_000),
+    );
+    let mut cache_read_per_million_usd = HashMap::new();
+    cache_read_per_million_usd.insert(
+        "claude-sonnet-4-5".to_owned(),
+        UsdPerMillion::from_micros_usd(300_000),
+    );
+    catalog.install_snapshot(CatalogSnapshot {
+        payload_hash: "activity-fixture".to_owned(),
+        fetched_at_ms: 1,
+        models,
+        raw_json: Vec::new(),
+        cache_creation_per_million_usd,
+        cache_read_per_million_usd,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
+        status: CatalogStatus::Ok,
+    });
+    catalog
+}
+
+fn renewal_evidence(
+    source_ref_id: &str,
+    cycle_id: Uuid,
+    request_start_ms: u64,
+    ttl: CacheTtl,
+    hit_miss: &str,
+    prefix_hash: &str,
+) -> CacheKeepaliveEvidenceRecord {
+    CacheKeepaliveEvidenceRecord {
+        evidence_id: format!("{source_ref_id}-evidence"),
+        cycle_id: Some(cycle_id),
+        evidence_kind: "renewal".to_owned(),
+        request_start_ms,
+        prefix_fingerprint: Some(format!("{source_ref_id}-fingerprint")),
+        prefix_hash: Some(prefix_hash.to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id: Uuid::nil(),
+        model: "claude-sonnet-4-5".to_owned(),
+        ttl,
+        hit_miss: Some(hit_miss.to_owned()),
+        cache_read_input_tokens: Some(20_000),
+        cost_micros: Some(0),
+        request_ref: Some(format!("{source_ref_id}-request")),
+        event_ref: Some(source_ref_id.to_owned()),
+    }
+}
+
+fn follow_up_evidence(
+    request_start_ms: u64,
+    ttl: CacheTtl,
+    prefix_hash: &str,
+) -> CacheKeepaliveEvidenceRecord {
+    CacheKeepaliveEvidenceRecord {
+        evidence_id: "follow-up-evidence".to_owned(),
+        cycle_id: None,
+        evidence_kind: "follow_up".to_owned(),
+        request_start_ms,
+        prefix_fingerprint: Some("follow-up-fingerprint".to_owned()),
+        prefix_hash: Some(prefix_hash.to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id: Uuid::nil(),
+        model: "claude-sonnet-4-5".to_owned(),
+        ttl,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(20_000),
+        cost_micros: Some(0),
+        request_ref: Some("follow-up-request".to_owned()),
+        event_ref: Some("follow-up".to_owned()),
     }
 }
 
@@ -354,4 +450,482 @@ fn cache_keepalive_activity_credits_only_the_latest_renewal_in_a_cycle() {
     assert!(activity.turns[0].followed_up);
     assert_eq!(activity.turns[1].source_ref_id, "renewal-a");
     assert!(!activity.turns[1].followed_up);
+}
+#[test]
+fn active_same_cycle_miss_followup_resolves_pending_without_miss_credit() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
+    let cycle_id = Uuid::from_u128(2);
+    item.cycle_id = Some(cycle_id);
+
+    let mut hit = turn("same-cycle-hit", 200);
+    hit.cycle_id = Some(cycle_id);
+    hit.cost_micros = 6_000;
+
+    let mut miss = turn("same-cycle-miss", 201);
+    miss.cycle_id = Some(cycle_id);
+    miss.hit_miss = "miss".to_owned();
+    miss.cost_micros = 15_000;
+
+    let mut miss_follow_up = follow_up_evidence(202_000, CacheTtl::Ttl5m, "shared-prefix");
+    miss_follow_up.evidence_id = "same-cycle-miss-follow-up".to_owned();
+    let evidence = [
+        renewal_evidence(
+            "same-cycle-hit",
+            cycle_id,
+            200_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "shared-prefix",
+        ),
+        renewal_evidence(
+            "same-cycle-miss",
+            cycle_id,
+            201_000,
+            CacheTtl::Ttl5m,
+            "miss",
+            "shared-prefix",
+        ),
+        miss_follow_up,
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[hit, miss],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    assert_eq!(activity.evidence_status, "observed");
+    assert_eq!(activity.total_renewals, 1);
+    assert_eq!(activity.total_avoided_micros, Some(0));
+    assert!(!activity.is_last_pending);
+    assert_eq!(activity.turns[0].source_ref_id, "same-cycle-miss");
+    assert!(!activity.turns[0].pending);
+    assert!(!activity.turns[0].followed_up);
+    assert_eq!(
+        activity.turns[0].pnl.as_ref().map(|pnl| pnl.net_micros),
+        Some(-15_000)
+    );
+    assert_eq!(activity.turns[1].source_ref_id, "same-cycle-hit");
+    assert!(!activity.turns[1].followed_up);
+    assert_eq!(
+        activity.turns[1].pnl.as_ref().map(|pnl| pnl.net_micros),
+        Some(-6_000)
+    );
+}
+
+#[test]
+fn terminal_complete_negative_evidence_is_observed_without_follow_up() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+    item.terminal_reason = Some(CacheKeepaliveTerminalReason::MaxRefreshes);
+    item.refresh_count = Some(12);
+
+    let mut hit = turn("terminal-hit", 200);
+    hit.cost_micros = 6_000;
+    let mut miss = turn("terminal-miss", 100);
+    miss.cost_micros = 15_000;
+    miss.hit_miss = "miss".to_owned();
+    let cycle_id = Uuid::from_u128(10);
+    let evidence = [
+        renewal_evidence(
+            "terminal-hit",
+            cycle_id,
+            200_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "terminal",
+        ),
+        renewal_evidence(
+            "terminal-miss",
+            cycle_id,
+            210_000,
+            CacheTtl::Ttl5m,
+            "miss",
+            "terminal",
+        ),
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[hit, miss],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    let pnl = activity.pnl.expect("priced terminal activity");
+    assert_eq!(pnl.spent_micros, 21_000);
+    assert_eq!(pnl.avoided_micros, 0);
+    assert_eq!(pnl.net_micros, -21_000);
+    assert_eq!(activity.total_spent_micros, 21_000);
+    assert_eq!(activity.total_avoided_micros, Some(0));
+    assert_eq!(activity.evidence_status, "observed");
+    assert_eq!(activity.total_renewals, 1);
+    assert!(
+        activity
+            .turns
+            .iter()
+            .all(|turn| !turn.pending && !turn.followed_up)
+    );
+}
+
+#[test]
+fn terminal_complete_hit_only_evidence_is_observed_without_avoided_credit() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+    item.terminal_reason = Some(CacheKeepaliveTerminalReason::MaxRefreshes);
+    item.refresh_count = Some(12);
+
+    let mut hit = turn("terminal-hit-only", 200);
+    hit.cost_micros = 6_000;
+    let evidence = [renewal_evidence(
+        "terminal-hit-only",
+        Uuid::from_u128(11),
+        200_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "terminal-hit-only",
+    )];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[hit],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    let pnl = activity.pnl.expect("priced terminal hit-only activity");
+    assert_eq!(pnl.spent_micros, 6_000);
+    assert_eq!(pnl.avoided_micros, 0);
+    assert_eq!(pnl.net_micros, -6_000);
+    assert_eq!(activity.total_spent_micros, 6_000);
+    assert_eq!(activity.total_avoided_micros, Some(0));
+    assert_eq!(activity.evidence_status, "observed");
+    assert_eq!(activity.turns.len(), 1);
+    assert!(!activity.turns[0].pending);
+    assert!(!activity.turns[0].followed_up);
+}
+
+#[test]
+fn legacy_null_cycle_turn_survives_without_owned_cycle_evidence() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    let c1 = Uuid::from_u128(19);
+    let c2 = Uuid::from_u128(20);
+    item.cycle_id = Some(c2);
+
+    let legacy_turn = turn("legacy-turn", 200);
+    let mut c1_turn = turn("c1-turn", 100);
+    c1_turn.cycle_id = Some(c1);
+    let mut unrelated_evidence =
+        renewal_evidence("legacy-turn", c1, 200_000, CacheTtl::Ttl5m, "hit", "legacy");
+    unrelated_evidence.principal_id = "other-principal".to_owned();
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[legacy_turn, c1_turn],
+            evidence: &[unrelated_evidence],
+            now_ms: 1_730_000_100_000,
+        },
+        PriceCatalog::new_empty().as_ref(),
+    );
+
+    assert_eq!(
+        activity
+            .turns
+            .iter()
+            .map(|turn| turn.source_ref_id.as_str())
+            .collect::<Vec<_>>(),
+        ["legacy-turn"]
+    );
+}
+
+#[test]
+fn replacing_c1_with_empty_c2_retains_history_without_inheriting_pending() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
+    let c1 = Uuid::from_u128(11);
+    let c2 = Uuid::from_u128(12);
+    item.cycle_id = Some(c2);
+    let active_session = session();
+
+    let mut c1_turn = turn("c1-turn", 200);
+    c1_turn.cost_micros = 21_000;
+    c1_turn.cycle_id = Some(c1);
+    let evidence = [
+        renewal_evidence("c1-turn", c1, 200_000, CacheTtl::Ttl5m, "hit", "c1"),
+        follow_up_evidence(201_000, CacheTtl::Ttl5m, "c1"),
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: Some(&active_session),
+            turns: &[c1_turn],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    let pnl = activity.pnl.expect("retained c1 activity");
+    assert_eq!(pnl.spent_micros, 21_000);
+    assert_eq!(pnl.avoided_micros, 75_000);
+    assert_eq!(pnl.net_micros, 54_000);
+    assert_eq!(activity.total_spent_micros, 21_000);
+    assert_eq!(activity.total_avoided_micros, Some(75_000));
+    assert!(activity.turns.is_empty());
+    assert_eq!(activity.total_renewals, 0);
+    assert!(!activity.is_last_pending);
+}
+
+#[test]
+fn persisted_zero_cost_is_real_zero_spend() {
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let mut turn = turn("zero-cost-hit", 200);
+    turn.cost_micros = 0;
+    let cycle_id = Uuid::from_u128(13);
+    let evidence = [
+        renewal_evidence(
+            "zero-cost-hit",
+            cycle_id,
+            200_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "zero",
+        ),
+        follow_up_evidence(201_000, CacheTtl::Ttl5m, "zero"),
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[turn],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    let pnl = activity.pnl.expect("priced zero-cost activity");
+    assert_eq!(pnl.spent_micros, 0);
+    assert_eq!(pnl.avoided_micros, 75_000);
+    assert_eq!(pnl.net_micros, 75_000);
+    assert_eq!(activity.total_spent_micros, 0);
+}
+
+#[test]
+fn hit_miss_counts_include_hits_but_not_misses() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+    let mut hit = turn("count-hit", 200);
+    hit.cost_micros = 6_000;
+    let mut miss = turn("count-miss", 100);
+    miss.cost_micros = 15_000;
+    miss.hit_miss = "miss".to_owned();
+    let cycle_id = Uuid::from_u128(14);
+    let evidence = [
+        renewal_evidence(
+            "count-hit",
+            cycle_id,
+            200_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "count",
+        ),
+        renewal_evidence(
+            "count-miss",
+            cycle_id,
+            210_000,
+            CacheTtl::Ttl5m,
+            "miss",
+            "count",
+        ),
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[hit, miss],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    assert_eq!(
+        activity
+            .turns
+            .iter()
+            .map(|turn| turn.renewals)
+            .collect::<Vec<_>>(),
+        [1, 0]
+    );
+    assert_eq!(activity.total_renewals, 1);
+    assert_eq!(activity.total_spent_micros, 21_000);
+}
+
+#[test]
+fn mixed_batch_evidence_stays_scoped_to_each_session() {
+    let mut observed_item = item(CacheKeepaliveSessionEntrySource::Session);
+    observed_item.id = "observed".to_owned();
+    let mut unknown_item = item(CacheKeepaliveSessionEntrySource::Session);
+    unknown_item.id = "unknown".to_owned();
+    unknown_item.session_key_hash = Some("session-unknown".to_owned());
+    let mut none_item = item(CacheKeepaliveSessionEntrySource::Session);
+    none_item.id = "none".to_owned();
+    none_item.session_key_hash = Some("session-none".to_owned());
+
+    let observed_turn = turn("observed-turn", 200);
+    let mut unknown_turn = turn("unknown-turn", 200);
+    unknown_turn.session_key_hash = "session-unknown".to_owned();
+    let observed_cycle = Uuid::from_u128(15);
+    let mut unknown_renewal = renewal_evidence(
+        "unknown-turn",
+        Uuid::from_u128(16),
+        200_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "unknown",
+    );
+    unknown_renewal.cycle_id = None;
+    unknown_renewal.prefix_hash = None;
+    unknown_renewal.prefix_policy_version = None;
+    unknown_renewal.prefix_schema_version = None;
+    let batch = CacheKeepaliveActivityBatch::from_turns(
+        vec![observed_turn, unknown_turn],
+        vec![
+            renewal_evidence(
+                "observed-turn",
+                observed_cycle,
+                200_000,
+                CacheTtl::Ttl5m,
+                "hit",
+                "observed",
+            ),
+            follow_up_evidence(201_000, CacheTtl::Ttl5m, "observed"),
+            unknown_renewal,
+        ],
+    );
+    let catalog = PriceCatalog::new_empty();
+
+    let observed = activity_for_item(
+        catalog.as_ref(),
+        1_730_000_100_000,
+        &observed_item,
+        None,
+        &batch,
+    )
+    .expect("observed activity");
+    let unknown = activity_for_item(
+        catalog.as_ref(),
+        1_730_000_100_000,
+        &unknown_item,
+        None,
+        &batch,
+    )
+    .expect("unknown activity");
+    let none = activity_for_item(
+        catalog.as_ref(),
+        1_730_000_100_000,
+        &none_item,
+        None,
+        &batch,
+    )
+    .expect("empty activity");
+
+    assert_eq!(observed.evidence_status, "observed");
+    assert_eq!(unknown.evidence_status, "unknown");
+    assert_eq!(unknown.unknown_cycles, 1);
+    assert_eq!(none.evidence_status, "none");
+}
+
+#[test]
+fn historical_turn_uses_its_persisted_ttl_for_avoided_cost() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.ttl = CacheTtl::Ttl1h;
+    let mut historical_turn = turn("historical-5m", 200);
+    historical_turn.cost_micros = 21_000;
+    let cycle_id = Uuid::from_u128(17);
+    let evidence = [
+        renewal_evidence(
+            "historical-5m",
+            cycle_id,
+            100_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "historical",
+        ),
+        follow_up_evidence(399_999, CacheTtl::Ttl5m, "historical"),
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[historical_turn],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    let pnl = activity.pnl.expect("priced historical activity");
+    assert_eq!(pnl.avoided_micros, 75_000);
+    assert_eq!(pnl.spent_micros, 21_000);
+    assert_eq!(pnl.net_micros, 54_000);
+}
+
+#[test]
+fn valid_follow_up_after_cap_is_attributed_once_within_historical_ttl() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+    item.terminal_reason = Some(CacheKeepaliveTerminalReason::MaxRefreshes);
+    item.refresh_count = Some(12);
+    let mut turn = turn("capped-turn", 200);
+    turn.cost_micros = 21_000;
+    let cycle_id = Uuid::from_u128(18);
+    let evidence = [
+        renewal_evidence(
+            "capped-turn",
+            cycle_id,
+            100_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "capped",
+        ),
+        follow_up_evidence(399_999, CacheTtl::Ttl5m, "capped"),
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[turn],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    assert_eq!(activity.evidence_status, "observed");
+    assert_eq!(activity.total_renewals, 1);
+    assert!(activity.turns[0].followed_up);
+    assert!(!activity.turns[0].pending);
 }
