@@ -1086,7 +1086,6 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
     Ok(())
 }
 
-
 #[tokio::test]
 async fn non_stream_without_content_type_preserves_usage() -> TestResult {
     let body =
@@ -1590,7 +1589,6 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
     rows.clear();
     Ok(())
 }
-
 
 #[tokio::test]
 async fn semantic_client_close_preserves_abnormal_stop() -> TestResult {
