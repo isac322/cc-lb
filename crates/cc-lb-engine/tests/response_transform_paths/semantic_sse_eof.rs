@@ -1539,9 +1539,11 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
         .expect("upstream frame succeeds")
         .into_data()
         .expect("upstream frame carries data");
-    assert!(frame.windows(b"response.incomplete".len()).any(|window| {
-        window == b"response.incomplete"
-    }));
+    assert!(
+        frame
+            .windows(b"response.incomplete".len())
+            .any(|window| { window == b"response.incomplete" })
+    );
     drop(body);
 
     let (reason, client_status) = tokio::time::timeout(Duration::from_secs(3), async {

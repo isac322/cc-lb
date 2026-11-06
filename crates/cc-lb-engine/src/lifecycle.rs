@@ -2530,23 +2530,18 @@ fn sse_event_completes_response(
                 == Some("message_stop")
         }
         crate::provider_capability::UsageShape::OpenaiResponses => {
-            event
+            event.value().ok().flatten().is_some_and(|_| {
+                event.event_name() == Some(b"response.completed")
+                    || event.event_name() == Some(b"response.incomplete")
+            }) || event
                 .value()
                 .ok()
                 .flatten()
-                .is_some_and(|_| {
-                    event.event_name() == Some(b"response.completed")
-                        || event.event_name() == Some(b"response.incomplete")
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|event_type| {
+                    event_type == "response.completed" || event_type == "response.incomplete"
                 })
-                || event
-                    .value()
-                    .ok()
-                    .flatten()
-                    .and_then(|value| value.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|event_type| {
-                        event_type == "response.completed" || event_type == "response.incomplete"
-                    })
         }
         crate::provider_capability::UsageShape::OpenaiChatCompletions
         | crate::provider_capability::UsageShape::OpenaiCompletions => {
@@ -2614,10 +2609,9 @@ fn observe_sse_terminal_event(
     let response_terminal_type = matches!(
         capability.usage_shape(),
         crate::provider_capability::UsageShape::OpenaiResponses
-    ) && semantic_event_type
-        .is_some_and(|event_type| {
-            event_type == "response.completed" || event_type == "response.incomplete"
-        });
+    ) && semantic_event_type.is_some_and(|event_type| {
+        event_type == "response.completed" || event_type == "response.incomplete"
+    });
     *semantic_message_stop_seen |= event_name_terminal
         || response_terminal_type
         || semantic_terminal_event_type(capability)
@@ -15646,12 +15640,10 @@ mod tests {
         let response_incomplete_data_only = usage_parser::parse_sse_event(
             b"data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
         );
-        let response_incomplete_malformed = usage_parser::parse_sse_event(
-            b"event: response.incomplete\ndata: {not-json}\n\n",
-        );
-        let response_incomplete_empty = usage_parser::parse_sse_event(
-            b"event: response.incomplete\ndata:\n\n",
-        );
+        let response_incomplete_malformed =
+            usage_parser::parse_sse_event(b"event: response.incomplete\ndata: {not-json}\n\n");
+        let response_incomplete_empty =
+            usage_parser::parse_sse_event(b"event: response.incomplete\ndata:\n\n");
         let response_delta = usage_parser::parse_sse_event(
             b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
         );
