@@ -32,6 +32,7 @@ import {
 
 export type RequestEventsFeedFilters = Omit<LogRowFilters, 'event_kind'> & {
   readonly event_kind?: RequestEventKind | 'all' | 'generation';
+  readonly event_kind_set?: readonly RequestEventKind[];
   readonly since_unix_secs?: number;
   readonly until_unix_secs?: number;
 };
@@ -53,7 +54,6 @@ export type RequestEventsFeedMode = 'paged' | 'infinite' | 'preview';
 export interface UseRequestEventsFeedOptions {
   readonly filters?: RequestEventsFeedFilters;
   readonly providers?: readonly ProviderFamily[];
-  readonly eventKinds?: readonly RequestEventKind[];
   readonly live?: boolean;
   readonly mode?: RequestEventsFeedMode;
   /**
@@ -193,7 +193,9 @@ function normalizeFilters(filters: RequestEventsFeedFilters): LogRowFilters & {
   return {
     ...filters,
     event_kind:
-      filters.event_kind === 'all' || filters.event_kind === 'generation'
+      filters.event_kind === 'all' ||
+      filters.event_kind === 'generation' ||
+      filters.event_kind_set !== undefined
         ? undefined
         : filters.event_kind,
   };
@@ -206,6 +208,8 @@ function addEventKindFilter(
 ) {
   if (input.event_kind === 'all') {
     base.source_kind = 'all';
+  } else if (input.event_kind_set) {
+    base.event_kind = input.event_kind_set.join(',');
   } else if (normalized.event_kind) {
     base.event_kind = normalized.event_kind;
   }
@@ -251,10 +255,7 @@ export function buildRequestEventsLiveFilters(
   return base;
 }
 
-function rowFiltersFrom(
-  input: RequestEventsFeedFilters,
-  eventKinds: readonly RequestEventKind[] | undefined,
-): LogRowFilters {
+function rowFiltersFrom(input: RequestEventsFeedFilters): LogRowFilters {
   const normalized = normalizeFilters(input);
   return {
     principal_id: normalized.principal_id,
@@ -263,8 +264,11 @@ function rowFiltersFrom(
     model: normalized.model,
     status: normalized.status,
     event_kind:
-      input.event_kind === 'generation' ? 'generation' : normalized.event_kind,
-    event_kinds: eventKinds,
+      input.event_kind === 'generation'
+        ? 'generation'
+        : input.event_kind_set !== undefined
+          ? undefined
+          : normalized.event_kind,
   };
 }
 
@@ -361,10 +365,7 @@ export function useRequestEventsFeed(
     options.providers,
   );
   const liveFilters = useProviderFilters(baseLiveFilters, options.providers);
-  const rowFilters = useMemo(
-    () => rowFiltersFrom(filters, options.eventKinds),
-    [filters, options.eventKinds],
-  );
+  const rowFilters = useMemo(() => rowFiltersFrom(filters), [filters]);
   const filterKey = stringFilterKey(historyFilters);
   const liveFilterKey = stringFilterKey(liveFilters);
   const mode: RequestEventsFeedMode = options.mode ?? 'paged';

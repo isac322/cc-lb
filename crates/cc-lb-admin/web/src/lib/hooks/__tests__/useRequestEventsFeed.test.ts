@@ -124,6 +124,17 @@ describe('request event feed query filters', () => {
     },
   );
 
+  it('serializes a provider event-kind set as one backend filter', () => {
+    const filters = {
+      event_kind_set: ['gemini_generate_content', 'gemini_predict'] as const,
+    };
+    expect(buildRequestEventsHistoryFilters(filters)).toEqual({
+      event_kind: 'gemini_generate_content,gemini_predict',
+    });
+    expect(buildRequestEventsLiveFilters(filters)).toEqual({
+      event_kind: 'gemini_generate_content,gemini_predict',
+    });
+  });
   it('keeps All kinds in bounded errors history without restricting live corrections', () => {
     const filters = {
       event_kind: 'all' as const,

@@ -67,7 +67,12 @@ describe('multi-provider overview principal merge', () => {
 });
 describe('overview request feeds', () => {
   it('uses provider-scoped endpoint taxonomy instead of one provider kind', () => {
-    expect(overviewEventFilters('gemini')).toEqual({});
+    expect(overviewEventFilters('gemini')).toEqual({
+      event_kind_set: expect.arrayContaining([
+        'gemini_generate_content',
+        'gemini_predict',
+      ]),
+    });
     expect(overviewEventKinds('gemini')).toEqual(
       expect.arrayContaining(['gemini_generate_content', 'gemini_predict']),
     );

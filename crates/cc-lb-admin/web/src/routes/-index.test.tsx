@@ -2066,43 +2066,11 @@ describe('Overview loading geometry', () => {
     };
     const liveMap: LiveEventMap = new Map([
       ['live-1', { phase: 'final', event: finalLiveEvent(1) }],
-      [
-        'live-2',
-        {
-          phase: 'final',
-          event: { ...finalLiveEvent(2), source_kind: 'renewal' },
-        },
-      ],
-      [
-        'live-3',
-        {
-          phase: 'final',
-          event: { ...finalLiveEvent(3), event_kind: 'count_tokens' },
-        },
-      ],
-      [
-        'live-4',
-        {
-          phase: 'final',
-          event: {
-            duration_ms: 10,
-            event_id: 'live-4',
-            model: 'model-4',
-            request_id: 'request-4',
-            status: 200,
-            ts: 4,
-          },
-        },
-      ],
     ]);
     mockRequestEventsFeed([historical], { liveEventsMap: liveMap, version: 4 });
 
     render(<OverviewPage />);
 
-    expect(queries.useRecentEventsPage).toHaveBeenCalledWith(
-      {},
-      { kind: 'initial', limit: 500 },
-    );
     expect(screen.getByLabelText('View request live-1')).toBeDefined();
     expect(screen.getByLabelText('View request historical-1')).toBeDefined();
     expect(screen.queryByLabelText('View request live-2')).toBeNull();

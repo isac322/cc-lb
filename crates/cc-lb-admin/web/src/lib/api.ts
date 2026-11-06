@@ -703,22 +703,35 @@ export interface EventsHistogramPayload {
   bucket_ms: number;
   bucket_count: number;
 }
-
 export interface EventsHistogramRange {
   readonly sinceSecs: number;
   readonly untilSecs: number;
   readonly bucketMs: number;
 }
 
+export type QueryFilterValue = string | readonly string[] | undefined;
+
+export function appendQueryParams(
+  params: URLSearchParams,
+  filters: Record<string, QueryFilterValue>,
+): void {
+  for (const [key, value] of Object.entries(filters)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item) params.append(key, item);
+      }
+    } else if (typeof value === 'string' && (value || key === 'providers')) {
+      params.set(key, value);
+    }
+  }
+}
+
 export function fetchEventsHistogram(
-  filters: Record<string, string | undefined>,
+  filters: Record<string, QueryFilterValue>,
   range: EventsHistogramRange,
 ): Promise<EventsHistogramPayload> {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filters)) {
-    if (value !== undefined && (value || key === 'providers'))
-      params.set(key, value);
-  }
+  appendQueryParams(params, filters);
   params.set('since_unix_secs', String(range.sinceSecs));
   params.set('until_unix_secs', String(range.untilSecs));
   params.set('bucket_ms', String(range.bucketMs));

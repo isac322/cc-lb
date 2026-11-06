@@ -141,10 +141,11 @@ type Range = TimePreset;
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
 const RANGE_SECONDS = TIME_PRESET_SECONDS;
 const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
-// The backend accepts one event kind, not a list. Provider-scoped queries
-// therefore page over all non-renewal traffic; the feed applies this shared
-// endpoint-kind set after fetching without altering its history cursor.
-export const overviewEventFilters = (_provider?: ProviderFamily) => ({});
+// The backend accepts one request with a comma-separated event-kind set. This
+// keeps provider feeds filtered before pagination and in live-tail matching.
+export const overviewEventFilters = (provider?: ProviderFamily) => ({
+  event_kind_set: overviewEventKinds(provider),
+});
 
 export function overviewEventKinds(
   provider?: ProviderFamily,
@@ -1680,7 +1681,6 @@ export function ProviderOverviewPage({
   );
   const feed = useRequestEventsFeed({
     filters: overviewEventFilters(scopedProvider),
-    eventKinds: overviewEventKinds(scopedProvider),
     providers: scopedProvider ? [scopedProvider] : undefined,
     mode: 'infinite',
     initialHistoryLimit: 500,

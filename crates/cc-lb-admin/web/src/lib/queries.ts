@@ -21,6 +21,7 @@ import {
   ApiError,
   type Upstream as ApiUpstream,
   type AuditQueryResponse,
+  appendQueryParams,
   type ConfigDraftResponse,
   type ConfigDraftSavedResponse,
   type ConfigEditorResponse,
@@ -556,8 +557,7 @@ export function useRecentEvents(
 ) {
   const filters = useProviderFilters(inputFilters, options.providers);
   const params = new URLSearchParams();
-  for (const [k, v] of Object.entries(filters))
-    if (v !== undefined && (v || k === 'providers')) params.set(k, v);
+  appendQueryParams(params, filters);
   return usePolledData(
     {
       queryKey: qk.events(filters),
@@ -672,10 +672,7 @@ export function fetchRecentEventsPage(
   pageParam: RecentEventsPageParam,
 ): Promise<RecentEventsPayload> {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filters)) {
-    if (value !== undefined && (value || key === 'providers'))
-      params.set(key, value);
-  }
+  appendQueryParams(params, filters);
   if (pageParam.kind === 'cursor') {
     params.set('until_ts_ms', String(pageParam.ts_ms));
     params.set('until_event_id', pageParam.event_id);
