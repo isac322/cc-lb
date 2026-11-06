@@ -1892,6 +1892,7 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
         cache_read_input_tokens: usage.cache_read_input_tokens,
         thinking_tokens: usage.thinking_tokens,
+        tool_use_prompt_tokens: usage.tool_use_prompt_tokens,
         web_search_requests: usage.web_search_requests,
         web_fetch_requests: usage.web_fetch_requests,
         service_tier: usage.service_tier,
