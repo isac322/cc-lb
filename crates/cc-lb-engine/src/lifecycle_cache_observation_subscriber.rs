@@ -153,6 +153,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(success),
             ..
         } => {
+            if !success.usage_present {
+                return;
+            }
             partial.usage = success.usage;
             partial.usage_seen = true;
         }
@@ -207,9 +210,16 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use cc_lb_control::event_bus::InMemoryBus;
-    use cc_lb_lifecycle::{ParseInfo, TerminationReason};
+    use std::sync::Arc;
+
+    use cc_lb_control::{RequestEventBus, event_bus::InMemoryBus};
+    use cc_lb_lifecycle::{
+        EventId, LifecycleEvent, ParseInfo, StreamSuccess, TerminationReason, UsageSnapshot,
+    };
+    use cc_lb_request_log::RequestCacheState;
+    use tokio::sync::mpsc;
+
+    use super::spawn_lifecycle_cache_observation_subscriber;
 
     fn eid(s: &str) -> EventId {
         s.to_owned()
@@ -245,6 +255,16 @@ mod tests {
                 ..UsageSnapshot::default()
             },
             source: cc_lb_lifecycle::UsageSource::NonStreamBody,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::StreamCompleted {
+            event_id: eid("evt-hit"),
+            result: Ok(StreamSuccess {
+                usage: UsageSnapshot::default(),
+                usage_present: false,
+                ..Default::default()
+            }),
         })
         .await
         .unwrap();

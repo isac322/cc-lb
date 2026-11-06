@@ -1303,6 +1303,427 @@ async fn openai_missing_content_type_uses_sse_hook_without_buffering() -> TestRe
     Ok(())
 }
 
+struct OpenaiChatToAnthropicSseTransform;
+
+impl SseEventTransformHook for OpenaiChatToAnthropicSseTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        let data = request.event.data.as_ref();
+        if data
+            .windows(b"\"finish_reason\":\"stop\"".len())
+            .any(|window| window == b"\"finish_reason\":\"stop\"")
+        {
+            return Ok(TransformSseEventResult::Replace {
+                events: vec![
+                    SseEvent {
+                        event: "message_delta".to_owned(),
+                        data: Bytes::from_static(
+                            br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+                        ),
+                    },
+                    SseEvent {
+                        event: "message_stop".to_owned(),
+                        data: Bytes::from_static(br#"{"type":"message_stop"}"#),
+                    },
+                ],
+            });
+        }
+        if data
+            .windows(b"\"content\":\"hello\"".len())
+            .any(|window| window == b"\"content\":\"hello\"")
+        {
+            return Ok(TransformSseEventResult::Replace {
+                events: vec![SseEvent {
+                    event: "content_block_delta".to_owned(),
+                    data: Bytes::from_static(
+                        br#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}"#,
+                    ),
+                }],
+            });
+        }
+        Ok(TransformSseEventResult::Unchanged)
+    }
+}
+
+#[tokio::test]
+async fn openai_chat_finish_reason_without_usage_refunds_pending_close() -> TestResult {
+    assert_chat_finish_reason_without_usage_refunds_pending_close(false, false).await
+}
+
+#[tokio::test]
+async fn native_openai_chat_finish_reason_without_usage_refunds_pending_close() -> TestResult {
+    assert_chat_finish_reason_without_usage_refunds_pending_close(true, false).await
+}
+
+#[tokio::test]
+async fn thinking_progress_without_usage_refunds_pending_close() -> TestResult {
+    assert_chat_finish_reason_without_usage_refunds_pending_close(false, true).await
+}
+
+async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
+    native_openai: bool,
+    thinking_progress: bool,
+) -> TestResult {
+    use cc_lb_storage_api::principal::{Limit, LimitKind};
+
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "openai-chat-finish.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut events = test_bus.bus.subscribe_lifecycle();
+    let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let reconcile =
+        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+    struct SplitPendingDispatch {
+        chunks: [Bytes; 3],
+        finish_ready: Arc<tokio::sync::Notify>,
+        usage_ready: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl UpstreamDispatch for SplitPendingDispatch {
+        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            let [content, finish, usage] = self.chunks.clone();
+            let finish_ready = self.finish_ready.clone();
+            let usage_ready = self.usage_ready.clone();
+            let stream = async_stream::stream! {
+                yield Ok::<Bytes, std::convert::Infallible>(content);
+                finish_ready.notified().await;
+                yield Ok::<Bytes, std::convert::Infallible>(finish);
+                usage_ready.notified().await;
+                yield Ok::<Bytes, std::convert::Infallible>(usage);
+                std::future::pending::<()>().await;
+            };
+            let mut response = Response::new(Body::from_stream(stream));
+            *response.headers_mut() = sse_headers();
+            Ok(response)
+        }
+    }
+
+    let upstream_content = Bytes::from_static(
+        b"data: {\"id\":\"chatcmpl-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+    );
+    let upstream_finish = if native_openai {
+        Bytes::from_static(
+            b"data: {\"id\":\"chatcmpl-test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        )
+    } else {
+        // The transformed /v1/messages path uses Anthropic terminal bookkeeping.
+        Bytes::from_static(
+            b"data: {\"id\":\"chatcmpl-test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"type\":\"message_stop\"}\n\n",
+        )
+    };
+    let (content, finish) = if native_openai {
+        (upstream_content.clone(), upstream_finish.clone())
+    } else if thinking_progress {
+        (
+            Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":9}}\n\n",
+            ),
+            Bytes::from_static(
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ),
+        )
+    } else {
+        (
+            Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
+            ),
+            Bytes::from_static(
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ),
+        )
+    };
+    let usage = Bytes::from_static(
+        b"data: {\"id\":\"chatcmpl-test\",\"choices\":[],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":7,\"total_tokens\":20}}\n\n",
+    );
+    let finish_ready = Arc::new(tokio::sync::Notify::new());
+    let lifecycle = lifecycle_with_options(
+        None,
+        (!native_openai)
+            .then(|| Arc::new(OpenaiChatToAnthropicSseTransform) as Arc<dyn SseEventTransformHook>),
+        Arc::new(SplitPendingDispatch {
+            chunks: [content.clone(), finish.clone(), usage],
+            finish_ready: finish_ready.clone(),
+            // Never released: usage cannot race the downstream close.
+            usage_ready: Arc::new(tokio::sync::Notify::new()),
+        }),
+        LifecycleConfig::default(),
+        upstream_record(
+            if native_openai {
+                StorageUpstreamKind::OpenaiApiKey
+            } else {
+                StorageUpstreamKind::AnthropicApiKey
+            },
+            "https://api.openai.com/",
+        ),
+        true,
+        vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 1_000_000,
+            },
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 2,
+            },
+        ],
+    )
+    .with_static_limit_subject(
+        engine.clone(),
+        "principal-test".to_owned(),
+        "key-test".to_owned(),
+        StoredApiKeyRecord {
+            key_hash_b64: "key-test".to_owned(),
+            status: KeyStatus::Active,
+            ..StoredApiKeyRecord::default()
+        },
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let request = if native_openai {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("x-api-key", common::managed_api_key())
+            .header(CONTENT_TYPE, "application/json")
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true}}"#,
+            ))?;
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+        request
+    } else {
+        messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+        ))
+    };
+    let response = handle_authenticated(&lifecycle, request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+        .await?
+        .expect("content frame")
+        .expect("content frame succeeds")
+        .into_data()
+        .expect("content frame carries data");
+    assert_eq!(frame, content);
+    // Only expose finish_reason after the first downstream frame was consumed.
+    // This forces the lifecycle to parse it in a separate upstream chunk.
+    finish_ready.notify_one();
+    if native_openai {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("finish_reason frame")
+            .expect("finish_reason frame succeeds")
+            .into_data()
+            .expect("finish_reason frame carries data");
+        assert_eq!(frame, finish);
+    } else {
+        let first = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("message_delta frame")
+            .expect("message_delta frame succeeds")
+            .into_data()
+            .expect("message_delta frame carries data");
+        let second = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("message_stop frame")
+            .expect("message_stop frame succeeds")
+            .into_data()
+            .expect("message_stop frame carries data");
+        let mut transformed_finish = Vec::with_capacity(first.len() + second.len());
+        transformed_finish.extend_from_slice(&first);
+        transformed_finish.extend_from_slice(&second);
+        assert_eq!(transformed_finish.as_slice(), finish.as_ref());
+    }
+    drop(body);
+
+    let observed_events = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut observed = Vec::new();
+        loop {
+            let event = events.recv().await.expect("lifecycle event delivered");
+            let terminated = matches!(event, LifecycleEvent::RequestTerminated { .. });
+            observed.push(event);
+            if terminated {
+                break observed;
+            }
+        }
+    })
+    .await
+    .expect("request terminates after downstream close");
+    let mut rows = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(rows.len(), 1);
+    let row = rows.remove(0);
+    assert_eq!(row.status, StatusCode::OK.as_u16());
+    assert_eq!(row.error_code, None);
+    assert_eq!(row.upstream_error_type, None);
+    assert_eq!(row.upstream_error_message, None);
+    let terminations = observed_events
+        .iter()
+        .filter_map(|event| match event {
+            LifecycleEvent::RequestTerminated {
+                reason,
+                client_status,
+                ..
+            } => Some((reason, *client_status)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminations,
+        vec![(&TerminationReason::Success, StatusCode::OK.as_u16())]
+    );
+    assert!(
+        !observed_events
+            .iter()
+            .any(|event| matches!(event, LifecycleEvent::UsageObserved { .. })),
+        "finish_reason without upstream usage must not fabricate measured zero usage"
+    );
+    assert!(
+        !observed_events
+            .iter()
+            .any(|event| matches!(event, LifecycleEvent::Priced { .. })),
+        "unavailable upstream usage must not be priced"
+    );
+
+    assert_eq!(
+        (row.input_tokens, row.output_tokens, row.cost_usd_micros),
+        (None, None, None),
+        "missing upstream usage remains unknown, not measured zero"
+    );
+
+    reconcile.shutdown().await;
+    let headers = engine.headers_for("key-test", "principal-test");
+    let remaining = |name: &str| -> i64 {
+        headers
+            .iter()
+            .find(|(header, _)| header == name)
+            .and_then(|(_, value)| value.parse().ok())
+            .expect("remaining limit header")
+    };
+    assert_eq!(
+        remaining("anthropic-ratelimit-requests-remaining"),
+        10,
+        "request reservation is refunded exactly once"
+    );
+    assert_eq!(
+        remaining("anthropic-ratelimit-tokens-remaining"),
+        1_000_000,
+        "token reservation is refunded exactly once"
+    );
+    assert_eq!(concurrency.current("key-test"), 0);
+    let reservation_id = observed_events
+        .iter()
+        .find_map(|event| match event {
+            LifecycleEvent::LimitDecision {
+                decision: cc_lb_lifecycle::LimitDecisionKind::Reserved { reservation_id, .. },
+                ..
+            } => Some(reservation_id.clone()),
+            _ => None,
+        })
+        .expect("reservation event");
+    assert!(
+        !engine.refund_by_id(&reservation_id),
+        "the reservation was already refunded"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_usage_before_terminal_is_measured_on_client_close() -> TestResult {
+    let body = Bytes::from(format!("{START}{CONTENT}{DELTA}{STOP}"));
+    let observed = observe_drop_after_terminal(
+        Arc::new(PendingDispatch {
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+        default_upstream_record(),
+        messages_request(Bytes::from_static(REQUEST)),
+        b"event: message_stop",
+        None,
+    )
+    .await?;
+
+    assert_eq!(observed.status, StatusCode::OK);
+    assert_eq!(observed.body, body);
+    assert_eq!(
+        (observed.row.input_tokens, observed.row.output_tokens),
+        (Some(13), Some(7))
+    );
+    observed.assert_terminal(None);
+    let usage_events = observed
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            LifecycleEvent::UsageObserved { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!usage_events.is_empty());
+    assert!(
+        usage_events
+            .iter()
+            .any(|usage| (usage.input_tokens, usage.output_tokens) == (13, 7))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_explicit_zero_usage_remains_measured() -> TestResult {
+    let body = Bytes::from_static(
+        b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1027\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n\
+event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\n\
+event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let observed = observe_drop_after_terminal(
+        Arc::new(PendingDispatch {
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+        default_upstream_record(),
+        messages_request(Bytes::from_static(REQUEST)),
+        b"event: message_stop",
+        None,
+    )
+    .await?;
+
+    assert_eq!(observed.status, StatusCode::OK);
+    assert_eq!(observed.body, body);
+    assert_eq!(
+        (observed.row.input_tokens, observed.row.output_tokens),
+        (Some(0), Some(0))
+    );
+    observed.assert_terminal(None);
+    let usage_events = observed
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            LifecycleEvent::UsageObserved { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!usage_events.is_empty(), "usage observation is present");
+    assert!(
+        usage_events
+            .iter()
+            .any(|usage| (usage.input_tokens, usage.output_tokens) == (0, 0)),
+        "explicit zero usage is measured"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds() -> TestResult {
     use cc_lb_storage_api::principal::{Limit, LimitKind};
