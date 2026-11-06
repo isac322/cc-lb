@@ -9764,6 +9764,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         .collect::<Vec<_>>();
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
+    let cache_control_block_count = raw_cache_breakpoints.len() as u64;
 
     let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
