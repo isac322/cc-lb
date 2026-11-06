@@ -911,7 +911,7 @@ async fn semantic_sse_eof_gemini_json_array_stream_records_usage_and_preserves_b
                 .method("POST")
                 .uri(path)
                 .header("x-api-key", common::managed_api_key())
-                .body(Bytes::from_static(br#"{"contents":[],"stream":true}"#))?,
+                .body(Bytes::from_static(br#"{"contents":[]}"#))?,
         )
         .await?;
 
