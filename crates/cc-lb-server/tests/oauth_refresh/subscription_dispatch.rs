@@ -310,8 +310,10 @@ async fn make_lifecycle(
     lazy: Arc<dyn LazyRefreshHandle>,
 ) -> Lifecycle {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let mut antigravity = AntigravityOAuthConfig::default();
-    antigravity.user_agent = "antigravity/oauth-refresh-test".to_owned();
+    let antigravity = AntigravityOAuthConfig {
+        user_agent: "antigravity/oauth-refresh-test".to_owned(),
+        ..Default::default()
+    };
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         Some(&antigravity),
