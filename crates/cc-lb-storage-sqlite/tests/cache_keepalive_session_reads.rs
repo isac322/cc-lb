@@ -1220,3 +1220,228 @@ async fn list_and_detail_match_legacy_on_same_database_collation() {
             .any(|row| row.get::<String, _>("name") == "BINARY")
     );
 }
+
+fn economics_projection(
+    source_ref_id: &str,
+    cycle_id: Option<Uuid>,
+    ts: u64,
+    hit_miss: &str,
+    cost_micros: i64,
+) -> RequestEventProjections {
+    let mut projection = renewal_projection(source_ref_id, ts);
+    let turn = projection.turn.as_mut().expect("renewal turn");
+    turn.cycle_id = cycle_id;
+    turn.hit_miss = hit_miss.to_owned();
+    turn.cost_micros = cost_micros;
+    turn.cache_read_input_tokens = if hit_miss.eq_ignore_ascii_case("hit") {
+        20_000
+    } else {
+        0
+    };
+    projection
+        .evidence
+        .push(cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+            evidence_id: format!("evidence-{source_ref_id}"),
+            cycle_id,
+            evidence_kind: "renewal".to_owned(),
+            request_start_ms: ts * 1_000,
+            prefix_fingerprint: Some("retained-prefix".to_owned()),
+            prefix_hash: Some("retained-prefix-hash".to_owned()),
+            prefix_policy_version: Some("policy-v1".to_owned()),
+            prefix_schema_version: Some("schema-v1".to_owned()),
+            principal_id: PRINCIPAL_ID.to_owned(),
+            upstream_id: UPSTREAM_ID,
+            model: turn.model.clone(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some(hit_miss.to_owned()),
+            cache_read_input_tokens: Some(turn.cache_read_input_tokens),
+            cost_micros: Some(cost_micros),
+            request_ref: Some(source_ref_id.to_owned()),
+            event_ref: Some(source_ref_id.to_owned()),
+        });
+    projection
+}
+
+#[tokio::test]
+async fn summary_aggregate_observes_complete_unfollowed_terminal_loss() {
+    let (_temp_dir, storage) = storage().await;
+    let cycle_id = Uuid::from_u128(1_074);
+    let mut replace = request("renewed-session", 1_000, "agent-in-turn");
+    replace.cycle_id = cycle_id;
+    let session = storage
+        .replace_from_real_request(&replace)
+        .await
+        .expect("create terminal cycle");
+    for (id, ts, outcome, cost) in [
+        ("terminal-miss", 1_001, "miss", 15_000),
+        ("terminal-hit", 1_002, "HiT", 6_000),
+    ] {
+        storage
+            .append_request_event_with_projections(
+                &event(id, ts),
+                &economics_projection(id, Some(cycle_id), ts, outcome, cost),
+            )
+            .await
+            .expect("persist complete renewal evidence");
+    }
+    storage
+        .mark_cache_keepalive_terminal(
+            &session.session_key_hash,
+            session.generation,
+            CacheKeepaliveTerminalReason::MaxRefreshes,
+            None,
+            1_003,
+        )
+        .await
+        .expect("finish cycle without follow-up");
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await
+        .expect("aggregate terminal retained economics");
+    assert_eq!(aggregate.renewing_now, 0);
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.retained_from_ms, Some(1_001_000));
+    assert_eq!(aggregate.evidence_status, "observed");
+    assert!(
+        aggregate.groups.is_empty(),
+        "no follow-up means zero avoided tokens"
+    );
+}
+
+#[tokio::test]
+async fn summary_aggregate_empty_has_no_economics_evidence() {
+    let (_temp_dir, storage) = storage().await;
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("aggregate empty history");
+    assert_eq!(aggregate.total_spent_micros, 0);
+    assert_eq!(aggregate.successful_hits, 0);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.retained_from_ms, None);
+    assert_eq!(aggregate.evidence_status, "none");
+    assert!(aggregate.groups.is_empty());
+}
+
+#[tokio::test]
+async fn summary_aggregate_legacy_and_incomplete_evidence_remain_unknown() {
+    for missing in ["evidence", "cycle", "hash", "policy", "schema"] {
+        let (_temp_dir, storage) = storage().await;
+        let mut projection = economics_projection(
+            "incomplete-miss",
+            Some(Uuid::from_u128(1_074)),
+            1_000,
+            "miss",
+            15_000,
+        );
+        match missing {
+            "evidence" => {
+                projection.evidence.clear();
+                projection.turn.as_mut().expect("legacy turn").cycle_id = None;
+            }
+            "cycle" => projection.evidence[0].cycle_id = None,
+            "hash" => projection.evidence[0].prefix_hash = None,
+            "policy" => projection.evidence[0].prefix_policy_version = None,
+            "schema" => projection.evidence[0].prefix_schema_version = None,
+            _ => unreachable!(),
+        }
+        storage
+            .append_request_event_with_projections(&event("incomplete-miss", 1_000), &projection)
+            .await
+            .expect("persist incomplete evidence control");
+        let aggregate = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await
+            .expect("aggregate incomplete evidence");
+        assert_eq!(aggregate.total_spent_micros, 15_000, "{missing}");
+        assert_eq!(aggregate.successful_hits, 0, "{missing}");
+        assert_eq!(aggregate.unknown_cycles, 1, "{missing}");
+        assert_eq!(aggregate.evidence_status, "unknown", "{missing}");
+        assert_eq!(
+            aggregate.retained_from_ms,
+            (missing != "evidence").then_some(1_000_000),
+            "{missing}"
+        );
+        assert!(aggregate.groups.is_empty(), "{missing}");
+    }
+}
+
+#[tokio::test]
+async fn summary_aggregate_counts_only_hits_and_keeps_miss_and_zero_costs() {
+    let (_temp_dir, storage) = storage().await;
+    for (id, ts, outcome, cost) in [
+        ("paid-hit", 1_000, "hit", 6_000),
+        ("free-hit", 1_001, "HiT", 0),
+        ("paid-miss", 1_002, "miss", 15_000),
+    ] {
+        storage
+            .append_request_event_with_projections(
+                &event(id, ts),
+                &economics_projection(id, Some(Uuid::from_u128(1_074)), ts, outcome, cost),
+            )
+            .await
+            .expect("persist mixed renewal outcomes");
+    }
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await
+        .expect("aggregate mixed renewal outcomes");
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 2);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert!(aggregate.groups.is_empty());
+}
+
+#[tokio::test]
+async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle() {
+    let (_temp_dir, storage) = storage().await;
+    let mut replace = request("scalar-cycle-session", 1_000, "agent-in-turn");
+    replace.cycle_id = Uuid::from_u128(1_074);
+    storage
+        .replace_from_real_request(&replace)
+        .await
+        .expect("create first cycle");
+    replace.cycle_id = Uuid::from_u128(1_075);
+    replace.now_unix_secs = 1_001;
+    storage
+        .replace_from_real_request(&replace)
+        .await
+        .expect("replace current cycle");
+    insert_decision(&storage, PRINCIPAL_ID, "scalar-cycle-decision", 1_002).await;
+
+    let page = storage
+        .list_cache_keepalive_sessions(&all_query(10))
+        .await
+        .expect("list scalar cycle projections");
+    let summary = storage
+        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 0)
+        .await
+        .expect("read scalar summary projection");
+    let session = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "scalar-cycle-session")
+        .await
+        .expect("read scalar session detail")
+        .expect("session exists");
+    let decision = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "scalar-cycle-decision")
+        .await
+        .expect("read scalar decision detail")
+        .expect("decision exists");
+    for row in page
+        .rows
+        .iter()
+        .chain(&summary.sessions)
+        .chain([&session, &decision])
+    {
+        let value = serde_json::to_value(row).expect("serialize scalar projection");
+        let expected = if row.is_decision() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(replace.cycle_id)
+        };
+        assert_eq!(value.get("cycle_id"), Some(&expected), "{}", row.id);
+    }
+}

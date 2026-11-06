@@ -23,6 +23,7 @@ SELECT
     session_key_hash,
     principal_id,
     upstream_id,
+    cycle_id,
     last_message_at_ms,
     ttl,
     generation,
@@ -49,6 +50,7 @@ SELECT
     session_key_hash,
     principal_id,
     upstream_id,
+    CAST(NULL AS TEXT) AS cycle_id,
     last_message_at_ms,
     ttl,
     generation,
@@ -473,6 +475,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                          AND e.event_ref = t.source_ref_id
                    )) +
                 COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND (cycle_id IS NULL OR prefix_hash IS NULL OR prefix_policy_version IS NULL OR prefix_schema_version IS NULL) THEN 1 ELSE 0 END), 0) AS unknown_cycles,
+                COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND cycle_id IS NOT NULL AND prefix_hash IS NOT NULL AND prefix_policy_version IS NOT NULL AND prefix_schema_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS observed_evidence,
                 MIN(request_start_ms) AS retained_from_ms
              FROM cache_keepalive_evidence
              WHERE principal_id = ?",
@@ -497,6 +500,13 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             .try_into()
             .map_err(|_| StorageError::Corrupted {
                 message: "negative cache keepalive unknown cycle count".to_owned(),
+            })?;
+        let observed_evidence: u64 = row
+            .try_get::<i64, _>("observed_evidence")
+            .map_err(map_sqlx_error)?
+            .try_into()
+            .map_err(|_| StorageError::Corrupted {
+                message: "negative cache keepalive observed evidence count".to_owned(),
             })?;
         let group_rows = sqlx::query(
             "WITH proven AS (
@@ -584,7 +594,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 .transpose()?,
             evidence_status: if unknown_cycles > 0 {
                 "unknown".to_owned()
-            } else if observed_cycles > 0 {
+            } else if observed_evidence > 0 {
                 "observed".to_owned()
             } else {
                 "none".to_owned()

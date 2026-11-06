@@ -22,6 +22,7 @@ SELECT \
     session_key_hash, \
     principal_id, \
     upstream_id, \
+    cycle_id, \
     last_message_at_ms, \
     ttl, \
     generation, \
@@ -47,6 +48,7 @@ SELECT \
     session_key_hash, \
     principal_id, \
     upstream_id, \
+    NULL::UUID AS cycle_id, \
     last_message_at_ms, \
     ttl, \
     generation, \
@@ -563,7 +565,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                 ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = $2 AND last_message_at_ms >= $3)
                  + (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = $4 AND last_message_at_ms >= $5 AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id))) AS sessions_last_5m,
                 (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = $6 AND last_message_at_ms >= $7 AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id)) AS recent_decisions,
-                (SELECT COALESCE(SUM(cost_micros), 0) FROM cache_keepalive_turns WHERE principal_id = $8) AS total_spent_micros,
+                (SELECT COALESCE(SUM(cost_micros), 0)::BIGINT FROM cache_keepalive_turns WHERE principal_id = $8) AS total_spent_micros,
                 (SELECT COUNT(*) FROM cache_keepalive_turns WHERE principal_id = $9 AND lower(hit_miss) = 'hit') AS successful_hits,
                 (SELECT COUNT(*) FROM cache_keepalive_turns t
                  WHERE t.principal_id = $10
@@ -574,6 +576,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                          AND e.event_ref = t.source_ref_id
                    )) +
                 COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND (cycle_id IS NULL OR prefix_hash IS NULL OR prefix_policy_version IS NULL OR prefix_schema_version IS NULL) THEN 1 ELSE 0 END), 0) AS unknown_cycles,
+                COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND cycle_id IS NOT NULL AND prefix_hash IS NOT NULL AND prefix_policy_version IS NOT NULL AND prefix_schema_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS observed_evidence,
                 MIN(request_start_ms) AS retained_from_ms
              FROM cache_keepalive_evidence
              WHERE principal_id = $11",
@@ -598,6 +601,13 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
             .try_into()
             .map_err(|_| StorageError::Corrupted {
                 message: "negative cache keepalive unknown cycle count".to_owned(),
+            })?;
+        let observed_evidence: u64 = row
+            .try_get::<i64, _>("observed_evidence")
+            .map_err(map_sqlx_error)?
+            .try_into()
+            .map_err(|_| StorageError::Corrupted {
+                message: "negative cache keepalive observed evidence count".to_owned(),
             })?;
         let successful_hits: u64 = row
             .try_get::<i64, _>("successful_hits")
@@ -624,7 +634,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                         AND f.request_start_ms <= r.request_start_ms + CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
                   )
              )
-             SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0) AS avoided_cache_read_tokens,
+             SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0)::BIGINT AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
              FROM proven r
              WHERE r.rn = 1
@@ -699,7 +709,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                 .transpose()?,
             evidence_status: if unknown_cycles > 0 {
                 "unknown".to_owned()
-            } else if observed_cycles > 0 {
+            } else if observed_evidence > 0 {
                 "observed".to_owned()
             } else {
                 "none".to_owned()

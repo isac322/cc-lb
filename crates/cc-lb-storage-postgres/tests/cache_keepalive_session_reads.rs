@@ -140,6 +140,41 @@ fn selected_corruption_is_not_silently_dropped() {
     });
 }
 
+#[test]
+fn summary_aggregate_observes_complete_unfollowed_terminal_loss() {
+    run_postgres_case("complete unfollowed terminal economics", |url| async move {
+        summary_aggregate_observes_complete_unfollowed_terminal_loss_case(&url).await
+    });
+}
+
+#[test]
+fn summary_aggregate_empty_has_no_economics_evidence() {
+    run_postgres_case("empty retained economics", |url| async move {
+        summary_aggregate_empty_has_no_economics_evidence_case(&url).await
+    });
+}
+
+#[test]
+fn summary_aggregate_legacy_and_incomplete_evidence_remain_unknown() {
+    run_postgres_case("legacy and incomplete economics", |url| async move {
+        summary_aggregate_legacy_and_incomplete_evidence_remain_unknown_case(&url).await
+    });
+}
+
+#[test]
+fn summary_aggregate_counts_only_hits_and_keeps_miss_and_zero_costs() {
+    run_postgres_case("miss spend and successful hit count", |url| async move {
+        summary_aggregate_counts_only_hits_and_keeps_miss_and_zero_costs_case(&url).await
+    });
+}
+
+#[test]
+fn scalar_session_reads_project_current_cycle_and_null_decision_cycle() {
+    run_postgres_case("scalar current cycle projection", |url| async move {
+        scalar_session_reads_project_current_cycle_and_null_decision_cycle_case(&url).await
+    });
+}
+
 async fn read_model_contract(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
@@ -1401,6 +1436,235 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
         },
         evidence: Vec::new(),
     }
+}
+
+fn economics_projection(
+    source_ref_id: &str,
+    cycle_id: Option<Uuid>,
+    ts: u64,
+    hit_miss: &str,
+    cost_micros: i64,
+) -> RequestEventProjections {
+    let mut projection = renewal_projection(source_ref_id, ts);
+    let turn = projection.turn.as_mut().expect("renewal turn");
+    turn.cycle_id = cycle_id;
+    turn.hit_miss = hit_miss.to_owned();
+    turn.cost_micros = cost_micros;
+    turn.cache_read_input_tokens = if hit_miss.eq_ignore_ascii_case("hit") {
+        20_000
+    } else {
+        0
+    };
+    projection
+        .evidence
+        .push(cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+            evidence_id: format!("evidence-{source_ref_id}"),
+            cycle_id,
+            evidence_kind: "renewal".to_owned(),
+            request_start_ms: ts * 1_000,
+            prefix_fingerprint: Some("retained-prefix".to_owned()),
+            prefix_hash: Some("retained-prefix-hash".to_owned()),
+            prefix_policy_version: Some("policy-v1".to_owned()),
+            prefix_schema_version: Some("schema-v1".to_owned()),
+            principal_id: PRINCIPAL_ID.to_owned(),
+            upstream_id: UPSTREAM_ID,
+            model: turn.model.clone(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some(hit_miss.to_owned()),
+            cache_read_input_tokens: Some(turn.cache_read_input_tokens),
+            cost_micros: Some(cost_micros),
+            request_ref: Some(source_ref_id.to_owned()),
+            event_ref: Some(source_ref_id.to_owned()),
+        });
+    projection
+}
+
+async fn summary_aggregate_observes_complete_unfollowed_terminal_loss_case(
+    url: &str,
+) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    let cycle_id = Uuid::from_u128(1_074);
+    let mut replace = request("renewed-session", 1_000, "agent-in-turn");
+    replace.cycle_id = cycle_id;
+    let session = storage.replace_from_real_request(&replace).await?;
+    for (id, ts, outcome, cost) in [
+        ("terminal-miss", 1_001, "miss", 15_000),
+        ("terminal-hit", 1_002, "HiT", 6_000),
+    ] {
+        storage
+            .append_request_event_with_projections(
+                &event(id, ts),
+                &economics_projection(id, Some(cycle_id), ts, outcome, cost),
+            )
+            .await?;
+    }
+    storage
+        .mark_cache_keepalive_terminal(
+            &session.session_key_hash,
+            session.generation,
+            CacheKeepaliveTerminalReason::MaxRefreshes,
+            None,
+            1_003,
+        )
+        .await?;
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await?;
+    assert_eq!(aggregate.renewing_now, 0);
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.retained_from_ms, Some(1_001_000));
+    assert_eq!(aggregate.evidence_status, "observed");
+    assert!(
+        aggregate.groups.is_empty(),
+        "no follow-up means zero avoided tokens"
+    );
+    fixture.drop_schema().await
+}
+
+async fn summary_aggregate_empty_has_no_economics_evidence_case(url: &str) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await?;
+    assert_eq!(aggregate.total_spent_micros, 0);
+    assert_eq!(aggregate.successful_hits, 0);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.retained_from_ms, None);
+    assert_eq!(aggregate.evidence_status, "none");
+    assert!(aggregate.groups.is_empty());
+    fixture.drop_schema().await
+}
+
+async fn summary_aggregate_legacy_and_incomplete_evidence_remain_unknown_case(
+    url: &str,
+) -> Result<()> {
+    for missing in ["evidence", "cycle", "hash", "policy", "schema"] {
+        let fixture = Fixture::create(url).await?;
+        let storage =
+            PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+        storage.initialize().await?;
+        let mut projection = economics_projection(
+            "incomplete-miss",
+            Some(Uuid::from_u128(1_074)),
+            1_000,
+            "miss",
+            15_000,
+        );
+        match missing {
+            "evidence" => {
+                projection.evidence.clear();
+                projection.turn.as_mut().expect("legacy turn").cycle_id = None;
+            }
+            "cycle" => projection.evidence[0].cycle_id = None,
+            "hash" => projection.evidence[0].prefix_hash = None,
+            "policy" => projection.evidence[0].prefix_policy_version = None,
+            "schema" => projection.evidence[0].prefix_schema_version = None,
+            _ => unreachable!(),
+        }
+        storage
+            .append_request_event_with_projections(&event("incomplete-miss", 1_000), &projection)
+            .await?;
+        let aggregate = storage
+            .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+            .await?;
+        assert_eq!(aggregate.total_spent_micros, 15_000, "{missing}");
+        assert_eq!(aggregate.successful_hits, 0, "{missing}");
+        assert_eq!(aggregate.unknown_cycles, 1, "{missing}");
+        assert_eq!(aggregate.evidence_status, "unknown", "{missing}");
+        assert_eq!(
+            aggregate.retained_from_ms,
+            (missing != "evidence").then_some(1_000_000),
+            "{missing}"
+        );
+        assert!(aggregate.groups.is_empty(), "{missing}");
+        fixture.drop_schema().await?;
+    }
+    Ok(())
+}
+
+async fn summary_aggregate_counts_only_hits_and_keeps_miss_and_zero_costs_case(
+    url: &str,
+) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    for (id, ts, outcome, cost) in [
+        ("paid-hit", 1_000, "hit", 6_000),
+        ("free-hit", 1_001, "HiT", 0),
+        ("paid-miss", 1_002, "miss", 15_000),
+    ] {
+        storage
+            .append_request_event_with_projections(
+                &event(id, ts),
+                &economics_projection(id, Some(Uuid::from_u128(1_074)), ts, outcome, cost),
+            )
+            .await?;
+    }
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 0)
+        .await?;
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 2);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert!(aggregate.groups.is_empty());
+    fixture.drop_schema().await
+}
+
+async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle_case(
+    url: &str,
+) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    let mut replace = request("scalar-cycle-session", 1_000, "agent-in-turn");
+    replace.cycle_id = Uuid::from_u128(1_074);
+    storage.replace_from_real_request(&replace).await?;
+    replace.cycle_id = Uuid::from_u128(1_075);
+    replace.now_unix_secs = 1_001;
+    storage.replace_from_real_request(&replace).await?;
+    storage
+        .append_request_event_with_projections(
+            &event("scalar-cycle-decision", 1_002),
+            &decision_projection("scalar-cycle-decision", 1_002),
+        )
+        .await?;
+
+    let page = storage
+        .list_cache_keepalive_sessions(&query(PRINCIPAL_ID, 10))
+        .await?;
+    let summary = storage
+        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 0)
+        .await?;
+    let session = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "scalar-cycle-session")
+        .await?
+        .expect("session exists");
+    let decision = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "scalar-cycle-decision")
+        .await?
+        .expect("decision exists");
+    for row in page
+        .rows
+        .iter()
+        .chain(&summary.sessions)
+        .chain([&session, &decision])
+    {
+        let value = serde_json::to_value(row)?;
+        let expected = if row.is_decision() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(replace.cycle_id)
+        };
+        assert_eq!(value.get("cycle_id"), Some(&expected), "{}", row.id);
+    }
+    fixture.drop_schema().await
 }
 
 struct Fixture {
