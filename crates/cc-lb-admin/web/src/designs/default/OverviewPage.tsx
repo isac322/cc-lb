@@ -72,6 +72,7 @@ import {
 import {
   type AggregateResponse,
   type PoolHistoryWindowResponse,
+  type RequestEventKind,
   windowLabel,
 } from '../../lib/api';
 import { categoricalColor, getWindowColor } from '../../lib/colors';
@@ -84,7 +85,12 @@ import {
   sumTokens,
 } from '../../lib/format';
 import { useTimezone } from '../../lib/locale';
-import { PROVIDER_LABELS, type ProviderFamily } from '../../lib/providers';
+import {
+  PROVIDER_FAMILIES,
+  PROVIDER_LABELS,
+  type ProviderFamily,
+  requestEventKindsForProvider,
+} from '../../lib/providers';
 import {
   usePrincipalNameMap,
   useSubscriptionQuotaAggregate,
@@ -135,15 +141,23 @@ type Range = TimePreset;
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
 const RANGE_SECONDS = TIME_PRESET_SECONDS;
 const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
-// The overview shows real user requests only: renewals and non-messages
-// endpoints are excluded server-side, and the shared feed re-checks the same
-// effective-kind rule so retained data cannot leak other categories.
-const overviewEventFilters = (provider?: ProviderFamily) => {
-  if (provider === 'openai') return { event_kind: 'openai_responses' } as const;
-  if (provider === 'gemini')
-    return { event_kind: 'gemini_generate_content' } as const;
-  return { event_kind: 'messages' } as const;
-};
+// The backend accepts one event kind, not a list. Provider-scoped queries
+// therefore page over all non-renewal traffic; the feed applies this shared
+// endpoint-kind set after fetching without altering its history cursor.
+export const overviewEventFilters = (_provider?: ProviderFamily) => ({});
+
+export function overviewEventKinds(
+  provider?: ProviderFamily,
+): readonly RequestEventKind[] {
+  const providers = provider === undefined ? PROVIDER_FAMILIES : [provider];
+  return [
+    ...new Set(
+      providers
+        .flatMap((family) => requestEventKindsForProvider(family))
+        .filter((kind) => !kind.endsWith('count_tokens')),
+    ),
+  ];
+}
 
 const stepFor = (r: Range): 'hour' | 'minute' =>
   r === '7d' || r === '24h' ? 'hour' : 'minute';
@@ -1666,6 +1680,7 @@ export function ProviderOverviewPage({
   );
   const feed = useRequestEventsFeed({
     filters: overviewEventFilters(scopedProvider),
+    eventKinds: overviewEventKinds(scopedProvider),
     providers: scopedProvider ? [scopedProvider] : undefined,
     mode: 'infinite',
     initialHistoryLimit: 500,

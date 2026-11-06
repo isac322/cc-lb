@@ -16,6 +16,7 @@ import type { OAuthReconnectNudge } from '../../lib/oauthReconnect';
 import type { Upstream } from '../../lib/queries';
 import {
   buildUpstreamUsageRows,
+  countReconnectNudges,
   rowMaxUsedPct,
   sortUpstreamRowsByUsage,
   type UpstreamUsageData,
@@ -152,6 +153,39 @@ const rowNames = () =>
     .map((row) => row.querySelector('[title]')?.getAttribute('title'));
 
 describe('UpstreamUsageTable', () => {
+  it('counts reconnect nudges only from the provider-scoped rows', () => {
+    const usageData = data(
+      [
+        ['anthropic', 'anthropic_oauth', true, 'active', null, null],
+        ['openai', 'openai_oauth', true, 'active', null, null],
+      ],
+      new Map<string, OAuthReconnectNudge>([
+        [
+          'openai',
+          {
+            tone: 'danger',
+            reason: 'renewal_rejected',
+            label: 'Reconnect required',
+            description: 'Reconnect',
+            actionLabel: 'Reconnect',
+            expiresAt: null,
+          },
+        ],
+      ]),
+    );
+    expect(
+      countReconnectNudges(
+        usageData.rows.filter((row) =>
+          row.upstream.kind.startsWith('anthropic'),
+        ),
+      ),
+    ).toBe(0);
+    expect(
+      countReconnectNudges(
+        usageData.rows.filter((row) => row.upstream.kind.startsWith('openai')),
+      ),
+    ).toBe(1);
+  });
   it('orders problems first, then quota by most-used window, API keys, disabled last', () => {
     const usageData = data([
       ['key-a', 'anthropic_api_key', true, 'active', null, null],

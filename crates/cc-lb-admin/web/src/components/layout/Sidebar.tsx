@@ -7,6 +7,7 @@ import {
   type OAuthReconnectNudge,
   useOAuthReconnectNudges,
 } from '../../lib/oauthReconnect';
+import { isOAuthUpstreamKind } from '../../lib/providers';
 import { useUpstreams } from '../../lib/queries';
 import { ProviderLogo } from '../ui/ProviderLogo';
 import { cx, IconButton } from '../ui/primitives';
@@ -23,8 +24,8 @@ export function useUpstreamOAuthAttention(): {
   const upstreams = useUpstreams();
   const oauthUpstreams = useMemo(
     () =>
-      (upstreams.data?.upstreams ?? []).filter(
-        (u) => u.kind === 'anthropic_oauth',
+      (upstreams.data?.upstreams ?? []).filter((u) =>
+        isOAuthUpstreamKind(u.kind),
       ),
     [upstreams.data],
   );

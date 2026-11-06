@@ -29,6 +29,7 @@ export interface LogRowFilters {
   readonly model?: string;
   readonly status?: LogStatusFilter;
   readonly event_kind?: RequestEventFilterKind;
+  readonly event_kinds?: readonly RequestEventKind[];
 }
 
 export type { RequestEventKind } from './api';
@@ -250,11 +251,15 @@ export function filterLogRows(
     if (!modelFilterMatches(filters.model, row.model)) {
       return false;
     }
+    const effectiveKind = effectiveRequestEventKind(row);
+    if (filters.event_kinds && !filters.event_kinds.includes(effectiveKind)) {
+      return false;
+    }
     if (
       filters.event_kind === 'generation'
         ? !isGenerationRequestEvent(row)
         : filters.event_kind !== undefined &&
-          effectiveRequestEventKind(row) !== filters.event_kind
+          effectiveKind !== filters.event_kind
     ) {
       return false;
     }

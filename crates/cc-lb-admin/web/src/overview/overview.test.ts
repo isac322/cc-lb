@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import {
+  overviewEventFilters,
+  overviewEventKinds,
+} from '../designs/default/OverviewPage';
 import type { DashboardUsageResponse } from '../lib/api';
 import { qk } from '../lib/queries';
 import { mergePrincipalProviderUsage } from './principalMerge';
@@ -57,7 +61,27 @@ describe('multi-provider overview principal merge', () => {
       },
       new Map(),
     );
+
     expect(rows[0]?.name).toBe('unknown-principal');
+  });
+});
+describe('overview request feeds', () => {
+  it('uses provider-scoped endpoint taxonomy instead of one provider kind', () => {
+    expect(overviewEventFilters('gemini')).toEqual({});
+    expect(overviewEventKinds('gemini')).toEqual(
+      expect.arrayContaining(['gemini_generate_content', 'gemini_predict']),
+    );
+    expect(overviewEventKinds('openai')).toEqual(
+      expect.arrayContaining([
+        'openai_responses',
+        'chat_completions',
+        'completions',
+        'embeddings',
+        'images',
+        'audio',
+        'codex_auxiliary',
+      ]),
+    );
   });
 });
 

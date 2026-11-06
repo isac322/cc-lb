@@ -8,9 +8,10 @@ import {
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { type RequestEventKind, RequestEventKindSchema } from '../../lib/api';
 import type * as FormatModule from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
-import { RequestEventsTable } from './RequestEventsTable';
+import { providerForEvent, RequestEventsTable } from './RequestEventsTable';
 
 type GetRequestOutcome = typeof FormatModule.getRequestOutcome;
 
@@ -40,6 +41,38 @@ function render(ui: ReactElement, options?: RenderOptions) {
 }
 
 describe('RequestEventsTable', () => {
+  it('infers every request kind through the shared provider taxonomy', () => {
+    const expected: Record<
+      RequestEventKind,
+      'anthropic' | 'openai' | 'gemini'
+    > = {
+      messages: 'anthropic',
+      count_tokens: 'anthropic',
+      openai_responses: 'openai',
+      gemini_generate_content: 'gemini',
+      gemini_count_tokens: 'gemini',
+      chat_completions: 'anthropic',
+      completions: 'anthropic',
+      embeddings: 'anthropic',
+      moderations: 'openai',
+      audio: 'openai',
+      images: 'openai',
+      codex_auxiliary: 'openai',
+      gemini_predict: 'gemini',
+      models: 'anthropic',
+      files: 'anthropic',
+      other: 'anthropic',
+      renewal: 'anthropic',
+      unclassified: 'anthropic',
+    };
+    for (const kind of RequestEventKindSchema.options) {
+      expect(
+        providerForEvent({
+          event_kind: kind,
+        } as RequestEventWithPhase),
+      ).toBe(expected[kind]);
+    }
+  });
   beforeEach(() => {
     vi.stubGlobal(
       'fetch',

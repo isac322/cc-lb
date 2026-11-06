@@ -156,6 +156,12 @@ export function buildUpstreamUsageRows({
   });
 }
 
+export function countReconnectNudges(
+  rows: readonly UpstreamUsageRow[],
+): number {
+  return rows.filter((row) => row.nudge != null).length;
+}
+
 /**
  * Everything the grid reads: upstreams, the 5s `/latest` poll (same key as
  * the Upstreams page), runtime status, OAuth reconnect nudges and 7-day

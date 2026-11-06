@@ -53,8 +53,8 @@ export type RequestEventsFeedMode = 'paged' | 'infinite' | 'preview';
 export interface UseRequestEventsFeedOptions {
   readonly filters?: RequestEventsFeedFilters;
   readonly providers?: readonly ProviderFamily[];
+  readonly eventKinds?: readonly RequestEventKind[];
   readonly live?: boolean;
-  /** Defaults to `paged`. See {@link RequestEventsFeedMode}. */
   readonly mode?: RequestEventsFeedMode;
   /**
    * Number of historical rows requested first. Defaults to 500. In
@@ -251,7 +251,10 @@ export function buildRequestEventsLiveFilters(
   return base;
 }
 
-function rowFiltersFrom(input: RequestEventsFeedFilters): LogRowFilters {
+function rowFiltersFrom(
+  input: RequestEventsFeedFilters,
+  eventKinds: readonly RequestEventKind[] | undefined,
+): LogRowFilters {
   const normalized = normalizeFilters(input);
   return {
     principal_id: normalized.principal_id,
@@ -261,6 +264,7 @@ function rowFiltersFrom(input: RequestEventsFeedFilters): LogRowFilters {
     status: normalized.status,
     event_kind:
       input.event_kind === 'generation' ? 'generation' : normalized.event_kind,
+    event_kinds: eventKinds,
   };
 }
 
@@ -357,7 +361,10 @@ export function useRequestEventsFeed(
     options.providers,
   );
   const liveFilters = useProviderFilters(baseLiveFilters, options.providers);
-  const rowFilters = useMemo(() => rowFiltersFrom(filters), [filters]);
+  const rowFilters = useMemo(
+    () => rowFiltersFrom(filters, options.eventKinds),
+    [filters, options.eventKinds],
+  );
   const filterKey = stringFilterKey(historyFilters);
   const liveFilterKey = stringFilterKey(liveFilters);
   const mode: RequestEventsFeedMode = options.mode ?? 'paged';

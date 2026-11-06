@@ -1,5 +1,10 @@
 import { useMemo } from 'react';
-import { apiKeyAccessOf, type Upstream, type UpstreamKind } from './api';
+import {
+  apiKeyAccessOf,
+  type RequestEventKind,
+  type Upstream,
+  type UpstreamKind,
+} from './api';
 import { useUpstreams } from './queries';
 
 export const PROVIDER_FAMILIES = ['anthropic', 'openai', 'gemini'] as const;
@@ -10,10 +15,60 @@ export const PROVIDER_LABELS: Record<ProviderFamily, string> = {
   gemini: 'Gemini',
 };
 
+/**
+ * Request endpoint kinds that can be attributed to a provider without an
+ * upstream inventory lookup. Shared endpoint families stay in every provider
+ * that can expose them; ambiguous or provider-neutral kinds are intentionally
+ * absent and fall back to the upstream identity.
+ */
+export const REQUEST_EVENT_KINDS_BY_PROVIDER: Record<
+  ProviderFamily,
+  readonly RequestEventKind[]
+> = {
+  anthropic: ['messages', 'count_tokens', 'completions'],
+  openai: [
+    'count_tokens',
+    'openai_responses',
+    'chat_completions',
+    'completions',
+    'embeddings',
+    'moderations',
+    'audio',
+    'images',
+    'codex_auxiliary',
+  ],
+  gemini: [
+    'gemini_generate_content',
+    'gemini_count_tokens',
+    'chat_completions',
+    'embeddings',
+    'gemini_predict',
+  ],
+};
+
+export function requestEventKindsForProvider(
+  provider: ProviderFamily,
+): readonly RequestEventKind[] {
+  return REQUEST_EVENT_KINDS_BY_PROVIDER[provider];
+}
+
+export function providersForRequestEventKind(
+  kind: RequestEventKind | null | undefined,
+): readonly ProviderFamily[] {
+  if (kind == null) return [];
+  return PROVIDER_FAMILIES.filter((provider) =>
+    REQUEST_EVENT_KINDS_BY_PROVIDER[provider].includes(kind),
+  );
+}
+
 export function providerOf(kind: UpstreamKind): ProviderFamily {
   if (kind === 'openai_oauth' || kind === 'openai_api_key') return 'openai';
   if (kind === 'gemini_oauth' || kind === 'gemini_api_key') return 'gemini';
   return 'anthropic';
+}
+
+export function isOAuthUpstreamKind(kind: UpstreamKind): boolean {
+  return kind.endsWith('_oauth');
 }
 export function upstreamTypeLabel(
   kind: UpstreamKind,

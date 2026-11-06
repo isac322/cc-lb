@@ -7,7 +7,11 @@ import {
   STATUS_TONE_TEXT_CLASS,
 } from '../../lib/format';
 import { requestModelLabel } from '../../lib/logRows';
-import { PROVIDER_LABELS, type ProviderFamily } from '../../lib/providers';
+import {
+  PROVIDER_LABELS,
+  type ProviderFamily,
+  providersForRequestEventKind,
+} from '../../lib/providers';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { serviceTierBadgeText } from '../../lib/reasoningTier';
 import { CostCell } from './CostCell';
@@ -272,7 +276,7 @@ interface RequestEventRowProps {
   fit: ColumnFit;
 }
 
-function providerForEvent(
+export function providerForEvent(
   event: RequestEventWithPhase,
   providerByUpstream?: ReadonlyMap<string, ProviderFamily>,
 ): ProviderFamily {
@@ -281,14 +285,8 @@ function providerForEvent(
       ? undefined
       : providerByUpstream?.get(event.upstream_id);
   if (upstreamProvider != null) return upstreamProvider;
-  if (event.event_kind === 'openai_responses') return 'openai';
-  if (
-    event.event_kind === 'gemini_generate_content' ||
-    event.event_kind === 'gemini_count_tokens'
-  ) {
-    return 'gemini';
-  }
-  return 'anthropic';
+  const inferred = providersForRequestEventKind(event.event_kind);
+  return inferred.length === 1 ? inferred[0] : 'anthropic';
 }
 
 const RequestEventRow = memo(function RequestEventRow({

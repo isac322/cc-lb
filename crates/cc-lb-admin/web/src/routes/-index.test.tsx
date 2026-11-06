@@ -2100,7 +2100,7 @@ describe('Overview loading geometry', () => {
     render(<OverviewPage />);
 
     expect(queries.useRecentEventsPage).toHaveBeenCalledWith(
-      { event_kind: 'messages' },
+      {},
       { kind: 'initial', limit: 500 },
     );
     expect(screen.getByLabelText('View request live-1')).toBeDefined();

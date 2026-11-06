@@ -106,6 +106,7 @@ import {
 } from '../components/upstreams/quotaWindowVisibility';
 import { UpstreamPlanCaption } from '../components/upstreams/UpstreamPlanCaption';
 import {
+  countReconnectNudges,
   formatQuotaStamp,
   subscriptionPlanLabel,
   UPSTREAM_LATEST_WINDOWS_BY_PROVIDER,
@@ -507,6 +508,7 @@ function UpstreamsPage() {
       providerScope === undefined ||
       providerScope.includes(providerOf(row.upstream.kind)),
   );
+  const reconnectCount = countReconnectNudges(scopedRows);
   const flatListView = useEntityListView(scopedRows, view, viewConfig);
   const providerCount = new Set(
     scopedRows.map((row) => providerOf(row.upstream.kind)),
@@ -585,8 +587,8 @@ function UpstreamsPage() {
             ? null
             : [
                 `${formatCount(total)} ${total === 1 ? 'upstream' : 'upstreams'}`,
-                upstreamUsage.reconnectCount > 0
-                  ? `${formatCount(upstreamUsage.reconnectCount)} need${upstreamUsage.reconnectCount === 1 ? 's' : ''} reconnect`
+                reconnectCount > 0
+                  ? `${formatCount(reconnectCount)} need${reconnectCount === 1 ? 's' : ''} reconnect`
                   : null,
               ]
                 .filter(Boolean)
