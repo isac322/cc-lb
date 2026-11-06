@@ -22,6 +22,56 @@ fn lifecycle_request_events_current_registry_smoke() {
 }
 
 #[tokio::test]
+async fn realtime_websocket_observers_classify_attempted_routes() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::new(TestState::default()),
+        Arc::new(CapturingDispatch::default()),
+        LifecycleConfig::default(),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let auth = lifecycle
+        .authenticate(messages_request(Bytes::new()).headers())
+        .await
+        .expect("test request authenticates");
+
+    for (path, expected) in [
+        (
+            "/v1/realtime",
+            cc_lb_request_log::RequestEventKind::OpenaiResponses,
+        ),
+        (
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+            cc_lb_request_log::RequestEventKind::GeminiGenerateContent,
+        ),
+    ] {
+        lifecycle
+            .begin_realtime_websocket(&auth, path)
+            .finish(StatusCode::SWITCHING_PROTOCOLS);
+        let mut saw_started = false;
+        let mut saw_terminated = false;
+        while !saw_terminated {
+            match tokio::time::timeout(Duration::from_secs(1), lifecycle_events.recv())
+                .await
+                .expect("lifecycle event arrives")
+                .expect("lifecycle event stream remains open")
+            {
+                cc_lb_lifecycle::LifecycleEvent::RequestStarted { event_kind, .. } => {
+                    assert_eq!(event_kind, Some(expected));
+                    saw_started = true;
+                }
+                cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. } => {
+                    saw_terminated = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_started);
+    }
+}
+
+#[tokio::test]
 async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
 -> Result<(), Box<dyn std::error::Error>> {
     let original_body = Bytes::from_static(

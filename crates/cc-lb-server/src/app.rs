@@ -2801,7 +2801,7 @@ async fn responses_websocket_handler(
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error);
+                .reject_responses_websocket_authentication(&error, "/v1/responses");
         }
     };
     let slots: usize = state
