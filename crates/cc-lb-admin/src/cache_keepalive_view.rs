@@ -159,8 +159,15 @@ pub fn derive_activity_view(
         (_, Some(turns)) => Some(sum_turn_pnl(&turns)),
         (_, None) => None,
     };
-    let pending_source_ref_id = if is_active {
-        turns.first().map(|turn| turn.source_ref_id.as_str())
+    let pending_source_ref_id = if is_active && cycle_id.is_some() {
+        records
+            .first()
+            .filter(|turn| {
+                renewal_evidence_for_turn(turn, source.evidence)
+                    .and_then(|renewal| renewal.cycle_id)
+                    == cycle_id
+            })
+            .map(|turn| turn.source_ref_id.as_str())
     } else {
         None
     };
@@ -227,6 +234,7 @@ fn evidence_status(
     }
     let mut unknown_cycles = 0_u64;
     let mut observed = false;
+    let mut pending = false;
     for turn in turns {
         let Some(renewal) = renewal_evidence_for_turn(turn, evidence) else {
             unknown_cycles = unknown_cycles.saturating_add(1);
@@ -235,18 +243,20 @@ fn evidence_status(
         if !renewal_evidence_known(renewal) {
             unknown_cycles = unknown_cycles.saturating_add(1);
         } else {
-            let is_pending = pending_source_ref_id == Some(turn.source_ref_id.as_str());
-            if follow_up_proven(turn, evidence) || !is_pending {
-                observed = true;
+            observed = true;
+            if pending_source_ref_id == Some(turn.source_ref_id.as_str())
+                && !follow_up_proven(turn, evidence)
+            {
+                pending = true;
             }
         }
     }
     if unknown_cycles > 0 {
         ("unknown".to_owned(), unknown_cycles)
+    } else if pending {
+        ("pending".to_owned(), 0)
     } else if observed {
         ("observed".to_owned(), 0)
-    } else if pending_source_ref_id.is_some() {
-        ("pending".to_owned(), 0)
     } else {
         ("none".to_owned(), 0)
     }

@@ -148,6 +148,48 @@ fn summary_aggregate_observes_complete_unfollowed_terminal_loss() {
 }
 
 #[test]
+fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending() {
+    run_postgres_case(
+        "active complete unfollowed pending economics",
+        |url| async move {
+            summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending_case(&url).await
+        },
+    );
+}
+
+#[test]
+fn summary_aggregate_active_complete_follow_up_is_observed() {
+    run_postgres_case("active proven follow-up economics", |url| async move {
+        summary_aggregate_active_complete_follow_up_is_observed_case(&url).await
+    });
+}
+
+#[test]
+fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pending() {
+    run_postgres_case("active multi-turn pending economics", |url| async move {
+        summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pending_case(&url)
+            .await
+    });
+}
+
+#[test]
+fn summary_aggregate_multiple_follow_ups_selects_latest_qualifying_renewal() {
+    run_postgres_case(
+        "latest qualifying follow-up attribution",
+        |url| async move {
+            summary_aggregate_multiple_follow_ups_selects_latest_qualifying_renewal_case(&url).await
+        },
+    );
+}
+
+#[test]
+fn summary_aggregate_historical_observed_turn_does_not_clear_active_pending() {
+    run_postgres_case("historical active pending economics", |url| async move {
+        summary_aggregate_historical_observed_turn_does_not_clear_active_pending_case(&url).await
+    });
+}
+
+#[test]
 fn summary_aggregate_empty_has_no_economics_evidence() {
     run_postgres_case("empty retained economics", |url| async move {
         summary_aggregate_empty_has_no_economics_evidence_case(&url).await
@@ -1479,6 +1521,79 @@ fn economics_projection(
     projection
 }
 
+fn follow_up_evidence(
+    source_ref_id: &str,
+    ts: u64,
+    model: &str,
+) -> cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+    cc_lb_storage_api::CacheKeepaliveEvidenceRow {
+        evidence_id: format!("follow-up-{source_ref_id}"),
+        cycle_id: None,
+        evidence_kind: "follow_up".to_owned(),
+        request_start_ms: ts * 1_000 + 1_000,
+        prefix_fingerprint: Some("follow-up-prefix".to_owned()),
+        prefix_hash: Some("retained-prefix-hash".to_owned()),
+        prefix_policy_version: Some("policy-v1".to_owned()),
+        prefix_schema_version: Some("schema-v1".to_owned()),
+        principal_id: PRINCIPAL_ID.to_owned(),
+        upstream_id: UPSTREAM_ID,
+        model: model.to_owned(),
+        ttl: CacheTtl::Ttl5m,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(20_000),
+        cost_micros: Some(0),
+        request_ref: Some(format!("follow-up-request-{source_ref_id}")),
+        event_ref: Some(format!("follow-up-event-{source_ref_id}")),
+    }
+}
+
+struct EconomicsTurnParams<'a> {
+    session_key_hash: &'a str,
+    cycle_id: Uuid,
+    source_ref_id: &'a str,
+    ts: u64,
+    hit_miss: &'a str,
+    cost_micros: i64,
+    renewal_tokens: u64,
+    with_follow_up: bool,
+}
+
+async fn append_economics_turn(
+    storage: &PostgresStorage,
+    params: EconomicsTurnParams<'_>,
+) -> Result<()> {
+    let mut projection = economics_projection(
+        params.source_ref_id,
+        Some(params.cycle_id),
+        params.ts,
+        params.hit_miss,
+        params.cost_micros,
+    );
+    {
+        let turn = projection.turn.as_mut().expect("renewal turn");
+        turn.session_key_hash = params.session_key_hash.to_owned();
+        turn.cache_read_input_tokens = params.renewal_tokens;
+    }
+    let prefix_hash = format!("prefix-hash-{}", params.source_ref_id);
+    projection.evidence[0].cache_read_input_tokens = Some(params.renewal_tokens);
+    projection.evidence[0].prefix_hash = Some(prefix_hash.clone());
+    if params.with_follow_up {
+        let model = projection
+            .turn
+            .as_ref()
+            .expect("renewal turn")
+            .model
+            .clone();
+        let mut follow_up = follow_up_evidence(params.source_ref_id, params.ts, &model);
+        follow_up.prefix_hash = Some(prefix_hash);
+        projection.evidence.push(follow_up);
+    }
+    storage
+        .append_request_event_with_projections(&event(params.source_ref_id, params.ts), &projection)
+        .await?;
+    Ok(())
+}
+
 async fn summary_aggregate_observes_complete_unfollowed_terminal_loss_case(
     url: &str,
 ) -> Result<()> {
@@ -1523,6 +1638,249 @@ async fn summary_aggregate_observes_complete_unfollowed_terminal_loss_case(
         aggregate.groups.is_empty(),
         "no follow-up means zero avoided tokens"
     );
+    fixture.drop_schema().await
+}
+
+async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending_case(
+    url: &str,
+) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    for (index, outcome, cost) in [(1_u128, "hit", 6_000_i64), (2, "miss", 15_000)] {
+        let session_key_hash = format!("active-{outcome}");
+        let cycle_id = Uuid::from_u128(1_074 + index);
+        let mut replace = request(&session_key_hash, 1_000, "agent-in-turn");
+        replace.cycle_id = cycle_id;
+        let session = storage.replace_from_real_request(&replace).await?;
+        let source_ref_id = format!("active-{outcome}-renewal");
+        let ts = 1_001 + index as u64;
+        let mut projection =
+            economics_projection(&source_ref_id, Some(cycle_id), ts, outcome, cost);
+        projection
+            .turn
+            .as_mut()
+            .expect("renewal turn")
+            .session_key_hash = session.session_key_hash.clone();
+        projection.decision.session_key_hash = Some(session.session_key_hash.clone());
+        storage
+            .append_request_event_with_projections(&event(&source_ref_id, ts), &projection)
+            .await?;
+    }
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await?;
+    assert_eq!(aggregate.renewing_now, 2);
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "pending");
+    assert!(aggregate.groups.is_empty());
+    fixture.drop_schema().await
+}
+
+async fn summary_aggregate_active_complete_follow_up_is_observed_case(url: &str) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    let cycle_id = Uuid::from_u128(1_076);
+    let mut replace = request("active-follow-up", 1_000, "agent-in-turn");
+    replace.cycle_id = cycle_id;
+    let session = storage.replace_from_real_request(&replace).await?;
+    let source_ref_id = "active-follow-up-renewal";
+    let ts = 1_001;
+    let mut projection = economics_projection(source_ref_id, Some(cycle_id), ts, "hit", 6_000);
+    let model = projection
+        .turn
+        .as_ref()
+        .expect("renewal turn")
+        .model
+        .clone();
+    projection
+        .turn
+        .as_mut()
+        .expect("renewal turn")
+        .session_key_hash = session.session_key_hash.clone();
+    projection.decision.session_key_hash = Some(session.session_key_hash.clone());
+    projection
+        .evidence
+        .push(follow_up_evidence(source_ref_id, ts, &model));
+    storage
+        .append_request_event_with_projections(&event(source_ref_id, ts), &projection)
+        .await?;
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await?;
+    assert_eq!(aggregate.renewing_now, 1);
+    assert_eq!(aggregate.total_spent_micros, 6_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "observed");
+    assert_eq!(aggregate.groups.len(), 1);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
+    fixture.drop_schema().await
+}
+
+async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pending_case(
+    url: &str,
+) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    let cycle_id = Uuid::from_u128(1_077);
+    let mut replace = request("active-multi-turn", 1_000, "agent-in-turn");
+    replace.cycle_id = cycle_id;
+    storage.replace_from_real_request(&replace).await?;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "active-multi-turn",
+            cycle_id,
+            source_ref_id: "active-multi-turn-old",
+            ts: 1_001,
+            hit_miss: "hit",
+            cost_micros: 6_000,
+            renewal_tokens: 20_000,
+            with_follow_up: false,
+        },
+    )
+    .await?;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "active-multi-turn",
+            cycle_id,
+            source_ref_id: "active-multi-turn-latest",
+            ts: 1_002,
+            hit_miss: "miss",
+            cost_micros: 15_000,
+            renewal_tokens: 20_000,
+            with_follow_up: false,
+        },
+    )
+    .await?;
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await?;
+    assert_eq!(aggregate.renewing_now, 1);
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "pending");
+    assert!(aggregate.groups.is_empty());
+    fixture.drop_schema().await
+}
+
+async fn summary_aggregate_multiple_follow_ups_selects_latest_qualifying_renewal_case(
+    url: &str,
+) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    let cycle_id = Uuid::from_u128(1_078);
+    let mut replace = request("active-multiple-follow-ups", 1_000, "agent-in-turn");
+    replace.cycle_id = cycle_id;
+    storage.replace_from_real_request(&replace).await?;
+    // Each follow-up carries its renewal's prefix hash; the cycle-wide group
+    // intentionally reports the latest qualifying renewal's retained tokens.
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "active-multiple-follow-ups",
+            cycle_id,
+            source_ref_id: "active-multiple-follow-ups-first",
+            ts: 1_001,
+            hit_miss: "hit",
+            cost_micros: 6_000,
+            renewal_tokens: 10_000,
+            with_follow_up: true,
+        },
+    )
+    .await?;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "active-multiple-follow-ups",
+            cycle_id,
+            source_ref_id: "active-multiple-follow-ups-latest",
+            ts: 1_002,
+            hit_miss: "hit",
+            cost_micros: 6_000,
+            renewal_tokens: 30_000,
+            with_follow_up: true,
+        },
+    )
+    .await?;
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await?;
+    assert_eq!(aggregate.renewing_now, 1);
+    assert_eq!(aggregate.total_spent_micros, 12_000);
+    assert_eq!(aggregate.successful_hits, 2);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "pending");
+    assert_eq!(aggregate.groups.len(), 1);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 30_000);
+    fixture.drop_schema().await
+}
+
+async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pending_case(
+    url: &str,
+) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    let historical_cycle_id = Uuid::from_u128(1_079);
+    let current_cycle_id = Uuid::from_u128(1_080);
+    let mut historical = request("historical-active-pending", 1_000, "agent-in-turn");
+    historical.cycle_id = historical_cycle_id;
+    storage.replace_from_real_request(&historical).await?;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "historical-active-pending",
+            cycle_id: historical_cycle_id,
+            source_ref_id: "historical-active-pending-old",
+            ts: 1_001,
+            hit_miss: "hit",
+            cost_micros: 6_000,
+            renewal_tokens: 20_000,
+            with_follow_up: false,
+        },
+    )
+    .await?;
+
+    let mut current = request("historical-active-pending", 1_005, "agent-in-turn");
+    current.cycle_id = current_cycle_id;
+    storage.replace_from_real_request(&current).await?;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "historical-active-pending",
+            cycle_id: current_cycle_id,
+            source_ref_id: "historical-active-pending-current",
+            ts: 1_006,
+            hit_miss: "hit",
+            cost_micros: 6_000,
+            renewal_tokens: 20_000,
+            with_follow_up: false,
+        },
+    )
+    .await?;
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await?;
+    assert_eq!(aggregate.renewing_now, 1);
+    assert_eq!(aggregate.total_spent_micros, 12_000);
+    assert_eq!(aggregate.successful_hits, 2);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "pending");
+    assert!(aggregate.groups.is_empty());
     fixture.drop_schema().await
 }
 

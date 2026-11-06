@@ -603,3 +603,370 @@ async fn miss_attempt_is_not_counted_as_successful_renewal_case() {
     assert_eq!(detail["turns"][0]["followed_up"], false);
     assert_json_dollars(&detail["turns"][0]["pnl"], -15_000);
 }
+
+#[test]
+fn active_unfollowed_turns_are_pending_but_active_followup_is_observed() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::active_unfollowed_turns_are_pending_but_active_followup_is_observed";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build isolated regression runtime")
+            .block_on(active_unfollowed_turns_are_pending_but_active_followup_is_observed_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_case() {
+    install_regression_catalog();
+
+    let (_pending_directory, pending_storage, pending_state, pending_principal_id) =
+        create_principal_id().await;
+    seed_session(
+        &pending_storage,
+        &pending_principal_id,
+        "active-unfollowed-hit",
+        CYCLE_ONE,
+        false,
+    )
+    .await;
+    append_turn(
+        &pending_storage,
+        AppendTurnParams {
+            principal_id: &pending_principal_id,
+            session_key_hash: "active-unfollowed-hit",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "active-unfollowed-hit",
+            ts: NOW_UNIX_SECS,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 6_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    seed_session(
+        &pending_storage,
+        &pending_principal_id,
+        "active-unfollowed-miss",
+        CYCLE_TWO,
+        false,
+    )
+    .await;
+    append_turn(
+        &pending_storage,
+        AppendTurnParams {
+            principal_id: &pending_principal_id,
+            session_key_hash: "active-unfollowed-miss",
+            cycle_id: CYCLE_TWO,
+            source_ref_id: "active-unfollowed-miss",
+            ts: NOW_UNIX_SECS + 1,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 15_000,
+            hit_miss: "miss",
+            with_follow_up: false,
+        },
+    )
+    .await;
+
+    let (pending_status, pending_body) = get_json(
+        &pending_state,
+        &format!("/admin/v1/principals/{pending_principal_id}/cache-keepalive?limit=10"),
+    )
+    .await;
+    assert_eq!(
+        pending_status,
+        StatusCode::OK,
+        "active unfollowed list: {pending_body:?}"
+    );
+    assert_eq!(pending_body["summary"]["evidence_status"], "pending");
+    assert!(pending_body["summary"]["cost_saved"].is_null());
+    assert!(pending_body["summary"]["total_avoided"].is_null());
+
+    let (_observed_directory, observed_storage, observed_state, observed_principal_id) =
+        create_principal_id().await;
+    seed_session(
+        &observed_storage,
+        &observed_principal_id,
+        "active-followup",
+        CYCLE_ONE,
+        false,
+    )
+    .await;
+    append_turn(
+        &observed_storage,
+        AppendTurnParams {
+            principal_id: &observed_principal_id,
+            session_key_hash: "active-followup",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "active-followup",
+            ts: NOW_UNIX_SECS,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 6_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+
+    let (observed_status, observed_body) = get_json(
+        &observed_state,
+        &format!("/admin/v1/principals/{observed_principal_id}/cache-keepalive?limit=10"),
+    )
+    .await;
+    assert_eq!(
+        observed_status,
+        StatusCode::OK,
+        "active follow-up list: {observed_body:?}"
+    );
+    assert_eq!(observed_body["summary"]["evidence_status"], "observed");
+    assert!(!observed_body["summary"]["cost_saved"].is_null());
+    assert!(!observed_body["summary"]["total_avoided"].is_null());
+}
+
+#[test]
+fn active_multi_turn_and_cycle_history_keep_pending_parity() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::active_multi_turn_and_cycle_history_keep_pending_parity";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build isolated regression runtime")
+            .block_on(active_multi_turn_and_cycle_history_keep_pending_parity_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
+    install_regression_catalog();
+
+    let (_multi_turn_directory, multi_turn_storage, multi_turn_state, multi_turn_principal_id) =
+        create_principal_id().await;
+    seed_session(
+        &multi_turn_storage,
+        &multi_turn_principal_id,
+        "active-multi-turn",
+        CYCLE_ONE,
+        false,
+    )
+    .await;
+    for (source_ref_id, ts, hit_miss, cost_micros) in [
+        ("active-multi-turn-old", NOW_UNIX_SECS, "hit", 6_000),
+        (
+            "active-multi-turn-latest",
+            NOW_UNIX_SECS + 1,
+            "miss",
+            15_000,
+        ),
+    ] {
+        append_turn(
+            &multi_turn_storage,
+            AppendTurnParams {
+                principal_id: &multi_turn_principal_id,
+                session_key_hash: "active-multi-turn",
+                cycle_id: CYCLE_ONE,
+                source_ref_id,
+                ts,
+                cache_read_input_tokens: 20_000,
+                cost_micros,
+                hit_miss,
+                with_follow_up: false,
+            },
+        )
+        .await;
+    }
+    let (multi_turn_status, multi_turn_body) = get_json(
+        &multi_turn_state,
+        &format!("/admin/v1/principals/{multi_turn_principal_id}/cache-keepalive?limit=10"),
+    )
+    .await;
+    assert_eq!(
+        multi_turn_status,
+        StatusCode::OK,
+        "active multi-turn list: {multi_turn_body:?}"
+    );
+    assert_eq!(multi_turn_body["summary"]["evidence_status"], "pending");
+    assert_json_dollars(&multi_turn_body["summary"]["total_spent"], 21_000);
+    assert_eq!(multi_turn_body["summary"]["retained_successful_hits"], 1);
+    assert!(multi_turn_body["summary"]["cost_saved"].is_null());
+    assert!(multi_turn_body["summary"]["total_avoided"].is_null());
+    let multi_turn_row = multi_turn_body["rows"]
+        .as_array()
+        .expect("active multi-turn rows")
+        .iter()
+        .find(|row| row["id"] == "active-multi-turn")
+        .expect("active multi-turn row");
+    assert_eq!(multi_turn_row["evidence_status"], "pending");
+    assert_json_dollars(&multi_turn_row["total_spent"], 21_000);
+    assert!(multi_turn_row["net_pnl"].is_null());
+    assert!(multi_turn_row["total_avoided"].is_null());
+
+    let (multi_turn_detail_status, multi_turn_detail) = get_json(
+        &multi_turn_state,
+        &keepalive_detail_uri(&multi_turn_principal_id, "active-multi-turn"),
+    )
+    .await;
+    assert_eq!(
+        multi_turn_detail_status,
+        StatusCode::OK,
+        "active multi-turn detail: {multi_turn_detail:?}"
+    );
+    assert_eq!(multi_turn_detail["evidence_status"], "pending");
+    assert_json_dollars(&multi_turn_detail["total_spent"], 21_000);
+    assert!(multi_turn_detail["net_pnl"].is_null());
+    assert!(multi_turn_detail["total_avoided"].is_null());
+    assert_eq!(multi_turn_detail["is_last_pending"], true);
+    let multi_turns = multi_turn_detail["turns"]
+        .as_array()
+        .expect("active multi-turn detail turns");
+    assert_eq!(multi_turns.len(), 2);
+    assert_eq!(multi_turns[0]["pending"], true);
+    assert_eq!(multi_turns[1]["pending"], false);
+
+    let (_historical_directory, historical_storage, historical_state, historical_principal_id) =
+        create_principal_id().await;
+    seed_session(
+        &historical_storage,
+        &historical_principal_id,
+        "historical-active-pending",
+        CYCLE_ONE,
+        false,
+    )
+    .await;
+    append_turn(
+        &historical_storage,
+        AppendTurnParams {
+            principal_id: &historical_principal_id,
+            session_key_hash: "historical-active-pending",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "historical-active-pending-old",
+            ts: NOW_UNIX_SECS,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 6_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    let mut replacement = cache_keepalive_replace_request(
+        &historical_principal_id,
+        "historical-active-pending",
+        NOW_UNIX_SECS + 2,
+        NOW_UNIX_SECS + 302,
+    );
+    replacement.cycle_id = CYCLE_TWO;
+    historical_storage
+        .replace_from_real_request(&replacement)
+        .await
+        .expect("replace with current cycle");
+    append_turn(
+        &historical_storage,
+        AppendTurnParams {
+            principal_id: &historical_principal_id,
+            session_key_hash: "historical-active-pending",
+            cycle_id: CYCLE_TWO,
+            source_ref_id: "historical-active-pending-current",
+            ts: NOW_UNIX_SECS + 3,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 6_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    let (historical_status, historical_body) = get_json(
+        &historical_state,
+        &format!("/admin/v1/principals/{historical_principal_id}/cache-keepalive?limit=10"),
+    )
+    .await;
+    assert_eq!(
+        historical_status,
+        StatusCode::OK,
+        "historical active list: {historical_body:?}"
+    );
+    assert_eq!(historical_body["summary"]["evidence_status"], "pending");
+    assert_json_dollars(&historical_body["summary"]["total_spent"], 12_000);
+    assert!(historical_body["summary"]["cost_saved"].is_null());
+    assert!(historical_body["summary"]["total_avoided"].is_null());
+    let (historical_detail_status, historical_detail) = get_json(
+        &historical_state,
+        &keepalive_detail_uri(&historical_principal_id, "historical-active-pending"),
+    )
+    .await;
+    assert_eq!(
+        historical_detail_status,
+        StatusCode::OK,
+        "historical active detail: {historical_detail:?}"
+    );
+    assert_eq!(historical_detail["evidence_status"], "pending");
+    assert_json_dollars(&historical_detail["total_spent"], 12_000);
+    assert!(historical_detail["net_pnl"].is_null());
+    assert!(historical_detail["total_avoided"].is_null());
+    assert_eq!(historical_detail["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(historical_detail["turns"][0]["pending"], true);
+
+    let (_follow_ups_directory, follow_ups_storage, follow_ups_state, follow_ups_principal_id) =
+        create_principal_id().await;
+    seed_session(
+        &follow_ups_storage,
+        &follow_ups_principal_id,
+        "active-multiple-follow-ups",
+        CYCLE_ONE,
+        false,
+    )
+    .await;
+    for (source_ref_id, ts) in [
+        ("active-multiple-follow-ups-first", NOW_UNIX_SECS),
+        ("active-multiple-follow-ups-latest", NOW_UNIX_SECS + 1),
+    ] {
+        append_turn(
+            &follow_ups_storage,
+            AppendTurnParams {
+                principal_id: &follow_ups_principal_id,
+                session_key_hash: "active-multiple-follow-ups",
+                cycle_id: CYCLE_ONE,
+                source_ref_id,
+                ts,
+                cache_read_input_tokens: 20_000,
+                cost_micros: 6_000,
+                hit_miss: "hit",
+                with_follow_up: true,
+            },
+        )
+        .await;
+    }
+    let (follow_ups_status, follow_ups_body) = get_json(
+        &follow_ups_state,
+        &format!("/admin/v1/principals/{follow_ups_principal_id}/cache-keepalive?limit=10"),
+    )
+    .await;
+    assert_eq!(
+        follow_ups_status,
+        StatusCode::OK,
+        "multiple follow-up list: {follow_ups_body:?}"
+    );
+    assert_eq!(follow_ups_body["summary"]["evidence_status"], "pending");
+    assert_json_dollars(&follow_ups_body["summary"]["total_spent"], 12_000);
+    assert!(follow_ups_body["summary"]["cost_saved"].is_null());
+    assert!(follow_ups_body["summary"]["total_avoided"].is_null());
+    let (follow_ups_detail_status, follow_ups_detail) = get_json(
+        &follow_ups_state,
+        &keepalive_detail_uri(&follow_ups_principal_id, "active-multiple-follow-ups"),
+    )
+    .await;
+    assert_eq!(
+        follow_ups_detail_status,
+        StatusCode::OK,
+        "multiple follow-up detail: {follow_ups_detail:?}"
+    );
+    let follow_up_turns = follow_ups_detail["turns"]
+        .as_array()
+        .expect("multiple follow-up detail turns");
+    assert_eq!(follow_up_turns.len(), 2);
+    assert_eq!(follow_up_turns[0]["pending"], true);
+    assert_eq!(follow_up_turns[0]["followed_up"], false);
+    assert_eq!(follow_up_turns[1]["pending"], false);
+    assert_eq!(follow_up_turns[1]["followed_up"], true);
+}
