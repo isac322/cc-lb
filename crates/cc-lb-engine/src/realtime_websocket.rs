@@ -128,6 +128,24 @@ impl RealtimeWebSocketSession {
             );
         }
     }
+
+    /// Finish a failed provider handshake without treating HTTP errors as a
+    /// successful relay response.
+    pub fn finish_handshake(mut self, status: StatusCode) {
+        if let Some(observer) = &self.observer {
+            if let Some(reservation) = self.reservation.take() {
+                reservation.handoff_after_response();
+            }
+            if status.is_client_error() {
+                observer.set_upstream_error(status, UpstreamErrorCode::Upstream4xx);
+            } else if status.is_server_error() {
+                observer.set_upstream_error(status, UpstreamErrorCode::Upstream5xx);
+            } else {
+                observer.set_success_status(status);
+            }
+            observer.finish();
+        }
+    }
 }
 
 #[derive(Default)]
