@@ -56,6 +56,8 @@ All notable changes to this project will be documented in this file.
 - Mid-stream `error: null` fields no longer classify OpenAI Responses completion events as provider errors.
 - Cache keep-alive turn claims now accept a published `pending` session once its encrypted payload is stored, preventing a due worker from acknowledging the job `Done` as a no-op before the producer's post-publish `enqueued` mark completes.
 
+- Gemini tool-use prompt token usage is now preserved as a separate optional request-event component, while ordinary input/output and billing semantics remain unchanged. ([#1090](https://github.com/isac322/cc-lb/issues/1090))
+
 ### Security
 
 - OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
