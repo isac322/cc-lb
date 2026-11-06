@@ -256,13 +256,17 @@ function redactUrl(raw) {
     )}>`;
   }
   const keepaliveAt = segments.indexOf('cache-keepalive');
-  if (keepaliveAt >= 0 && segments[keepaliveAt + 1]) {
+  if (
+    keepaliveAt >= 0 &&
+    segments[keepaliveAt + 1] &&
+    segments[keepaliveAt + 1] !== 'detail'
+  ) {
     segments[keepaliveAt + 1] = `<sha256:${sha256(
       decodeURIComponent(segments[keepaliveAt + 1]),
     )}>`;
   }
   url.pathname = segments.join('/');
-  for (const key of ['cursor', 'selectedId']) {
+  for (const key of ['cursor', 'selectedId', 'id']) {
     const value = url.searchParams.get(key);
     if (value !== null) {
       url.searchParams.set(key, `<sha256:${sha256(value)}>`);
@@ -281,7 +285,8 @@ function keepaliveKind(raw) {
     return null;
   }
   const suffix = url.pathname.split('/cache-keepalive')[1];
-  if (suffix && suffix !== '/') return 'detail';
+  if (suffix === '/detail' && url.searchParams.has('id')) return 'detail';
+  if (suffix && suffix !== '/') return null;
   return url.searchParams.get('limit') === '0' ? 'summary' : 'list';
 }
 
@@ -882,12 +887,16 @@ async function prepareTarget(context, target, manifest, token, ledger) {
     }
     const drawer = page.getByTestId('cache-keepalive-sessions-drawer');
     await drawer.waitFor({ state: 'visible', timeout: READY_TIMEOUT_MS });
-    const encoded = encodeURIComponent(manifest.low_ids.active);
-    const detailPath = `/admin/v1/principals/${manifest.principals.low}/cache-keepalive/${encoded}`;
+    const detailPath = `/admin/v1/principals/${manifest.principals.low}/cache-keepalive/detail?${new URLSearchParams(
+      { id: manifest.low_ids.active },
+    )}`;
+    const expectedDetailUrl = new URL(detailPath, target.origin);
     const detailResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return (
-        response.request().method() === 'GET' && url.pathname === detailPath
+        response.request().method() === 'GET' &&
+        url.pathname === expectedDetailUrl.pathname &&
+        url.searchParams.get('id') === expectedDetailUrl.searchParams.get('id')
       );
     });
     await drawer

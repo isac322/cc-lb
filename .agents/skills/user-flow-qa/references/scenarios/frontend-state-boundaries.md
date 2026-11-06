@@ -13,10 +13,12 @@ Run both the development UI and a production build/preview. The production previ
 ## Fixtures and point-in-time checks
 
 1. Create two principals through `POST /admin/v1/principals`, with different names and `allowed_models`, and an API-key upstream with a disposable, nonfunctional upstream credential.
-2. Seed at least 51 request records in the isolated SQLite database so `/admin/v1/events/recent?limit=50` has a second page. Populate the materialized `list_status`, `list_ts_ms`, `list_event_key`, and `list_duration_ms` columns as well as the JSON payload. Match principal/upstream UUIDs. Verify list and detail API responses before browser use.
-3. Create an inert terminal `cache_keepalive_sessions` row for the first principal (`status=terminal`, `terminal_reason=max_refreshes`, `ttl=5m`, recent `last_message_at_ms`). It must appear in the real `/admin/v1/principals/{id}/cache-keepalive?limit=100` list and `/cache-keepalive/{sessionId}` detail. Do not seed active jobs.
+2. Seed at least 51 request records in the isolated SQLite database so `/admin/v1/events/recent?limit=50` has a second page. Populate the materialized `list_status`, `list_ts_ms`, `list_event_key`, and `list_duration_ms` columns and the typed request-event columns. Match principal/upstream UUIDs. Verify the list and `/admin/v1/events/detail?id=<encoded ID>` responses before browser use.
+3. Create an inert terminal `cache_keepalive_sessions` row for the first principal (`status=terminal`, `terminal_reason=max_refreshes`, `ttl=5m`, recent `last_message_at_ms`). It must appear in the real `/admin/v1/principals/{principal_id}/cache-keepalive?limit=100` list and `/admin/v1/principals/{principal_id}/cache-keepalive/detail?id=<encoded ID>` detail. Do not seed active jobs.
 4. Read the real config editor metadata through `GET /admin/v1/config/editor`, then exercise the v1 draft flow: `GET`/`PUT /admin/v1/config/draft`, `POST /admin/v1/config/draft/validate`, `POST /admin/v1/config/save`, `POST /admin/v1/config/draft/download`, and `GET /admin/v1/config/history`. Preserve each expected-revision/fingerprint contract. Do not assume a writable file: cover both writable and read-only editor states. Do not seed or publish an unversioned draft.
 5. Principal create/update actions generate real Audit entries. Multiple updates within one second may have identical `request_id`; retain all entries. Verify API count and each payload rather than treating request_id as a unique row ID.
+
+Build each detail query with `new URLSearchParams({ id: originalId })` or an equivalent query encoder. Keep composite IDs unchanged and encode the query value once, without pre-encoding it. The old per-ID path routes are removed; migrate direct fixture and probe scripts to these static query endpoints. Event-detail audit entries use `/admin/v1/events/detail` as the route and retain the original ID in `payload.event_id`.
 
 ## State-transition scenarios
 

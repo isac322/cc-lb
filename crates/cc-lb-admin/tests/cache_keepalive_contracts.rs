@@ -23,6 +23,14 @@ use config_admin_common::{app, authed_bytes, authed_json, temp_storage};
 use fixtures::{principal_create_body, seed_cache_keepalive_contract_rows};
 use serde_json::{Value, json};
 use uuid::Uuid;
+fn keepalive_detail_uri(principal_id: &str, id: &str) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("id", id);
+    format!(
+        "/admin/v1/principals/{principal_id}/cache-keepalive/detail?{}",
+        query.finish()
+    )
+}
 
 const NOW_UNIX_SECS: u64 = 1_730_000_100;
 
@@ -140,8 +148,7 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
         .expect("seeded keepalive row");
     assert_eq!(row["upstream"], "retired-upstream");
 
-    let detail_uri =
-        format!("/admin/v1/principals/{principal_id}/cache-keepalive/{session_key_hash}");
+    let detail_uri = keepalive_detail_uri(&principal_id, session_key_hash);
     let (status, _headers, raw) = authed_bytes(app(state), "GET", &detail_uri, None).await;
     assert_eq!(status, StatusCode::OK, "detail response: {raw:?}");
     let detail: Value = serde_json::from_slice(&raw).expect("detail response JSON");
@@ -154,8 +161,7 @@ async fn cache_keepalive_detail_returns_frozen_multi_turn_fields() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
 
-    // When: the drawer loads the selected session.
-    let uri = format!("/admin/v1/principals/{principal_id}/cache-keepalive/f4b71a0c9d52");
+    let uri = keepalive_detail_uri(&principal_id, "f4b71a0c9d52");
     let (status, _headers, raw) = authed_bytes(app(state), "GET", &uri, None).await;
 
     // Then: every frozen detail field is present and turns remain newest first.
@@ -195,6 +201,34 @@ async fn cache_keepalive_detail_returns_frozen_multi_turn_fields() {
         pair[0]["time_ms"].as_u64().unwrap_or_default()
             >= pair[1]["time_ms"].as_u64().unwrap_or_default()
     }));
+}
+
+#[tokio::test]
+async fn cache_keepalive_detail_query_preserves_all_state_shapes() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
+
+    for (id, expected_state) in [
+        ("a1f39c2b7e04", "renewed"),
+        ("7b204de1c83f", "scheduled"),
+        ("f4b71a0c9d52", "capped"),
+        ("0b33e9f71a2c", "expired"),
+        ("error-overlaps-reason", "scheduled"),
+        ("decision-2d8077e9a1c4", "not_tracked"),
+    ] {
+        let uri = keepalive_detail_uri(&principal_id, id);
+        let (status, _headers, body, _raw) =
+            authed_json(app(state.clone()), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{id}: {body:?}");
+        assert_eq!(body["id"], id);
+        assert_eq!(body["state"], expected_state);
+        assert!(body["turns"].is_array(), "{id}: missing turns");
+        assert!(body["config_snapshot"].is_object(), "{id}: missing config");
+        assert!(body["raw_record"].is_object(), "{id}: missing raw record");
+        if id == "error-overlaps-reason" {
+            assert!(body["error"].is_string(), "{id}: missing error");
+        }
+    }
 }
 
 #[tokio::test]
@@ -319,8 +353,7 @@ async fn cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malfor
     seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
 
     // When: the detail route and malformed query boundaries are requested.
-    let detail_uri =
-        format!("/admin/v1/principals/{principal_id}/cache-keepalive/decision-2d8077e9a1c4");
+    let detail_uri = keepalive_detail_uri(&principal_id, "decision-2d8077e9a1c4");
     let (status, _headers, raw) = authed_bytes(app(state.clone()), "GET", &detail_uri, None).await;
     assert_eq!(status, StatusCode::OK, "not tracked detail: {raw:?}");
     let detail: Value = serde_json::from_slice(&raw).expect("decision detail JSON");
