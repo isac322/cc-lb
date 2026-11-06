@@ -327,9 +327,12 @@ export function useRequestEventsFeed(
     model,
     status: statusFilter,
     event_kind,
+    event_kind_set,
     since_unix_secs,
     until_unix_secs,
   } = options.filters ?? {};
+  // Callers may rebuild the set each render; key the memo on its contents.
+  const eventKindSetKey = event_kind_set?.join(',');
   const filters = useMemo(
     () => ({
       principal_id,
@@ -338,6 +341,10 @@ export function useRequestEventsFeed(
       model,
       status: statusFilter,
       event_kind,
+      event_kind_set:
+        eventKindSetKey === undefined || eventKindSetKey === ''
+          ? undefined
+          : (eventKindSetKey.split(',') as RequestEventKind[]),
       since_unix_secs,
       until_unix_secs,
     }),
@@ -348,6 +355,7 @@ export function useRequestEventsFeed(
       model,
       statusFilter,
       event_kind,
+      eventKindSetKey,
       since_unix_secs,
       until_unix_secs,
     ],

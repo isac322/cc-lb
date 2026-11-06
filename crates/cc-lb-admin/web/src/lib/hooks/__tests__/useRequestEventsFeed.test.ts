@@ -326,4 +326,34 @@ describe('useRequestEventsFeed', () => {
         ?._phase,
     ).toBe('final');
   });
+
+  it('sends a provider event-kind set on history and live-tail requests', async () => {
+    const client = new QueryClient();
+    const { result } = renderHook(
+      () =>
+        useRequestEventsFeed({
+          // A fresh array each render must not change the request identity.
+          filters: {
+            event_kind_set: ['gemini_generate_content', 'gemini_predict'],
+          },
+          initialHistoryLimit: 500,
+          pageSize: 50,
+        }),
+      { wrapper: makeWrapper(client) },
+    );
+
+    await waitFor(() => expect(result.current.rows).toHaveLength(500));
+    expect(mocks.useRecentEventsPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        event_kind: 'gemini_generate_content,gemini_predict',
+      }),
+      expect.anything(),
+    );
+    expect(mocks.useLiveEventStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        event_kind: 'gemini_generate_content,gemini_predict',
+      }),
+      { enabled: true },
+    );
+  });
 });
