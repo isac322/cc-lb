@@ -12,6 +12,8 @@ mod evidence_scope;
 mod fixtures;
 #[path = "cache_keepalive_contracts/read_equivalence.rs"]
 mod read_equivalence;
+#[path = "cache_keepalive_contracts/read_model_regressions.rs"]
+mod read_model_regressions;
 
 use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};

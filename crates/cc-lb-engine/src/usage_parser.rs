@@ -42,6 +42,12 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_creation_evidence: CacheTokenEvidence,
     pub(crate) cache_read_evidence: CacheTokenEvidence,
     pub(crate) thinking_tokens: u64,
+    /// Gemini's cumulative prompt tokens attributed to tool use, when reported.
+    ///
+    /// This remains distinct from `input_tokens`: Gemini's `promptTokenCount`
+    /// continues to drive input accounting, while this optional component is
+    /// propagated for usage attribution.
+    pub(crate) tool_use_prompt_tokens: Option<u64>,
     /// Last Gemini candidates snapshot, kept separately from billable output
     /// so partial updates can retain it without adding cumulative counts.
     pub(crate) last_candidates_tokens: u64,
@@ -554,6 +560,27 @@ fn usage_from_value(value: &Value) -> UsageCounts {
 }
 
 fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> UsageCounts {
+    if matches!(shape, Some(UsageShape::GeminiGenerateContent))
+        && let Value::Array(elements) = value
+    {
+        let mut usage = UsageCounts::default();
+        for element in elements {
+            let Some(usage_value) =
+                usage_value_for_shape(element, shape).filter(|value| !value.is_null())
+            else {
+                continue;
+            };
+            usage.present = true;
+            merge_usage_value(&mut usage, usage_value);
+            if usage.service_tier.is_none()
+                && let Some(tier) = service_tier_from_envelope(element)
+            {
+                usage.service_tier = Some(tier.to_owned());
+            }
+        }
+        return usage;
+    }
+
     let Some(usage_value) = usage_value_for_shape(value, shape).filter(|value| !value.is_null())
     else {
         return UsageCounts::default();
@@ -705,6 +732,12 @@ pub(crate) fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
         .and_then(Value::as_u64)
     {
         usage.thinking_tokens = reasoning_tokens;
+    }
+    if let Some(tool_use_prompt_tokens) = reported
+        .get("toolUsePromptTokenCount")
+        .and_then(Value::as_u64)
+    {
+        usage.tool_use_prompt_tokens = Some(tool_use_prompt_tokens);
     }
     if reported.get("output_tokens").is_none() {
         let candidates_tokens = reported.get("candidatesTokenCount").and_then(Value::as_u64);
@@ -2182,7 +2215,8 @@ mod tests {
                 "promptTokenCount": 120,
                 "candidatesTokenCount": 48,
                 "cachedContentTokenCount": 17,
-                "thoughtsTokenCount": 12
+                "thoughtsTokenCount": 12,
+                "toolUsePromptTokenCount": 9
             }
         });
 
@@ -2193,6 +2227,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
     }
 
     #[test]
@@ -2208,7 +2243,8 @@ mod tests {
                     "promptTokenCount": 120,
                     "candidatesTokenCount": 48,
                     "cachedContentTokenCount": 17,
-                    "thoughtsTokenCount": 12
+                    "thoughtsTokenCount": 12,
+                    "toolUsePromptTokenCount": 9
                 }
             }
         });
@@ -2220,6 +2256,73 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
+    }
+    #[test]
+    fn gm_use_05_tool_use_prompt_tokens_non_stream_presence_states() {
+        for (tool_use_prompt_tokens, expected) in
+            [(Some(37), Some(37)), (None, None), (Some(0), Some(0))]
+        {
+            let usage_metadata = match tool_use_prompt_tokens {
+                Some(value) => serde_json::json!({
+                    "promptTokenCount": 120,
+                    "candidatesTokenCount": 48,
+                    "toolUsePromptTokenCount": value
+                }),
+                None => serde_json::json!({
+                    "promptTokenCount": 120,
+                    "candidatesTokenCount": 48
+                }),
+            };
+            let usage = observe_non_stream_json_value(&serde_json::json!({
+                "usageMetadata": usage_metadata
+            }))
+            .usage;
+            assert_eq!(usage.tool_use_prompt_tokens, expected);
+            assert_eq!(usage.input_tokens, 120);
+            assert_eq!(usage.output_tokens, 48);
+        }
+
+        let null = observe_non_stream_json_value(&serde_json::json!({
+            "usageMetadata": {
+                "promptTokenCount": 120,
+                "candidatesTokenCount": 48,
+                "toolUsePromptTokenCount": null
+            }
+        }))
+        .usage;
+        assert_eq!(null.tool_use_prompt_tokens, None);
+    }
+
+    #[test]
+    fn gm_sse_06_tool_use_prompt_tokens_replace_and_retain_cumulative_snapshots() {
+        let mut usage = UsageCounts::default();
+        for (payload, expected) in [
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48,"toolUsePromptTokenCount":37}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":49}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":50,"toolUsePromptTokenCount":null}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":51,"toolUsePromptTokenCount":0}}"#,
+                Some(0),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":52,"toolUsePromptTokenCount":11}}"#,
+                Some(11),
+            ),
+        ] {
+            let frame = format!("data: {payload}\n\n");
+            accumulate_raw_sse_usage(frame.as_bytes(), &mut usage);
+            assert_eq!(usage.tool_use_prompt_tokens, expected, "{payload}");
+        }
     }
 
     #[test]
@@ -2261,6 +2364,138 @@ mod tests {
         );
         assert_eq!(streamed.output_tokens, u64::MAX - 5);
         assert_eq!(streamed.thinking_tokens, 0);
+    }
+
+    #[test]
+    fn gm_use_05_generate_content_array_usage_metadata_maps_last_element() {
+        let body = serde_json::json!([
+            {
+                "candidates": [{
+                    "content": {"parts": [{"text": "partial"}]}
+                }]
+            },
+            {
+                "candidates": [{
+                    "content": {"parts": [{"text": "complete"}]}
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 110,
+                    "candidatesTokenCount": 4,
+                    "cachedContentTokenCount": 17,
+                    "thoughtsTokenCount": 12
+                }
+            }
+        ]);
+
+        let usage =
+            observe_non_stream_json_value_for_shape(&body, UsageShape::GeminiGenerateContent).usage;
+
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 93);
+        assert_eq!(usage.gross_input_tokens, Some(110));
+        assert_eq!(usage.output_tokens, 16);
+        assert_eq!(usage.cache_read_input_tokens, 17);
+        assert_eq!(usage.thinking_tokens, 12);
+    }
+
+    #[test]
+    fn gm_use_06_code_assist_array_response_usage_metadata_maps_usage() {
+        let body = serde_json::json!([
+            {
+                "response": {
+                    "candidates": [{
+                        "content": {"parts": [{"text": "partial"}]}
+                    }]
+                }
+            },
+            {
+                "response": {
+                    "candidates": [{
+                        "content": {"parts": [{"text": "complete"}]}
+                    }],
+                    "usageMetadata": {
+                        "promptTokenCount": 110,
+                        "candidatesTokenCount": 4,
+                        "cachedContentTokenCount": 17,
+                        "thoughtsTokenCount": 12
+                    }
+                }
+            }
+        ]);
+
+        let usage =
+            observe_non_stream_json_value_for_shape(&body, UsageShape::GeminiGenerateContent).usage;
+
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 93);
+        assert_eq!(usage.gross_input_tokens, Some(110));
+        assert_eq!(usage.output_tokens, 16);
+        assert_eq!(usage.cache_read_input_tokens, 17);
+        assert_eq!(usage.thinking_tokens, 12);
+    }
+
+    #[test]
+    fn gm_use_07_array_usage_merges_cumulative_snapshots_without_summing() {
+        let body = serde_json::json!([
+            {
+                "usageMetadata": {
+                    "promptTokenCount": 120,
+                    "cachedContentTokenCount": 17,
+                    "candidatesTokenCount": 10,
+                    "thoughtsTokenCount": 2
+                }
+            },
+            {
+                "usageMetadata": {
+                    "promptTokenCount": 120,
+                    "candidatesTokenCount": 15
+                }
+            },
+            {
+                "usageMetadata": {
+                    "thoughtsTokenCount": 4
+                }
+            }
+        ]);
+
+        let usage =
+            observe_non_stream_json_value_for_shape(&body, UsageShape::GeminiGenerateContent).usage;
+
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 103);
+        assert_eq!(usage.gross_input_tokens, Some(120));
+        assert_eq!(usage.cache_read_input_tokens, 17);
+        assert_eq!(usage.thinking_tokens, 4);
+        assert_eq!(usage.output_tokens, 19);
+    }
+
+    #[test]
+    fn gm_use_08_empty_and_non_object_arrays_have_no_usage() {
+        for body in [
+            serde_json::json!([]),
+            serde_json::json!([null]),
+            serde_json::json!([{"candidates": []}]),
+        ] {
+            assert!(
+                !observe_non_stream_json_value_for_shape(&body, UsageShape::GeminiGenerateContent,)
+                    .usage
+                    .present,
+                "array without usage metadata must remain absent: {body}"
+            );
+        }
+
+        let non_gemini = serde_json::json!([
+            {"usage": {"input_tokens": 9, "output_tokens": 4}}
+        ]);
+        assert!(
+            !observe_non_stream_json_value_for_shape(
+                &non_gemini,
+                UsageShape::OpenaiChatCompletions,
+            )
+            .usage
+            .present,
+            "top-level arrays must not change non-Gemini usage shapes"
+        );
     }
 
     #[test]
@@ -2324,7 +2559,7 @@ mod tests {
     fn gm_sse_01_stream_generate_content_reports_terminal_usage() {
         let first =
             b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n";
-        let terminal = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":120,\"candidatesTokenCount\":48,\"cachedContentTokenCount\":17,\"thoughtsTokenCount\":12}}\n\n";
+        let terminal = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":120,\"candidatesTokenCount\":48,\"cachedContentTokenCount\":17,\"thoughtsTokenCount\":12,\"toolUsePromptTokenCount\":9}}\n\n";
         let mut usage = UsageCounts::default();
 
         let first_update = accumulate_raw_sse_usage(first, &mut usage);
@@ -2341,6 +2576,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
         assert!(usage.thinking_tokens < usage.output_tokens);
     }
 

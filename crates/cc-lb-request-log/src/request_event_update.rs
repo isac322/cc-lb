@@ -82,6 +82,8 @@ pub struct RequestEventPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens_5m: Option<u64>,
@@ -298,5 +300,26 @@ mod tests {
         let restored: RequestEventPartial =
             serde_json::from_value(json).expect("deserialize partial latency fields");
         assert_eq!(restored, partial);
+    }
+    #[test]
+    fn request_event_partial_tool_use_prompt_tokens_roundtrip_and_legacy_default() {
+        let partial = RequestEventPartial {
+            tool_use_prompt_tokens: Some(0),
+            ..RequestEventPartial::default()
+        };
+        let json = serde_json::to_value(&partial).expect("serialize tool usage");
+        assert_eq!(json["tool_use_prompt_tokens"], 0);
+        let restored: RequestEventPartial =
+            serde_json::from_value(json).expect("deserialize tool usage");
+        assert_eq!(restored.tool_use_prompt_tokens, Some(0));
+        let mut legacy =
+            serde_json::to_value(RequestEventPartial::default()).expect("serialize legacy partial");
+        legacy
+            .as_object_mut()
+            .expect("request event partial serializes as an object")
+            .remove("tool_use_prompt_tokens");
+        let legacy: RequestEventPartial =
+            serde_json::from_value(legacy).expect("deserialize legacy partial");
+        assert_eq!(legacy.tool_use_prompt_tokens, None);
     }
 }
