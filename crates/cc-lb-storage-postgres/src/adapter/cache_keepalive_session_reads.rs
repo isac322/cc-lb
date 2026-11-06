@@ -717,6 +717,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                        ROW_NUMBER() OVER (PARTITION BY r.cycle_id ORDER BY r.request_start_ms DESC, r.evidence_id) AS rn
                 FROM cache_keepalive_evidence r
                 WHERE r.principal_id = $1 AND r.evidence_kind = 'renewal' AND r.cycle_id IS NOT NULL
+                  AND lower(r.hit_miss) = 'hit'
                   AND EXISTS (
                       SELECT 1 FROM cache_keepalive_evidence f
                       WHERE f.principal_id = r.principal_id

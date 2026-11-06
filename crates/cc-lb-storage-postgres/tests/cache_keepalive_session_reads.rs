@@ -1723,6 +1723,58 @@ async fn summary_aggregate_active_complete_follow_up_is_observed_case(url: &str)
     fixture.drop_schema().await
 }
 
+async fn summary_aggregate_active_follow_up_credits_hits_but_not_misses_case(
+    url: &str,
+) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    for (index, outcome, cost) in [(1_u128, "hit", 6_000_i64), (2, "miss", 15_000)] {
+        let session_key_hash = format!("active-follow-up-{outcome}");
+        let source_ref_id = format!("active-follow-up-{outcome}-renewal");
+        let cycle_id = Uuid::from_u128(1_080 + index);
+        let mut replace = request(&session_key_hash, 1_000, "agent-in-turn");
+        replace.cycle_id = cycle_id;
+        storage.replace_from_real_request(&replace).await?;
+        append_economics_turn(
+            &storage,
+            EconomicsTurnParams {
+                session_key_hash: &session_key_hash,
+                cycle_id,
+                source_ref_id: &source_ref_id,
+                ts: 1_001 + index as u64,
+                hit_miss: outcome,
+                cost_micros: cost,
+                renewal_tokens: 20_000,
+                with_follow_up: true,
+            },
+        )
+        .await?;
+    }
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await?;
+    assert_eq!(aggregate.renewing_now, 2);
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "observed");
+    assert_eq!(aggregate.groups.len(), 1);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
+    fixture.drop_schema().await
+}
+
+#[test]
+fn summary_aggregate_active_follow_up_credits_hits_but_not_misses() {
+    run_postgres_case(
+        "active follow-up credits hits but not misses",
+        |url| async move {
+            summary_aggregate_active_follow_up_credits_hits_but_not_misses_case(&url).await
+        },
+    );
+}
+
 async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pending_case(
     url: &str,
 ) -> Result<()> {

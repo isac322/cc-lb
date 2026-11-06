@@ -1478,6 +1478,48 @@ async fn summary_aggregate_active_complete_follow_up_is_observed() {
 }
 
 #[tokio::test]
+async fn summary_aggregate_active_follow_up_credits_hits_but_not_misses() {
+    let (_temp_dir, storage) = storage().await;
+    for (index, outcome, cost) in [(1_u128, "hit", 6_000_i64), (2, "miss", 15_000)] {
+        let session_key_hash = format!("active-follow-up-{outcome}");
+        let source_ref_id = format!("active-follow-up-{outcome}-renewal");
+        let cycle_id = Uuid::from_u128(1_080 + index);
+        let mut replace = request(&session_key_hash, 1_000, "agent-in-turn");
+        replace.cycle_id = cycle_id;
+        storage
+            .replace_from_real_request(&replace)
+            .await
+            .expect("create follow-up cycle");
+        append_economics_turn(
+            &storage,
+            EconomicsTurnParams {
+                session_key_hash: &session_key_hash,
+                cycle_id,
+                source_ref_id: &source_ref_id,
+                ts: 1_001 + index as u64,
+                hit_miss: outcome,
+                cost_micros: cost,
+                renewal_tokens: 20_000,
+                with_follow_up: true,
+            },
+        )
+        .await;
+    }
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await
+        .expect("aggregate hit and miss follow-up economics");
+    assert_eq!(aggregate.renewing_now, 2);
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "observed");
+    assert_eq!(aggregate.groups.len(), 1);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
+}
+
+#[tokio::test]
 async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pending() {
     let (_temp_dir, storage) = storage().await;
     let cycle_id = Uuid::from_u128(1_077);

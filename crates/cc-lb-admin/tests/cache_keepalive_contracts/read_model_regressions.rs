@@ -709,6 +709,29 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
         },
     )
     .await;
+    seed_session(
+        &observed_storage,
+        &observed_principal_id,
+        "active-followup-miss",
+        CYCLE_TWO,
+        false,
+    )
+    .await;
+    append_turn(
+        &observed_storage,
+        AppendTurnParams {
+            principal_id: &observed_principal_id,
+            session_key_hash: "active-followup-miss",
+            cycle_id: CYCLE_TWO,
+            source_ref_id: "active-followup-miss",
+            ts: NOW_UNIX_SECS + 1,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 15_000,
+            hit_miss: "miss",
+            with_follow_up: true,
+        },
+    )
+    .await;
 
     let (observed_status, observed_body) = get_json(
         &observed_state,
@@ -721,8 +744,24 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
         "active follow-up list: {observed_body:?}"
     );
     assert_eq!(observed_body["summary"]["evidence_status"], "observed");
-    assert!(!observed_body["summary"]["cost_saved"].is_null());
-    assert!(!observed_body["summary"]["total_avoided"].is_null());
+    assert_json_dollars(&observed_body["summary"]["total_spent"], 21_000);
+    assert_json_dollars(&observed_body["summary"]["total_avoided"], 75_000);
+    assert_json_dollars(&observed_body["summary"]["cost_saved"], 54_000);
+    assert_eq!(observed_body["summary"]["retained_successful_hits"], 1);
+    let (miss_detail_status, miss_detail) = get_json(
+        &observed_state,
+        &keepalive_detail_uri(&observed_principal_id, "active-followup-miss"),
+    )
+    .await;
+    assert_eq!(
+        miss_detail_status,
+        StatusCode::OK,
+        "active miss follow-up detail: {miss_detail:?}"
+    );
+    assert_json_dollars(&miss_detail["total_spent"], 15_000);
+    assert_json_dollars(&miss_detail["total_avoided"], 0);
+    assert_json_dollars(&miss_detail["net_pnl"], -15_000);
+    assert_eq!(miss_detail["turns"][0]["followed_up"], false);
 }
 
 #[test]
