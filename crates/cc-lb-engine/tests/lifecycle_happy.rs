@@ -865,7 +865,7 @@ async fn openai_chat_max_completion_tokens_respects_output_token_limit_boundary(
             &state,
             None,
         );
-        let request = http::Request::builder()
+        let mut request = http::Request::builder()
             .method("POST")
             .uri("/v1/chat/completions")
             .header("x-api-key", managed_api_key())
@@ -873,7 +873,12 @@ async fn openai_chat_max_completion_tokens_respects_output_token_limit_boundary(
                 br#"{"model":"gpt-limit-test","max_completion_tokens":2000,"messages":[]}"#,
             ))
             .expect("OpenAI Chat Completions request builds");
-
+        // Chat Completions is an explicitly OpenAI-scoped operation on the
+        // production proxy; mirror that existing route scope in this direct
+        // lifecycle fixture so the shared LimitRequest admission path runs.
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
         // When max_completion_tokens crosses the real lifecycle admission path.
         let response = handle(&lifecycle, request).await;
 
