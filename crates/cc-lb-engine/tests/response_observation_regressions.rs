@@ -12,11 +12,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
-use cc_lb_control::RequestEventBus;
-use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
+use cc_lb_domain::Provider;
+use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProviderScope, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
@@ -28,6 +30,7 @@ use tracing::Subscriber;
 use tracing::span::{Attributes, Id};
 use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
 use tracing_subscriber::{Layer, Registry};
+use url::Url;
 
 use common::{TestAuthn, TestLifecycleBus, TestState, messages_request};
 
@@ -266,6 +269,289 @@ fn lifecycle_exports_queryable_numeric_stage_and_response_stream_attributes() {
         .expect("shutdown lifecycle numeric provider");
 }
 
+#[tokio::test]
+async fn openai_responses_lifecycle_observes_content_count_timing_and_terminal() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+    let body = Bytes::from_static(
+        b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n\
+event: response.reasoning.delta\ndata: {\"type\":\"response.reasoning.delta\",\"delta\":\"hidden\"}\n\n\
+event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n\
+event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}}\n\n",
+    );
+    let lifecycle = openai_lifecycle(
+        Arc::new(SequenceDispatch::new([ResponseSpec {
+            body: body.clone(),
+            content_encoding: None,
+        }])),
+        &test_bus,
+    );
+    let mut request = http::Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(
+            br#"{"model":"gpt-test","input":"hello","stream":true}"#,
+        ))
+        .expect("OpenAI Responses request builds");
+    request
+        .extensions_mut()
+        .insert(ProviderScope(Provider::Openai));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("OpenAI Responses request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("OpenAI Responses request is handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .expect("OpenAI Responses body collects")
+            .to_bytes(),
+        body
+    );
+
+    let (stream, terminal) = tokio::time::timeout(BOUNDED_WAIT, async {
+        let mut stream = None;
+        let mut terminal = None;
+        while stream.is_none() || terminal.is_none() {
+            match lifecycle_rx
+                .recv()
+                .await
+                .expect("lifecycle event delivered")
+            {
+                LifecycleEvent::StreamCompleted {
+                    result: Ok(success),
+                    ..
+                } => stream = Some(success),
+                LifecycleEvent::RequestTerminated {
+                    client_status,
+                    reason,
+                    ..
+                } => terminal = Some((client_status, reason)),
+                _ => {}
+            }
+        }
+        (
+            stream.expect("stream completion observed"),
+            terminal.expect("terminal observed"),
+        )
+    })
+    .await
+    .expect("OpenAI Responses lifecycle events arrive");
+    lifecycle.shutdown().await;
+
+    assert_eq!(stream.sse_event_count, 4);
+    assert_eq!(stream.content_delta_count, Some(2));
+    let first = stream
+        .stream_first_content_delta_ms
+        .expect("first content timing observed");
+    let last = stream
+        .stream_last_content_delta_ms
+        .expect("last content timing observed");
+    assert!(first <= last, "content timing must be monotonic");
+    assert!(
+        stream.inter_token_avg_ms.is_some(),
+        "inter-token average observed for multiple content frames"
+    );
+    assert_eq!(
+        terminal,
+        (StatusCode::OK.as_u16(), TerminationReason::Success)
+    );
+}
+
+#[tokio::test]
+async fn native_gemini_lifecycle_observes_content_count_timing_and_terminal() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+    let body = Bytes::from_static(
+        b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"},{\"thought\":true,\"text\":\"hidden\"}]}}]}\n\n\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" world\"}]}}]}\n\n\
+data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+    );
+    let lifecycle = provider_lifecycle(
+        Arc::new(SequenceDispatch::new([ResponseSpec {
+            body: body.clone(),
+            content_encoding: None,
+        }])),
+        &test_bus,
+        StorageUpstreamKind::GeminiApiKey,
+    );
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(br#"{"contents":[],"stream":true}"#))
+        .expect("native Gemini request builds");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("native Gemini request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("native Gemini request is handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .expect("native Gemini body collects")
+            .to_bytes(),
+        body
+    );
+
+    let (stream, terminal) = tokio::time::timeout(BOUNDED_WAIT, async {
+        let mut stream = None;
+        let mut terminal = None;
+        while stream.is_none() || terminal.is_none() {
+            match lifecycle_rx
+                .recv()
+                .await
+                .expect("lifecycle event delivered")
+            {
+                LifecycleEvent::StreamCompleted {
+                    result: Ok(success),
+                    ..
+                } => stream = Some(success),
+                LifecycleEvent::RequestTerminated {
+                    client_status,
+                    reason,
+                    ..
+                } => terminal = Some((client_status, reason)),
+                _ => {}
+            }
+        }
+        (
+            stream.expect("stream completion observed"),
+            terminal.expect("terminal observed"),
+        )
+    })
+    .await
+    .expect("native Gemini lifecycle events arrive");
+    lifecycle.shutdown().await;
+
+    assert_eq!(stream.sse_event_count, 3);
+    assert_eq!(stream.content_delta_count, Some(2));
+    let first = stream
+        .stream_first_content_delta_ms
+        .expect("first content timing observed");
+    let last = stream
+        .stream_last_content_delta_ms
+        .expect("last content timing observed");
+    assert!(first <= last, "content timing must be monotonic");
+    assert!(
+        stream.inter_token_avg_ms.is_some(),
+        "inter-token average observed for multiple content frames"
+    );
+    assert_eq!(
+        terminal,
+        (StatusCode::OK.as_u16(), TerminationReason::Success)
+    );
+}
+
+#[tokio::test]
+async fn gemini_oauth_lifecycle_observes_wrapped_content_count_timing_and_terminal() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+    let body = Bytes::from_static(
+        b"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"},{\"thought\":true,\"text\":\"hidden\"}]}}]}}\n\n\
+data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" world\"}]}}]}}\n\n\
+data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}]}}\n\n",
+    );
+    let expected_body = Bytes::from_static(
+        b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"},{\"text\":\"hidden\",\"thought\":true}]}}]}\n\n\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" world\"}]}}]}\n\n\
+data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+    );
+    let lifecycle = provider_lifecycle(
+        Arc::new(SequenceDispatch::new([ResponseSpec {
+            body: body.clone(),
+            content_encoding: None,
+        }])),
+        &test_bus,
+        StorageUpstreamKind::GeminiOauth,
+    );
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(br#"{"contents":[],"stream":true}"#))
+        .expect("Gemini OAuth request builds");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("Gemini OAuth request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("Gemini OAuth request is handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .expect("Gemini OAuth body collects")
+            .to_bytes(),
+        expected_body
+    );
+
+    let (stream, terminal) = tokio::time::timeout(BOUNDED_WAIT, async {
+        let mut stream = None;
+        let mut terminal = None;
+        while stream.is_none() || terminal.is_none() {
+            match lifecycle_rx
+                .recv()
+                .await
+                .expect("lifecycle event delivered")
+            {
+                LifecycleEvent::StreamCompleted {
+                    result: Ok(success),
+                    ..
+                } => stream = Some(success),
+                LifecycleEvent::RequestTerminated {
+                    client_status,
+                    reason,
+                    ..
+                } => terminal = Some((client_status, reason)),
+                _ => {}
+            }
+        }
+        (
+            stream.expect("stream completion observed"),
+            terminal.expect("terminal observed"),
+        )
+    })
+    .await
+    .expect("Gemini OAuth lifecycle events arrive");
+    lifecycle.shutdown().await;
+
+    assert_eq!(stream.sse_event_count, 3);
+    assert_eq!(stream.content_delta_count, Some(2));
+    let first = stream
+        .stream_first_content_delta_ms
+        .expect("first content timing observed");
+    let last = stream
+        .stream_last_content_delta_ms
+        .expect("last content timing observed");
+    assert!(first <= last, "content timing must be monotonic");
+    assert!(
+        stream.inter_token_avg_ms.is_some(),
+        "inter-token average observed for multiple content frames"
+    );
+    assert_eq!(
+        terminal,
+        (StatusCode::OK.as_u16(), TerminationReason::Success)
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn response_span_closes_at_eos_and_body_drop() {
     if std::env::var_os(SPAN_CHILD_ENV).is_none() {
@@ -430,6 +716,42 @@ fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycleBus)
         TestAuthn::new(TestState::default()),
         dispatcher,
         LifecycleConfig::default(),
+    )
+    .with_event_bus(test_bus.bus_arc())
+}
+fn openai_lifecycle(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+) -> Lifecycle {
+    provider_lifecycle(dispatcher, test_bus, StorageUpstreamKind::OpenaiApiKey)
+}
+
+fn provider_lifecycle(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+    kind: StorageUpstreamKind,
+) -> Lifecycle {
+    let authn = TestAuthn::new(TestState::default());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![UpstreamRecord {
+            id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
+                .expect("provider test upstream id parses"),
+            name: "provider-test-upstream".to_owned(),
+            kind,
+            base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .with_event_bus(test_bus.bus_arc())
 }
