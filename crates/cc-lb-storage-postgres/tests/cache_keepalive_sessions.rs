@@ -85,7 +85,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
             .await?
             .expect("fenced fresh session")
             .cycle_id,
-        first_cycle_id
+        Some(first_cycle_id)
     );
 
     let mut stale_request = replace_request(key, b"fenced-stale", 99);
@@ -118,7 +118,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
             .await?
             .expect("fenced replacement session")
             .cycle_id,
-        second_cycle_id
+        Some(second_cycle_id)
     );
 
     let healthy = storage
