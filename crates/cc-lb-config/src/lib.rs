@@ -15,14 +15,15 @@ use thiserror::Error;
 
 pub use types::{
     ADMIN_AUTH_PROVIDERS_JSON_ENV, AdminAuthConfig, AdminAuthProviderConfig, AdminConfig,
-    AnthropicOAuthConfig, BodyConfig, BulkheadConfig, CircuitBreakerConfig, ClusterConfig, Config,
-    ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_CLUSTER_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES,
-    DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH,
-    DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, EventBusConfig, LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS,
-    LONG_LIVED_MIN_GRANT_SECS, ListenerConfig, ListenerOverrides, ObservabilityConfig,
-    PluginWireBounds, PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig,
-    RecurringJobConfig, RuntimeConfig, SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy,
-    StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UpstreamAffinityConfig,
+    AnthropicOAuthConfig, AntigravityOAuthConfig, BodyConfig, BulkheadConfig, CircuitBreakerConfig,
+    ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_CLUSTER_TOKEN_ENV,
+    DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
+    DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, EventBusConfig, GeminiOAuthConfig,
+    LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS, LONG_LIVED_MIN_GRANT_SECS, ListenerConfig,
+    ListenerOverrides, ObservabilityConfig, OpenAiOAuthConfig, PluginWireBounds,
+    PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig,
+    RuntimeConfig, SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy, StorageConfig,
+    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UpstreamAffinityConfig, WarmupConfig,
     WasmtimeAllocationStrategy, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};

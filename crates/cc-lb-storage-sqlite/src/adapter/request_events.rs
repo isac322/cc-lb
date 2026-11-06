@@ -138,7 +138,6 @@ impl RequestEventStore for SqliteStorage {
         if limit == 0 || until <= after {
             return Ok(Vec::new());
         }
-
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "SELECT {REQUEST_EVENT_COLUMNS} FROM request_events_v1 \
@@ -155,7 +154,9 @@ impl RequestEventStore for SqliteStorage {
                             ELSE COALESCE(event_kind, 'unclassified') END = ?11) \
                        AND (?12 IS NULL OR source_kind = ?12) \
                        AND (?13 = 0 OR source_kind IS NULL OR source_kind <> 'renewal') \
-                     ORDER BY id ASC LIMIT ?14"
+                       AND (?14 IS NULL OR upstream_id IN \
+                            (SELECT CAST(value AS TEXT) FROM json_each(?14))) \
+                     ORDER BY id ASC LIMIT ?15"
             )
         });
         let (status_min, status_max) = filters
@@ -166,6 +167,14 @@ impl RequestEventStore for SqliteStorage {
             .model
             .as_deref()
             .and_then(model_filter_like_patterns);
+        let provider_upstream_ids_json = filters
+            .provider_upstream_ids
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StorageError::Fatal {
+                message: format!("request event provider filter serialization failed: {error}"),
+            })?;
         let rows = sqlx::query(SQL.as_str())
             .bind(u64_to_i64(after, "request event cursor after")?)
             .bind(u64_to_i64(until, "request event cursor until")?)
@@ -180,6 +189,7 @@ impl RequestEventStore for SqliteStorage {
             .bind(filters.event_kind.map(|kind| kind.as_str()))
             .bind(filters.source_kind.as_deref())
             .bind(i64::from(filters.exclude_renewal))
+            .bind(provider_upstream_ids_json)
             .bind(usize_to_i64(limit.min(500), "request event cursor limit")?)
             .fetch_all(self.pool())
             .await
@@ -742,6 +752,7 @@ const HISTOGRAM_SQL_HEAD: &str = "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3)
    AND (?6 IS NULL OR principal_id = ?6) \
    AND (?7 IS NULL OR lower(model) LIKE ?7 ESCAPE '\\' OR lower(model) LIKE ?18 ESCAPE '\\') \
    AND (?8 IS NULL OR upstream_id = ?8) \
+   AND (?19 IS NULL OR upstream_id IN (SELECT CAST(value AS TEXT) FROM json_each(?19))) \
    AND (?13 IS NULL OR thread_id = ?13) \
    AND (?9 IS NULL OR list_status BETWEEN ?9 AND ?10) \
    AND (?17 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
@@ -826,6 +837,15 @@ async fn request_event_histogram(
         SQL.0.as_str()
     };
 
+    let provider_upstream_ids_json = query
+        .filters
+        .provider_upstream_ids
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| StorageError::Fatal {
+            message: format!("request event provider filter serialization failed: {error}"),
+        })?;
     let rows = sqlx::query_as::<_, (i64, i64, i64)>(sql)
         .bind(u64_to_i64(
             range_start_ms,
@@ -865,10 +885,8 @@ async fn request_event_histogram(
         ))
         .bind(query.filters.event_kind.map(|kind| kind.as_str()))
         .bind(i64::from(query.filters.errors_only))
-        // Parameter `?18`: second arm of the model-pattern disjunction. sqlx
-        // binds SQLite parameters positionally, so this 18th .bind call lands
-        // on `?18` regardless of the placeholder's position in the SQL.
         .bind(model_contains_pattern)
+        .bind(provider_upstream_ids_json)
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;

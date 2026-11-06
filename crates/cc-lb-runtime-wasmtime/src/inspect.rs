@@ -8,7 +8,7 @@
 //!    via the declared exports.
 //! 2. **Required exports per declared hook.** Every module requires
 //!    `memory`, `cc_lb_alloc`, `cc_lb_free`. On top of that each hook
-//!    listed in `cc_lb.plugin.v1` requires its matching export.
+//!    listed in `cc_lb.plugin.v1` or `cc_lb.plugin.v2` requires its matching export.
 //!    Signature validation of `cc_lb_alloc` and the hook export is
 //!    deferred to call time via `instance.get_typed_func`.
 //! 3. **Schema fingerprints.** Each declared hook ships a
@@ -29,16 +29,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::error::WasmtimeRuntimeError;
 use cc_lb_plugin_wire::metadata::PluginMetadata;
-use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion, host_supported_versions};
+use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema, WireVersion};
 use wasmparser::{ExternalKind, Parser, Payload};
 
 const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v1";
+const QUALIFIED_PLUGIN_META_SECTION: &str = "cc_lb.plugin.v2";
 const REQUIRED_MEMORY_EXPORT: &str = "memory";
 const ALWAYS_REQUIRED_FUNC_EXPORTS: &[&str] = &["cc_lb_alloc", "cc_lb_free"];
-const SHAPE_OWNED_HOOKS: [HookKind; 3] = [
+const SHAPE_OWNED_HOOKS: [HookKind; 4] = [
     HookKind::Shape,
     HookKind::TransformResponse,
     HookKind::TransformSseEvent,
+    HookKind::ShapeEnvelopeGemini,
 ];
 
 /// Outcome of [`inspect_wasm`].
@@ -73,6 +75,7 @@ fn inspect_wasm_with_scope(
 ) -> Result<ModuleInspection, WasmtimeRuntimeError> {
     let mut observed_sections: HashMap<String, [u8; 32]> = HashMap::new();
     let mut plugin_metadata: Option<Vec<u8>> = None;
+    let mut metadata_section_name = PLUGIN_META_SECTION;
     let mut found_func_exports: HashSet<String> = HashSet::new();
     let mut found_memory_export = false;
 
@@ -110,9 +113,19 @@ fn inspect_wasm_with_scope(
             }
             Payload::CustomSection(section) => {
                 let name = section.name();
-                if name == PLUGIN_META_SECTION {
+                if name == PLUGIN_META_SECTION || name == QUALIFIED_PLUGIN_META_SECTION {
+                    if plugin_metadata.is_some() {
+                        return Err(WasmtimeRuntimeError::ModuleRejected {
+                            reason: "plugin must contain exactly one metadata section (v1 or v2)"
+                                .into(),
+                        });
+                    }
+                    metadata_section_name = if name == QUALIFIED_PLUGIN_META_SECTION {
+                        QUALIFIED_PLUGIN_META_SECTION
+                    } else {
+                        PLUGIN_META_SECTION
+                    };
                     plugin_metadata = Some(section.data().to_vec());
-                    continue;
                 }
                 if name.starts_with("cc_lb.schema.") {
                     let data = section.data();
@@ -146,6 +159,7 @@ fn inspect_wasm_with_scope(
     })?;
 
     reject_non_response_noop_modes(&metadata)?;
+    validate_export_inventory(&metadata, &found_func_exports, metadata_section_name)?;
     match scope {
         InspectionScope::Slot(kind) => require_hooks_for_slot(kind, &metadata)?,
         InspectionScope::DeclaredHooks => require_declared_hook_contracts(&metadata)?,
@@ -167,10 +181,26 @@ fn inspect_wasm_with_scope(
     let mut hook_versions = BTreeMap::new();
     let mut hook_fingerprints = BTreeMap::new();
     for (hook_name, hook_metadata) in &metadata.hooks {
-        let hook =
-            HookKind::parse(hook_name).ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
+        let (hook, provider) = HookKind::parse_entrypoint(hook_name).ok_or_else(|| {
+            WasmtimeRuntimeError::ModuleRejected {
                 reason: format!("unknown hook `{hook_name}` in metadata"),
-            })?;
+            }
+        })?;
+        if hook == HookKind::ShapeEnvelopeGemini
+            && hook_name != HookKind::ShapeEnvelopeGemini.as_str()
+        {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "hook `{hook_name}` must use the canonical Gemini envelope metadata key `{}`",
+                    HookKind::ShapeEnvelopeGemini.as_str()
+                ),
+            });
+        }
+        if hook == HookKind::ShapeEnvelopeGemini && provider != Some(ProviderFamily::Gemini) {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: "shape_envelope_gemini is Gemini-only".into(),
+            });
+        }
         let wire_version = WireVersion::from_u8(hook_metadata.wire_version).ok_or_else(|| {
             WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
@@ -180,16 +210,17 @@ fn inspect_wasm_with_scope(
                 ),
             }
         })?;
-        if !host_supported_versions(hook).contains(&wire_version) {
+        if wire_version == WireVersion::V2 && provider.is_none() {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
-                    "host does not support hook `{}` wire version {}",
-                    hook.as_str(),
-                    wire_version.as_u8()
+                    "hook `{hook_name}` wire version 2 requires provider-qualified metadata"
                 ),
             });
         }
-        let needed_export = hook.export_name();
+        let needed_export = provider.map_or_else(
+            || hook.export_name(),
+            |provider| hook.qualified_export_name(provider),
+        );
         if !found_func_exports.contains(needed_export) {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
@@ -242,21 +273,50 @@ fn require_hooks_for_slot(
     kind: HookKind,
     metadata: &PluginMetadata,
 ) -> Result<(), WasmtimeRuntimeError> {
-    match kind {
-        HookKind::Shape => require_shape_hook_contracts(metadata),
-        HookKind::Filter => require_declared_hook(metadata, HookKind::Filter, "this slot"),
-        HookKind::TransformResponse => reject_shape_owned_hook_as_slot(HookKind::TransformResponse),
-        HookKind::TransformSseEvent => reject_shape_owned_hook_as_slot(HookKind::TransformSseEvent),
+    if metadata.hooks.keys().any(|name| {
+        HookKind::parse_entrypoint(name).is_some_and(|(hook, _)| match kind {
+            HookKind::Filter => hook == HookKind::Filter,
+            HookKind::Shape => SHAPE_OWNED_HOOKS.contains(&hook),
+            _ => false,
+        })
+    }) {
+        require_declared_hook_contracts(metadata)
+    } else {
+        match kind {
+            HookKind::TransformResponse | HookKind::TransformSseEvent => {
+                reject_shape_owned_hook_as_slot(kind)
+            }
+            _ => require_declared_hook(metadata, kind, "this slot"),
+        }
     }
 }
 
 fn require_declared_hook_contracts(metadata: &PluginMetadata) -> Result<(), WasmtimeRuntimeError> {
+    // Wire v1 shape plugins retain their historical all-hooks contract.
     if metadata.hooks.contains_key(HookKind::Shape.as_str()) {
-        return require_shape_hook_contracts(metadata);
+        for hook in [
+            HookKind::Shape,
+            HookKind::TransformResponse,
+            HookKind::TransformSseEvent,
+        ] {
+            require_declared_hook(metadata, hook, "legacy shape plugin")?;
+        }
     }
 
-    for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
-        if metadata.hooks.contains_key(hook.as_str()) {
+    // Legacy bare response hooks remain shape-owned and cannot be admitted
+    // without the legacy bare shape hook. Provider-qualified v2 response
+    // hooks are intentionally independent.
+    for name in metadata.hooks.keys() {
+        let Some((hook, provider)) = HookKind::parse_entrypoint(name) else {
+            continue;
+        };
+        if provider.is_none()
+            && matches!(
+                hook,
+                HookKind::TransformResponse | HookKind::TransformSseEvent
+            )
+            && !metadata.hooks.contains_key(HookKind::Shape.as_str())
+        {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
                     "shape-owned hook `{}` requires a declared `shape` hook",
@@ -265,12 +325,18 @@ fn require_declared_hook_contracts(metadata: &PluginMetadata) -> Result<(), Wasm
             });
         }
     }
-    Ok(())
-}
 
-fn require_shape_hook_contracts(metadata: &PluginMetadata) -> Result<(), WasmtimeRuntimeError> {
-    for hook in SHAPE_OWNED_HOOKS {
-        require_declared_hook(metadata, hook, "shape plugin")?;
+    // The Gemini envelope transform is a provider-specific extension of the
+    // Gemini shape contract, not an independent shape owner.
+    if metadata
+        .hooks
+        .contains_key(HookKind::ShapeEnvelopeGemini.as_str())
+        && !metadata.hooks.contains_key("shape_gemini")
+    {
+        return Err(WasmtimeRuntimeError::ModuleRejected {
+            reason: "shape_envelope_gemini requires a declared shape hook for provider `gemini`"
+                .into(),
+        });
     }
     Ok(())
 }
@@ -285,16 +351,18 @@ fn reject_shape_owned_hook_as_slot(hook: HookKind) -> Result<(), WasmtimeRuntime
 }
 
 fn reject_non_response_noop_modes(metadata: &PluginMetadata) -> Result<(), WasmtimeRuntimeError> {
-    for hook in [HookKind::Filter, HookKind::Shape] {
-        if metadata
-            .hooks
-            .get(hook.as_str())
-            .is_some_and(|hook_metadata| hook_metadata.mode.is_noop())
+    for (name, hook_metadata) in &metadata.hooks {
+        if HookKind::parse_entrypoint(name).is_some_and(|(hook, _)| {
+            matches!(
+                hook,
+                HookKind::Filter | HookKind::Shape | HookKind::ShapeEnvelopeGemini
+            )
+        }) && hook_metadata.mode.is_noop()
         {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
                     "hook `{}` cannot declare mode `noop`; no-op is only valid for shape-owned response hooks",
-                    hook.as_str()
+                    name,
                 ),
             });
         }
@@ -318,6 +386,62 @@ fn require_declared_hook(
     })
 }
 
+fn validate_export_inventory(
+    metadata: &PluginMetadata,
+    exports: &HashSet<String>,
+    section_name: &str,
+) -> Result<(), WasmtimeRuntimeError> {
+    for name in metadata.hooks.keys() {
+        let Some((hook, provider)) = HookKind::parse_entrypoint(name) else {
+            continue;
+        };
+        if provider.is_some() && section_name != QUALIFIED_PLUGIN_META_SECTION {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "qualified hook `{name}` requires `{QUALIFIED_PLUGIN_META_SECTION}` metadata"
+                ),
+            });
+        }
+        if let Some(provider) = provider {
+            let legacy_overlaps = provider == cc_lb_plugin_wire::schema::ProviderFamily::Anthropic;
+            if legacy_overlaps && metadata.hooks.contains_key(hook.as_str()) {
+                return Err(WasmtimeRuntimeError::ModuleRejected {
+                    reason: format!(
+                        "legacy `{}` overlaps qualified `{name}`; export only one form for this provider",
+                        hook.as_str()
+                    ),
+                });
+            }
+        }
+    }
+    for export in exports {
+        let Some(name) = export.strip_prefix("cc_lb_") else {
+            continue;
+        };
+        if name == "alloc" || name == "free" {
+            continue;
+        }
+        let reserved = [
+            "filter",
+            "shape",
+            "transform_response",
+            "transform_sse_event",
+            "shape_envelope_gemini",
+        ];
+        let reserved = reserved
+            .iter()
+            .any(|stem| name == *stem || name.starts_with(&format!("{stem}_")));
+        if reserved
+            && (HookKind::parse_entrypoint(name).is_none() || !metadata.hooks.contains_key(name))
+        {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!("unrecognized or undeclared plugin entrypoint `{export}`"),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn schema_section_name(hook: HookKind, version: WireVersion) -> String {
     format!("{}.{}", hook.section_prefix(), version.as_str())
 }
@@ -336,6 +460,22 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         (HookKind::TransformSseEvent, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT)
         }
+        (HookKind::Filter, WireVersion::V2) => {
+            Some(<cc_lb_plugin_wire::v2::FilterRequest as WireSchema>::FINGERPRINT)
+        }
+        (HookKind::Shape, WireVersion::V2) => {
+            Some(<cc_lb_plugin_wire::v2::ShapeRequest as WireSchema>::FINGERPRINT)
+        }
+        (HookKind::TransformResponse, WireVersion::V2) => {
+            Some(<cc_lb_plugin_wire::v2::TransformResponseRequest as WireSchema>::FINGERPRINT)
+        }
+        (HookKind::TransformSseEvent, WireVersion::V2) => {
+            Some(<cc_lb_plugin_wire::v2::TransformSseEventRequest as WireSchema>::FINGERPRINT)
+        }
+        (HookKind::ShapeEnvelopeGemini, WireVersion::V2) => {
+            Some(<cc_lb_plugin_wire::v2::ShapeEnvelopeGeminiRequest as WireSchema>::FINGERPRINT)
+        }
+        _ => None,
     }
 }
 
@@ -689,5 +829,62 @@ mod tests {
             msg.contains("does not declare required `shape`"),
             "got: {msg}"
         );
+    }
+    #[test]
+    fn qualified_v2_shape_contracts_are_checked_per_provider() {
+        use cc_lb_plugin_wire::metadata::{HookMetadata, HookMode};
+
+        let hook = |name: &str| HookMetadata {
+            wire_version: 2,
+            description: format!("{name} hook"),
+            usage: format!("call {name}"),
+            mode: HookMode::Active,
+        };
+        let mut hooks = BTreeMap::new();
+        hooks.insert("shape_openai".to_owned(), hook("shape_openai"));
+        hooks.insert(
+            "transform_response_openai".to_owned(),
+            hook("transform_response_openai"),
+        );
+        hooks.insert(
+            "transform_sse_event_openai".to_owned(),
+            hook("transform_sse_event_openai"),
+        );
+        let metadata = PluginMetadata {
+            name: "qualified".into(),
+            version: "0.0.1".into(),
+            description: "qualified test".into(),
+            usage: "test only".into(),
+            hooks,
+        };
+
+        assert!(require_declared_hook_contracts(&metadata).is_ok());
+    }
+
+    #[test]
+    fn envelope_hook_requires_a_gemini_shape_contract() {
+        use cc_lb_plugin_wire::metadata::{HookMetadata, HookMode};
+
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            "shape_envelope_gemini".to_owned(),
+            HookMetadata {
+                wire_version: 2,
+                description: "envelope".into(),
+                usage: "test only".into(),
+                mode: HookMode::Active,
+            },
+        );
+        let metadata = PluginMetadata {
+            name: "envelope".into(),
+            version: "0.0.1".into(),
+            description: "envelope test".into(),
+            usage: "test only".into(),
+            hooks,
+        };
+
+        let error = require_declared_hook_contracts(&metadata)
+            .expect_err("envelope cannot be admitted without shape ownership");
+        assert!(format!("{error}").contains("shape"));
     }
 }

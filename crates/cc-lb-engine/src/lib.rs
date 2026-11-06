@@ -60,6 +60,9 @@ pub(crate) mod provider_capability;
 mod request_classification;
 pub mod request_context;
 #[cfg(not(loom))]
+pub use request_context::{ProviderScope, RequestContext};
+#[cfg(not(loom))]
+pub mod realtime_websocket;
 pub mod request_diagnostics_sink;
 #[cfg(not(loom))]
 pub mod request_timing;
@@ -112,7 +115,9 @@ pub use dns_cache::{
 #[cfg(not(loom))]
 pub use drain::{DrainController, proxy_drain_middleware};
 #[cfg(not(loom))]
-pub use error_format::{anthropic_error_body, anthropic_error_response};
+pub use error_format::{
+    anthropic_error_body, anthropic_error_response, provider_scope_error_response,
+};
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]

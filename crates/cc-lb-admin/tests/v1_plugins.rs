@@ -53,6 +53,10 @@ async fn registry_list_exposes_builtin_subscription_preference() {
             .is_none_or(Value::is_null)
     );
     assert_eq!(subscription_preference["is_builtin"], true);
+    assert_eq!(
+        subscription_preference["supported_providers"],
+        json!(["anthropic", "gemini", "openai"])
+    );
     let uploaded_entry = body["entries"]
         .as_array()
         .unwrap()
@@ -60,6 +64,103 @@ async fn registry_list_exposes_builtin_subscription_preference() {
         .find(|entry| entry["id"] == uploaded.id.to_string())
         .expect("uploaded plugin entry is listed");
     assert!(uploaded_entry.get("metadata").is_none_or(Value::is_null));
+}
+
+#[tokio::test]
+async fn legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropic_upstreams() {
+    use cc_lb_plugin_wire::metadata::{HookMetadata, HookMode};
+    use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "legacy-plugin-warning").await;
+    let (registry, _) = storage
+        .persist_wasm_upload(
+            WasmBlob {
+                sha256: [245; 32],
+                bytes: vec![1],
+                size_bytes: 1,
+            },
+            WasmRegistryEntryInput {
+                name: "legacy-warning-filter".to_owned(),
+                version: Some("1".to_owned()),
+                original_filename: "legacy-warning-filter.wasm".to_owned(),
+                label: None,
+                uploaded_at_unix_secs: 1,
+                uploaded_by_admin_id: Uuid::nil(),
+                description: "legacy filter".to_owned(),
+                usage: "test".to_owned(),
+                hook_metadata: std::collections::BTreeMap::from([(
+                    "filter".to_owned(),
+                    HookMetadata {
+                        wire_version: 1,
+                        description: "legacy".to_owned(),
+                        usage: "test".to_owned(),
+                        mode: HookMode::Active,
+                    },
+                )]),
+                supported_slots: vec![PluginSlotKind::Router],
+            },
+        )
+        .await
+        .expect("registry");
+    let chain_entry = seed_chain(&storage, principal_id, registry.id, 2000).await;
+    let upstream = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "warning-openai".to_owned(),
+            kind: cc_lb_storage_api::upstream::UpstreamKind::OpenaiApiKey,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("OpenAI upstream");
+    let upstream =
+        UpstreamStore::set_enabled(storage.as_ref(), upstream.id, upstream.revision, true)
+            .await
+            .expect("enabled OpenAI");
+    let app = app(test_state(Config::default(), Some(storage.clone())));
+    let uri = format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=router");
+    let (status, _, body) = request_json(app.clone(), "GET", &uri, None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["warnings"].as_array().expect("warnings").len(), 1);
+    assert_eq!(body["warnings"][0]["code"], "legacy_plugin_anthropic_only");
+    assert_eq!(
+        body["warnings"][0]["chain_entry_id"],
+        chain_entry.id.to_string()
+    );
+    assert_eq!(
+        body["warnings"][0]["unsupported_providers"],
+        json!(["openai"])
+    );
+    assert!(
+        body["entries"]
+            .as_array()
+            .expect("chain")
+            .iter()
+            .any(|entry| entry["id"] == chain_entry.id.to_string())
+    );
+    let (status, _, registry_view) = request_json(
+        app.clone(),
+        "GET",
+        &format!("/admin/v1/plugins/registry/{}", registry.id),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(registry_view["supported_providers"], json!(["anthropic"]));
+    UpstreamStore::set_enabled(storage.as_ref(), upstream.id, upstream.revision, false)
+        .await
+        .expect("disabled OpenAI");
+    let (status, _, body) = request_json(app, "GET", &uri, None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["warnings"].as_array().expect("warnings").is_empty());
 }
 
 #[tokio::test]

@@ -199,8 +199,8 @@ export async function getCacheKeepaliveSessionDetail(
   principalId: string,
   sessionId: string,
 ): Promise<CacheKeepaliveDetail> {
-  const res = await getJson<unknown>(
-    `/admin/v1/principals/${principalId}/cache-keepalive/${encodeURIComponent(sessionId)}`,
-  );
+  const searchParams = new URLSearchParams({ id: sessionId });
+  const path = `/admin/v1/principals/${principalId}/cache-keepalive/detail?${searchParams.toString()}`;
+  const res = await getJson<unknown>(path);
   return CacheKeepaliveDetailSchema.parse(res);
 }

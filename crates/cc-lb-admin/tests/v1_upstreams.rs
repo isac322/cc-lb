@@ -811,6 +811,7 @@ async fn access_only_oauth_update_replaces_previous_refresh_secret()
             refresh_token_expires_at_unix_secs: None,
             account_id: None,
             project_id: (kind == UpstreamKind::GeminiOauth).then(|| "test-project".to_owned()),
+            oauth_profile: Default::default(),
             scopes: Vec::new(),
             never_refresh: false,
         };
@@ -1387,13 +1388,8 @@ async fn openai_and_gemini_api_key_writes_are_not_cacheable() {
 }
 
 #[tokio::test]
-async fn non_anthropic_oauth_upstreams_reject_warmup_on_create_and_update() {
-    for kind in [
-        "openai_api_key",
-        "gemini_api_key",
-        "openai_oauth",
-        "gemini_oauth",
-    ] {
+async fn api_key_warmup_and_dialects_are_rejected() {
+    for kind in ["openai_api_key", "gemini_api_key"] {
         let (_dir, storage) = new_store().await;
         let app = router(test_state(storage.clone()));
         let mut create_body = json!({
@@ -1416,14 +1412,16 @@ async fn non_anthropic_oauth_upstreams_reject_warmup_on_create_and_update() {
             "wasm_registry_id": Uuid::new_v4(),
             "config": {}
         });
-        let unsupported_requests = [
-            json!({ "warmup_enabled": true }),
+        let mut unsupported_requests = vec![
             json!({ "warmup_dialect_plugin": plugin.clone() }),
             json!({
                 "warmup_enabled": false,
                 "warmup_dialect_plugin": plugin
             }),
         ];
+        if kind.ends_with("_api_key") {
+            unsupported_requests.push(json!({ "warmup_enabled": true }));
+        }
         for warmup in &unsupported_requests {
             let mut rejected_body = create_body.clone();
             rejected_body
@@ -1450,7 +1448,7 @@ async fn non_anthropic_oauth_upstreams_reject_warmup_on_create_and_update() {
             );
             assert_eq!(
                 body(&rejected)["detail"],
-                "warmup is supported only for anthropic_oauth upstreams",
+                "warmup is supported only for OAuth upstreams",
                 "{kind}: {warmup}"
             );
         }
@@ -1488,7 +1486,7 @@ async fn non_anthropic_oauth_upstreams_reject_warmup_on_create_and_update() {
                 );
                 assert_eq!(
                     body(&rejected)["detail"],
-                    "warmup is supported only for anthropic_oauth upstreams",
+                    "warmup is supported only for OAuth upstreams",
                     "{kind}: {method} {warmup}"
                 );
             }
@@ -1501,19 +1499,144 @@ async fn non_anthropic_oauth_upstreams_reject_warmup_on_create_and_update() {
         assert!(!stored.warmup_enabled, "{kind}");
         assert!(stored.warmup_dialect_plugin.is_none(), "{kind}");
 
-        let disabled = request(
+        let enabled = request(
             app,
             "PATCH",
             &format!("/admin/v1/upstreams/{id}"),
-            Some(json!({
-                "warmup_enabled": false,
-                "warmup_dialect_plugin": null
-            })),
+            Some(json!({ "warmup_enabled": true })),
             Some("W/\"1\""),
         )
         .await;
-        assert_eq!(disabled.status, StatusCode::OK, "{kind}");
-        assert_eq!(body(&disabled)["warmup_enabled"], false, "{kind}");
+        if kind.ends_with("_oauth") {
+            assert_eq!(enabled.status, StatusCode::OK, "{kind}");
+            assert_eq!(body(&enabled)["warmup_enabled"], true, "{kind}");
+        } else {
+            assert_eq!(enabled.status, StatusCode::BAD_REQUEST, "{kind}");
+            assert_eq!(body(&enabled)["error"], "warmup_unsupported_kind", "{kind}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_warmup_plugins_require_the_upstreams_qualified_shape_export() {
+    use cc_lb_storage_api::{
+        PluginRegistryStore, PluginSlotKind, WasmBlob, WasmRegistryEntryInput,
+    };
+
+    for (kind, provider) in [("openai_oauth", "openai"), ("gemini_oauth", "gemini")] {
+        let (_dir, storage) = new_store().await;
+        let app = router(test_state(storage.clone()));
+        let mut entries = Vec::new();
+        for (index, hook) in [
+            "shape".to_owned(),
+            format!("transform_response_{provider}"),
+            format!("shape_{provider}"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let hooks = serde_json::from_value(json!({
+                (hook): {"wire_version": 1, "description": "fixture", "usage": "fixture", "mode": "active"}
+            })).unwrap();
+            let (entry, _) = storage
+                .persist_wasm_upload(
+                    WasmBlob {
+                        sha256: [index as u8 + 40; 32],
+                        bytes: vec![index as u8],
+                        size_bytes: 1,
+                    },
+                    WasmRegistryEntryInput {
+                        name: format!("warmup-{provider}-{index}"),
+                        version: None,
+                        original_filename: "warmup.wasm".to_owned(),
+                        label: None,
+                        uploaded_at_unix_secs: 1,
+                        uploaded_by_admin_id: Uuid::nil(),
+                        description: "fixture".to_owned(),
+                        usage: "fixture".to_owned(),
+                        hook_metadata: hooks,
+                        supported_slots: vec![PluginSlotKind::Shape],
+                    },
+                )
+                .await
+                .unwrap();
+            entries.push(entry);
+        }
+        let create_body = json!({
+            "name": format!("warmup-{provider}"),
+            "kind": kind,
+            "warmup_enabled": false,
+            "oauth_tokens": oauth_bundle_json(
+                "provider-access", "provider-refresh", Some("provider-account"),
+                (provider == "gemini").then_some("provider-project"), false,
+            ),
+        });
+        for entry in &entries[..2] {
+            let mut invalid = create_body.clone();
+            invalid["warmup_dialect_plugin"] = json!({"wasm_registry_id": entry.id, "config": {}});
+            let rejected = request(
+                app.clone(),
+                "POST",
+                "/admin/v1/upstreams",
+                Some(invalid),
+                None,
+            )
+            .await;
+            assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body(&rejected)["error"],
+                "warmup_plugin_unsupported_provider"
+            );
+        }
+        let mut valid = create_body.clone();
+        valid["warmup_dialect_plugin"] = json!({"wasm_registry_id": entries[2].id, "config": {}});
+        let created = request(
+            app.clone(),
+            "POST",
+            "/admin/v1/upstreams",
+            Some(valid),
+            None,
+        )
+        .await;
+        assert_eq!(
+            created.status,
+            StatusCode::CREATED,
+            "{provider}: {:?}",
+            created.body
+        );
+        let id = body(&created)["id"].as_str().unwrap();
+        for method in ["PUT", "PATCH"] {
+            for entry in &entries[..2] {
+                let rejected = request(
+                    app.clone(), method, &format!("/admin/v1/upstreams/{id}"),
+                    Some(json!({"warmup_dialect_plugin": {"wasm_registry_id": entry.id, "config": {}}})),
+                    Some("W/\"1\""),
+                ).await;
+                assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    body(&rejected)["error"],
+                    "warmup_plugin_unsupported_provider"
+                );
+            }
+        }
+        for (index, method) in ["PUT", "PATCH"].into_iter().enumerate() {
+            let revision = format!("W/\"{}\"", index + 1);
+            let updated = request(
+                app.clone(), method, &format!("/admin/v1/upstreams/{id}"),
+                Some(json!({"warmup_dialect_plugin": {"wasm_registry_id": entries[2].id, "config": {"updated": true}}})),
+                Some(&revision),
+            ).await;
+            assert_eq!(
+                updated.status,
+                StatusCode::OK,
+                "{provider}: {:?}",
+                updated.body
+            );
+            assert_eq!(
+                body(&updated)["warmup_dialect_plugin"]["config"]["updated"],
+                true
+            );
+        }
     }
 }
 

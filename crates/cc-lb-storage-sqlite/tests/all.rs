@@ -20,6 +20,8 @@ mod principal_terminal_strategy;
 mod prompt_cache_observation;
 #[path = "provider_kind_migration_compat.rs"]
 mod provider_kind_migration_compat;
+#[path = "provider_quota_window_migration.rs"]
+mod provider_quota_window_migration;
 #[path = "quota_aggregate.rs"]
 mod quota_aggregate;
 #[path = "reassembly_serde_fixtures.rs"]

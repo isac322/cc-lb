@@ -15,7 +15,8 @@ import {
 } from '../../test-utils/cacheKeepalive-fixtures';
 
 const PRINCIPAL_ID = 'principal-1';
-const SESSION_ID = 'a1f39c2b7e04';
+const SESSION_ID = 'session/a%2Bb+c&d?e#한글';
+const SESSION_DETAIL_PATH = `/admin/v1/principals/${PRINCIPAL_ID}/cache-keepalive/detail`;
 
 function makeClient() {
   return new QueryClient({
@@ -157,9 +158,10 @@ describe('useCacheKeepaliveSessionDetail', () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    expect(urlFrom(fetchMock)).toBe(
-      `/admin/v1/principals/${PRINCIPAL_ID}/cache-keepalive/${SESSION_ID}`,
-    );
+    const detailUrl = new URL(urlFrom(fetchMock), 'http://localhost');
+    expect(detailUrl.pathname).toBe(SESSION_DETAIL_PATH);
+    expect(detailUrl.searchParams.get('id')).toBe(SESSION_ID);
+    expect([...detailUrl.searchParams.keys()]).toEqual(['id']);
     expect(result.current.data?.turns).toHaveLength(3);
     expect(result.current.data?.config_snapshot?.snapshot_bytes).toBe(524_288);
   });

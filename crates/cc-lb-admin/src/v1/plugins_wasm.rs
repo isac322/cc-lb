@@ -760,7 +760,10 @@ fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginS
             HookKind::Filter => {
                 slots.insert(PluginSlotKind::Router);
             }
-            HookKind::Shape | HookKind::TransformResponse | HookKind::TransformSseEvent => {
+            HookKind::Shape
+            | HookKind::TransformResponse
+            | HookKind::TransformSseEvent
+            | HookKind::ShapeEnvelopeGemini => {
                 slots.insert(PluginSlotKind::Shape);
             }
         }

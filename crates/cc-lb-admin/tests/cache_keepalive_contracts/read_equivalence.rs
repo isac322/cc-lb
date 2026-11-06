@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
 
-use axum::http::StatusCode;
+use axum::{
+    extract::Query,
+    http::{StatusCode, Uri, header},
+};
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion};
 use cc_lb_storage_api::{
     CacheKeepaliveHitRefreshRequest, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
@@ -11,15 +14,22 @@ use serde_json::{Value, json};
 use sqlx::Row as _;
 use uuid::Uuid;
 
-use crate::config_admin_common::{app, authed_json};
+use crate::config_admin_common::{app, authed_bytes, authed_json};
 
 use super::fixtures::{
     cache_keepalive_replace_request, principal_create_body_named, seed_cache_keepalive_decision,
     seed_cache_keepalive_turn,
 };
-use super::{NOW_UNIX_SECS, create_principal_id};
+use super::{
+    NOW_UNIX_SECS, create_principal_id, keepalive_detail_uri, seed_cache_keepalive_contract_rows,
+};
 
 const FIVE_MINUTES_MS: u64 = 5 * 60 * 1_000;
+
+#[derive(serde::Deserialize)]
+struct DetailId {
+    id: String,
+}
 
 async fn get_json(state: &cc_lb_admin::AdminState, uri: &str) -> (StatusCode, Value) {
     let (status, _headers, body, _raw) = authed_json(app(state.clone()), "GET", uri, None).await;
@@ -243,6 +253,216 @@ async fn mismatched_cursor_is_400_invalid_input() {
 }
 
 #[tokio::test]
+async fn detail_query_transport_round_trips_structural_and_escaped_keys() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    let now_ms = NOW_UNIX_SECS * 1_000;
+    let ids = [
+        format!("{principal_id}/thread:thread-a"),
+        format!("{principal_id}/thread:thread-a/agent:agent-a"),
+        format!("{principal_id}/thread:a%252Fagent:b"),
+        format!("{principal_id}/thread:a%25-ready"),
+    ];
+
+    for id in ids {
+        seed_session(&storage, &principal_id, &id, now_ms, NOW_UNIX_SECS + 300).await;
+        let uri = keepalive_detail_uri(&principal_id, &id);
+        let (status, body) = get_json(&state, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{id}: {body:?}");
+        assert_eq!(body["id"], id);
+        assert_eq!(body["session_key_hash"], id);
+
+        let stored: String = sqlx::query(
+            "SELECT session_key_hash FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+        )
+        .bind(&id)
+        .fetch_one(storage.pool())
+        .await
+        .expect("stored session key")
+        .get("session_key_hash");
+        assert_eq!(stored, id);
+    }
+}
+
+#[tokio::test]
+async fn detail_query_transport_round_trips_special_characters() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    let now_ms = NOW_UNIX_SECS * 1_000;
+    let ids = [
+        format!("{principal_id}/thread:+%&=?# space/ユニコード"),
+        format!("{principal_id}/thread:literal%2F/%25"),
+    ];
+
+    for id in ids {
+        seed_session(&storage, &principal_id, &id, now_ms, NOW_UNIX_SECS + 300).await;
+        let uri = keepalive_detail_uri(&principal_id, &id);
+        let (status, body) = get_json(&state, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{id}: {body:?}");
+        assert_eq!(body["id"], id);
+        assert_eq!(body["session_key_hash"], id);
+        let stored = storage
+            .get_cache_keepalive_session(&id)
+            .await
+            .expect("read stored session")
+            .expect("stored session exists");
+        assert_eq!(stored.session_key_hash, id);
+    }
+}
+
+#[tokio::test]
+async fn detail_query_transport_preserves_malformed_percent_behavior() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    for (index, suffix) in ["%", "%2", "%GG", "%FF"].into_iter().enumerate() {
+        let uri = format!(
+            "/admin/v1/principals/{principal_id}/cache-keepalive/detail?id=malformed-{index}-{suffix}"
+        );
+        let reference = Query::<DetailId>::try_from_uri(&uri.parse::<Uri>().unwrap());
+        match reference {
+            Ok(reference) => {
+                seed_session(
+                    &storage,
+                    &principal_id,
+                    &reference.id,
+                    NOW_UNIX_SECS * 1_000,
+                    NOW_UNIX_SECS + 300,
+                )
+                .await;
+                let (status, body) = get_json(&state, &uri).await;
+                assert_eq!(status, StatusCode::OK, "{uri}: {body:?}");
+                assert_eq!(body["id"], reference.id);
+            }
+            Err(_) => {
+                let (status, headers, raw) =
+                    authed_bytes(app(state.clone()), "GET", &uri, None).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {raw:?}");
+                assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+                let body: Value = serde_json::from_slice(&raw).expect("validation response JSON");
+                assert_eq!(body["error"], "validation_failed");
+                assert_eq!(body["field"], "id");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn detail_query_transport_preserves_principal_scope() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    let other_id = create_principal(&state, "cache-keepalive-query-other", true).await;
+    let session_id = format!("{principal_id}/thread:scoped/agent:agent-a");
+    seed_session(
+        &storage,
+        &principal_id,
+        &session_id,
+        NOW_UNIX_SECS * 1_000,
+        NOW_UNIX_SECS + 300,
+    )
+    .await;
+
+    let (status, body) = get_json(&state, &keepalive_detail_uri(&principal_id, &session_id)).await;
+    assert_eq!(status, StatusCode::OK, "owner lookup: {body:?}");
+    assert_eq!(body["id"], session_id);
+
+    let (status, body) = get_json(&state, &keepalive_detail_uri(&other_id, &session_id)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "unknown_cache_keepalive_entry" }));
+
+    for (principal, expected) in [
+        (
+            "not-a-uuid".to_owned(),
+            json!({ "error": "invalid_principal_id" }),
+        ),
+        (
+            Uuid::new_v4().to_string(),
+            json!({ "error": "unknown_principal" }),
+        ),
+    ] {
+        let (status, body) = get_json(&state, &keepalive_detail_uri(&principal, &session_id)).await;
+        assert_eq!(
+            status,
+            if expected["error"] == "invalid_principal_id" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        );
+        assert_eq!(body, expected);
+    }
+
+    let principal_uuid = principal_id.parse().expect("principal UUID");
+    let principal = PrincipalStore::get_by_id(storage.as_ref(), principal_uuid)
+        .await
+        .expect("read principal")
+        .expect("principal exists");
+    PrincipalStore::soft_delete(
+        storage.as_ref(),
+        principal_uuid,
+        principal.revision,
+        NOW_UNIX_SECS,
+    )
+    .await
+    .expect("soft delete principal")
+    .expect("deleted principal exists");
+    let (status, body) = get_json(&state, &keepalive_detail_uri(&principal_id, &session_id)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "unknown_principal" }));
+}
+
+#[tokio::test]
+async fn detail_query_transport_preserves_validation_lookup_and_fallback_boundaries() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
+
+    let (status, body) = get_json(&state, &keepalive_detail_uri(&principal_id, "missing-id")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "unknown_cache_keepalive_entry" }));
+
+    let (status, body) = get_json(
+        &state,
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/detail?id="),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "unknown_cache_keepalive_entry" }));
+
+    let known_uri = keepalive_detail_uri(&principal_id, "f4b71a0c9d52");
+    let (status, known) = get_json(&state, &known_uri).await;
+    assert_eq!(status, StatusCode::OK, "known detail: {known:?}");
+    let known_with_extra = format!("{known_uri}&limit=1");
+    let (status, extra) = get_json(&state, &known_with_extra).await;
+    assert_eq!(status, StatusCode::OK, "extra detail query: {extra:?}");
+    assert_eq!(extra["id"], known["id"]);
+
+    for uri in [
+        format!("/admin/v1/principals/{principal_id}/cache-keepalive/detail"),
+        format!("/admin/v1/principals/{principal_id}/cache-keepalive/detail?id=a&id=b"),
+    ] {
+        let (status, headers, raw) = authed_bytes(app(state.clone()), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {raw:?}");
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        let body: Value = serde_json::from_slice(&raw).expect("validation response JSON");
+        assert_eq!(body["error"], "validation_failed");
+        assert_eq!(body["field"], "id");
+    }
+
+    let (status, _headers, raw) = authed_bytes(
+        app(state.clone()),
+        "GET",
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/decision:1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(raw.is_empty(), "legacy path must use unmatched fallback");
+
+    let (status, _headers, raw) =
+        authed_bytes(app(state), "GET", "/admin/v1/not-a-real-route", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        raw.is_empty(),
+        "unknown admin path must use unmatched fallback"
+    );
+}
+
+#[tokio::test]
 async fn detail_direct_lookup_preserves_session_and_decision_wire() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     let now_ms = NOW_UNIX_SECS * 1_000;
@@ -266,11 +486,8 @@ async fn detail_direct_lookup_preserves_session_and_decision_wire() {
     .await;
     seed_cache_keepalive_decision(&storage, &principal_id, "detail-decision", now_ms - 1).await;
 
-    let (session_status, session) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/detail-session"),
-    )
-    .await;
+    let session_uri = keepalive_detail_uri(&principal_id, "detail-session");
+    let (session_status, session) = get_json(&state, &session_uri).await;
     assert_eq!(
         session_status,
         StatusCode::OK,
@@ -281,11 +498,8 @@ async fn detail_direct_lookup_preserves_session_and_decision_wire() {
     assert_eq!(session["turns"].as_array().expect("session turns").len(), 1);
     assert!(session["turns"][0]["pnl"].is_null());
 
-    let (decision_status, decision) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/detail-decision"),
-    )
-    .await;
+    let decision_uri = keepalive_detail_uri(&principal_id, "detail-decision");
+    let (decision_status, decision) = get_json(&state, &decision_uri).await;
     assert_eq!(
         decision_status,
         StatusCode::OK,
@@ -311,11 +525,8 @@ async fn detail_collision_matches_legacy_first_match() {
     .await;
     seed_cache_keepalive_decision(&storage, &principal_id, "collision", now_ms).await;
 
-    let (status, tied) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/collision"),
-    )
-    .await;
+    let collision_uri = keepalive_detail_uri(&principal_id, "collision");
+    let (status, tied) = get_json(&state, &collision_uri).await;
     assert_eq!(status, StatusCode::OK, "tie detail: {tied:?}");
     assert_eq!(
         tied["state"], "not_tracked",
@@ -327,11 +538,7 @@ async fn detail_collision_matches_legacy_first_match() {
         .execute(storage.pool())
         .await
         .expect("make session newer");
-    let (status, session_newer) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/collision"),
-    )
-    .await;
+    let (status, session_newer) = get_json(&state, &collision_uri).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -344,11 +551,7 @@ async fn detail_collision_matches_legacy_first_match() {
         .execute(storage.pool())
         .await
         .expect("make decision newer");
-    let (status, decision_newer) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/collision"),
-    )
-    .await;
+    let (status, decision_newer) = get_json(&state, &collision_uri).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -361,8 +564,8 @@ async fn detail_collision_matches_legacy_first_match() {
 async fn detail_hides_late_joined_decision() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     let now_ms = NOW_UNIX_SECS * 1_000;
+    let uri = keepalive_detail_uri(&principal_id, "late-decision");
     seed_cache_keepalive_decision(&storage, &principal_id, "late-decision", now_ms).await;
-    let uri = format!("/admin/v1/principals/{principal_id}/cache-keepalive/late-decision");
     let (before_status, before) = get_json(&state, &uri).await;
     assert_eq!(
         before_status,
@@ -524,11 +727,8 @@ async fn mixed_read_paths_preserve_sort_horizon_limit_and_tenant_scope() {
     assert!(!body.to_string().contains("old-decision"));
     assert!(!body.to_string().contains("tenant-secret"));
 
-    let (status, missing) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/tenant-secret"),
-    )
-    .await;
+    let missing_uri = keepalive_detail_uri(&principal_id, "tenant-secret");
+    let (status, missing) = get_json(&state, &missing_uri).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(missing, json!({ "error": "unknown_cache_keepalive_entry" }));
 }
@@ -594,11 +794,8 @@ async fn corruption_mapping_tracks_narrow_read_scope() {
         "selected list corruption: {body:?}"
     );
     assert_eq!(body, json!({ "error": "storage_error" }));
-    let (status, body) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/selected-corrupt-decision"),
-    )
-    .await;
+    let corrupt_decision_uri = keepalive_detail_uri(&principal_id, "selected-corrupt-decision");
+    let (status, body) = get_json(&state, &corrupt_decision_uri).await;
     assert_eq!(
         status,
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -632,13 +829,8 @@ async fn corruption_mapping_tracks_narrow_read_scope() {
     .execute(storage.pool())
     .await
     .expect("corrupt selected turn");
-    let (status, body) = get_json(
-        &state,
-        &format!(
-            "/admin/v1/principals/{principal_id}/cache-keepalive/selected-corrupt-turn-session"
-        ),
-    )
-    .await;
+    let corrupt_turn_uri = keepalive_detail_uri(&principal_id, "selected-corrupt-turn-session");
+    let (status, body) = get_json(&state, &corrupt_turn_uri).await;
     assert_eq!(
         status,
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -686,8 +878,7 @@ async fn reactivation_increments_generation_and_resets_summary_inputs() {
             .expect("terminalize session")
     );
 
-    let detail_uri =
-        format!("/admin/v1/principals/{principal_id}/cache-keepalive/reactivated-session");
+    let detail_uri = keepalive_detail_uri(&principal_id, "reactivated-session");
     let (before_status, before) = get_json(&state, &detail_uri).await;
     assert_eq!(
         before_status,
@@ -845,21 +1036,15 @@ async fn cleanup_removes_only_expired_sessions_from_read_surfaces() {
         .map(|row| row["id"].as_str().expect("row id"))
         .collect::<Vec<_>>();
     assert_eq!(after_ids, ["cleanup-retained"]);
-    let (expired_status, expired) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/cleanup-expired"),
-    )
-    .await;
+    let expired_uri = keepalive_detail_uri(&principal_id, "cleanup-expired");
+    let (expired_status, expired) = get_json(&state, &expired_uri).await;
     assert_eq!(
         expired_status,
         StatusCode::NOT_FOUND,
         "expired detail: {expired:?}"
     );
-    let (retained_status, retained) = get_json(
-        &state,
-        &format!("/admin/v1/principals/{principal_id}/cache-keepalive/cleanup-retained"),
-    )
-    .await;
+    let retained_uri = keepalive_detail_uri(&principal_id, "cleanup-retained");
+    let (retained_status, retained) = get_json(&state, &retained_uri).await;
     assert_eq!(
         retained_status,
         StatusCode::OK,

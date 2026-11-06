@@ -31,6 +31,7 @@ pub struct Reconciler {
     pub prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub clock: ClockHandle,
+    pub antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
 }
 
 impl Reconciler {
@@ -48,6 +49,7 @@ impl Reconciler {
         prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
         subscription_quota_routing_max_staleness_secs: u64,
         clock: ClockHandle,
+        antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
     ) -> Self {
         Self {
             stores,
@@ -62,6 +64,7 @@ impl Reconciler {
             prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs,
             clock,
+            antigravity_config,
         }
     }
 
@@ -118,6 +121,7 @@ impl Reconciler {
         drop(current);
         match build_dynamic_view(
             &self.stores,
+            self.antigravity_config.as_ref(),
             self.aead.clone(),
             self.lazy_refresher.clone(),
             generation,

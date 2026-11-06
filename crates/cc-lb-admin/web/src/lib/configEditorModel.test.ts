@@ -13,6 +13,7 @@ import {
   type ConfigSchema,
   checkConfigScalar,
   classifyConfigLeaf,
+  configKeyLabel,
   expandConfigSchema,
   getConfigSchemaVariants,
   getConfigValue,
@@ -491,7 +492,7 @@ describe('resolved editor model', () => {
     );
 
     expect(CONFIG_EDITOR_CATEGORIES).toHaveLength(7);
-    expect(new Set(roots).size).toBe(20);
+    expect(new Set(roots).size).toBe(21);
     expect(roots).toEqual(
       expect.arrayContaining([
         'listener',
@@ -501,6 +502,7 @@ describe('resolved editor model', () => {
         'price_catalog',
         'storage',
         'scheduler',
+        'warmup',
         'upstream_affinity',
         'aead',
         'observability',
@@ -703,6 +705,25 @@ describe('config editor information architecture', () => {
     ).toEqual([]);
     expect(searchConfigLeaves(model, '   ')).toEqual([]);
   });
+
+  it.each([
+    ['openai_model', 'OpenAI model', 'OpenAI'],
+    ['gemini_model', 'Gemini model', 'Gemini'],
+  ])(
+    'places warmup.%s in scheduling with provider guidance',
+    (key, label, provider) => {
+      expect(classifyConfigLeaf(`warmup.${key}`, 'string')).toMatchObject({
+        categoryId: 'scheduling',
+        sectionId: 'warmup-models',
+        advanced: false,
+      });
+      expect(configKeyLabel(key)).toBe(label);
+      expect(
+        resolveConfigFieldGuidance(`warmup.${key}`, undefined, 'string')
+          .description,
+      ).toContain(provider);
+    },
+  );
 
   it('assigns every real schema leaf to exactly one section or the unassigned fallback', () => {
     const realSchema = JSON.parse(

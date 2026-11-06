@@ -130,29 +130,84 @@ fn classifies_429_without_relevant_reset_as_missing_cycle_key() {
     assert_429(&[], MISSING_CYCLE_KEY);
 }
 
-fn assert_429(observations: &[UnifiedQuotaObservation], expected: ExpectedAttempt) {
-    let fields = response_attempt_fields(
-        StatusCode::TOO_MANY_REQUESTS,
-        observations,
-        None,
-        SCHEDULED_FOR,
-        SCHEDULED_FOR,
-        None,
-    );
+#[test]
+fn success_without_target_headers_preserves_the_candidate_cycle() {
+    for kind in [
+        UpstreamKind::AnthropicOauth,
+        UpstreamKind::OpenaiOauth,
+        UpstreamKind::GeminiOauth,
+    ] {
+        for expected_cycle_key in [None, Some(FIVE_HOUR_RESET)] {
+            let fields = response_attempt_fields(
+                kind,
+                StatusCode::OK,
+                &[],
+                expected_cycle_key,
+                SCHEDULED_FOR,
+                SCHEDULED_FOR,
+                None,
+            );
 
-    assert_eq!(fields.outcome, expected.outcome);
-    assert_eq!(fields.cycle_key, expected.cycle_key);
+            assert_eq!(
+                fields.outcome,
+                WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive)
+            );
+            assert_eq!(
+                fields.cycle_key,
+                Some(expected_cycle_key.unwrap_or(SCHEDULED_FOR)),
+                "kind={kind:?}",
+            );
+        }
+    }
 }
 
 #[test]
-fn success_with_only_seven_day_headers_advances_weekly_only_account() {
+fn successful_response_without_reset_is_authoritative_despite_exhaustion_observation() {
+    for (kind, weekly) in [
+        (
+            UpstreamKind::AnthropicOauth,
+            SubscriptionQuotaWindow::SevenDay,
+        ),
+        (UpstreamKind::OpenaiOauth, SubscriptionQuotaWindow::SevenDay),
+        (
+            UpstreamKind::GeminiOauth,
+            SubscriptionQuotaWindow::GeminiSevenDay,
+        ),
+    ] {
+        let observations = [UnifiedQuotaObservation {
+            window: weekly,
+            status: Some(SubscriptionQuotaStatus::Rejected),
+            utilization: Some(1.0),
+            ..UnifiedQuotaObservation::default()
+        }];
+        let fields = response_attempt_fields(
+            kind,
+            StatusCode::OK,
+            &observations,
+            Some(SCHEDULED_FOR),
+            SCHEDULED_FOR,
+            SCHEDULED_FOR,
+            None,
+        );
+        assert_eq!(
+            fields.outcome,
+            WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive),
+            "kind={kind:?}",
+        );
+        assert_eq!(fields.cycle_key, Some(SCHEDULED_FOR));
+    }
+}
+
+#[test]
+fn success_with_five_hour_headers_advances_the_cycle() {
     let observations = [quota_observation(
-        SubscriptionQuotaWindow::SevenDay,
-        SEVEN_DAY_RESET,
+        SubscriptionQuotaWindow::FiveHour,
+        FIVE_HOUR_RESET,
         Some(SubscriptionQuotaStatus::Allowed),
-        Some(0.01),
+        Some(0.0),
     )];
     let fields = response_attempt_fields(
+        UpstreamKind::AnthropicOauth,
         StatusCode::OK,
         &observations,
         Some(SCHEDULED_FOR),
@@ -165,6 +220,170 @@ fn success_with_only_seven_day_headers_advances_weekly_only_account() {
         fields.outcome,
         WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced)
     );
+    assert_eq!(fields.cycle_key, Some(FIVE_HOUR_RESET));
+}
+
+#[test]
+fn success_with_only_seven_day_headers_advances_weekly_only_accounts() {
+    for kind in [UpstreamKind::AnthropicOauth, UpstreamKind::OpenaiOauth] {
+        let observations = [quota_observation(
+            SubscriptionQuotaWindow::SevenDay,
+            SEVEN_DAY_RESET,
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(0.01),
+        )];
+        let fields = response_attempt_fields(
+            kind,
+            StatusCode::OK,
+            &observations,
+            Some(SCHEDULED_FOR),
+            SCHEDULED_FOR,
+            SCHEDULED_FOR,
+            None,
+        );
+        assert_eq!(
+            fields.outcome,
+            WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced)
+        );
+        assert_eq!(fields.cycle_key, Some(SEVEN_DAY_RESET));
+    }
+}
+
+#[test]
+fn success_chooses_earliest_future_target_and_ignores_expired_resets() {
+    for kind in [UpstreamKind::AnthropicOauth, UpstreamKind::OpenaiOauth] {
+        let observations = [
+            quota_observation(
+                SubscriptionQuotaWindow::FiveHour,
+                SCHEDULED_FOR - 1,
+                None,
+                None,
+            ),
+            quota_observation(
+                SubscriptionQuotaWindow::SevenDay,
+                SEVEN_DAY_RESET,
+                None,
+                None,
+            ),
+        ];
+        let fields = response_attempt_fields(
+            kind,
+            StatusCode::OK,
+            &observations,
+            Some(SCHEDULED_FOR),
+            SCHEDULED_FOR,
+            SCHEDULED_FOR,
+            None,
+        );
+        assert_eq!(fields.cycle_key, Some(SEVEN_DAY_RESET));
+        let observations = [
+            quota_observation(
+                SubscriptionQuotaWindow::FiveHour,
+                FIVE_HOUR_RESET,
+                None,
+                None,
+            ),
+            quota_observation(
+                SubscriptionQuotaWindow::SevenDay,
+                FIVE_HOUR_RESET - 1,
+                None,
+                None,
+            ),
+        ];
+        let fields = response_attempt_fields(
+            kind,
+            StatusCode::OK,
+            &observations,
+            Some(SCHEDULED_FOR),
+            SCHEDULED_FOR,
+            SCHEDULED_FOR,
+            None,
+        );
+        assert_eq!(fields.cycle_key, Some(FIVE_HOUR_RESET - 1));
+    }
+}
+
+#[test]
+fn gemini_success_uses_only_gemini_group_resets() {
+    let observations = [
+        quota_observation(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            FIVE_HOUR_RESET,
+            None,
+            None,
+        ),
+        quota_observation(
+            SubscriptionQuotaWindow::GeminiSevenDay,
+            SEVEN_DAY_RESET,
+            None,
+            None,
+        ),
+        quota_observation(
+            SubscriptionQuotaWindow::ThirdPartyFiveHour,
+            FIVE_HOUR_RESET - 1,
+            None,
+            None,
+        ),
+    ];
+    let fields = response_attempt_fields(
+        UpstreamKind::GeminiOauth,
+        StatusCode::OK,
+        &observations,
+        Some(SCHEDULED_FOR),
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+    assert_eq!(fields.cycle_key, Some(FIVE_HOUR_RESET));
+}
+
+#[test]
+fn gemini_429_with_active_target_is_transient() {
+    let observations = [
+        quota_observation(
+            SubscriptionQuotaWindow::GeminiFiveHour,
+            FIVE_HOUR_RESET,
+            None,
+            None,
+        ),
+        quota_observation(
+            SubscriptionQuotaWindow::ThirdPartySevenDay,
+            SEVEN_DAY_RESET,
+            Some(SubscriptionQuotaStatus::Rejected),
+            Some(1.0),
+        ),
+    ];
+    let fields = response_attempt_fields(
+        UpstreamKind::GeminiOauth,
+        StatusCode::TOO_MANY_REQUESTS,
+        &observations,
+        None,
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+    assert_eq!(fields.outcome, MISSING_CYCLE_KEY.outcome);
+    assert_eq!(fields.cycle_key, None);
+}
+
+#[test]
+fn gemini_429_exhausted_weekly_is_skipped() {
+    let observations = [quota_observation(
+        SubscriptionQuotaWindow::GeminiSevenDay,
+        SEVEN_DAY_RESET,
+        Some(SubscriptionQuotaStatus::Rejected),
+        Some(1.0),
+    )];
+    let fields = response_attempt_fields(
+        UpstreamKind::GeminiOauth,
+        StatusCode::TOO_MANY_REQUESTS,
+        &observations,
+        None,
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+    assert_eq!(fields.outcome, SEVEN_DAY_SKIPPED.outcome);
     assert_eq!(fields.cycle_key, Some(SEVEN_DAY_RESET));
 }
 
@@ -258,6 +477,42 @@ fn quota_sample(
         extra_usage_used_credits: None,
         ingested_at_unix_millis: observed_at_unix_millis,
     }
+}
+
+#[test]
+fn openai_429_with_active_target_is_transient() {
+    let observations = [quota_observation(
+        SubscriptionQuotaWindow::SevenDay,
+        SEVEN_DAY_RESET,
+        Some(SubscriptionQuotaStatus::Allowed),
+        Some(0.2),
+    )];
+    let fields = response_attempt_fields(
+        UpstreamKind::OpenaiOauth,
+        StatusCode::TOO_MANY_REQUESTS,
+        &observations,
+        None,
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+    assert_eq!(fields.outcome, MISSING_CYCLE_KEY.outcome);
+    assert_eq!(fields.cycle_key, None);
+}
+
+fn assert_429(observations: &[UnifiedQuotaObservation], expected: ExpectedAttempt) {
+    let fields = response_attempt_fields(
+        UpstreamKind::AnthropicOauth,
+        StatusCode::TOO_MANY_REQUESTS,
+        observations,
+        None,
+        SCHEDULED_FOR,
+        SCHEDULED_FOR,
+        None,
+    );
+
+    assert_eq!(fields.outcome, expected.outcome);
+    assert_eq!(fields.cycle_key, expected.cycle_key);
 }
 
 fn quota_observation(

@@ -223,6 +223,7 @@ impl Harness {
             refresh_token_expires_at_unix_secs: None,
             account_id: None,
             project_id: None,
+            oauth_profile: Default::default(),
             scopes: vec!["messages".to_owned()],
             never_refresh: true,
         };
@@ -424,9 +425,11 @@ impl Harness {
         .await
     }
     pub async fn admin_cache_keepalive_detail(&self, id: &str) -> Response {
-        let encoded: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("id", id)
+            .finish();
         self.admin_get(&format!(
-            "/admin/v1/principals/{}/cache-keepalive/{encoded}",
+            "/admin/v1/principals/{}/cache-keepalive/detail?{query}",
             self.principal_id
         ))
         .await

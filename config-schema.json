@@ -224,6 +224,13 @@
       "default": {
         "ttl_days": 7
       }
+    },
+    "warmup": {
+      "$ref": "#/$defs/WarmupConfig",
+      "default": {
+        "gemini_model": "gemini-2.5-flash-lite",
+        "openai_model": "gpt-6.1-sol"
+      }
     }
   },
   "additionalProperties": false,
@@ -351,6 +358,61 @@
         }
       }
     },
+    "AntigravityOAuthConfig": {
+      "type": "object",
+      "properties": {
+        "authorize_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://accounts.google.com/o/oauth2/v2/auth"
+        },
+        "client_id": {
+          "type": "string",
+          "default": ""
+        },
+        "client_secret": {
+          "type": "string",
+          "default": ""
+        },
+        "code_assist_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://daily-cloudcode-pa.googleapis.com/"
+        },
+        "redirect_uri": {
+          "type": "string",
+          "format": "uri",
+          "default": "http://localhost:51121/oauth-callback"
+        },
+        "scopes": {
+          "type": "array",
+          "default": [
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/cclog",
+            "https://www.googleapis.com/auth/experimentsandconfigs"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "token_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://oauth2.googleapis.com/token"
+        },
+        "user_agent": {
+          "type": "string",
+          "default": "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)"
+        },
+        "userinfo_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://www.googleapis.com/oauth2/v2/userinfo?alt=json"
+        }
+      }
+    },
     "BodyConfig": {
       "type": "object",
       "properties": {
@@ -459,6 +521,44 @@
       },
       "additionalProperties": false
     },
+    "GeminiOAuthConfig": {
+      "type": "object",
+      "properties": {
+        "auth_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://accounts.google.com/o/oauth2/v2/auth"
+        },
+        "client_id": {
+          "type": "string",
+          "default": ""
+        },
+        "client_secret": {
+          "type": "string",
+          "default": ""
+        },
+        "code_assist_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://cloudcode-pa.googleapis.com/v1internal"
+        },
+        "redirect_uri": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://codeassist.google.com/authcode"
+        },
+        "token_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://oauth2.googleapis.com/token"
+        },
+        "userinfo_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://www.googleapis.com/oauth2/v3/userinfo"
+        }
+      }
+    },
     "LimitReservationTtlConfig": {
       "description": "Background TTL sweeper for stale limit reservations. The LimitEngine\nperiodically walks its reservation map and full-refunds any reservation\nolder than `ttl_secs`; the sweeper runs unconditionally because the\nsubscriber path is authoritative.",
       "type": "object",
@@ -517,6 +617,36 @@
               "type": "null"
             }
           ]
+        },
+        "antigravity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AntigravityOAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gemini": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeminiOAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openai": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpenAiOAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -547,6 +677,55 @@
         }
       },
       "additionalProperties": false
+    },
+    "OpenAiOAuthConfig": {
+      "type": "object",
+      "properties": {
+        "auth_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://auth.openai.com/oauth/authorize"
+        },
+        "authorize_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://auth.openai.com/oauth/authorize"
+        },
+        "browser_redirect_uri": {
+          "type": "string",
+          "format": "uri",
+          "default": "http://localhost:1455/auth/callback"
+        },
+        "client_id": {
+          "type": "string",
+          "default": "app_EMoamEEZ73f0CkXaXp7hrann"
+        },
+        "device_redirect_uri": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://auth.openai.com/deviceauth/callback"
+        },
+        "device_token_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://auth.openai.com/api/accounts/deviceauth/token"
+        },
+        "device_usercode_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://auth.openai.com/api/accounts/deviceauth/usercode"
+        },
+        "device_verification_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://auth.openai.com/codex/device"
+        },
+        "token_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://auth.openai.com/oauth/token"
+        }
+      }
     },
     "PluginWireBounds": {
       "description": "Upper bounds enforced on plugin wire I/O. Defaults match current\nunbounded-ish behaviour by tracking the request body cap already\nenforced at the HTTP layer, so enabling this struct with defaults\nis a no-op. Tightening any field is opt-in.",
@@ -990,6 +1169,20 @@
           "format": "uint32",
           "default": 7,
           "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "WarmupConfig": {
+      "type": "object",
+      "properties": {
+        "gemini_model": {
+          "type": "string",
+          "default": "gemini-2.5-flash-lite"
+        },
+        "openai_model": {
+          "type": "string",
+          "default": "gpt-6.1-sol"
         }
       },
       "additionalProperties": false

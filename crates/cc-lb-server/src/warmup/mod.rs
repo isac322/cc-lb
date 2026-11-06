@@ -4,4 +4,4 @@ pub mod helpers;
 pub mod request;
 
 pub use helpers::stable_jitter_ms;
-pub use request::dispatch_warmup_attempt;
+pub use request::dispatch_provider_warmup_attempt;

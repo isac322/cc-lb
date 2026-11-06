@@ -557,6 +557,7 @@ fn principal_view(
         user_filters: filters,
         terminal,
         instantiation_error: None,
+        provider_filters: None,
     });
     let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
     chains.insert(

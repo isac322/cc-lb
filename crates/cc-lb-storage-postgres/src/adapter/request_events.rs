@@ -167,7 +167,6 @@ impl RequestEventStore for PostgresStorage {
         if limit == 0 || until <= after {
             return Ok(Vec::new());
         }
-
         let mut builder = QueryBuilder::<Postgres>::new(row::CURSOR_SQL_PREFIX);
         builder.push_bind(u64_to_i64(after, "request event cursor after")?);
         builder.push(" AND seq <= ");
@@ -182,7 +181,6 @@ impl RequestEventStore for PostgresStorage {
             builder.push(" AND thread_id = ");
             builder.push_bind(thread_id);
         }
-        // C collation keeps lower() ASCII-only, matching `model_filter_matches`.
         if let Some([prefix_pattern, contains_pattern]) = filters
             .model
             .as_deref()
@@ -197,6 +195,17 @@ impl RequestEventStore for PostgresStorage {
         if let Some(upstream_id) = filters.upstream_id {
             builder.push(" AND upstream_id = ");
             builder.push_bind(upstream_id);
+        }
+        if let Some(provider_upstream_ids) = filters.provider_upstream_ids.as_ref() {
+            if provider_upstream_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            builder.push(" AND upstream_id IN (");
+            let mut separated = builder.separated(", ");
+            for upstream_id in provider_upstream_ids {
+                separated.push_bind(*upstream_id);
+            }
+            separated.push_unseparated(")");
         }
         if let Some(status_class) = filters.status_class {
             let (status_min, status_max) = status_class_range(status_class);
@@ -222,7 +231,6 @@ impl RequestEventStore for PostgresStorage {
             );
             builder.push_bind(event_kind.as_str());
         }
-
         builder.push(" ORDER BY seq ASC LIMIT ");
         builder.push_bind(u64_to_i64(
             limit.min(500) as u64,
@@ -233,15 +241,13 @@ impl RequestEventStore for PostgresStorage {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
-
         rows.into_iter()
             .map(|row| {
                 let cursor = i64_to_u64(
                     row.try_get("seq").map_err(map_sqlx_error)?,
                     "request event cursor",
                 )?;
-                let event = row::from_row(&row)?;
-                Ok((cursor, event))
+                Ok((cursor, row::from_row(&row)?))
             })
             .collect()
     }
@@ -822,6 +828,17 @@ fn request_event_histogram_query(
     if let Some(upstream_id) = query.filters.upstream_id {
         builder.push(" AND r.upstream_id = ");
         builder.push_bind(upstream_id);
+    }
+    if let Some(provider_upstream_ids) = query.filters.provider_upstream_ids.as_ref() {
+        if provider_upstream_ids.is_empty() {
+            return Ok(None);
+        }
+        builder.push(" AND r.upstream_id IN (");
+        let mut separated = builder.separated(", ");
+        for upstream_id in provider_upstream_ids {
+            separated.push_bind(*upstream_id);
+        }
+        separated.push_unseparated(")");
     }
     if let Some(thread_id) = query.filters.thread_id.as_deref() {
         builder.push(" AND r.thread_id = ");

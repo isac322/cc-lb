@@ -24,6 +24,7 @@ pub struct RequestEventStreamFilters {
     pub thread_id: Option<String>,
     pub model: Option<String>,
     pub upstream_id: Option<Uuid>,
+    pub provider_upstream_ids: Option<Vec<Uuid>>,
     pub status_class: Option<StatusClass>,
     pub errors_only: bool,
     /// Endpoint classification filter. `Some(kind)` matches rows whose

@@ -1298,12 +1298,12 @@ def compare(args: argparse.Namespace) -> None:
             ("SEM-03-limit", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive?limit=101"),
             ("SEM-03-horizon", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive?horizon=2h"),
             ("SEM-03-status", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive?status=warm"),
-            ("SEM-05-session", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive/{urllib.parse.quote(LOW_IDS['active'], safe='')}"),
-            ("SEM-05-decision", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive/{urllib.parse.quote(LOW_IDS['decision'], safe='')}"),
-            ("SEM-06", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive/{LOW_IDS['collision']}"),
+            ("SEM-05-session", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive/detail?{urllib.parse.urlencode({'id': LOW_IDS['active']})}"),
+            ("SEM-05-decision", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive/detail?{urllib.parse.urlencode({'id': LOW_IDS['decision']})}"),
+            ("SEM-06", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive/detail?{urllib.parse.urlencode({'id': LOW_IDS['collision']})}"),
             ("SEM-08-empty", f"/admin/v1/principals/{PRINCIPALS['empty']}/cache-keepalive?limit=0"),
             ("SEM-08-disabled", f"/admin/v1/principals/{PRINCIPALS['disabled']}/cache-keepalive?limit=0"),
-            ("DETAIL-404", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive/missing-entry"),
+            ("DETAIL-404", f"/admin/v1/principals/{PRINCIPALS['low']}/cache-keepalive/detail?{urllib.parse.urlencode({'id': 'missing-entry'})}"),
         ]
         expected = {
             "SEM-01": (400, "invalid_principal_id"),
@@ -1743,7 +1743,7 @@ def compare(args: argparse.Namespace) -> None:
         target_summary: dict[str, Any] = {}
         for target in targets:
             baseline_records, candidate_records = [], []
-            path = f"/admin/v1/principals/{PRINCIPALS['d100k']}/cache-keepalive/{urllib.parse.quote(target, safe='')}"
+            path = f"/admin/v1/principals/{PRINCIPALS['d100k']}/cache-keepalive/detail?{urllib.parse.urlencode({'id': target})}"
             for sample in range(args.warm_samples):
                 baseline, candidate, baseline_body, _ = request_pair(args, "PERF-03", path, sample, "warm")
                 assert_api_oracle(

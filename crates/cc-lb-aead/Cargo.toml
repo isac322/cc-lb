@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 base64 = { workspace = true }
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 chacha20poly1305 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

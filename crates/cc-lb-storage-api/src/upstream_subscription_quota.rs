@@ -17,6 +17,14 @@ pub enum SubscriptionQuotaWindow {
     SevenDayOpus,
     #[serde(rename = "7d_fable")]
     SevenDayFable,
+    #[serde(rename = "gemini_5h")]
+    GeminiFiveHour,
+    #[serde(rename = "gemini_7d")]
+    GeminiSevenDay,
+    #[serde(rename = "third_party_5h")]
+    ThirdPartyFiveHour,
+    #[serde(rename = "third_party_7d")]
+    ThirdPartySevenDay,
     #[serde(rename = "overage")]
     Overage,
     #[serde(rename = "unified")]
@@ -28,9 +36,13 @@ impl SubscriptionQuotaWindow {
         match self {
             Self::FiveHour => "5h",
             Self::SevenDay => "7d",
-            Self::SevenDayFable => "7d_fable",
             Self::SevenDaySonnet => "7d_sonnet",
             Self::SevenDayOpus => "7d_opus",
+            Self::SevenDayFable => "7d_fable",
+            Self::GeminiFiveHour => "gemini_5h",
+            Self::GeminiSevenDay => "gemini_7d",
+            Self::ThirdPartyFiveHour => "third_party_5h",
+            Self::ThirdPartySevenDay => "third_party_7d",
             Self::Overage => "overage",
             Self::Unified => "unified",
         }
@@ -41,9 +53,13 @@ impl SubscriptionQuotaWindow {
         Some(match value {
             "5h" => Self::FiveHour,
             "7d" => Self::SevenDay,
-            "7d_fable" => Self::SevenDayFable,
             "7d_sonnet" => Self::SevenDaySonnet,
             "7d_opus" => Self::SevenDayOpus,
+            "7d_fable" => Self::SevenDayFable,
+            "gemini_5h" => Self::GeminiFiveHour,
+            "gemini_7d" => Self::GeminiSevenDay,
+            "third_party_5h" => Self::ThirdPartyFiveHour,
+            "third_party_7d" => Self::ThirdPartySevenDay,
             "overage" => Self::Overage,
             "unified" => Self::Unified,
             _ => return None,
@@ -59,6 +75,10 @@ impl SubscriptionQuotaWindow {
             Self::Overage => 5,
             Self::Unified => 6,
             Self::SevenDayFable => 7,
+            Self::GeminiFiveHour => 8,
+            Self::GeminiSevenDay => 9,
+            Self::ThirdPartyFiveHour => 10,
+            Self::ThirdPartySevenDay => 11,
         }
     }
 
@@ -71,17 +91,24 @@ impl SubscriptionQuotaWindow {
             5 => Self::Overage,
             6 => Self::Unified,
             7 => Self::SevenDayFable,
+            8 => Self::GeminiFiveHour,
+            9 => Self::GeminiSevenDay,
+            10 => Self::ThirdPartyFiveHour,
+            11 => Self::ThirdPartySevenDay,
             _ => return None,
         })
     }
 
     pub const fn is_weekly(self) -> bool {
-        match self {
-            Self::SevenDay | Self::SevenDaySonnet | Self::SevenDayOpus | Self::SevenDayFable => {
-                true
-            }
-            Self::FiveHour | Self::Overage | Self::Unified => false,
-        }
+        matches!(
+            self,
+            Self::SevenDay
+                | Self::SevenDaySonnet
+                | Self::SevenDayOpus
+                | Self::SevenDayFable
+                | Self::GeminiSevenDay
+                | Self::ThirdPartySevenDay
+        )
     }
 
     pub const fn all() -> &'static [SubscriptionQuotaWindow] {
@@ -91,12 +118,15 @@ impl SubscriptionQuotaWindow {
             Self::SevenDaySonnet,
             Self::SevenDayOpus,
             Self::SevenDayFable,
+            Self::GeminiFiveHour,
+            Self::GeminiSevenDay,
+            Self::ThirdPartyFiveHour,
+            Self::ThirdPartySevenDay,
             Self::Overage,
             Self::Unified,
         ]
     }
 }
-
 #[cfg(test)]
 mod subscription_quota_window_tests {
     use super::SubscriptionQuotaWindow;
@@ -122,6 +152,34 @@ mod subscription_quota_window_tests {
     }
 
     #[test]
+    fn gemini_windows_round_trip_stable_vocabulary() {
+        for (window, name, code) in [
+            (SubscriptionQuotaWindow::GeminiFiveHour, "gemini_5h", 8),
+            (SubscriptionQuotaWindow::GeminiSevenDay, "gemini_7d", 9),
+            (
+                SubscriptionQuotaWindow::ThirdPartyFiveHour,
+                "third_party_5h",
+                10,
+            ),
+            (
+                SubscriptionQuotaWindow::ThirdPartySevenDay,
+                "third_party_7d",
+                11,
+            ),
+        ] {
+            assert_eq!(window.as_str(), name);
+            assert_eq!(SubscriptionQuotaWindow::from_str(name), Some(window));
+            assert_eq!(window.code(), code);
+            assert_eq!(SubscriptionQuotaWindow::from_code(code), Some(window));
+            assert_eq!(
+                serde_json::to_string(&window).expect("Gemini window serializes"),
+                format!("\"{name}\"")
+            );
+            assert!(SubscriptionQuotaWindow::all().contains(&window));
+        }
+    }
+
+    #[test]
     fn weekly_classification_covers_every_quota_window() {
         for window in SubscriptionQuotaWindow::all() {
             assert_eq!(
@@ -132,6 +190,8 @@ mod subscription_quota_window_tests {
                         | SubscriptionQuotaWindow::SevenDaySonnet
                         | SubscriptionQuotaWindow::SevenDayOpus
                         | SubscriptionQuotaWindow::SevenDayFable
+                        | SubscriptionQuotaWindow::GeminiSevenDay
+                        | SubscriptionQuotaWindow::ThirdPartySevenDay
                 ),
                 "window={window:?}"
             );

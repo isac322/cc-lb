@@ -409,8 +409,10 @@ function evidenceUrl(raw: string): {
 } {
   const url = new URL(raw);
   const cursor = url.searchParams.get('cursor');
+  const id = url.searchParams.get('id');
   if (cursor !== null)
     url.searchParams.set('cursor', `<sha256:${sha256(cursor)}>`);
+  if (id !== null) url.searchParams.set('id', `<sha256:${sha256(id)}>`);
   return { display: url.toString(), cursorSha: sha256Nullable(cursor) };
 }
 
@@ -430,7 +432,8 @@ function keepaliveKind(url: URL): 'summary' | 'list' | 'detail' | null {
   )
     return null;
   const suffix = url.pathname.split('/cache-keepalive')[1];
-  if (suffix && suffix !== '/') return 'detail';
+  if (suffix === '/detail' && url.searchParams.has('id')) return 'detail';
+  if (suffix && suffix !== '/') return null;
   return url.searchParams.get('limit') === '0' ? 'summary' : 'list';
 }
 
@@ -918,23 +921,31 @@ async function selectFilter(
   return response;
 }
 
+function keepaliveDetailPath(principal: string, id: string): string {
+  const params = new URLSearchParams({ id });
+  return `/admin/v1/principals/${principal}/cache-keepalive/detail?${params}`;
+}
+
 async function clickRow(
   page: Page,
   id: string,
   principal = manifest.principals.low,
 ): Promise<Response> {
-  const encoded = encodeURIComponent(id);
-  const expectedPath = `/admin/v1/principals/${principal}/cache-keepalive/${encoded}`;
+  const expectedUrl = new URL(keepaliveDetailPath(principal, id), BACKEND_URL);
   const response = page.waitForResponse((item) => {
     const url = new URL(item.url());
-    return item.request().method() === 'GET' && url.pathname === expectedPath;
+    return (
+      item.request().method() === 'GET' &&
+      url.pathname === expectedUrl.pathname &&
+      url.searchParams.get('id') === expectedUrl.searchParams.get('id')
+    );
   });
   await drawer(page)
     .locator(`li[data-key=${JSON.stringify(id)}]`)
     .getByRole('button')
     .click();
   const received = await response;
-  expect(received.request().url()).toContain(encoded);
+  expect(new URL(received.request().url()).searchParams.get('id')).toBe(id);
   return received;
 }
 
@@ -2372,21 +2383,24 @@ test('FLOW-01 terminal reactivation appears on the next actual poll', async ({
   const before = await directRequest(
     'FLOW-01',
     'GET',
-    `/admin/v1/principals/${manifest.principals.low}/cache-keepalive/${manifest.low_ids.terminal}`,
+    keepaliveDetailPath(manifest.principals.low, manifest.low_ids.terminal),
   );
   applyMutation('FLOW-01', 'reactivate');
-  await pollResponse(page, (response) =>
-    new URL(response.url()).pathname.endsWith(
-      `/cache-keepalive/${manifest.low_ids.terminal}`,
-    ),
-  );
+  await pollResponse(page, (response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname ===
+        `/admin/v1/principals/${manifest.principals.low}/cache-keepalive/detail` &&
+      url.searchParams.get('id') === manifest.low_ids.terminal
+    );
+  });
   await expect(
     page.getByText('Scheduled', { exact: true }).last(),
   ).toBeVisible();
   const after = await directRequest(
     'FLOW-01',
     'GET',
-    `/admin/v1/principals/${manifest.principals.low}/cache-keepalive/${manifest.low_ids.terminal}`,
+    keepaliveDetailPath(manifest.principals.low, manifest.low_ids.terminal),
   );
   const beforeDetail = DetailTransitionBodySchema.parse(before.body);
   const afterDetail = DetailTransitionBodySchema.parse(after.body);
@@ -2406,7 +2420,10 @@ test('FLOW-02 late turn removes the decision and converges to one session repres
   const before = await directRequest(
     'FLOW-02',
     'GET',
-    `/admin/v1/principals/${manifest.principals.low}/cache-keepalive/${manifest.low_ids.transition_decision}`,
+    keepaliveDetailPath(
+      manifest.principals.low,
+      manifest.low_ids.transition_decision,
+    ),
   );
   expect(before.status).toBe(200);
   applyMutation('FLOW-02', 'late-turn');
@@ -2426,7 +2443,10 @@ test('FLOW-02 late turn removes the decision and converges to one session repres
   const hidden = await directRequest(
     'FLOW-02',
     'GET',
-    `/admin/v1/principals/${manifest.principals.low}/cache-keepalive/${manifest.low_ids.transition_decision}`,
+    keepaliveDetailPath(
+      manifest.principals.low,
+      manifest.low_ids.transition_decision,
+    ),
   );
   expect(hidden.status).toBe(404);
 });
@@ -2452,7 +2472,7 @@ test('FLOW-03 isolated cleanup removes the retained session from summary, list, 
   const detail = await directRequest(
     'FLOW-03',
     'GET',
-    `/admin/v1/principals/${manifest.principals.low}/cache-keepalive/${manifest.low_ids.cleanup}`,
+    keepaliveDetailPath(manifest.principals.low, manifest.low_ids.cleanup),
   );
   expect(detail.status).toBe(404);
 });

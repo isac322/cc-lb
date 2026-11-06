@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_domain::TerminalStrategy;
+use cc_lb_domain::{Provider, TerminalStrategy};
 use cc_lb_routing::FilterPlugin;
 use cc_lb_storage_api::principal::Limit as DbLimit;
 use cc_lb_storage_api::{CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord};
@@ -23,6 +23,34 @@ pub struct RouterPipelineCache {
     pub user_filters: Vec<Arc<dyn FilterPlugin>>,
     pub terminal: TerminalStrategy,
     pub instantiation_error: Option<Arc<str>>,
+    /// Provider-specific chains constructed from validated plugin exports.
+    /// `None` is used by native, provider-independent filter pipelines.
+    pub provider_filters: Option<ProviderFilterChains>,
+}
+
+#[derive(Clone, Default)]
+pub struct ProviderFilterChains {
+    pub anthropic: Vec<Arc<dyn FilterPlugin>>,
+    pub openai: Vec<Arc<dyn FilterPlugin>>,
+    pub gemini: Vec<Arc<dyn FilterPlugin>>,
+}
+
+impl ProviderFilterChains {
+    pub fn get(&self, provider: Provider) -> &[Arc<dyn FilterPlugin>] {
+        match provider {
+            Provider::Anthropic => &self.anthropic,
+            Provider::Openai => &self.openai,
+            Provider::Gemini => &self.gemini,
+        }
+    }
+
+    pub fn get_mut(&mut self, provider: Provider) -> &mut Vec<Arc<dyn FilterPlugin>> {
+        match provider {
+            Provider::Anthropic => &mut self.anthropic,
+            Provider::Openai => &mut self.openai,
+            Provider::Gemini => &mut self.gemini,
+        }
+    }
 }
 
 impl RouterPipelineCache {
@@ -31,7 +59,14 @@ impl RouterPipelineCache {
             user_filters: Vec::new(),
             terminal,
             instantiation_error: None,
+            provider_filters: None,
         }
+    }
+
+    pub fn filters_for(&self, provider: Provider) -> &[Arc<dyn FilterPlugin>] {
+        self.provider_filters
+            .as_ref()
+            .map_or(self.user_filters.as_slice(), |chains| chains.get(provider))
     }
 }
 
@@ -39,6 +74,8 @@ impl RouterPipelineCache {
 pub enum DialectCache {
     Inherit,
     Explicit(ShapePluginCache),
+    /// Complete dialects, including native request shaping for response-only plugins.
+    PerUpstream(HashMap<Uuid, Arc<dyn UpstreamDialect>>),
 }
 
 #[derive(Clone)]
@@ -250,13 +287,11 @@ impl PrincipalSpecCached {
             .unwrap_or_else(|| Arc::clone(&self.default_router_pipeline))
     }
 
-    pub fn resolved_dialect<'a>(
-        &'a self,
-        fallback: &'a Arc<dyn UpstreamDialect>,
-    ) -> &'a Arc<dyn UpstreamDialect> {
+    pub fn resolved_dialect(&self, upstream_id: Uuid) -> Option<&Arc<dyn UpstreamDialect>> {
         match &self.dialect {
-            DialectCache::Inherit => fallback,
-            DialectCache::Explicit(cache) => &cache.dialect,
+            DialectCache::Inherit => None,
+            DialectCache::Explicit(cache) => Some(&cache.dialect),
+            DialectCache::PerUpstream(dialects) => dialects.get(&upstream_id),
         }
     }
 
@@ -319,6 +354,7 @@ mod tests {
             user_filters: vec![Arc::new(StubFilter("global"))],
             terminal: TerminalStrategy::FirstPick,
             instantiation_error: None,
+            provider_filters: None,
         });
         let spec = cached(None);
 
@@ -337,6 +373,7 @@ mod tests {
             user_filters: vec![Arc::new(StubFilter("explicit"))],
             terminal: TerminalStrategy::Random,
             instantiation_error: None,
+            provider_filters: None,
         });
         let spec = cached(Some(explicit.clone()));
 

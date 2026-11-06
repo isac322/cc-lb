@@ -25,7 +25,7 @@ use crate::probe::probe_hook_dispatch;
 // plugin to recompile on next reconcile even when the wasm bytes are
 // byte-identical — guarantees a policy tightening cannot be silently
 // carried by a stale short-circuited slot.
-pub(crate) const VALIDATION_POLICY_VERSION: u32 = 1;
+pub(crate) const VALIDATION_POLICY_VERSION: u32 = 2;
 
 const WASMTIME_CACHE_COMPATIBILITY_VERSION: &str = "wasmtime-46.0.1";
 
@@ -132,11 +132,21 @@ fn admit_inspected_wasm(
     let instance_pre = compiled_modules.get_or_compile(content_hash, || {
         compile_instance_pre(engine, linker, wasm_bytes)
     })?;
-    for (hook, wire_version) in &inspection.hook_versions {
+    for (name, metadata) in &inspection.metadata.hooks {
+        let (hook, provider) = HookKind::parse_entrypoint(name).ok_or_else(|| {
+            WasmtimeRuntimeError::ModuleRejected {
+                reason: format!("unknown hook `{name}`"),
+            }
+        })?;
+        let wire_version = cc_lb_plugin_wire::schema::WireVersion::from_u8(metadata.wire_version)
+            .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
+            reason: format!("unsupported wire version for `{name}`"),
+        })?;
         probe_hook_dispatch(
             Arc::clone(&instance_pre),
-            *hook,
-            *wire_version,
+            hook,
+            wire_version,
+            provider,
             &inspection.metadata,
             config.memory_max_pages,
         )?;

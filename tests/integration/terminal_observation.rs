@@ -1390,10 +1390,13 @@ async fn admin_event_detail_propagates_internal_errors() -> Result<(), Box<dyn s
     let event_id = row.event_id.clone().expect("event_id persisted");
 
     // The admin detail endpoint must surface the same typed diagnostics.
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("id", &event_id)
+        .finish();
     let detail = client
         .request(
             "GET",
-            &format!("{}/admin/v1/events/detail/{event_id}", server.admin_url),
+            &format!("{}/admin/v1/events/detail?{query}", server.admin_url),
             &[("authorization", "Bearer test-admin-token")],
             &[],
         )

@@ -73,6 +73,7 @@ pub struct LazyRefresher {
     stores: Arc<Stores>,
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
+    google_config: Arc<cc_lb_config::Config>,
     replica_id: Uuid,
     http: TokenHttpClient,
     metadata_hook: Option<MetadataHookHandle>,
@@ -333,6 +334,7 @@ impl LazyRefresher {
             stores: deps.stores,
             aead: deps.aead,
             oauth_cfg: deps.oauth_cfg,
+            google_config: deps.google_config,
             replica_id,
             http,
             metadata_hook,
@@ -437,6 +439,7 @@ pub struct LazyRefresherDeps {
     pub stores: Arc<Stores>,
     pub aead: Arc<AeadService>,
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
+    pub google_config: Arc<cc_lb_config::Config>,
     pub clock: ClockHandle,
 }
 
@@ -465,6 +468,7 @@ impl LazyRefresher {
             self.stores.audit.as_deref(),
             &self.aead,
             &self.oauth_cfg,
+            &self.google_config,
             self.replica_id,
             &self.http,
             &self.cancel,
@@ -555,6 +559,7 @@ impl LazyRefreshHandle for LazyRefresher {
             self.stores.audit.as_deref(),
             &self.aead,
             &self.oauth_cfg,
+            &self.google_config,
             self.replica_id,
             &self.http,
             &self.cancel,
@@ -682,6 +687,10 @@ pub enum RefreshError {
     Parse(cc_lb_oauth_protocol::TokenEndpointParseError),
     #[error("oauth refresh cancelled")]
     Cancelled,
+    #[error(
+        "oauth_client_not_configured: configure oauth.antigravity.client_id and oauth.antigravity.client_secret before refreshing Antigravity credentials"
+    )]
+    AntigravityClientNotConfigured,
     /// The credential's policy prohibits token refresh. This protects both
     /// access-only imports and Anthropic long-lived grants from rotation.
     #[error("long-lived oauth credential must not be refreshed; reauthorization required")]
@@ -734,6 +743,7 @@ async fn refresh_flow(
     audit: Option<&dyn AuditStore>,
     aead: &AeadService,
     oauth_cfg: &AnthropicOAuthConfig,
+    google_config: &cc_lb_config::Config,
     replica_id: Uuid,
     http: &TokenHttpClient,
     cancel: &CancellationToken,
@@ -759,7 +769,9 @@ async fn refresh_flow(
     let token = request_refresh(
         http,
         oauth_cfg,
+        google_config,
         upstream.kind,
+        previous.oauth_profile,
         cancel,
         &previous.refresh_token,
     )
@@ -785,6 +797,7 @@ async fn refresh_flow(
                 never_refresh: previous.never_refresh,
                 account_id,
                 project_id: previous.project_id,
+                oauth_profile: previous.oauth_profile,
             };
             let fingerprint = access_token_fingerprint(&bundle.access_token);
             let expires_at = bundle.expires_at_unix_secs;
@@ -837,10 +850,13 @@ async fn refresh_flow(
 async fn request_refresh(
     http: &TokenHttpClient,
     oauth_cfg: &AnthropicOAuthConfig,
+    google_config: &cc_lb_config::Config,
     oauth_kind: UpstreamKind,
+    oauth_profile: cc_lb_oauth_protocol::GeminiOAuthProfile,
     cancel: &CancellationToken,
     refresh_token: &str,
 ) -> Result<TokenEndpointResponse, RefreshError> {
+    let antigravity = google_config.oauth.antigravity.clone().unwrap_or_default();
     let (token_url, content_type, body) = match oauth_kind {
         UpstreamKind::AnthropicOauth => (
             oauth_cfg.token_url.as_str(),
@@ -852,11 +868,34 @@ async fn request_refresh(
             "application/json",
             refresh_token_json_body(OPENAI_CODEX_CLIENT_ID, refresh_token),
         ),
-        UpstreamKind::GeminiOauth => (
-            GEMINI_OAUTH_TOKEN_URL,
-            "application/x-www-form-urlencoded",
-            gemini_refresh_token_form_body(refresh_token),
-        ),
+        UpstreamKind::GeminiOauth => {
+            let (client_id, client_secret, token_url) = match oauth_profile {
+                cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity => {
+                    if antigravity.missing_client_credentials().is_some() {
+                        return Err(RefreshError::AntigravityClientNotConfigured);
+                    }
+                    (
+                        antigravity.client_id.as_str(),
+                        antigravity.client_secret.as_str(),
+                        antigravity.token_url.as_str(),
+                    )
+                }
+                cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli => (
+                    GEMINI_OAUTH_CLIENT_ID,
+                    GEMINI_OAUTH_CLIENT_SECRET,
+                    GEMINI_OAUTH_TOKEN_URL,
+                ),
+            };
+            (
+                token_url,
+                "application/x-www-form-urlencoded",
+                cc_lb_oauth_protocol::gemini_refresh_token_form_body(
+                    client_id,
+                    client_secret,
+                    refresh_token,
+                ),
+            )
+        }
         _ => return Err(RefreshError::NotRefreshable),
     };
     let content_length = HeaderValue::from_str(&body.len().to_string())
@@ -900,15 +939,6 @@ async fn request_refresh(
         });
     }
     parse_token_endpoint_response(&bytes).map_err(RefreshError::Parse)
-}
-
-fn gemini_refresh_token_form_body(refresh_token: &str) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("grant_type", "refresh_token");
-    serializer.append_pair("client_id", GEMINI_OAUTH_CLIENT_ID);
-    serializer.append_pair("client_secret", GEMINI_OAUTH_CLIENT_SECRET);
-    serializer.append_pair("refresh_token", refresh_token);
-    serializer.finish()
 }
 
 fn access_token_fingerprint(access_token: &str) -> String {
@@ -995,6 +1025,7 @@ fn reason_for(error: &RefreshError) -> String {
         RefreshError::Decrypt => "decrypt".to_owned(),
         RefreshError::Encrypt => "encrypt".to_owned(),
         RefreshError::Storage(_) => "storage".to_owned(),
+        RefreshError::AntigravityClientNotConfigured => "oauth_client_not_configured".to_owned(),
         // Unreachable in practice: `reason_for` is only called on errors from
         // `request_refresh`, and a long-lived credential is stopped by the
         // `refresh_one` guard long before that. The arm exists because the
@@ -1233,6 +1264,7 @@ mod tests {
             let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
             let id = Uuid::new_v4();
             let bundle = OAuthTokenBundle {
+                oauth_profile: Default::default(),
                 access_token: "access-only-test-token".to_owned(),
                 refresh_token: String::new(),
                 expires_at_unix_secs: 1,
@@ -1478,6 +1510,7 @@ mod tests {
             let encrypted = EncryptedOAuthTokens::encrypt(
                 self.aead.as_ref(),
                 &OAuthTokenBundle {
+                    oauth_profile: Default::default(),
                     access_token: "sk-ant-oat01-old".to_owned(),
                     refresh_token: "sk-ant-ort01-old".to_owned(),
                     expires_at_unix_secs: 1,
@@ -1504,6 +1537,7 @@ mod tests {
         ) -> LazyRefresher {
             LazyRefresher::new_with_claim_guard_for_tests(
                 LazyRefresherDeps {
+                    google_config: Default::default(),
                     stores: self.stores.clone(),
                     aead: self.aead.clone(),
                     oauth_cfg: self.oauth_cfg.clone(),
@@ -1752,6 +1786,7 @@ mod tests {
                 let rotated = EncryptedOAuthTokens::encrypt(
                     self.aead.as_ref(),
                     &OAuthTokenBundle {
+                        oauth_profile: Default::default(),
                         access_token: "sk-ant-oat01-rotated".to_owned(),
                         refresh_token: "sk-ant-ort01-rotated".to_owned(),
                         expires_at_unix_secs: 9_999_999_999,

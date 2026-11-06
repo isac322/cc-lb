@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_plugin_wire::metadata::{HookMode, PluginMetadata};
-use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
+use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireVersion};
 use cc_lb_plugin_wire::v1::{
     ArchivedShapeResponse, ArchivedTransformResponseResult, ArchivedTransformSseEventResult,
     Header, Principal, ShapeRequest, SseEvent, TransformResponseRequest, TransformSseEventRequest,
@@ -12,32 +12,39 @@ use rkyv::util::AlignedVec;
 use wasmtime::InstancePre;
 
 use crate::budget::StoreBudget;
-use crate::cache::{call_shape_hook, call_transform_response_hook, call_transform_sse_event_hook};
+use crate::cache::call_hook_export_scoped;
 use crate::cell::PluginCell;
 use crate::engine::HostState;
 use crate::error::WasmtimeRuntimeError;
 
 mod filter;
+mod v2;
 
 use filter::probe_filter;
-
+use v2::{
+    probe_envelope as probe_shape_envelope_gemini_v2,
+    probe_response as probe_transform_response_v2, probe_shape as probe_shape_v2,
+    probe_sse as probe_transform_sse_event_v2,
+};
 pub(crate) fn probe_hook_dispatch(
     instance_pre: Arc<InstancePre<HostState>>,
     hook: HookKind,
     wire_version: WireVersion,
+    provider: Option<ProviderFamily>,
     metadata: &PluginMetadata,
     memory_max_pages: u32,
 ) -> Result<(), WasmtimeRuntimeError> {
-    if matches!(
+    let noop = matches!(
         hook,
         HookKind::TransformResponse | HookKind::TransformSseEvent
     ) && metadata
         .hooks
-        .get(hook.as_str())
-        .is_some_and(|hook_metadata| hook_metadata.mode == HookMode::Noop)
-    {
-        return Ok(());
-    }
+        .get(
+            provider
+                .map_or(hook.export_name(), |p| hook.qualified_export_name(p))
+                .trim_start_matches("cc_lb_"),
+        )
+        .is_some_and(|hook_metadata| hook_metadata.mode == HookMode::Noop);
 
     let cell = Arc::new(PluginCell {
         instance_pre,
@@ -47,19 +54,55 @@ pub(crate) fn probe_hook_dispatch(
         plugin_name: Arc::from(metadata.name.as_str()),
         content_hash: [0; 32],
     });
+    let export = provider.map_or(hook.export_name(), |p| hook.qualified_export_name(p));
+    if noop {
+        if provider.is_some() {
+            crate::cache::validate_hook_export(&cell, hook, export)?;
+        }
+        return Ok(());
+    }
+    let provider = provider.unwrap_or(ProviderFamily::Anthropic);
     match (hook, wire_version) {
-        (HookKind::Filter, WireVersion::V1) => probe_filter(&cell),
-        (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell),
-        (HookKind::TransformResponse, WireVersion::V1) => probe_transform_response_v1(&cell),
-        (HookKind::TransformSseEvent, WireVersion::V1) => probe_transform_sse_event_v1(&cell),
+        (HookKind::Filter, version) => probe_filter(&cell, provider, export, version),
+        (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell, provider, export),
+        (HookKind::Shape, WireVersion::V2) => probe_shape_v2(&cell, provider, export),
+        (HookKind::TransformResponse, WireVersion::V1) => {
+            probe_transform_response_v1(&cell, provider, export)
+        }
+        (HookKind::TransformResponse, WireVersion::V2) => {
+            probe_transform_response_v2(&cell, provider, export)
+        }
+        (HookKind::TransformSseEvent, WireVersion::V1) => {
+            probe_transform_sse_event_v1(&cell, provider, export)
+        }
+        (HookKind::TransformSseEvent, WireVersion::V2) => {
+            probe_transform_sse_event_v2(&cell, provider, export)
+        }
+        (HookKind::ShapeEnvelopeGemini, WireVersion::V2) => {
+            probe_shape_envelope_gemini_v2(&cell, provider, export)
+        }
+        (HookKind::ShapeEnvelopeGemini, WireVersion::V1) => Err(probe_failed(
+            HookKind::ShapeEnvelopeGemini,
+            "wire v1 is unsupported for Gemini shape envelope".into(),
+        )),
     }
 }
 
-fn probe_shape_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
-    let input = rkyv::to_bytes::<RkyvError>(&sample_shape_request())
+fn probe_shape_v1(
+    cell: &Arc<PluginCell>,
+    provider: ProviderFamily,
+    export: &str,
+) -> Result<(), WasmtimeRuntimeError> {
+    let input = rkyv::to_bytes::<RkyvError>(&sample_shape_request(provider))
         .map_err(|error| probe_failed(HookKind::Shape, format!("encode ShapeRequest: {error}")))?;
-    let output = call_shape_hook(cell, input.as_slice())
-        .map_err(|error| probe_failed(HookKind::Shape, error.to_string()))?;
+    let output = call_hook_export_scoped(
+        cell,
+        input.as_slice(),
+        HookKind::Shape,
+        export,
+        <[u8]>::to_vec,
+    )
+    .map_err(|error| probe_failed(HookKind::Shape, error.to_string()))?;
     let mut aligned = AlignedVec::<16>::with_capacity(output.len());
     aligned.extend_from_slice(&output);
     rkyv::access::<ArchivedShapeResponse, RkyvError>(&aligned)
@@ -67,16 +110,27 @@ fn probe_shape_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
     Ok(())
 }
 
-fn probe_transform_response_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
-    let input =
-        rkyv::to_bytes::<RkyvError>(&sample_transform_response_request()).map_err(|error| {
+fn probe_transform_response_v1(
+    cell: &Arc<PluginCell>,
+    provider: ProviderFamily,
+    export: &str,
+) -> Result<(), WasmtimeRuntimeError> {
+    let input = rkyv::to_bytes::<RkyvError>(&sample_transform_response_request(provider)).map_err(
+        |error| {
             probe_failed(
                 HookKind::TransformResponse,
                 format!("encode TransformResponseRequest: {error}"),
             )
-        })?;
-    let output = call_transform_response_hook(cell, input.as_slice())
-        .map_err(|error| probe_failed(HookKind::TransformResponse, error.to_string()))?;
+        },
+    )?;
+    let output = call_hook_export_scoped(
+        cell,
+        input.as_slice(),
+        HookKind::TransformResponse,
+        export,
+        copy_aligned,
+    )
+    .map_err(|error| probe_failed(HookKind::TransformResponse, error.to_string()))?;
     rkyv::access::<ArchivedTransformResponseResult, RkyvError>(&output).map_err(|error| {
         probe_failed(
             HookKind::TransformResponse,
@@ -86,16 +140,26 @@ fn probe_transform_response_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRun
     Ok(())
 }
 
-fn probe_transform_sse_event_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
-    let input =
-        rkyv::to_bytes::<RkyvError>(&sample_transform_sse_event_request()).map_err(|error| {
+fn probe_transform_sse_event_v1(
+    cell: &Arc<PluginCell>,
+    provider: ProviderFamily,
+    export: &str,
+) -> Result<(), WasmtimeRuntimeError> {
+    let input = rkyv::to_bytes::<RkyvError>(&sample_transform_sse_event_request(provider))
+        .map_err(|error| {
             probe_failed(
                 HookKind::TransformSseEvent,
                 format!("encode TransformSseEventRequest: {error}"),
             )
         })?;
-    let output = call_transform_sse_event_hook(cell, input.as_slice())
-        .map_err(|error| probe_failed(HookKind::TransformSseEvent, error.to_string()))?;
+    let output = call_hook_export_scoped(
+        cell,
+        input.as_slice(),
+        HookKind::TransformSseEvent,
+        export,
+        copy_aligned,
+    )
+    .map_err(|error| probe_failed(HookKind::TransformSseEvent, error.to_string()))?;
     rkyv::access::<ArchivedTransformSseEventResult, RkyvError>(&output).map_err(|error| {
         probe_failed(
             HookKind::TransformSseEvent,
@@ -105,52 +169,60 @@ fn probe_transform_sse_event_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRu
     Ok(())
 }
 
-fn sample_shape_request() -> ShapeRequest {
+fn sample_shape_request(provider: ProviderFamily) -> ShapeRequest {
     ShapeRequest {
         request_id: Box::from("probe-req-1"),
         method: Box::from("POST"),
-        path: Box::from("/v1/messages"),
+        path: Box::from(sample_path(provider)),
         query: None,
         headers: Box::new([hdr("content-type", "application/json")]),
-        body: Box::from(&br#"{"model":"claude-3-haiku-20240307","messages":[]}"#[..]),
+        body: Box::from(sample_body(provider)),
         principal: synth_principal(),
-        upstream: Upstream::AnthropicDirect {
-            base_url: Some(Box::from("https://example.test")),
-        },
+        upstream: sample_upstream(provider),
     }
 }
 
-fn sample_transform_response_request() -> TransformResponseRequest {
+fn sample_transform_response_request(provider: ProviderFamily) -> TransformResponseRequest {
     TransformResponseRequest {
         request_id: Box::from("probe-req-1"),
         principal: synth_principal(),
-        upstream: Upstream::AnthropicDirect {
-            base_url: Some(Box::from("https://example.test")),
-        },
+        upstream: sample_upstream(provider),
         request_method: Box::from("POST"),
-        request_path: Box::from("/v1/messages"),
-        canonical_model_id: Box::from("claude-3-haiku-20240307"),
+        request_path: Box::from(sample_path(provider)),
+        canonical_model_id: Box::from(sample_model(provider)),
         response_status: 200,
         response_headers: Box::new([hdr("content-type", "application/json")]),
-        body: Box::from(&br#"{"content":[]}"#[..]),
+        body: Box::from(match provider {
+            ProviderFamily::Anthropic => &br#"{"content":[]}"#[..],
+            ProviderFamily::Openai => &br#"{"id":"resp_probe","output":[]}"#[..],
+            ProviderFamily::Gemini => &br#"{"candidates":[]}"#[..],
+        }),
     }
 }
 
-fn sample_transform_sse_event_request() -> TransformSseEventRequest {
+fn sample_transform_sse_event_request(provider: ProviderFamily) -> TransformSseEventRequest {
     TransformSseEventRequest {
         request_id: Box::from("probe-req-1"),
         principal: synth_principal(),
-        upstream: Upstream::AnthropicDirect {
-            base_url: Some(Box::from("https://example.test")),
-        },
+        upstream: sample_upstream(provider),
         request_method: Box::from("POST"),
-        request_path: Box::from("/v1/messages"),
-        canonical_model_id: Box::from("claude-3-haiku-20240307"),
+        request_path: Box::from(sample_path(provider)),
+        canonical_model_id: Box::from(sample_model(provider)),
         response_status: 200,
         response_headers: Box::new([hdr("content-type", "text/event-stream")]),
         event: SseEvent {
-            event: Box::from("content_block_start"),
-            data: Box::from(&br#"{"type":"content_block_start"}"#[..]),
+            event: Box::from(match provider {
+                ProviderFamily::Anthropic => "content_block_start",
+                ProviderFamily::Openai => "response.created",
+                ProviderFamily::Gemini => "",
+            }),
+            data: Box::from(match provider {
+                ProviderFamily::Anthropic => &br#"{"type":"content_block_start"}"#[..],
+                ProviderFamily::Openai => {
+                    &br#"{"type":"response.created","response":{"id":"resp_probe","output":[]}}"#[..]
+                }
+                ProviderFamily::Gemini => &br#"{"candidates":[]}"#[..],
+            }),
         },
     }
 }
@@ -174,5 +246,44 @@ fn probe_failed(hook: HookKind, reason: String) -> WasmtimeRuntimeError {
     WasmtimeRuntimeError::ProbeFailed {
         hook: hook.as_str(),
         reason,
+    }
+}
+
+fn copy_aligned(output: &[u8]) -> AlignedVec<16> {
+    let mut aligned = AlignedVec::with_capacity(output.len());
+    aligned.extend_from_slice(output);
+    aligned
+}
+
+fn sample_upstream(provider: ProviderFamily) -> Upstream {
+    let base_url = Some(Box::from("https://example.test"));
+    match provider {
+        ProviderFamily::Anthropic => Upstream::AnthropicDirect { base_url },
+        ProviderFamily::Openai => Upstream::OpenaiDirect { base_url },
+        ProviderFamily::Gemini => Upstream::GeminiDirect { base_url },
+    }
+}
+
+fn sample_path(provider: ProviderFamily) -> &'static str {
+    match provider {
+        ProviderFamily::Anthropic => "/v1/messages",
+        ProviderFamily::Openai => "/v1/responses",
+        ProviderFamily::Gemini => "/v1beta/models/gemini-2.5-flash:generateContent",
+    }
+}
+
+fn sample_model(provider: ProviderFamily) -> &'static str {
+    match provider {
+        ProviderFamily::Anthropic => "claude-3-haiku-20240307",
+        ProviderFamily::Openai => "gpt-4.1",
+        ProviderFamily::Gemini => "gemini-2.5-flash",
+    }
+}
+
+fn sample_body(provider: ProviderFamily) -> &'static [u8] {
+    match provider {
+        ProviderFamily::Anthropic => br#"{"model":"claude-3-haiku-20240307","messages":[]}"#,
+        ProviderFamily::Openai => br#"{"model":"gpt-4.1","input":"probe"}"#,
+        ProviderFamily::Gemini => br#"{"contents":[{"role":"user","parts":[{"text":"probe"}]}]}"#,
     }
 }

@@ -155,6 +155,7 @@ fn pipeline(
         user_filters,
         terminal,
         instantiation_error,
+        provider_filters: None,
     })
 }
 

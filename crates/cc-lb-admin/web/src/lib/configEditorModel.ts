@@ -43,8 +43,9 @@ export const CONFIG_EDITOR_CATEGORIES = [
   {
     id: 'scheduling',
     label: 'Scheduling',
-    description: 'Worker pools, recurring jobs, and scheduler concurrency.',
-    roots: ['scheduler'],
+    description:
+      'Worker pools, recurring jobs, scheduler concurrency, and warm-up models.',
+    roots: ['scheduler', 'warmup'],
   },
   {
     id: 'routing',
@@ -239,6 +240,15 @@ export const CONFIG_EDITOR_SECTIONS = [
     label: 'Recurring jobs',
     description: 'Per-job enablement and cadence.',
     paths: ['scheduler.recurring_jobs.**'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'warmup-models',
+    categoryId: 'scheduling',
+    label: 'Warm-up models',
+    description: 'Models used for OpenAI and Gemini OAuth warm-up requests.',
+    paths: ['warmup.openai_model', 'warmup.gemini_model'],
     advancedPaths: [],
     danger: [],
   },
@@ -1857,6 +1867,24 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       impactDimensions: ['storage', 'latency'],
     },
   },
+  {
+    pattern: 'warmup.openai_model',
+    guidance: {
+      description: 'Model used for OpenAI OAuth warm-up requests.',
+      recommendation:
+        'Choose a model available to the connected OpenAI accounts.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'warmup.gemini_model',
+    guidance: {
+      description: 'Gemini model used for Gemini OAuth warm-up requests.',
+      recommendation:
+        'Choose a Gemini model available to the connected Google accounts.',
+      impactDimensions: ['availability'],
+    },
+  },
 ];
 
 const GENERIC_LEAF_GUIDANCE: Record<
@@ -2032,6 +2060,8 @@ export function isConfigLeafActive(
  * shows them beside the input.
  */
 const CONFIG_KEY_LABELS: Record<string, string> = {
+  openai_model: 'OpenAI model',
+  gemini_model: 'Gemini model',
   drain_secs: 'Shutdown drain period',
   tick_secs: 'Tick interval',
   writer_flush_ms: 'Writer flush interval',

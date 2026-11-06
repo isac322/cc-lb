@@ -1,6 +1,6 @@
-//! Plugin metadata JSON schema — parsed from wasm's `cc_lb.plugin.v1`
-//! custom section at admission time. This is the host-side parser;
-//! the guest-side emitter is in `cc-lb-pdk-wasmtime-macros`.
+//! Plugin metadata JSON schema, shared by `cc_lb.plugin.v1` (legacy) and
+//! `cc_lb.plugin.v2` (provider-qualified) custom sections.
+//! The guest-side emitter is in `cc-lb-pdk-wasmtime-macros`.
 
 use std::collections::BTreeMap;
 use std::string::String;
@@ -8,8 +8,8 @@ use std::string::String;
 use serde::{Deserialize, Serialize};
 
 /// Top-level plugin metadata. Written by the `#[cc_lb_plugin(...)]`
-/// proc-macro into the wasm's `cc_lb.plugin.v1` custom section as
-/// canonical JSON (sorted keys, no extra whitespace).
+/// proc-macro into one metadata custom section. V1 hook keys are bare
+/// (e.g. `shape`); V2 also accepts qualified keys (e.g. `shape_openai`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginMetadata {
     pub name: String,
@@ -84,8 +84,8 @@ impl From<serde_json::Error> for MetadataError {
 }
 
 impl PluginMetadata {
-    /// Parse `cc_lb.plugin.v1` custom section bytes as JSON and
-    /// validate required fields.
+    /// Parse V1 or V2 metadata custom section bytes as JSON and validate
+    /// required fields. The host validates the section's version separately.
     pub fn parse(bytes: &[u8]) -> Result<Self, MetadataError> {
         let raw: Self = serde_json::from_slice(bytes)?;
         raw.validate()?;
@@ -111,7 +111,7 @@ impl PluginMetadata {
         }
 
         for (name, hook) in &self.hooks {
-            if crate::schema::HookKind::parse(name).is_none() {
+            if crate::schema::HookKind::parse_entrypoint(name).is_none() {
                 return Err(MetadataError::UnknownHook(name.clone()));
             }
             if hook.description.trim().is_empty() {

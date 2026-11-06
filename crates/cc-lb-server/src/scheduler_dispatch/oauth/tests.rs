@@ -146,6 +146,7 @@ async fn scoped_refresh_probe_record(
         refresh_token_expires_at_unix_secs: None,
         account_id: None,
         project_id: (kind == UpstreamKind::GeminiOauth).then(|| "test-project".to_owned()),
+        oauth_profile: Default::default(),
         scopes: Vec::new(),
         never_refresh,
     };
@@ -316,7 +317,9 @@ async fn gemini_refresh_does_not_use_configured_token_url() {
     let result = crate::scheduler_dispatch::http::request_refresh(
         &client,
         &config,
+        &cc_lb_config::Config::default(),
         cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth,
+        cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli,
         &CancellationToken::new(),
         "gemini-refresh-token",
     )
@@ -605,6 +608,7 @@ impl DispatchFixture {
         });
         let lazy_refresher = Arc::new(LazyRefresher::new_with_claim_guard(
             LazyRefresherDeps {
+                google_config: Default::default(),
                 stores: refresher_stores,
                 aead: aead.clone(),
                 oauth_cfg: oauth_cfg.clone(),
@@ -708,6 +712,7 @@ impl DispatchFixture {
                 refresh_token_expires_at_unix_secs: None,
                 account_id: None,
                 project_id: None,
+                oauth_profile: Default::default(),
                 scopes: vec!["messages".to_owned()],
                 never_refresh,
             },

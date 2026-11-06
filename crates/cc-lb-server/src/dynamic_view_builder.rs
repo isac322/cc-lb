@@ -9,13 +9,14 @@ use cc_lb_aead::AeadService;
 use cc_lb_clock::{unix_millis, unix_secs};
 use cc_lb_control::anthropic_api_key::credential::{ApiKeyResolutionError, resolve_api_key};
 use cc_lb_control::api_keys::principal_view::{
-    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, ProviderFilterChains,
+    RouterPipelineCache,
 };
 use cc_lb_control::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
     UpstreamStatusSnapshot,
 };
-use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, RateLimitObservation, Upstream};
+use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Provider, RateLimitObservation, Upstream};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_quota::plan_capacity::{
@@ -165,6 +166,7 @@ pub fn ensure_wasm_cached(
 #[allow(clippy::too_many_arguments)]
 pub async fn build_dynamic_view(
     stores: &Stores,
+    antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     current_generation: u64,
@@ -202,7 +204,7 @@ pub async fn build_dynamic_view(
     }));
     let principals = list_principals(stores).await?;
     let (principal_chains, registered_slot_keys) =
-        build_principal_chains(stores, runtime, data_dir, &principals).await?;
+        build_principal_chains(stores, runtime, data_dir, &principals, &upstreams, &aead).await?;
     // RFC-0001 gap-analysis #1: sweep any runtime slot whose key is
     // no longer referenced by the freshly-built view. Must run AFTER
     // build_principal_chains succeeds so we don't tear down slots the
@@ -227,6 +229,7 @@ pub async fn build_dynamic_view(
         aead,
         lazy_refresher,
         clock.clone(),
+        antigravity_config.cloned().unwrap_or_default(),
     ));
     let snapshot = Arc::new(UpstreamStatusSnapshot {
         entries: statuses,
@@ -539,6 +542,8 @@ async fn build_principal_chains(
     runtime: &Arc<WasmtimeRuntime>,
     data_dir: &Path,
     principals: &[PrincipalRecord],
+    upstreams: &[UpstreamRecord],
+    aead: &AeadService,
 ) -> Result<
     (
         HashMap<String, PrincipalRoutingArtifacts>,
@@ -564,22 +569,45 @@ async fn build_principal_chains(
                 .push(entry);
             entries
         });
+    // Identity is bound only for records used by a plugin, once per
+    // reconciliation rather than once per principal or request.
+    let mut upstream_identities = HashMap::new();
     let mut chains = HashMap::new();
     let mut registered_slot_keys: HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey> = HashSet::new();
     for principal in principals {
+        let allowed_upstreams: Vec<&UpstreamRecord> = upstreams
+            .iter()
+            .filter(|upstream| {
+                upstream.enabled
+                    && upstream.deleted_at_unix_secs.is_none()
+                    && (principal.allowed_upstreams.is_empty()
+                        || principal.allowed_upstreams.contains(&upstream.id))
+            })
+            .collect();
+        let providers: Vec<Provider> = [Provider::Anthropic, Provider::Openai, Provider::Gemini]
+            .into_iter()
+            .filter(|provider| {
+                allowed_upstreams
+                    .iter()
+                    .any(|record| record.kind.provider() == *provider)
+            })
+            .collect();
         let router_entries =
             take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Router);
         let shape_entries =
             take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Shape);
 
         let router = build_router_pipeline(
-            stores,
-            runtime,
-            data_dir,
+            RouterPipelineBuildContext {
+                stores,
+                runtime,
+                data_dir,
+                registry: &registry,
+            },
             principal,
             router_entries,
-            &registry,
             &mut registered_slot_keys,
+            &providers,
         )
         .await?;
 
@@ -612,13 +640,48 @@ async fn build_principal_chains(
                 registered_slot_keys.insert(slot_key.clone());
                 match register_shape_slot(runtime, &slot_key, &manifest).await {
                     Ok(slot) => {
-                        let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-                            slot,
-                            runtime.config_arc(),
-                        ));
-                        let handle: Arc<dyn cc_lb_upstream::UpstreamDialect> =
-                            Arc::new(WasmtimeUpstreamDialect::new(dispatch));
-                        DialectCache::Explicit(ShapePluginCache { dialect: handle })
+                        let dispatch =
+                            WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
+                        let mut dialects = HashMap::new();
+                        for provider in &providers {
+                            let Some(selected) = dispatch.for_provider(wire_provider(*provider))
+                            else {
+                                continue;
+                            };
+                            let selected = Arc::new(selected);
+                            for record in allowed_upstreams
+                                .iter()
+                                .filter(|record| record.kind.provider() == *provider)
+                            {
+                                let identity =
+                                    upstream_identities.entry(record.id).or_insert_with(|| {
+                                        let tokens = if record.kind == UpstreamKind::GeminiOauth {
+                                            record.oauth_credentials.as_ref().and_then(
+                                                |credentials| {
+                                                    credentials
+                                                        .decrypt(aead, record.id.as_bytes())
+                                                        .ok()
+                                                },
+                                            )
+                                        } else {
+                                            None
+                                        };
+                                        upstream_identity(record, tokens.as_ref())
+                                    });
+                                let mut dialect =
+                                    WasmtimeUpstreamDialect::new(Arc::clone(&selected))
+                                        .with_upstream_identity(identity.clone());
+                                if selected.shape_wire_version().is_none() {
+                                    dialect = dialect.with_native_request(
+                                        cc_lb_engine::lifecycle::native_route_dialect(record),
+                                    );
+                                }
+                                let dialect: Arc<dyn cc_lb_upstream::UpstreamDialect> =
+                                    Arc::new(dialect);
+                                dialects.insert(record.id, dialect);
+                            }
+                        }
+                        DialectCache::PerUpstream(dialects)
                     }
                     Err(error) => {
                         tracing::error!(
@@ -639,6 +702,34 @@ async fn build_principal_chains(
         chains.insert(principal.name.clone(), (router, dialect));
     }
     Ok((chains, registered_slot_keys))
+}
+
+/// Copies stored upstream identity without decrypting or inferring metadata.
+pub(crate) fn upstream_identity(
+    record: &UpstreamRecord,
+    tokens: Option<&cc_lb_aead::OAuthTokenBundle>,
+) -> cc_lb_domain::UpstreamIdentity {
+    let gemini_tokens = tokens.filter(|_| record.kind == UpstreamKind::GeminiOauth);
+    cc_lb_domain::UpstreamIdentity {
+        provider: record.kind.provider(),
+        credential_kind: record.kind.as_str().to_owned(),
+        upstream_id: record.id.to_string(),
+        name: record.name.clone(),
+        base_url: record.base_url.as_ref().map(ToString::to_string),
+        gemini_oauth_profile: gemini_tokens.map(|tokens| match tokens.oauth_profile {
+            cc_lb_aead::GeminiOAuthProfile::GeminiCli => "gemini_cli".to_owned(),
+            cc_lb_aead::GeminiOAuthProfile::Antigravity => "antigravity".to_owned(),
+        }),
+        code_assist_project_id: gemini_tokens.and_then(|tokens| tokens.project_id.clone()),
+    }
+}
+
+fn wire_provider(provider: Provider) -> cc_lb_plugin_wire::schema::ProviderFamily {
+    match provider {
+        Provider::Anthropic => cc_lb_plugin_wire::schema::ProviderFamily::Anthropic,
+        Provider::Openai => cc_lb_plugin_wire::schema::ProviderFamily::Openai,
+        Provider::Gemini => cc_lb_plugin_wire::schema::ProviderFamily::Gemini,
+    }
 }
 
 fn take_chain_entries(
@@ -700,15 +791,26 @@ async fn manifest_for_chain_entry(
     })
 }
 
+struct RouterPipelineBuildContext<'a> {
+    stores: &'a Stores,
+    runtime: &'a Arc<WasmtimeRuntime>,
+    data_dir: &'a Path,
+    registry: &'a HashMap<Uuid, WasmRegistryEntry>,
+}
+
 async fn build_router_pipeline(
-    stores: &Stores,
-    runtime: &Arc<WasmtimeRuntime>,
-    data_dir: &Path,
+    context: RouterPipelineBuildContext<'_>,
     principal: &PrincipalRecord,
     mut router_entries: Vec<cc_lb_storage_api::PluginChainEntry>,
-    registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
     registered_slot_keys: &mut HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
+    providers: &[Provider],
 ) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
+    let RouterPipelineBuildContext {
+        stores,
+        runtime,
+        data_dir,
+        registry,
+    } = context;
     if router_entries.is_empty() {
         return Ok(None);
     }
@@ -724,11 +826,12 @@ async fn build_router_pipeline(
                 "router user filter depth {} exceeds maximum {}",
                 user_router_filter_count, MAX_ROUTER_CHAIN_DEPTH
             ))),
+            provider_filters: None,
         })));
     }
 
     router_entries.sort_by_key(|entry| entry.order);
-    let mut filters: Vec<Arc<dyn FilterPlugin>> = Vec::with_capacity(router_entries.len());
+    let mut provider_filters = ProviderFilterChains::default();
     for entry in router_entries {
         let Some(registry_entry) = registry.get(&entry.wasm_registry_id) else {
             let error = io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found");
@@ -744,11 +847,17 @@ async fn build_router_pipeline(
                 instantiation_error: Some(Arc::<str>::from(format!(
                     "router pipeline instantiation failed: {error}"
                 ))),
+                provider_filters: None,
             })));
         };
         if registry_entry.is_builtin {
             if registry_entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
-                filters.push(Arc::new(SubscriptionPreferenceFilter::new()));
+                let filter: Arc<dyn FilterPlugin> = Arc::new(SubscriptionPreferenceFilter::new());
+                for provider in providers {
+                    provider_filters
+                        .get_mut(*provider)
+                        .push(Arc::clone(&filter));
+                }
             }
             continue;
         }
@@ -767,6 +876,7 @@ async fn build_router_pipeline(
                     instantiation_error: Some(Arc::<str>::from(format!(
                         "router pipeline instantiation failed: {error}"
                     ))),
+                    provider_filters: None,
                 })));
             }
         };
@@ -777,16 +887,17 @@ async fn build_router_pipeline(
         registered_slot_keys.insert(slot_key.clone());
         match register_filter_slot(runtime, &slot_key, &manifest).await {
             Ok(slot) => {
-                let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-                    slot,
-                    runtime.config_arc(),
-                ));
-                let handle: Arc<dyn FilterPlugin> = Arc::new(WasmtimeFilterPlugin::new(
-                    dispatch,
-                    entry.id,
-                    manifest.name.clone(),
-                ));
-                filters.push(handle);
+                let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
+                for provider in providers {
+                    if let Some(filter) = WasmtimeFilterPlugin::for_provider(
+                        &dispatch,
+                        wire_provider(*provider),
+                        entry.id,
+                        manifest.name.clone(),
+                    ) {
+                        provider_filters.get_mut(*provider).push(Arc::new(filter));
+                    }
+                }
             }
             Err(error) => {
                 tracing::error!(
@@ -802,15 +913,17 @@ async fn build_router_pipeline(
                     instantiation_error: Some(Arc::<str>::from(format!(
                         "router pipeline instantiation failed: {error}"
                     ))),
+                    provider_filters: None,
                 })));
             }
         }
     }
 
     Ok(Some(Arc::new(RouterPipelineCache {
-        user_filters: filters,
+        user_filters: provider_filters.anthropic.clone(),
         terminal: principal.router_terminal_strategy.clone(),
         instantiation_error: None,
+        provider_filters: Some(provider_filters),
     })))
 }
 
@@ -1002,6 +1115,7 @@ struct DbCompositeSignerFactory {
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     router_chosen_upstream_name: Option<String>,
     clock: cc_lb_clock::ClockHandle,
+    antigravity_config: Arc<cc_lb_config::AntigravityOAuthConfig>,
 }
 
 impl DbCompositeSignerFactory {
@@ -1011,6 +1125,7 @@ impl DbCompositeSignerFactory {
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
         clock: cc_lb_clock::ClockHandle,
+        antigravity_config: cc_lb_config::AntigravityOAuthConfig,
     ) -> Self {
         Self {
             upstreams,
@@ -1019,6 +1134,7 @@ impl DbCompositeSignerFactory {
             lazy_refresher,
             router_chosen_upstream_name: None,
             clock,
+            antigravity_config: Arc::new(antigravity_config),
         }
     }
 
@@ -1030,6 +1146,7 @@ impl DbCompositeSignerFactory {
             lazy_refresher: self.lazy_refresher.clone(),
             router_chosen_upstream_name: Some(router_chosen_upstream_name),
             clock: self.clock.clone(),
+            antigravity_config: self.antigravity_config.clone(),
         }
     }
 }
@@ -1116,10 +1233,10 @@ impl SignerFactory for DbCompositeSignerFactory {
                     .build(upstream)
                     .await
             }
-            UpstreamKind::OpenaiOauth => {
+            UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
                 let encrypted = record.oauth_credentials.as_ref().ok_or_else(|| {
                     SignerError::MissingCredentials {
-                        reason: "openai oauth upstream has no stored credential".to_owned(),
+                        reason: "subscription oauth upstream has no stored credential".to_owned(),
                     }
                 })?;
                 let tokens = encrypted
@@ -1127,32 +1244,12 @@ impl SignerFactory for DbCompositeSignerFactory {
                     .map_err(|source| SignerError::SigningFailed {
                         reason: source.to_string(),
                     })?;
-                let signer = cc_lb_signer_anthropic_key::OpenaiSubscriptionSigner::new(
-                    tokens.access_token.as_str(),
-                    tokens.account_id.as_deref(),
-                    tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                build_subscription_signer(
+                    record,
+                    &tokens,
                     self.clock.clone(),
-                )?;
-                Ok(Arc::new(signer))
-            }
-            UpstreamKind::GeminiOauth => {
-                let encrypted = record.oauth_credentials.as_ref().ok_or_else(|| {
-                    SignerError::MissingCredentials {
-                        reason: "gemini oauth upstream has no stored credential".to_owned(),
-                    }
-                })?;
-                let tokens = encrypted
-                    .decrypt(&self.aead, record.id.as_bytes())
-                    .map_err(|source| SignerError::SigningFailed {
-                        reason: source.to_string(),
-                    })?;
-                let signer = cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new(
-                    tokens.access_token.as_str(),
-                    tokens.project_id.as_deref(),
-                    tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
-                    self.clock.clone(),
-                )?;
-                Ok(Arc::new(signer))
+                    Some(&self.antigravity_config),
+                )
             }
             UpstreamKind::AnthropicOauth => {
                 let factory =
@@ -1175,6 +1272,64 @@ impl SignerFactory for DbCompositeSignerFactory {
                 }
             }
         }
+    }
+}
+
+/// Shared proxy and background-request signer construction for subscription OAuth.
+pub(crate) fn build_subscription_signer(
+    record: &UpstreamRecord,
+    tokens: &cc_lb_aead::OAuthTokenBundle,
+    clock: cc_lb_clock::ClockHandle,
+    antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
+) -> Result<Arc<dyn Signer>, SignerError> {
+    match record.kind {
+        UpstreamKind::OpenaiOauth => Ok(Arc::new(
+            cc_lb_signer_anthropic_key::OpenaiSubscriptionSigner::new(
+                tokens.access_token.as_str(),
+                tokens.account_id.as_deref(),
+                tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                clock,
+            )?,
+        )),
+        UpstreamKind::GeminiOauth => {
+            let signer = match tokens.oauth_profile {
+                cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                    cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new(
+                        tokens.access_token.as_str(),
+                        tokens.project_id.as_deref(),
+                        tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                        clock,
+                    )?
+                }
+                cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                    let default_config;
+                    let antigravity_config = match antigravity_config {
+                        Some(config) => config,
+                        None => {
+                            default_config = cc_lb_config::AntigravityOAuthConfig::default();
+                            &default_config
+                        }
+                    };
+                    let base_url = record
+                        .base_url
+                        .as_ref()
+                        .filter(|url| url.host_str() != Some("cloudcode-pa.googleapis.com"))
+                        .unwrap_or(&antigravity_config.code_assist_url);
+                    cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_antigravity(
+                        tokens.access_token.as_str(),
+                        tokens.project_id.as_deref(),
+                        tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                        clock,
+                        base_url.as_str(),
+                        &antigravity_config.user_agent,
+                    )?
+                }
+            };
+            Ok(Arc::new(signer))
+        }
+        _ => Err(SignerError::SigningFailed {
+            reason: "subscription signer requires OpenAI or Gemini OAuth".to_owned(),
+        }),
     }
 }
 
@@ -1232,6 +1387,335 @@ mod tests {
 
     const MODEL: &str = "claude-sonnet-4-5-20250929";
 
+    fn provider_test_section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
+        fn leb(bytes: &mut Vec<u8>, mut value: usize) {
+            loop {
+                let byte = (value & 0x7f) as u8;
+                value >>= 7;
+                bytes.push(if value == 0 { byte } else { byte | 0x80 });
+                if value == 0 {
+                    break;
+                }
+            }
+        }
+        let mut payload = Vec::new();
+        leb(&mut payload, name.len());
+        payload.extend_from_slice(name.as_bytes());
+        payload.extend_from_slice(data);
+        bytes.push(0);
+        leb(bytes, payload.len());
+        bytes.extend_from_slice(&payload);
+    }
+
+    fn legacy_filter_provider_fixture() -> Vec<u8> {
+        use cc_lb_plugin_wire::schema::WireSchema;
+        let output = rkyv::to_bytes::<rkyv::rancor::Error>(&cc_lb_plugin_wire::FilterResponse {
+            results: Box::new([cc_lb_plugin_wire::PerCandidateReason {
+                upstream_id: Box::from("00000000-0000-0000-0000-000000000001"),
+                decision: Box::from("reject"),
+                reason: Box::from("legacy-ran"),
+            }]),
+        })
+        .expect("filter response");
+        let data: String = output.iter().map(|byte| format!("\\{byte:02x}")).collect();
+        let packed = cc_lb_plugin_wire::schema::pack_ret(16, output.len() as u32);
+        let mut wasm = wat::parse_str(format!(
+            "(module (memory (export \"memory\") 1) (data (i32.const 16) \"{data}\") (func (export \"cc_lb_alloc\") (param i32 i32) (result i32) i32.const 8192) (func (export \"cc_lb_free\") (param i32 i32 i32)) (func (export \"cc_lb_filter\") (param i32 i32) (result i64) i64.const {}))",
+            packed as i64,
+        )).expect("filter module");
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.schema.filter.v1",
+            &<cc_lb_plugin_wire::FilterRequest as WireSchema>::FINGERPRINT,
+        );
+        provider_test_section(&mut wasm, "cc_lb.plugin.v1", br#"{
+            "name":"legacy-provider-filter","version":"1.0.0","description":"legacy filter","usage":"test",
+            "hooks":{"filter":{"wire_version":1,"description":"legacy","usage":"test","mode":"active"}}
+        }"#);
+        wasm
+    }
+
+    fn openai_response_only_provider_fixture() -> Vec<u8> {
+        use cc_lb_plugin_wire::schema::WireSchema;
+        let output = rkyv::to_bytes::<rkyv::rancor::Error>(
+            &cc_lb_plugin_wire::TransformResponseResult::Unchanged,
+        )
+        .expect("response transform");
+        let data: String = output.iter().map(|byte| format!("\\{byte:02x}")).collect();
+        let packed = cc_lb_plugin_wire::schema::pack_ret(16, output.len() as u32);
+        let mut wasm = wat::parse_str(format!(
+            "(module (memory (export \"memory\") 1) (data (i32.const 16) \"{data}\") (func (export \"cc_lb_alloc\") (param i32 i32) (result i32) i32.const 8192) (func (export \"cc_lb_free\") (param i32 i32 i32)) (func (export \"cc_lb_transform_response_openai\") (param i32 i32) (result i64) i64.const {}))",
+            packed as i64,
+        )).expect("response module");
+        provider_test_section(
+            &mut wasm,
+            "cc_lb.schema.transform_response.v1",
+            &<cc_lb_plugin_wire::TransformResponseRequest as WireSchema>::FINGERPRINT,
+        );
+        provider_test_section(&mut wasm, "cc_lb.plugin.v2", br#"{
+            "name":"openai-response-only","version":"1.0.0","description":"OpenAI response","usage":"test",
+            "hooks":{"transform_response_openai":{"wire_version":1,"description":"response","usage":"test","mode":"active"}}
+        }"#);
+        wasm
+    }
+
+    #[tokio::test]
+    async fn real_principal_chains_select_provider_hooks_and_preserve_native_response_only_shaping()
+    {
+        use cc_lb_storage_api::{PluginChainEntryInput, WasmBlob, WasmRegistryEntryInput};
+        let (dir, storage) = storage_fixture(40).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("runtime"));
+        let principal = PrincipalStore::create(
+            storage.as_ref(),
+            cc_lb_storage_api::PrincipalCreate {
+                name: "provider-chain".to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1,
+        )
+        .await
+        .expect("principal");
+        let anthropic = create_upstream(storage.as_ref(), "anthropic-provider-chain").await;
+        let openai = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "openai-provider-chain".to_owned(),
+                kind: UpstreamKind::OpenaiOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("OpenAI upstream");
+        let openai = UpstreamStore::set_enabled(storage.as_ref(), openai.id, openai.revision, true)
+            .await
+            .expect("OpenAI enabled");
+        let anthropic =
+            UpstreamStore::set_enabled(storage.as_ref(), anthropic.id, anthropic.revision, true)
+                .await
+                .expect("Anthropic enabled");
+        let wasm = legacy_filter_provider_fixture();
+        let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
+            .expect("inspection")
+            .metadata;
+        let (registry, _) = storage
+            .persist_wasm_upload(
+                WasmBlob {
+                    sha256: [240; 32],
+                    size_bytes: wasm.len() as u64,
+                    bytes: wasm,
+                },
+                WasmRegistryEntryInput {
+                    name: metadata.name,
+                    version: Some(metadata.version),
+                    original_filename: "legacy-provider-filter.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: metadata.description,
+                    usage: metadata.usage,
+                    hook_metadata: metadata.hooks,
+                    supported_slots: vec![PluginSlotKind::Router],
+                },
+            )
+            .await
+            .expect("registry");
+        let entry = storage
+            .insert_chain_entry(PluginChainEntryInput {
+                principal_id: principal.id,
+                slot: PluginSlotKind::Router,
+                order: 2000,
+                wasm_registry_id: registry.id,
+                config: serde_json::json!({}),
+            })
+            .await
+            .expect("chain entry");
+        let wasm = openai_response_only_provider_fixture();
+        let metadata = cc_lb_runtime_wasmtime::inspect_wasm_agnostic(&wasm)
+            .expect("response inspection")
+            .metadata;
+        let (registry, _) = storage
+            .persist_wasm_upload(
+                WasmBlob {
+                    sha256: [241; 32],
+                    size_bytes: wasm.len() as u64,
+                    bytes: wasm,
+                },
+                WasmRegistryEntryInput {
+                    name: metadata.name,
+                    version: Some(metadata.version),
+                    original_filename: "openai-response-only.wasm".to_owned(),
+                    label: None,
+                    uploaded_at_unix_secs: 1,
+                    uploaded_by_admin_id: Uuid::nil(),
+                    description: metadata.description,
+                    usage: metadata.usage,
+                    hook_metadata: metadata.hooks,
+                    supported_slots: vec![PluginSlotKind::Shape],
+                },
+            )
+            .await
+            .expect("response registry");
+        storage
+            .insert_chain_entry(PluginChainEntryInput {
+                principal_id: principal.id,
+                slot: PluginSlotKind::Shape,
+                order: 1000,
+                wasm_registry_id: registry.id,
+                config: serde_json::json!({}),
+            })
+            .await
+            .expect("response chain entry");
+        let upstreams = [anthropic, openai];
+        let (chains, _) = build_principal_chains(
+            &stores,
+            &runtime,
+            dir.path(),
+            std::slice::from_ref(&principal),
+            &upstreams,
+            &AeadService::from_master_key([19; 32]),
+        )
+        .await
+        .expect("real principal chains");
+        let principal_view = PrincipalView::from_db(std::slice::from_ref(&principal), chains);
+        let pipeline = principal_view
+            .get(&principal.name)
+            .expect("principal view")
+            .resolved_pipeline(None);
+        assert!(pipeline.instantiation_error.is_none());
+        let identity = cc_lb_domain::Principal {
+            id: principal.name.clone(),
+            kind: cc_lb_domain::PrincipalKind::ApiKey,
+        };
+        for (provider, path, body, expected) in [
+            (
+                Provider::Anthropic,
+                "/v1/messages",
+                &br#"{"model":"claude-test","messages":[]}"#[..],
+                true,
+            ),
+            (
+                Provider::Openai,
+                "/v1/responses",
+                &br#"{"model":"gpt-test","input":"hi"}"#[..],
+                false,
+            ),
+        ] {
+            let context = cc_lb_routing::RoutingContext {
+                request_id: "provider-chain-request".to_owned(),
+                thread_id: None,
+                requested_service_tier: None,
+                downstream_headers: http::HeaderMap::new(),
+                method: http::Method::POST,
+                path: path.to_owned(),
+                query: None,
+                body_bytes: bytes::Bytes::copy_from_slice(body),
+                canonical_model_id: "test-model".to_owned(),
+                cache_pricing: cc_lb_domain::CachePricingSummary::default(),
+            };
+            let mut candidates = vec![cc_lb_domain::UpstreamCandidate {
+                upstream_id: Uuid::from_u128(1),
+                name: "provider-candidate".to_owned(),
+                kind: match provider {
+                    Provider::Anthropic => cc_lb_domain::UpstreamKind::AnthropicApiKey,
+                    Provider::Openai => cc_lb_domain::UpstreamKind::OpenaiOauth,
+                    Provider::Gemini => cc_lb_domain::UpstreamKind::GeminiApiKey,
+                },
+                subscription_quotas: Vec::new(),
+                observed_at_unix_secs: 1,
+                cache_score: None,
+                base_url: None,
+                plan_capacity_ratio: None,
+                organization_type: None,
+                rate_limit_tier: None,
+                seat_tier: None,
+            }];
+            let mut ran = false;
+            for filter in pipeline.filters_for(provider) {
+                let output = filter
+                    .filter(&context, &identity, &candidates)
+                    .expect("provider filter executes");
+                candidates
+                    .retain(|candidate| output.kept_upstream_ids.contains(&candidate.upstream_id));
+                if filter.plugin_id() == entry.id {
+                    assert!(output.reason.contains("legacy-ran"));
+                    ran = true;
+                }
+            }
+            assert_eq!(ran, expected, "provider {provider:?}");
+            assert_eq!(
+                candidates.is_empty(),
+                expected,
+                "only the Anthropic chain applies the legacy rejection"
+            );
+        }
+        let openai = upstreams
+            .iter()
+            .find(|record| record.kind == UpstreamKind::OpenaiOauth)
+            .expect("OpenAI record");
+        let spec = principal_view.get(&principal.name).expect("principal");
+        let dialect = spec
+            .resolved_dialect(openai.id)
+            .expect("prebuilt response-only dialect");
+        let context = cc_lb_upstream::DialectShapeContext {
+            request_id: "response-only-request".to_owned(),
+            downstream_headers: http::HeaderMap::new(),
+            method: http::Method::POST,
+            path: "/v1/responses".to_owned(),
+            query: Some("key=secret&stream=false".to_owned()),
+            body_bytes: bytes::Bytes::from_static(br#"{"model":"gpt-test","input":"hi"}"#),
+        };
+        let upstream = cc_lb_domain::Upstream::OpenaiDirect { base_url: None };
+        let shaped =
+            cc_lb_upstream::shape_request(dialect.as_ref(), &context, &upstream, &identity).expect(
+                "response-only plugin uses native request shaping without a guest request hook",
+            );
+        assert_eq!(
+            shaped.url().as_str(),
+            "https://chatgpt.com/backend-api/codex/responses?stream=false"
+        );
+        assert_eq!(shaped.body(), &context.body_bytes);
+        assert!(dialect.sse_event_transform_hook().is_none());
+        let response = dialect
+            .response_transform_hook()
+            .expect("buffered response hook")
+            .transform_response(cc_lb_upstream::TransformResponseRequest {
+                request_id: context.request_id.clone(),
+                principal: identity.clone(),
+                upstream,
+                request_method: context.method.clone(),
+                request_path: context.path.clone(),
+                canonical_model_id: "gpt-test".to_owned(),
+                response_status: http::StatusCode::OK,
+                response_headers: http::HeaderMap::new(),
+                body: bytes::Bytes::from_static(br#"{"output":[]}"#),
+            })
+            .expect("independent qualified response export");
+        assert_eq!(response, cc_lb_upstream::TransformResponseResult::Unchanged);
+        let anthropic = upstreams
+            .iter()
+            .find(|record| record.kind == UpstreamKind::AnthropicApiKey)
+            .expect("Anthropic record");
+        assert!(
+            spec.resolved_dialect(anthropic.id).is_none(),
+            "unsupported Shape provider selects no plugin dialect"
+        );
+    }
+
     #[tokio::test]
     async fn stale_oauth_validation_failure_cannot_poison_replacement_long_lived_credential() {
         let (_dir, storage) = storage_fixture(19).await;
@@ -1270,6 +1754,7 @@ mod tests {
                 refresh_token_expires_at_unix_secs: None,
                 account_id: None,
                 project_id: None,
+                oauth_profile: Default::default(),
                 scopes: vec!["messages".to_owned()],
                 never_refresh: true,
             },
@@ -1353,6 +1838,7 @@ mod tests {
                     refresh_token_expires_at_unix_secs: None,
                     account_id: None,
                     project_id: None,
+                    oauth_profile: Default::default(),
                     scopes: vec!["messages".to_owned()],
                     never_refresh: false,
                 },
@@ -1457,13 +1943,16 @@ mod tests {
 
         let mut slot_keys = HashSet::new();
         let pipeline = build_router_pipeline(
-            &stores,
-            &runtime,
-            dir.path(),
+            RouterPipelineBuildContext {
+                stores: &stores,
+                runtime: &runtime,
+                data_dir: dir.path(),
+                registry: &registry,
+            },
             &principal,
             router_entries,
-            &registry,
             &mut slot_keys,
+            &[Provider::Anthropic, Provider::Openai, Provider::Gemini],
         )
         .await
         .expect("pipeline builds");
@@ -1630,6 +2119,7 @@ mod tests {
         let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
         build_dynamic_view(
             stores,
+            config.oauth.antigravity.as_ref(),
             Arc::new(AeadService::from_master_key([19; 32])),
             None,
             0,
@@ -1737,6 +2227,76 @@ mod tests {
         assert_eq!(dynamic_view.prompt_cache_grace_margin_secs, 99);
     }
 
+    #[test]
+    fn upstream_identity_preserves_record_fields_for_all_six_credential_kinds() {
+        let mut tokens = oauth_bundle("not-exported-access", "not-exported-refresh");
+        tokens.oauth_profile = cc_lb_aead::GeminiOAuthProfile::Antigravity;
+        tokens.project_id = Some("stored-project".to_owned());
+        for kind in [
+            UpstreamKind::AnthropicApiKey,
+            UpstreamKind::AnthropicOauth,
+            UpstreamKind::OpenaiApiKey,
+            UpstreamKind::OpenaiOauth,
+            UpstreamKind::GeminiApiKey,
+            UpstreamKind::GeminiOauth,
+        ] {
+            let record = UpstreamRecord {
+                id: Uuid::from_u128(42),
+                name: "operator-selected-name".to_owned(),
+                kind,
+                base_url: Some(
+                    "https://operator.example/custom-prefix"
+                        .parse()
+                        .expect("URL"),
+                ),
+                ..UpstreamRecord::default()
+            };
+            let identity = upstream_identity(&record, Some(&tokens));
+            assert_eq!(identity.provider, kind.provider());
+            assert_eq!(identity.credential_kind, kind.as_str());
+            assert_eq!(identity.upstream_id, record.id.to_string());
+            assert_eq!(identity.name, record.name);
+            assert_eq!(
+                identity.base_url.as_deref(),
+                Some("https://operator.example/custom-prefix")
+            );
+            if kind == UpstreamKind::GeminiOauth {
+                assert_eq!(
+                    identity.gemini_oauth_profile.as_deref(),
+                    Some("antigravity")
+                );
+                assert_eq!(
+                    identity.code_assist_project_id.as_deref(),
+                    Some("stored-project")
+                );
+            } else {
+                assert!(identity.gemini_oauth_profile.is_none());
+                assert!(identity.code_assist_project_id.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn upstream_identity_does_not_infer_missing_gemini_metadata() {
+        let record = UpstreamRecord {
+            kind: UpstreamKind::GeminiOauth,
+            name: "antigravity-is-only-a-name".to_owned(),
+            base_url: Some(
+                "https://daily-cloudcode-pa.googleapis.com"
+                    .parse()
+                    .expect("URL"),
+            ),
+            ..UpstreamRecord::default()
+        };
+        let missing = upstream_identity(&record, None);
+        assert!(missing.gemini_oauth_profile.is_none());
+        assert!(missing.code_assist_project_id.is_none());
+        let tokens = oauth_bundle("access", "refresh");
+        let present = upstream_identity(&record, Some(&tokens));
+        assert_eq!(present.gemini_oauth_profile.as_deref(), Some("gemini_cli"));
+        assert!(present.code_assist_project_id.is_none());
+    }
+
     struct DirectDialect;
 
     impl cc_lb_upstream::UpstreamDialect for DirectDialect {
@@ -1781,6 +2341,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gemini_signer_profile_comes_from_encrypted_credentials() {
+        let (_dir, storage) = storage_fixture(27).await;
+        let stored = create_upstream(&storage, "gemini-profile").await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        for (profile, configured_endpoint, override_endpoint, expected_host) in [
+            (
+                cc_lb_aead::GeminiOAuthProfile::GeminiCli,
+                None,
+                None,
+                "cloudcode-pa.googleapis.com",
+            ),
+            (
+                cc_lb_aead::GeminiOAuthProfile::Antigravity,
+                None,
+                None,
+                "daily-cloudcode-pa.googleapis.com",
+            ),
+            (
+                cc_lb_aead::GeminiOAuthProfile::Antigravity,
+                None,
+                Some("https://cloudcode-pa.googleapis.com/v1internal"),
+                "daily-cloudcode-pa.googleapis.com",
+            ),
+            (
+                cc_lb_aead::GeminiOAuthProfile::Antigravity,
+                Some("https://configured.invalid/"),
+                None,
+                "configured.invalid",
+            ),
+            (
+                cc_lb_aead::GeminiOAuthProfile::Antigravity,
+                Some("https://configured.invalid/"),
+                Some("http://override.invalid/"),
+                "override.invalid",
+            ),
+        ] {
+            let mut record = stored.clone();
+            record.kind = UpstreamKind::GeminiOauth;
+            record.base_url = override_endpoint.map(|url| url.parse().expect("override URL"));
+            let mut bundle = oauth_bundle("gemini-profile-access", "gemini-profile-refresh");
+            bundle.oauth_profile = profile;
+            bundle.project_id = Some("project-123".to_owned());
+            record.oauth_credentials = Some(
+                cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                    aead.as_ref(),
+                    &bundle,
+                    record.id.as_bytes(),
+                )
+                .expect("encrypted credential"),
+            );
+            let mut config = cc_lb_config::AntigravityOAuthConfig {
+                user_agent: "antigravity/custom-config".to_owned(),
+                ..Default::default()
+            };
+            if let Some(endpoint) = configured_endpoint {
+                config.code_assist_url = endpoint.parse().expect("configured URL");
+            }
+            let factory = DbCompositeSignerFactory::new(
+                vec![record],
+                storage.clone(),
+                aead.clone(),
+                None,
+                Arc::new(TestClock::new_at_secs(1_700_000_000)),
+                config,
+            )
+            .with_router_choice_state(stored.name.clone());
+            let signer = factory
+                .build(&Upstream::GeminiDirect { base_url: None })
+                .await
+                .expect("Gemini signer");
+            let mut shaped = shaped_request();
+            shaped.set_url(
+                "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                    .parse()
+                    .expect("request URL"),
+            );
+            shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+            shaped.headers_mut().insert(
+                http::header::USER_AGENT,
+                http::HeaderValue::from_static("GeminiCLI/existing"),
+            );
+            let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped)
+                .await
+                .expect("signed Gemini request");
+            assert_eq!(signed.url().host_str(), Some(expected_host));
+            let body: serde_json::Value = serde_json::from_slice(signed.body()).expect("envelope");
+            assert_eq!(body["project"], "project-123");
+            match profile {
+                cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                    assert!(body.get("userAgent").is_none());
+                    assert!(body.get("requestId").is_none());
+                    assert_eq!(
+                        signed.headers().get(http::header::USER_AGENT),
+                        Some(&http::HeaderValue::from_static("GeminiCLI/existing"))
+                    );
+                }
+                cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                    assert_eq!(body["userAgent"], "antigravity");
+                    assert_eq!(body["requestType"], "agent");
+                    assert_eq!(
+                        signed.headers().get(http::header::USER_AGENT),
+                        Some(&http::HeaderValue::from_static("antigravity/custom-config"))
+                    );
+                }
+            }
+        }
+    }
+    #[tokio::test]
     async fn access_only_oauth_signer_rechecks_expiry_before_mutating_request()
     -> Result<(), Box<dyn std::error::Error>> {
         let (_dir, storage) = storage_fixture(26).await;
@@ -1807,6 +2475,7 @@ mod tests {
                 aead.clone(),
                 None,
                 clock.clone(),
+                cc_lb_config::AntigravityOAuthConfig::default(),
             )
             .with_router_choice_state(stored.name.clone());
             let upstream = match kind {
@@ -1905,6 +2574,7 @@ mod tests {
                 Arc::new(AeadService::from_master_key([19; 32])),
                 None,
                 Arc::new(TestClock::new_at_secs(1_700_000_000)),
+                cc_lb_config::AntigravityOAuthConfig::default(),
             )
             .with_router_choice_state("workspace-key".to_owned());
 
@@ -2006,6 +2676,7 @@ mod tests {
                 refresh_token_expires_at_unix_secs: None,
                 account_id: None,
                 project_id: None,
+                oauth_profile: Default::default(),
                 scopes: vec!["messages".to_owned()],
                 never_refresh: false,
             },
@@ -2081,6 +2752,7 @@ mod tests {
             Arc::new(sink),
             1800,
             clock,
+            None,
         );
 
         reconciler.reconcile_once().await.expect("reconcile runs");
@@ -2234,6 +2906,7 @@ mod tests {
             refresh_token_expires_at_unix_secs: None,
             account_id: None,
             project_id: None,
+            oauth_profile: Default::default(),
             scopes: vec!["messages".to_owned()],
             never_refresh: false,
         }
@@ -2355,6 +3028,7 @@ mod tests {
             .store(PRINCIPAL_LIST_FAIL, Ordering::SeqCst);
         let forced = build_dynamic_view(
             &stores,
+            None,
             aead.clone(),
             None,
             holder.generation(),
@@ -2389,6 +3063,7 @@ mod tests {
             sink,
             1800,
             clock,
+            None,
         );
         reconciler.reconcile_once().await.expect("reconcile runs");
         let rebuilt = holder.load();

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
+use cc_lb_config::Config;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
 use cc_lb_storage_api::{
@@ -131,6 +132,8 @@ struct Fixture {
     data_dir: TempDir,
     storage: Arc<SqliteStorage>,
     stores: Stores,
+    config: Config,
+    aead: Arc<AeadService>,
 }
 
 impl Fixture {
@@ -162,19 +165,27 @@ impl Fixture {
             anthropic_compatibility_kv: storage.clone(),
             audit: None,
         };
+        let aead = Arc::new(AeadService::from_master_key([9; 32]));
         Self {
             _db_dir: db_dir,
             data_dir,
             storage,
             stores,
+            config: Config::default(),
+            aead,
         }
     }
 }
 
 async fn run_preflight(fixture: &Fixture) -> PreflightReport {
-    preflight::run_preflight(&fixture.stores, fixture.data_dir.path())
-        .await
-        .unwrap()
+    preflight::run_preflight(
+        &fixture.stores,
+        fixture.data_dir.path(),
+        &fixture.config,
+        fixture.aead.as_ref(),
+    )
+    .await
+    .unwrap()
 }
 
 fn print_report(report: &PreflightReport) {

@@ -10,9 +10,18 @@ use cc_lb_storage_api::{
 const QUOTA_PREFLIGHT_MAX_AGE_SECS: i64 = 180;
 const FIVE_HOUR_WINDOW_SECS: i64 = 5 * 60 * 60;
 const SEVEN_DAY_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
+
 const ANTHROPIC_TARGET_WINDOWS: &[SubscriptionQuotaWindow] = &[
     SubscriptionQuotaWindow::FiveHour,
     SubscriptionQuotaWindow::SevenDay,
+];
+const OPENAI_TARGET_WINDOWS: &[SubscriptionQuotaWindow] = &[
+    SubscriptionQuotaWindow::FiveHour,
+    SubscriptionQuotaWindow::SevenDay,
+];
+const GEMINI_TARGET_WINDOWS: &[SubscriptionQuotaWindow] = &[
+    SubscriptionQuotaWindow::GeminiFiveHour,
+    SubscriptionQuotaWindow::GeminiSevenDay,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,7 +44,11 @@ pub(super) fn warmup_preflight_reject(upstream: &UpstreamRecord) -> Option<Warmu
             WarmupSkipReason::UpstreamDeleted,
         ));
     }
-    if upstream.kind != UpstreamKind::AnthropicOauth || !upstream.warmup_enabled {
+    if !matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) || !upstream.warmup_enabled
+    {
         return Some(WarmupPreflightReject::Skip(
             WarmupSkipReason::UpstreamDisabled,
         ));
@@ -49,10 +62,11 @@ pub(super) fn warmup_preflight_reject(upstream: &UpstreamRecord) -> Option<Warmu
 }
 
 pub(super) fn quota_preflight_decision_from_snapshots(
+    kind: UpstreamKind,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
     now_unix_secs: i64,
 ) -> WarmupQuotaPreflightDecision {
-    if let Some(cycle_key) = weekly_windows().iter().find_map(|window| {
+    if let Some(cycle_key) = weekly_windows_for_kind(kind).iter().find_map(|window| {
         snapshots
             .iter()
             .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
@@ -65,7 +79,7 @@ pub(super) fn quota_preflight_decision_from_snapshots(
 
     let mut earliest_active_reset = None;
 
-    for window in target_windows_for_kind() {
+    for window in target_windows_for_kind(kind) {
         let Some(snapshot) = snapshots
             .iter()
             .find(|snapshot| quota_snapshot_matches_window(snapshot, *window))
@@ -84,6 +98,13 @@ pub(super) fn quota_preflight_decision_from_snapshots(
         let Some(reset) = quota_snapshot_future_reset(snapshot, now_unix_secs) else {
             return WarmupQuotaPreflightDecision::SendWarmup;
         };
+        // OpenAI and Gemini may report a full rolling duration before any
+        // usage starts; Anthropic's future resets remain authoritative.
+        if matches!(kind, UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth)
+            && quota_snapshot_is_unused_rolling_window(snapshot, *window, reset)
+        {
+            return WarmupQuotaPreflightDecision::SendWarmup;
+        }
         earliest_active_reset =
             Some(earliest_active_reset.map_or(reset, |current: i64| current.min(reset)));
     }
@@ -94,6 +115,7 @@ pub(super) fn quota_preflight_decision_from_snapshots(
 }
 
 pub(super) fn next_warmup_evaluation_after_success(
+    kind: UpstreamKind,
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
     observations: &[UnifiedQuotaObservation],
     now_unix_secs: i64,
@@ -102,7 +124,7 @@ pub(super) fn next_warmup_evaluation_after_success(
     let mut shortest_present_duration = None;
     let mut unknown_target = false;
 
-    for window in target_windows_for_kind() {
+    for window in target_windows_for_kind(kind) {
         let snapshot = snapshots
             .iter()
             .find(|snapshot| quota_snapshot_matches_window(snapshot, *window));
@@ -152,26 +174,40 @@ pub(super) fn next_warmup_evaluation_after_success(
     }
 }
 
-fn target_windows_for_kind() -> &'static [SubscriptionQuotaWindow] {
-    ANTHROPIC_TARGET_WINDOWS
+fn target_windows_for_kind(kind: UpstreamKind) -> &'static [SubscriptionQuotaWindow] {
+    match kind {
+        UpstreamKind::AnthropicOauth => ANTHROPIC_TARGET_WINDOWS,
+        UpstreamKind::OpenaiOauth => OPENAI_TARGET_WINDOWS,
+        UpstreamKind::GeminiOauth => GEMINI_TARGET_WINDOWS,
+        _ => &[],
+    }
 }
 
-fn weekly_windows() -> &'static [SubscriptionQuotaWindow] {
-    &[
-        SubscriptionQuotaWindow::SevenDay,
-        SubscriptionQuotaWindow::SevenDaySonnet,
-        SubscriptionQuotaWindow::SevenDayOpus,
-        SubscriptionQuotaWindow::SevenDayFable,
-    ]
+fn weekly_windows_for_kind(kind: UpstreamKind) -> &'static [SubscriptionQuotaWindow] {
+    match kind {
+        UpstreamKind::AnthropicOauth => &[
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaWindow::SevenDaySonnet,
+            SubscriptionQuotaWindow::SevenDayOpus,
+            SubscriptionQuotaWindow::SevenDayFable,
+        ],
+        UpstreamKind::OpenaiOauth => &[SubscriptionQuotaWindow::SevenDay],
+        UpstreamKind::GeminiOauth => &[SubscriptionQuotaWindow::GeminiSevenDay],
+        _ => &[],
+    }
 }
 
 fn quota_window_duration_secs(window: SubscriptionQuotaWindow) -> i64 {
     match window {
-        SubscriptionQuotaWindow::FiveHour => FIVE_HOUR_WINDOW_SECS,
+        SubscriptionQuotaWindow::FiveHour
+        | SubscriptionQuotaWindow::GeminiFiveHour
+        | SubscriptionQuotaWindow::ThirdPartyFiveHour => FIVE_HOUR_WINDOW_SECS,
         SubscriptionQuotaWindow::SevenDay
         | SubscriptionQuotaWindow::SevenDaySonnet
         | SubscriptionQuotaWindow::SevenDayOpus
-        | SubscriptionQuotaWindow::SevenDayFable => SEVEN_DAY_WINDOW_SECS,
+        | SubscriptionQuotaWindow::SevenDayFable
+        | SubscriptionQuotaWindow::GeminiSevenDay
+        | SubscriptionQuotaWindow::ThirdPartySevenDay => SEVEN_DAY_WINDOW_SECS,
         SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => {
             unreachable!("unsupported warmup quota window: {window:?}")
         }
@@ -197,6 +233,22 @@ fn quota_snapshot_is_usable(
                 let age_secs = now_unix_secs - observed_at;
                 (0..=QUOTA_PREFLIGHT_MAX_AGE_SECS).contains(&age_secs)
             })
+}
+
+fn quota_snapshot_is_unused_rolling_window(
+    snapshot: &SubscriptionQuotaCandidateSnapshot,
+    window: SubscriptionQuotaWindow,
+    reset: i64,
+) -> bool {
+    snapshot.utilization == Some(0.0)
+        && reset.saturating_sub(observed_at_unix_secs(snapshot).unwrap_or(reset))
+            >= quota_window_duration_secs(window) - 60
+}
+
+fn observed_at_unix_secs(snapshot: &SubscriptionQuotaCandidateSnapshot) -> Option<i64> {
+    snapshot
+        .observed_at_unix_millis
+        .and_then(|observed_at| i64::try_from(observed_at / 1_000).ok())
 }
 
 fn quota_snapshot_is_exhausted(snapshot: &SubscriptionQuotaCandidateSnapshot) -> bool {

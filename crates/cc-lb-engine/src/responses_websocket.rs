@@ -19,8 +19,10 @@ use uuid::Uuid;
 
 use crate::authn_rail::{Authenticated, reject_unauthenticated};
 use crate::lifecycle::Lifecycle;
+use crate::response_transform::ResponseTransformContext;
 use crate::terminal_observer::{InternalFailure, LifecycleContext, UpstreamErrorCode};
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value};
+use cc_lb_upstream::{SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
 #[derive(Clone, Debug)]
 pub struct WebSocketError {
@@ -107,6 +109,13 @@ pub(crate) struct PreparedWebSocketTurn {
     pub store: bool,
     pub span: Span,
     pub route_info: cc_lb_lifecycle::RouteInfo,
+    pub request_id: String,
+}
+
+pub(crate) struct WebSocketPluginRequest {
+    pub frame: Bytes,
+    pub headers: HeaderMap,
+    pub context: ResponseTransformContext,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +130,8 @@ pub struct WebSocketDispatch {
 #[derive(Default)]
 pub struct WebSocketEventResult {
     pub forward: bool,
+    /// Replacement text frames, in order; `None` retains the upstream frame.
+    pub frames: Option<Vec<Bytes>>,
     pub dispatches: Vec<WebSocketDispatch>,
     pub errors: Vec<WebSocketError>,
 }
@@ -161,6 +172,7 @@ struct Turn {
     charged_bytes: usize,
     usage: Option<UsageCounts>,
     usage_complete: bool,
+    plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
 }
 
 /// A session owns no authenticated proof until a fresh client check succeeds.
@@ -430,6 +442,7 @@ impl ResponsesWebSocketGateway {
                 charged_bytes: charge,
                 usage: None,
                 usage_complete: false,
+                plugin_request: None,
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -599,6 +612,7 @@ impl ResponsesWebSocketGateway {
                 charged_bytes: charge,
                 usage: None,
                 usage_complete: false,
+                plugin_request: None,
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -627,7 +641,7 @@ impl ResponsesWebSocketGateway {
     }
 
     pub async fn prepare_connection(
-        &self,
+        &mut self,
         dispatch: &WebSocketDispatch,
         candidate: &WebSocketCandidate,
     ) -> Result<(Url, HeaderMap), WebSocketError> {
@@ -638,49 +652,164 @@ impl ResponsesWebSocketGateway {
                 error.to_string(),
             )
         })?;
-        let turn = self.turns.get(&dispatch.turn_id).ok_or_else(|| {
-            WebSocketError::new(
-                409,
-                "response_not_found",
-                "The admitted response is no longer available",
-            )
-        })?;
-        if auth.principal_id() != turn.prepared.principal_id
-            || auth.key_id() != turn.prepared.key_id
-        {
-            return Err(WebSocketError::new(
-                401,
-                "authentication_error",
-                "The client identity changed before connection",
-            ));
-        }
-        if turn
-            .prepared
-            .reservation
-            .as_ref()
-            .is_some_and(|reservation| !reservation.is_active())
-        {
-            return Err(WebSocketError::new(
-                503,
-                "reservation_expired",
-                "The queued response reservation is no longer active",
-            ));
-        }
+        let (turn_frame, turn_body) = {
+            let turn = self.turns.get(&dispatch.turn_id).ok_or_else(|| {
+                WebSocketError::new(
+                    409,
+                    "response_not_found",
+                    "The admitted response is no longer available",
+                )
+            })?;
+            if auth.principal_id() != turn.prepared.principal_id
+                || auth.key_id() != turn.prepared.key_id
+            {
+                return Err(WebSocketError::new(
+                    401,
+                    "authentication_error",
+                    "The client identity changed before connection",
+                ));
+            }
+            if turn
+                .prepared
+                .reservation
+                .as_ref()
+                .is_some_and(|reservation| !reservation.is_active())
+            {
+                return Err(WebSocketError::new(
+                    503,
+                    "reservation_expired",
+                    "The queued response reservation is no longer active",
+                ));
+            }
+            (turn.frame.clone(), turn.body.clone())
+        };
         self.lifecycle
             .validate_websocket_turn(
                 &auth,
                 WebSocketIngress {
                     headers: &self.headers,
-                    frame: &turn.frame,
+                    frame: &turn_frame,
                     query: self.query.as_deref(),
                 },
-                &turn.body,
+                &turn_body,
                 candidate.upstream_id,
             )
             .await?;
+        self.prepare_plugin_request(dispatch.turn_id, candidate.upstream_id)?;
+        let headers = self
+            .turns
+            .get(&dispatch.turn_id)
+            .and_then(|turn| turn.plugin_request.as_ref())
+            .map_or(&self.headers, |(_, request)| &request.headers);
         self.lifecycle
-            .sign_websocket_connection(&auth, &self.headers, candidate, self.query.as_deref())
+            .sign_websocket_connection(&auth, headers, candidate, self.query.as_deref())
             .await
+    }
+
+    fn prepare_plugin_request(
+        &mut self,
+        turn_id: u64,
+        upstream_id: Uuid,
+    ) -> Result<(), WebSocketError> {
+        let (auth, frame, request_id, observer, old_charge) = {
+            let turn = self.turns.get(&turn_id).ok_or_else(|| {
+                WebSocketError::new(
+                    409,
+                    "response_not_found",
+                    "The admitted response is no longer available",
+                )
+            })?;
+            if turn
+                .plugin_request
+                .as_ref()
+                .is_some_and(|(id, _)| *id == upstream_id)
+            {
+                return Ok(());
+            }
+            (
+                turn.auth.clone(),
+                turn.frame.clone(),
+                turn.prepared.request_id.clone(),
+                turn.prepared.observer.clone(),
+                turn.plugin_request
+                    .as_ref()
+                    .map_or(0, |(_, request)| request.frame.len()),
+            )
+        };
+        let request = self.lifecycle.shape_websocket_frame(
+            &auth,
+            WebSocketIngress {
+                headers: &self.headers,
+                frame: &frame,
+                query: self.query.as_deref(),
+            },
+            upstream_id,
+            &request_id,
+            observer.as_ref(),
+        )?;
+        let new_charge = request.as_ref().map_or(0, |request| request.frame.len());
+        if new_charge
+            > self
+                .byte_cap
+                .saturating_sub(self.used_bytes)
+                .saturating_add(old_charge)
+        {
+            return Err(WebSocketError::new(
+                503,
+                "overloaded_error",
+                "Shaped WebSocket frame exceeds the session budget",
+            ));
+        }
+        self.used_bytes = self
+            .used_bytes
+            .saturating_sub(old_charge)
+            .saturating_add(new_charge);
+        let turn = self.turns.get_mut(&turn_id).expect("turn remains admitted");
+        turn.charged_bytes = turn
+            .charged_bytes
+            .saturating_sub(old_charge)
+            .saturating_add(new_charge);
+        turn.plugin_request = request.map(|request| (upstream_id, request));
+        Ok(())
+    }
+
+    /// Shape each create once for the actual connection owner. Steering controls
+    /// keep their native wire format; their successor retains the response hook.
+    pub fn frame_for_send(
+        &mut self,
+        dispatch: &WebSocketDispatch,
+    ) -> Result<Bytes, WebSocketError> {
+        let (upstream_id, steer) = {
+            let turn = self.turns.get(&dispatch.turn_id).ok_or_else(|| {
+                WebSocketError::new(
+                    409,
+                    "response_not_found",
+                    "The admitted response is no longer available",
+                )
+            })?;
+            (
+                turn.upstream_id.ok_or_else(|| {
+                    WebSocketError::new(
+                        502,
+                        "upstream_unavailable",
+                        "No upstream owns this dispatch",
+                    )
+                })?,
+                turn.steer_parent.is_some(),
+            )
+        };
+        if steer {
+            return Ok(dispatch.frame.clone());
+        }
+        self.prepare_plugin_request(dispatch.turn_id, upstream_id)?;
+        let turn = self
+            .turns
+            .get(&dispatch.turn_id)
+            .expect("turn remains admitted");
+        Ok(turn.plugin_request.as_ref().map_or_else(
+            || dispatch.frame.clone(),
+            |(_, request)| request.frame.clone(),
+        ))
     }
 
     pub fn assign_connection(
@@ -861,6 +990,89 @@ impl ResponsesWebSocketGateway {
         &mut self,
         connection_id: u64,
         frame: &Bytes,
+    ) -> Result<WebSocketEventResult, WebSocketError> {
+        let transformed = self.transform_provider_frame(connection_id, frame);
+        let mut result = self
+            .observe_provider_message(connection_id, frame, transformed.as_ref().err())
+            .await?;
+        match transformed {
+            Ok(Some(frames)) => {
+                result.forward = false;
+                result.frames = Some(frames);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                result.forward = false;
+                if let Some(lane) = error.stream_id.as_ref()
+                    && let Some(turn_id) = self
+                        .lanes
+                        .get(&Some(lane.clone()))
+                        .and_then(|lane| lane.active)
+                {
+                    self.finish_turn(turn_id, Some(&error));
+                    if let Some(dispatch) = self.next_in_lane(&Some(lane.clone())) {
+                        result.dispatches.push(dispatch);
+                    }
+                }
+                result.errors.push(error);
+            }
+        }
+        Ok(result)
+    }
+
+    fn transform_provider_frame(
+        &self,
+        connection_id: u64,
+        frame: &Bytes,
+    ) -> Result<Option<Vec<Bytes>>, WebSocketError> {
+        // No JSON work, allocation, or guest call for connections without hooks.
+        if !self.turns.values().any(|turn| {
+            turn.connection_id == Some(connection_id)
+                && turn.plugin_request.as_ref().is_some_and(|(_, request)| {
+                    request.context.dialect.sse_event_transform_hook().is_some()
+                })
+        }) {
+            return Ok(None);
+        }
+        let lane = sonic_rs::get_from_slice(frame, &["stream_id"])
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned));
+        let response_id = sonic_rs::get_from_slice(frame, &["response_id"])
+            .ok()
+            .or_else(|| sonic_rs::get_from_slice(frame, &["response", "id"]).ok());
+        let turn = response_id
+            .as_ref()
+            .and_then(|id| id.as_str())
+            .and_then(|id| self.owners.get(id))
+            .and_then(|owner| self.turns.get(&owner.turn_id))
+            .or_else(|| {
+                self.lanes
+                    .get(&lane)
+                    .and_then(|lane| lane.active)
+                    .and_then(|id| self.turns.get(&id))
+            })
+            .filter(|turn| turn.connection_id == Some(connection_id) && turn.sent);
+        let Some(turn) = turn else {
+            return Ok(None);
+        };
+        let Some((_, request)) = turn.plugin_request.as_ref() else {
+            return Ok(None);
+        };
+        transform_websocket_event(
+            &request.context,
+            &turn.prepared.request_id,
+            &turn.prepared.model,
+            frame,
+            self.byte_cap,
+        )
+        .map_err(|error| error.with_stream(lane))
+    }
+
+    async fn observe_provider_message(
+        &mut self,
+        connection_id: u64,
+        frame: &Bytes,
+        transform_error: Option<&WebSocketError>,
     ) -> Result<WebSocketEventResult, WebSocketError> {
         // A borrowed lazy discriminator is the only work for deltas. It does
         // not construct a Value, copy payload bytes, or record observations.
@@ -1106,12 +1318,18 @@ impl ResponsesWebSocketGateway {
             ..Default::default()
         };
         if terminal {
-            let failure =
-                (kind != "response.completed").then(|| native_terminal_error(&value, &lane));
+            let failure = transform_error.cloned().or_else(|| {
+                (kind != "response.completed").then(|| native_terminal_error(&value, &lane))
+            });
             self.finish_turn(turn_id, failure.as_ref());
             if let Some(dispatch) = self.next_in_lane(&lane) {
                 result.dispatches.push(dispatch);
             }
+        }
+        if let Some(error) = transform_error
+            && !terminal
+        {
+            self.finish_turn(turn_id, Some(error));
         }
         Ok(result)
     }
@@ -1366,13 +1584,18 @@ impl ResponsesWebSocketGateway {
         self.used_bytes = self.used_bytes.saturating_sub(released);
     }
 
-    fn next_in_lane(&mut self, lane_id: &Option<String>) -> Option<WebSocketDispatch> {
-        let lane = self.lanes.get_mut(lane_id)?;
+    fn activate_next_turn(lane: &mut Lane) -> Option<u64> {
         if lane.active.is_some() {
             return None;
         }
         let next = lane.queued.pop_front()?;
         lane.active = Some(next);
+        Some(next)
+    }
+
+    fn next_in_lane(&mut self, lane_id: &Option<String>) -> Option<WebSocketDispatch> {
+        let lane = self.lanes.get_mut(lane_id)?;
+        let next = Self::activate_next_turn(lane)?;
         self.dispatch(next)
     }
 
@@ -1459,6 +1682,75 @@ impl ResponsesWebSocketGateway {
 impl Drop for ResponsesWebSocketGateway {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+fn transform_websocket_event(
+    context: &ResponseTransformContext,
+    request_id: &str,
+    model: &str,
+    frame: &Bytes,
+    cap: usize,
+) -> Result<Option<Vec<Bytes>>, WebSocketError> {
+    let Some(hook) = context.dialect.sse_event_transform_hook() else {
+        return Ok(None);
+    };
+    let error = |message: String| WebSocketError::new(502, "response_transform_error", message);
+    let kind = sonic_rs::get_from_slice(frame, &["type"])
+        .map_err(|_| error("Upstream event has no valid type".to_owned()))?;
+    let name = kind
+        .as_str()
+        .ok_or_else(|| error("Upstream event type is not a string".to_owned()))?;
+    match hook
+        .transform_sse_event(TransformSseEventRequest {
+            request_id: request_id.to_owned(),
+            principal: context.principal.clone(),
+            upstream: context.upstream.clone(),
+            request_method: context.request_method.clone(),
+            request_path: context.request_path.clone(),
+            canonical_model_id: crate::model_resolution::canonical_model_id(model).to_owned(),
+            response_status: StatusCode::OK,
+            response_headers: HeaderMap::new(),
+            event: SseEvent {
+                event: name.to_owned(),
+                data: frame.clone(),
+            },
+        })
+        .map_err(|source| error(source.to_string()))?
+    {
+        TransformSseEventResult::Unchanged => Ok(None),
+        TransformSseEventResult::Drop => Ok(Some(Vec::new())),
+        TransformSseEventResult::Replace { events } => {
+            let mut frames = Vec::with_capacity(events.len());
+            let mut bytes = 0usize;
+            for event in events {
+                let mut value: Value = sonic_rs::from_slice(&event.data).map_err(|_| {
+                    error("Plugin returned an invalid WebSocket JSON event".to_owned())
+                })?;
+                let object = value.as_object_mut().ok_or_else(|| {
+                    error("Plugin returned a non-object WebSocket event".to_owned())
+                })?;
+                if !event.event.is_empty() {
+                    object.insert("type".to_owned(), Value::String(event.event));
+                }
+                if object.get("type").and_then(Value::as_str).is_none() {
+                    return Err(error(
+                        "Plugin returned a WebSocket event without a type".to_owned(),
+                    ));
+                }
+                let frame = Bytes::from(
+                    serde_json::to_vec(&value).map_err(|source| error(source.to_string()))?,
+                );
+                bytes = bytes.saturating_add(frame.len());
+                if bytes > cap {
+                    return Err(error(
+                        "Plugin WebSocket output exceeds the message budget".to_owned(),
+                    ));
+                }
+                frames.push(frame);
+            }
+            Ok(Some(frames))
+        }
     }
 }
 
@@ -1753,5 +2045,101 @@ mod tests {
             raw.as_ref(),
             br#"{"type":"response.output_text.delta","delta":"opaque payload","stream_id":"main"}"#
         );
+    }
+
+    struct TestWebSocketTransformDialect {
+        result: TransformSseEventResult,
+    }
+
+    impl cc_lb_upstream::UpstreamDialect for TestWebSocketTransformDialect {
+        fn shape(
+            &self,
+            _context: &cc_lb_upstream::DialectShapeContext,
+            _upstream: &cc_lb_domain::Upstream,
+            _principal: &cc_lb_domain::Principal,
+            _builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+        ) -> Result<cc_lb_upstream::ShapedRequest, cc_lb_upstream::DialectError> {
+            unreachable!("the websocket transform test does not shape a request")
+        }
+
+        fn sse_event_transform_hook(&self) -> Option<&dyn cc_lb_upstream::SseEventTransformHook> {
+            Some(self)
+        }
+    }
+
+    impl cc_lb_upstream::SseEventTransformHook for TestWebSocketTransformDialect {
+        fn transform_sse_event(
+            &self,
+            _request: cc_lb_upstream::TransformSseEventRequest,
+        ) -> Result<TransformSseEventResult, cc_lb_upstream::ResponseTransformError> {
+            Ok(self.result.clone())
+        }
+    }
+
+    fn websocket_transform_context(result: TransformSseEventResult) -> ResponseTransformContext {
+        ResponseTransformContext {
+            principal: cc_lb_domain::Principal {
+                id: "principal".to_owned(),
+                kind: cc_lb_domain::PrincipalKind::InternalKey,
+            },
+            upstream: cc_lb_domain::Upstream::OpenaiDirect { base_url: None },
+            request_method: http::Method::POST,
+            request_path: "/v1/responses".to_owned(),
+            dialect: Arc::new(TestWebSocketTransformDialect { result }),
+            gemini_oauth: false,
+        }
+    }
+
+    #[test]
+    fn websocket_sse_transform_maps_replace_drop_and_event_type() {
+        let replacement = transform_websocket_event(
+            &websocket_transform_context(TransformSseEventResult::Replace {
+                events: vec![SseEvent {
+                    event: "response.output_text.delta".to_owned(),
+                    data: Bytes::from_static(br#"{"delta":"rewritten"}"#),
+                }],
+            }),
+            "request",
+            "gpt-test",
+            &Bytes::from_static(br#"{"type":"response.output_text.delta","delta":"raw"}"#),
+            1024,
+        )
+        .expect("replacement succeeds")
+        .expect("replacement emits frames");
+        let value: Value = sonic_rs::from_slice(&replacement[0]).expect("frame is JSON");
+        assert_eq!(value["type"], "response.output_text.delta");
+        assert_eq!(value["delta"], "rewritten");
+
+        let dropped = transform_websocket_event(
+            &websocket_transform_context(TransformSseEventResult::Drop),
+            "request",
+            "gpt-test",
+            &Bytes::from_static(br#"{"type":"response.completed"}"#),
+            1024,
+        )
+        .expect("drop succeeds");
+        assert_eq!(dropped, Some(Vec::new()));
+    }
+
+    #[test]
+    fn terminal_transform_failure_advances_named_and_default_lanes() {
+        for lane_id in [None, Some("main".to_owned())] {
+            let mut lane = Lane {
+                active: None,
+                queued: VecDeque::from([11, 12]),
+            };
+            assert_eq!(
+                ResponsesWebSocketGateway::activate_next_turn(&mut lane),
+                Some(11)
+            );
+            assert_eq!(lane.active, Some(11));
+            lane.active = None;
+            assert_eq!(
+                ResponsesWebSocketGateway::activate_next_turn(&mut lane),
+                Some(12)
+            );
+            assert_eq!(lane.active, Some(12));
+            assert!(lane_id.is_none() || lane_id.as_deref() == Some("main"));
+        }
     }
 }

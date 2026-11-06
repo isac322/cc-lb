@@ -1,74 +1,138 @@
 use std::sync::Arc;
 
+use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireVersion};
 use rkyv::util::AlignedVec;
 
-use crate::cache::{
-    call_filter_hook_scoped, call_shape_hook_scoped, call_transform_response_hook_scoped,
-    call_transform_sse_event_hook_scoped,
-};
+use crate::HotEngineConfig;
+use crate::cache::call_hook_export_scoped;
 use crate::cell::{LoadedPluginSlot, PluginCell};
 use crate::error::WasmtimeRuntimeError;
 use crate::policy::{PluginWireBounds, ShapeOriginPolicy};
-use crate::{HookKind, HotEngineConfig};
 
-/// Wire-level dispatch handle for a single loaded plugin slot.
-///
-/// Snapshots the slot's [`PluginCell`] at construction time so
-/// hot-swap replacements on the same [`RuntimeSlotKey`] cannot
-/// disturb an in-flight view — each `DynamicView` keeps the cells
-/// it was built with until it is itself replaced.
-///
-/// All methods take and return raw rkyv-encoded bytes; callers own
-/// the host↔wire type conversion.
+#[derive(Clone, Copy)]
+struct ResolvedHook {
+    export: &'static str,
+    version: WireVersion,
+    active: bool,
+}
+
+/// Immutable module snapshot with export selectors resolved outside the proxy path.
+/// Typed functions are bound only inside each invocation's fresh Store.
+#[derive(Clone)]
 pub struct WasmPluginWireDispatch {
     pub(crate) cell: Arc<PluginCell>,
     pub(crate) kind: HookKind,
     pub(crate) config: Arc<HotEngineConfig>,
+    filter: Option<ResolvedHook>,
+    shape: Option<ResolvedHook>,
+    response: Option<ResolvedHook>,
+    sse: Option<ResolvedHook>,
+    envelope: Option<ResolvedHook>,
 }
 
 impl WasmPluginWireDispatch {
-    /// Snapshot the current cell from `slot` for the lifetime of this handle.
+    /// Snapshot a slot. Existing direct callers retain the Anthropic contract.
+    /// Provider pipelines use `for_provider` while constructing the view.
     pub fn from_slot(slot: Arc<LoadedPluginSlot>, config: Arc<HotEngineConfig>) -> Self {
-        let cell = slot.current.load_full();
-        let kind = slot.kind;
-        Self { cell, kind, config }
+        let mut dispatch = Self {
+            cell: slot.current.load_full(),
+            kind: slot.kind,
+            config,
+            filter: None,
+            shape: None,
+            response: None,
+            sse: None,
+            envelope: None,
+        };
+        dispatch.resolve(ProviderFamily::Anthropic);
+        dispatch
     }
 
-    /// The [`HookKind`] this dispatch handle was built for.
+    /// Select a provider's validated exports once; absence means skip the plugin.
+    pub fn for_provider(&self, provider: ProviderFamily) -> Option<Self> {
+        let mut selected = self.clone();
+        selected.resolve(provider);
+        let applicable = match selected.kind {
+            HookKind::Filter => selected.filter.is_some(),
+            HookKind::ShapeEnvelopeGemini => selected.envelope.is_some(),
+            _ => {
+                selected.shape.is_some()
+                    || selected.response.is_some_and(|h| h.active)
+                    || selected.sse.is_some_and(|h| h.active)
+            }
+        };
+        applicable.then_some(selected)
+    }
+    fn resolve(&mut self, provider: ProviderFamily) {
+        self.filter = self.resolve_hook(HookKind::Filter, provider);
+        self.shape = self.resolve_hook(HookKind::Shape, provider);
+        self.response = self.resolve_hook(HookKind::TransformResponse, provider);
+        self.sse = self.resolve_hook(HookKind::TransformSseEvent, provider);
+        self.envelope = self.resolve_hook(HookKind::ShapeEnvelopeGemini, provider);
+    }
+
+    fn resolve_hook(&self, hook: HookKind, provider: ProviderFamily) -> Option<ResolvedHook> {
+        if hook == HookKind::ShapeEnvelopeGemini && provider != ProviderFamily::Gemini {
+            return None;
+        }
+        let export = hook.qualified_export_name(provider);
+        if let Some(metadata) = self.cell.metadata.hooks.get(export.strip_prefix("cc_lb_")?) {
+            return Some(ResolvedHook {
+                export,
+                version: WireVersion::from_u8(metadata.wire_version)?,
+                active: !metadata.mode.is_noop(),
+            });
+        }
+        if provider != ProviderFamily::Anthropic {
+            return None;
+        }
+        let metadata = self.cell.metadata.hooks.get(hook.as_str())?;
+        Some(ResolvedHook {
+            export: hook.export_name(),
+            version: WireVersion::from_u8(metadata.wire_version)?,
+            active: !metadata.mode.is_noop(),
+        })
+    }
+
     pub fn kind(&self) -> HookKind {
         self.kind
     }
-
-    /// Shareable config handle (wire bounds, origin policy, etc.).
     pub fn config(&self) -> &Arc<HotEngineConfig> {
         &self.config
     }
-
-    /// Wire bounds from the runtime config.
     pub fn wire_bounds(&self) -> &PluginWireBounds {
         &self.config.wire_bounds
     }
-
-    /// Shape origin policy from the runtime config.
     pub fn shape_origin_policy(&self) -> ShapeOriginPolicy {
         self.config.shape_origin_policy
     }
-
-    /// Whether cookie headers should be stripped before crossing the plugin boundary.
     pub fn cookie_redaction(&self) -> bool {
         self.config.cookie_redaction
     }
 
-    /// Dispatch a filter call and consume its checked output while guest memory is borrowed.
-    /// `input` must be rkyv-encoded `FilterRequest` bytes; the callback receives
-    /// rkyv-encoded `FilterResponse` bytes.
-    ///
-    /// The callback receives only the bounded guest-memory slice. Its higher-ranked lifetime
-    /// prevents that slice from escaping in the return value:
+    fn call<R, F>(
+        &self,
+        hook: HookKind,
+        selected: Option<ResolvedHook>,
+        input: &[u8],
+        with_output: F,
+    ) -> Result<R, WasmtimeRuntimeError>
+    where
+        F: for<'a> FnOnce(&'a [u8]) -> R,
+    {
+        let selected = selected.ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
+            reason: format!(
+                "hook `{}` is absent from this provider's prebuilt pipeline",
+                hook.as_str()
+            ),
+        })?;
+        call_hook_export_scoped(&self.cell, input, hook, selected.export, with_output)
+    }
+
+    /// Consume checked guest output before its fresh Store is dropped.
     ///
     /// ```compile_fail
     /// use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntimeError};
-    ///
     /// fn escape_guest_output<'a>(
     ///     dispatch: &'a WasmPluginWireDispatch,
     ///     input: &'a [u8],
@@ -84,12 +148,8 @@ impl WasmPluginWireDispatch {
     where
         F: for<'a> FnOnce(&'a [u8]) -> R,
     {
-        call_filter_hook_scoped(&self.cell, input, with_output)
+        self.call(HookKind::Filter, self.filter, input, with_output)
     }
-
-    /// Dispatch a shape call and consume its checked output before the fresh Store is dropped.
-    /// `input` must be rkyv-encoded `ShapeRequest` bytes; the callback receives
-    /// rkyv-encoded `ShapeResponse` bytes.
     pub fn call_shape_scoped<R, F>(
         &self,
         input: &[u8],
@@ -98,22 +158,8 @@ impl WasmPluginWireDispatch {
     where
         F: for<'a> FnOnce(&'a [u8]) -> R,
     {
-        call_shape_hook_scoped(&self.cell, input, with_output)
+        self.call(HookKind::Shape, self.shape, input, with_output)
     }
-
-    /// Dispatch a transform_response call. Returns aligned bytes for rkyv access.
-    pub fn call_transform_response(
-        &self,
-        input: &[u8],
-    ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-        self.call_transform_response_scoped(input, |output| {
-            let mut aligned = AlignedVec::with_capacity(output.len());
-            aligned.extend_from_slice(output);
-            aligned
-        })
-    }
-
-    /// Dispatch a response transform and consume its checked output before the Store is dropped.
     pub fn call_transform_response_scoped<R, F>(
         &self,
         input: &[u8],
@@ -122,22 +168,13 @@ impl WasmPluginWireDispatch {
     where
         F: for<'a> FnOnce(&'a [u8]) -> R,
     {
-        call_transform_response_hook_scoped(&self.cell, input, with_output)
+        self.call(
+            HookKind::TransformResponse,
+            self.response,
+            input,
+            with_output,
+        )
     }
-
-    /// Dispatch a transform_sse_event call. Returns aligned bytes for rkyv access.
-    pub fn call_transform_sse_event(
-        &self,
-        input: &[u8],
-    ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-        self.call_transform_sse_event_scoped(input, |output| {
-            let mut aligned = AlignedVec::with_capacity(output.len());
-            aligned.extend_from_slice(output);
-            aligned
-        })
-    }
-
-    /// Dispatch an SSE transform and consume its checked output before the Store is dropped.
     pub fn call_transform_sse_event_scoped<R, F>(
         &self,
         input: &[u8],
@@ -146,42 +183,64 @@ impl WasmPluginWireDispatch {
     where
         F: for<'a> FnOnce(&'a [u8]) -> R,
     {
-        call_transform_sse_event_hook_scoped(&self.cell, input, with_output)
+        self.call(HookKind::TransformSseEvent, self.sse, input, with_output)
+    }
+    pub fn call_shape_envelope_gemini_scoped<R, F>(
+        &self,
+        input: &[u8],
+        with_output: F,
+    ) -> Result<R, WasmtimeRuntimeError>
+    where
+        F: for<'a> FnOnce(&'a [u8]) -> R,
+    {
+        self.call(
+            HookKind::ShapeEnvelopeGemini,
+            self.envelope,
+            input,
+            with_output,
+        )
+    }
+    pub fn call_transform_response(
+        &self,
+        input: &[u8],
+    ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
+        self.call_transform_response_scoped(input, copy_aligned)
+    }
+    pub fn call_transform_sse_event(
+        &self,
+        input: &[u8],
+    ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
+        self.call_transform_sse_event_scoped(input, copy_aligned)
+    }
+    pub fn filter_wire_version(&self) -> Option<WireVersion> {
+        self.filter.map(|h| h.version)
+    }
+    pub fn shape_wire_version(&self) -> Option<WireVersion> {
+        self.shape.map(|h| h.version)
+    }
+    pub fn response_wire_version(&self) -> Option<WireVersion> {
+        self.response.map(|h| h.version)
+    }
+    pub fn sse_wire_version(&self) -> Option<WireVersion> {
+        self.sse.map(|h| h.version)
+    }
+    pub fn envelope_wire_version(&self) -> Option<WireVersion> {
+        self.envelope.map(|h| h.version)
     }
 
-    /// Wire version for the filter hook, if declared in plugin metadata.
-    pub fn filter_wire_version(&self) -> Option<cc_lb_plugin_wire::schema::WireVersion> {
-        self.cell
-            .metadata
-            .hooks
-            .get(cc_lb_plugin_wire::schema::HookKind::Filter.as_str())
-            .and_then(|m| cc_lb_plugin_wire::schema::WireVersion::from_u8(m.wire_version))
+    pub fn has_shape_envelope_gemini(&self) -> bool {
+        self.envelope.is_some_and(|h| h.active)
     }
-
-    /// Wire version for the shape hook, if declared in plugin metadata.
-    pub fn shape_wire_version(&self) -> Option<cc_lb_plugin_wire::schema::WireVersion> {
-        self.cell
-            .metadata
-            .hooks
-            .get(cc_lb_plugin_wire::schema::HookKind::Shape.as_str())
-            .and_then(|m| cc_lb_plugin_wire::schema::WireVersion::from_u8(m.wire_version))
-    }
-
-    /// Whether the transform_response hook is non-noop (active).
     pub fn has_response_transform(&self) -> bool {
-        self.cell
-            .metadata
-            .hooks
-            .get(cc_lb_plugin_wire::schema::HookKind::TransformResponse.as_str())
-            .is_some_and(|m| !m.mode.is_noop())
+        self.response.is_some_and(|h| h.active)
     }
-
-    /// Whether the transform_sse_event hook is non-noop (active).
     pub fn has_sse_event_transform(&self) -> bool {
-        self.cell
-            .metadata
-            .hooks
-            .get(cc_lb_plugin_wire::schema::HookKind::TransformSseEvent.as_str())
-            .is_some_and(|m| !m.mode.is_noop())
+        self.sse.is_some_and(|h| h.active)
     }
+}
+
+fn copy_aligned(output: &[u8]) -> AlignedVec<16> {
+    let mut aligned = AlignedVec::with_capacity(output.len());
+    aligned.extend_from_slice(output);
+    aligned
 }

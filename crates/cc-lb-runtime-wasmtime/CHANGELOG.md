@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Admit optional provider-qualified filter, request, buffered-response, and SSE exports with `cc_lb.plugin.v2` metadata. Wire V1 layouts and schema fingerprints remain unchanged.
+- Resolve provider export selectors when constructing plugin dispatch handles. Missing provider hooks do not invoke Wasm.
+- Build provider-specific principal filter chains and upstream dialects before serving requests. Response-only plugins retain native request shaping, including OAuth URL handling.
+- Expose derived provider/hook capabilities in the admin registry and non-blocking legacy-provider warnings in plugin-chain responses.
+- Dispatch V2 wire contracts and the optional Gemini envelope export while preserving legacy V1 guest decoding.
+
+### Changed
+
+- **Breaking:** all legacy unqualified hooks, including router filters, now apply only to Anthropic. Plugins used with OpenAI or Gemini must export qualified hooks for those providers.
+- Reject overlapping legacy and qualified Anthropic entrypoints. Legacy hooks may coexist with qualified OpenAI and Gemini hooks.
+
 ## [0.3.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.2.0...cc-lb-runtime-wasmtime-v0.3.0) - 2026-10-31
 
 ### Fixed

@@ -102,6 +102,13 @@ pub trait SubscriptionQuotaIngestionPort: Send + Sync {
         upstream_id: Uuid,
         observed_at: SystemTime,
     );
+
+    fn ingest_subscription_quota_observations(
+        &self,
+        observations: &[UnifiedQuotaObservation],
+        upstream_id: Uuid,
+        observed_at: SystemTime,
+    );
 }
 
 #[derive(Debug)]

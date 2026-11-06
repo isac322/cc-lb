@@ -7,6 +7,7 @@ use cc_lb_plugin_wire::{
         CachePricingSummaryRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
         UpstreamCandidateRef,
     },
+    v2,
 };
 use cc_lb_routing::RoutingContext;
 use rkyv::rancor::Error as RkyvError;
@@ -123,6 +124,139 @@ impl FilterWireRequest<'_> {
                 },
                 with_bytes,
             ),
+            WireVersion::V2 => {
+                let thread_id = self
+                    .ctx
+                    .thread_id
+                    .as_deref()
+                    .map(|value| v2::OptionalStrRef { value });
+                let service_tier = self
+                    .ctx
+                    .requested_service_tier
+                    .as_deref()
+                    .map(|value| v2::OptionalStrRef { value });
+                let query = self
+                    .ctx
+                    .query
+                    .as_deref()
+                    .map(|value| v2::OptionalStrRef { value });
+                let principal = v2::PrincipalRef {
+                    id: self.principal.id.as_str(),
+                    kind: principal_kind,
+                    claims: &[],
+                };
+                let quota_refs: Vec<Vec<v2::SubscriptionQuotaSampleRef<'_>>> = self
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        candidate
+                            .subscription_quotas
+                            .iter()
+                            .map(|quota| v2::SubscriptionQuotaSampleRef {
+                                window: quota.window.as_str(),
+                                utilization: quota.utilization,
+                                resets_at_unix_secs: quota.resets_at_unix_secs,
+                                status: quota
+                                    .status
+                                    .as_deref()
+                                    .map(|value| v2::OptionalStrRef { value }),
+                                sample_kind: match quota.state {
+                                    cc_lb_domain::SubscriptionQuotaDataState::Fresh
+                                    | cc_lb_domain::SubscriptionQuotaDataState::Stale => "sample",
+                                    cc_lb_domain::SubscriptionQuotaDataState::Absent => "absent",
+                                    cc_lb_domain::SubscriptionQuotaDataState::Unobserved => {
+                                        "unobserved"
+                                    }
+                                },
+                                observed_at_unix_millis: quota.observed_at_unix_millis,
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let candidates: Vec<v2::UpstreamCandidateRef<'_>> = self
+                    .candidates
+                    .iter()
+                    .zip(candidate_ids.iter())
+                    .zip(quota_refs.iter())
+                    .map(|((candidate, upstream_id), quotas)| {
+                        let cache_score = candidate.cache_score.as_ref();
+                        v2::UpstreamCandidateRef {
+                            upstream_id,
+                            name: candidate.name.as_str(),
+                            kind: candidate.kind.as_str(),
+                            base_url: candidate
+                                .base_url
+                                .as_deref()
+                                .map(|value| v2::OptionalStrRef { value }),
+                            observed_at_unix_secs: candidate.observed_at_unix_secs,
+                            predicted_cache_read_tokens: cache_score
+                                .map(|score| score.predicted_cache_read_tokens)
+                                .unwrap_or(0),
+                            predicted_cache_creation_tokens_5m: cache_score
+                                .map(|score| score.predicted_cache_creation_tokens_5m)
+                                .unwrap_or(0),
+                            predicted_cache_creation_tokens_1h: cache_score
+                                .map(|score| score.predicted_cache_creation_tokens_1h)
+                                .unwrap_or(0),
+                            predicted_uncached_input_tokens: cache_score
+                                .map(|score| score.predicted_uncached_input_tokens)
+                                .unwrap_or(0),
+                            plan_capacity_ratio: candidate.plan_capacity_ratio.unwrap_or(1.0),
+                            organization_type: candidate.organization_type.as_deref().unwrap_or(""),
+                            rate_limit_tier: candidate.rate_limit_tier.as_deref().unwrap_or(""),
+                            seat_tier: candidate.seat_tier.as_deref().unwrap_or(""),
+                            subscription_quotas: quotas,
+                        }
+                    })
+                    .collect();
+                let v2_headers: Vec<v2::HeaderRef<'_>> = self
+                    .ctx
+                    .downstream_headers
+                    .iter()
+                    .filter(|(name, _)| {
+                        !is_stripped_downstream_header(name.as_str(), self.cookie_redaction)
+                    })
+                    .map(|(name, value)| v2::HeaderRef {
+                        name: name.as_str(),
+                        value: value.as_bytes(),
+                    })
+                    .collect();
+                serialize_with_input_scratch(
+                    &v2::FilterRequestRef {
+                        request_id: self.ctx.request_id.as_str(),
+                        thread_id,
+                        service_tier,
+                        canonical_model_id: self.ctx.canonical_model_id.as_str(),
+                        cache_pricing: v2::CachePricingSummaryRef {
+                            status: self.ctx.cache_pricing.status.as_str(),
+                            input_micros_per_million: self
+                                .ctx
+                                .cache_pricing
+                                .input_micros_per_million,
+                            cache_creation_5m_micros_per_million: self
+                                .ctx
+                                .cache_pricing
+                                .cache_creation_5m_micros_per_million,
+                            cache_creation_1h_micros_per_million: self
+                                .ctx
+                                .cache_pricing
+                                .cache_creation_1h_micros_per_million,
+                            cache_read_micros_per_million: self
+                                .ctx
+                                .cache_pricing
+                                .cache_read_micros_per_million,
+                        },
+                        method: self.ctx.method.as_str(),
+                        path: self.ctx.path.as_str(),
+                        query,
+                        headers: &v2_headers,
+                        body: self.ctx.body_bytes.as_ref(),
+                        principal,
+                        candidates: &candidates,
+                    },
+                    with_bytes,
+                )
+            }
         }
     }
 }

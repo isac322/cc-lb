@@ -2,12 +2,10 @@
 //!
 //! Selects at most one OAuth upstream per request via:
 //!
-//! 1. Anthropic candidates use a strict tier ordering (KnownBase > PartialBase > Overage >
-//!    UnknownProbe) that keeps the Anthropic base plan strictly higher priority than the
-//!    overage bucket.
-//! 2. OpenAI and Gemini candidates prefer OAuth over API keys, ranking OAuth candidates by
-//!    predicted cache reads and then upstream ID.
-//! 3. Within the winning Anthropic tier, deterministic cost-first-v2 selection. Candidates
+//! 1. OAuth candidates use a strict tier ordering (KnownBase > PartialBase > Overage >
+//!    UnknownProbe) that keeps the base plan strictly higher priority than the overage bucket.
+//! 2. OpenAI uses shared windows; Gemini selects windows for the requested model family.
+//! 3. Within the winning tier, deterministic cost-first-v2 selection. Candidates
 //!    within five percent of the lowest known input cost use urgency, the raw five-hour
 //!    pressure, the overage-only warning multiplier, upstream ID, and original position as
 //!    stable tiebreaks. Base-tier warning signals remain observable but do not affect ranking.
@@ -89,6 +87,10 @@ pub(crate) const WINDOW_SEVEN_DAY: &str = "7d";
 pub(crate) const WINDOW_SEVEN_DAY_FABLE: &str = "7d_fable";
 pub(crate) const WINDOW_SEVEN_DAY_SONNET: &str = "7d_sonnet";
 pub(crate) const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
+const WINDOW_GEMINI_FIVE_HOUR: &str = "gemini_5h";
+const WINDOW_GEMINI_SEVEN_DAY: &str = "gemini_7d";
+const WINDOW_THIRD_PARTY_FIVE_HOUR: &str = "third_party_5h";
+const WINDOW_THIRD_PARTY_SEVEN_DAY: &str = "third_party_7d";
 pub(crate) const WINDOW_OVERAGE: &str = "overage";
 pub(crate) const WINDOW_UNIFIED: &str = "unified";
 pub(crate) const FABLE_MODEL: &str = "claude-fable-5";
@@ -182,88 +184,36 @@ fn evaluate(
     config: &FilterConfig,
 ) -> FilterOutput {
     let canonical_model = ctx.canonical_model_id.as_str();
-    let base_windows = relevant_base_windows(canonical_model);
-
-    let has_subscription = candidates
-        .iter()
-        .any(|c| c.kind == UpstreamKind::AnthropicOauth);
-    let has_api_key = candidates
-        .iter()
-        .any(|c| c.kind == UpstreamKind::AnthropicApiKey);
-
-    // Anthropic candidates are the filter's original scope and retain the full four-tier
-    // subscription logic below. Other providers use the simpler OAuth/API-key preference.
-    if !has_subscription && !has_api_key {
-        let has_openai_or_gemini = candidates.iter().any(|candidate| {
-            matches!(
-                candidate.kind,
-                UpstreamKind::OpenaiOauth
-                    | UpstreamKind::OpenaiApiKey
-                    | UpstreamKind::GeminiOauth
-                    | UpstreamKind::GeminiApiKey
-            )
-        });
-        if !has_openai_or_gemini {
-            return FilterOutput {
-                kept_upstream_ids: candidates.iter().map(|c| c.upstream_id).collect(),
-                reason: NOT_APPLICABLE_REASON.to_owned(),
-                per_candidate_reasons: Vec::new(),
-                subscription_preference: None,
-            };
-        }
-
-        if let Some(winner) = candidates
-            .iter()
-            .filter(|candidate| {
-                matches!(
-                    candidate.kind,
-                    UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
-                )
-            })
-            .max_by(|left, right| {
-                let left_cache_read_tokens = left
-                    .cache_score
-                    .as_ref()
-                    .map_or(0, |score| score.predicted_cache_read_tokens);
-                let right_cache_read_tokens = right
-                    .cache_score
-                    .as_ref()
-                    .map_or(0, |score| score.predicted_cache_read_tokens);
-                left_cache_read_tokens
-                    .cmp(&right_cache_read_tokens)
-                    .then_with(|| right.upstream_id.cmp(&left.upstream_id))
-            })
-        {
-            return FilterOutput {
-                kept_upstream_ids: vec![winner.upstream_id],
-                reason: SUBSCRIPTION_ALIVE_REASON.to_owned(),
-                per_candidate_reasons: Vec::new(),
-                subscription_preference: None,
-            };
-        }
-
-        let api_key_ids = candidates
-            .iter()
-            .filter(|candidate| {
-                matches!(
-                    candidate.kind,
-                    UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
-                )
-            })
-            .map(|candidate| candidate.upstream_id)
-            .collect();
-        return FilterOutput {
-            kept_upstream_ids: api_key_ids,
-            reason: API_KEY_FALLBACK_REASON.to_owned(),
-            per_candidate_reasons: Vec::new(),
-            subscription_preference: None,
-        };
-    }
+    // Preserve the original Anthropic scope even for mixed-provider inputs.
+    // Normal routing has already restricted candidates to the request provider.
+    let anthropic_scope = candidates.iter().any(|candidate| {
+        matches!(
+            candidate.kind,
+            UpstreamKind::AnthropicOauth | UpstreamKind::AnthropicApiKey
+        )
+    });
+    let has_subscription = candidates.iter().any(|candidate| {
+        in_provider_scope(candidate.kind, anthropic_scope)
+            && candidate.kind.credential_kind() == cc_lb_domain::CredentialKind::Oauth
+    });
+    let has_api_key = candidates.iter().any(|candidate| {
+        in_provider_scope(candidate.kind, anthropic_scope)
+            && candidate.kind.credential_kind() == cc_lb_domain::CredentialKind::ApiKey
+    });
 
     if !has_subscription {
         return FilterOutput {
-            kept_upstream_ids: collect_kind(candidates, UpstreamKind::AnthropicApiKey),
-            reason: NO_SUBSCRIPTION_REASON.to_owned(),
+            kept_upstream_ids: collect_api_keys(candidates, anthropic_scope),
+            reason: if has_api_key {
+                if anthropic_scope {
+                    NO_SUBSCRIPTION_REASON
+                } else {
+                    API_KEY_FALLBACK_REASON
+                }
+            } else {
+                NOT_APPLICABLE_REASON
+            }
+            .to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
         };
@@ -271,9 +221,12 @@ fn evaluate(
 
     let mut buckets: [Vec<Assessment<'_>>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     for (index, candidate) in candidates.iter().enumerate() {
-        if candidate.kind != UpstreamKind::AnthropicOauth {
+        if !in_provider_scope(candidate.kind, anthropic_scope)
+            || candidate.kind.credential_kind() != cc_lb_domain::CredentialKind::Oauth
+        {
             continue;
         }
+        let base_windows = subscription_base_windows(candidate.kind, canonical_model);
         if let Some(assessment) = assess_candidate(candidate, index, base_windows, config) {
             buckets[assessment.tier as usize].push(assessment);
         }
@@ -374,7 +327,7 @@ fn evaluate(
 
     if has_api_key {
         FilterOutput {
-            kept_upstream_ids: collect_kind(candidates, UpstreamKind::AnthropicApiKey),
+            kept_upstream_ids: collect_api_keys(candidates, anthropic_scope),
             reason: API_KEY_FALLBACK_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
@@ -403,6 +356,26 @@ const FABLE_BASE_WINDOWS: [&str; 3] = [WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, WINDO
 const SONNET_BASE_WINDOWS: [&str; 3] =
     [WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, WINDOW_SEVEN_DAY_SONNET];
 const OPUS_BASE_WINDOWS: [&str; 3] = [WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, WINDOW_SEVEN_DAY_OPUS];
+const GEMINI_BASE_WINDOWS: [&str; 2] = [WINDOW_GEMINI_FIVE_HOUR, WINDOW_GEMINI_SEVEN_DAY];
+const THIRD_PARTY_BASE_WINDOWS: [&str; 2] =
+    [WINDOW_THIRD_PARTY_FIVE_HOUR, WINDOW_THIRD_PARTY_SEVEN_DAY];
+
+fn subscription_base_windows(kind: UpstreamKind, canonical_model: &str) -> &'static [&'static str] {
+    match kind {
+        UpstreamKind::AnthropicOauth => relevant_base_windows(canonical_model),
+        UpstreamKind::OpenaiOauth => &BASE_WINDOWS,
+        UpstreamKind::GeminiOauth if canonical_model.starts_with("gemini-") => &GEMINI_BASE_WINDOWS,
+        UpstreamKind::GeminiOauth
+            if canonical_model.starts_with("claude-")
+                || canonical_model.starts_with("gpt-oss-") =>
+        {
+            &THIRD_PARTY_BASE_WINDOWS
+        }
+        // An unidentified Gemini model family cannot use either bucket as evidence
+        // of headroom or exhaustion. No relevant observations means UnknownProbe.
+        _ => &[],
+    }
+}
 
 fn relevant_base_windows(canonical_model: &str) -> &'static [&'static str] {
     if canonical_model == FABLE_MODEL {
@@ -423,21 +396,28 @@ pub(crate) fn subscription_hard_blocked(
     canonical_model: &str,
     candidate: &UpstreamCandidate,
 ) -> bool {
-    candidate.kind == UpstreamKind::AnthropicOauth
+    candidate.kind.credential_kind() == cc_lb_domain::CredentialKind::Oauth
         && assess_candidate(
             candidate,
             0,
-            relevant_base_windows(canonical_model),
+            subscription_base_windows(candidate.kind, canonical_model),
             &FilterConfig::default(),
         )
         .is_none()
 }
 
-fn collect_kind(candidates: &[UpstreamCandidate], kind: UpstreamKind) -> Vec<Uuid> {
+fn in_provider_scope(kind: UpstreamKind, anthropic_scope: bool) -> bool {
+    !anthropic_scope || kind.provider() == cc_lb_domain::Provider::Anthropic
+}
+
+fn collect_api_keys(candidates: &[UpstreamCandidate], anthropic_scope: bool) -> Vec<Uuid> {
     candidates
         .iter()
-        .filter(|c| c.kind == kind)
-        .map(|c| c.upstream_id)
+        .filter(|candidate| {
+            in_provider_scope(candidate.kind, anthropic_scope)
+                && candidate.kind.credential_kind() == cc_lb_domain::CredentialKind::ApiKey
+        })
+        .map(|candidate| candidate.upstream_id)
         .collect()
 }
 
@@ -532,6 +512,9 @@ fn assess_candidate<'a>(
     let mut model_scoped_weekly_pressure = 0.0f64;
     for window in base_windows.iter().copied() {
         let snapshot = find_snapshot(candidate, window);
+        // Explicit provider absence means this account has no constraint for
+        // the window, including Anthropic accounts without a five-hour limit.
+        // Missing or stale observations still participate as unknown windows.
         if snapshot.is_some_and(|snapshot| snapshot.state == SubscriptionQuotaDataState::Absent) {
             continue;
         }
@@ -541,10 +524,10 @@ fn assess_candidate<'a>(
             BaseSignal::CurrentPositive => {
                 positive_count += 1;
                 match window {
-                    WINDOW_FIVE_HOUR => {
+                    WINDOW_FIVE_HOUR | WINDOW_GEMINI_FIVE_HOUR | WINDOW_THIRD_PARTY_FIVE_HOUR => {
                         five_hour_pressure = base_window_pressure(snapshot, now_secs);
                     }
-                    WINDOW_SEVEN_DAY => {
+                    WINDOW_SEVEN_DAY | WINDOW_GEMINI_SEVEN_DAY | WINDOW_THIRD_PARTY_SEVEN_DAY => {
                         shared_weekly_pressure = base_window_pressure(snapshot, now_secs);
                     }
                     WINDOW_SEVEN_DAY_FABLE | WINDOW_SEVEN_DAY_SONNET | WINDOW_SEVEN_DAY_OPUS => {
@@ -557,10 +540,10 @@ fn assess_candidate<'a>(
                 positive_count += 1;
                 warning_positive_count += 1;
                 match window {
-                    WINDOW_FIVE_HOUR => {
+                    WINDOW_FIVE_HOUR | WINDOW_GEMINI_FIVE_HOUR | WINDOW_THIRD_PARTY_FIVE_HOUR => {
                         five_hour_pressure = base_window_pressure(snapshot, now_secs);
                     }
-                    WINDOW_SEVEN_DAY => {
+                    WINDOW_SEVEN_DAY | WINDOW_GEMINI_SEVEN_DAY | WINDOW_THIRD_PARTY_SEVEN_DAY => {
                         shared_weekly_pressure = base_window_pressure(snapshot, now_secs);
                     }
                     WINDOW_SEVEN_DAY_FABLE | WINDOW_SEVEN_DAY_SONNET | WINDOW_SEVEN_DAY_OPUS => {
@@ -672,8 +655,15 @@ fn five_hour_pressure_can_forfeit_weekly_quota(
     base_windows: &[&'static str],
     now_secs: u64,
 ) -> bool {
+    let (five_hour_window, seven_day_window) = if base_windows.contains(&WINDOW_GEMINI_FIVE_HOUR) {
+        (WINDOW_GEMINI_FIVE_HOUR, WINDOW_GEMINI_SEVEN_DAY)
+    } else if base_windows.contains(&WINDOW_THIRD_PARTY_FIVE_HOUR) {
+        (WINDOW_THIRD_PARTY_FIVE_HOUR, WINDOW_THIRD_PARTY_SEVEN_DAY)
+    } else {
+        (WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY)
+    };
     let Some((_, five_hour_secs)) =
-        usable_window(find_snapshot(candidate, WINDOW_FIVE_HOUR), now_secs)
+        usable_window(find_snapshot(candidate, five_hour_window), now_secs)
     else {
         return true;
     };
@@ -686,7 +676,7 @@ fn five_hour_pressure_can_forfeit_weekly_quota(
             },
         )
     };
-    match behind_weekly_pace(WINDOW_SEVEN_DAY) {
+    match behind_weekly_pace(seven_day_window) {
         None | Some(true) => true,
         Some(false) => base_windows.iter().copied().any(|window| {
             matches!(
@@ -728,12 +718,16 @@ fn pressure_from_ratios(
 
 fn base_window_pressure_config(window: &str) -> Option<BaseWindowPressureConfig> {
     match window {
-        WINDOW_FIVE_HOUR => Some(BaseWindowPressureConfig {
-            window_len_secs: FIVE_HOUR_WINDOW_LEN_SECS,
-            gamma: FIVE_HOUR_GAMMA,
-            target_floor: FIVE_HOUR_TARGET_FLOOR,
-        }),
+        WINDOW_FIVE_HOUR | WINDOW_GEMINI_FIVE_HOUR | WINDOW_THIRD_PARTY_FIVE_HOUR => {
+            Some(BaseWindowPressureConfig {
+                window_len_secs: FIVE_HOUR_WINDOW_LEN_SECS,
+                gamma: FIVE_HOUR_GAMMA,
+                target_floor: FIVE_HOUR_TARGET_FLOOR,
+            })
+        }
         WINDOW_SEVEN_DAY
+        | WINDOW_GEMINI_SEVEN_DAY
+        | WINDOW_THIRD_PARTY_SEVEN_DAY
         | WINDOW_SEVEN_DAY_FABLE
         | WINDOW_SEVEN_DAY_SONNET
         | WINDOW_SEVEN_DAY_OPUS => Some(BaseWindowPressureConfig {

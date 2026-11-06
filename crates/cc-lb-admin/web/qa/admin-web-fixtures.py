@@ -105,7 +105,7 @@ GET_SIDE_EFFECTS = [
     {"id": "GET-AUDIT-CONFIG-DRAFT-V1", "method": "GET", "path": "/admin/v1/config/draft", "effect": "appends config_draft_read Audit entry"},
     {"id": "GET-AUDIT-CONFIG-HISTORY-V1", "method": "GET", "path": "/admin/v1/config/history", "effect": "appends config_history_read Audit entry"},
     {"id": "GET-AUDIT-AUDIT", "method": "GET", "path": "/admin/v1/audit", "effect": "queries first, then appends audit_query; response does not contain its own new row"},
-    {"id": "GET-AUDIT-EVENT-DETAIL", "method": "GET", "path": "/admin/v1/events/detail/{event_id}", "effect": "appends request_event_detail_read Audit entry"},
+    {"id": "GET-AUDIT-EVENT-DETAIL", "method": "GET", "path": "/admin/v1/events/detail", "query": {"id": "{event_id}"}, "effect": "appends request_event_detail_read Audit entry"},
     {"id": "GET-AUDIT-KEY-LIST", "method": "GET", "path": "/admin/v1/principals/{principal_id}/keys", "effect": "appends principal_keys_list Audit entry"},
 ]
 

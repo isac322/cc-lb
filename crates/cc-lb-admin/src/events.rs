@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::dashboard::parse_provider_families;
 use cc_lb_request_log::RequestEventKind;
 use cc_lb_storage_api::{
     RequestEvent, RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventListItem,
@@ -9,7 +10,6 @@ use cc_lb_storage_api::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
-
 pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
 pub const MAX_RECENT_EVENTS_LIMIT: usize = 500;
 pub const MAX_HISTOGRAM_BUCKETS: u64 = 240;
@@ -34,6 +34,7 @@ pub struct RecentEventsParams {
     pub thread_id: Option<String>,
     pub model: Option<String>,
     pub upstream_id: Option<Uuid>,
+    pub provider_upstream_ids: Option<Vec<Uuid>>,
     pub status_class: Option<StatusClass>,
     pub errors_only: bool,
     pub source_kind: Option<String>,
@@ -55,6 +56,7 @@ pub struct StreamFilters {
     pub thread_id: Option<String>,
     pub model: Option<String>,
     pub upstream_id: Option<Uuid>,
+    pub provider_upstream_ids: Option<Vec<Uuid>>,
     pub status_class: Option<StatusClass>,
     pub errors_only: bool,
     pub source_kind: Option<String>,
@@ -110,6 +112,7 @@ pub enum EventsError {
     InvalidLimit,
     LimitTooLarge,
     InvalidUpstreamId,
+    InvalidProviders,
     InvalidStatusClass,
     InvalidEventKind,
     Storage(StorageError),
@@ -166,6 +169,7 @@ pub fn parse_recent_params(
         thread_id: filters.thread_id,
         model: filters.model,
         upstream_id: filters.upstream_id,
+        provider_upstream_ids: filters.provider_upstream_ids,
         status_class: filters.status_class,
         errors_only: filters.errors_only,
         source_kind: filters.source_kind,
@@ -298,6 +302,9 @@ pub async fn build_delta_events_payload(
 }
 
 pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilters, EventsError> {
+    if let Some(value) = map.get("providers") {
+        parse_provider_families(Some(value.as_str())).map_err(|_| EventsError::InvalidProviders)?;
+    }
     Ok(StreamFilters {
         principal_id: map.get("principal_id").cloned(),
         thread_id: map.get("thread_id").cloned(),
@@ -312,6 +319,7 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
             }
             None => None,
         },
+        provider_upstream_ids: None,
         status_class: match map.get("status_class") {
             Some(value) if value == "errors" => None,
             Some(value) => Some(parse_status_class(value)?),
@@ -350,6 +358,13 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
     }
     if let Some(upstream_id) = filters.upstream_id
         && event.upstream_id != Some(upstream_id)
+    {
+        return false;
+    }
+    if let Some(provider_upstream_ids) = filters.provider_upstream_ids.as_ref()
+        && !event
+            .upstream_id
+            .is_some_and(|id| provider_upstream_ids.contains(&id))
     {
         return false;
     }
@@ -421,6 +436,7 @@ impl RecentEventsParams {
             thread_id: self.thread_id.clone(),
             model: self.model.clone(),
             upstream_id: self.upstream_id,
+            provider_upstream_ids: self.provider_upstream_ids.clone(),
             status_class: self.status_class,
             errors_only: self.errors_only,
             source_kind: self.source_kind.clone(),
@@ -461,6 +477,7 @@ impl StreamFilters {
             thread_id: self.thread_id.clone(),
             model: self.model.clone(),
             upstream_id: self.upstream_id,
+            provider_upstream_ids: self.provider_upstream_ids.clone(),
             status_class: self.status_class,
             errors_only: self.errors_only,
             event_kind: self.event_kind,
@@ -487,6 +504,7 @@ impl EventsError {
             Self::InvalidLimit => "invalid_limit",
             Self::LimitTooLarge => "limit_too_large",
             Self::InvalidUpstreamId => "invalid_upstream_id",
+            Self::InvalidProviders => "invalid_providers",
             Self::InvalidStatusClass => "invalid_status_class",
             Self::InvalidEventKind => "invalid_event_kind",
             Self::Storage(_) => "storage_error",

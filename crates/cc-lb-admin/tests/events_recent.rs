@@ -157,7 +157,7 @@ async fn events_recent_serializes_request_timings_without_losing_zero_or_fractio
     let (status, _, detail, _) = authed_json(
         admin,
         "GET",
-        "/admin/v1/events/detail/event-setup-timings",
+        "/admin/v1/events/detail?id=event-setup-timings",
         None,
     )
     .await;

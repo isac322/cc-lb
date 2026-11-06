@@ -128,6 +128,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     let lazy_cancel = CancellationToken::new();
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
+            google_config: Default::default(),
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
             oauth_cfg: fixture.oauth_cfg.clone(),
@@ -141,6 +142,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
+        None,
         fixture.aead.clone(),
         Some(lazy),
         0,

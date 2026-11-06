@@ -93,6 +93,7 @@ impl Fixture {
                 refresh_token: format!("sk-ant-ort01-{name}-refresh-token-123456789"),
                 account_id: None,
                 project_id: None,
+                oauth_profile: Default::default(),
                 expires_at_unix_secs: now_secs() + 3600,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
@@ -232,6 +233,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
+        None,
         fixture.aead.clone(),
         None,
         0,
@@ -274,6 +276,7 @@ async fn empty_router_choice_errors() {
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
+        None,
         fixture.aead.clone(),
         None,
         0,

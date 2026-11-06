@@ -334,6 +334,7 @@ impl LazyFixture {
     pub(super) fn refresher(&self, claims: Arc<dyn LazyRefreshClaimGuard>) -> Arc<LazyRefresher> {
         Arc::new(LazyRefresher::new_with_claim_guard(
             LazyRefresherDeps {
+                google_config: Default::default(),
                 stores: self.inner.stores.clone(),
                 aead: self.inner.aead.clone(),
                 oauth_cfg: self.inner.oauth_cfg.clone(),
@@ -360,6 +361,7 @@ impl LazyFixture {
             &self.inner.aead,
             upstream_id,
             &OAuthTokenBundle {
+                oauth_profile: Default::default(),
                 access_token: "access-reconnected".to_owned(),
                 refresh_token: "refresh-reconnected".to_owned(),
                 expires_at_unix_secs: now_secs(self.inner.clock.as_ref()).saturating_sub(1),

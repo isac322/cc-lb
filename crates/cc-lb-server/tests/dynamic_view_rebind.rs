@@ -146,6 +146,7 @@ async fn build(
 ) -> Arc<DynamicView> {
     build_dynamic_view(
         stores,
+        None,
         Arc::new(AeadService::from_master_key([1; 32])),
         None,
         current_generation,
@@ -279,6 +280,7 @@ async fn oauth_reconnect_error_survives_active_and_disabled_rebuilds_until_token
         refresh_token: "refresh-before-reconnect".to_owned(),
         account_id: None,
         project_id: None,
+        oauth_profile: Default::default(),
         expires_at_unix_secs: 1_900_000_000,
         refresh_token_expires_at_unix_secs: None,
         scopes: vec!["messages".to_owned()],

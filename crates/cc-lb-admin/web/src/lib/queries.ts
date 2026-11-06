@@ -517,10 +517,12 @@ export function useEventsHistogram(
 export function useRequestEventDetail(eventId: string | null) {
   return useQuery({
     queryKey: ['request-event-detail', eventId ?? ''],
-    queryFn: () =>
-      getJson<RequestEvent>(
-        `/admin/v1/events/detail/${encodeURIComponent(eventId ?? '')}`,
-      ),
+    queryFn: () => {
+      const searchParams = new URLSearchParams({ id: eventId ?? '' });
+      return getJson<RequestEvent>(
+        `/admin/v1/events/detail?${searchParams.toString()}`,
+      );
+    },
     enabled: !!eventId,
     staleTime: Infinity,
   });

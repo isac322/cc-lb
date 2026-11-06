@@ -204,6 +204,7 @@ impl Fixture {
                 refresh_token: tokens.refresh_token,
                 account_id: None,
                 project_id: None,
+                oauth_profile: Default::default(),
                 expires_at_unix_secs: expires_at,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
@@ -244,6 +245,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
     let replica_id = Uuid::new_v4();
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
+            google_config: Default::default(),
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
             oauth_cfg: fixture.oauth_cfg.clone(),
@@ -307,6 +309,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
     let replica_id = Uuid::new_v4();
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
+            google_config: Default::default(),
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
             oauth_cfg: fixture.oauth_cfg.clone(),
@@ -320,6 +323,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
+        None,
         fixture.aead.clone(),
         Some(lazy),
         0,
@@ -383,6 +387,7 @@ async fn long_lived_expired_oauth_upstream_never_triggers_lazy_refresh() {
             .expect("initial token generation exists");
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
+            google_config: Default::default(),
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
             oauth_cfg: fixture.oauth_cfg.clone(),
@@ -443,6 +448,7 @@ async fn routable_upstream_ids(fixture: &Fixture, principal: &str) -> Vec<Uuid> 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
+        None,
         fixture.aead.clone(),
         None,
         0,
@@ -540,6 +546,7 @@ async fn long_lived_oauth_401_persists_reconnect_required_until_reconnect() {
             refresh_token: reconnected.refresh_token,
             account_id: None,
             project_id: None,
+            oauth_profile: Default::default(),
             expires_at_unix_secs: expires_at,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["messages".to_owned()],
@@ -653,6 +660,7 @@ async fn long_lived_oauth_upstream_unauthorized_response_is_terminal() {
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
+        None,
         fixture.aead.clone(),
         Some(lazy_handle),
         0,
@@ -1096,6 +1104,7 @@ async fn refresh_tokens(
             refresh_token: refreshed.refresh_token,
             account_id: None,
             project_id: None,
+            oauth_profile: Default::default(),
             expires_at_unix_secs,
             refresh_token_expires_at_unix_secs: None,
             scopes: refreshed.scopes,

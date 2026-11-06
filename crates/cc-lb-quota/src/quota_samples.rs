@@ -4,14 +4,18 @@ use cc_lb_storage_api::{
 use http::HeaderMap;
 use uuid::Uuid;
 
-use crate::rate_limit_headers::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
+use crate::rate_limit_headers::{
+    UnifiedQuotaObservation, parse_anthropic_unified_headers, parse_openai_codex_quota_headers,
+};
 
 pub fn build_subscription_quota_samples(
     headers: &HeaderMap,
     upstream_id: Uuid,
     observed_at_unix_millis: u64,
 ) -> Vec<SubscriptionQuotaSample> {
-    parse_anthropic_unified_headers(headers)
+    let mut observations = parse_anthropic_unified_headers(headers);
+    observations.extend(parse_openai_codex_quota_headers(headers));
+    observations
         .into_iter()
         .map(|observation| {
             unified_observation_to_sample(upstream_id, observation, observed_at_unix_millis)

@@ -9,15 +9,17 @@ use bytes::Bytes;
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_domain::{ANTHROPIC_WORKSPACE_ID_HEADER, Upstream};
 use cc_lb_upstream::{
-    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
-    SigningCapability, UpstreamError, scrub_secret, scrub_url_query_api_key,
+    GeminiEnvelopeRequest, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
+    SignerFactory, SigningCapability, UpstreamError, scrub_secret, scrub_url_query_api_key,
 };
-use http::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderValue, USER_AGENT};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, USER_AGENT};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
+use url::Url;
+use uuid::Uuid;
 
 const API_KEY_HEADER: &str = "x-api-key";
-const ANTIGRAVITY_USER_AGENT: &str =
+const LEGACY_DAILY_USER_AGENT: &str =
     "antigravity/hub/2.19.1 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)";
 
 fn strip_provider_credential_headers(headers: &mut http::HeaderMap) {
@@ -157,6 +159,7 @@ pub struct ProviderKeySigner {
     api_key: SecretString,
     header_name: &'static str,
     header_value: HeaderValue,
+    gemini_bearer_value: Option<HeaderValue>,
 }
 
 impl ProviderKeySigner {
@@ -171,11 +174,23 @@ impl ProviderKeySigner {
                 reason: "provider api key is not a valid header value".to_owned(),
             })?;
         header_value.set_sensitive(true);
+        let gemini_bearer_value = if kind == ProviderKeyKind::Gemini {
+            let mut value = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
+                SignerError::SigningFailed {
+                    reason: "provider api key is not a valid bearer header value".to_owned(),
+                }
+            })?;
+            value.set_sensitive(true);
+            Some(value)
+        } else {
+            None
+        };
         Ok(Self {
             kind,
             api_key: SecretString::new(Box::from(api_key)),
             header_name,
             header_value,
+            gemini_bearer_value,
         })
     }
 }
@@ -202,9 +217,18 @@ impl Signer for ProviderKeySigner {
         if self.kind == ProviderKeyKind::Gemini {
             ensure_gemini_stream_alt_sse(&mut shaped);
         }
+        let gemini_openai_compat = shaped.url().path().starts_with("/v1beta/openai/");
         let headers = shaped.headers_mut();
         strip_provider_credential_headers(headers);
-        headers.insert(self.header_name, self.header_value.clone());
+        if let Some(value) = self
+            .gemini_bearer_value
+            .as_ref()
+            .filter(|_| gemini_openai_compat)
+        {
+            headers.insert("authorization", value.clone());
+        } else {
+            headers.insert(self.header_name, self.header_value.clone());
+        }
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
@@ -357,6 +381,14 @@ pub struct GeminiSubscriptionSigner {
     project_id: Option<String>,
     expires_at_unix_secs: Option<u64>,
     clock: ClockHandle,
+    antigravity: Option<AntigravityRequestProfile>,
+}
+
+#[derive(Clone)]
+struct AntigravityRequestProfile {
+    base_url: Url,
+    user_agent: HeaderValue,
+    content_type: HeaderValue,
 }
 
 impl GeminiSubscriptionSigner {
@@ -379,7 +411,34 @@ impl GeminiSubscriptionSigner {
             project_id: project_id.map(str::to_owned),
             expires_at_unix_secs,
             clock,
+            antigravity: None,
         })
+    }
+
+    /// Builds the Antigravity profile with endpoint and headers parsed once.
+    pub fn new_antigravity(
+        access_token: &str,
+        project_id: Option<&str>,
+        expires_at_unix_secs: Option<u64>,
+        clock: ClockHandle,
+        code_assist_url: &str,
+        user_agent: &str,
+    ) -> Result<Self, SignerError> {
+        let base_url = Url::parse(code_assist_url).map_err(|_| SignerError::SigningFailed {
+            reason: "antigravity Code Assist URL is invalid".to_owned(),
+        })?;
+        let user_agent =
+            HeaderValue::from_str(user_agent).map_err(|_| SignerError::SigningFailed {
+                reason: "antigravity user agent is not a valid header value".to_owned(),
+            })?;
+        let content_type = HeaderValue::from_static("application/json");
+        let mut signer = Self::new(access_token, project_id, expires_at_unix_secs, clock)?;
+        signer.antigravity = Some(AntigravityRequestProfile {
+            base_url,
+            user_agent,
+            content_type,
+        });
+        Ok(signer)
     }
 }
 
@@ -406,7 +465,8 @@ fn ensure_gemini_stream_alt_sse(shaped: &mut ShapedRequest) {
 fn wrap_gemini_code_assist_request(
     shaped: &mut ShapedRequest,
     project_id: Option<&str>,
-) -> Result<(), SignerError> {
+    antigravity: Option<&AntigravityRequestProfile>,
+) -> Result<bool, SignerError> {
     let mut url = shaped.url().clone();
     scrub_url_query_api_key(&mut url);
     shaped.set_url(url);
@@ -417,7 +477,7 @@ fn wrap_gemini_code_assist_request(
     let is_generate = path == "/v1internal:generateContent" || path.ends_with(":generateContent");
     let is_count = path == "/v1internal:countTokens" || path.ends_with(":countTokens");
     if !is_stream && !is_generate && !is_count {
-        return Ok(());
+        return Ok(false);
     }
 
     let original =
@@ -444,7 +504,7 @@ fn wrap_gemini_code_assist_request(
             reason: "Gemini Code Assist request has no model".to_owned(),
         })?;
 
-    let envelope = if is_count {
+    let mut envelope = if is_count {
         // Cloud Code Assist `/v1internal:countTokens` accepts only `{ "request": { "model": "models/<id>", ... } }`
         // and rejects top-level `model` or `project` fields with HTTP 400 INVALID_ARGUMENT.
         let model = Value::String(format!("models/{model}"));
@@ -496,11 +556,31 @@ fn wrap_gemini_code_assist_request(
             }
         }
     };
+    if antigravity.is_some()
+        && !is_count
+        && let Some(envelope) = envelope.as_object_mut()
+    {
+        envelope.insert(
+            "userAgent".to_owned(),
+            Value::String("antigravity".to_owned()),
+        );
+        envelope.insert("requestType".to_owned(), Value::String("agent".to_owned()));
+        envelope.insert(
+            "requestId".to_owned(),
+            Value::String(format!("agent-{}", Uuid::new_v4())),
+        );
+    }
     let body = serde_json::to_vec(&envelope).map_err(|_| SignerError::SigningFailed {
         reason: "Gemini Code Assist request could not be serialized".to_owned(),
     })?;
     let is_antigravity_host = shaped.url().host_str() == Some("daily-cloudcode-pa.googleapis.com");
-    let mut url = shaped.url().clone();
+    let mut url = antigravity
+        .map(|profile| {
+            let mut url = profile.base_url.clone();
+            url.set_query(shaped.url().query());
+            url
+        })
+        .unwrap_or_else(|| shaped.url().clone());
     url.set_path(if is_stream {
         "/v1internal:streamGenerateContent"
     } else if is_count {
@@ -515,16 +595,19 @@ fn wrap_gemini_code_assist_request(
     shaped.set_body(Bytes::from(body));
     let headers = shaped.headers_mut();
     headers.remove(CONTENT_LENGTH);
-    if is_antigravity_host {
+    if antigravity.is_none() && is_antigravity_host {
         let keep_existing_ua = headers
             .get(USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ua| ua.starts_with("antigravity/") || ua.starts_with("GeminiCLI/"));
         if !keep_existing_ua {
-            headers.insert(USER_AGENT, HeaderValue::from_static(ANTIGRAVITY_USER_AGENT));
+            headers.insert(
+                USER_AGENT,
+                HeaderValue::from_static(LEGACY_DAILY_USER_AGENT),
+            );
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 impl fmt::Debug for GeminiSubscriptionSigner {
@@ -547,10 +630,35 @@ impl Signer for GeminiSubscriptionSigner {
         scrub_url_query_api_key(&mut url);
         shaped.set_url(url);
         check_access_token_expiry(self.expires_at_unix_secs, self.clock.as_ref())?;
-        wrap_gemini_code_assist_request(&mut shaped, self.project_id.as_deref())?;
+        let wrapped = wrap_gemini_code_assist_request(
+            &mut shaped,
+            self.project_id.as_deref(),
+            self.antigravity.as_ref(),
+        )?;
+        if wrapped && let Some(hook) = shaped.take_gemini_envelope_hook() {
+            let result = hook.shape_envelope_gemini(GeminiEnvelopeRequest {
+                url: shaped.url(),
+                headers: shaped.headers(),
+                envelope_body: shaped.body(),
+            })?;
+            if let Some(body) = result.envelope_body {
+                shaped.set_body(body);
+                shaped.headers_mut().remove(CONTENT_LENGTH);
+            }
+            if let Some(mut headers) = result.headers {
+                headers.remove(CONTENT_LENGTH);
+                *shaped.headers_mut() = headers;
+            }
+        }
         let headers = shaped.headers_mut();
         strip_provider_credential_headers(headers);
         headers.insert(AUTHORIZATION, self.authorization_header.clone());
+        if let Some(profile) = &self.antigravity {
+            headers.remove("x-goog-api-client");
+            headers.remove("client-metadata");
+            headers.insert(USER_AGENT, profile.user_agent.clone());
+            headers.insert(CONTENT_TYPE, profile.content_type.clone());
+        }
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
@@ -889,6 +997,38 @@ mod tests {
         assert!(!signed.headers().contains_key("api-key"));
     }
 
+    #[tokio::test]
+    async fn gemini_openai_compat_uses_sensitive_bearer_without_rewriting_path_or_body() {
+        let signer =
+            ProviderKeySigner::new(ProviderKeyKind::Gemini, "gemini-secret").expect("signer");
+        for path in [
+            "/v1beta/openai/chat/completions",
+            "/v1beta/openai/embeddings",
+            "/v1beta/openai/images/generations",
+            "/v1beta/openai/models",
+            "/v1beta/openai/models/gemini-test",
+        ] {
+            let mut shaped = hostile_shaped_request();
+            let body = shaped.body().clone();
+            shaped.set_url(
+                format!("https://generativelanguage.googleapis.com{path}?key=downstream&keep=1")
+                    .parse()
+                    .expect("URL"),
+            );
+            let signed = sign_request(&signer, shaped).await.expect("sign request");
+            assert_eq!(signed.url().path(), path);
+            assert_eq!(signed.url().query(), Some("keep=1"));
+            assert_eq!(signed.body(), &body);
+            assert_eq!(
+                signed.headers().get(AUTHORIZATION),
+                Some(&HeaderValue::from_static("Bearer gemini-secret"))
+            );
+            assert!(signed.headers()[AUTHORIZATION].is_sensitive());
+            assert!(!signed.headers().contains_key("x-goog-api-key"));
+            assert!(!signed.headers().contains_key("x-api-key"));
+        }
+    }
+
     #[test]
     fn provider_signer_debug_redacts_key() {
         let secret = "provider-secret-value";
@@ -1005,6 +1145,170 @@ mod tests {
         );
     }
 
+    struct EnvelopeProbe {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+        replace: bool,
+    }
+
+    impl cc_lb_upstream::GeminiEnvelopeHook for EnvelopeProbe {
+        fn shape_envelope_gemini(
+            &self,
+            request: GeminiEnvelopeRequest<'_>,
+        ) -> Result<cc_lb_upstream::GeminiEnvelopeResult, SignerError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(request.url.host_str(), Some("cloudcode-pa.googleapis.com"));
+            assert_eq!(request.url.path(), "/v1internal:generateContent");
+            assert_eq!(request.url.query(), Some("keep=1"));
+            let body: Value =
+                serde_json::from_slice(request.envelope_body).expect("wrapped envelope");
+            assert_eq!(body["model"], "gemini-2.5-pro");
+            assert_eq!(body["project"], "stored-project");
+            assert_eq!(body["request"], json!({"contents":[]}));
+            assert_ne!(
+                request.headers.get(AUTHORIZATION),
+                Some(&HeaderValue::from_static("Bearer stored-access-token"))
+            );
+            if self.fail {
+                return Err(SignerError::SigningFailed {
+                    reason: "envelope hook rejected request".to_owned(),
+                });
+            }
+            if !self.replace {
+                return Ok(cc_lb_upstream::GeminiEnvelopeResult::default());
+            }
+            let mut headers = HeaderMap::new();
+            headers.insert("x-envelope-hook", HeaderValue::from_static("applied"));
+            headers.insert(CONTENT_LENGTH, HeaderValue::from_static("999"));
+            for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+                headers.insert(name, HeaderValue::from_static("plugin-credential"));
+            }
+            Ok(cc_lb_upstream::GeminiEnvelopeResult {
+                envelope_body: Some(Bytes::from_static(br#"{"request":{"hook":true}}"#)),
+                headers: Some(headers),
+            })
+        }
+    }
+
+    fn gemini_envelope_request() -> ShapedRequest {
+        let mut shaped = shaped_request();
+        shaped.set_url(
+            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=downstream&keep=1"
+                .parse()
+                .expect("request URL"),
+        );
+        shaped.set_body(Bytes::from_static(br#"{"contents":[]}"#));
+        shaped
+    }
+
+    #[tokio::test]
+    async fn gemini_envelope_hook_runs_after_wrapping_before_signing_without_url_control() {
+        let signer = GeminiSubscriptionSigner::new(
+            "stored-access-token",
+            Some("stored-project"),
+            None,
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .expect("signer");
+        for replace in [false, true] {
+            let hook = Arc::new(EnvelopeProbe {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fail: false,
+                replace,
+            });
+            let mut shaped = gemini_envelope_request();
+            shaped.set_gemini_envelope_hook(hook.clone());
+            let signed = sign_request(&signer, shaped)
+                .await
+                .expect("signed envelope");
+            assert_eq!(hook.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(
+                signed.url().as_str(),
+                "https://cloudcode-pa.googleapis.com/v1internal:generateContent?keep=1"
+            );
+            assert_eq!(
+                signed.headers().get(AUTHORIZATION),
+                Some(&HeaderValue::from_static("Bearer stored-access-token"))
+            );
+            for name in ["x-api-key", "x-goog-api-key", "api-key", "content-length"] {
+                assert!(!signed.headers().contains_key(name), "{name}");
+            }
+            if replace {
+                assert_eq!(signed.body().as_ref(), br#"{"request":{"hook":true}}"#);
+                assert_eq!(signed.headers()["x-envelope-hook"], "applied");
+            } else {
+                assert_eq!(
+                    signed.body().as_ref(),
+                    br#"{"model":"gemini-2.5-pro","project":"stored-project","request":{"contents":[]}}"#
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_envelope_hook_is_optional_and_ignored_for_unwrapped_or_api_key_requests() {
+        let hook = Arc::new(EnvelopeProbe {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail: true,
+            replace: false,
+        });
+        let signer = GeminiSubscriptionSigner::new(
+            "stored-access-token",
+            Some("stored-project"),
+            None,
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .expect("signer");
+        let signed = sign_request(&signer, gemini_envelope_request())
+            .await
+            .expect("absent hook preserves legacy signing");
+        assert_eq!(
+            signed.body().as_ref(),
+            br#"{"model":"gemini-2.5-pro","project":"stored-project","request":{"contents":[]}}"#
+        );
+        let mut unwrapped = shaped_request();
+        unwrapped.set_gemini_envelope_hook(hook.clone());
+        sign_request(&signer, unwrapped)
+            .await
+            .expect("unrelated operation skips envelope hook");
+        let key_signer =
+            ProviderKeySigner::new(ProviderKeyKind::Gemini, "stored-key").expect("key signer");
+        let mut native = gemini_envelope_request();
+        native.set_gemini_envelope_hook(hook.clone());
+        let signed = sign_request(&key_signer, native)
+            .await
+            .expect("API-key signing skips envelope hook");
+        assert_eq!(signed.body().as_ref(), br#"{"contents":[]}"#);
+        assert_eq!(hook.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn gemini_envelope_hook_failure_aborts_signing() {
+        let hook = Arc::new(EnvelopeProbe {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail: true,
+            replace: false,
+        });
+        let mut shaped = gemini_envelope_request();
+        shaped.set_gemini_envelope_hook(hook.clone());
+        let signer = GeminiSubscriptionSigner::new(
+            "stored-access-token",
+            Some("stored-project"),
+            None,
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .expect("signer");
+        let error = sign_request(&signer, shaped)
+            .await
+            .expect_err("failed envelope must not be sent");
+        assert!(matches!(
+            error,
+            SignerError::SigningFailed { reason } if reason == "envelope hook rejected request"
+        ));
+        assert_eq!(hook.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
     #[tokio::test]
     async fn gemini_subscription_signer_wraps_request_with_project_and_rewrites_path() {
         let mut shaped = shaped_request();
@@ -1038,8 +1342,170 @@ mod tests {
         assert!(!signed.headers().contains_key(CONTENT_LENGTH));
         assert_eq!(
             signed.headers().get(USER_AGENT),
-            Some(&HeaderValue::from_static(ANTIGRAVITY_USER_AGENT))
+            Some(&HeaderValue::from_static(LEGACY_DAILY_USER_AGENT))
         );
+    }
+
+    #[tokio::test]
+    async fn antigravity_signer_uses_profile_endpoint_headers_and_generation_metadata() {
+        let signer = GeminiSubscriptionSigner::new_antigravity(
+            "antigravity-access-token",
+            Some("project-123"),
+            None,
+            Arc::new(cc_lb_clock::SystemClock),
+            "https://daily-cloudcode-pa.googleapis.com",
+            "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)",
+        )
+        .expect("antigravity signer");
+        let mut request_ids = Vec::new();
+        for operation in ["generateContent", "streamGenerateContent"] {
+            let mut shaped = shaped_request();
+            shaped.set_url(
+                format!("https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:{operation}?key=downstream&keep=1")
+                    .parse()
+                    .expect("request URL"),
+            );
+            shaped.set_body(Bytes::from_static(br#"{"contents":[]}"#));
+            for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+                shaped
+                    .headers_mut()
+                    .insert(name, HeaderValue::from_static("downstream"));
+            }
+            shaped
+                .headers_mut()
+                .insert(USER_AGENT, HeaderValue::from_static("GeminiCLI/downstream"));
+            shaped
+                .headers_mut()
+                .insert("x-goog-api-client", HeaderValue::from_static("downstream"));
+            shaped
+                .headers_mut()
+                .insert("client-metadata", HeaderValue::from_static("downstream"));
+            shaped
+                .headers_mut()
+                .insert(CONTENT_LENGTH, HeaderValue::from_static("15"));
+
+            let signed = sign_request(&signer, shaped).await.expect("sign request");
+            assert_eq!(
+                signed.url().host_str(),
+                Some("daily-cloudcode-pa.googleapis.com")
+            );
+            assert_eq!(signed.url().path(), format!("/v1internal:{operation}"));
+            assert_eq!(
+                signed.url().query(),
+                Some(if operation == "streamGenerateContent" {
+                    "keep=1&alt=sse"
+                } else {
+                    "keep=1"
+                }),
+            );
+            assert_eq!(
+                signed.headers().get(AUTHORIZATION),
+                Some(&HeaderValue::from_static("Bearer antigravity-access-token"))
+            );
+            assert_eq!(
+                signed.headers().get(USER_AGENT),
+                Some(&HeaderValue::from_static(
+                    "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)"
+                ))
+            );
+            assert_eq!(
+                signed.headers().get(CONTENT_TYPE),
+                Some(&HeaderValue::from_static("application/json"))
+            );
+            for name in [
+                "x-api-key",
+                "x-goog-api-key",
+                "api-key",
+                "x-goog-api-client",
+                "client-metadata",
+                "content-length",
+            ] {
+                assert!(!signed.headers().contains_key(name), "{name}");
+            }
+            let body: Value = serde_json::from_slice(signed.body()).expect("JSON envelope");
+            assert_eq!(body["model"], "gemini-3-pro");
+            assert_eq!(body["project"], "project-123");
+            assert_eq!(body["request"], json!({"contents": []}));
+            assert_eq!(body["userAgent"], "antigravity");
+            assert_eq!(body["requestType"], "agent");
+            let request_id = body["requestId"].as_str().expect("request ID");
+            let uuid = request_id.strip_prefix("agent-").expect("agent prefix");
+            assert_eq!(Uuid::parse_str(uuid).expect("UUID").get_version_num(), 4);
+            request_ids.push(request_id.to_owned());
+        }
+        assert_ne!(request_ids.first(), request_ids.last());
+    }
+
+    #[tokio::test]
+    async fn antigravity_signer_preserves_count_tokens_shape_and_custom_endpoint() {
+        let signer = GeminiSubscriptionSigner::new_antigravity(
+            "access-token",
+            Some("project-123"),
+            None,
+            Arc::new(cc_lb_clock::SystemClock),
+            "http://gateway.invalid/custom-prefix",
+            "antigravity/custom",
+        )
+        .expect("antigravity signer");
+        let mut shaped = shaped_request();
+        shaped.set_url(
+            "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-flash:countTokens"
+                .parse()
+                .expect("URL"),
+        );
+        shaped.set_body(Bytes::from_static(
+            br#"{"generateContentRequest":{"contents":[]}}"#,
+        ));
+        let signed = sign_request(&signer, shaped).await.expect("sign request");
+        assert_eq!(
+            signed.url().as_str(),
+            "http://gateway.invalid/v1internal:countTokens"
+        );
+        assert_eq!(
+            signed.body().as_ref(),
+            br#"{"request":{"contents":[],"model":"models/gemini-3-flash"}}"#
+        );
+        assert_eq!(
+            signed.headers().get(USER_AGENT),
+            Some(&HeaderValue::from_static("antigravity/custom"))
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_cli_generation_envelope_remains_byte_identical() {
+        let signer = GeminiSubscriptionSigner::new(
+            "gemini-access-token",
+            Some("project-123"),
+            None,
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .expect("Gemini CLI signer");
+        for (operation, expected_query) in [
+            ("generateContent", "keep=1"),
+            ("streamGenerateContent", "keep=1&alt=sse"),
+        ] {
+            let mut shaped = shaped_request();
+            shaped.set_url(
+                format!("https://cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:{operation}?keep=1")
+                    .parse()
+                    .expect("request URL"),
+            );
+            shaped.set_body(Bytes::from_static(
+                br#"{"contents":[],"generationConfig":{"temperature":0.5}}"#,
+            ));
+            shaped
+                .headers_mut()
+                .insert(USER_AGENT, HeaderValue::from_static("GeminiCLI/existing"));
+            let signed = sign_request(&signer, shaped).await.expect("sign request");
+            assert_eq!(signed.url().host_str(), Some("cloudcode-pa.googleapis.com"));
+            assert_eq!(signed.url().path(), format!("/v1internal:{operation}"));
+            assert_eq!(signed.url().query(), Some(expected_query));
+            assert_eq!(signed.body().as_ref(), br#"{"model":"gemini-2.5-pro","project":"project-123","request":{"contents":[],"generationConfig":{"temperature":0.5}}}"#);
+            assert_eq!(
+                signed.headers().get(USER_AGENT),
+                Some(&HeaderValue::from_static("GeminiCLI/existing"))
+            );
+        }
     }
 
     #[tokio::test]
