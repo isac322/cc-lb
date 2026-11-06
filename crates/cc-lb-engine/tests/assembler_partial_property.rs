@@ -195,6 +195,7 @@ fn usage(profile: Profile) -> UsageSnapshot {
         cache_creation_input_tokens_1h: base + 40,
         cache_read_input_tokens: base + 50,
         thinking_tokens: base + 60,
+        tool_use_prompt_tokens: None,
         web_search_requests: base + 70,
         web_fetch_requests: base + 80,
         service_tier: Some(format!("tier-{base}")),

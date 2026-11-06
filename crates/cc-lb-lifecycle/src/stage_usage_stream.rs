@@ -13,6 +13,9 @@ use serde_json::Value as JsonValue;
 pub struct UsageSnapshot {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Gemini `usageMetadata.toolUsePromptTokenCount`, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_tokens: Option<u64>,
     pub cache_creation_input_tokens: u64,
     pub cache_creation_input_tokens_5m: u64,
     pub cache_creation_input_tokens_1h: u64,
