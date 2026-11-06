@@ -226,6 +226,9 @@ pub enum RejectReason {
     UnsupportedLimitWindow {
         window_secs: u64,
     },
+    InvalidOutputCap {
+        requested: i64,
+    },
     OutputCapExceeded {
         cap: i64,
         requested: i64,
@@ -453,6 +456,10 @@ impl LimitEngine {
             .is_some_and(|expires_at| now_sec > expires_at)
         {
             return Err(RejectReason::Expired);
+        }
+
+        if let Some(requested) = max_tokens.filter(|value| *value < 0) {
+            return Err(RejectReason::InvalidOutputCap { requested });
         }
 
         if !model.is_empty() && !view.is_model_allowed(principal_id, model) {
@@ -1684,6 +1691,34 @@ mod tests {
             ..StoredApiKeyRecord::default()
         };
         (engine, view, record)
+    }
+
+    #[test]
+    fn negative_output_cap_is_rejected_before_output_reservation() {
+        let (engine, view, record) = engine_with_output_token_limit(100);
+        assert_eq!(
+            engine
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    Some(-1),
+                    0,
+                    None
+                )
+                .err(),
+            Some(RejectReason::InvalidOutputCap { requested: -1 }),
+        );
+        assert_eq!(
+            engine.current_total(
+                &key_id_for(&record),
+                LimitKind::OutputTokens,
+                60,
+                unix_secs(engine.inner.clock.now()),
+            ),
+            0,
+        );
     }
 
     #[test]

@@ -8755,6 +8755,11 @@ mod limit_request_estimate_tests {
                 json!({"generationConfig":{"maxOutputTokens": 88}, "max_tokens": 99}),
                 Some(88),
             ),
+            (
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig":{"maxOutputTokens": -3}, "max_tokens": 99}),
+                Some(-3),
+            ),
         ];
         for (capability, value, expected) in cases {
             let request =
@@ -8780,7 +8785,7 @@ mod limit_request_estimate_tests {
     }
 
     #[test]
-    fn zero_and_negative_output_caps_keep_capability_specific_precedence() {
+    fn zero_and_negative_output_caps_remain_visible_for_fail_closed_rejection() {
         for (capability, value, expected) in [
             (
                 ProviderCapability::AnthropicMessages,
@@ -10281,6 +10286,12 @@ fn limit_rejection_response(
             format!("API key limit window {window_secs}s is unsupported"),
             None,
         ),
+        RejectReason::InvalidOutputCap { requested } => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!("requested output token bound {requested} must be zero or greater"),
+            None,
+        ),
         RejectReason::OutputCapExceeded { cap, requested } => (
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -10335,6 +10346,7 @@ fn limit_retry_after_secs(reason: RejectReason) -> Option<u64> {
         | RejectReason::ModelNotAllowed
         | RejectReason::CostUnavailable
         | RejectReason::UnsupportedLimitWindow { .. }
+        | RejectReason::InvalidOutputCap { .. }
         | RejectReason::OutputCapExceeded { .. }
         | RejectReason::OutputCapRequired { .. }
         | RejectReason::Unsatisfiable { .. } => None,
@@ -10356,6 +10368,7 @@ fn limit_violation_name(reason: &RejectReason) -> Option<&'static str> {
         | RejectReason::ModelNotAllowed
         | RejectReason::CostUnavailable
         | RejectReason::UnsupportedLimitWindow { .. }
+        | RejectReason::InvalidOutputCap { .. }
         | RejectReason::OutputCapExceeded { .. }
         | RejectReason::OutputCapRequired { .. } => None,
     }
@@ -15420,6 +15433,32 @@ mod tests {
         ))
     }
 
+    fn limited_failure_principal_view(
+        limit: cc_lb_storage_api::principal::Limit,
+    ) -> Arc<PrincipalView> {
+        Arc::new(PrincipalView::for_tests(
+            "principal-test",
+            true,
+            vec!["*".to_owned()],
+            vec![limit],
+            HashMap::new(),
+        ))
+    }
+
+    fn upstream_record_with_kind(kind: StorageRecordKind) -> UpstreamRecord {
+        UpstreamRecord {
+            id: Uuid::new_v4(),
+            name: "upstream-test".to_owned(),
+            kind,
+            enabled: true,
+            revision: 1,
+            oauth_token_generation: 0,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+            ..UpstreamRecord::default()
+        }
+    }
+
     fn default_artifacts() -> cc_lb_control::api_keys::principal_view::PrincipalRoutingArtifacts {
         (
             None,
@@ -15605,6 +15644,73 @@ mod tests {
                 "{provider:?} {path}"
             );
             assert_eq!(terminal_snapshot(&events).client_status, 404);
+        }
+    }
+
+    #[tokio::test]
+    async fn negative_generation_bounds_reject_before_provider_dispatch() {
+        use cc_lb_domain::Provider;
+
+        for (provider, path, body, upstream_kind) in [
+            (
+                Provider::Openai,
+                "/v1/responses",
+                br#"{"model":"gpt-test","max_output_tokens":-1,"input":[]}"#.as_slice(),
+                StorageRecordKind::OpenaiApiKey,
+            ),
+            (
+                Provider::Gemini,
+                "/v1beta/models/gemini-test:generateContent",
+                br#"{"contents":[],"generationConfig":{"maxOutputTokens":-1}}"#.as_slice(),
+                StorageRecordKind::GeminiApiKey,
+            ),
+        ] {
+            let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+            let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+            let view = provenance_view(
+                limited_failure_principal_view(cc_lb_storage_api::principal::Limit {
+                    kind: cc_lb_storage_api::principal::LimitKind::OutputTokens,
+                    window_secs: 60,
+                    cap_micros: 100,
+                }),
+                Arc::new(TestSignerFactory),
+                vec![upstream_record_with_kind(upstream_kind)],
+            );
+            let limit_engine = cc_lb_control::api_keys::limit_engine::LimitEngine::new(
+                Arc::new(cc_lb_control::api_keys::KeyConcurrencyManager::new()),
+                Arc::new(cc_lb_clock::SystemClock),
+            );
+            let fixture = failure_key_fixture();
+            let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus)
+                .with_static_limit_subject(
+                    limit_engine,
+                    "principal-test".to_owned(),
+                    fixture.key_id.clone(),
+                    fixture.record.clone(),
+                );
+            let mut request = failure_request(Bytes::from_static(body));
+            *request.uri_mut() = path.parse().expect("provider path");
+            request
+                .extensions_mut()
+                .insert(crate::request_context::ProviderScope(provider));
+            let auth = lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("authenticated");
+            let response = lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("request handled");
+            let (status, body) = collect_response_body(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{provider:?}");
+            let body: Value = serde_json::from_slice(&body).expect("error JSON");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("zero or greater"))
+            );
+            assert_eq!(dispatcher.call_count(), 0, "{provider:?}");
         }
     }
 
