@@ -10714,6 +10714,7 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
     cc_lb_lifecycle::UsageSnapshot {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
+        tool_use_prompt_tokens: u.tool_use_prompt_tokens,
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_creation_input_tokens_5m: u.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: u.cache_creation_input_tokens_1h,
