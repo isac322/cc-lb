@@ -8648,6 +8648,7 @@ impl LimitRequest {
             max_tokens: value
                 .and_then(|v| {
                     v.get("max_tokens")
+                        .or_else(|| v.get("max_completion_tokens"))
                         .or_else(|| v.get("max_output_tokens"))
                         .and_then(Value::as_i64)
                         .or_else(|| {
@@ -8701,12 +8702,16 @@ mod limit_request_estimate_tests {
     fn zero_and_negative_output_caps_keep_existing_top_level_precedence() {
         for (value, expected) in [
             (
-                json!({"max_tokens":0, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
+                json!({"max_tokens":0, "max_completion_tokens":99, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
                 0,
             ),
             (
-                json!({"max_tokens":-1, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
+                json!({"max_tokens":-1, "max_completion_tokens":99, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
                 -1,
+            ),
+            (
+                json!({"max_completion_tokens":-2, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
+                -2,
             ),
             (
                 json!({"max_output_tokens":-2, "generationConfig":{"maxOutputTokens":88}}),
@@ -8720,6 +8725,18 @@ mod limit_request_estimate_tests {
                 &[],
             );
             assert_eq!(request.max_tokens, expected);
+        }
+    }
+
+    #[test]
+    fn openai_chat_completions_accept_max_completion_tokens() {
+        let body = json!({"model":"gpt-test","max_completion_tokens":100});
+        for capability in [
+            ProviderCapability::OpenaiChatCompletions,
+            ProviderCapability::GeminiOpenaiChatCompletions,
+        ] {
+            let request = LimitRequest::from_value(Some(&body), "", Some(capability), &[]);
+            assert_eq!(request.max_tokens, 100, "{capability:?}");
         }
     }
 
