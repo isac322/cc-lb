@@ -186,17 +186,15 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::StreamCompleted {
             result: Ok(success),
             ..
-        } => {
-            if success.usage_present {
-                partial.input_tokens = success.usage.input_tokens;
-                partial.output_tokens = success.usage.output_tokens;
-                partial.cache_creation_input_tokens = success.usage.cache_creation_input_tokens;
-                partial.cache_creation_5m = success.usage.cache_creation_input_tokens_5m;
-                partial.cache_creation_1h = success.usage.cache_creation_input_tokens_1h;
-                partial.cache_read = success.usage.cache_read_input_tokens;
-                partial.service_tier = success.usage.service_tier;
-                partial.usage_seen = true;
-            }
+        } if success.usage_present => {
+            partial.input_tokens = success.usage.input_tokens;
+            partial.output_tokens = success.usage.output_tokens;
+            partial.cache_creation_input_tokens = success.usage.cache_creation_input_tokens;
+            partial.cache_creation_5m = success.usage.cache_creation_input_tokens_5m;
+            partial.cache_creation_1h = success.usage.cache_creation_input_tokens_1h;
+            partial.cache_read = success.usage.cache_read_input_tokens;
+            partial.service_tier = success.usage.service_tier;
+            partial.usage_seen = true;
         }
         _ => {}
     }
