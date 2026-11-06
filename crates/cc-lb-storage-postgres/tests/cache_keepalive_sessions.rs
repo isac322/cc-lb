@@ -104,8 +104,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
         none_first
     );
 
-    let mut none_replacement_request =
-        replace_request(none_key, b"fenced-none-replacement", 101);
+    let mut none_replacement_request = replace_request(none_key, b"fenced-none-replacement", 101);
     none_replacement_request.cycle_id = none_second_cycle_id;
     let none_replacement = storage
         .replace_from_real_request_fenced(&none_replacement_request, None)
@@ -143,8 +142,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
         Some(ticketed_first_cycle_id)
     );
 
-    let mut ticketed_replay_request =
-        replace_request(ticketed_key, b"fenced-ticketed-replay", 101);
+    let mut ticketed_replay_request = replace_request(ticketed_key, b"fenced-ticketed-replay", 101);
     ticketed_replay_request.cycle_id = ticketed_second_cycle_id;
     assert!(
         storage
@@ -164,7 +162,9 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
     );
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(ticketed_key))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                ticketed_key
+            ))
             .await?,
         Some(format!("{ticketed_first_ticket}:{ticketed_first_ticket}"))
     );
@@ -172,8 +172,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
     let ticketed_replacement_ticket = storage
         .allocate_cache_keepalive_completion_ticket(ticketed_key)
         .await?;
-    let mut ticketed_stale_request =
-        replace_request(ticketed_key, b"fenced-ticketed-stale", 99);
+    let mut ticketed_stale_request = replace_request(ticketed_key, b"fenced-ticketed-stale", 99);
     ticketed_stale_request.cycle_id = ticketed_second_cycle_id;
     assert!(
         storage
@@ -193,9 +192,14 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
     );
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(ticketed_key))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                ticketed_key
+            ))
             .await?,
-        Some(format!("{ticketed_replacement_ticket}:{}", ticketed_first_ticket))
+        Some(format!(
+            "{ticketed_replacement_ticket}:{}",
+            ticketed_first_ticket
+        ))
     );
 
     let mut ticketed_replacement_request =
@@ -212,7 +216,10 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
         ticketed_replacement.generation,
         ticketed_first.generation + 1
     );
-    assert_eq!(ticketed_replacement.cycle_id, Some(ticketed_second_cycle_id));
+    assert_eq!(
+        ticketed_replacement.cycle_id,
+        Some(ticketed_second_cycle_id)
+    );
     assert_eq!(
         storage
             .get_cache_keepalive_session(ticketed_key)
@@ -222,7 +229,9 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
     );
     assert_eq!(
         storage
-            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(ticketed_key))
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                ticketed_key
+            ))
             .await?,
         Some(format!(
             "{ticketed_replacement_ticket}:{ticketed_replacement_ticket}"
