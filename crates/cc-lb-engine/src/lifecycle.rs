@@ -5363,7 +5363,7 @@ impl Lifecycle {
                     .saturating_add(usage.cache_creation_input_tokens),
             );
         }
-        if usage.present
+        if usage.has_billable_usage()
             && status == StatusCode::OK
             && let Some(context) = prompt_cache_observation_context.as_ref()
         {
@@ -5393,7 +5393,7 @@ impl Lifecycle {
 
         let finalize_ms = if let Some(o) = observer.as_ref() {
             o.set_usage_counts(&usage, true);
-            if usage.present {
+            if usage.has_billable_usage() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                     event_id: o.event_id().to_owned(),
                     usage: to_usage_snapshot(&usage),
@@ -5424,7 +5424,7 @@ impl Lifecycle {
             } else {
                 Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
-                    usage_present: usage.present,
+                    usage_present: usage.has_billable_usage(),
                     sse_event_count: 0,
                     body_bytes: Some(downstream_body.len() as u64),
                     body_chunk_count: Some(body_chunk_count),
@@ -6680,7 +6680,7 @@ impl Lifecycle {
                                     semantic_completion_observed = true;
                                     if let Some(o) = observer.as_ref() {
                                         o.set_usage_counts(&usage, true);
-                                        if usage.present {
+                                        if usage.has_billable_usage() {
                                             o.emit_lifecycle(
                                                 cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                     event_id: o.event_id().to_owned(),
@@ -6698,18 +6698,22 @@ impl Lifecycle {
                                 {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);
-                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageStart,
-                                        });
+                                        if usage.has_billable_usage() {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageStart,
+                                            });
+                                        }
                                     } else if usage_update.message_stop {
                                         o.set_usage_counts(&usage, true);
-                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageStop,
-                                        });
+                                        if usage.has_billable_usage() {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageStop,
+                                            });
+                                        }
                                     }
                                     let force_publish = usage_update.message_start_usage
                                         || usage_update.message_stop;
@@ -6723,7 +6727,10 @@ impl Lifecycle {
                                         >= Duration::from_millis(1000)
                                         || tokens_since_last >= 100;
                                     if force_publish || throttle_ok {
-                                        if !usage_update.message_start_usage && !usage_update.message_stop {
+                                        if !usage_update.message_start_usage
+                                            && !usage_update.message_stop
+                                            && usage.has_billable_usage()
+                                        {
                                             o.set_usage_counts(&usage, false);
                                             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
@@ -7355,7 +7362,7 @@ impl Lifecycle {
                                 semantic_completion_observed = true;
                                 if let Some(o) = observer.as_ref() {
                                     o.set_usage_counts(&usage, true);
-                                    if usage.present {
+                                    if usage.has_billable_usage() {
                                         o.emit_lifecycle(
                                             cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
@@ -7729,7 +7736,7 @@ impl Lifecycle {
                 && stream_affinity_error.is_none()
             {
                 if let Some(o) = observer.as_ref()
-                    && usage.present
+                    && usage.has_billable_usage()
                 {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                         event_id: o.event_id().to_owned(),
@@ -7860,7 +7867,7 @@ impl Lifecycle {
                         event_id: o.event_id().to_owned(),
                         result: Ok(cc_lb_lifecycle::StreamSuccess {
                             usage: to_usage_snapshot(&usage),
-                            usage_present: usage.present,
+                            usage_present: usage.has_billable_usage(),
                             sse_event_count,
                             body_bytes: Some(total_bytes),
                             body_chunk_count: Some(batch_index),

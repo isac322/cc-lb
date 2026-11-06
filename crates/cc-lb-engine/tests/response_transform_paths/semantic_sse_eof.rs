@@ -1303,16 +1303,22 @@ impl SseEventTransformHook for OpenaiChatToAnthropicSseTransform {
 
 #[tokio::test]
 async fn openai_chat_finish_reason_without_usage_refunds_pending_close() -> TestResult {
-    assert_chat_finish_reason_without_usage_refunds_pending_close(false).await
+    assert_chat_finish_reason_without_usage_refunds_pending_close(false, false).await
 }
 
 #[tokio::test]
 async fn native_openai_chat_finish_reason_without_usage_refunds_pending_close() -> TestResult {
-    assert_chat_finish_reason_without_usage_refunds_pending_close(true).await
+    assert_chat_finish_reason_without_usage_refunds_pending_close(true, false).await
+}
+
+#[tokio::test]
+async fn thinking_progress_without_usage_refunds_pending_close() -> TestResult {
+    assert_chat_finish_reason_without_usage_refunds_pending_close(false, true).await
 }
 
 async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
     native_openai: bool,
+    thinking_progress: bool,
 ) -> TestResult {
     use cc_lb_storage_api::principal::{Limit, LimitKind};
 
@@ -1367,6 +1373,15 @@ async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
     };
     let (content, finish) = if native_openai {
         (upstream_content.clone(), upstream_finish.clone())
+    } else if thinking_progress {
+        (
+            Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":9}}\n\n",
+            ),
+            Bytes::from_static(
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ),
+        )
     } else {
         (
             Bytes::from_static(
@@ -1386,7 +1401,7 @@ async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
         (!native_openai)
             .then(|| Arc::new(OpenaiChatToAnthropicSseTransform) as Arc<dyn SseEventTransformHook>),
         Arc::new(SplitPendingDispatch {
-            chunks: [upstream_content, upstream_finish, usage],
+            chunks: [content.clone(), finish.clone(), usage],
             finish_ready: finish_ready.clone(),
             // Never released: usage cannot race the downstream close.
             usage_ready: Arc::new(tokio::sync::Notify::new()),
@@ -1461,13 +1476,32 @@ async fn assert_chat_finish_reason_without_usage_refunds_pending_close(
     // Only expose finish_reason after the first downstream frame was consumed.
     // This forces the lifecycle to parse it in a separate upstream chunk.
     finish_ready.notify_one();
-    let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
-        .await?
-        .expect("finish_reason frame")
-        .expect("finish_reason frame succeeds")
-        .into_data()
-        .expect("finish_reason frame carries data");
-    assert_eq!(frame, finish);
+    if native_openai {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("finish_reason frame")
+            .expect("finish_reason frame succeeds")
+            .into_data()
+            .expect("finish_reason frame carries data");
+        assert_eq!(frame, finish);
+    } else {
+        let first = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("message_delta frame")
+            .expect("message_delta frame succeeds")
+            .into_data()
+            .expect("message_delta frame carries data");
+        let second = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("message_stop frame")
+            .expect("message_stop frame succeeds")
+            .into_data()
+            .expect("message_stop frame carries data");
+        let mut transformed_finish = Vec::with_capacity(first.len() + second.len());
+        transformed_finish.extend_from_slice(&first);
+        transformed_finish.extend_from_slice(&second);
+        assert_eq!(transformed_finish.as_slice(), finish.as_ref());
+    }
     drop(body);
 
     let observed_events = tokio::time::timeout(Duration::from_secs(3), async {

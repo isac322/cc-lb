@@ -1487,6 +1487,7 @@ mod tests {
         observer.set_usage_counts(
             &crate::usage_parser::UsageCounts {
                 present: true,
+                billable_present: true,
                 input_tokens: 41,
                 output_tokens: 0,
                 ..Default::default()
@@ -1530,6 +1531,7 @@ mod tests {
         observer.set_usage_counts(
             &crate::usage_parser::UsageCounts {
                 present: true,
+                billable_present: true,
                 input_tokens: 41,
                 ..Default::default()
             },
