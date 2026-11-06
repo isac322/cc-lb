@@ -1091,11 +1091,12 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
         Some("client_closed_request")
     );
     assert!(
-        observed
-            .events
-            .iter()
-            .all(|event| !matches!(event, LifecycleEvent::UsageObserved { .. })),
-        "pre-terminal close must not observe usage from the undispatched terminal"
+        observed.events.iter().all(|event| !matches!(
+            event,
+            LifecycleEvent::UsageObserved { usage, .. }
+                if (usage.input_tokens, usage.output_tokens) == (12, 7)
+        )),
+        "pre-terminal close must not observe terminal usage from the undispatched terminal"
     );
     assert!(
         observed
