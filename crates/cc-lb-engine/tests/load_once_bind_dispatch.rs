@@ -48,7 +48,7 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
         ..StoredApiKeyRecord::default()
     };
 
-    let reservation = engine.reserve(&view, &record, "principal-a", "claude", 0, 0, None);
+    let reservation = engine.reserve(&view, &record, "principal-a", "claude", Some(0), 0, None);
 
     assert!(reservation.is_ok());
 }

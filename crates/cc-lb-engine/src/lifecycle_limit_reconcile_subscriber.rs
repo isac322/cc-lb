@@ -468,7 +468,7 @@ mod tests {
             record,
             "ws-accounting-principal",
             "gpt-5-codex",
-            100,
+            Some(100),
             0,
             Some(200),
         ) else {
@@ -560,7 +560,7 @@ mod tests {
                     &record,
                     "ws-accounting-principal",
                     "gpt-5-codex",
-                    0,
+                    Some(0),
                     0,
                     Some(976),
                 ),
@@ -917,7 +917,7 @@ mod tests {
                 &record,
                 "ws-accounting-principal",
                 "gpt-5-codex",
-                0,
+                Some(0),
                 0,
                 Some(1_000),
             );

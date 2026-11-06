@@ -223,7 +223,7 @@ impl RenewalAccountingScenario {
                     &self.key_record,
                     PRINCIPAL_ID,
                     "claude-test",
-                    1,
+                    Some(1),
                     0,
                     None,
                 )
@@ -256,7 +256,7 @@ impl RenewalAccountingScenario {
                 &self.key_record,
                 PRINCIPAL_ID,
                 "claude-test",
-                OUTPUT_CAP,
+                Some(OUTPUT_CAP),
                 0,
                 None,
             )

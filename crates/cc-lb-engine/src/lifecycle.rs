@@ -556,11 +556,12 @@ impl From<ProviderCapability> for RequestKind {
     fn from(capability: ProviderCapability) -> Self {
         match capability {
             ProviderCapability::AnthropicMessages => Self::AnthropicMessages,
-            ProviderCapability::OpenaiResponses => Self::OpenaiResponses,
+            ProviderCapability::AnthropicCountTokens => Self::AnthropicMessages,
             ProviderCapability::GeminiGenerateContent => Self::GeminiGenerateContent,
             ProviderCapability::GeminiCountTokens => Self::GeminiCountTokens,
             ProviderCapability::AnthropicModels => Self::AnthropicModels,
             ProviderCapability::AnthropicComplete => Self::AnthropicComplete,
+            ProviderCapability::OpenaiResponses => Self::OpenaiResponses,
             ProviderCapability::OpenaiResponsesInputTokens => Self::OpenaiResponsesInputTokens,
             ProviderCapability::OpenaiResponsesCompact => Self::OpenaiResponsesCompact,
             ProviderCapability::OpenaiChatCompletions => Self::OpenaiChatCompletions,
@@ -3283,11 +3284,7 @@ impl Lifecycle {
                     || {
                         body_view.limit_request(
                             &ctx.canonical_model_id,
-                            classify_provider_capability(
-                                &ctx.method,
-                                &ctx.path,
-                                ctx.provider_scope,
-                            ),
+                            Some(ProviderCapability::OpenaiResponses),
                             &routed.cache_bundle.cache_breakpoints,
                         )
                     },
@@ -3324,9 +3321,9 @@ impl Lifecycle {
                             .and_then(|limit| limit.reservation.as_ref())
                             .map(|reservation| reservation.id().to_owned())
                             .unwrap_or_default(),
-                        amount: active_limit
-                            .as_ref()
-                            .map_or(0, |limit| limit.request.max_tokens.max(0) as u64),
+                        amount: active_limit.as_ref().map_or(0, |limit| {
+                            limit.request.max_tokens.unwrap_or(0).max(0) as u64
+                        }),
                         limit_reserve_ms: Some(duration_to_ms(reserve_started.elapsed())),
                     },
                 });
@@ -4550,9 +4547,9 @@ impl Lifecycle {
                                 .and_then(|limit| limit.reservation.as_ref())
                                 .map(|reservation| reservation.id().to_owned())
                                 .unwrap_or_default(),
-                            amount: active_limit
-                                .as_ref()
-                                .map_or(0, |limit| limit.request.max_tokens as u64),
+                            amount: active_limit.as_ref().map_or(0, |limit| {
+                                limit.request.max_tokens.unwrap_or(0).max(0) as u64
+                            }),
                             limit_reserve_ms: Some(limit_reserve_ms),
                         },
                     });
@@ -4904,7 +4901,7 @@ impl Lifecycle {
                     estimator.estimate_max_with_local_cache(
                         &limit_request.model,
                         input,
-                        limit_request.max_tokens.max(0) as u64,
+                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
                         limit_request.service_tier.as_deref(),
                     )
                 } else {
@@ -4913,7 +4910,7 @@ impl Lifecycle {
                     estimator.estimate_max_with_cache(
                         &limit_request.model,
                         max_input_estimate as u64,
-                        limit_request.max_tokens.max(0) as u64,
+                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
                         estimated_cache_tokens,
                         can_cross_cache_cliff,
                         limit_request.service_tier.as_deref(),
@@ -8590,7 +8587,7 @@ impl RequestBodyView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LimitRequest {
     model: String,
-    max_tokens: i64,
+    max_tokens: Option<i64>,
     input_tokens_estimate: i64,
     local_cache_input: Option<cc_lb_pricing::LocalCacheInputEstimate>,
     estimated_cache_tokens: u64,
@@ -8643,20 +8640,37 @@ impl LimitRequest {
             body_model.or(fallback)
         }
         .unwrap_or(if model_optional { "" } else { "unknown" });
+        let max_tokens = match capability {
+            Some(ProviderCapability::OpenaiResponses) => value
+                .and_then(|v| v.get("max_output_tokens"))
+                .and_then(Value::as_i64),
+            Some(ProviderCapability::AnthropicMessages) => value
+                .and_then(|v| v.get("max_tokens"))
+                .and_then(Value::as_i64),
+            Some(ProviderCapability::AnthropicComplete) => value
+                .and_then(|v| v.get("max_tokens_to_sample"))
+                .and_then(Value::as_i64),
+            Some(
+                ProviderCapability::OpenaiChatCompletions
+                | ProviderCapability::GeminiOpenaiChatCompletions,
+            ) => value.and_then(|v| {
+                ["max_completion_tokens", "max_tokens"]
+                    .into_iter()
+                    .filter_map(|key| v.get(key).and_then(Value::as_i64))
+                    .max()
+            }),
+            Some(ProviderCapability::OpenaiCompletions) => value
+                .and_then(|v| v.get("max_tokens"))
+                .and_then(Value::as_i64),
+            Some(ProviderCapability::GeminiGenerateContent) => value
+                .and_then(|v| v.get("generationConfig"))
+                .and_then(|config| config.get("maxOutputTokens"))
+                .and_then(Value::as_i64),
+            _ => Some(0),
+        };
         Self {
             model: model.to_owned(),
-            max_tokens: value
-                .and_then(|v| {
-                    v.get("max_tokens")
-                        .or_else(|| v.get("max_output_tokens"))
-                        .and_then(Value::as_i64)
-                        .or_else(|| {
-                            v.get("generationConfig")
-                                .and_then(|config| config.get("maxOutputTokens"))
-                                .and_then(Value::as_i64)
-                        })
-                })
-                .unwrap_or(0),
+            max_tokens,
             input_tokens_estimate: anthropic_input
                 .map(|input| {
                     let whole = input
@@ -8698,28 +8712,74 @@ mod limit_request_estimate_tests {
     use serde_json::json;
 
     #[test]
-    fn zero_and_negative_output_caps_keep_existing_top_level_precedence() {
-        for (value, expected) in [
+    fn output_caps_are_capability_aware() {
+        let cases = [
             (
-                json!({"max_tokens":0, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
-                0,
+                ProviderCapability::AnthropicMessages,
+                json!({"max_tokens": 0, "max_output_tokens": 99}),
+                Some(0),
             ),
             (
-                json!({"max_tokens":-1, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
-                -1,
+                ProviderCapability::AnthropicComplete,
+                json!({"max_tokens": 99, "max_tokens_to_sample": 37}),
+                Some(37),
             ),
             (
-                json!({"max_output_tokens":-2, "generationConfig":{"maxOutputTokens":88}}),
-                -2,
+                ProviderCapability::OpenaiResponses,
+                json!({"max_tokens": 0, "max_output_tokens": 99}),
+                Some(99),
             ),
+            (
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"max_completion_tokens": 40, "max_tokens": 99}),
+                Some(99),
+            ),
+            (
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig":{"maxOutputTokens": 88}, "max_tokens": 99}),
+                Some(88),
+            ),
+        ];
+        for (capability, value, expected) in cases {
+            let request =
+                LimitRequest::from_value(Some(&value), "test-model", Some(capability), &[]);
+            assert_eq!(request.max_tokens, expected, "{capability:?}");
+        }
+        for capability in [
+            ProviderCapability::OpenaiResponses,
+            ProviderCapability::AnthropicMessages,
+            ProviderCapability::AnthropicComplete,
+            ProviderCapability::OpenaiChatCompletions,
+            ProviderCapability::OpenaiCompletions,
+            ProviderCapability::GeminiGenerateContent,
         ] {
             let request = LimitRequest::from_value(
-                Some(&value),
-                "claude-test",
-                Some(ProviderCapability::AnthropicMessages),
+                Some(&json!({"max_tokens": "wrong", "max_output_tokens": null})),
+                "test-model",
+                Some(capability),
                 &[],
             );
-            assert_eq!(request.max_tokens, expected);
+            assert_eq!(request.max_tokens, None, "{capability:?}");
+        }
+    }
+
+    #[test]
+    fn non_generation_operations_reserve_zero_output_tokens() {
+        for capability in [
+            ProviderCapability::AnthropicCountTokens,
+            ProviderCapability::GeminiCountTokens,
+            ProviderCapability::OpenaiEmbeddings,
+            ProviderCapability::OpenaiModerations,
+            ProviderCapability::OpenaiModels,
+            ProviderCapability::GeminiModels,
+        ] {
+            let request = LimitRequest::from_value(
+                Some(&json!({"max_tokens": 99, "max_output_tokens": 88})),
+                "test-model",
+                Some(capability),
+                &[],
+            );
+            assert_eq!(request.max_tokens, Some(0), "{capability:?}");
         }
     }
 
@@ -8732,7 +8792,7 @@ mod limit_request_estimate_tests {
             &[],
         );
         assert_eq!(request.input_tokens_estimate, 4_000);
-        assert_eq!(request.max_tokens, 0);
+        assert_eq!(request.max_tokens, None);
         assert!(request.local_cache_input.is_none());
     }
 
@@ -8749,7 +8809,7 @@ mod limit_request_estimate_tests {
             let request = LimitRequest::from_value(None, "", Some(capability), &[]);
             assert_eq!(request.model, "", "{capability:?}");
             assert_eq!(request.input_tokens_estimate, 0);
-            assert_eq!(request.max_tokens, 0);
+            assert_eq!(request.max_tokens, Some(0));
         }
         let body = json!({"model":"omni-moderation-latest"});
         let explicit = LimitRequest::from_value(
@@ -10123,6 +10183,12 @@ fn limit_rejection_response(
             format!("max_tokens {requested} exceeds key output limit {cap}"),
             None,
         ),
+        RejectReason::OutputCapRequired { cap } => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!("provider output limit is required for configured cap {cap}"),
+            None,
+        ),
     };
 
     let mut response = Response::new(Body::from(provider_error_body_with_retry_after(
@@ -10166,6 +10232,7 @@ fn limit_retry_after_secs(reason: RejectReason) -> Option<u64> {
         | RejectReason::CostUnavailable
         | RejectReason::UnsupportedLimitWindow { .. }
         | RejectReason::OutputCapExceeded { .. }
+        | RejectReason::OutputCapRequired { .. }
         | RejectReason::Unsatisfiable { .. } => None,
     }
 }
@@ -10185,7 +10252,8 @@ fn limit_violation_name(reason: &RejectReason) -> Option<&'static str> {
         | RejectReason::ModelNotAllowed
         | RejectReason::CostUnavailable
         | RejectReason::UnsupportedLimitWindow { .. }
-        | RejectReason::OutputCapExceeded { .. } => None,
+        | RejectReason::OutputCapExceeded { .. }
+        | RejectReason::OutputCapRequired { .. } => None,
     }
 }
 
