@@ -23,7 +23,8 @@ async fn openai_image_and_transcription_usage_persist_in_request_events()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let mut update_rx = test_bus.bus.subscribe();
     let state = TestState::default();
     let authn = TestAuthn::new(state);
