@@ -78,7 +78,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
         .replace_from_real_request_fenced(&first_request, None)
         .await?
         .expect("fenced fresh insert");
-    assert_eq!(first.cycle_id, first_cycle_id);
+    assert_eq!(first.cycle_id, Some(first_cycle_id));
     assert_eq!(
         storage
             .get_cache_keepalive_session(key)
@@ -111,7 +111,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
         .await?
         .expect("fenced newer replacement");
     assert_eq!(replacement.generation, first.generation + 1);
-    assert_eq!(replacement.cycle_id, second_cycle_id);
+    assert_eq!(replacement.cycle_id, Some(second_cycle_id));
     assert_eq!(
         storage
             .get_cache_keepalive_session(key)
@@ -124,7 +124,7 @@ async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences
     let healthy = storage
         .replace_from_real_request(&replace_request("fenced-healthy", b"healthy", 200))
         .await?;
-    assert_eq!(healthy.cycle_id, Uuid::nil());
+    assert_eq!(healthy.cycle_id, Some(Uuid::nil()));
     Ok(())
 }
 
