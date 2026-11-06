@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::process::Command;
 
 use axum::http::StatusCode;
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion};
@@ -139,8 +140,34 @@ async fn seed_boundary_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, p
     }
 }
 
-#[tokio::test]
-async fn list_and_detail_include_follow_up_at_turn_boundary_like_summary() {
+#[test]
+fn list_and_detail_include_follow_up_at_turn_boundary_like_summary() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::evidence_scope::list_and_detail_include_follow_up_at_turn_boundary_like_summary";
+
+    if std::env::var("CC_LB_KEEPALIVE_EVIDENCE_SCOPE_CHILD").as_deref() == Ok("1") {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build isolated evidence-scope runtime")
+            .block_on(list_and_detail_include_follow_up_at_turn_boundary_like_summary_async());
+        return;
+    }
+
+    let output =
+        Command::new(std::env::current_exe().expect("current integration test executable"))
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env("CC_LB_KEEPALIVE_EVIDENCE_SCOPE_CHILD", "1")
+            .output()
+            .expect("run isolated evidence-scope route test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(TEST_NAME) && stdout.contains("1 passed"),
+        "isolated evidence-scope test did not execute successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+async fn list_and_detail_include_follow_up_at_turn_boundary_like_summary_async() {
     cc_lb_pricing::global_catalog().install_snapshot(CatalogSnapshot {
         payload_hash: "evidence-scope-boundary".to_owned(),
         fetched_at_ms: 1,
