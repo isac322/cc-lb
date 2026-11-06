@@ -1090,10 +1090,19 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
         observed.row.error_code.as_deref(),
         Some("client_closed_request")
     );
-    assert_eq!(
-        (observed.row.input_tokens, observed.row.output_tokens),
-        (None, None),
-        "pre-terminal close cannot settle usage from the undispatched terminal"
+    assert!(
+        observed
+            .events
+            .iter()
+            .all(|event| !matches!(event, LifecycleEvent::UsageObserved { .. })),
+        "pre-terminal close must not observe usage from the undispatched terminal"
+    );
+    assert!(
+        observed
+            .events
+            .iter()
+            .all(|event| !matches!(event, LifecycleEvent::StreamCompleted { .. })),
+        "pre-terminal close must not settle the stream"
     );
     Ok(())
 }
