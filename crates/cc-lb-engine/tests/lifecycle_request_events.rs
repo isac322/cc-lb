@@ -15,8 +15,7 @@ use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 
 use crate::common::{
-    TestAuthn, TestLifecycleBus, TestState, lifecycle_with_parts, managed_api_key,
-    messages_request,
+    TestAuthn, TestLifecycleBus, TestState, lifecycle_with_parts, managed_api_key, messages_request,
 };
 
 #[tokio::test]
@@ -63,8 +62,14 @@ async fn openai_image_and_transcription_usage_persist_in_request_events()
     .with_event_bus(test_bus.bus_arc());
 
     for (path, body) in [
-        ("/v1/images/generations", br#"{"model":"gpt-image-1"}"#.as_slice()),
-        ("/v1/audio/transcriptions", br#"{"model":"whisper-1"}"#.as_slice()),
+        (
+            "/v1/images/generations",
+            br#"{"model":"gpt-image-1"}"#.as_slice(),
+        ),
+        (
+            "/v1/audio/transcriptions",
+            br#"{"model":"whisper-1"}"#.as_slice(),
+        ),
     ] {
         let mut request = http::Request::builder()
             .method("POST")
