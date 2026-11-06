@@ -27,6 +27,15 @@ pub(crate) fn list_item_from_row(row: SqliteRow) -> StorageResult<CacheKeepalive
         id,
         source,
         session_key_hash: row.try_get("session_key_hash").map_err(map_sqlx_error)?,
+        cycle_id: row
+            .try_get::<Option<String>, _>("cycle_id")
+            .map_err(map_sqlx_error)?
+            .map(|value| {
+                uuid::Uuid::parse_str(&value).map_err(|error| StorageError::Corrupted {
+                    message: format!("invalid cache keepalive session cycle_id: {error}"),
+                })
+            })
+            .transpose()?,
         principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
         upstream_id: uuid_from_db(
             &row.try_get::<String, _>("upstream_id")
