@@ -56,6 +56,8 @@ All notable changes to this project will be documented in this file.
 - Cache keep-alive turn claims now accept a published `pending` session once its encrypted payload is stored, preventing a due worker from acknowledging the job `Done` as a no-op before the producer's post-publish `enqueued` mark completes.
 - OpenAI `gpt-image-1` image responses and token-billed audio transcription responses now retain documented input and output token usage in request events; duration-based audio usage, binary speech responses, and image models without documented token usage remain unchanged. ([#1093](https://github.com/isac322/cc-lb/issues/1093))
 
+- Gemini tool-use prompt token usage is now preserved as a separate optional request-event component, while ordinary input/output and billing semantics remain unchanged. ([#1090](https://github.com/isac322/cc-lb/issues/1090))
+
 ### Security
 
 - OAuth PKCE sign-in no longer logs authorization-code, state-token, or code-verifier fragments or the exchange-time verifier-derived challenge. The public authorization challenge is logged only at DEBUG; token-exchange endpoint, client, redirect, and length diagnostics remain available. ([#1009](https://github.com/isac322/cc-lb/issues/1009))
