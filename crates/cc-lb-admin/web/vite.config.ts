@@ -13,6 +13,9 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  build: {
+    assetsInlineLimit: 0,
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,

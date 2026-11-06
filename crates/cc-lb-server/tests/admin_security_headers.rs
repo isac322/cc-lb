@@ -87,12 +87,38 @@ async fn body_text(response: Response) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+fn is_spa_skip_placeholder(index_html: &str) -> bool {
+    index_html
+        .split(['"', '\''])
+        .any(|part| part == "/assets/index-skip.js")
+}
+
 fn discover_index_asset(index_html: &str) -> String {
     index_html
         .split(['"', '\''])
         .find(|part| part.starts_with("/assets/") && part.ends_with(".js"))
         .unwrap_or_else(|| panic!("missing index script asset"))
         .to_owned()
+}
+
+fn discover_bootstrap_asset(index_html: &str) -> String {
+    index_html
+        .split(['"', '\''])
+        .find(|part| *part == "/theme-init.js")
+        .unwrap_or_else(|| panic!("missing external theme bootstrap"))
+        .to_owned()
+}
+
+fn assert_scripts_are_external(index_html: &str) {
+    let mut script_count = 0;
+    for script in index_html.split("<script").skip(1) {
+        let tag = script
+            .split_once("</script>")
+            .map_or(script, |(tag, _)| tag);
+        assert!(tag.contains("src="), "index contains an inline script");
+        script_count += 1;
+    }
+    assert!(script_count > 0, "index contains no script tags");
 }
 
 fn assert_security_headers(response: &Response) {
@@ -125,7 +151,22 @@ async fn admin_responses_include_browser_security_headers() {
     let html = get(app.admin_router.clone(), "/").await;
     assert_eq!(html.status(), StatusCode::OK);
     assert_security_headers(&html);
-    let asset_path = discover_index_asset(&body_text(html).await);
+    let index_html = body_text(html).await;
+    assert_scripts_are_external(&index_html);
+    if !is_spa_skip_placeholder(&index_html) {
+        let bootstrap_path = discover_bootstrap_asset(&index_html);
+        let bootstrap = get(app.admin_router.clone(), &bootstrap_path).await;
+        assert_eq!(bootstrap.status(), StatusCode::OK);
+        assert_eq!(
+            bootstrap
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/javascript")
+        );
+        assert_security_headers(&bootstrap);
+    }
+    let asset_path = discover_index_asset(&index_html);
 
     let asset = get(app.admin_router.clone(), &asset_path).await;
     assert_eq!(asset.status(), StatusCode::OK);
