@@ -39,7 +39,7 @@ use cc_lb_storage_api::{
 };
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
-    SigningCapability, UpstreamError,
+    SigningCapability, UpstreamError, scrub_secret,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -1267,6 +1267,7 @@ impl SignerFactory for DbCompositeSignerFactory {
                             access_token: secrecy::SecretString::new(
                                 tokens.access_token.clone().into_boxed_str(),
                             ),
+                            historical_access_tokens: Vec::new(),
                             expires_at_unix_secs: tokens.expires_at_unix_secs,
                         })),
                         record: record.clone(),
@@ -1406,7 +1407,15 @@ fn build_subscription_signer_with_policy(
 struct SubscriptionSignerState {
     signer: Arc<dyn Signer>,
     access_token: secrecy::SecretString,
+    historical_access_tokens: Vec<secrecy::SecretString>,
     expires_at_unix_secs: u64,
+}
+
+fn scrub_secret_owned(secret: &str, text: &str) -> Option<String> {
+    match scrub_secret(secret, text) {
+        std::borrow::Cow::Borrowed(_) => None,
+        std::borrow::Cow::Owned(value) => Some(value),
+    }
 }
 
 struct RefreshingSubscriptionSigner {
@@ -1473,8 +1482,11 @@ impl RefreshingSubscriptionSigner {
     ) -> Arc<dyn Signer> {
         let mut state = self.state.write();
         state.signer = signer.clone();
-        state.access_token =
-            secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str());
+        let previous_access_token = std::mem::replace(
+            &mut state.access_token,
+            secrecy::SecretString::new(tokens.access_token.clone().into_boxed_str()),
+        );
+        state.historical_access_tokens.push(previous_access_token);
         state.expires_at_unix_secs = tokens.expires_at_unix_secs;
         signer
     }
@@ -1566,7 +1578,23 @@ impl Signer for RefreshingSubscriptionSigner {
     }
 
     fn scrub_secrets<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
-        self.state.read().signer.scrub_secrets(text)
+        let state = self.state.read();
+        let signer_scrubbed = state.signer.scrub_secrets(text);
+        let mut owned = match signer_scrubbed {
+            std::borrow::Cow::Borrowed(_) => None,
+            std::borrow::Cow::Owned(value) => Some(value),
+        };
+        for access_token in
+            std::iter::once(&state.access_token).chain(state.historical_access_tokens.iter())
+        {
+            let input = owned.as_deref().unwrap_or(text);
+            if let Some(value) = scrub_secret_owned(access_token.expose_secret(), input) {
+                owned = Some(value);
+            }
+        }
+        owned
+            .map(std::borrow::Cow::Owned)
+            .unwrap_or(std::borrow::Cow::Borrowed(text))
     }
 }
 
@@ -3637,6 +3665,9 @@ mod tests {
             signed.headers().get(http::header::AUTHORIZATION),
             Some(&http::HeaderValue::from_static("Bearer pre-send-token"))
         );
+        let scrubbed = signer.scrub_secrets("old-access pre-send-token");
+        assert!(!scrubbed.as_ref().contains("old-access"));
+        assert!(!scrubbed.as_ref().contains("pre-send-token"));
         let decision = signer
             .on_unauthorized(&UpstreamError::Unauthorized {
                 status: http::StatusCode::UNAUTHORIZED,
