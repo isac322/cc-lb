@@ -42,6 +42,12 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_creation_evidence: CacheTokenEvidence,
     pub(crate) cache_read_evidence: CacheTokenEvidence,
     pub(crate) thinking_tokens: u64,
+    /// Gemini's cumulative prompt tokens attributed to tool use, when reported.
+    ///
+    /// This remains distinct from `input_tokens`: Gemini's `promptTokenCount`
+    /// continues to drive input accounting, while this optional component is
+    /// propagated for usage attribution.
+    pub(crate) tool_use_prompt_tokens: Option<u64>,
     /// Last Gemini candidates snapshot, kept separately from billable output
     /// so partial updates can retain it without adding cumulative counts.
     pub(crate) last_candidates_tokens: u64,
@@ -705,6 +711,12 @@ pub(crate) fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
         .and_then(Value::as_u64)
     {
         usage.thinking_tokens = reasoning_tokens;
+    }
+    if let Some(tool_use_prompt_tokens) = reported
+        .get("toolUsePromptTokenCount")
+        .and_then(Value::as_u64)
+    {
+        usage.tool_use_prompt_tokens = Some(tool_use_prompt_tokens);
     }
     if reported.get("output_tokens").is_none() {
         let candidates_tokens = reported.get("candidatesTokenCount").and_then(Value::as_u64);
@@ -2182,7 +2194,8 @@ mod tests {
                 "promptTokenCount": 120,
                 "candidatesTokenCount": 48,
                 "cachedContentTokenCount": 17,
-                "thoughtsTokenCount": 12
+                "thoughtsTokenCount": 12,
+                "toolUsePromptTokenCount": 9
             }
         });
 
@@ -2193,6 +2206,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
     }
 
     #[test]
@@ -2208,7 +2222,8 @@ mod tests {
                     "promptTokenCount": 120,
                     "candidatesTokenCount": 48,
                     "cachedContentTokenCount": 17,
-                    "thoughtsTokenCount": 12
+                    "thoughtsTokenCount": 12,
+                    "toolUsePromptTokenCount": 9
                 }
             }
         });
@@ -2220,6 +2235,73 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
+    }
+    #[test]
+    fn gm_use_05_tool_use_prompt_tokens_non_stream_presence_states() {
+        for (tool_use_prompt_tokens, expected) in
+            [(Some(37), Some(37)), (None, None), (Some(0), Some(0))]
+        {
+            let usage_metadata = match tool_use_prompt_tokens {
+                Some(value) => serde_json::json!({
+                    "promptTokenCount": 120,
+                    "candidatesTokenCount": 48,
+                    "toolUsePromptTokenCount": value
+                }),
+                None => serde_json::json!({
+                    "promptTokenCount": 120,
+                    "candidatesTokenCount": 48
+                }),
+            };
+            let usage = observe_non_stream_json_value(&serde_json::json!({
+                "usageMetadata": usage_metadata
+            }))
+            .usage;
+            assert_eq!(usage.tool_use_prompt_tokens, expected);
+            assert_eq!(usage.input_tokens, 120);
+            assert_eq!(usage.output_tokens, 48);
+        }
+
+        let null = observe_non_stream_json_value(&serde_json::json!({
+            "usageMetadata": {
+                "promptTokenCount": 120,
+                "candidatesTokenCount": 48,
+                "toolUsePromptTokenCount": null
+            }
+        }))
+        .usage;
+        assert_eq!(null.tool_use_prompt_tokens, None);
+    }
+
+    #[test]
+    fn gm_sse_06_tool_use_prompt_tokens_replace_and_retain_cumulative_snapshots() {
+        let mut usage = UsageCounts::default();
+        for (payload, expected) in [
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48,"toolUsePromptTokenCount":37}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":49}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":50,"toolUsePromptTokenCount":null}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":51,"toolUsePromptTokenCount":0}}"#,
+                Some(0),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":52,"toolUsePromptTokenCount":11}}"#,
+                Some(11),
+            ),
+        ] {
+            let frame = format!("data: {payload}\n\n");
+            accumulate_raw_sse_usage(frame.as_bytes(), &mut usage);
+            assert_eq!(usage.tool_use_prompt_tokens, expected, "{payload}");
+        }
     }
 
     #[test]
@@ -2324,7 +2406,7 @@ mod tests {
     fn gm_sse_01_stream_generate_content_reports_terminal_usage() {
         let first =
             b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n";
-        let terminal = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":120,\"candidatesTokenCount\":48,\"cachedContentTokenCount\":17,\"thoughtsTokenCount\":12}}\n\n";
+        let terminal = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":120,\"candidatesTokenCount\":48,\"cachedContentTokenCount\":17,\"thoughtsTokenCount\":12,\"toolUsePromptTokenCount\":9}}\n\n";
         let mut usage = UsageCounts::default();
 
         let first_update = accumulate_raw_sse_usage(first, &mut usage);
@@ -2341,6 +2423,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
         assert!(usage.thinking_tokens < usage.output_tokens);
     }
 
