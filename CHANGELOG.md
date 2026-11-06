@@ -28,6 +28,7 @@ All notable changes to this project will be documented in this file.
 - OpenAI and Gemini OAuth warm-up now support provider-qualified shape plugins. Admin create/update rejects plugins without the upstream provider's shape export. Plugins see native Responses or Gemini `generateContent` input before the normal OAuth signer and Code Assist envelope.
 
 ### Fixed
+- PostgreSQL fenced cache keep-alive inserts and replacements now persist the real request's `cycle_id` instead of dropping it. ([#1100](https://github.com/isac322/cc-lb/issues/1100))
 - HTTP request events now extract reasoning metadata from provider-native request shapes: OpenAI Chat `reasoning_effort`, OpenAI Responses `reasoning.effort`, and Gemini `generationConfig.thinkingConfig.thinkingBudget`, while preserving Anthropic metadata. ([#1081](https://github.com/isac322/cc-lb/issues/1081))
 - Admin cache keep-alive read models now align terminal states, filters, and activity projections; retain successful-hit and exact-spend totals through session reset and purge; use aggregate summary reads; report unknown evidence instead of false savings; and surface truthful UI read/conflict states across SQLite and PostgreSQL. Retained history is not a lifetime total. ([#1049](https://github.com/isac322/cc-lb/issues/1049))
 - Admin cache keep-alive activity now includes follow-up evidence that starts after renewal dispatch, even when it falls within the renewal's completion second. ([#1101](https://github.com/isac322/cc-lb/issues/1101))
