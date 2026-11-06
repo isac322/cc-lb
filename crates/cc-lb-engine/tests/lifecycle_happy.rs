@@ -846,6 +846,58 @@ async fn openai_max_output_tokens_drives_usd_limit_admission_and_rejection() {
     }
 }
 
+#[tokio::test]
+async fn openai_chat_max_completion_tokens_respects_output_token_limit_boundary() {
+    for (cap, expected_status, expected_calls) in [
+        (2_000, StatusCode::OK, 1),
+        (1_999, StatusCode::BAD_REQUEST, 0),
+    ] {
+        // Given an OpenAI Chat Completions request reserving 2,000 output
+        // tokens and a limit at, or just below, that reservation.
+        let state = TestState::default();
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::OpenaiApiKey,
+            vec![Limit {
+                kind: LimitKind::OutputTokens,
+                window_secs: 60,
+                cap_micros: cap,
+            }],
+            &state,
+            None,
+        );
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("x-api-key", managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-limit-test","max_completion_tokens":2000,"messages":[]}"#,
+            ))
+            .expect("OpenAI Chat Completions request builds");
+        // Chat Completions is an explicitly OpenAI-scoped operation on the
+        // production proxy; mirror that existing route scope in this direct
+        // lifecycle fixture so the shared LimitRequest admission path runs.
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+        // When max_completion_tokens crosses the real lifecycle admission path.
+        let response = handle(&lifecycle, request).await;
+
+        // Then equality is a healthy boundary control, while one fewer
+        // available output token rejects before dispatch.
+        if expected_status == StatusCode::OK {
+            let (status, _headers, body) = collect_body(response).await;
+            assert_eq!(status, expected_status, "cap {cap}, body: {body:?}");
+        } else {
+            assert_local_limit_retryability(response, expected_status, None, None, None).await;
+        }
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            expected_calls,
+            "cap {cap}"
+        );
+    }
+}
+
 struct CatalogLimitCostEstimator {
     catalog: Arc<PriceCatalog>,
 }
