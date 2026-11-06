@@ -9132,10 +9132,11 @@ mod prompt_cache_policy_tests {
                 literal_cacheable_breakpoint_prefix_keys: Vec::new(),
                 timings: PromptCacheAnalysisTimings::default(),
             };
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             assert_eq!(metadata.bundles.official.cache_breakpoints.len(), 1);
             assert_eq!(metadata.bundles.literal.cache_breakpoints.len(), 1);
@@ -9175,10 +9176,11 @@ mod prompt_cache_policy_tests {
             )
             .await;
         assert!(output.analysis.breakpoints.is_empty());
-        let metadata = request_cache_metadata_from_value_with_analysis(
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
             &HeaderMap::new(),
             Some(&request),
             Some(output),
+            None,
         );
         assert!(metadata.bundles.official.cache_breakpoints.is_empty());
         let literal = &metadata.bundles.literal;
@@ -9337,7 +9339,7 @@ impl RequestCacheMetadata {
                 message_index: breakpoint.message_index.map(saturating_u64_to_u32),
                 prefix_hash: breakpoint.prefix_hash.clone(),
                 // Produced in-process by the current estimator (see
-                // `request_cache_metadata_from_value_with_analysis`).
+                // `request_cache_metadata_from_value_with_analysis_for_capability`).
                 prefix_bytes: PrefixBytes::new(breakpoint.prefix_token_count),
                 requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
                 lookback_prefixes: breakpoint
@@ -9605,14 +9607,6 @@ fn request_cache_metadata_from_value(
             timings: PromptCacheAnalysisTimings::default(),
         }
     });
-    request_cache_metadata_from_value_with_analysis_for_capability(headers, value, analysis, None)
-}
-
-fn request_cache_metadata_from_value_with_analysis(
-    headers: &HeaderMap,
-    value: Option<&Value>,
-    analysis: Option<PromptCacheAnalysisOutput>,
-) -> RequestCacheMetadata {
     request_cache_metadata_from_value_with_analysis_for_capability(headers, value, analysis, None)
 }
 
@@ -12177,10 +12171,11 @@ mod tests {
                     Some(1_024),
                 )
                 .await;
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
             let context = PromptCacheObservationContext {
@@ -12241,10 +12236,11 @@ mod tests {
                 )
                 .await;
             assert!(output.cacheable_breakpoint_prefix_keys.is_empty());
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
             let mut context = PromptCacheObservationContext {
