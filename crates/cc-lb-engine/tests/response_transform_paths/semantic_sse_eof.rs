@@ -364,6 +364,27 @@ impl UpstreamDispatch for PendingDispatch {
     }
 }
 
+struct TerminalThenPendingDispatch {
+    headers: HeaderMap,
+    chunks: Vec<Bytes>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for TerminalThenPendingDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let chunks = self.chunks.clone();
+        let stream = async_stream::stream! {
+            for chunk in chunks {
+                yield Ok::<Bytes, std::convert::Infallible>(chunk);
+            }
+            std::future::pending::<()>().await;
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.headers_mut() = self.headers.clone();
+        Ok(response)
+    }
+}
+
 async fn anthropic(
     body: Bytes,
     status: StatusCode,
@@ -1004,18 +1025,20 @@ data: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"o
 #[tokio::test]
 async fn openai_incomplete_terminal_client_close_preserves_usage() -> TestResult {
     for transform in [false, true] {
-        let body = Bytes::from_static(
+        let first = Bytes::from_static(
             b"event: response.created\n\
 data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
 event: response.output_text.delta\n\
-data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n\
-event: response.incomplete\n\
+data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n",
+        );
+        let terminal = Bytes::from_static(
+            b"event: response.incomplete\n\
 data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"total_tokens\":19}}}\n\n",
         );
         let observed = observe_drop_after_terminal(
-            Arc::new(PendingDispatch {
+            Arc::new(TerminalThenPendingDispatch {
                 headers: HeaderMap::new(),
-                body,
+                chunks: vec![first, terminal],
             }),
             upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
             http::Request::builder()
@@ -1051,15 +1074,10 @@ data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"
 event: response.output_text.delta\n\
 data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
     );
-    let terminal = Bytes::from_static(
-        b"event: response.incomplete\n\
-data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
-    );
     let observed = observe_drop_after_terminal(
-        Arc::new(ChunkedDispatch {
-            status: StatusCode::OK,
+        Arc::new(PendingDispatch {
             headers: sse_headers(),
-            chunks: vec![first, terminal],
+            body: first,
         }),
         upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
         http::Request::builder()
@@ -1484,9 +1502,17 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
     let lifecycle = lifecycle_with_options(
         None,
         None,
-        Arc::new(PendingDispatch {
+        Arc::new(TerminalThenPendingDispatch {
             headers: sse_headers(),
-            body: upstream,
+            chunks: vec![
+                Bytes::from_static(
+                    b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+                ),
+                upstream,
+            ],
         }),
         LifecycleConfig::default(),
         upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
@@ -1533,17 +1559,22 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
     .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
-    let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
-        .await?
-        .expect("upstream frame")
-        .expect("upstream frame succeeds")
-        .into_data()
-        .expect("upstream frame carries data");
-    assert!(
-        frame
+    let mut received = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("upstream frame")
+            .expect("upstream frame succeeds")
+            .into_data()
+            .expect("upstream frame carries data");
+        received.extend_from_slice(&frame);
+        if received
             .windows(b"response.incomplete".len())
-            .any(|window| { window == b"response.incomplete" })
-    );
+            .any(|window| window == b"response.incomplete")
+        {
+            break;
+        }
+    }
     drop(body);
 
     let (reason, client_status) = tokio::time::timeout(Duration::from_secs(3), async {
