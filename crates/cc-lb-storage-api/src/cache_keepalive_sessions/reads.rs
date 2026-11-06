@@ -100,6 +100,7 @@ pub struct CacheKeepaliveSessionListItem {
     pub id: String,
     pub source: CacheKeepaliveSessionEntrySource,
     pub session_key_hash: Option<String>,
+    pub cycle_id: Option<Uuid>,
     pub principal_id: String,
     pub upstream_id: Uuid,
     pub last_message_at_ms: u64,
