@@ -16,9 +16,9 @@ use cc_lb_config::{PromptCacheShadowConfig, UpstreamAffinityConfig};
 use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheBreakpoint, CacheBreakpointSource,
-    CacheLookbackPrefix, CachePricingSummary, CacheScore, InternalError, InternalErrorKind,
-    InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace, StageDecision,
-    TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
+    CacheLookbackPrefix, CachePricingSummary, CacheScore, CredentialKind, InternalError,
+    InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace,
+    StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
     UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_quota::build_subscription_quota_samples;
@@ -10557,18 +10557,16 @@ impl<'a> FailoverRouter<'a> {
                 &*lifecycle.clock,
             );
         candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
-        // The last allowed attempt goes to an API key when one remains, so
-        // the attempt cap never strands a request on exhausted OAuth accounts.
-        if self.request_kind == RequestKind::AnthropicMessages {
-            let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
-            if last_attempt
-                && candidates
-                    .iter()
-                    .any(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey)
-            {
-                candidates
-                    .retain(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey);
-            }
+        // The last allowed attempt goes to an API key when one remains, so the
+        // attempt cap never strands a request on exhausted OAuth accounts.
+        let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
+        if last_attempt
+            && candidates
+                .iter()
+                .any(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey)
+        {
+            candidates
+                .retain(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey);
         }
         if candidates.is_empty() {
             return None;
