@@ -183,6 +183,130 @@ describe('CacheKeepaliveDetailSchema', () => {
     expect(parsed.turns[0].pnl).toBeNull();
     expect(parsed.net_pnl).toBe(0);
   });
+  it.each([
+    {
+      name: 'terminal hit loss',
+      evidence: 'observed',
+      renewals: 1,
+      spent: 0.006,
+      avoided: 0,
+      pnl: -0.006,
+      followedUp: false,
+      pending: false,
+    },
+    {
+      name: 'terminal miss loss',
+      evidence: 'observed',
+      renewals: 0,
+      spent: 0.015,
+      avoided: 0,
+      pnl: -0.015,
+      followedUp: false,
+      pending: false,
+    },
+    {
+      name: 'persisted zero-cost follow-up',
+      evidence: 'observed',
+      renewals: 1,
+      spent: 0,
+      avoided: 0.075,
+      pnl: 0.075,
+      followedUp: true,
+      pending: false,
+    },
+    {
+      name: 'unknown evidence',
+      evidence: 'unknown',
+      renewals: 1,
+      spent: 0.021,
+      avoided: null,
+      pnl: null,
+      followedUp: null,
+      pending: false,
+    },
+    {
+      name: 'pending follow-up',
+      evidence: 'pending',
+      renewals: 1,
+      spent: 0.006,
+      avoided: null,
+      pnl: null,
+      followedUp: null,
+      pending: true,
+    },
+  ])('preserves $name economics and renewal count', (scenario) => {
+    const parsed = CacheKeepaliveDetailSchema.parse({
+      ...cacheKeepaliveRenewedDetailFixture,
+      state: scenario.pending ? 'renewed' : 'expired',
+      is_active: scenario.pending,
+      attempts: scenario.renewals,
+      total_spent: scenario.spent,
+      total_avoided: scenario.avoided,
+      net_pnl: scenario.pnl,
+      evidence_status: scenario.evidence,
+      total_renewals_current_cycle: scenario.renewals,
+      is_last_pending: scenario.pending,
+      turns: [
+        {
+          turn_number: 1,
+          renewals: scenario.renewals,
+          followed_up: scenario.followedUp,
+          label: 'agent-in-turn',
+          time_ms: 1_700_000_000_000,
+          pnl: scenario.pnl,
+          pending: scenario.pending,
+          evidence_status: scenario.evidence,
+        },
+      ],
+      raw_record: {
+        ...cacheKeepaliveRenewedDetailFixture.raw_record,
+        renewal_count: scenario.renewals,
+        status: scenario.pending ? 'renewed' : 'expired',
+      },
+    });
+
+    expect(parsed.total_spent).toBe(scenario.spent);
+    expect(parsed.total_avoided).toBe(scenario.avoided);
+    expect(parsed.net_pnl).toBe(scenario.pnl);
+    expect(parsed.evidence_status).toBe(scenario.evidence);
+    expect(parsed.total_renewals_current_cycle).toBe(scenario.renewals);
+    expect(parsed.turns[0]).toMatchObject({
+      renewals: scenario.renewals,
+      followed_up: scenario.followedUp,
+      pnl: scenario.pnl,
+      pending: scenario.pending,
+      evidence_status: scenario.evidence,
+    });
+  });
+
+  it('preserves retained economics when a replacement cycle has no turns', () => {
+    const parsed = CacheKeepaliveDetailSchema.parse({
+      ...cacheKeepaliveRenewedDetailFixture,
+      state: 'scheduled',
+      attempts: 0,
+      total_spent: 0.021,
+      total_avoided: 0.075,
+      net_pnl: 0.054,
+      evidence_status: 'observed',
+      total_renewals_current_cycle: 0,
+      is_last_pending: false,
+      turns: [],
+      raw_record: {
+        ...cacheKeepaliveRenewedDetailFixture.raw_record,
+        renewal_count: 0,
+        status: 'scheduled',
+      },
+    });
+
+    expect(parsed.total_spent).toBe(0.021);
+    expect(parsed.total_avoided).toBe(0.075);
+    expect(parsed.net_pnl).toBe(0.054);
+    expect(parsed.evidence_status).toBe('observed');
+    expect(parsed.is_active).toBe(true);
+    expect(parsed.is_last_pending).toBe(false);
+    expect(parsed.total_renewals_current_cycle).toBe(0);
+    expect(parsed.turns).toEqual([]);
+  });
 
   it('rejects a detail whose state enum is malformed', () => {
     const bad: unknown = {
