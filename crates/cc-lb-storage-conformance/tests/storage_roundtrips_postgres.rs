@@ -262,6 +262,14 @@ fn request_event_list_model_filter_matches_case_insensitive_prefix_postgres() {
 }
 
 #[test]
+fn request_event_kind_sets_filter_before_pagination_postgres() {
+    run_postgres_scenario(
+        "request_event_kind_sets_filter_before_pagination",
+        request_event_list::request_event_kind_sets_filter_before_pagination,
+    );
+}
+
+#[test]
 fn request_event_principal_cost_components_postgres() {
     run_postgres_scenario(
         "request_event_principal_cost_components",

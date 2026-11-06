@@ -13,6 +13,21 @@ use uuid::Uuid;
 pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
 pub const MAX_RECENT_EVENTS_LIMIT: usize = 500;
 pub const MAX_HISTOGRAM_BUCKETS: u64 = 240;
+pub fn parse_query_map(raw: Option<&str>) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut event_kinds = Vec::new();
+    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        if key == "event_kind" {
+            event_kinds.push(value.into_owned());
+        } else {
+            map.insert(key.into_owned(), value.into_owned());
+        }
+    }
+    if !event_kinds.is_empty() {
+        map.insert("event_kind".to_owned(), event_kinds.join(","));
+    }
+    map
+}
 
 /// Upper bound on matching durable events replayed by one reconnect.
 ///
@@ -38,16 +53,7 @@ pub struct RecentEventsParams {
     pub status_class: Option<StatusClass>,
     pub errors_only: bool,
     pub source_kind: Option<String>,
-    pub event_kind: Option<RequestEventKind>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistogramParams {
-    pub since_unix_secs: u64,
-    pub until_unix_secs: u64,
-    pub bucket_ms: u64,
-    pub bucket_count: u64,
-    pub filters: StreamFilters,
+    pub event_kinds: Option<Vec<RequestEventKind>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -60,13 +66,22 @@ pub struct StreamFilters {
     pub status_class: Option<StatusClass>,
     pub errors_only: bool,
     pub source_kind: Option<String>,
-    pub event_kind: Option<RequestEventKind>,
+    pub event_kinds: Option<Vec<RequestEventKind>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventsDeltaQuery {
     pub since_cursor: u64,
     pub limit: usize,
+    pub filters: StreamFilters,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistogramParams {
+    pub since_unix_secs: u64,
+    pub until_unix_secs: u64,
+    pub bucket_ms: u64,
+    pub bucket_count: u64,
     pub filters: StreamFilters,
 }
 
@@ -173,7 +188,7 @@ pub fn parse_recent_params(
         status_class: filters.status_class,
         errors_only: filters.errors_only,
         source_kind: filters.source_kind,
-        event_kind: filters.event_kind,
+        event_kinds: filters.event_kinds,
     })
 }
 
@@ -329,12 +344,19 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
             .get("status_class")
             .is_some_and(|value| value == "errors"),
         source_kind: map.get("source_kind").cloned(),
-        event_kind: match map.get("event_kind") {
-            Some(value) => Some(
-                value
-                    .parse::<RequestEventKind>()
-                    .map_err(|_| EventsError::InvalidEventKind)?,
-            ),
+        event_kinds: match map.get("event_kind") {
+            Some(value) => {
+                let kinds = value
+                    .split(',')
+                    .map(str::trim)
+                    .map(|value| value.parse::<RequestEventKind>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| EventsError::InvalidEventKind)?;
+                if kinds.is_empty() {
+                    return Err(EventsError::InvalidEventKind);
+                }
+                Some(kinds)
+            }
             None => None,
         },
     })
@@ -376,8 +398,11 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
     if filters.errors_only && event.status < 400 && event.error_code.is_none() {
         return false;
     }
-    if let Some(event_kind) = filters.event_kind
-        && RequestEventKind::effective(event.source_kind.as_deref(), event.event_kind) != event_kind
+    if let Some(event_kinds) = filters.event_kinds.as_ref()
+        && !event_kinds.contains(&RequestEventKind::effective(
+            event.source_kind.as_deref(),
+            event.event_kind,
+        ))
     {
         return false;
     }
@@ -385,7 +410,7 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
         if source_kind != "all" && event.source_kind.as_deref() != Some(source_kind) {
             return false;
         }
-    } else if filters.event_kind.is_none() && event.source_kind.as_deref() == Some("renewal") {
+    } else if filters.event_kinds.is_none() && event.source_kind.as_deref() == Some("renewal") {
         return false;
     }
     true
@@ -440,7 +465,7 @@ impl RecentEventsParams {
             status_class: self.status_class,
             errors_only: self.errors_only,
             source_kind: self.source_kind.clone(),
-            event_kind: self.event_kind,
+            event_kinds: self.event_kinds.clone(),
         }
     }
 
@@ -480,13 +505,13 @@ impl StreamFilters {
             provider_upstream_ids: self.provider_upstream_ids.clone(),
             status_class: self.status_class,
             errors_only: self.errors_only,
-            event_kind: self.event_kind,
+            event_kinds: self.event_kinds.clone(),
             source_kind: self
                 .source_kind
                 .as_ref()
                 .filter(|source_kind| source_kind.as_str() != "all")
                 .cloned(),
-            exclude_renewal: self.source_kind.is_none() && self.event_kind.is_none(),
+            exclude_renewal: self.source_kind.is_none() && self.event_kinds.is_none(),
         }
     }
 }
@@ -541,7 +566,7 @@ mod tests {
         ] {
             let params = HashMap::from([("event_kind".to_owned(), kind.as_str().to_owned())]);
             let filters = parse_stream_filters(&params).expect("multi-provider event kind");
-            assert_eq!(filters.event_kind, Some(kind));
+            assert_eq!(filters.event_kinds, Some(vec![kind]));
             let mut event = RequestEvent {
                 event_kind: Some(kind),
                 ..Default::default()
@@ -552,6 +577,129 @@ mod tests {
             event.event_kind = Some(kind);
             event.source_kind = Some("renewal".to_owned());
             assert!(!apply_filters_to_event(&event, &filters));
+        }
+    }
+
+    #[test]
+    fn event_kind_query_forms_combine_into_one_set() {
+        for query in [
+            "event_kind=messages,openai_responses",
+            "event_kind=messages&event_kind=openai_responses",
+            "event_kind=messages%2Copenai_responses&event_kind=messages",
+        ] {
+            let params = parse_query_map(Some(query));
+            let recent = parse_recent_params(&params).expect("recent event kinds");
+            let filters = recent.stream_filters();
+            for kind in [
+                RequestEventKind::Messages,
+                RequestEventKind::OpenaiResponses,
+            ] {
+                assert!(
+                    filters.event_kinds.as_ref().unwrap().contains(&kind),
+                    "{query}"
+                );
+            }
+            assert_eq!(filters.storage_filters().event_kinds, filters.event_kinds);
+            assert!(!filters.storage_filters().exclude_renewal);
+            assert!(!apply_filters_to_event(
+                &RequestEvent {
+                    event_kind: Some(RequestEventKind::Other),
+                    ..Default::default()
+                },
+                &filters
+            ));
+        }
+    }
+
+    #[test]
+    fn event_kind_query_rejects_each_invalid_or_empty_entry() {
+        for query in [
+            "event_kind=",
+            "event_kind",
+            "event_kind=messages,",
+            "event_kind=,messages",
+            "event_kind=messages,,openai_responses",
+            "event_kind=messages&event_kind=",
+            "event_kind=&event_kind=messages",
+            "event_kind=messages&event_kind=bogus",
+            "event_kind=bogus&event_kind=messages",
+            "event_kind=messages,bogus",
+            "event_kind=MESSAGES",
+            "event_kind=all",
+            "event_kind=%20",
+        ] {
+            let params = parse_query_map(Some(query));
+            assert!(
+                matches!(
+                    parse_stream_filters(&params),
+                    Err(EventsError::InvalidEventKind)
+                ),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn event_kind_set_matching_preserves_renewal_and_source_precedence() {
+        let cases = [
+            (None, None, vec![true, true, true, false, true]),
+            (
+                Some(vec![
+                    RequestEventKind::Messages,
+                    RequestEventKind::OpenaiResponses,
+                ]),
+                None,
+                vec![true, true, false, false, false],
+            ),
+            (
+                Some(vec![RequestEventKind::Messages, RequestEventKind::Renewal]),
+                None,
+                vec![true, false, false, true, false],
+            ),
+            (
+                Some(vec![RequestEventKind::Renewal, RequestEventKind::Messages]),
+                Some("request"),
+                vec![true, false, false, false, false],
+            ),
+            (
+                Some(vec![RequestEventKind::Renewal, RequestEventKind::Messages]),
+                Some("renewal"),
+                vec![false, false, false, true, false],
+            ),
+            (
+                Some(vec![RequestEventKind::Renewal, RequestEventKind::Messages]),
+                Some("all"),
+                vec![true, false, false, true, false],
+            ),
+            (Some(vec![]), None, vec![false; 5]),
+        ];
+        for (event_kinds, source_kind, expected) in cases {
+            let filters = StreamFilters {
+                event_kinds,
+                source_kind: source_kind.map(str::to_owned),
+                ..Default::default()
+            };
+            for ((event_kind, source), expected) in [
+                (Some(RequestEventKind::Messages), Some("request")),
+                (Some(RequestEventKind::OpenaiResponses), Some("request")),
+                (Some(RequestEventKind::Models), Some("request")),
+                (Some(RequestEventKind::Messages), Some("renewal")),
+                (None, None),
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                let event = RequestEvent {
+                    event_kind,
+                    source_kind: source.map(str::to_owned),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    apply_filters_to_event(&event, &filters),
+                    expected,
+                    "filters={filters:?}, event={event:?}"
+                );
+            }
         }
     }
 }

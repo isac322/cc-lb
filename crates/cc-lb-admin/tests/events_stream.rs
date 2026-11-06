@@ -17,7 +17,7 @@ use cc_lb_request_log::{
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind, UpstreamStore,
 };
-use config_admin_common::{TOKEN, app, authed_bytes, temp_storage, test_state};
+use config_admin_common::{TOKEN, app, authed_bytes, authed_json, temp_storage, test_state};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio::time::timeout;
@@ -86,6 +86,28 @@ async fn events_stream_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) = authed_bytes(app(state), "GET", "/admin/v1/events/stream", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn events_stream_rejects_invalid_event_kind_among_valid_and_empty_entries() {
+    let (_dir, storage) = temp_storage().await;
+    let state = test_state(Config::default(), Some(storage));
+    for query in [
+        "event_kind=messages&event_kind=bogus",
+        "event_kind=messages&event_kind=",
+        "event_kind=messages,,openai_responses",
+        "event_kind=,messages",
+    ] {
+        let (status, _, body, _) = authed_json(
+            app(state.clone()),
+            "GET",
+            &format!("/admin/v1/events/stream?{query}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(body["error"], "invalid_event_kind", "{query}");
+    }
 }
 
 #[tokio::test]
@@ -191,6 +213,8 @@ async fn events_stream_backfills_sparse_renewals_before_high_water_bookmark() {
         "/admin/v1/events/stream?event_kind=renewal",
         "/admin/v1/events/stream?source_kind=renewal",
         "/admin/v1/events/stream?source_kind=renewal&event_kind=renewal",
+        "/admin/v1/events/stream?source_kind=renewal&event_kind=messages,renewal",
+        "/admin/v1/events/stream?source_kind=renewal&event_kind=messages&event_kind=renewal",
     ] {
         let response = stream_response_uri(state.clone(), uri, Some("0")).await;
         let text = read_backfill(response.into_body()).await;
@@ -870,4 +894,99 @@ fn request_event(index: u64) -> RequestEvent {
         retry_overhead_ms: None,
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn events_stream_matches_multiple_event_kinds_and_keeps_renewals_authoritative() {
+    let (_dir, storage) = temp_storage().await;
+    let bus = Arc::new(InMemoryBus::with_capacity(16));
+    let mut state = test_state(Config::default(), Some(storage));
+    state.event_bus = Some(bus.clone() as Arc<dyn RequestEventBus>);
+
+    let response = stream_response_uri(
+        state,
+        "/admin/v1/events/stream?event_kind=messages,openai_responses",
+        Some("0"),
+    )
+    .await;
+    let mut body = response.into_body();
+    let mut text = String::new();
+    while !text.contains("event: cursor") {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("initial cursor frame timeout")
+            .expect("stream ended before initial cursor")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+
+    let matching_messages = RequestEventPartial {
+        event_id: "event-messages".to_owned(),
+        request_id: "messages".to_owned(),
+        event_kind: Some(RequestEventKind::Messages),
+        ..Default::default()
+    };
+    let matching_openai = RequestEventPartial {
+        event_id: "event-openai".to_owned(),
+        request_id: "openai".to_owned(),
+        event_kind: Some(RequestEventKind::OpenaiResponses),
+        ..Default::default()
+    };
+    let renewal = RequestEventPartial {
+        event_id: "event-renewal".to_owned(),
+        request_id: "renewal".to_owned(),
+        event_kind: Some(RequestEventKind::Messages),
+        source_kind: Some("renewal".to_owned()),
+        ..Default::default()
+    };
+
+    bus.publish(RequestEventUpdate::Partial(matching_messages));
+    bus.publish(RequestEventUpdate::Partial(matching_openai));
+    bus.publish(RequestEventUpdate::Partial(renewal));
+    bus.publish(RequestEventUpdate::final_(
+        RequestEvent {
+            event_id: Some("event-messages".to_owned()),
+            request_id: "messages".to_owned(),
+            event_kind: Some(RequestEventKind::Messages),
+            ..Default::default()
+        },
+        1,
+    ));
+    bus.publish(RequestEventUpdate::final_(
+        RequestEvent {
+            event_id: Some("event-openai".to_owned()),
+            request_id: "openai".to_owned(),
+            event_kind: Some(RequestEventKind::OpenaiResponses),
+            ..Default::default()
+        },
+        2,
+    ));
+    bus.publish(RequestEventUpdate::final_(
+        RequestEvent {
+            event_id: Some("event-renewal".to_owned()),
+            request_id: "renewal".to_owned(),
+            event_kind: Some(RequestEventKind::Messages),
+            source_kind: Some("renewal".to_owned()),
+            ..Default::default()
+        },
+        3,
+    ));
+
+    while message_request_ids(&text).len() < 4 {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("filtered message frames timeout")
+            .expect("stream ended before filtered messages")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+    assert_eq!(
+        message_request_ids(&text),
+        ["messages", "openai", "messages", "openai"]
+    );
+    assert!(!text.contains("\"request_id\":\"renewal\""));
 }

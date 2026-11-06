@@ -98,6 +98,12 @@ async fn events_delta_filters_before_paging_and_traverses_each_match_once() {
     for (filters, expected, page_sizes) in [
         ("", &messages, vec![500, 10]),
         ("&event_kind=messages", &messages, vec![500, 10]),
+        ("&event_kind=messages,renewal", &all, vec![500, 12]),
+        (
+            "&event_kind=messages&event_kind=renewal",
+            &all,
+            vec![500, 12],
+        ),
         ("&source_kind=request", &messages, vec![500, 10]),
         ("&source_kind=all", &all, vec![500, 12]),
         ("&event_kind=renewal", &renewals, vec![2]),
@@ -152,6 +158,28 @@ async fn events_delta_filters_before_paging_and_traverses_each_match_once() {
     assert!(end["events"].as_array().unwrap().is_empty());
     assert_eq!(end["next_cursor"], cursors[511]);
     assert_eq!(end["exhausted"], true);
+}
+
+#[tokio::test]
+async fn events_delta_rejects_invalid_event_kind_among_valid_and_empty_entries() {
+    let (_dir, storage) = temp_storage().await;
+    let state = test_state(Config::default(), Some(storage));
+    for query in [
+        "event_kind=messages&event_kind=bogus",
+        "event_kind=messages&event_kind=",
+        "event_kind=messages,,openai_responses",
+        "event_kind=,messages",
+    ] {
+        let (status, _, body, _) = authed_json(
+            app(state.clone()),
+            "GET",
+            &format!("/admin/v1/events/delta?since_cursor=0&{query}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(body["error"], "invalid_event_kind", "{query}");
+    }
 }
 
 #[tokio::test]

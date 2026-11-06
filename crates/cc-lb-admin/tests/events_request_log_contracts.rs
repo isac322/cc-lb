@@ -7,7 +7,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_config::Config;
 use cc_lb_control::RequestEventBus;
-use cc_lb_storage_api::RequestEventStore;
+use cc_lb_request_log::RequestEventKind;
+use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use events_request_log_contracts_support::{
     BROAD_REQUEST_ID, CANCELED_REQUEST_ID, DROPPED_REQUEST_ID, EVENT_ID, MODEL,
@@ -280,19 +281,87 @@ async fn events_delta_applies_event_kind_filter_consistently() {
 }
 
 #[tokio::test]
+async fn events_histogram_accepts_repeated_and_comma_separated_event_kinds() {
+    let (_dir, storage) = temp_storage().await;
+    for (index, kind, status) in [
+        (1, RequestEventKind::Messages, 200),
+        (2, RequestEventKind::OpenaiResponses, 500),
+        (3, RequestEventKind::Models, 200),
+    ] {
+        storage
+            .append_request_event(&RequestEvent {
+                ts: 1_800_000_000 + index,
+                ts_ms: Some((1_800_000_000 + index) * 1_000),
+                request_id: format!("req-histogram-{index}"),
+                event_id: Some(format!("event-histogram-{index}")),
+                event_kind: Some(kind),
+                status,
+                ..RequestEvent::default()
+            })
+            .await
+            .unwrap();
+    }
+    let state = test_state(Config::default(), Some(Arc::clone(&storage)));
+
+    for filter in [
+        "event_kind=messages,openai_responses",
+        "event_kind=messages&event_kind=openai_responses",
+    ] {
+        let uri = format!(
+            "/admin/v1/events/histogram?since_unix_secs=1800000000&until_unix_secs=1800000010&bucket_ms=1000&{filter}"
+        );
+        let (status, _, body, _) = authed_json(app(state.clone()), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{filter}");
+        let buckets = body["buckets"].as_array().expect("histogram buckets");
+        let total_count: u64 = buckets
+            .iter()
+            .map(|bucket| bucket["total_count"].as_u64().unwrap())
+            .sum();
+        let error_count: u64 = buckets
+            .iter()
+            .map(|bucket| bucket["error_count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total_count, 2, "{filter}");
+        assert_eq!(error_count, 1, "{filter}");
+    }
+}
+
+#[tokio::test]
 async fn events_endpoints_reject_unknown_event_kind_consistently() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(Arc::clone(&storage)));
 
-    for uri in [
-        "/admin/v1/events/recent?event_kind=bogus",
-        "/admin/v1/events/histogram?since_unix_secs=1&until_unix_secs=2&bucket_ms=1000&event_kind=bogus",
-        "/admin/v1/events/delta?since_cursor=0&event_kind=bogus",
-        "/admin/v1/events/stream?event_kind=bogus",
+    for endpoint in [
+        "/admin/v1/events/recent?",
+        "/admin/v1/events/histogram?since_unix_secs=1&until_unix_secs=2&bucket_ms=1000&",
+        "/admin/v1/events/delta?since_cursor=0&",
+        "/admin/v1/events/stream?",
     ] {
-        let (status, _, body, _) = authed_json(app(state.clone()), "GET", uri, None).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
-        assert_eq!(body["error"], "invalid_event_kind", "{uri}");
+        for query in [
+            "event_kind=bogus",
+            "event_kind=",
+            "event_kind",
+            "event_kind=MESSAGES",
+            "event_kind=all",
+            "event_kind=messages,bogus",
+            "event_kind=bogus&event_kind=messages",
+            "event_kind=messages&event_kind=bogus",
+            "event_kind=messages&event_kind=",
+            "event_kind=&event_kind=messages",
+            "event_kind=messages,",
+            "event_kind=,messages",
+            "event_kind=messages,,openai_responses",
+            "event_kind=messages,%20",
+        ] {
+            let uri = format!("{endpoint}{query}");
+            let (status, _, body, _) = authed_json(app(state.clone()), "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(
+                body,
+                serde_json::json!({ "error": "invalid_event_kind" }),
+                "{uri}"
+            );
+        }
     }
 }
 

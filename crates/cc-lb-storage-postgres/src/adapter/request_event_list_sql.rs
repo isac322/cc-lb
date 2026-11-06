@@ -264,7 +264,7 @@ pub(super) fn list_request_events_query(
         }
         // An explicit event_kind filter bypasses only this implicit default
         // renewal exclusion; an explicit source_kind stays conjunctive.
-        None if query.filters.event_kind.is_none() => {
+        None if query.filters.event_kinds.is_none() => {
             builder.push(" AND (r.source_kind IS NULL OR r.source_kind <> 'renewal')");
         }
         None => {}
@@ -272,15 +272,30 @@ pub(super) fn list_request_events_query(
 
     // The pinned renewal source already determines the effective kind. A
     // duplicate predicate makes the planner underestimate the matching rows.
-    if let Some(event_kind) = query.filters.event_kind
-        && !(query.source_kind.as_deref() == Some("renewal")
-            && event_kind == RequestEventKind::Renewal)
-    {
-        builder.push(
-            " AND CASE WHEN r.source_kind = 'renewal' THEN 'renewal' \
-             ELSE COALESCE(r.event_kind, 'unclassified') END = ",
-        );
-        builder.push_bind(event_kind.as_str());
+    if let Some(event_kinds) = query.filters.event_kinds.as_ref() {
+        if event_kinds.is_empty() {
+            return Ok(None);
+        }
+        if let [event_kind] = event_kinds.as_slice()
+            && !(query.source_kind.as_deref() == Some("renewal")
+                && *event_kind == RequestEventKind::Renewal)
+        {
+            builder.push(
+                " AND CASE WHEN r.source_kind = 'renewal' THEN 'renewal' \
+                 ELSE COALESCE(r.event_kind, 'unclassified') END = ",
+            );
+            builder.push_bind(event_kind.as_str());
+        } else if event_kinds.len() > 1 {
+            builder.push(
+                " AND CASE WHEN r.source_kind = 'renewal' THEN 'renewal' \
+                 ELSE COALESCE(r.event_kind, 'unclassified') END IN (",
+            );
+            let mut separated = builder.separated(", ");
+            for event_kind in event_kinds {
+                separated.push_bind(event_kind.as_str());
+            }
+            separated.push_unseparated(")");
+        }
     }
 
     if let Some(until_ts_ms) = query.until_ts_ms {

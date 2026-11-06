@@ -316,7 +316,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
                 provider_upstream_ids: None,
                 status_class: Some(StatusClass::TwoXx),
                 errors_only: false,
-                event_kind: None,
+                event_kinds: None,
                 source_kind: None,
                 exclude_renewal: false,
             },

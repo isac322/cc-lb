@@ -3,7 +3,7 @@ use std::convert::Infallible;
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
@@ -51,11 +51,12 @@ impl ResetReason {
 
 pub async fn handle_recent_events(
     State(state): State<AdminState>,
-    Query(map): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
+    let map = crate::events::parse_query_map(raw_query.as_deref());
     let mut params = match parse_recent_params(&map) {
         Ok(params) => params,
         Err(EventsError::Storage(error)) => {
@@ -90,11 +91,12 @@ pub async fn handle_recent_events(
 
 pub async fn handle_events_histogram(
     State(state): State<AdminState>,
-    Query(map): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
+    let map = crate::events::parse_query_map(raw_query.as_deref());
     let mut params = match parse_histogram_params(&map) {
         Ok(params) => params,
         Err(EventsError::Storage(error)) => {
@@ -129,11 +131,12 @@ pub async fn handle_events_histogram(
 
 pub async fn handle_events_delta(
     State(state): State<AdminState>,
-    Query(map): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
+    let map = crate::events::parse_query_map(raw_query.as_deref());
     let mut query = match parse_delta_query(&map) {
         Ok(query) => query,
         Err(error) => return bad_request(error.as_str()),
@@ -164,7 +167,7 @@ pub async fn handle_events_delta(
 
 pub async fn handle_events_stream(
     State(state): State<AdminState>,
-    Query(map): Query<HashMap<String, String>>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(bus) = state.event_bus.as_ref() else {
@@ -173,6 +176,7 @@ pub async fn handle_events_stream(
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
+    let map = crate::events::parse_query_map(raw_query.as_deref());
     let mut filters = match parse_stream_filters(&map) {
         Ok(filters) => filters,
         Err(error) => return bad_request(error.as_str()),
@@ -566,9 +570,11 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
     if filters.errors_only && partial.upstream_response_status.unwrap_or(0) < 400 {
         return false;
     }
-    if let Some(event_kind) = filters.event_kind
-        && RequestEventKind::effective(partial.source_kind.as_deref(), partial.event_kind)
-            != event_kind
+    if let Some(event_kinds) = filters.event_kinds.as_ref()
+        && !event_kinds.contains(&RequestEventKind::effective(
+            partial.source_kind.as_deref(),
+            partial.event_kind,
+        ))
     {
         return false;
     }
@@ -576,7 +582,7 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
         if source_kind != "all" && partial.source_kind.as_deref() != Some(source_kind) {
             return false;
         }
-    } else if filters.event_kind.is_none() && partial.source_kind.as_deref() == Some("renewal") {
+    } else if filters.event_kinds.is_none() && partial.source_kind.as_deref() == Some("renewal") {
         return false;
     }
     true
@@ -644,4 +650,91 @@ fn internal_error(error: &str) -> Response {
         Json(json!({ "error": error })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_tail_kind_sets_match_partials_and_finals_with_the_same_precedence() {
+        for (event_kinds, source_kind, expected) in [
+            (None, None, [true, true, true, false, true]),
+            (
+                Some(vec![
+                    RequestEventKind::Messages,
+                    RequestEventKind::OpenaiResponses,
+                ]),
+                None,
+                [true, true, false, false, false],
+            ),
+            (
+                Some(vec![RequestEventKind::Messages, RequestEventKind::Renewal]),
+                None,
+                [true, false, false, true, false],
+            ),
+            (
+                Some(vec![RequestEventKind::Messages, RequestEventKind::Renewal]),
+                Some("request"),
+                [true, false, false, false, false],
+            ),
+            (
+                Some(vec![RequestEventKind::Messages, RequestEventKind::Renewal]),
+                Some("renewal"),
+                [false, false, false, true, false],
+            ),
+            (
+                Some(vec![RequestEventKind::Messages, RequestEventKind::Renewal]),
+                Some("all"),
+                [true, false, false, true, false],
+            ),
+            (
+                Some(vec![
+                    RequestEventKind::Unclassified,
+                    RequestEventKind::Renewal,
+                ]),
+                None,
+                [false, false, false, true, true],
+            ),
+            (Some(vec![]), None, [false; 5]),
+        ] {
+            let filters = StreamFilters {
+                event_kinds,
+                source_kind: source_kind.map(str::to_owned),
+                ..Default::default()
+            };
+            for ((event_kind, source), expected) in [
+                (Some(RequestEventKind::Messages), Some("request")),
+                (Some(RequestEventKind::OpenaiResponses), Some("request")),
+                (Some(RequestEventKind::Models), Some("request")),
+                (Some(RequestEventKind::Messages), Some("renewal")),
+                (None, None),
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                let source_kind = source.map(str::to_owned);
+                let partial = RequestEventUpdate::Partial(RequestEventPartial {
+                    event_kind,
+                    source_kind: source_kind.clone(),
+                    ..Default::default()
+                });
+                let final_update = RequestEventUpdate::final_(
+                    RequestEvent {
+                        event_kind,
+                        source_kind,
+                        ..Default::default()
+                    },
+                    1,
+                );
+                for update in [partial, final_update] {
+                    assert_eq!(
+                        apply_filters_to_update(&update, &filters),
+                        expected,
+                        "filters={filters:?}, update={update:?}"
+                    );
+                }
+            }
+        }
+    }
 }
