@@ -130,11 +130,11 @@ fn request_event_matches_filters(
     {
         return false;
     }
-    if let Some(event_kind) = filters.event_kind
-        && cc_lb_request_log::RequestEventKind::effective(
+    if let Some(event_kinds) = filters.event_kinds.as_deref()
+        && !event_kinds.contains(&cc_lb_request_log::RequestEventKind::effective(
             event.source_kind.as_deref(),
             event.event_kind,
-        ) != event_kind
+        ))
     {
         return false;
     }

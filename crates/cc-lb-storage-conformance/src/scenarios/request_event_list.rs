@@ -2,8 +2,8 @@ use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestEventStore,
-    RequestEventStreamFilters, StatusClass,
+    RequestEvent, RequestEventHistogramQuery, RequestEventKind, RequestEventListItem,
+    RequestEventListQuery, RequestEventStore, RequestEventStreamFilters, StatusClass,
 };
 use uuid::Uuid;
 
@@ -65,7 +65,7 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             model: Some("claude-sonnet-4-5".to_owned()),
             upstream_id: Some(upstream_id),
             provider_upstream_ids: None,
-            event_kind: None,
+            event_kinds: None,
             status_class: Some(StatusClass::TwoXx),
             errors_only: false,
             source_kind: None,
@@ -318,6 +318,214 @@ pub async fn request_event_list_model_filter_matches_case_insensitive_prefix<
     .await
 }
 
+pub async fn request_event_kind_sets_filter_before_pagination<B: ConformanceBackend>(
+    backend: Arc<B>,
+) -> Result<()> {
+    with_fixture(Arc::clone(&backend), |storage| async move {
+        const PREFIX_LEN: usize = 501;
+        const GENERATION_END: usize = 1_002;
+        const ROW_COUNT: usize = 1_008;
+        let generation_kinds = [
+            RequestEventKind::Messages,
+            RequestEventKind::OpenaiResponses,
+            RequestEventKind::GeminiGenerateContent,
+        ];
+        let mut expected_rows = Vec::with_capacity(ROW_COUNT);
+        for index in 0..ROW_COUNT {
+            // Newer metadata rows precede older generation rows both in list
+            // order and append order, exposing either raw-page filtering bug.
+            let mut event = cursor_event(index);
+            event.status = if index.is_multiple_of(2) { 503 } else { 200 };
+            event.error_code = None;
+            event.event_kind = Some(if index < PREFIX_LEN {
+                RequestEventKind::Models
+            } else {
+                generation_kinds[(index - PREFIX_LEN) % generation_kinds.len()]
+            });
+            match index {
+                1_002 => {
+                    event.source_kind = Some("renewal".to_owned());
+                    event.event_kind = Some(RequestEventKind::Messages);
+                }
+                1_003 => {
+                    event.source_kind = Some("renewal".to_owned());
+                    event.event_kind = None;
+                }
+                1_004 => event.event_kind = Some(RequestEventKind::Renewal),
+                1_005 => {
+                    event.source_kind = None;
+                    event.event_kind = None;
+                }
+                1_006 => event.event_kind = Some(RequestEventKind::CountTokens),
+                1_007 => event.event_kind = Some(RequestEventKind::Other),
+                _ => {}
+            }
+            let cursor = storage.append_request_event(&event).await?;
+            expected_rows.push((cursor, event.event_id.expect("kind-set fixture event ID")));
+        }
+        let hi = expected_rows.last().expect("kind-set high fence").0;
+        backend
+            .wait_for_events_visible_for_rollup(storage.as_ref())
+            .await?;
+
+        let cases = [
+            (
+                "generation kinds cross 501 newer metadata rows and a full matching page",
+                Some(generation_kinds.to_vec()),
+                None,
+                (PREFIX_LEN..GENERATION_END).collect::<Vec<_>>(),
+            ),
+            (
+                "duplicate kinds are set membership, not duplicate rows",
+                Some(vec![
+                    RequestEventKind::GeminiGenerateContent,
+                    RequestEventKind::Messages,
+                    RequestEventKind::Messages,
+                ]),
+                Some("proxy"),
+                (PREFIX_LEN..GENERATION_END)
+                    .filter(|index| (index - PREFIX_LEN) % 3 != 1)
+                    .collect(),
+            ),
+            (
+                "renewal source wins over recorded messages and NULL is unclassified",
+                Some(vec![
+                    RequestEventKind::Renewal,
+                    RequestEventKind::Unclassified,
+                ]),
+                None,
+                (1_002..1_006).collect(),
+            ),
+            (
+                "all sources does not remove an explicit kind set",
+                Some(generation_kinds.to_vec()),
+                Some("all"),
+                (PREFIX_LEN..GENERATION_END).collect(),
+            ),
+            (
+                "source conjunction keeps only stored proxy renewal",
+                Some(vec![
+                    RequestEventKind::Renewal,
+                    RequestEventKind::Unclassified,
+                ]),
+                Some("proxy"),
+                vec![1_004],
+            ),
+            (
+                "source conjunction keeps both authoritative renewal sources",
+                Some(vec![RequestEventKind::Messages, RequestEventKind::Renewal]),
+                Some("renewal"),
+                vec![1_002, 1_003],
+            ),
+            (
+                "recorded generation kind cannot override renewal source",
+                Some(generation_kinds.to_vec()),
+                Some("renewal"),
+                Vec::new(),
+            ),
+            (
+                "empty set stays empty even with all sources",
+                Some(Vec::new()),
+                Some("all"),
+                Vec::new(),
+            ),
+            (
+                "empty set stays empty without an explicit source",
+                Some(Vec::new()),
+                None,
+                Vec::new(),
+            ),
+            (
+                "absent kind set preserves default source renewal exclusion",
+                None,
+                None,
+                (0..GENERATION_END).chain(1_004..ROW_COUNT).collect(),
+            ),
+            (
+                "all sources without a kind set includes every row",
+                None,
+                Some("all"),
+                (0..ROW_COUNT).collect(),
+            ),
+        ];
+        for (name, event_kinds, source_kind, expected) in cases {
+            let filters = RequestEventStreamFilters {
+                event_kinds,
+                ..Default::default()
+            };
+            let mut query = list_query(filters.clone(), source_kind, 500, None, None);
+            for expected_page in expected.chunks(500) {
+                let page = storage.list_request_events(&query).await?;
+                let actual = page
+                    .iter()
+                    .map(|row| row.event_id.as_deref().expect("listed kind-set event ID"))
+                    .collect::<Vec<_>>();
+                let expected_ids = expected_page
+                    .iter()
+                    .map(|&index| expected_rows[index].1.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected_ids, "{name}: list page");
+                let last = page.last().expect("nonempty kind-set list page");
+                query.until_ts_ms = last.ts_ms;
+                query.until_event_id = last.event_id.clone();
+            }
+            assert!(
+                storage.list_request_events(&query).await?.is_empty(),
+                "{name}: list exhausted"
+            );
+
+            let buckets = storage
+                .request_event_histogram(&RequestEventHistogramQuery {
+                    since_unix_secs: 1_998_000,
+                    until_unix_secs: 2_000_000,
+                    bucket_ms: 2_001_000,
+                    bucket_count: 1,
+                    filters: filters.clone(),
+                    source_kind: source_kind.map(str::to_owned),
+                })
+                .await?;
+            assert_eq!(buckets.len(), 1, "{name}: zero-filled histogram axis");
+            assert_eq!(
+                buckets[0].total_count,
+                expected.len() as u64,
+                "{name}: histogram counts all matches without the list cap"
+            );
+            assert_eq!(
+                buckets[0].error_count,
+                expected
+                    .iter()
+                    .filter(|index| index.is_multiple_of(2))
+                    .count() as u64,
+                "{name}: histogram error count"
+            );
+
+            // The raw cursor API has no implicit admin renewal exclusion;
+            // translate that default explicitly, just as the admin caller does.
+            let cursor_filters = RequestEventStreamFilters {
+                source_kind: source_kind
+                    .filter(|source| *source != "all")
+                    .map(str::to_owned),
+                exclude_renewal: source_kind.is_none() && filters.event_kinds.is_none(),
+                ..filters
+            };
+            let mut after = 0;
+            for expected_page in expected.chunks(500) {
+                let rows = storage
+                    .query_request_events_between_cursors(after, hi, 500, &cursor_filters)
+                    .await?;
+                assert_cursor_rows(&rows, &expected_rows, expected_page, name);
+                after = rows.last().expect("nonempty kind-set cursor page").0;
+            }
+            let exhausted = storage
+                .query_request_events_between_cursors(after, hi, 500, &cursor_filters)
+                .await?;
+            assert_cursor_rows(&exhausted, &expected_rows, &[], name);
+        }
+        Ok(())
+    })
+    .await
+}
+
 async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
     backend: &B,
     storage: &B::Storage,
@@ -464,7 +672,7 @@ async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
         (
             "effective messages exclude renewal source and historical NULL kind",
             RequestEventStreamFilters {
-                event_kind: Some(RequestEventKind::Messages),
+                event_kinds: Some(vec![RequestEventKind::Messages]),
                 ..Default::default()
             },
             (501..999).collect(),
@@ -472,15 +680,31 @@ async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
         (
             "effective renewal uses source precedence or stored kind",
             RequestEventStreamFilters {
-                event_kind: Some(RequestEventKind::Renewal),
+                event_kinds: Some(vec![RequestEventKind::Renewal]),
                 ..Default::default()
             },
             vec![1_000, 1_001],
         ),
         (
+            "multiple effective kinds include messages and renewal but not unclassified",
+            RequestEventStreamFilters {
+                event_kinds: Some(vec![RequestEventKind::Messages, RequestEventKind::Renewal]),
+                ..Default::default()
+            },
+            (501..999).chain(1_000..1_002).collect(),
+        ),
+        (
+            "empty event kind set matches nothing",
+            RequestEventStreamFilters {
+                event_kinds: Some(Vec::new()),
+                ..Default::default()
+            },
+            Vec::new(),
+        ),
+        (
             "historical NULL kind is unclassified",
             RequestEventStreamFilters {
-                event_kind: Some(RequestEventKind::Unclassified),
+                event_kinds: Some(vec![RequestEventKind::Unclassified]),
                 ..Default::default()
             },
             vec![999],
@@ -512,7 +736,7 @@ async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
         (
             "event kind and source kind are conjunctive",
             RequestEventStreamFilters {
-                event_kind: Some(RequestEventKind::Renewal),
+                event_kinds: Some(vec![RequestEventKind::Renewal]),
                 source_kind: Some("proxy".to_owned()),
                 ..Default::default()
             },
@@ -542,7 +766,7 @@ async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
                 provider_upstream_ids: None,
                 status_class: Some(StatusClass::FiveXx),
                 errors_only: true,
-                event_kind: Some(RequestEventKind::Messages),
+                event_kinds: Some(vec![RequestEventKind::Messages]),
                 source_kind: None,
                 exclude_renewal: false,
             },

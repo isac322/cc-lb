@@ -114,7 +114,8 @@ const LIST_REQUEST_EVENTS_SQL_FILTERS: &str = "\
 // source_kind clause above still references it.
 const LIST_REQUEST_EVENTS_EVENT_KIND_FILTER: &str = " \
   AND CASE WHEN source_kind = 'renewal' THEN 'renewal' \
-           ELSE COALESCE(event_kind, 'unclassified') END = ?14 ";
+           ELSE COALESCE(event_kind, 'unclassified') END IN \
+      (SELECT value FROM json_each(?14)) ";
 
 const LIST_REQUEST_EVENTS_SQL_TAIL: &str = "\
   AND ( \
@@ -244,6 +245,15 @@ fn bind_list_query<'q>(
         .map_or([None, None], |[prefix, contains]| {
             [Some(prefix), Some(contains)]
         });
+    let event_kinds_json = query
+        .filters
+        .event_kinds
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| StorageError::Fatal {
+            message: format!("request event kind filter serialization failed: {error}"),
+        })?;
     let provider_upstream_ids_json = query
         .filters
         .provider_upstream_ids
@@ -275,7 +285,7 @@ fn bind_list_query<'q>(
         .bind(i64::from(source_kind_all))
         .bind(source_kind_exact)
         .bind(query.filters.thread_id.as_deref())
-        .bind(query.filters.event_kind.map(|kind| kind.as_str()))
+        .bind(event_kinds_json)
         .bind(i64::from(query.filters.errors_only))
         // Parameter `?16`: second arm of the model-pattern disjunction.
         .bind(model_contains_pattern)
@@ -306,7 +316,7 @@ fn list_request_events_sql(query: &RequestEventListQuery) -> &'static str {
     // the whole log instead of reading one ordered page. Bounded windows
     // keep ts indexable so narrow historical/future reads still seek.
     let unbounded = query.since_unix_secs == 0 && query.until_unix_secs >= i64::MAX as u64;
-    SQL[usize::from(unbounded)][usize::from(query.filters.event_kind.is_some())].as_str()
+    SQL[usize::from(unbounded)][usize::from(query.filters.event_kinds.is_some())].as_str()
 }
 
 pub(super) async fn get_request_event(
@@ -404,7 +414,7 @@ mod tests {
             until_event_id: until_event_id.map(str::to_owned),
             limit: 100,
             filters: RequestEventStreamFilters {
-                event_kind,
+                event_kinds: event_kind.map(|kind| vec![kind]),
                 ..Default::default()
             },
             source_kind: source_kind.map(str::to_owned),

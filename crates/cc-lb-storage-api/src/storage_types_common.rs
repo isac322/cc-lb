@@ -27,13 +27,13 @@ pub struct RequestEventStreamFilters {
     pub provider_upstream_ids: Option<Vec<Uuid>>,
     pub status_class: Option<StatusClass>,
     pub errors_only: bool,
-    /// Endpoint classification filter. `Some(kind)` matches rows whose
+    /// Endpoint classification filter. `Some(kinds)` matches rows whose
     /// effective kind (renewal via `source_kind` precedence, else stored
-    /// `event_kind`, else `unclassified` for historical NULLs) equals `kind`.
+    /// `event_kind`, else `unclassified` for historical NULLs) is in `kinds`.
     /// When set, it bypasses the implicit `source_kind <> 'renewal'`
     /// exclusion on list/histogram queries unless `source_kind` is also
     /// explicitly supplied.
-    pub event_kind: Option<cc_lb_request_log::RequestEventKind>,
+    pub event_kinds: Option<Vec<cc_lb_request_log::RequestEventKind>>,
     /// Cursor-only exact source-kind filter; `None` leaves sources unrestricted.
     /// List and histogram queries use their separate `source_kind` fields.
     pub source_kind: Option<String>,

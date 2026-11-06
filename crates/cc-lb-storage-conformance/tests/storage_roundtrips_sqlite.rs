@@ -218,6 +218,14 @@ fn request_event_list_model_filter_matches_case_insensitive_prefix_sqlite() {
 }
 
 #[test]
+fn request_event_kind_sets_filter_before_pagination_sqlite() {
+    run_sqlite_scenario(
+        "request_event_kind_sets_filter_before_pagination",
+        request_event_list::request_event_kind_sets_filter_before_pagination,
+    );
+}
+
+#[test]
 fn request_event_principal_cost_components_sqlite() {
     run_sqlite_scenario(
         "request_event_principal_cost_components",

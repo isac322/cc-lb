@@ -224,12 +224,19 @@ impl RequestEventStore for PostgresStorage {
         if filters.exclude_renewal {
             builder.push(" AND (source_kind IS NULL OR source_kind <> 'renewal')");
         }
-        if let Some(event_kind) = filters.event_kind {
+        if let Some(event_kinds) = filters.event_kinds.as_ref() {
+            if event_kinds.is_empty() {
+                return Ok(Vec::new());
+            }
             builder.push(
                 " AND CASE WHEN source_kind = 'renewal' THEN 'renewal' \
-                 ELSE COALESCE(event_kind, 'unclassified') END = ",
+                 ELSE COALESCE(event_kind, 'unclassified') END IN (",
             );
-            builder.push_bind(event_kind.as_str());
+            let mut separated = builder.separated(", ");
+            for event_kind in event_kinds {
+                separated.push_bind(event_kind.as_str());
+            }
+            separated.push_unseparated(")");
         }
         builder.push(" ORDER BY seq ASC LIMIT ");
         builder.push_bind(u64_to_i64(
@@ -863,18 +870,26 @@ fn request_event_histogram_query(
         }
         // An explicit event_kind filter bypasses only this implicit default
         // renewal exclusion; an explicit source_kind stays conjunctive.
-        None if query.filters.event_kind.is_none() => {
+        None if query.filters.event_kinds.is_none() => {
             builder.push(" AND (r.source_kind IS NULL OR r.source_kind <> 'renewal')");
         }
         None => {}
     }
 
-    if let Some(event_kind) = query.filters.event_kind {
-        builder.push(
-            " AND CASE WHEN r.source_kind = 'renewal' THEN 'renewal' \
-             ELSE COALESCE(r.event_kind, 'unclassified') END = ",
-        );
-        builder.push_bind(event_kind.as_str());
+    if let Some(event_kinds) = query.filters.event_kinds.as_ref() {
+        if event_kinds.is_empty() {
+            builder.push(" AND FALSE");
+        } else {
+            builder.push(
+                " AND CASE WHEN r.source_kind = 'renewal' THEN 'renewal' \
+                 ELSE COALESCE(r.event_kind, 'unclassified') END IN (",
+            );
+            let mut separated = builder.separated(", ");
+            for event_kind in event_kinds {
+                separated.push_bind(event_kind.as_str());
+            }
+            separated.push_unseparated(")");
+        }
     }
 
     builder.push(" GROUP BY bucket_index");

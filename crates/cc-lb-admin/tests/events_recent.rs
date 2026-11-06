@@ -410,7 +410,15 @@ async fn events_recent_rejects_unknown_event_kind() {
     let (_dir, storage) = temp_storage().await;
     let admin_app = app(test_state(Config::default(), Some(storage)));
 
-    for query in ["event_kind=bogus", "event_kind=", "event_kind=MESSAGES"] {
+    for query in [
+        "event_kind=bogus",
+        "event_kind=",
+        "event_kind=MESSAGES",
+        "event_kind=messages,bogus",
+        "event_kind=messages&event_kind=bogus",
+        "event_kind=messages&event_kind=",
+        "event_kind=messages,,openai_responses",
+    ] {
         let (status, _, body, _) = authed_json(
             admin_app.clone(),
             "GET",
@@ -420,6 +428,49 @@ async fn events_recent_rejects_unknown_event_kind() {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
         assert_eq!(body["error"], "invalid_event_kind", "{query}");
+    }
+}
+
+#[tokio::test]
+async fn events_recent_accepts_repeated_and_comma_separated_event_kinds() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(1);
+    let mut messages = request_event(clock.as_ref(), 0, "req-messages", upstream_id, "up");
+    messages.event_kind = Some(RequestEventKind::Messages);
+    let mut openai = request_event(clock.as_ref(), 1, "req-openai", upstream_id, "up");
+    openai.event_kind = Some(RequestEventKind::OpenaiResponses);
+    let mut models = request_event(clock.as_ref(), 2, "req-models", upstream_id, "up");
+    models.event_kind = Some(RequestEventKind::Models);
+    for event in [&messages, &openai, &models] {
+        storage.append_request_event(event).await.unwrap();
+    }
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+
+    for query in [
+        "event_kind=messages,openai_responses",
+        "event_kind=messages&event_kind=openai_responses",
+    ] {
+        let (status, _, body, _) = authed_json(
+            admin_app.clone(),
+            "GET",
+            &format!("/admin/v1/events/recent?limit=20&{query}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        let mut request_ids = body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event["request_id"].as_str())
+            .collect::<Vec<_>>();
+        request_ids.sort_unstable();
+        assert_eq!(request_ids, ["req-messages", "req-openai"], "{query}");
     }
 }
 

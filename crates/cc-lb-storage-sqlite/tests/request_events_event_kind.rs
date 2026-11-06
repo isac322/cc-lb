@@ -74,7 +74,7 @@ fn list_query(
         until_unix_secs: BASE + 1_000,
         limit,
         filters: RequestEventStreamFilters {
-            event_kind,
+            event_kinds: event_kind.map(|kind| vec![kind]),
             ..Default::default()
         },
         source_kind: source_kind.map(str::to_owned),
@@ -288,7 +288,7 @@ async fn event_kind_filter_partitions_list_and_histogram() {
                 bucket_ms: 60_000,
                 bucket_count: 20,
                 filters: RequestEventStreamFilters {
-                    event_kind: Some(kind),
+                    event_kinds: Some(vec![kind]),
                     ..Default::default()
                 },
                 source_kind: None,
@@ -394,7 +394,7 @@ async fn event_kind_cursor_backfill_uses_effective_kind() {
                     cursor,
                     500,
                     &RequestEventStreamFilters {
-                        event_kind: Some(event_kind),
+                        event_kinds: Some(vec![event_kind]),
                         ..Default::default()
                     },
                 )

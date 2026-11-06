@@ -116,11 +116,11 @@ pub struct RequestEventListQuery {
     pub filters: RequestEventStreamFilters,
     /// Source-kind filter for the list view:
     /// - `None` excludes `renewal` rows (the default admin request-log view),
-    ///   unless `filters.event_kind` is set — an explicit endpoint-kind filter
-    ///   bypasses only this implicit exclusion
+    ///   unless `filters.event_kinds` is set — an explicit endpoint-kind
+    ///   filter bypasses only this implicit exclusion
     /// - `Some("all")` includes every source kind
     /// - `Some(kind)` returns only rows whose `source_kind` equals `kind`
-    ///   (conjunctive with `filters.event_kind` when both are supplied)
+    ///   (conjunctive with `filters.event_kinds` when both are supplied)
     pub source_kind: Option<String>,
 }
 

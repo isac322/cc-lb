@@ -1100,7 +1100,7 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
                     limit: 100,
                     filters: RequestEventStreamFilters {
                         principal_id: Some(principal.to_owned()),
-                        event_kind,
+                        event_kinds: event_kind.map(|kind| vec![kind]),
                         ..Default::default()
                     },
                     source_kind,
@@ -1182,7 +1182,7 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
                     bucket_count: 1,
                     filters: RequestEventStreamFilters {
                         principal_id: Some(principal.to_owned()),
-                        event_kind,
+                        event_kinds: event_kind.map(|kind| vec![kind]),
                         ..Default::default()
                     },
                     source_kind,
@@ -1218,7 +1218,7 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
                 until_cursor,
                 500,
                 &RequestEventStreamFilters {
-                    event_kind,
+                    event_kinds: event_kind.map(|kind| vec![kind]),
                     ..Default::default()
                 },
             )

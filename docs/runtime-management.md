@@ -98,6 +98,24 @@ An unsupported operation under a provider prefix returns HTTP **404**, with a pr
 
 Multipart audio transcription/translation and image edit/variation requests use `files_body_cap_bytes`; other supported HTTP operations use `messages_body_cap_bytes`. Bodies and provider-owned state are forwarded without rewriting. Model catalogs and model-less default moderation requests still pass through key/principal, rate, and concurrency admission rather than requiring a fabricated model id.
 
+### Request events API
+
+The authenticated request-event endpoints accept the same filters:
+
+- `GET /admin/v1/events/recent`
+- `GET /admin/v1/events/histogram`
+- `GET /admin/v1/events/delta`
+- `GET /admin/v1/events/stream`
+
+`event_kind` selects one or more effective event kinds. The HTTP query accepts either a comma-separated value or repeated keys; both forms combine into one set:
+
+```text
+event_kind=messages,openai_responses
+event_kind=messages&event_kind=openai_responses
+```
+
+The filter applies to retained rows, histogram buckets, SSE backfill, and live partial and final updates. A repeated or comma-separated value with any unknown or empty entry returns `400 {"error":"invalid_event_kind"}`. An omitted `event_kind` keeps the default that excludes cache-keepalive renewal events. Supplying `event_kind` makes renewal an explicit effective kind, while `source_kind` remains conjunctive when both filters are present.
+
 ### Responses WebSocket gateway
 
 `GET /v1/responses` authenticates the proxy client before returning `101`.

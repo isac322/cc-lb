@@ -159,7 +159,7 @@ fn request_event_renewal_conjunctive_plan_avoids_bitmap_and_sort() {
                 until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
                 limit: 50,
                 filters: RequestEventStreamFilters {
-                    event_kind: Some(RequestEventKind::Renewal),
+                    event_kinds: Some(vec![RequestEventKind::Renewal]),
                     ..Default::default()
                 },
                 source_kind: Some("renewal".to_owned()),
@@ -193,7 +193,7 @@ fn request_event_renewal_conjunctive_plan_avoids_bitmap_and_sort() {
                         until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
                         limit: 50,
                         filters: RequestEventStreamFilters {
-                            event_kind,
+                            event_kinds: event_kind.map(|kind| vec![kind]),
                             ..Default::default()
                         },
                         source_kind: source_kind.map(str::to_owned),
@@ -215,7 +215,7 @@ fn request_event_renewal_conjunctive_plan_avoids_bitmap_and_sort() {
                     until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
                     limit: 50,
                     filters: RequestEventStreamFilters {
-                        event_kind: Some(RequestEventKind::Messages),
+                        event_kinds: Some(vec![RequestEventKind::Messages]),
                         ..Default::default()
                     },
                     source_kind: Some("renewal".to_owned()),
@@ -233,7 +233,7 @@ fn request_event_renewal_conjunctive_plan_avoids_bitmap_and_sort() {
                     until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
                     limit: 50,
                     filters: RequestEventStreamFilters {
-                        event_kind: Some(RequestEventKind::Renewal),
+                        event_kinds: Some(vec![RequestEventKind::Renewal]),
                         ..Default::default()
                     },
                     source_kind: Some("all".to_owned()),

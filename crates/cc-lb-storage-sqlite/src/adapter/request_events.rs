@@ -151,7 +151,8 @@ impl RequestEventStore for SqliteStorage {
                        AND (?10 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
                        AND (?11 IS NULL OR CASE \
                             WHEN source_kind = 'renewal' THEN 'renewal' \
-                            ELSE COALESCE(event_kind, 'unclassified') END = ?11) \
+                            ELSE COALESCE(event_kind, 'unclassified') END IN \
+                            (SELECT value FROM json_each(?11))) \
                        AND (?12 IS NULL OR source_kind = ?12) \
                        AND (?13 = 0 OR source_kind IS NULL OR source_kind <> 'renewal') \
                        AND (?14 IS NULL OR upstream_id IN \
@@ -167,6 +168,14 @@ impl RequestEventStore for SqliteStorage {
             .model
             .as_deref()
             .and_then(model_filter_like_patterns);
+        let event_kinds_json = filters
+            .event_kinds
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StorageError::Fatal {
+                message: format!("request event kind filter serialization failed: {error}"),
+            })?;
         let provider_upstream_ids_json = filters
             .provider_upstream_ids
             .as_ref()
@@ -186,7 +195,7 @@ impl RequestEventStore for SqliteStorage {
             .bind(status_min)
             .bind(status_max)
             .bind(i64::from(filters.errors_only))
-            .bind(filters.event_kind.map(|kind| kind.as_str()))
+            .bind(event_kinds_json)
             .bind(filters.source_kind.as_deref())
             .bind(i64::from(filters.exclude_renewal))
             .bind(provider_upstream_ids_json)
@@ -763,16 +772,12 @@ const HISTOGRAM_SQL_HEAD: &str = "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3)
       OR (?12 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
    )";
 
-// Emitted only when `event_kind` is `Some`: a direct equality against the
-// effective kind so the query can seek
-// `request_events_v1_event_kind_list_order_idx` instead of scanning the whole
-// time window. The `?16 IS NULL OR ...` optional form cannot use that index,
-// so the clause is omitted entirely when no kind filter is set. `?16` stays
-// bound in both branches because the source_kind clause above still
-// references it.
+// Emitted only when `event_kinds` is `Some`: a direct IN predicate against the
+// effective kind.
 const HISTOGRAM_EVENT_KIND_FILTER: &str = " \
    AND CASE WHEN source_kind = 'renewal' THEN 'renewal' \
-            ELSE COALESCE(event_kind, 'unclassified') END = ?16";
+            ELSE COALESCE(event_kind, 'unclassified') END IN \
+       (SELECT value FROM json_each(?16))";
 
 const HISTOGRAM_SQL_TAIL: &str = " \
  GROUP BY bucket_index";
@@ -831,12 +836,21 @@ async fn request_event_histogram(
             .concat(),
         )
     });
-    let sql = if query.filters.event_kind.is_some() {
+    let sql = if query.filters.event_kinds.is_some() {
         SQL.1.as_str()
     } else {
         SQL.0.as_str()
     };
 
+    let event_kinds_json = query
+        .filters
+        .event_kinds
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| StorageError::Fatal {
+            message: format!("request event kind filter serialization failed: {error}"),
+        })?;
     let provider_upstream_ids_json = query
         .filters
         .provider_upstream_ids
@@ -883,7 +897,7 @@ async fn request_event_histogram(
                 .saturating_mul(1_000)
                 .saturating_add(HISTOGRAM_INDEX_HINT_SLACK_MS),
         ))
-        .bind(query.filters.event_kind.map(|kind| kind.as_str()))
+        .bind(event_kinds_json)
         .bind(i64::from(query.filters.errors_only))
         .bind(model_contains_pattern)
         .bind(provider_upstream_ids_json)

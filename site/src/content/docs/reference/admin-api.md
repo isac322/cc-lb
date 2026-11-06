@@ -71,6 +71,17 @@ Stored IDs, including composite IDs containing `/`, stay unchanged. Authenticati
 
 The old `/admin/v1/principals/{principal_id}/cache-keepalive/{session_or_decision_id}` and `/admin/v1/events/detail/{event_id}` routes are removed. Migrate direct scripts and API clients to the query endpoints. Event-detail audit entries use the static route `/admin/v1/events/detail` and retain the original ID in `payload.event_id`.
 
+## Request event filters
+
+The request-event endpoints accept `event_kind` as a comma-separated value or as repeated query keys. Both forms select the same set of effective event kinds:
+
+```text
+event_kind=messages,openai_responses
+event_kind=messages&event_kind=openai_responses
+```
+
+The filter applies to recent rows, histogram buckets, delta pages, SSE backfill, and live partial and final updates. Any unknown or empty entry returns `400 {"error":"invalid_event_kind"}`. Omitting `event_kind` preserves the default exclusion of cache-keepalive renewal events. `source_kind` remains conjunctive when supplied with `event_kind`.
+
 ## Request event diagnostic fields
 
 Request events are stored in `request_events_v1` with all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so `GET /admin/v1/events/detail?id=<encoded ID>`, `GET /admin/v1/events/delta`, and final updates on `GET /admin/v1/events/stream` read the committed relational representation directly with zero TOAST overhead.
