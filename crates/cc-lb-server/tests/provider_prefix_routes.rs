@@ -79,9 +79,7 @@ async fn fake_handler(State(state): State<FakeState>, request: Request) -> Respo
         } else {
             (
                 "text/event-stream",
-                concat!(
-                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini-ok\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n"
-                ),
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini-ok\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n",
             )
         };
         return (

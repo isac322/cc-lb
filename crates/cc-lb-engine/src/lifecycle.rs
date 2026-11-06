@@ -8832,7 +8832,7 @@ mod limit_request_estimate_tests {
             ProviderCapability::GeminiOpenaiChatCompletions,
         ] {
             let request = LimitRequest::from_value(Some(&body), "", Some(capability), &[]);
-            assert_eq!(request.max_tokens, 100, "{capability:?}");
+            assert_eq!(request.max_tokens, Some(100), "{capability:?}");
         }
     }
 
