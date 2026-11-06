@@ -4081,10 +4081,11 @@ impl Lifecycle {
             }
             None => None,
         };
-        let mut cache_metadata = request_cache_metadata_from_value_with_analysis(
+        let mut cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
             &ctx.downstream_headers,
             body_view.value(),
             prompt_cache_analysis,
+            Some(request_capability),
         );
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
@@ -9131,10 +9132,11 @@ mod prompt_cache_policy_tests {
                 literal_cacheable_breakpoint_prefix_keys: Vec::new(),
                 timings: PromptCacheAnalysisTimings::default(),
             };
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             assert_eq!(metadata.bundles.official.cache_breakpoints.len(), 1);
             assert_eq!(metadata.bundles.literal.cache_breakpoints.len(), 1);
@@ -9174,10 +9176,11 @@ mod prompt_cache_policy_tests {
             )
             .await;
         assert!(output.analysis.breakpoints.is_empty());
-        let metadata = request_cache_metadata_from_value_with_analysis(
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
             &HeaderMap::new(),
             Some(&request),
             Some(output),
+            None,
         );
         assert!(metadata.bundles.official.cache_breakpoints.is_empty());
         let literal = &metadata.bundles.literal;
@@ -9336,7 +9339,7 @@ impl RequestCacheMetadata {
                 message_index: breakpoint.message_index.map(saturating_u64_to_u32),
                 prefix_hash: breakpoint.prefix_hash.clone(),
                 // Produced in-process by the current estimator (see
-                // `request_cache_metadata_from_value_with_analysis`).
+                // `request_cache_metadata_from_value_with_analysis_for_capability`).
                 prefix_bytes: PrefixBytes::new(breakpoint.prefix_token_count),
                 requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
                 lookback_prefixes: breakpoint
@@ -9604,13 +9607,73 @@ fn request_cache_metadata_from_value(
             timings: PromptCacheAnalysisTimings::default(),
         }
     });
-    request_cache_metadata_from_value_with_analysis(headers, value, analysis)
+    request_cache_metadata_from_value_with_analysis_for_capability(headers, value, analysis, None)
 }
 
-fn request_cache_metadata_from_value_with_analysis(
+fn request_reasoning_metadata(
+    value: &Value,
+    capability: Option<ProviderCapability>,
+) -> (Option<u64>, Option<String>) {
+    let anthropic_thinking_budget = || {
+        value
+            .get("thinking")
+            .filter(|thinking| thinking.get("type").and_then(Value::as_str) == Some("enabled"))
+            .and_then(|thinking| thinking.get("budget_tokens"))
+            .and_then(Value::as_u64)
+            .filter(|budget| *budget <= 9_007_199_254_740_991)
+    };
+    let anthropic_reasoning_effort = || {
+        value
+            .get("output_config")
+            .and_then(|config| config.get("effort"))
+            .and_then(Value::as_str)
+            .filter(|effort| !effort.is_empty() && effort.len() <= 64)
+            .map(str::to_owned)
+    };
+    match capability {
+        // Callers without a capability retain the historical Anthropic-shaped
+        // extraction used by cache and preview metadata.
+        None | Some(ProviderCapability::AnthropicMessages) => {
+            (anthropic_thinking_budget(), anthropic_reasoning_effort())
+        }
+        Some(
+            ProviderCapability::OpenaiChatCompletions
+            | ProviderCapability::GeminiOpenaiChatCompletions,
+        ) => (
+            None,
+            value
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .filter(|effort| !effort.is_empty() && effort.len() <= 64)
+                .map(str::to_owned),
+        ),
+        Some(ProviderCapability::OpenaiResponses) => (
+            None,
+            value
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(Value::as_str)
+                .filter(|effort| !effort.is_empty() && effort.len() <= 64)
+                .map(str::to_owned),
+        ),
+        Some(ProviderCapability::GeminiGenerateContent) => (
+            value
+                .get("generationConfig")
+                .and_then(|config| config.get("thinkingConfig"))
+                .and_then(|thinking| thinking.get("thinkingBudget"))
+                .and_then(Value::as_u64)
+                .filter(|budget| *budget <= 9_007_199_254_740_991),
+            None,
+        ),
+        _ => (None, None),
+    }
+}
+
+fn request_cache_metadata_from_value_with_analysis_for_capability(
     headers: &HeaderMap,
     value: Option<&Value>,
     analysis: Option<PromptCacheAnalysisOutput>,
+    capability: Option<ProviderCapability>,
 ) -> RequestCacheMetadata {
     let identity = request_identity_metadata(headers, value);
     let thread_id = identity.thread_id.clone();
@@ -9701,20 +9764,9 @@ fn request_cache_metadata_from_value_with_analysis(
         .collect::<Vec<_>>();
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
-
     let cache_control_block_count = raw_cache_breakpoints.len() as u64;
-    let thinking_budget_tokens = value
-        .get("thinking")
-        .filter(|t| t.get("type").and_then(Value::as_str) == Some("enabled"))
-        .and_then(|t| t.get("budget_tokens"))
-        .and_then(Value::as_u64)
-        .filter(|v| *v <= 9_007_199_254_740_991);
-    let reasoning_effort = value
-        .get("output_config")
-        .and_then(|c| c.get("effort"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.len() <= 64)
-        .map(str::to_owned);
+
+    let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
@@ -12120,10 +12172,11 @@ mod tests {
                     Some(1_024),
                 )
                 .await;
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
             let context = PromptCacheObservationContext {
@@ -12184,10 +12237,11 @@ mod tests {
                 )
                 .await;
             assert!(output.cacheable_breakpoint_prefix_keys.is_empty());
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
             let mut context = PromptCacheObservationContext {
@@ -12830,6 +12884,185 @@ mod tests {
                 "{case} must preserve only valid reasoning effort"
             );
         }
+    }
+
+    #[test]
+    fn request_cache_metadata_extracts_http_provider_reasoning_shapes() {
+        let cases = [
+            (
+                "openai chat",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({
+                    "reasoning_effort": "high",
+                    "reasoning": {"effort": "wrong-shape"},
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 99}}
+                }),
+                None,
+                Some("high"),
+            ),
+            (
+                "gemini openai chat",
+                ProviderCapability::GeminiOpenaiChatCompletions,
+                json!({"reasoning_effort": "high"}),
+                None,
+                Some("high"),
+            ),
+            (
+                "openai responses",
+                ProviderCapability::OpenaiResponses,
+                json!({
+                    "reasoning": {"effort": "medium"},
+                    "reasoning_effort": "wrong-shape",
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 99}}
+                }),
+                None,
+                Some("medium"),
+            ),
+            (
+                "gemini buffered",
+                ProviderCapability::GeminiGenerateContent,
+                json!({
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 8192}},
+                    "reasoning_effort": "wrong-shape",
+                    "reasoning": {"effort": "wrong-shape"}
+                }),
+                Some(8192),
+                None,
+            ),
+            (
+                "gemini streaming",
+                ProviderCapability::GeminiGenerateContent,
+                json!({
+                    "stream": true,
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 16384}}
+                }),
+                Some(16384),
+                None,
+            ),
+            (
+                "anthropic",
+                ProviderCapability::AnthropicMessages,
+                json!({
+                    "thinking": {"type": "enabled", "budget_tokens": 18000},
+                    "output_config": {"effort": "max"},
+                    "reasoning_effort": "wrong-shape",
+                    "reasoning": {"effort": "wrong-shape"},
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 99}}
+                }),
+                Some(18000),
+                Some("max"),
+            ),
+        ];
+
+        for (case, capability, request, expected_budget, expected_effort) in cases {
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(capability),
+            );
+            assert_eq!(
+                metadata.thinking_budget_tokens, expected_budget,
+                "{case} budget"
+            );
+            assert_eq!(
+                metadata.reasoning_effort.as_deref(),
+                expected_effort,
+                "{case} effort"
+            );
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_ignores_invalid_http_provider_reasoning_values() {
+        let cases = [
+            (
+                "openai chat null",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"reasoning_effort": null}),
+            ),
+            (
+                "openai chat wrong type",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"reasoning_effort": 3}),
+            ),
+            (
+                "openai chat empty",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"reasoning_effort": ""}),
+            ),
+            (
+                "openai chat overlong",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"reasoning_effort": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}),
+            ),
+            (
+                "openai responses empty",
+                ProviderCapability::OpenaiResponses,
+                json!({"reasoning": {"effort": ""}}),
+            ),
+            (
+                "openai responses overlong",
+                ProviderCapability::OpenaiResponses,
+                json!({"reasoning": {"effort": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}),
+            ),
+            (
+                "openai responses wrong type",
+                ProviderCapability::OpenaiResponses,
+                json!({"reasoning": {"effort": false}}),
+            ),
+            (
+                "gemini string budget",
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig": {"thinkingConfig": {"thinkingBudget": "8192"}}}),
+            ),
+            (
+                "gemini negative budget",
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig": {"thinkingConfig": {"thinkingBudget": -1}}}),
+            ),
+            (
+                "gemini fractional budget",
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig": {"thinkingConfig": {"thinkingBudget": 1.5}}}),
+            ),
+            (
+                "gemini unsafe budget",
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig": {"thinkingConfig": {"thinkingBudget": 9007199254740992_u64}}}),
+            ),
+        ];
+
+        for (case, capability, request) in cases {
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(capability),
+            );
+            assert_eq!(metadata.thinking_budget_tokens, None, "{case} budget");
+            assert_eq!(metadata.reasoning_effort, None, "{case} effort");
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_without_capability_preserves_legacy_anthropic_shape() {
+        let request = json!({
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "output_config": {"effort": "low"},
+            "reasoning_effort": "wrong-shape",
+            "reasoning": {"effort": "wrong-shape"},
+            "generationConfig": {"thinkingConfig": {"thinkingBudget": 99}}
+        });
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &HeaderMap::new(),
+            Some(&request),
+            None,
+            None,
+        );
+
+        assert_eq!(metadata.thinking_budget_tokens, Some(4096));
+        assert_eq!(metadata.reasoning_effort.as_deref(), Some("low"));
     }
 
     #[test]
