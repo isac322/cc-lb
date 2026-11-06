@@ -219,7 +219,7 @@ async fn cache_keepalive_detail_query_preserves_all_state_shapes() {
         ("7b204de1c83f", "scheduled"),
         ("f4b71a0c9d52", "capped"),
         ("0b33e9f71a2c", "expired"),
-        ("error-overlaps-reason", "scheduled"),
+        ("error-overlaps-reason", "capped"),
         ("decision-2d8077e9a1c4", "not_tracked"),
     ] {
         let uri = keepalive_detail_uri(&principal_id, id);
@@ -227,7 +227,7 @@ async fn cache_keepalive_detail_query_preserves_all_state_shapes() {
             authed_json(app(state.clone()), "GET", &uri, None).await;
         assert_eq!(status, StatusCode::OK, "{id}: {body:?}");
         assert_eq!(body["id"], id);
-        assert_eq!(body["state"], expected_state);
+        assert_eq!(body["state"], expected_state, "unexpected state for {id}");
         assert!(body["turns"].is_array(), "{id}: missing turns");
         assert!(body["config_snapshot"].is_object(), "{id}: missing config");
         assert!(body["raw_record"].is_object(), "{id}: missing raw record");

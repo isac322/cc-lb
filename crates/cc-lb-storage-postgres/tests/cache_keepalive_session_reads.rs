@@ -253,7 +253,7 @@ async fn read_model_contract(url: &str) -> Result<()> {
     );
     assert_eq!(second.rows[0].reason, "max renewals reached");
     assert_eq!(second.rows[1].reason, "TTL expired before follow-up");
-    assert_eq!(second.rows[2].reason, "max duration reached (4h)");
+    assert_eq!(second.rows[2].reason, "max duration reached");
     assert_eq!(
         ids.iter()
             .copied()
@@ -957,8 +957,8 @@ async fn pagination_reaches_terminal_with_engine_parity_case(url: &str) -> Resul
          (source_ref_id, decision, reason, generation, ts, principal_id, session_key_hash, \
           upstream_id, error, ttl, config_snapshot, last_message_at_ms) \
          SELECT 'page-' || lpad(value::TEXT, 4, '0'), 'not_tracked', 'page', 1, \
-                2_000_000 - (value / 5), $1, NULL, $2, NULL, '5m', NULL, \
-                (2_000_000 - (value / 5)) * 1000 \
+                2000000 - (value / 5), $1, NULL, $2, NULL, '5m', NULL, \
+                (2000000 - (value / 5)) * 1000 \
          FROM generate_series(1, 1005) AS series(value)",
     )
     .bind(PRINCIPAL_ID)

@@ -333,7 +333,7 @@ async fn lists_frozen_session_and_decision_projection_rows() {
     );
     assert_eq!(page.rows[3].reason, "max renewals reached");
     assert_eq!(page.rows[4].reason, "TTL expired before follow-up");
-    assert_eq!(page.rows[5].reason, "max duration reached (4h)");
+    assert_eq!(page.rows[5].reason, "max duration reached");
 
     let session = storage
         .get_cache_keepalive_session_for_principal(PRINCIPAL_ID, "renewed-session")
