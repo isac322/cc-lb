@@ -84,7 +84,7 @@ jobs:
 
       - name: Run release-plz release
         id: release-plz
-        uses: MarcoIeni/release-plz-action@v0.5.147
+        uses: MarcoIeni/release-plz-action@v0.5.148
         with:
           command: release
           # Later musl builds hit the pest stack guard: release-plz/release-plz#3299.
@@ -121,7 +121,7 @@ jobs:
       - uses: ./.github/actions/setup-rust-cache
 
       - name: Run release-plz release-pr
-        uses: MarcoIeni/release-plz-action@v0.5.147
+        uses: MarcoIeni/release-plz-action@v0.5.148
         with:
           command: release-pr
           # Keep version generation on the same working engine as publication.
