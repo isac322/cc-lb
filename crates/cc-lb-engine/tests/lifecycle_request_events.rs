@@ -66,12 +66,15 @@ async fn openai_image_and_transcription_usage_persist_in_request_events()
         ("/v1/images/generations", br#"{"model":"gpt-image-1"}"#.as_slice()),
         ("/v1/audio/transcriptions", br#"{"model":"whisper-1"}"#.as_slice()),
     ] {
-        let request = http::Request::builder()
+        let mut request = http::Request::builder()
             .method("POST")
             .uri(path)
             .header("x-api-key", managed_api_key())
             .header("content-type", "application/json")
             .body(Bytes::from_static(body))?;
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
         let auth = lifecycle
             .authenticate(request.headers())
             .await
