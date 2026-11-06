@@ -3506,7 +3506,7 @@ mod tests {
             let aead = Arc::new(AeadService::from_master_key([19; 32]));
             let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
             let mut tokens = expired_tokens();
-            tokens.oauth_profile = profile.clone();
+            tokens.oauth_profile = profile;
             let record = oauth_record(
                 &storage,
                 &aead,
