@@ -187,14 +187,16 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(success),
             ..
         } => {
-            partial.input_tokens = success.usage.input_tokens;
-            partial.output_tokens = success.usage.output_tokens;
-            partial.cache_creation_input_tokens = success.usage.cache_creation_input_tokens;
-            partial.cache_creation_5m = success.usage.cache_creation_input_tokens_5m;
-            partial.cache_creation_1h = success.usage.cache_creation_input_tokens_1h;
-            partial.cache_read = success.usage.cache_read_input_tokens;
-            partial.service_tier = success.usage.service_tier;
-            partial.usage_seen = true;
+            if success.usage_present {
+                partial.input_tokens = success.usage.input_tokens;
+                partial.output_tokens = success.usage.output_tokens;
+                partial.cache_creation_input_tokens = success.usage.cache_creation_input_tokens;
+                partial.cache_creation_5m = success.usage.cache_creation_input_tokens_5m;
+                partial.cache_creation_1h = success.usage.cache_creation_input_tokens_1h;
+                partial.cache_read = success.usage.cache_read_input_tokens;
+                partial.service_tier = success.usage.service_tier;
+                partial.usage_seen = true;
+            }
         }
         _ => {}
     }
@@ -302,6 +304,73 @@ mod tests {
 
     fn eid(s: &str) -> EventId {
         s.to_owned()
+    }
+
+    #[test]
+    fn stream_success_usage_presence_preserves_pricing_measurement() {
+        let event_id = eid("stream-success-usage-presence");
+        let mut partial = Partial::default();
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: event_id.clone(),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_tokens: 99,
+                        output_tokens: 101,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(!partial.usage_seen);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::UsageObserved {
+                event_id: event_id.clone(),
+                usage: UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                },
+                source: UsageSource::MessageDelta,
+            },
+        );
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: event_id.clone(),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_tokens: 99,
+                        output_tokens: 101,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(partial.usage_seen);
+        assert_eq!(partial.input_tokens, 7);
+        assert_eq!(partial.output_tokens, 11);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id,
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot::default(),
+                    usage_present: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(partial.usage_seen);
+        assert_eq!(partial.input_tokens, 0);
+        assert_eq!(partial.output_tokens, 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -489,6 +558,7 @@ mod tests {
                     cache_read_input_tokens: 50,
                     ..Default::default()
                 },
+                usage_present: true,
                 sse_event_count: 100,
                 ..Default::default()
             }),

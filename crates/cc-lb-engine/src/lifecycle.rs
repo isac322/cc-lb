@@ -5393,11 +5393,13 @@ impl Lifecycle {
 
         let finalize_ms = if let Some(o) = observer.as_ref() {
             o.set_usage_counts(&usage, true);
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                event_id: o.event_id().to_owned(),
-                usage: to_usage_snapshot(&usage),
-                source: cc_lb_lifecycle::UsageSource::NonStreamBody,
-            });
+            if usage.present {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                    event_id: o.event_id().to_owned(),
+                    usage: to_usage_snapshot(&usage),
+                    source: cc_lb_lifecycle::UsageSource::NonStreamBody,
+                });
+            }
             let stream_result = if body_collect_failed {
                 Err(cc_lb_lifecycle::StreamError {
                     error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
@@ -5422,6 +5424,7 @@ impl Lifecycle {
             } else {
                 Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
+                    usage_present: usage.present,
                     sse_event_count: 0,
                     body_bytes: Some(downstream_body.len() as u64),
                     body_chunk_count: Some(body_chunk_count),
@@ -6677,18 +6680,22 @@ impl Lifecycle {
                                     semantic_completion_observed = true;
                                     if let Some(o) = observer.as_ref() {
                                         o.set_usage_counts(&usage, true);
-                                        o.emit_lifecycle(
-                                            cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                                event_id: o.event_id().to_owned(),
-                                                usage: to_usage_snapshot(&usage),
-                                                source:
-                                                    cc_lb_lifecycle::UsageSource::MessageDelta,
-                                            },
-                                        );
+                                        if usage.present {
+                                            o.emit_lifecycle(
+                                                cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                    event_id: o.event_id().to_owned(),
+                                                    usage: to_usage_snapshot(&usage),
+                                                    source:
+                                                        cc_lb_lifecycle::UsageSource::MessageDelta,
+                                                },
+                                            );
+                                        }
                                         o.set_success_status(status);
                                     }
                                 }
-                                if let Some(o) = observer.as_ref() {
+                                if let Some(o) = observer.as_ref()
+                                    && usage.present
+                                {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);
                                         o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
@@ -7348,13 +7355,15 @@ impl Lifecycle {
                                 semantic_completion_observed = true;
                                 if let Some(o) = observer.as_ref() {
                                     o.set_usage_counts(&usage, true);
-                                    o.emit_lifecycle(
-                                        cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageDelta,
-                                        },
-                                    );
+                                    if usage.present {
+                                        o.emit_lifecycle(
+                                            cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                                            },
+                                        );
+                                    }
                                     o.set_success_status(status);
                                 }
                             }
@@ -7719,7 +7728,9 @@ impl Lifecycle {
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
             {
-                if let Some(o) = observer.as_ref() {
+                if let Some(o) = observer.as_ref()
+                    && usage.present
+                {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                         event_id: o.event_id().to_owned(),
                         usage: to_usage_snapshot(&usage),
@@ -7849,6 +7860,7 @@ impl Lifecycle {
                         event_id: o.event_id().to_owned(),
                         result: Ok(cc_lb_lifecycle::StreamSuccess {
                             usage: to_usage_snapshot(&usage),
+                            usage_present: usage.present,
                             sse_event_count,
                             body_bytes: Some(total_bytes),
                             body_chunk_count: Some(batch_index),
