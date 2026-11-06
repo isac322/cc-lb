@@ -216,14 +216,15 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         // hits advance cache_anchor_at but leave first_scheduled_at unchanged.
         let row = sqlx::query(
             "INSERT INTO cache_keepalive_sessions
-             (session_key_hash, principal_id, accounting_key_id, upstream_id, generation, refresh_count,
+             (session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, generation, refresh_count,
               first_scheduled_at, cache_anchor_at, run_at, ttl, status, enqueue_state, running_since_unix_secs,
               current_job_key, encrypted_payload, display_reason, error, config_snapshot, last_message_at_ms, terminal_reason, expires_at, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, 1, 0, $5, $6, $7, $8, 'active', 'pending', NULL, $9, $10, $11, NULL, $12, $13, NULL, $14, $15, $16)
+             VALUES ($1, $2, $3, $4, $5, 1, 0, $6, $7, $8, $9, 'active', 'pending', NULL, $10, $11, $12, NULL, $13, $14, NULL, $15, $16, $17)
              ON CONFLICT(session_key_hash) DO UPDATE SET
               principal_id = EXCLUDED.principal_id,
               accounting_key_id = EXCLUDED.accounting_key_id,
               upstream_id = EXCLUDED.upstream_id,
+              cycle_id = EXCLUDED.cycle_id,
               generation = cache_keepalive_sessions.generation + 1,
               refresh_count = 0,
               first_scheduled_at = EXCLUDED.first_scheduled_at,
@@ -242,8 +243,8 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
               terminal_reason = NULL,
               expires_at = EXCLUDED.expires_at,
               updated_at = EXCLUDED.updated_at
-             WHERE ($17 AND cache_keepalive_sessions.first_scheduled_at <= EXCLUDED.cache_anchor_at)
-                OR (NOT $17 AND cache_keepalive_sessions.cache_anchor_at <= EXCLUDED.cache_anchor_at
+             WHERE ($18 AND cache_keepalive_sessions.first_scheduled_at <= EXCLUDED.cache_anchor_at)
+                OR (NOT $18 AND cache_keepalive_sessions.cache_anchor_at <= EXCLUDED.cache_anchor_at
                     AND (cache_keepalive_sessions.status != 'terminal' OR cache_keepalive_sessions.updated_at <= EXCLUDED.cache_anchor_at))
              RETURNING *",
         )
@@ -251,6 +252,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         .bind(&request.principal_id)
         .bind(&request.accounting_key_id)
         .bind(request.upstream_id)
+        .bind(request.cycle_id)
         .bind(u64_to_i64(
             request.cache_anchor_at_unix_secs,
             "cache keepalive first_scheduled_at",
