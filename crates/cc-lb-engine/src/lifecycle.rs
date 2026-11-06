@@ -9605,12 +9605,7 @@ fn request_cache_metadata_from_value(
             timings: PromptCacheAnalysisTimings::default(),
         }
     });
-    request_cache_metadata_from_value_with_analysis_for_capability(
-        headers,
-        value,
-        analysis,
-        None,
-    )
+    request_cache_metadata_from_value_with_analysis_for_capability(headers, value, analysis, None)
 }
 
 fn request_cache_metadata_from_value_with_analysis(
@@ -9776,8 +9771,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
 
-    let (thinking_budget_tokens, reasoning_effort) =
-        request_reasoning_metadata(value, capability);
+    let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
