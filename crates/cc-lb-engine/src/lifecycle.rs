@@ -5392,7 +5392,9 @@ impl Lifecycle {
         }
 
         let finalize_ms = if let Some(o) = observer.as_ref() {
-            o.set_usage_counts(&usage, true);
+            if usage.has_billable_usage() {
+                o.set_usage_counts(&usage, true);
+            }
             if usage.has_billable_usage() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                     event_id: o.event_id().to_owned(),
@@ -6679,8 +6681,8 @@ impl Lifecycle {
                                 if !semantic_completion_observed && event_completes_response {
                                     semantic_completion_observed = true;
                                     if let Some(o) = observer.as_ref() {
-                                        o.set_usage_counts(&usage, true);
                                         if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, true);
                                             o.emit_lifecycle(
                                                 cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                     event_id: o.event_id().to_owned(),
@@ -6697,7 +6699,9 @@ impl Lifecycle {
                                     && usage.present
                                 {
                                     if usage_update.message_start_usage {
-                                        o.set_usage_counts(&usage, false);
+                                        if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, false);
+                                        }
                                         if usage.has_billable_usage() {
                                             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
@@ -6706,7 +6710,9 @@ impl Lifecycle {
                                             });
                                         }
                                     } else if usage_update.message_stop {
-                                        o.set_usage_counts(&usage, true);
+                                        if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, true);
+                                        }
                                         if usage.has_billable_usage() {
                                             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
@@ -7361,7 +7367,9 @@ impl Lifecycle {
                             if !semantic_completion_observed && event_completes_response {
                                 semantic_completion_observed = true;
                                 if let Some(o) = observer.as_ref() {
-                                    o.set_usage_counts(&usage, true);
+                                    if usage.has_billable_usage() {
+                                        o.set_usage_counts(&usage, true);
+                                    }
                                     if usage.has_billable_usage() {
                                         o.emit_lifecycle(
                                             cc_lb_lifecycle::LifecycleEvent::UsageObserved {
@@ -7827,7 +7835,9 @@ impl Lifecycle {
                 downstream_drop_guard.mark_proxy_error(StreamTerminationCause::TransformError);
             }
             let finalize_ms = if let Some(o) = observer.as_ref() {
-                o.set_usage_counts(&usage, message_stop_at.is_some());
+                if usage.has_billable_usage() {
+                    o.set_usage_counts(&usage, message_stop_at.is_some());
+                }
                 if let Some(first_content_delta_ms) = elapsed_ms(first_content_delta_at) {
                     o.set_first_content_delta_ms(first_content_delta_ms);
                 }
