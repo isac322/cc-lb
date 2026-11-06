@@ -876,6 +876,52 @@ async fn semantic_sse_eof_non_anthropic_and_non_sse_controls() -> TestResult {
 }
 
 #[tokio::test]
+async fn semantic_sse_eof_gemini_json_array_stream_records_usage_and_preserves_body() -> TestResult
+{
+    let cases = [
+        (
+            upstream_record(
+                StorageUpstreamKind::GeminiApiKey,
+                "https://generativelanguage.googleapis.com/",
+            ),
+            "/v1beta/models/gemini-test:streamGenerateContent?alt=json",
+            br#"[{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]},{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":110,"candidatesTokenCount":4}}]"#.as_slice(),
+        ),
+        (
+            upstream_record(
+                StorageUpstreamKind::GeminiOauth,
+                "https://cloudcode-pa.googleapis.com/v1internal",
+            ),
+            "/v1beta/models/gemini-test:streamGenerateContent?alt=json",
+            br#"[{"response":{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}},{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":110,"candidatesTokenCount":4}}}]"#.as_slice(),
+        ),
+    ];
+
+    for (record, path, raw_body) in cases {
+        let body = Bytes::copy_from_slice(raw_body);
+        let observed = observe(
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers: json_headers(body.len(), false),
+                body: body.clone(),
+            }),
+            false,
+            record,
+            http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("x-api-key", common::managed_api_key())
+                .body(Bytes::from_static(br#"{"contents":[]}"#))?,
+        )
+        .await?;
+
+        assert_eq!(observed.body, body);
+        observed.assert_success(110, 4, false);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn codex_event_name_completed_accepts_transport_close() -> TestResult {
     let body = Bytes::from_static(
         b"event: response.created\n\

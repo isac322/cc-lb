@@ -1142,6 +1142,50 @@ async fn rejected_provider_output_cap_does_not_consume_request_or_concurrent_res
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
 }
+#[tokio::test]
+async fn openai_chat_max_completion_tokens_respects_output_token_limit_boundary() {
+    for (cap, expected_status, expected_calls) in [
+        (2_000, StatusCode::OK, 1),
+        (1_999, StatusCode::BAD_REQUEST, 0),
+    ] {
+        // Given an OpenAI Chat Completions request reserving 2,000 output
+        // tokens and a limit at, or just below, that reservation.
+        let state = TestState::default();
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::OpenaiApiKey,
+            vec![Limit {
+                kind: LimitKind::OutputTokens,
+                window_secs: 60,
+                cap_micros: cap,
+            }],
+            &state,
+            None,
+        );
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("x-api-key", managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-limit-test","max_completion_tokens":2000,"messages":[]}"#,
+            ))
+            .expect("OpenAI Chat Completions request builds");
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+        let response = handle(&lifecycle, request).await;
+        if expected_status == StatusCode::OK {
+            let (status, _headers, body) = collect_body(response).await;
+            assert_eq!(status, expected_status, "cap {cap}, body: {body:?}");
+        } else {
+            assert_local_limit_retryability(response, expected_status, None, None, None).await;
+        }
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            expected_calls,
+            "cap {cap}"
+        );
+    }
+}
 
 struct CatalogLimitCostEstimator {
     catalog: Arc<PriceCatalog>,
