@@ -341,7 +341,6 @@ fn responses_request(body: Value) -> Request<Bytes> {
         .expect("Responses request builds")
 }
 
-
 fn lifecycle(
     records: Vec<cc_lb_storage_api::UpstreamRecord>,
     dispatcher: Arc<RecordingDispatch>,
@@ -735,7 +734,11 @@ async fn stateless_openai_reasoning_replay_stays_with_owner_and_fails_closed_whe
         .expect("owner replay handled");
     assert_eq!(owner_response.status(), StatusCode::OK);
     assert_eq!(
-        owner_dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
+        owner_dispatch
+            .urls
+            .lock()
+            .expect("dispatch URL lock")
+            .as_slice(),
         &["http://origin.local/v1/responses".to_owned()]
     );
 
@@ -755,7 +758,6 @@ async fn stateless_openai_reasoning_replay_stays_with_owner_and_fails_closed_whe
     assert_eq!(disabled_response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(disabled_dispatch.call_count(), 0);
 }
-
 
 #[tokio::test]
 async fn no_failover_when_request_affinity_pinned() {
