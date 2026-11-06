@@ -15677,7 +15677,7 @@ mod tests {
                 vec![upstream_record_with_kind(upstream_kind)],
             );
             let limit_engine = cc_lb_control::api_keys::limit_engine::LimitEngine::new(
-                Arc::new(cc_lb_control::api_keys::KeyConcurrencyManager::new()),
+                Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
                 Arc::new(cc_lb_clock::SystemClock),
             );
             let fixture = failure_key_fixture();
