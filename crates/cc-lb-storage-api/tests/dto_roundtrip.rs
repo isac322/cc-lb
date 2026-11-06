@@ -290,6 +290,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         upstream_id: Uuid::from_u128(0x77777777777777777777777777777777),
         cycle_id: None,
         generation: 4,
+        refresh_count: 3,
         first_scheduled_at_unix_secs: 1_716_000_100,
         cache_anchor_at_unix_secs: 1_716_000_200,
         run_at_unix_secs: 1_716_000_470,
