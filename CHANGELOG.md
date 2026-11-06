@@ -29,6 +29,7 @@ All notable changes to this project will be documented in this file.
 
 - OpenAI Responses stateless reasoning `encrypted_content` items now retain upstream affinity across buffered and streaming responses, preventing replay from silently crossing to another credential when the owning upstream is unavailable. ([#1077](https://github.com/isac322/cc-lb/issues/1077))
 ### Fixed
+- OpenAI and Gemini OAuth subscription signers now refresh expired credentials before signing and retry once after provider `401` responses instead of sending a stale access token. ([#1079](https://github.com/isac322/cc-lb/issues/1079))
 - PostgreSQL fenced cache keep-alive inserts and replacements now persist the real request's `cycle_id` instead of dropping it. ([#1100](https://github.com/isac322/cc-lb/issues/1100))
 - HTTP request events now extract reasoning metadata from provider-native request shapes: OpenAI Chat `reasoning_effort`, OpenAI Responses `reasoning.effort`, and Gemini `generationConfig.thinkingConfig.thinkingBudget`, while preserving Anthropic metadata. ([#1081](https://github.com/isac322/cc-lb/issues/1081))
 - Admin cache keep-alive read models now align terminal states, filters, and activity projections; retain successful-hit and exact-spend totals through session reset and purge; use aggregate summary reads; report unknown evidence instead of false savings; and surface truthful UI read/conflict states across SQLite and PostgreSQL. Retained history is not a lifetime total. ([#1049](https://github.com/isac322/cc-lb/issues/1049))

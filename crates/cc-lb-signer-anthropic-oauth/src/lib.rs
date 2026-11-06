@@ -33,8 +33,7 @@ pub use http_client::{
 };
 pub use pkce::{PkceHandshake, PkceHandshakeState, complete_pkce_flow, start_pkce_flow};
 pub use refresh::RefreshError;
-pub use single_flight::{RefreshLocks, new_refresh_locks};
-
+pub use single_flight::{RefreshLocks, lock_for, new_refresh_locks};
 #[derive(Debug, thiserror::Error)]
 pub enum LazyRefreshError {
     #[error("refresh failed: {reason}")]
