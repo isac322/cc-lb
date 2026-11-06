@@ -451,6 +451,73 @@ fn cache_keepalive_activity_credits_only_the_latest_renewal_in_a_cycle() {
     assert_eq!(activity.turns[1].source_ref_id, "renewal-a");
     assert!(!activity.turns[1].followed_up);
 }
+#[test]
+fn active_same_cycle_miss_followup_resolves_pending_without_miss_credit() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
+    let cycle_id = Uuid::from_u128(2);
+    item.cycle_id = Some(cycle_id);
+
+    let mut hit = turn("same-cycle-hit", 200);
+    hit.cycle_id = Some(cycle_id);
+    hit.cost_micros = 6_000;
+
+    let mut miss = turn("same-cycle-miss", 201);
+    miss.cycle_id = Some(cycle_id);
+    miss.hit_miss = "miss".to_owned();
+    miss.cost_micros = 15_000;
+
+    let mut miss_follow_up = follow_up_evidence(202_000, CacheTtl::Ttl5m, "shared-prefix");
+    miss_follow_up.evidence_id = "same-cycle-miss-follow-up".to_owned();
+    let evidence = [
+        renewal_evidence(
+            "same-cycle-hit",
+            cycle_id,
+            200_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "shared-prefix",
+        ),
+        renewal_evidence(
+            "same-cycle-miss",
+            cycle_id,
+            201_000,
+            CacheTtl::Ttl5m,
+            "miss",
+            "shared-prefix",
+        ),
+        miss_follow_up,
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[hit, miss],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    assert_eq!(activity.evidence_status, "observed");
+    assert_eq!(activity.total_renewals, 1);
+    assert_eq!(activity.total_avoided_micros, Some(0));
+    assert!(!activity.is_last_pending);
+    assert_eq!(activity.turns[0].source_ref_id, "same-cycle-miss");
+    assert!(!activity.turns[0].pending);
+    assert!(!activity.turns[0].followed_up);
+    assert_eq!(
+        activity.turns[0].pnl.as_ref().map(|pnl| pnl.net_micros),
+        Some(-15_000)
+    );
+    assert_eq!(activity.turns[1].source_ref_id, "same-cycle-hit");
+    assert!(!activity.turns[1].followed_up);
+    assert_eq!(
+        activity.turns[1].pnl.as_ref().map(|pnl| pnl.net_micros),
+        Some(-6_000)
+    );
+}
 
 #[test]
 fn terminal_complete_negative_evidence_is_observed_without_follow_up() {

@@ -1520,6 +1520,74 @@ async fn summary_aggregate_active_follow_up_credits_hits_but_not_misses() {
 }
 
 #[tokio::test]
+async fn summary_aggregate_active_same_cycle_hit_then_miss_shared_follow_up_credits_neither() {
+    let (_temp_dir, storage) = storage().await;
+    let cycle_id = Uuid::from_u128(1_081);
+    let session_key_hash = "active-same-cycle-hit-miss";
+    let mut replace = request(session_key_hash, 1_000, "agent-in-turn");
+    replace.cycle_id = cycle_id;
+    storage
+        .replace_from_real_request(&replace)
+        .await
+        .expect("create same-cycle follow-up cycle");
+
+    let shared_prefix_hash = "same-cycle-shared-prefix";
+    let mut hit =
+        economics_projection("active-same-cycle-hit", Some(cycle_id), 1_001, "hit", 6_000);
+    hit.turn
+        .as_mut()
+        .expect("hit renewal turn")
+        .session_key_hash = session_key_hash.to_owned();
+    hit.decision.session_key_hash = Some(session_key_hash.to_owned());
+    hit.evidence[0].prefix_hash = Some(shared_prefix_hash.to_owned());
+    storage
+        .append_request_event_with_projections(&event("active-same-cycle-hit", 1_001), &hit)
+        .await
+        .expect("persist same-cycle hit renewal");
+
+    let mut miss = economics_projection(
+        "active-same-cycle-miss",
+        Some(cycle_id),
+        1_002,
+        "miss",
+        15_000,
+    );
+    miss.turn
+        .as_mut()
+        .expect("miss renewal turn")
+        .session_key_hash = session_key_hash.to_owned();
+    miss.turn
+        .as_mut()
+        .expect("miss renewal turn")
+        .cache_read_input_tokens = 20_000;
+    miss.decision.session_key_hash = Some(session_key_hash.to_owned());
+    miss.evidence[0].prefix_hash = Some(shared_prefix_hash.to_owned());
+    miss.evidence[0].cache_read_input_tokens = Some(20_000);
+    let model = miss.turn.as_ref().expect("miss renewal turn").model.clone();
+    let mut follow_up = follow_up_evidence("active-same-cycle-miss", 1_002, &model);
+    follow_up.prefix_hash = Some(shared_prefix_hash.to_owned());
+    miss.evidence.push(follow_up);
+    storage
+        .append_request_event_with_projections(&event("active-same-cycle-miss", 1_002), &miss)
+        .await
+        .expect("persist same-cycle miss renewal and follow-up");
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await
+        .expect("aggregate same-cycle hit then miss economics");
+    assert_eq!(aggregate.renewing_now, 1);
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "observed");
+    assert!(
+        aggregate.groups.is_empty(),
+        "the latest miss must suppress avoided-token credit for the shared follow-up"
+    );
+}
+
+#[tokio::test]
 async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pending() {
     let (_temp_dir, storage) = storage().await;
     let cycle_id = Uuid::from_u128(1_077);

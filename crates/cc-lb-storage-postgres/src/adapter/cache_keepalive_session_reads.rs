@@ -717,7 +717,6 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                        ROW_NUMBER() OVER (PARTITION BY r.cycle_id ORDER BY r.request_start_ms DESC, r.evidence_id) AS rn
                 FROM cache_keepalive_evidence r
                 WHERE r.principal_id = $1 AND r.evidence_kind = 'renewal' AND r.cycle_id IS NOT NULL
-                  AND lower(r.hit_miss) = 'hit'
                   AND EXISTS (
                       SELECT 1 FROM cache_keepalive_evidence f
                       WHERE f.principal_id = r.principal_id
@@ -733,7 +732,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
              SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0)::BIGINT AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
              FROM proven r
-             WHERE r.rn = 1
+             WHERE r.rn = 1 AND lower(r.hit_miss) = 'hit'
              GROUP BY r.model, r.ttl
              ORDER BY r.model, r.ttl",
         )

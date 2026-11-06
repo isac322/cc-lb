@@ -119,16 +119,35 @@ pub fn derive_activity_view(
         source.item.status,
         Some(cc_lb_storage_api::CacheKeepaliveSessionStatus::Active)
     );
+    let pending_source_ref_id = if is_active && cycle_id.is_some() {
+        records
+            .first()
+            .filter(|turn| {
+                renewal_evidence_for_turn(turn, source.evidence)
+                    .and_then(|renewal| renewal.cycle_id)
+                    == cycle_id
+            })
+            .map(|turn| turn.source_ref_id.as_str())
+    } else {
+        None
+    };
+    // A proven follow-up closes the active window for the newest turn. Keep
+    // the newest turn pending only while its current-cycle renewal is unresolved.
     let turns = records
         .iter()
         .enumerate()
         .map(|(index, record)| {
+            let pending = is_active
+                && index == 0
+                && (pending_source_ref_id.is_none()
+                    || (pending_source_ref_id == Some(record.source_ref_id.as_str())
+                        && !follow_up_proven(record, source.evidence)));
             let turn_number =
                 u32::try_from(records.len().saturating_sub(index)).unwrap_or(u32::MAX);
             activity_turn(
                 record,
                 turn_number,
-                is_active && index == 0,
+                pending,
                 catalog,
                 source.item.ttl,
                 source.evidence,
@@ -158,18 +177,6 @@ pub fn derive_activity_view(
         (CacheKeepaliveViewState::NotTracked, _) => Some(sum_turn_pnl(&[])),
         (_, Some(turns)) => Some(sum_turn_pnl(&turns)),
         (_, None) => None,
-    };
-    let pending_source_ref_id = if is_active && cycle_id.is_some() {
-        records
-            .first()
-            .filter(|turn| {
-                renewal_evidence_for_turn(turn, source.evidence)
-                    .and_then(|renewal| renewal.cycle_id)
-                    == cycle_id
-            })
-            .map(|turn| turn.source_ref_id.as_str())
-    } else {
-        None
     };
     let (evidence_status, unknown_cycles) =
         evidence_status(source.turns, source.evidence, pending_source_ref_id);
