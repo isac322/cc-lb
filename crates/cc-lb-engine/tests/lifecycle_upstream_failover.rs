@@ -1215,7 +1215,6 @@ async fn openai_request_does_not_select_anthropic_api_key() {
     assert_eq!(fixture.hosts(), vec![host("openai-oauth")]);
 }
 
-
 #[tokio::test]
 async fn single_oauth_429_without_alternative_relays_original_429()
 -> Result<(), Box<dyn std::error::Error>> {
