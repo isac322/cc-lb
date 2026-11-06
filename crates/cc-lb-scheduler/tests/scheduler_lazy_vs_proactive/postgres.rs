@@ -91,6 +91,7 @@ async fn run_postgres_race_inner(databases: &TestDatabases) -> TestResult<()> {
     let worker = spawn_oauth_worker(&backend, state, cancel.clone())?;
     let lazy = LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
+            google_config: Default::default(),
             stores: stores_from_storage(storage.clone()),
             aead,
             oauth_cfg,

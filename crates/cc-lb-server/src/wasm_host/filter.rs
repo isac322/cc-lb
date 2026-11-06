@@ -27,6 +27,17 @@ impl WasmtimeFilterPlugin {
             plugin_name: plugin_name.into(),
         }
     }
+
+    /// Build only applicable provider filters while constructing a principal pipeline.
+    pub fn for_provider(
+        dispatch: &WasmPluginWireDispatch,
+        provider: cc_lb_plugin_wire::schema::ProviderFamily,
+        plugin_id: Uuid,
+        plugin_name: impl Into<String>,
+    ) -> Option<Self> {
+        let selected = dispatch.for_provider(provider)?;
+        Some(Self::new(Arc::new(selected), plugin_id, plugin_name))
+    }
 }
 
 impl FilterPlugin for WasmtimeFilterPlugin {

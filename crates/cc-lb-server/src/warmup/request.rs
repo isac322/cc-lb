@@ -1,14 +1,21 @@
+use std::time::Duration;
+
 use bytes::Bytes;
 use cc_lb_quota::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
-use http::{Method, Request, StatusCode};
-use http_body_util::Full;
+use http::{HeaderMap, Method, Request, StatusCode};
+use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
 use serde_json::{Value, json};
 use url::Url;
 
+mod provider;
+pub(crate) use provider::build_provider_warmup_request;
+pub use provider::{ProviderWarmupDispatchParams, dispatch_provider_warmup_attempt};
+
 pub(crate) const WARMUP_MODEL: &str = "claude-haiku-4-5-20251001";
 pub(crate) const WARMUP_MAX_TOKENS: u32 = 1;
 const WARMUP_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
+pub(crate) const WARMUP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) type WarmupHttpClient = Client<
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
@@ -20,6 +27,10 @@ pub enum WarmupRequestAttempt {
     Response {
         status: StatusCode,
         observations: Vec<UnifiedQuotaObservation>,
+        error_detail: Option<String>,
+    },
+    CredentialDecryptFailed {
+        error: String,
     },
     RequestBuildFailed {
         error: String,
@@ -67,7 +78,7 @@ fn warmup_body() -> Value {
     })
 }
 
-pub async fn dispatch_warmup_attempt(
+async fn dispatch_anthropic_warmup_attempt(
     client: &WarmupHttpClient,
     access_token: &str,
     base_url: &Url,
@@ -77,19 +88,105 @@ pub async fn dispatch_warmup_attempt(
         Err(error) => return WarmupRequestAttempt::RequestBuildFailed { error },
     };
 
-    match client.request(request).await {
-        Ok(response) => {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let observations = parse_anthropic_unified_headers(&headers);
-            WarmupRequestAttempt::Response {
-                status,
-                observations,
+    let mut attempt =
+        dispatch_http_request(client, request, parse_anthropic_unified_headers, None).await;
+    if let WarmupRequestAttempt::Response {
+        error_detail: Some(detail),
+        ..
+    } = &mut attempt
+        && let std::borrow::Cow::Owned(scrubbed) =
+            cc_lb_upstream::scrub_secret(access_token, detail)
+    {
+        *detail = scrubbed;
+    }
+    attempt
+}
+
+async fn dispatch_http_request(
+    client: &WarmupHttpClient,
+    request: Request<Full<Bytes>>,
+    parse_observations: fn(&HeaderMap) -> Vec<UnifiedQuotaObservation>,
+    signer: Option<&dyn cc_lb_upstream::Signer>,
+) -> WarmupRequestAttempt {
+    dispatch_http_request_with_timeout(
+        client,
+        request,
+        parse_observations,
+        signer,
+        WARMUP_RESPONSE_TIMEOUT,
+    )
+    .await
+}
+
+pub(crate) async fn dispatch_http_request_with_timeout(
+    client: &WarmupHttpClient,
+    request: Request<Full<Bytes>>,
+    parse_observations: fn(&HeaderMap) -> Vec<UnifiedQuotaObservation>,
+    signer: Option<&dyn cc_lb_upstream::Signer>,
+    timeout: Duration,
+) -> WarmupRequestAttempt {
+    match tokio::time::timeout(
+        timeout,
+        dispatch_http_request_inner(client, request, parse_observations, signer),
+    )
+    .await
+    {
+        Ok(attempt) => attempt,
+        Err(_) => WarmupRequestAttempt::NetworkError {
+            error: "warmup response timed out".to_owned(),
+        },
+    }
+}
+
+async fn dispatch_http_request_inner(
+    client: &WarmupHttpClient,
+    request: Request<Full<Bytes>>,
+    parse_observations: fn(&HeaderMap) -> Vec<UnifiedQuotaObservation>,
+    signer: Option<&dyn cc_lb_upstream::Signer>,
+) -> WarmupRequestAttempt {
+    let response = match client.request(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            return WarmupRequestAttempt::NetworkError {
+                error: error.to_string(),
+            };
+        }
+    };
+    let status = response.status();
+    let observations = parse_observations(response.headers());
+    let mut body = response.into_body();
+    let mut error_body = Vec::new();
+    // Drain streamed Responses to completion without buffering generated output.
+    // Only a bounded provider error is retained for the attempt's detail.
+    while let Some(frame) = body.frame().await {
+        match frame {
+            Ok(frame) if !status.is_success() => {
+                if let Some(data) = frame.data_ref() {
+                    let remaining = 16_384_usize.saturating_sub(error_body.len());
+                    error_body.extend_from_slice(&data[..data.len().min(remaining)]);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return WarmupRequestAttempt::NetworkError {
+                    error: error.to_string(),
+                };
             }
         }
-        Err(error) => WarmupRequestAttempt::NetworkError {
-            error: error.to_string(),
-        },
+    }
+    let error_detail = if error_body.is_empty() {
+        None
+    } else {
+        let detail = String::from_utf8_lossy(&error_body);
+        Some(match signer {
+            Some(signer) => signer.scrub_secrets(&detail).into_owned(),
+            None => detail.into_owned(),
+        })
+    };
+    WarmupRequestAttempt::Response {
+        status,
+        observations,
+        error_detail,
     }
 }
 
@@ -173,8 +270,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warmup_intent_contract_dispatch_warmup_attempt_shaped_input() {
-        // Given: the exact request constructed before dispatch_warmup_attempt sends it.
+    async fn anthropic_warmup_intent_contract_shaped_input() {
+        // Given: the exact request constructed before the Anthropic warmup sends it.
         let base_url = Url::parse("https://api.anthropic.com/").expect("valid URL");
         let request =
             build_warmup_request("test-token", &base_url).expect("request builds successfully");
@@ -208,7 +305,7 @@ mod tests {
         )
         .expect("warmup request shapes successfully");
 
-        // Then: dispatch_warmup_attempt receives the fixed request as rail-shaped input.
+        // Then: the fixed Anthropic request is preserved as rail-shaped input.
         assert_eq!(
             shaped_request.url().as_str(),
             "https://api.anthropic.com/v1/messages"

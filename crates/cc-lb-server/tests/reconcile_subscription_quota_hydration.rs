@@ -223,6 +223,7 @@ async fn peer(upstream_names: &[&str]) -> (Peer, Vec<UpstreamRecord>) {
     let quota = Arc::new(SubscriptionQuotaCache::new());
     let initial = build_dynamic_view(
         &stores,
+        None,
         aead.clone(),
         None,
         0,
@@ -250,6 +251,7 @@ async fn peer(upstream_names: &[&str]) -> (Peer, Vec<UpstreamRecord>) {
         Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         STALENESS_SECS,
         Arc::new(cc_lb_clock::SystemClock),
+        None,
     );
     (
         Peer {

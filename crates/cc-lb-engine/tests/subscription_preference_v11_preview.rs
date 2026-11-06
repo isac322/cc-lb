@@ -494,6 +494,7 @@ mod no_builtin_filter {
                 user_filters: Vec::new(),
                 terminal: TerminalStrategy::FirstPick,
                 instantiation_error: None,
+                provider_filters: None,
             });
             let principal_view = Arc::new(PrincipalView::for_tests(
                 PRINCIPAL,

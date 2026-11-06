@@ -16,6 +16,8 @@ mod on_demand_memory_limit;
 mod plugin_metrics_emission;
 #[path = "pool_saturation.rs"]
 mod pool_saturation;
+#[path = "provider_exports.rs"]
+mod provider_exports;
 #[path = "register_unchanged_short_circuit.rs"]
 mod register_unchanged_short_circuit;
 #[path = "scoped_dispatch.rs"]

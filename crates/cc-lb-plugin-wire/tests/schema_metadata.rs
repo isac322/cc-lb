@@ -4,14 +4,25 @@ use cc_lb_plugin_wire::{HookKind, WireVersion, schema};
 fn root_schema_exports_describe_supported_hooks() {
     assert_eq!(WireVersion::V1.as_u8(), 1);
     assert_eq!(WireVersion::from_u8(1), Some(WireVersion::V1));
-    assert_eq!(WireVersion::from_u8(2), None);
+    assert_eq!(WireVersion::from_u8(2), Some(WireVersion::V2));
     assert_eq!(WireVersion::V1.as_str(), "v1");
 
     assert_eq!(HookKind::Filter.as_str(), "filter");
     assert_eq!(HookKind::Filter.export_name(), "cc_lb_filter");
+    assert_eq!(
+        HookKind::Filter.qualified_export_name(schema::ProviderFamily::Openai),
+        "cc_lb_filter_openai"
+    );
     assert_eq!(HookKind::Filter.section_prefix(), "cc_lb.schema.filter");
     assert_eq!(HookKind::parse("shape"), Some(HookKind::Shape));
-    assert_eq!(HookKind::TransformResponse.as_str(), "transform_response");
+    assert_eq!(
+        HookKind::parse_entrypoint("shape_openai"),
+        Some((HookKind::Shape, Some(schema::ProviderFamily::Openai)))
+    );
+    assert_eq!(
+        HookKind::parse_entrypoint("filter"),
+        Some((HookKind::Filter, None))
+    );
     assert_eq!(
         HookKind::TransformResponse.export_name(),
         "cc_lb_transform_response"
@@ -33,6 +44,14 @@ fn root_schema_exports_describe_supported_hooks() {
         WireVersion::V1
     ));
     assert!(schema::host_supports(HookKind::Filter, WireVersion::V1));
+    assert!(schema::host_supports(HookKind::Filter, WireVersion::V2));
+    assert_eq!(
+        HookKind::parse_entrypoint("shape_envelope_gemini"),
+        Some((
+            HookKind::ShapeEnvelopeGemini,
+            Some(schema::ProviderFamily::Gemini)
+        ))
+    );
 }
 
 #[cfg(feature = "std")]
@@ -97,4 +116,96 @@ fn plugin_metadata_parse_validates_required_fields() {
         MetadataError::UnknownHook(hook) => assert_eq!(hook, "sign"),
         other => panic!("unexpected error: {other}"),
     }
+}
+
+#[test]
+fn provider_entrypoints_cover_every_hook_without_changing_wire_sections() {
+    for hook in HookKind::ALL {
+        assert_eq!(
+            HookKind::parse_entrypoint(hook.as_str()),
+            Some((*hook, None))
+        );
+        for provider in [
+            schema::ProviderFamily::Anthropic,
+            schema::ProviderFamily::Openai,
+            schema::ProviderFamily::Gemini,
+        ] {
+            let key = format!("{}_{}", hook.as_str(), provider.as_str());
+            assert_eq!(
+                HookKind::parse_entrypoint(&key),
+                Some((*hook, Some(provider)))
+            );
+            assert_eq!(
+                hook.qualified_export_name(provider),
+                format!("{}_{}", hook.export_name(), provider.as_str())
+            );
+        }
+    }
+    for invalid in [
+        "shape_unknown",
+        "shape_openai_extra",
+        "filter_OpenAI",
+        "transform_response_",
+        "cc_lb_shape_openai",
+    ] {
+        assert_eq!(HookKind::parse_entrypoint(invalid), None, "{invalid}");
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn plugin_metadata_accepts_qualified_and_mixed_hook_keys() {
+    use cc_lb_plugin_wire::PluginMetadata;
+
+    let metadata = PluginMetadata::parse(
+        br#"{
+            "name":"provider-aware",
+            "version":"0.1.0",
+            "description":"Provider-aware test plugin.",
+            "usage":"Testing only.",
+            "hooks":{
+                "filter":{
+                    "wire_version":1,
+                    "description":"Legacy Anthropic filter.",
+                    "usage":"Testing only.",
+                    "mode":"active"
+                },
+                "shape_openai":{
+                    "wire_version":1,
+                    "description":"Shapes OpenAI requests.",
+                    "usage":"Testing only.",
+                    "mode":"active"
+                },
+                "transform_sse_event_gemini":{
+                    "wire_version":1,
+                    "description":"Transforms Gemini SSE events.",
+                    "usage":"Testing only.",
+                    "mode":"active"
+                }
+            }
+        }"#,
+    )
+    .expect("qualified and legacy metadata keys parse");
+
+    assert!(metadata.hooks.contains_key("filter"));
+    assert!(metadata.hooks.contains_key("shape_openai"));
+    assert!(metadata.hooks.contains_key("transform_sse_event_gemini"));
+    let round_trip = serde_json::to_vec(&metadata).expect("metadata serializes");
+    assert_eq!(
+        PluginMetadata::parse(&round_trip).expect("metadata reparses"),
+        metadata
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn plugin_metadata_rejects_unknown_provider_keys() {
+    let error = cc_lb_plugin_wire::PluginMetadata::parse(
+        br#"{"name":"x","version":"1","description":"Test","usage":"Test","hooks":{"shape_unknown":{"wire_version":1,"description":"Test","usage":"Test","mode":"active"}}}"#,
+    )
+    .expect_err("unknown provider is rejected");
+    assert!(matches!(
+        error,
+        cc_lb_plugin_wire::MetadataError::UnknownHook(name) if name == "shape_unknown"
+    ));
 }

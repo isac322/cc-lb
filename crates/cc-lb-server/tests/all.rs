@@ -83,6 +83,8 @@ mod preflight_common;
 mod prompt_cache_live_qa;
 #[path = "prompt_cache_observation_metrics.rs"]
 mod prompt_cache_observation_metrics;
+#[path = "provider_prefix_routes.rs"]
+mod provider_prefix_routes;
 #[path = "proxy_body_limits.rs"]
 mod proxy_body_limits;
 #[path = "proxy_error_fallbacks.rs"]

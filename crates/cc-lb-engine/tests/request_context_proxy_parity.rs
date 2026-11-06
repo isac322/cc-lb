@@ -87,6 +87,7 @@ fn lifecycle(state: ParityState) -> Lifecycle {
         user_filters: vec![filter],
         terminal: cc_lb_domain::TerminalStrategy::FirstPick,
         instantiation_error: None,
+        provider_filters: None,
     });
     let mut chains = HashMap::new();
     chains.insert(

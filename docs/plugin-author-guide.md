@@ -15,12 +15,13 @@ The focused crate READMEs are also useful while building plugins:
 
 1. [Runtime model](#runtime-model)
 2. [Authoring a plugin](#authoring-a-plugin)
-3. [Hook contracts](#hook-contracts)
-4. [Owned vs view mode](#owned-vs-view-mode)
-5. [Pure vs stateful dispatch](#pure-vs-stateful-dispatch)
-6. [Schema hash + bumping the wire](#schema-hash--bumping-the-wire)
-7. [Admin upload](#admin-upload)
-8. [Operational invariants](#operational-invariants)
+3. [Provider-qualified handlers](#provider-qualified-handlers)
+4. [Hook contracts](#hook-contracts)
+5. [Owned vs view mode](#owned-vs-view-mode)
+6. [Pure vs stateful dispatch](#pure-vs-stateful-dispatch)
+7. [Schema hash + bumping the wire](#schema-hash--bumping-the-wire)
+8. [Admin upload](#admin-upload)
+9. [Operational invariants](#operational-invariants)
 
 ## Runtime model
 
@@ -63,7 +64,7 @@ cc-lb-plugin-wire = "0.9"
 cc-lb-pdk-wasmtime = "0.2"
 ```
 
-Minimal filter plugin:
+Minimal Anthropic filter plugin:
 
 ```rust
 #![cfg_attr(target_arch = "wasm32", no_std)]
@@ -86,6 +87,7 @@ mod accept_all {
 
     #[handler(
         filter,
+        provider = "anthropic",
         wire = 1,
         description = "Accepts all candidates without modification.",
         usage = "Attach to a router filter chain for baseline validation.",
@@ -125,19 +127,143 @@ Required plugin metadata:
 - `description`: short operator-facing summary.
 - `usage`: operator-facing deployment guidance.
 
-The macro emits allocator exports, hook exports, per-hook schema custom
-sections, and one `cc_lb.plugin.v1` metadata custom section. For a complete
-filter handler, see the filter example under [Hook
-Contracts](#hook-contracts).
+The macro emits allocator exports, hook exports, one schema custom section per
+distinct hook/wire version, and one metadata section. Plugins with only legacy
+handlers emit `cc_lb.plugin.v1`. Adding any provider-qualified handler selects
+`cc_lb.plugin.v2`, including when the module also contains legacy handlers.
+
+### Provider-qualified handlers
+
+Split provider-specific behavior into separate functions with
+`provider = "anthropic"`, `provider = "openai"`, or `provider = "gemini"`.
+The attribute selects the export; Rust function names remain author-controlled.
+For example, this complete plugin exports request shaping for Anthropic and
+OpenAI without claiming any response-transform or Gemini capability:
+
+```rust
+extern crate alloc;
+
+use alloc::{format, string::String};
+use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
+use cc_lb_plugin_wire::v2::{ShapeRequest, ShapeResponse};
+#[cc_lb_plugin(
+    name = "provider-request-shaper",
+    version = "0.1.0",
+    description = "Routes Anthropic and OpenAI HTTP requests to their API hosts.",
+    usage = "Attach to a shape slot; response bodies remain unchanged.",
+)]
+mod provider_request_shaper {
+    use super::*;
+
+    #[handler(
+        shape,
+        provider = "anthropic",
+        wire = 1,
+        description = "Builds Anthropic requests.",
+        usage = "Use for Anthropic upstreams.",
+    )]
+    pub fn anthropic_request(req: ShapeRequest) -> ShapeResponse {
+        shape_at("https://api.anthropic.com", req)
+    }
+
+    #[handler(
+        shape,
+        provider = "openai",
+        wire = 1,
+        description = "Builds OpenAI HTTP requests.",
+        usage = "Use for OpenAI upstreams.",
+    )]
+    pub fn openai_request(req: ShapeRequest) -> ShapeResponse {
+        // OpenAI OAuth (Codex) uses `{base}/responses`, not `{base}/v1/responses`.
+        shape_at("https://chatgpt.com/backend-api/codex", req)
+    }
+
+    fn shape_at(base: &str, req: ShapeRequest) -> ShapeResponse {
+        let suffix = if base.contains("chatgpt.com/backend-api/codex") && req.path == "/v1/responses" {
+            "/responses"
+        } else {
+            req.path.as_str()
+        };
+        let mut url: String = format!("{base}{suffix}");
+        if let Some(query) = req.query.as_deref().filter(|query| !query.is_empty()) {
+            url.push('?');
+            url.push_str(query);
+        }
+        ShapeResponse {
+            url: url.into_boxed_str(),
+            method: req.method,
+            headers: req.headers,
+            body: req.body,
+        }
+    }
+}
+```
+
+The generated exports are `cc_lb_shape_anthropic` and `cc_lb_shape_openai`;
+the V2 metadata keys are `shape_anthropic` and `shape_openai`. Qualified
+handlers use the V2 request types, including upstream identity; legacy
+unqualified handlers retain the V1 wire layout. Filter, buffered-response,
+and SSE handlers use the same provider suffix convention.
+For Gemini OAuth Code Assist requests, a provider-qualified shape plugin may
+also declare `shape_envelope_gemini` with `wire = 2`. The host invokes this
+optional export after native Code Assist wrapping and before credentials are
+applied. It may replace the envelope body or headers, but never the host;
+missing export means no envelope call.
+Principal claims are currently empty on this wire boundary because the
+authenticated principal record does not expose a cheap claims projection;
+plugins must not infer claims from the principal id or credential headers.
+
+Each provider/hook combination is optional. Omit unsupported hooks instead of
+writing placeholder no-ops. Without a request hook, the host uses the selected
+upstream's native request dialect; independent buffered-response or SSE hooks
+can still run. Without a response hook, that response passes through without a
+guest call. OpenAI Responses WebSocket turns use the OpenAI shape hook for each
+`response.create` frame. The shaped body is sent upstream; the shaped URL and
+method are ignored because the host owns the WebSocket connection. Shaped
+headers are applied when the provider connection opens when possible. The
+OpenAI SSE-event hook also receives each upstream WebSocket frame as an SSE
+event whose `data` is the frame JSON and whose event name is the frame's
+`type`; `Unchanged`, `Replace`, and `Drop` map to unchanged, replacement, and
+dropped WebSocket frames. Buffered-response transforms do not apply to frames.
+Shape failures fall back to the raw frame as they do for HTTP. SSE transform
+failures emit a WebSocket error event and terminate that turn.
+
+For Gemini OAuth, Code Assist wrapping is removed before a custom buffered
+response hook runs, including `streamGenerateContent` JSON-array responses.
+
+OpenAI audio endpoints also stream non-JSON output without a request `stream`
+flag. They relay chunks immediately when no buffered hook is installed; a
+buffered hook receives the complete body within the request path's body cap.
+JSON audio responses retain the ordinary buffered response behavior.
+
+### Legacy compatibility and migration
+
+Omitting `provider` preserves the unqualified export and V1 metadata. All
+legacy exports, including `cc_lb_filter`, are Anthropic-only. Valid existing
+artifacts need no rebuild for Anthropic; a legacy artifact intentionally used
+for OpenAI or Gemini must add qualified functions to keep handling that traffic.
+
+To migrate, replace each legacy handler's attribute with the corresponding
+`provider = "anthropic"` attribute, then add separate OpenAI or Gemini functions
+only for hooks you support. Reuse ordinary Rust helpers where logic is shared.
+The macro rejects duplicate `(hook, provider)` pairs and legacy/qualified
+Anthropic overlap. A legacy hook may coexist with qualified OpenAI or Gemini
+hooks. V1 wire layouts and fingerprints are unchanged; provider qualification
+does not require a new `wire` version.
+
+Operators receive the non-blocking `legacy_plugin_anthropic_only` chain warning
+when a legacy-only attached artifact coexists with enabled, allowed OpenAI or
+Gemini upstreams. Migrate the artifact rather than relying on cross-provider
+legacy dispatch.
 
 ## Hook Contracts
 
 cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more hooks; upload registers the artifact for every slot whose hook it exports.
 
-| Slot | Export | Request type | Response type | Use |
-|---|---|---|---|---|
-| `filter` | `cc_lb_filter` | `v1::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. The V1 request exposes the requested service tier. |
-| `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Unified slot that produces the upstream-bound request and transforms downstream responses (both buffered and SSE). |
+| Slot | Legacy export | Provider-qualified exports | Request type | Response type | Use |
+|---|---|---|---|---|---|
+| `filter` | `cc_lb_filter` | `cc_lb_filter_{anthropic,openai,gemini}` | `v1::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. |
+| `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `cc_lb_{shape,transform_response,transform_sse_event}_{anthropic,openai,gemini}` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Provider-specific request and response processing. Legacy shape is Anthropic-only. |
 
 Filter example:
 
@@ -179,9 +305,13 @@ candidate is dropped, whether the plugin rejects it or leaves it out of
 writes each non-empty `reason` to the router audit log as `{upstream_id}:
 {reason}`; pass an empty string when the decision needs no explanation.
 
-Shape example (Unified Slot):
+Shape example (legacy unified slot):
 
-A plugin registered to the `shape` slot must implement all three wire hook functions: request shaping, buffered response transform, and SSE event transform. If your plugin only needs to shape requests or only needs to transform responses, you must explicitly implement no-op handlers for the other hooks.
+The unqualified `shape` handler is a legacy Anthropic-only contract. A legacy
+Shape plugin must implement all three wire hook functions: request shaping,
+buffered response transform, and SSE event transform. Provider-qualified
+handlers are independent: implement only the `(hook, provider)` combinations
+your plugin supports, and omit unused request or response hooks.
 
 When a request asks for streaming but the upstream returns a non-SSE body,
 the host buffers the complete body within the configured response cap and
@@ -258,13 +388,16 @@ mod request_only_shaper {
 }
 ```
 
-Each handler declares its own `wire = N`. The published PDK supports `wire = 1`
-for every hook.
+Each handler declares its own `wire = N`. Legacy handlers use `wire = 1`;
+provider-qualified handlers use `wire = 2` and the V2 request types.
 
 ## Metadata Contract
 
-Plugin and per-hook metadata is required. The host rejects uploads when the
-`cc_lb.plugin.v1` section is absent, malformed, or incomplete.
+Plugin and per-hook metadata is required. Legacy-only artifacts emit
+`cc_lb.plugin.v1`; any artifact with provider-qualified handlers emits
+`cc_lb.plugin.v2`. The host rejects uploads when the selected section is
+absent, malformed, incomplete, or contains an unknown hook key. Bare keys in
+V2 remain legacy Anthropic-only entries.
 
 Required top-level fields:
 

@@ -12,14 +12,17 @@ use cc_lb_control::{InMemoryBus, RequestEventBus};
 use cc_lb_domain::{InternalError, RoutingTrace};
 use cc_lb_request_log::{
     RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestDiagnostics, RequestEventKind,
-    RequestEventPartial, RequestEventUpdate,
+    RequestEventPartial, RequestEventUpdate, StorageTailUpdate,
 };
-use cc_lb_storage_api::{RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{
+    RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind, UpstreamStore,
+};
 use config_admin_common::{TOKEN, app, authed_bytes, temp_storage, test_state};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio::time::timeout;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn events_stream_opens_with_sse_content_type() {
@@ -568,6 +571,116 @@ async fn events_stream_serves_rows_without_diagnostic_keys_and_matching_live_fin
     };
     assert_eq!(normalize(&events[0]), normalize(&events[1]));
     assert_eq!(normalize(&events[1]), normalize(&events[2]));
+}
+
+#[tokio::test]
+async fn events_stream_retracts_failover_partials_without_leaking_scoped_finals() {
+    for (scope, via_storage_tail) in [
+        ("upstream", false),
+        ("upstream", true),
+        ("provider", false),
+        ("provider", true),
+        ("unfiltered", false),
+    ] {
+        let (_dir, storage) = temp_storage().await;
+        let first_upstream = Uuid::from_u128(1);
+        let final_upstream = Uuid::from_u128(2);
+        for (id, kind) in [
+            (first_upstream, UpstreamKind::GeminiOauth),
+            (final_upstream, UpstreamKind::OpenaiOauth),
+        ] {
+            UpstreamStore::create(
+                storage.as_ref(),
+                UpstreamCreate {
+                    id,
+                    name: id.to_string(),
+                    kind,
+                    base_url: None,
+                    api_key_ciphertext: None,
+                    oauth_tokens: None,
+                    warmup_enabled: false,
+                    warmup_dialect_plugin: None,
+                    workspace_id: None,
+                    api_key_access: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let bus = Arc::new(InMemoryBus::with_capacity(8));
+        let mut state = test_state(Config::default(), Some(storage));
+        state.event_bus = Some(bus.clone() as Arc<dyn RequestEventBus>);
+        let storage_tail = state.storage_tail.clone();
+        let uri = match scope {
+            "upstream" => format!("/admin/v1/events/stream?upstream_id={first_upstream}"),
+            "provider" => "/admin/v1/events/stream?providers=gemini".to_owned(),
+            _ => "/admin/v1/events/stream".to_owned(),
+        };
+        let response = stream_response_uri(state, &uri, None).await;
+        let mut body = response.into_body();
+        read_sse_until(&mut body, "event: cursor").await;
+
+        // A final that never entered this feed must not produce a retraction.
+        let mut unrelated = request_event(2);
+        unrelated.upstream_id = Some(final_upstream);
+        bus.publish(RequestEventUpdate::final_(unrelated, 1));
+        let mut event = request_event(1);
+        event.upstream_id = Some(final_upstream);
+        bus.publish(RequestEventUpdate::partial(RequestEventPartial {
+            event_id: event.event_id.clone().unwrap(),
+            request_id: event.request_id.clone(),
+            upstream_id: Some(first_upstream),
+            ..Default::default()
+        }));
+        let partials = read_sse_until(&mut body, r#""phase":"partial""#).await;
+        assert!(!partials.contains("event: remove"));
+        if scope != "unfiltered" {
+            assert!(!partials.contains(r#""phase":"final""#));
+        }
+
+        if via_storage_tail {
+            storage_tail
+                .send(StorageTailUpdate { event, cursor: 2 })
+                .unwrap();
+        } else {
+            bus.publish(RequestEventUpdate::final_(event, 2));
+        }
+        if scope == "unfiltered" {
+            let finals = read_sse_until(&mut body, r#""phase":"final""#).await;
+            assert!(!finals.contains("event: remove"));
+            assert_eq!(message_request_ids(&finals), ["req-1"]);
+        } else {
+            let removed = read_sse_until(&mut body, "event: remove").await;
+            assert!(removed.contains(r#"{"event_id":"event-000001"}"#));
+            assert!(!removed.contains(r#""phase":"final""#));
+            assert!(!removed.contains(&final_upstream.to_string()));
+            // Removal keeps a durable bookmark, not the uncommitted bus cursor.
+            let bookmark = if via_storage_tail { "id: 2" } else { "id: 0" };
+            assert!(removed.contains(bookmark), "{removed}");
+        }
+
+        let mut matching = request_event(3);
+        matching.upstream_id = Some(first_upstream);
+        bus.publish(RequestEventUpdate::final_(matching, 3));
+        let finals = read_sse_until(&mut body, r#""phase":"final""#).await;
+        assert_eq!(message_request_ids(&finals), ["req-3"]);
+        assert!(!finals.contains("event: remove"));
+    }
+}
+
+async fn read_sse_until(body: &mut Body, needle: &str) -> String {
+    let mut text = String::new();
+    while !text.contains(needle) {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("sse frame timeout")
+            .expect("stream ended")
+            .expect("sse frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+    text
 }
 
 fn message_events(text: &str) -> Vec<Value> {

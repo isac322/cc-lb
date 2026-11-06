@@ -278,9 +278,9 @@ impl DownstreamStreamDropGuard {
     pub(crate) fn mark_proxy_error(&mut self, cause: StreamTerminationCause) {
         self.mark_error(StreamTerminationOutcome::ProxyError, cause, None);
     }
-    /// Record that the downstream received the provider's semantic terminal
-    /// event. A later downstream close is successful unless an upstream or
-    /// proxy error was recorded first.
+    /// Record that the downstream has received the provider's semantic terminal
+    /// event. A later downstream close is a successful completion, not a
+    /// client cancellation, unless an upstream/proxy error is recorded first.
     pub(crate) fn mark_semantic_completion(&mut self) {
         self.semantic_completed = true;
     }

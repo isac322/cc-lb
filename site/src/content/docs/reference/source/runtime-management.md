@@ -28,7 +28,7 @@ The default admin listener is `[::1]:9090`; use `http://[::1]:9090` for the exam
 
 ### Proxy capability boundary
 
-The proxy routes only consistency-safe operations: `POST /v1/messages` and `POST /v1/messages/count_tokens` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses, plus the `GET /v1/responses` WebSocket upgrade), and Gemini `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`. Other provider operations sent to the proxy are rejected with `404 operation_not_supported`, including files/uploads, model and account catalogs, stored-response and conversation management endpoints, and catch-all provider operations. These remain bounded because they are account-bound and cannot be served consistently across credentials.
+Provider-prefixed routes select the provider explicitly: `/anthropic/v1/...`, `/openai/v1/...`, and `/gemini/v1beta/...` (plus Gemini `/gemini/v1/...` model catalogs). The tables below list supported operations and eligible credentials. Shared unprefixed routes are kept for backward compatibility and retain their existing operation set only: `POST /v1/messages` and `POST /v1/messages/count_tokens` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses, plus the `GET /v1/responses` WebSocket upgrade), and Gemini `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`. Every other unprefixed operation returns `404 operation_not_supported`; new operations require a matching provider prefix.
 
 Provider-owned state referenced inside a supported HTTP generation request is forwarded unchanged and kept on its owning upstream through upstream affinity. cc-lb records a SHA-256 digest of each state id together with the upstream that created it, and routes later requests that reference the id only to that upstream:
 
@@ -39,6 +39,65 @@ Provider-owned state referenced inside a supported HTTP generation request is fo
 A request whose durable state resolves to an upstream that is disabled, unhealthy, or removed by routing filters fails with `503 upstream_affinity_unavailable` instead of falling back to another upstream; cross-upstream failover is disabled for pinned requests. Prompt-cache analysis and cache-aware routing apply only to Anthropic Messages; OpenAI and Gemini requests carry neutral cache metadata.
 
 Admin preflight is separate from client proxy routing: `GET /v1/models` and `POST /v1/messages/count_tokens` (Anthropic), `GET /v1/models` (OpenAI), and `GET /v1beta/models` (Gemini) run as direct upstream probes during key verification.
+
+#### Anthropic endpoint reference
+
+| Method | Client path | Credentials |
+|---|---|---|
+| POST | `/anthropic/v1/messages`, `/anthropic/v1/messages/count_tokens` | API key, OAuth |
+| GET | `/anthropic/v1/models`, `/anthropic/v1/models/{id}` | API key, OAuth |
+| POST | `/anthropic/v1/complete` (legacy text completions, including SSE) | API key |
+
+Not yet supported: files, message batches, skills, agents, and sessions.
+
+#### OpenAI endpoint reference
+
+| Method | Client path | Credentials |
+|---|---|---|
+| POST / GET WebSocket | `/openai/v1/responses` | API key, OAuth |
+| POST | `/openai/v1/responses/input_tokens` | API key |
+| POST | `/openai/v1/responses/compact` | API key, OAuth |
+| POST | `/openai/v1/chat/completions`, `/openai/v1/completions` | API key |
+| POST | `/openai/v1/embeddings`, `/openai/v1/moderations` | API key |
+| POST | `/openai/v1/audio/speech`, `/openai/v1/audio/transcriptions`, `/openai/v1/audio/translations` | API key |
+| POST | `/openai/v1/images/generations`, `/openai/v1/images/edits` | API key, OAuth |
+| POST | `/openai/v1/images/variations` | API key |
+| GET | `/openai/v1/models`, `/openai/v1/models/{id}` | API key, OAuth |
+| POST | `/openai/v1/alpha/search`, `/openai/v1/memories/trace_summarize` | OAuth only |
+| GET WebSocket | `/openai/v1/realtime?model={model}` | API key |
+
+OAuth operations drop the canonical `/v1/` prefix and append the remaining path to the configured Codex base URL (for example, `{base}/responses/compact`). Model catalog queries preserve a client-supplied `client_version`; cc-lb does not invent one. The `x-codex-turn-state` response header is forwarded unchanged.
+
+Not yet supported: files, uploads, batches, vector stores, conversations, containers, stored chat completion retrieve/update/delete, response retrieve/delete/cancel/input_items, Realtime calls control and client secrets, videos, and audio voices.
+
+#### Gemini endpoint reference
+
+| Method | Client path | Credentials |
+|---|---|---|
+| POST | `/gemini/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens` | API key, OAuth |
+| POST | `/gemini/v1beta/models/{model}:embedContent`, `:batchEmbedContents`, `:predict` | API key |
+| GET | `/gemini/v1beta/models`, `/gemini/v1beta/models/{model}` (also `/gemini/v1/models` and `/gemini/v1/models/{model}`) | API key |
+| POST | `/gemini/v1beta/openai/chat/completions`, `/gemini/v1beta/openai/embeddings`, `/gemini/v1beta/openai/images/generations` | API key |
+| GET | `/gemini/v1beta/openai/models`, `/gemini/v1beta/openai/models/{id}` | API key |
+| WebSocket | `/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent` | API key |
+
+OpenAI-compatible Gemini requests retain their `/v1beta/openai/...` path and use the Gemini API key as `Authorization: Bearer`. Native Gemini requests use `x-goog-api-key`; OAuth remains limited to generation and token counting.
+
+Realtime and Live WebSockets authenticate the proxy client before upgrade and select one eligible API-key upstream for the connection lifetime; OAuth subscriptions are not eligible. A connection never reconnects or fails over to another credential. Text, binary, ping, and pong frames retain their payloads; client/provider close frames retain their explicit code and reason while propagating tunnel shutdown. A later connection failure closes the tunnel rather than returning a new HTTP response.
+
+Gemini Live rejects the handshake with HTTP `503` when the principal has no eligible Gemini API-key upstream, before receiving a setup frame. With an eligible key, model-specific routing still runs after the setup frame supplies the model.
+
+OpenAI's `OpenAI-Beta` header is passed through. Gemini client-supplied `key=` query credentials are removed before the configured upstream key is applied. Usage accounting observes only provider usage frames: OpenAI `response.done` and Gemini frames containing `usageMetadata`.
+
+New tunnel handshakes during server drain receive HTTP `503` without upgrading. Existing tunnels stop relaying and send best-effort close frames, without an explicit close code or reason, to both peers. Idle Gemini connections waiting for a setup frame also close on drain. After an upgrade, drain cannot produce a new HTTP response.
+
+Not yet supported: file upload/download, cachedContents, batches, operations, predictLongRunning, fileSearchStores, interactions, agents, auth_tokens, and OpenAI-compatible files/batches. Code Assist account controls are not proxy operations: loadCodeAssist, onboardUser, retrieveUserQuota*, listExperiments, metrics, admin controls, and user settings are excluded.
+
+#### Unsupported operations and body limits
+
+An unsupported operation under a provider prefix returns HTTP **404**, with a provider-shaped `operation_not_supported` error and the message `<method> <canonical-path> is not supported by cc-lb yet`. It produces one terminal request event after authentication, without selecting an upstream. Unprefixed unsupported paths retain their previous rejection behavior.
+
+Multipart audio transcription/translation and image edit/variation requests use `files_body_cap_bytes`; other supported HTTP operations use `messages_body_cap_bytes`. Bodies and provider-owned state are forwarded without rewriting. Model catalogs and model-less default moderation requests still pass through key/principal, rate, and concurrency admission rather than requiring a fabricated model id.
 
 ### Responses WebSocket gateway
 
@@ -329,6 +388,27 @@ Each principal receives a built-in `subscription-preference` Router chain
 entry at creation, with order `0`. Use the plugin-chain endpoints below to
 remove the entry or change its position among other router plugins.
 
+#### Subscription preference
+
+Anthropic, OpenAI, and Gemini OAuth candidates use the same tier order:
+`KnownBase` > `PartialBase` > `Overage` > `UnknownProbe`. Within the winning
+tier, cost-first selection uses quota pressure and reset pace as tiebreaks;
+base-window warnings do not affect ranking.
+
+OpenAI uses `5h` and `7d`; Pro accounts that report an absent `5h` window are
+weekly-only. Gemini models (`gemini-*`) use `gemini_5h`/`gemini_7d`. Claude
+(`claude-*`) and GPT-OSS (`gpt-oss-*`) models routed through Antigravity use
+`third_party_5h`/`third_party_7d`. An unknown Gemini model family treats both
+families as unknown rather than using either family's exhaustion or headroom.
+Anthropic's shared and model-scoped window rules are unchanged.
+
+Fresh utilization at or above `1.0`, rejection, or a disabled reason blocks
+base quota. A stale hard negative remains blocking until its reported reset;
+without a reset it remains blocking. Stale positive data is unknown.
+Confirmed-absent windows are skipped; unobserved windows remain unknown.
+API keys are retained only when no usable OAuth subscription remains. An
+already-pinned sole candidate retains the existing preservation behavior.
+
 ### Plugins API
 
 | Method | Path | Auth | Request Body | Response Body | Error Codes |
@@ -427,13 +507,13 @@ preserved on the signed request. Other provider URL construction is unchanged.
 
 #### Gemini OAuth
 
-Use `kind: "gemini_oauth"` and provide a trimmed, non-empty Gemini Code Assist
-`project_id`. The project may be supplied at the top level or inside
-`oauth_tokens`; if both are supplied, they must match:
+Use `kind: "gemini_oauth"` for both Gemini CLI enterprise grants and Gemini subscriptions. New subscription sign-ins and reconnects use the Antigravity OAuth client. The operator MUST configure both `[oauth.antigravity]` `client_id` and `client_secret`; cc-lb does not embed or default those credentials. If either key is absent, sign-in and refresh return `oauth_client_not_configured` with the missing configuration path. Google retired Gemini CLI consumer login on June 18, 2026; see the [transition announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity/).
+
+The existing Gemini CLI profile behavior is unchanged: enterprise grants retain `gemini_cli`, and a missing `oauth_profile` defaults to `gemini_cli`. Antigravity credentials retain `antigravity`, and cc-lb never refreshes a grant with the other profile's OAuth client.
 
 ```json
 {
-  "name": "gemini-cli",
+  "name": "gemini-subscription",
   "kind": "gemini_oauth",
   "project_id": "my-gemini-project",
   "oauth_tokens": {
@@ -441,14 +521,21 @@ Use `kind: "gemini_oauth"` and provide a trimmed, non-empty Gemini Code Assist
     "refresh_token": "<REFRESH_TOKEN>",
     "expires_at_unix_secs": 1760000000,
     "refresh_token_expires_at_unix_secs": 1770000000,
+    "oauth_profile": "antigravity",
     "scopes": ["openid"],
     "never_refresh": false
   }
 }
 ```
 
-The same refreshing-mode token and expiry rules apply. A project-id mismatch is
-rejected, and a blank project id cannot be imported.
+The same refreshing-mode token and expiry rules apply. A project-id mismatch is rejected, and a blank project id cannot be imported. Set `oauth_profile` to `gemini_cli` for an existing enterprise grant; omitting it preserves that legacy default.
+
+For an interactive Gemini subscription sign-in, open the returned Google authorization URL in a browser. After approval, the browser lands on `http://localhost:51121/oauth-callback`; the page does not need to load. Copy the full URL from the address bar and paste it into the completion form. A bare authorization code also works. cc-lb validates the state token before exchanging the code.
+
+Antigravity content requests use `https://daily-cloudcode-pa.googleapis.com`. Usage polling calls `POST /v1internal:retrieveUserQuotaSummary` with `{"project":"<project-id>"}` and uses the same parser and fallback behavior as Gemini CLI sign-ins. It reports the same four windows: Gemini models have 5-hour (`gemini_5h`) and weekly (`gemini_7d`) windows; Claude and GPT-OSS models have 5-hour (`third_party_5h`) and weekly (`third_party_7d`) windows.
+
+> [!WARNING]
+> Google Antigravity Additional Terms [§6](https://antigravity.google/terms) prohibit using third-party software, tools, or services to access the Service with Antigravity OAuth. The terms state that this is a breach and may be grounds for suspension or termination of Antigravity and/or Gemini CLI accounts. Operators decide at their own risk whether to use this integration.
 
 #### Access-only OAuth
 

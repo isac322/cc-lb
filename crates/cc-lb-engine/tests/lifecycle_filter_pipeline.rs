@@ -193,6 +193,7 @@ fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
         user_filters: filters,
         terminal: TerminalStrategy::FirstPick,
         instantiation_error: None,
+        provider_filters: None,
     });
     let mut chains = HashMap::new();
     chains.insert(

@@ -99,6 +99,7 @@ where
     let encrypted = EncryptedOAuthTokens::encrypt(
         aead,
         &OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
             expires_at_unix_secs: near_expiry_secs(),

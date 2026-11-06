@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use cc_lb_domain::{Principal, Upstream};
+use cc_lb_domain::{Principal, Upstream, UpstreamIdentity};
 use cc_lb_plugin_wire::schema::WireVersion;
+use cc_lb_plugin_wire::v2;
 use cc_lb_plugin_wire::{
     ArchivedTransformResponseResult, ArchivedTransformSseEventResult, HeaderRef, PrincipalRef,
     QueryRef, SseEvent, SseEventRef, TransformResponseRequestRef, TransformSseEventRequestRef,
@@ -9,9 +10,10 @@ use cc_lb_plugin_wire::{
 };
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntimeError};
 use cc_lb_upstream::{
-    DialectError, DialectShapeContext, ResponseTransformError, ResponseTransformHook,
-    ShapedRequest, ShapedRequestBuilder, SseEventTransformHook, TransformResponseRequest,
-    TransformResponseResult, TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
+    DialectError, DialectShapeContext, GeminiEnvelopeHook, GeminiEnvelopeRequest,
+    GeminiEnvelopeResult, ResponseTransformError, ResponseTransformHook, ShapedRequest,
+    ShapedRequestBuilder, SseEventTransformHook, TransformResponseRequest, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -26,6 +28,8 @@ pub struct WasmtimeUpstreamDialect {
     dispatch: Arc<WasmPluginWireDispatch>,
     response_transform: Option<WasmtimeResponseTransformHook>,
     sse_event_transform: Option<WasmtimeSseEventTransformHook>,
+    native_request: Option<Arc<dyn UpstreamDialect>>,
+    upstream_identity: Option<UpstreamIdentity>,
 }
 
 impl WasmtimeUpstreamDialect {
@@ -33,7 +37,8 @@ impl WasmtimeUpstreamDialect {
         let response_transform = if dispatch.has_response_transform() {
             Some(WasmtimeResponseTransformHook {
                 dispatch: Arc::clone(&dispatch),
-                wire_version: dispatch.shape_wire_version(),
+                wire_version: dispatch.response_wire_version(),
+                identity: None,
             })
         } else {
             None
@@ -41,7 +46,8 @@ impl WasmtimeUpstreamDialect {
         let sse_event_transform = if dispatch.has_sse_event_transform() {
             Some(WasmtimeSseEventTransformHook {
                 dispatch: Arc::clone(&dispatch),
-                wire_version: dispatch.shape_wire_version(),
+                wire_version: dispatch.sse_wire_version(),
+                identity: None,
             })
         } else {
             None
@@ -50,7 +56,71 @@ impl WasmtimeUpstreamDialect {
             dispatch,
             response_transform,
             sse_event_transform,
+            native_request: None,
+            upstream_identity: None,
         }
+    }
+
+    /// Compose a response-only plugin with the selected upstream's native request dialect.
+    pub fn with_native_request(mut self, native: Arc<dyn UpstreamDialect>) -> Self {
+        self.native_request = Some(native);
+        self
+    }
+    pub fn with_upstream_identity(mut self, identity: UpstreamIdentity) -> Self {
+        self.upstream_identity = Some(identity.clone());
+        if let Some(hook) = self.response_transform.as_mut() {
+            hook.identity = Some(identity.clone());
+        }
+        if let Some(hook) = self.sse_event_transform.as_mut() {
+            hook.identity = Some(identity);
+        }
+        self
+    }
+    fn call_shape_output(
+        &self,
+        in_bytes: &[u8],
+        builder: &mut ShapedRequestBuilder,
+        upstream: &Upstream,
+    ) -> Result<ShapedRequest, DialectError> {
+        self.dispatch.call_shape_scoped(in_bytes, |guest_bytes| {
+            let out_bound = self.dispatch.wire_bounds().output_body_bytes;
+            if guest_bytes.len() as u64 > out_bound {
+                return Err(DialectError::UnsupportedRequest {
+                    reason: format!(
+                        "shape output {} bytes exceeds wire_bounds.output_body_bytes ({out_bound})",
+                        guest_bytes.len(),
+                    ),
+                });
+            }
+            access_archived_scoped_or_copy::<cc_lb_plugin_wire::ArchivedShapeResponse, _>(
+                guest_bytes,
+                |archived| {
+                    let mut shaped = wire_to_host_shaped_request(
+                        builder,
+                        archived,
+                        upstream,
+                        self.dispatch.shape_origin_policy(),
+                        self.dispatch.wire_bounds(),
+                    )?;
+                    if self.dispatch.has_shape_envelope_gemini()
+                        && let Some(identity) = self.upstream_identity.clone()
+                    {
+                        shaped.set_gemini_envelope_hook(Arc::new(
+                            WasmtimeGeminiEnvelopeHook {
+                                dispatch: Arc::clone(&self.dispatch),
+                                identity,
+                            },
+                        ));
+                    }
+                    Ok(shaped)
+                },
+            )
+            .map_err(|e| DialectError::UnsupportedRequest {
+                reason: format!("rkyv access ShapeResponse: {e}"),
+            })
+            .and_then(std::convert::identity)
+        })
+        .map_err(runtime_error_to_dialect)?
     }
 }
 
@@ -63,54 +133,44 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
         let wire_version = self.dispatch.shape_wire_version();
+        let identity = self.upstream_identity.as_ref();
         match wire_version {
             Some(WireVersion::V1) => {}
+            Some(WireVersion::V2) if identity.is_some() => {}
+            Some(WireVersion::V2) => {
+                return Err(DialectError::UnsupportedRequest {
+                    reason: "provider-qualified shape hook is missing upstream identity".to_owned(),
+                });
+            }
             None => {
+                if let Some(native) = &self.native_request {
+                    return native.shape(context, upstream, principal, builder);
+                }
                 return Err(DialectError::UnsupportedRequest {
                     reason: "plugin metadata missing shape hook".to_owned(),
                 });
             }
         }
-
-        let guest_result = with_wire_shape_request(
-            context,
-            upstream,
-            principal,
-            self.dispatch.cookie_redaction(),
-            |in_bytes| {
-                self.dispatch.call_shape_scoped(in_bytes, |guest_bytes| {
-                    let out_bound = self.dispatch.wire_bounds().output_body_bytes;
-                    if guest_bytes.len() as u64 > out_bound {
-                        return Err(DialectError::UnsupportedRequest {
-                            reason: format!(
-                                "shape output {} bytes exceeds wire_bounds.output_body_bytes ({out_bound})",
-                                guest_bytes.len(),
-                            ),
-                        });
-                    }
-                    access_archived_scoped_or_copy::<
-                        cc_lb_plugin_wire::ArchivedShapeResponse,
-                        _,
-                    >(guest_bytes, |archived| {
-                        wire_to_host_shaped_request(
-                            builder,
-                            archived,
-                            upstream,
-                            self.dispatch.shape_origin_policy(),
-                            self.dispatch.wire_bounds(),
-                        )
-                    })
-                    .map_err(|e| DialectError::UnsupportedRequest {
-                        reason: format!("rkyv access ShapeResponse: {e}"),
-                    })
-                    .and_then(std::convert::identity)
-                })
-            },
-        )
+        match wire_version.expect("shape wire version checked above") {
+            WireVersion::V1 => with_wire_shape_request(
+                context,
+                upstream,
+                principal,
+                self.dispatch.cookie_redaction(),
+                |in_bytes| self.call_shape_output(in_bytes, builder, upstream),
+            ),
+            WireVersion::V2 => with_wire_shape_request_v2(
+                context,
+                upstream,
+                principal,
+                identity.expect("V2 identity checked above"),
+                self.dispatch.cookie_redaction(),
+                |in_bytes| self.call_shape_output(in_bytes, builder, upstream),
+            ),
+        }
         .map_err(|e| DialectError::UnsupportedRequest {
             reason: format!("rkyv encode ShapeRequest: {e}"),
-        })?;
-        guest_result.map_err(runtime_error_to_dialect)?
+        })?
     }
 
     fn response_transform_hook(&self) -> Option<&dyn ResponseTransformHook> {
@@ -126,28 +186,154 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
     }
 }
 
+struct WasmtimeGeminiEnvelopeHook {
+    dispatch: Arc<WasmPluginWireDispatch>,
+    identity: UpstreamIdentity,
+}
+
+impl GeminiEnvelopeHook for WasmtimeGeminiEnvelopeHook {
+    fn shape_envelope_gemini(
+        &self,
+        request: GeminiEnvelopeRequest<'_>,
+    ) -> Result<GeminiEnvelopeResult, cc_lb_upstream::SignerError> {
+        if self.identity.credential_kind == "gemini_oauth"
+            && !request
+                .url
+                .host_str()
+                .is_some_and(|host| host.ends_with(".googleapis.com"))
+        {
+            return Err(cc_lb_upstream::SignerError::SigningFailed {
+                reason: "Gemini OAuth envelope hook requires a Code Assist Google host".to_owned(),
+            });
+        }
+        let headers: Vec<v2::HeaderRef<'_>> = request
+            .headers
+            .iter()
+            .map(|(name, value)| v2::HeaderRef {
+                name: name.as_str(),
+                value: value.as_bytes(),
+            })
+            .collect();
+        let identity_ref = v2::UpstreamIdentityRef {
+            provider: match self.identity.provider {
+                cc_lb_domain::Provider::Anthropic => "anthropic",
+                cc_lb_domain::Provider::Openai => "openai",
+                cc_lb_domain::Provider::Gemini => "gemini",
+            },
+            credential_kind: self.identity.credential_kind.as_str(),
+            upstream_id: self.identity.upstream_id.as_str(),
+            name: self.identity.name.as_str(),
+            base_url: self
+                .identity
+                .base_url
+                .as_deref()
+                .map(|value| v2::OptionalStrRef { value }),
+            gemini_oauth_profile: self
+                .identity
+                .gemini_oauth_profile
+                .as_deref()
+                .map(|value| v2::OptionalStrRef { value }),
+            code_assist_project_id: self
+                .identity
+                .code_assist_project_id
+                .as_deref()
+                .map(|value| v2::OptionalStrRef { value }),
+        };
+        let wire = v2::ShapeEnvelopeGeminiRequestRef {
+            envelope_body: request.envelope_body.as_ref(),
+            url: request.url.as_str(),
+            headers: &headers,
+            upstream: identity_ref,
+        };
+        let input = rkyv::to_bytes::<RkyvError>(&wire).map_err(|error| {
+            cc_lb_upstream::SignerError::SigningFailed {
+                reason: format!("rkyv encode Gemini envelope request: {error}"),
+            }
+        })?;
+        let output = self
+            .dispatch
+            .call_shape_envelope_gemini_scoped(input.as_slice(), |bytes| bytes.to_vec())
+            .map_err(|error| cc_lb_upstream::SignerError::SigningFailed {
+                reason: format!("Gemini envelope hook failed: {error}"),
+            })?;
+        if output.len() as u64 > self.dispatch.wire_bounds().output_body_bytes {
+            return Err(cc_lb_upstream::SignerError::SigningFailed {
+                reason: "Gemini envelope hook output exceeds wire bounds".to_owned(),
+            });
+        }
+        let result = access_archived_scoped_or_copy::<v2::ArchivedShapeEnvelopeGeminiResponse, _>(
+            &output,
+            rkyv::deserialize::<v2::ShapeEnvelopeGeminiResponse, RkyvError>,
+        )
+        .map_err(|error| cc_lb_upstream::SignerError::SigningFailed {
+            reason: format!("rkyv decode Gemini envelope response: {error}"),
+        })?
+        .map_err(|error| cc_lb_upstream::SignerError::SigningFailed {
+            reason: format!("rkyv deserialize Gemini envelope response: {error}"),
+        })?;
+        let headers = result
+            .headers
+            .map(|headers| {
+                headers.into_vec().into_iter().try_fold(
+                    http::HeaderMap::new(),
+                    |mut map, header| {
+                        let name = http::header::HeaderName::from_bytes(header.name.as_bytes())
+                            .map_err(|_| cc_lb_upstream::SignerError::SigningFailed {
+                                reason: "Gemini envelope hook returned invalid header name"
+                                    .to_owned(),
+                            })?;
+                        let value = http::HeaderValue::from_bytes(&header.value).map_err(|_| {
+                            cc_lb_upstream::SignerError::SigningFailed {
+                                reason: "Gemini envelope hook returned invalid header value"
+                                    .to_owned(),
+                            }
+                        })?;
+                        map.append(name, value);
+                        Ok(map)
+                    },
+                )
+            })
+            .transpose()?;
+        Ok(GeminiEnvelopeResult {
+            envelope_body: result.envelope_body.map(bytes::Bytes::from),
+            headers,
+        })
+    }
+}
+
 struct WasmtimeResponseTransformHook {
     dispatch: Arc<WasmPluginWireDispatch>,
     wire_version: Option<WireVersion>,
+    identity: Option<UpstreamIdentity>,
 }
-
 impl ResponseTransformHook for WasmtimeResponseTransformHook {
     fn transform_response(
         &self,
         request: TransformResponseRequest,
     ) -> Result<TransformResponseResult, ResponseTransformError> {
-        let in_bytes = host_to_wire_transform_response(&request).map_err(|e| {
-            response_runtime_error(format!("rkyv encode TransformResponseRequest: {e}"))
-        })?;
-        let out_bytes = match self.wire_version {
-            Some(WireVersion::V1) => self.dispatch.call_transform_response(in_bytes.as_slice()),
+        let in_bytes = match self.wire_version {
+            Some(WireVersion::V1) => host_to_wire_transform_response(&request),
+            Some(WireVersion::V2) => {
+                let Some(identity) = self.identity.as_ref() else {
+                    return Err(response_runtime_error(
+                        "V2 response transform missing upstream identity".to_owned(),
+                    ));
+                };
+                host_to_wire_transform_response_v2(&request, identity)
+            }
             None => {
                 return Err(response_runtime_error(
                     "shape plugin is missing transform_response metadata".to_owned(),
                 ));
             }
         }
-        .map_err(runtime_error_to_response_transform)?;
+        .map_err(|e| {
+            response_runtime_error(format!("rkyv encode TransformResponseRequest: {e}"))
+        })?;
+        let out_bytes = self
+            .dispatch
+            .call_transform_response(in_bytes.as_slice())
+            .map_err(runtime_error_to_response_transform)?;
         reject_oversized_output(
             out_bytes.as_slice(),
             self.dispatch.wire_bounds().output_body_bytes,
@@ -159,6 +345,7 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
 struct WasmtimeSseEventTransformHook {
     dispatch: Arc<WasmPluginWireDispatch>,
     wire_version: Option<WireVersion>,
+    identity: Option<UpstreamIdentity>,
 }
 
 impl SseEventTransformHook for WasmtimeSseEventTransformHook {
@@ -166,18 +353,29 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
         &self,
         request: TransformSseEventRequest,
     ) -> Result<TransformSseEventResult, ResponseTransformError> {
-        let in_bytes = host_to_wire_transform_sse_event(&request).map_err(|e| {
-            response_runtime_error(format!("rkyv encode TransformSseEventRequest: {e}"))
-        })?;
-        let out_bytes = match self.wire_version {
-            Some(WireVersion::V1) => self.dispatch.call_transform_sse_event(in_bytes.as_slice()),
+        let in_bytes = match self.wire_version {
+            Some(WireVersion::V1) => host_to_wire_transform_sse_event(&request),
+            Some(WireVersion::V2) => {
+                let Some(identity) = self.identity.as_ref() else {
+                    return Err(response_runtime_error(
+                        "V2 SSE transform missing upstream identity".to_owned(),
+                    ));
+                };
+                host_to_wire_transform_sse_event_v2(&request, identity)
+            }
             None => {
                 return Err(response_runtime_error(
                     "shape plugin is missing transform_sse_event metadata".to_owned(),
                 ));
             }
         }
-        .map_err(runtime_error_to_response_transform)?;
+        .map_err(|e| {
+            response_runtime_error(format!("rkyv encode TransformSseEventRequest: {e}"))
+        })?;
+        let out_bytes = self
+            .dispatch
+            .call_transform_sse_event(in_bytes.as_slice())
+            .map_err(runtime_error_to_response_transform)?;
         reject_oversized_output(
             out_bytes.as_slice(),
             self.dispatch.wire_bounds().output_body_bytes,
@@ -237,6 +435,89 @@ fn with_wire_shape_request<R>(
     serialize_with_input_scratch(&request, with_bytes)
 }
 
+fn with_wire_shape_request_v2<R>(
+    context: &DialectShapeContext,
+    upstream: &Upstream,
+    principal: &Principal,
+    identity: &UpstreamIdentity,
+    cookie_redaction: bool,
+    with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
+) -> Result<R, RkyvError> {
+    let principal_kind_str = principal_kind_to_wire(principal);
+    let header_refs: Vec<v2::HeaderRef<'_>> = context
+        .downstream_headers
+        .iter()
+        .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
+        .map(|(name, value)| v2::HeaderRef {
+            name: name.as_str(),
+            value: value.as_bytes(),
+        })
+        .collect();
+    let base_url_str = upstream_base_url(upstream).map(|u| u.to_string());
+    let upstream_ref = match upstream {
+        Upstream::AnthropicDirect { .. } => v2::UpstreamRef::AnthropicDirect {
+            base_url: base_url_str
+                .as_deref()
+                .map(|value| v2::OptionalStrRef { value }),
+        },
+        Upstream::OpenaiDirect { .. } => v2::UpstreamRef::OpenaiDirect {
+            base_url: base_url_str
+                .as_deref()
+                .map(|value| v2::OptionalStrRef { value }),
+        },
+        Upstream::GeminiDirect { .. } => v2::UpstreamRef::GeminiDirect {
+            base_url: base_url_str
+                .as_deref()
+                .map(|value| v2::OptionalStrRef { value }),
+        },
+    };
+    let provider = match identity.provider {
+        cc_lb_domain::Provider::Anthropic => "anthropic",
+        cc_lb_domain::Provider::Openai => "openai",
+        cc_lb_domain::Provider::Gemini => "gemini",
+    };
+    let identity_ref = v2::UpstreamIdentityRef {
+        provider,
+        credential_kind: identity.credential_kind.as_str(),
+        upstream_id: identity.upstream_id.as_str(),
+        name: identity.name.as_str(),
+        base_url: identity
+            .base_url
+            .as_deref()
+            .map(|value| v2::OptionalStrRef { value }),
+        gemini_oauth_profile: identity
+            .gemini_oauth_profile
+            .as_deref()
+            .map(|value| v2::OptionalStrRef { value }),
+        code_assist_project_id: identity
+            .code_assist_project_id
+            .as_deref()
+            .map(|value| v2::OptionalStrRef { value }),
+    };
+    let scrubbed_query = context
+        .query
+        .as_deref()
+        .map(cc_lb_upstream::scrub_query_api_key);
+    let query_ref = scrubbed_query
+        .as_deref()
+        .map(|value| v2::OptionalStrRef { value });
+    let request = v2::ShapeRequestRef {
+        request_id: context.request_id.as_str(),
+        method: context.method.as_str(),
+        path: context.path.as_str(),
+        query: query_ref,
+        headers: &header_refs,
+        body: context.body_bytes.as_ref(),
+        principal: v2::PrincipalRef {
+            id: principal.id.as_str(),
+            kind: principal_kind_str,
+            claims: &[],
+        },
+        upstream: upstream_ref,
+        upstream_identity: identity_ref,
+    };
+    serialize_with_input_scratch(&request, with_bytes)
+}
 fn canonical_base_url(value: &str) -> url::Url {
     match url::Url::parse(value) {
         Ok(url) => url,
@@ -448,6 +729,104 @@ fn host_to_wire_transform_sse_event(
         response_status: request.response_status.as_u16(),
         response_headers: &header_refs,
         event,
+    };
+    rkyv::to_bytes::<RkyvError>(&wire)
+}
+
+fn v2_identity_ref(identity: &UpstreamIdentity) -> v2::UpstreamIdentityRef<'_> {
+    v2::UpstreamIdentityRef {
+        provider: match identity.provider {
+            cc_lb_domain::Provider::Anthropic => "anthropic",
+            cc_lb_domain::Provider::Openai => "openai",
+            cc_lb_domain::Provider::Gemini => "gemini",
+        },
+        credential_kind: identity.credential_kind.as_str(),
+        upstream_id: identity.upstream_id.as_str(),
+        name: identity.name.as_str(),
+        base_url: identity
+            .base_url
+            .as_deref()
+            .map(|value| v2::OptionalStrRef { value }),
+        gemini_oauth_profile: identity
+            .gemini_oauth_profile
+            .as_deref()
+            .map(|value| v2::OptionalStrRef { value }),
+        code_assist_project_id: identity
+            .code_assist_project_id
+            .as_deref()
+            .map(|value| v2::OptionalStrRef { value }),
+    }
+}
+
+fn v2_upstream_ref(upstream: &Upstream) -> v2::UpstreamRef<'_> {
+    match upstream {
+        Upstream::AnthropicDirect { .. } => v2::UpstreamRef::AnthropicDirect { base_url: None },
+        Upstream::OpenaiDirect { .. } => v2::UpstreamRef::OpenaiDirect { base_url: None },
+        Upstream::GeminiDirect { .. } => v2::UpstreamRef::GeminiDirect { base_url: None },
+    }
+}
+
+fn host_to_wire_transform_response_v2(
+    request: &TransformResponseRequest,
+    identity: &UpstreamIdentity,
+) -> Result<AlignedVec<16>, RkyvError> {
+    let headers = request
+        .response_headers
+        .iter()
+        .map(|(name, value)| v2::HeaderRef {
+            name: name.as_str(),
+            value: value.as_bytes(),
+        })
+        .collect::<Vec<_>>();
+    let wire = v2::TransformResponseRequestRef {
+        request_id: request.request_id.as_str(),
+        principal: v2::PrincipalRef {
+            id: request.principal.id.as_str(),
+            kind: principal_kind_to_wire(&request.principal),
+            claims: &[],
+        },
+        upstream: v2_upstream_ref(&request.upstream),
+        upstream_identity: v2_identity_ref(identity),
+        request_method: request.request_method.as_str(),
+        request_path: request.request_path.as_str(),
+        canonical_model_id: request.canonical_model_id.as_str(),
+        response_status: request.response_status.as_u16(),
+        response_headers: &headers,
+        body: request.body.as_ref(),
+    };
+    rkyv::to_bytes::<RkyvError>(&wire)
+}
+
+fn host_to_wire_transform_sse_event_v2(
+    request: &TransformSseEventRequest,
+    identity: &UpstreamIdentity,
+) -> Result<AlignedVec<16>, RkyvError> {
+    let headers = request
+        .response_headers
+        .iter()
+        .map(|(name, value)| v2::HeaderRef {
+            name: name.as_str(),
+            value: value.as_bytes(),
+        })
+        .collect::<Vec<_>>();
+    let wire = v2::TransformSseEventRequestRef {
+        request_id: request.request_id.as_str(),
+        principal: v2::PrincipalRef {
+            id: request.principal.id.as_str(),
+            kind: principal_kind_to_wire(&request.principal),
+            claims: &[],
+        },
+        upstream: v2_upstream_ref(&request.upstream),
+        upstream_identity: v2_identity_ref(identity),
+        request_method: request.request_method.as_str(),
+        request_path: request.request_path.as_str(),
+        canonical_model_id: request.canonical_model_id.as_str(),
+        response_status: request.response_status.as_u16(),
+        response_headers: &headers,
+        event: v2::SseEventRef {
+            event: request.event.event.as_str(),
+            data: request.event.data.as_ref(),
+        },
     };
     rkyv::to_bytes::<RkyvError>(&wire)
 }

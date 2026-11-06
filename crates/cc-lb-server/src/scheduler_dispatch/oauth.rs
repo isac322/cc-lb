@@ -1,8 +1,9 @@
+use bytes::Bytes;
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_clock::unix_secs;
 use cc_lb_oauth_protocol::{
-    ExistingTokenParts, is_terminal_refresh_failure, refresh_requires_reconnect,
-    refreshed_token_parts,
+    ANTIGRAVITY_OAUTH_USER_AGENT, ExistingTokenParts, GeminiOAuthProfile,
+    is_terminal_refresh_failure, refresh_requires_reconnect, refreshed_token_parts,
 };
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
@@ -31,7 +32,8 @@ use cc_lb_control::anthropic_metadata::{
 };
 
 use crate::scheduler_dispatch::http::{
-    RefreshRequestError, decrypt_bundle, fetch_usage, request_refresh, upstream_base_url,
+    RefreshRequestError, decrypt_bundle, fetch_gemini_quota, fetch_usage, gemini_summary_groups,
+    request_refresh, upstream_base_url,
 };
 use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
 use crate::scheduler_dispatch::time::now_unix_millis;
@@ -91,7 +93,9 @@ impl SchedulerDispatch {
         let response = match request_refresh(
             &self.http,
             self.oauth_cfg.as_ref(),
+            &self.config,
             upstream.kind,
+            bundle.oauth_profile,
             &self.cancel,
             &bundle.refresh_token,
         )
@@ -133,6 +137,7 @@ impl SchedulerDispatch {
             refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
             account_id,
             project_id: bundle.project_id,
+            oauth_profile: bundle.oauth_profile,
             scopes: refreshed.scopes,
             never_refresh: bundle.never_refresh,
         };
@@ -243,15 +248,23 @@ impl SchedulerDispatch {
         if !should_poll_oauth_usage(&upstream) {
             return Ok(OAuthUsagePollObservation::Skip);
         }
-        // The provider gates the `cedar_ember` coupon surface on a recognised
-        // Claude Code client, so both the usage GET and the one-time profile
-        // fetch present the same stored-version CLI user agent.
-        let user_agent = self.claude_code_user_agent().await?;
-        // The invalidation epoch is captured before the provider request is
-        // issued: a claim that lands mid-flight bumps the epoch, and the
-        // snapshot this response produces is then unservable regardless of
-        // write ordering or replica clock skew.
-        let epoch = self.cedar_ember_epoch(upstream.id).await;
+        let is_anthropic = upstream.kind == UpstreamKind::AnthropicOauth;
+        let is_antigravity = upstream.kind == UpstreamKind::GeminiOauth
+            && decrypt_bundle(&upstream, self.aead.as_ref())
+                .ok()
+                .is_some_and(|bundle| bundle.oauth_profile == GeminiOAuthProfile::Antigravity);
+        let user_agent = if is_anthropic {
+            self.claude_code_user_agent().await?
+        } else if is_antigravity {
+            ANTIGRAVITY_OAUTH_USER_AGENT.to_owned()
+        } else {
+            String::new()
+        };
+        let epoch = if is_anthropic {
+            self.cedar_ember_epoch(upstream.id).await
+        } else {
+            None
+        };
         let observed_at_unix_secs = unix_secs(self.clock.now());
         let first_response = match self
             .fetch_usage_with_current_token(&upstream, &user_agent)
@@ -298,13 +311,30 @@ impl SchedulerDispatch {
             });
         }
         let observed_at_unix_millis = now_unix_millis(&*self.clock);
-        let cedar_ember = observe_usage_body(
-            upstream.id,
-            &response.body,
-            observed_at_unix_millis,
-            &self.subscription_quota_sink,
-            self.subscription_quota_cache.as_ref(),
-        )?;
+        let cedar_ember = if is_anthropic {
+            observe_usage_body(
+                upstream.id,
+                &response.body,
+                observed_at_unix_millis,
+                &self.subscription_quota_sink,
+                self.subscription_quota_cache.as_ref(),
+            )?
+        } else {
+            let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
+            super::usage::observe_provider_usage_body(
+                super::usage::ProviderUsageContext {
+                    upstream_id: upstream.id,
+                    kind: upstream.kind,
+                    profile: bundle.oauth_profile,
+                    project_id: bundle.project_id.as_deref(),
+                },
+                &response.body,
+                observed_at_unix_millis,
+                &self.subscription_quota_sink,
+                self.subscription_quota_cache.as_ref(),
+            )?;
+            None
+        };
         if let Some(epoch) = epoch {
             let fingerprint = upstream.oauth_credential_fingerprint().unwrap_or_default();
             self.persist_cedar_ember(
@@ -534,21 +564,111 @@ impl SchedulerDispatch {
                 return FetchOutcome::Network;
             }
         };
-        match fetch_usage(
+        let summary_response = match fetch_usage(
             &self.http,
             &base_url,
+            upstream.kind,
+            bundle.oauth_profile,
             &bundle.access_token,
+            bundle.account_id.as_deref(),
+            bundle.project_id.as_deref(),
             user_agent,
             &self.cancel,
         )
         .await
         {
-            Ok(response) => FetchOutcome::Response(response),
+            Ok(response) => response,
             Err(error) => {
                 tracing::warn!(upstream_id = %upstream.id, %error, "oauth usage poll fetch failed");
-                FetchOutcome::Network
+                return FetchOutcome::Network;
+            }
+        };
+        if upstream.kind == UpstreamKind::GeminiOauth {
+            let user_agent = match bundle.oauth_profile {
+                GeminiOAuthProfile::GeminiCli => user_agent,
+                GeminiOAuthProfile::Antigravity => {
+                    cc_lb_oauth_protocol::ANTIGRAVITY_OAUTH_USER_AGENT
+                }
+            };
+            return self
+                .complete_gemini_usage(
+                    &base_url,
+                    &bundle.access_token,
+                    bundle.project_id.as_deref(),
+                    user_agent,
+                    summary_response,
+                )
+                .await;
+        }
+        FetchOutcome::Response(summary_response)
+    }
+
+    async fn complete_gemini_usage(
+        &self,
+        base_url: &url::Url,
+        access_token: &str,
+        project_id: Option<&str>,
+        user_agent: &str,
+        summary_response: crate::scheduler_dispatch::http::UsageFetchResponse,
+    ) -> FetchOutcome {
+        if summary_response.status == http::StatusCode::UNAUTHORIZED {
+            return FetchOutcome::Response(summary_response);
+        }
+        let present = if summary_response.status.is_success() {
+            gemini_summary_groups(&summary_response.body).unwrap_or((false, false))
+        } else {
+            (false, false)
+        };
+        let mut fallback = serde_json::Map::new();
+        let mut fallback_succeeded = false;
+        for (name, needed) in [("gemini", !present.0), ("third_party", !present.1)] {
+            if !needed {
+                continue;
+            }
+            match fetch_gemini_quota(
+                &self.http,
+                base_url,
+                access_token,
+                project_id,
+                user_agent,
+                &self.cancel,
+            )
+            .await
+            {
+                Ok(response) if response.status == http::StatusCode::UNAUTHORIZED => {
+                    return FetchOutcome::Response(response);
+                }
+                Ok(response) if response.status.is_success() => {
+                    if let Ok(value) = serde_json::from_slice(&response.body) {
+                        fallback.insert(name.to_owned(), value);
+                        fallback_succeeded = true;
+                    }
+                }
+                Ok(_) | Err(_) => {}
             }
         }
+        if !summary_response.status.is_success() && !fallback_succeeded {
+            return FetchOutcome::Response(summary_response);
+        }
+        let summary = if summary_response.status.is_success() {
+            serde_json::from_slice(&summary_response.body).unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        };
+        let body = match serde_json::to_vec(&serde_json::json!({
+            "summary": summary,
+            "fallback": fallback,
+        })) {
+            Ok(body) => Bytes::from(body),
+            Err(error) => {
+                tracing::warn!(%error, "Gemini quota response envelope encode failed");
+                return FetchOutcome::Network;
+            }
+        };
+        FetchOutcome::Response(crate::scheduler_dispatch::http::UsageFetchResponse {
+            status: http::StatusCode::OK,
+            body,
+        })
     }
 
     async fn ensure_fresh_usage_token(&self, upstream: &mut UpstreamRecord) -> SchedulerResult<()> {
@@ -648,8 +768,10 @@ enum FetchOutcome {
 }
 
 fn should_poll_oauth_usage(upstream: &UpstreamRecord) -> bool {
-    upstream.kind == UpstreamKind::AnthropicOauth
-        && upstream.deleted_at_unix_secs.is_none()
+    matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) && upstream.deleted_at_unix_secs.is_none()
         && upstream.oauth_credentials.is_some()
         && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
 }

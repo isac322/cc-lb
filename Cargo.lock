@@ -661,6 +661,7 @@ dependencies = [
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
+ "chrono",
  "fake-anthropic",
  "figment",
  "hex",
@@ -707,6 +708,7 @@ name = "cc-lb-aead"
 version = "2.2.1"
 dependencies = [
  "base64 0.23.1",
+ "cc-lb-oauth-protocol",
  "chacha20poly1305",
  "serde",
  "serde_json",
@@ -722,6 +724,7 @@ version = "0.1.0"
 name = "cc-lb-config"
 version = "2.2.1"
 dependencies = [
+ "cc-lb-oauth-protocol",
  "clap",
  "figment",
  "http",
@@ -841,6 +844,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
+ "multer",
  "opentelemetry",
  "opentelemetry_sdk",
  "parking_lot 0.13.0",
@@ -1217,6 +1221,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -6129,6 +6135,13 @@ dependencies = [
  "wasmprinter",
  "wasmtime-internal-component-util",
  "wasmtime-internal-core",
+]
+
+[[package]]
+name = "wasmtime-filter-openai"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-pdk-wasmtime",
 ]
 
 [[package]]

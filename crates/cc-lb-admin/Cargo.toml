@@ -56,6 +56,7 @@ reqwest.workspace = true
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
 oauth2.workspace = true
 secrecy.workspace = true
+chrono.workspace = true
 sha2.workspace = true
 semver = "1"
 tower.workspace = true

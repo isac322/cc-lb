@@ -20,6 +20,7 @@ name = "validate"
 path = "src/bin/validate.rs"
 
 [dependencies]
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 clap = { workspace = true, features = ["derive"] }
 figment = { workspace = true, features = ["env", "toml"] }
 http.workspace = true

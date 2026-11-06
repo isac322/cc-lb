@@ -1,9 +1,10 @@
-use bytes::Bytes;
+use super::usage::{GeminiQuotaGroup, classify_gemini_summary_bucket};
+use bytes::{Bytes, BytesMut};
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_oauth_protocol::{
-    TokenEndpointResponse, parse_token_endpoint_response, refresh_token_form_body,
-    refresh_token_json_body,
+    ANTIGRAVITY_OAUTH_USER_AGENT, GeminiOAuthProfile, TokenEndpointResponse,
+    parse_token_endpoint_response, refresh_token_form_body, refresh_token_json_body,
 };
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::UpstreamRecord;
@@ -32,6 +33,7 @@ const GEMINI_OAUTH_CLIENT_SECRET: &str = "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";
 /// limit-reset block together. `skip_spend` is deliberately absent so the
 /// provider keeps reporting `extra_usage`.
 const USAGE_PATH: &str = "api/oauth/usage?cedar_ember=1";
+const SCHEDULER_RESPONSE_BODY_CAP_BYTES: usize = 1 << 20;
 
 pub(super) type JsonHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -53,6 +55,19 @@ pub(super) struct UsageFetchResponse {
     pub body: Bytes,
 }
 
+struct JsonRequest<'a> {
+    url: Url,
+    method: http::Method,
+    body: Bytes,
+    content_type: &'a str,
+    access_token: &'a str,
+    account_id: Option<&'a str>,
+    codex: bool,
+    user_agent: &'a str,
+    anthropic: bool,
+    cancel: &'a CancellationToken,
+}
+
 #[derive(thiserror::Error)]
 pub(super) enum RefreshRequestError {
     #[error("oauth token endpoint returned {status}")]
@@ -72,11 +87,48 @@ impl std::fmt::Debug for RefreshRequestError {
         }
     }
 }
+async fn read_bounded_response_body<B>(
+    body: B,
+    cancel: &CancellationToken,
+    timeout_message: &'static str,
+) -> SchedulerResult<Bytes>
+where
+    B: BodyExt + Unpin,
+    B::Data: AsRef<[u8]>,
+    B::Error: std::fmt::Display,
+{
+    let collect = async move {
+        let mut output = BytesMut::new();
+        let mut body = body;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|error| SchedulerError::Job(error.to_string()))?;
+            let Ok(data) = frame.into_data() else {
+                continue;
+            };
+            let data = data.as_ref();
+            if output.len().saturating_add(data.len()) > SCHEDULER_RESPONSE_BODY_CAP_BYTES {
+                return Err(SchedulerError::Job(
+                    "scheduler response body exceeded the configured cap".to_owned(),
+                ));
+            }
+            output.extend_from_slice(data);
+        }
+        Ok(output.freeze())
+    };
+    tokio::select! {
+        _ = cancel.cancelled() => Err(SchedulerError::Job("scheduler response body cancelled".to_owned())),
+        result = tokio::time::timeout(Duration::from_secs(30), collect) => {
+            result.map_err(|_| SchedulerError::Job(timeout_message.to_owned()))?
+        }
+    }
+}
 
 pub(super) async fn request_refresh(
     http: &JsonHttpClient,
     oauth_cfg: &AnthropicOAuthConfig,
+    google_config: &cc_lb_config::Config,
     oauth_kind: cc_lb_storage_api::upstream::UpstreamKind,
+    oauth_profile: cc_lb_oauth_protocol::GeminiOAuthProfile,
     cancel: &CancellationToken,
     refresh_token: &str,
 ) -> Result<TokenEndpointResponse, RefreshRequestError> {
@@ -90,6 +142,7 @@ pub(super) async fn request_refresh(
         )
         .into());
     }
+    let antigravity = google_config.oauth.antigravity.clone().unwrap_or_default();
     let (token_url, content_type, body) = match oauth_kind {
         cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth => (
             oauth_cfg.token_url.as_str(),
@@ -101,11 +154,37 @@ pub(super) async fn request_refresh(
             "application/json",
             refresh_token_json_body(OPENAI_CODEX_CLIENT_ID, refresh_token),
         ),
-        cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth => (
-            GEMINI_OAUTH_TOKEN_URL,
-            "application/x-www-form-urlencoded",
-            gemini_refresh_token_form_body(refresh_token),
-        ),
+        cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth => {
+            let (client_id, client_secret, token_url) = match oauth_profile {
+                cc_lb_oauth_protocol::GeminiOAuthProfile::Antigravity => {
+                    if antigravity.missing_client_credentials().is_some() {
+                        return Err(SchedulerError::Job(
+                            "oauth_client_not_configured: configure oauth.antigravity.client_id and oauth.antigravity.client_secret before refreshing Antigravity credentials".to_owned(),
+                        )
+                        .into());
+                    }
+                    (
+                        antigravity.client_id.as_str(),
+                        antigravity.client_secret.as_str(),
+                        antigravity.token_url.as_str(),
+                    )
+                }
+                cc_lb_oauth_protocol::GeminiOAuthProfile::GeminiCli => (
+                    GEMINI_OAUTH_CLIENT_ID,
+                    GEMINI_OAUTH_CLIENT_SECRET,
+                    GEMINI_OAUTH_TOKEN_URL,
+                ),
+            };
+            (
+                token_url,
+                "application/x-www-form-urlencoded",
+                cc_lb_oauth_protocol::gemini_refresh_token_form_body(
+                    client_id,
+                    client_secret,
+                    refresh_token,
+                ),
+            )
+        }
         _ => {
             return Err(SchedulerError::Job("unsupported oauth upstream kind".to_owned()).into());
         }
@@ -124,53 +203,156 @@ pub(super) async fn request_refresh(
     let status = response.status();
     if !status.is_success() {
         let body = if status == StatusCode::BAD_REQUEST {
-            tokio::select! {
-                _ = cancel.cancelled() => return Err(SchedulerError::Job("oauth refresh cancelled".to_owned()).into()),
-                body = tokio::time::timeout(Duration::from_secs(30), response.into_body().collect()) => body,
-            }
-            .map_err(|_| SchedulerError::Job("oauth refresh response body timed out".to_owned()))?
-            .map_err(|error| SchedulerError::Job(error.to_string()))?
-            .to_bytes()
+            read_bounded_response_body(
+                response.into_body(),
+                cancel,
+                "oauth refresh response body timed out",
+            )
+            .await?
         } else {
             Bytes::new()
         };
         return Err(RefreshRequestError::Endpoint { status, body });
     }
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .map_err(|error| SchedulerError::Job(error.to_string()))?
-        .to_bytes();
+    let body = read_bounded_response_body(
+        response.into_body(),
+        cancel,
+        "oauth refresh response body timed out",
+    )
+    .await?;
     parse_token_endpoint_response(&body)
         .map_err(|error| SchedulerError::Job(error.to_string()).into())
 }
-fn gemini_refresh_token_form_body(refresh_token: &str) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("grant_type", "refresh_token");
-    serializer.append_pair("client_id", GEMINI_OAUTH_CLIENT_ID);
-    serializer.append_pair("client_secret", GEMINI_OAUTH_CLIENT_SECRET);
-    serializer.append_pair("refresh_token", refresh_token);
-    serializer.finish()
-}
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn fetch_usage(
     http: &JsonHttpClient,
     base_url: &Url,
+    kind: cc_lb_storage_api::upstream::UpstreamKind,
+    profile: GeminiOAuthProfile,
     access_token: &str,
+    account_id: Option<&str>,
+    project_id: Option<&str>,
     user_agent: &str,
     cancel: &CancellationToken,
 ) -> SchedulerResult<UsageFetchResponse> {
-    let url = base_url
-        .join(USAGE_PATH)
-        .map_err(|error| SchedulerError::Job(format!("invalid usage base URL: {error}")))?;
-    let request = Request::get(url.as_str())
-        .header("Authorization", format!("Bearer {access_token}"))
-        .header("User-Agent", user_agent)
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .header("Accept", "application/json")
-        .body(Full::new(Bytes::new()))
-        .map_err(|error| SchedulerError::Job(error.to_string()))?;
+    fetch_json_request(
+        http,
+        usage_request(
+            base_url,
+            kind,
+            profile,
+            access_token,
+            account_id,
+            project_id,
+            user_agent,
+            cancel,
+        )?,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn usage_request<'a>(
+    base_url: &Url,
+    kind: cc_lb_storage_api::upstream::UpstreamKind,
+    profile: GeminiOAuthProfile,
+    access_token: &'a str,
+    account_id: Option<&'a str>,
+    project_id: Option<&str>,
+    user_agent: &'a str,
+    cancel: &'a CancellationToken,
+) -> SchedulerResult<JsonRequest<'a>> {
+    let (url, method, body, content_type) = match kind {
+        cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth => (
+            base_url
+                .join(USAGE_PATH)
+                .map_err(|error| SchedulerError::Job(format!("invalid usage base URL: {error}")))?,
+            http::Method::GET,
+            Bytes::new(),
+            "application/json",
+        ),
+        cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth => (
+            codex_usage_url(base_url),
+            http::Method::GET,
+            Bytes::new(),
+            "application/json",
+        ),
+        cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth => {
+            let project = project_id.unwrap_or_default();
+            let body = serde_json::to_vec(&serde_json::json!({ "project": project })).map_err(
+                |error| SchedulerError::Job(format!("Gemini quota body encode failed: {error}")),
+            )?;
+            let url = gemini_summary_url(base_url)?;
+            (
+                url,
+                http::Method::POST,
+                Bytes::from(body),
+                "application/json",
+            )
+        }
+        _ => {
+            return Err(SchedulerError::Job(
+                "unsupported usage poll kind".to_owned(),
+            ));
+        }
+    };
+    Ok(JsonRequest {
+        url,
+        method,
+        body,
+        content_type,
+        access_token,
+        account_id,
+        codex: kind == cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth,
+        user_agent: if kind == cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth
+            && profile == GeminiOAuthProfile::Antigravity
+        {
+            ANTIGRAVITY_OAUTH_USER_AGENT
+        } else {
+            user_agent
+        },
+        anthropic: kind == cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth,
+        cancel,
+    })
+}
+
+pub(super) async fn fetch_gemini_quota(
+    http: &JsonHttpClient,
+    base_url: &Url,
+    access_token: &str,
+    project_id: Option<&str>,
+    user_agent: &str,
+    cancel: &CancellationToken,
+) -> SchedulerResult<UsageFetchResponse> {
+    let project = project_id.unwrap_or_default();
+    let body = serde_json::to_vec(&serde_json::json!({ "project": project })).map_err(|error| {
+        SchedulerError::Job(format!("Gemini quota body encode failed: {error}"))
+    })?;
+    fetch_json_request(
+        http,
+        JsonRequest {
+            url: gemini_quota_url(base_url)?,
+            method: http::Method::POST,
+            body: Bytes::from(body),
+            content_type: "application/json",
+            access_token,
+            account_id: None,
+            codex: false,
+            user_agent,
+            anthropic: false,
+            cancel,
+        },
+    )
+    .await
+}
+
+async fn fetch_json_request(
+    http: &JsonHttpClient,
+    request: JsonRequest<'_>,
+) -> SchedulerResult<UsageFetchResponse> {
+    let cancel = request.cancel;
+    let request = build_json_request(request)?;
     let response = tokio::select! {
         _ = cancel.cancelled() => return Err(SchedulerError::Job("oauth usage poll cancelled".to_owned())),
         response = tokio::time::timeout(Duration::from_secs(30), http.request(request)) => response,
@@ -178,13 +360,138 @@ pub(super) async fn fetch_usage(
     .map_err(|_| SchedulerError::Job("oauth usage request timed out".to_owned()))?
     .map_err(|error| SchedulerError::Job(error.to_string()))?;
     let status = response.status();
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .map_err(|error| SchedulerError::Job(error.to_string()))?
-        .to_bytes();
+    let body = read_bounded_response_body(
+        response.into_body(),
+        cancel,
+        "oauth usage response body timed out",
+    )
+    .await?;
     Ok(UsageFetchResponse { status, body })
+}
+
+fn build_json_request(request: JsonRequest<'_>) -> SchedulerResult<Request<Full<Bytes>>> {
+    let JsonRequest {
+        url,
+        method,
+        body,
+        content_type,
+        access_token,
+        account_id,
+        codex,
+        user_agent,
+        anthropic,
+        cancel: _,
+    } = request;
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(url.as_str())
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", if codex { "codex-cli" } else { user_agent })
+        .header("Accept", "application/json")
+        .header(http::header::CONTENT_TYPE, content_type);
+    if codex {
+        // https://github.com/openai/codex/blob/main/codex-rs/login/src/auth/default_client.rs
+        // https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client.rs
+        // Use the backend client's User-Agent fallback and the default Codex originator.
+        builder = builder.header("originator", "codex_cli_rs");
+        if let Some(account_id) = account_id {
+            builder = builder.header("ChatGPT-Account-Id", account_id);
+        }
+    }
+    if anthropic {
+        builder = builder.header("anthropic-beta", "oauth-2025-04-20");
+    }
+    builder
+        .body(Full::new(body))
+        .map_err(|error| SchedulerError::Job(error.to_string()))
+}
+
+fn codex_usage_url(base_url: &Url) -> Url {
+    // https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client.rs
+    // PathStyle selects ChatGptApi for /backend-api; rate_limit_resets.rs appends
+    // /wham/usage. The configured proxy base ends in /codex, not the backend base.
+    // https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets.rs
+    let mut url = base_url.clone();
+    let base_path = base_url.path().trim_end_matches('/');
+    let backend_path = base_path.strip_suffix("/codex").unwrap_or(base_path);
+    let path = if backend_path.contains("/backend-api") {
+        format!("{backend_path}/wham/usage")
+    } else if matches!(url.host_str(), Some("chatgpt.com" | "chat.openai.com")) {
+        format!("{backend_path}/backend-api/wham/usage")
+    } else {
+        format!("{base_path}/api/codex/usage")
+    };
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    url
+}
+
+pub(super) fn gemini_summary_groups(body: &[u8]) -> Option<(bool, bool)> {
+    let value: serde_json::Value = sonic_rs::from_slice(body).ok()?;
+    let groups = value.get("groups")?.as_array()?;
+    let mut gemini = false;
+    let mut third_party = false;
+    for group in groups {
+        let display_name = group
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let Some(buckets) = group.get("buckets").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let usable = |bucket: &serde_json::Value| {
+            !bucket
+                .get("disabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                && bucket
+                    .get("remainingFraction")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|value| value.is_finite())
+                && bucket
+                    .get("resetTime")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .is_some()
+        };
+        for bucket in buckets {
+            if !usable(bucket) {
+                continue;
+            }
+            match classify_gemini_summary_bucket(&display_name, bucket) {
+                GeminiQuotaGroup::Gemini => gemini = true,
+                GeminiQuotaGroup::ThirdParty => third_party = true,
+                GeminiQuotaGroup::Unknown => {}
+            }
+        }
+    }
+    Some((gemini, third_party))
+}
+
+fn gemini_summary_url(base_url: &Url) -> SchedulerResult<Url> {
+    let base_path = base_url.path().trim_end_matches('/');
+    let path = if base_path.is_empty() {
+        "/v1internal:retrieveUserQuotaSummary".to_owned()
+    } else {
+        format!("{base_path}:retrieveUserQuotaSummary")
+    };
+    let mut url = base_url.clone();
+    url.set_path(&path);
+    Ok(url)
+}
+
+fn gemini_quota_url(base_url: &Url) -> SchedulerResult<Url> {
+    let base_path = base_url.path().trim_end_matches('/');
+    let path = if base_path.is_empty() {
+        "/v1internal:retrieveUserQuota".to_owned()
+    } else {
+        format!("{base_path}:retrieveUserQuota")
+    };
+    let mut url = base_url.clone();
+    url.set_path(&path);
+    Ok(url)
 }
 
 pub(super) fn decrypt_bundle(
@@ -224,4 +531,212 @@ pub(super) fn json_http_client() -> JsonHttpClient {
         .enable_http2()
         .build();
     Client::builder(TokioExecutor::new()).build(connector)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SCHEDULER_RESPONSE_BODY_CAP_BYTES, gemini_quota_url, gemini_summary_groups,
+        gemini_summary_url,
+    };
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use url::Url;
+    #[test]
+    fn codex_usage_request_matches_backend_path_and_account_headers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{JsonRequest, build_json_request, codex_usage_url};
+        use bytes::Bytes;
+        use tokio_util::sync::CancellationToken;
+
+        let cancel = CancellationToken::new();
+        let base = Url::parse("https://chatgpt.com/backend-api/codex")?;
+        let request = build_json_request(JsonRequest {
+            url: codex_usage_url(&base),
+            method: http::Method::GET,
+            body: Bytes::new(),
+            content_type: "application/json",
+            access_token: "test-access",
+            account_id: Some("team-account"),
+            codex: true,
+            user_agent: "claude-code/test",
+            anthropic: false,
+            cancel: &cancel,
+        })?;
+        assert_eq!(
+            request.uri().to_string(),
+            "https://chatgpt.com/backend-api/wham/usage"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-access")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("chatgpt-account-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("team-account")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok()),
+            Some("codex-cli")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("originator")
+                .and_then(|value| value.to_str().ok()),
+            Some("codex_cli_rs")
+        );
+        assert!(!request.headers().contains_key("anthropic-beta"));
+        assert_eq!(
+            codex_usage_url(&Url::parse("https://codex.example/custom")?).as_str(),
+            "https://codex.example/custom/api/codex/usage"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codex_usage_url_normalizes_chatgpt_backend_variants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for base in [
+            "https://chatgpt.com",
+            "https://chatgpt.com/backend-api",
+            "https://chatgpt.com/backend-api/",
+            "https://chatgpt.com/backend-api/codex/",
+        ] {
+            assert_eq!(
+                super::codex_usage_url(&Url::parse(base)?).as_str(),
+                "https://chatgpt.com/backend-api/wham/usage"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn anthropic_usage_request_keeps_provider_headers() -> Result<(), Box<dyn std::error::Error>> {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let request = super::build_json_request(super::JsonRequest {
+            url: Url::parse("https://api.anthropic.com/api/oauth/usage?cedar_ember=1")?,
+            method: http::Method::GET,
+            body: bytes::Bytes::new(),
+            content_type: "application/json",
+            access_token: "test-access",
+            account_id: None,
+            codex: false,
+            user_agent: "claude-code/test",
+            anthropic: true,
+            cancel: &cancel,
+        })?;
+        assert_eq!(
+            request
+                .headers()
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some("oauth-2025-04-20")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok()),
+            Some("claude-code/test")
+        );
+        assert!(!request.headers().contains_key("originator"));
+        assert!(!request.headers().contains_key("chatgpt-account-id"));
+        Ok(())
+    }
+
+    #[test]
+    fn gemini_quota_url_handles_root_custom_base() {
+        let base = Url::parse("http://127.0.0.1:18181").unwrap();
+        assert_eq!(
+            gemini_quota_url(&base).unwrap().as_str(),
+            "http://127.0.0.1:18181/v1internal:retrieveUserQuota"
+        );
+    }
+
+    #[test]
+    fn gemini_quota_url_preserves_cloud_code_path() {
+        let base = Url::parse("https://cloudcode-pa.googleapis.com/v1internal").unwrap();
+        assert_eq!(
+            gemini_quota_url(&base).unwrap().as_str(),
+            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+        );
+    }
+
+    #[test]
+    fn gemini_summary_url_preserves_cloud_code_path() {
+        let base = Url::parse("https://cloudcode-pa.googleapis.com/v1internal").unwrap();
+        assert_eq!(
+            gemini_summary_url(&base).unwrap().as_str(),
+            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+        );
+    }
+
+    #[test]
+    fn antigravity_usage_request_uses_daily_quota_summary() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let base = Url::parse("https://daily-cloudcode-pa.googleapis.com")?;
+        let request = super::build_json_request(super::usage_request(
+            &base,
+            cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth,
+            super::GeminiOAuthProfile::Antigravity,
+            "test-access",
+            None,
+            Some("test-project"),
+            "gemini-cli/test",
+            &cancel,
+        )?)?;
+        assert_eq!(
+            request.uri().to_string(),
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+        );
+        assert_eq!(request.method(), http::Method::POST);
+        assert_eq!(
+            request
+                .headers()
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok()),
+            Some(super::ANTIGRAVITY_OAUTH_USER_AGENT)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gemini_summary_groups_detects_only_usable_provider_groups() {
+        let body = br#"{"groups":[{"displayName":"Gemini models","buckets":[{"bucketId":"gemini-5h","remainingFraction":0.7,"resetTime":"2026-11-01T13:00:00Z"}]},{"displayName":"Claude and GPT-OSS models","buckets":[{"bucketId":"3p-weekly","remainingFraction":0.4,"resetTime":"2026-11-07T15:00:00Z"}]}]}"#;
+        assert_eq!(gemini_summary_groups(body), Some((true, true)));
+    }
+
+    #[test]
+    fn gemini_summary_groups_does_not_relabel_third_party_bucket_by_group_name() {
+        let body = br#"{"groups":[{"displayName":"Gemini models","buckets":[{"bucketId":"3p-5h","remainingFraction":0.7,"resetTime":"2026-11-01T13:00:00Z"}]}]}"#;
+        assert_eq!(gemini_summary_groups(body), Some((false, true)));
+    }
+
+    #[tokio::test]
+    async fn scheduler_body_collector_rejects_oversized_responses() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let body = Full::new(Bytes::from(vec![
+            b'x';
+            SCHEDULER_RESPONSE_BODY_CAP_BYTES + 1
+        ]));
+        let error = super::read_bounded_response_body(body, &cancel, "scheduler body timed out")
+            .await
+            .expect_err("oversized scheduler body must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("scheduler response body exceeded")
+        );
+    }
 }

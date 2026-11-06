@@ -198,6 +198,9 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
                 r#"(func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)"#
                     .to_owned()
             }
+            HookKind::ShapeEnvelopeGemini => {
+                unreachable!("Gemini envelope hooks require a wire-v2 fixture")
+            }
         })
         .collect::<String>();
     let wat = format!(
@@ -219,6 +222,9 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
             HookKind::Shape => <ShapeRequest as WireSchema>::FINGERPRINT,
             HookKind::TransformResponse => <TransformResponseRequest as WireSchema>::FINGERPRINT,
             HookKind::TransformSseEvent => <TransformSseEventRequest as WireSchema>::FINGERPRINT,
+            HookKind::ShapeEnvelopeGemini => {
+                unreachable!("Gemini envelope hooks require a wire-v2 fixture")
+            }
         };
         append_custom_section(
             &mut wasm,

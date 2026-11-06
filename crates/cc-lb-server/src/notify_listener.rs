@@ -31,6 +31,7 @@ pub struct NotifyListener {
     prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
     clock: ClockHandle,
+    antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
 }
 
 pub struct NotifyListenerParams {
@@ -47,6 +48,7 @@ pub struct NotifyListenerParams {
     pub prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub clock: ClockHandle,
+    pub antigravity_config: Option<cc_lb_config::AntigravityOAuthConfig>,
 }
 
 impl NotifyListener {
@@ -65,6 +67,7 @@ impl NotifyListener {
             prompt_cache_observation_sink: params.prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs: params
                 .subscription_quota_routing_max_staleness_secs,
+            antigravity_config: params.antigravity_config,
             clock: params.clock,
         }
     }
@@ -141,6 +144,7 @@ impl NotifyListener {
         let started = Instant::now();
         match dynamic_view_builder::build_dynamic_view(
             &self.stores,
+            self.antigravity_config.as_ref(),
             self.aead.clone(),
             self.lazy_refresher.clone(),
             current_generation,

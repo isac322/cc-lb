@@ -1,3 +1,6 @@
+#[path = "realtime_websocket_lifecycle.rs"]
+mod realtime_websocket_lifecycle;
+
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fmt::Write as _;
@@ -42,7 +45,7 @@ use cc_lb_upstream::{
     TransformResponseRequest, UpstreamDialect, UpstreamError, shape_request, sign_request,
 };
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
-use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use http_body::Body as _;
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
@@ -84,10 +87,11 @@ use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
 use crate::request_classification::classify_client_request_kind_with_class;
-use crate::request_context::RequestContext;
+use crate::request_context::{ProviderScope, RequestContext};
 use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
 use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
+    WebSocketPluginRequest,
 };
 use crate::sse_error_frame::{make_error_frame, make_provider_error_frame};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
@@ -101,7 +105,9 @@ use crate::upstream_affinity::{
     extract_response_affinity_keys_from_sse_event, request_observes_response_affinity,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
-use crate::usage_parser::{self, UsageCounts, accumulate_sse_usage, parse_sse_event};
+#[cfg(test)]
+use crate::usage_parser::accumulate_sse_usage;
+use crate::usage_parser::{self, UsageCounts, parse_sse_event};
 use cc_lb_clock::{Clock, ClockHandle, unix_millis, unix_secs};
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
@@ -462,20 +468,87 @@ pub enum RequestKind {
     OpenaiResponses,
     GeminiGenerateContent,
     GeminiCountTokens,
+    AnthropicModels,
+    AnthropicComplete,
+    OpenaiResponsesInputTokens,
+    OpenaiResponsesCompact,
+    OpenaiChatCompletions,
+    OpenaiCompletions,
+    OpenaiEmbeddings,
+    OpenaiModerations,
+    OpenaiAudio,
+    OpenaiImages,
+    OpenaiModels,
+    OpenaiCodexAuxiliary,
+    GeminiEmbedContent,
+    GeminiPredict,
+    GeminiModels,
+    GeminiOpenaiChatCompletions,
+    GeminiOpenaiEmbeddings,
+    GeminiOpenaiImages,
+    GeminiOpenaiModels,
+    OpenaiImageVariations,
 }
 
 impl RequestKind {
     fn matches_upstream(self, kind: StorageUpstreamKind) -> bool {
-        let (protocol, _) = ids_for(kind);
-        matches!(
-            (self, protocol),
-            (Self::AnthropicMessages, ProtocolId::AnthropicMessages)
-                | (Self::OpenaiResponses, ProtocolId::OpenaiResponses)
-                | (
-                    Self::GeminiGenerateContent | Self::GeminiCountTokens,
-                    ProtocolId::GeminiGenerateContent
-                )
-        )
+        use StorageUpstreamKind as K;
+        if self.provider()
+            != match kind {
+                K::AnthropicApiKey | K::AnthropicOauth => cc_lb_domain::Provider::Anthropic,
+                K::OpenaiApiKey | K::OpenaiOauth => cc_lb_domain::Provider::Openai,
+                K::GeminiApiKey | K::GeminiOauth => cc_lb_domain::Provider::Gemini,
+            }
+        {
+            return false;
+        }
+        match kind {
+            K::AnthropicApiKey | K::GeminiApiKey => true,
+            K::OpenaiApiKey => self != Self::OpenaiCodexAuxiliary,
+            K::AnthropicOauth => matches!(self, Self::AnthropicMessages | Self::AnthropicModels),
+            K::OpenaiOauth => matches!(
+                self,
+                Self::OpenaiResponses
+                    | Self::OpenaiResponsesCompact
+                    | Self::OpenaiImages
+                    | Self::OpenaiModels
+                    | Self::OpenaiCodexAuxiliary
+            ),
+            K::GeminiOauth => matches!(self, Self::GeminiGenerateContent | Self::GeminiCountTokens),
+        }
+    }
+
+    fn capability(self) -> ProviderCapability {
+        match self {
+            Self::AnthropicMessages => ProviderCapability::AnthropicMessages,
+            Self::OpenaiResponses => ProviderCapability::OpenaiResponses,
+            Self::GeminiGenerateContent => ProviderCapability::GeminiGenerateContent,
+            Self::GeminiCountTokens => ProviderCapability::GeminiCountTokens,
+            Self::AnthropicModels => ProviderCapability::AnthropicModels,
+            Self::AnthropicComplete => ProviderCapability::AnthropicComplete,
+            Self::OpenaiResponsesInputTokens => ProviderCapability::OpenaiResponsesInputTokens,
+            Self::OpenaiResponsesCompact => ProviderCapability::OpenaiResponsesCompact,
+            Self::OpenaiChatCompletions => ProviderCapability::OpenaiChatCompletions,
+            Self::OpenaiCompletions => ProviderCapability::OpenaiCompletions,
+            Self::OpenaiEmbeddings => ProviderCapability::OpenaiEmbeddings,
+            Self::OpenaiModerations => ProviderCapability::OpenaiModerations,
+            Self::OpenaiAudio => ProviderCapability::OpenaiAudio,
+            Self::OpenaiImages => ProviderCapability::OpenaiImages,
+            Self::OpenaiModels => ProviderCapability::OpenaiModels,
+            Self::OpenaiCodexAuxiliary => ProviderCapability::OpenaiCodexAuxiliary,
+            Self::GeminiEmbedContent => ProviderCapability::GeminiEmbedContent,
+            Self::GeminiPredict => ProviderCapability::GeminiPredict,
+            Self::GeminiModels => ProviderCapability::GeminiModels,
+            Self::GeminiOpenaiChatCompletions => ProviderCapability::GeminiOpenaiChatCompletions,
+            Self::GeminiOpenaiEmbeddings => ProviderCapability::GeminiOpenaiEmbeddings,
+            Self::GeminiOpenaiImages => ProviderCapability::GeminiOpenaiImages,
+            Self::GeminiOpenaiModels => ProviderCapability::GeminiOpenaiModels,
+            Self::OpenaiImageVariations => ProviderCapability::OpenaiImages,
+        }
+    }
+
+    fn provider(self) -> cc_lb_domain::Provider {
+        self.capability().provider()
     }
 }
 
@@ -486,44 +559,44 @@ impl From<ProviderCapability> for RequestKind {
             ProviderCapability::OpenaiResponses => Self::OpenaiResponses,
             ProviderCapability::GeminiGenerateContent => Self::GeminiGenerateContent,
             ProviderCapability::GeminiCountTokens => Self::GeminiCountTokens,
+            ProviderCapability::AnthropicModels => Self::AnthropicModels,
+            ProviderCapability::AnthropicComplete => Self::AnthropicComplete,
+            ProviderCapability::OpenaiResponsesInputTokens => Self::OpenaiResponsesInputTokens,
+            ProviderCapability::OpenaiResponsesCompact => Self::OpenaiResponsesCompact,
+            ProviderCapability::OpenaiChatCompletions => Self::OpenaiChatCompletions,
+            ProviderCapability::OpenaiCompletions => Self::OpenaiCompletions,
+            ProviderCapability::OpenaiEmbeddings => Self::OpenaiEmbeddings,
+            ProviderCapability::OpenaiModerations => Self::OpenaiModerations,
+            ProviderCapability::OpenaiAudio => Self::OpenaiAudio,
+            ProviderCapability::OpenaiImages => Self::OpenaiImages,
+            ProviderCapability::OpenaiModels => Self::OpenaiModels,
+            ProviderCapability::OpenaiCodexAuxiliary => Self::OpenaiCodexAuxiliary,
+            ProviderCapability::GeminiEmbedContent => Self::GeminiEmbedContent,
+            ProviderCapability::GeminiPredict => Self::GeminiPredict,
+            ProviderCapability::GeminiModels => Self::GeminiModels,
+            ProviderCapability::GeminiOpenaiChatCompletions => Self::GeminiOpenaiChatCompletions,
+            ProviderCapability::GeminiOpenaiEmbeddings => Self::GeminiOpenaiEmbeddings,
+            ProviderCapability::GeminiOpenaiImages => Self::GeminiOpenaiImages,
+            ProviderCapability::GeminiOpenaiModels => Self::GeminiOpenaiModels,
         }
     }
 }
 
 fn gemini_model_from_path(path: &str) -> Option<String> {
-    let prefix = "/v1beta/models/";
-    let model_path = path.strip_prefix(prefix)?;
-    let model = model_path
-        .strip_suffix(":generateContent")
-        .or_else(|| model_path.strip_suffix(":streamGenerateContent"))
-        .or_else(|| model_path.strip_suffix(":countTokens"))?;
-    (!model.is_empty()).then(|| model.to_owned())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProtocolId {
-    AnthropicMessages,
-    OpenaiResponses,
-    GeminiGenerateContent,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TransportId {
-    Http,
-}
-
-fn ids_for(kind: StorageUpstreamKind) -> (ProtocolId, TransportId) {
-    match kind {
-        StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
-            (ProtocolId::AnthropicMessages, TransportId::Http)
-        }
-        StorageUpstreamKind::OpenaiApiKey | StorageUpstreamKind::OpenaiOauth => {
-            (ProtocolId::OpenaiResponses, TransportId::Http)
-        }
-        StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::GeminiOauth => {
-            (ProtocolId::GeminiGenerateContent, TransportId::Http)
-        }
-    }
+    let model_path = path
+        .strip_prefix("/v1beta/models/")
+        .or_else(|| path.strip_prefix("/v1/models/"))?;
+    let (model, action) = model_path.rsplit_once(':')?;
+    (matches!(
+        action,
+        "generateContent"
+            | "streamGenerateContent"
+            | "countTokens"
+            | "embedContent"
+            | "batchEmbedContents"
+            | "predict"
+    ) && !model.is_empty())
+    .then(|| model.to_owned())
 }
 
 #[derive(Debug, Clone)]
@@ -2446,8 +2519,8 @@ fn sse_event_completes_response(
     event: &usage_parser::ParsedSseEvent<'_>,
     _anthropic_message_stop: bool,
 ) -> bool {
-    match capability {
-        ProviderCapability::AnthropicMessages => {
+    match capability.usage_shape() {
+        crate::provider_capability::UsageShape::AnthropicMessages => {
             event
                 .value()
                 .ok()
@@ -2456,7 +2529,7 @@ fn sse_event_completes_response(
                 .and_then(serde_json::Value::as_str)
                 == Some("message_stop")
         }
-        ProviderCapability::OpenaiResponses => {
+        crate::provider_capability::UsageShape::OpenaiResponses => {
             event
                 .value()
                 .ok()
@@ -2470,7 +2543,14 @@ fn sse_event_completes_response(
                     .and_then(serde_json::Value::as_str)
                     == Some("response.completed")
         }
-        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => false,
+        crate::provider_capability::UsageShape::OpenaiChatCompletions
+        | crate::provider_capability::UsageShape::OpenaiCompletions => {
+            event.is_done() || event.has_finished_choices()
+        }
+        crate::provider_capability::UsageShape::GeminiGenerateContent
+        | crate::provider_capability::UsageShape::GeminiEmbed
+        | crate::provider_capability::UsageShape::OpenaiEmbeddings
+        | crate::provider_capability::UsageShape::None => false,
     }
 }
 
@@ -2490,10 +2570,15 @@ fn transformed_sse_completes_response(capability: ProviderCapability, mut bytes:
 /// JSON `type` of the provider's terminal success SSE event, used by the #663
 /// accept-with-warning path. Gemini streams have no terminal event.
 const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<&'static str> {
-    match capability {
-        ProviderCapability::AnthropicMessages => Some("message_stop"),
-        ProviderCapability::OpenaiResponses => Some("response.completed"),
-        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => None,
+    match capability.usage_shape() {
+        crate::provider_capability::UsageShape::AnthropicMessages => Some("message_stop"),
+        crate::provider_capability::UsageShape::OpenaiResponses => Some("response.completed"),
+        crate::provider_capability::UsageShape::OpenaiChatCompletions
+        | crate::provider_capability::UsageShape::OpenaiCompletions
+        | crate::provider_capability::UsageShape::OpenaiEmbeddings
+        | crate::provider_capability::UsageShape::GeminiGenerateContent
+        | crate::provider_capability::UsageShape::GeminiEmbed
+        | crate::provider_capability::UsageShape::None => None,
     }
 }
 
@@ -2505,11 +2590,14 @@ fn observe_sse_terminal_event(
     message_stop_at: &mut Option<Instant>,
     now: impl FnOnce() -> Instant,
 ) {
-    // OpenAI Responses identifies terminal events by event name even when
-    // the payload omits its redundant `type`; Anthropic keeps JSON-type-only
-    // semantics so a named `message_stop` cannot complete malformed data.
-    let event_name_terminal = capability == ProviderCapability::OpenaiResponses
-        && event.event_name() == Some(b"response.completed")
+    // OpenAI Responses providers identify terminal events in the SSE event
+    // name even when the JSON payload omits its redundant `type` field.
+    // Anthropic keeps the stricter JSON-type-only rule so a named
+    // `message_stop` event cannot turn malformed payloads into completion.
+    let event_name_terminal = matches!(
+        capability.usage_shape(),
+        crate::provider_capability::UsageShape::OpenaiResponses
+    ) && event.event_name() == Some(b"response.completed")
         && event.value().ok().flatten().is_some();
     let semantic_event_type = event
         .value()
@@ -2827,7 +2915,7 @@ impl Lifecycle {
         )
         .0;
         let pipeline_result = execute_filter_pipeline(
-            &resolved_pipeline.user_filters,
+            resolved_pipeline.filters_for(cc_lb_domain::Provider::Anthropic),
             &ctx,
             &principal,
             candidates,
@@ -3195,7 +3283,11 @@ impl Lifecycle {
                     || {
                         body_view.limit_request(
                             &ctx.canonical_model_id,
-                            classify_provider_capability(&ctx.method, &ctx.path),
+                            classify_provider_capability(
+                                &ctx.method,
+                                &ctx.path,
+                                ctx.provider_scope,
+                            ),
                             &routed.cache_bundle.cache_breakpoints,
                         )
                     },
@@ -3267,6 +3359,7 @@ impl Lifecycle {
                 model,
                 store: body.get("store").and_then(Value::as_bool).unwrap_or(true),
                 span: span.clone(),
+                request_id: request_id.to_owned(),
             })
         }
         .instrument(span.clone())
@@ -3454,8 +3547,12 @@ impl Lifecycle {
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
-        let mut result =
-            execute_filter_pipeline(&pipeline.user_filters, &ctx, &principal, candidates);
+        let mut result = execute_filter_pipeline(
+            pipeline.filters_for(cc_lb_domain::Provider::Openai),
+            &ctx,
+            &principal,
+            candidates,
+        );
         if let Some(target) = target {
             result
                 .candidates
@@ -3477,6 +3574,83 @@ impl Lifecycle {
             ));
         }
         Ok((ctx, result))
+    }
+
+    /// Match HTTP Responses shaping while keeping the WebSocket URL and method
+    /// host-owned. The returned headers apply only when opening a connection.
+    pub(crate) fn shape_websocket_frame(
+        &self,
+        auth: &crate::Authenticated,
+        ingress: WebSocketIngress<'_>,
+        upstream_id: Uuid,
+        request_id: &str,
+        observer: Option<&LifecycleContext>,
+    ) -> Result<Option<WebSocketPluginRequest>, WebSocketError> {
+        let view = self.dynamic_view.load();
+        let cached = view
+            .principal_view
+            .get(auth.principal_id())
+            .ok_or_else(|| {
+                WebSocketError::new(
+                    403,
+                    error_codes::PRINCIPAL_MISSING,
+                    "authenticated principal is unavailable",
+                )
+            })?;
+        let Some(dialect) = cached.resolved_dialect(upstream_id) else {
+            return Ok(None);
+        };
+        let record = view
+            .upstreams_snapshot()
+            .iter()
+            .find(|record| record.id == upstream_id && record.enabled)
+            .ok_or_else(|| {
+                WebSocketError::new(
+                    503,
+                    error_codes::ROUTE_NOT_CONFIGURED,
+                    "upstream is no longer available",
+                )
+            })?;
+        let upstream = upstream_for_record(record).map_err(|message| {
+            WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, message)
+        })?;
+        let mut downstream_headers = ingress.headers.clone();
+        strip_hop_by_hop(&mut downstream_headers);
+        let context = DialectShapeContext {
+            request_id: request_id.to_owned(),
+            downstream_headers,
+            method: http::Method::POST,
+            path: "/v1/responses".to_owned(),
+            query: ingress.query.map(str::to_owned),
+            body_bytes: ingress.frame.clone(),
+        };
+        // BuiltinAuthn authenticates managed cc-lb keys, not provider keys or
+        // OAuth subjects. Human/machine/admin is a separate storage taxonomy.
+        let principal = Principal {
+            id: auth.principal_id().to_owned(),
+            kind: PrincipalKind::InternalKey,
+        };
+        let (frame, headers) =
+            match shape_request(dialect.as_ref(), &context, &upstream, &principal) {
+                Ok(shaped) => (shaped.body().clone(), shaped.headers().clone()),
+                Err(error) => {
+                    tracing::warn!(%error, "websocket shape_request failed; forwarding raw frame");
+                    record_shape_internal_error(observer, &error.to_string());
+                    (ingress.frame.clone(), context.downstream_headers)
+                }
+            };
+        Ok(Some(WebSocketPluginRequest {
+            frame,
+            headers,
+            context: ResponseTransformContext {
+                principal,
+                upstream,
+                request_method: http::Method::POST,
+                request_path: "/v1/responses".to_owned(),
+                dialect: dialect.clone(),
+                gemini_oauth: false,
+            },
+        }))
     }
 
     /// Sign only a newly opened upstream connection, using its current credentials.
@@ -3689,10 +3863,31 @@ impl Lifecycle {
         let started = Instant::now();
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
-        let body_view = RequestBodyView::new(&ctx.body_bytes);
-        let path_model = gemini_model_from_path(&ctx.path);
-        let request_model = body_view.model().or(path_model.clone());
-        let request_capability = classify_provider_capability(&ctx.method, &ctx.path);
+        let multipart = is_multipart_operation(&ctx.path)
+            && ctx
+                .downstream_headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| {
+                    value
+                        .split(';')
+                        .next()
+                        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("multipart/form-data"))
+                });
+        let empty_body = Bytes::new();
+        let body_view = RequestBodyView::new(if multipart {
+            &empty_body
+        } else {
+            &ctx.body_bytes
+        });
+        let path_model = if multipart && body_too_large.is_none() {
+            multipart_request_model(auth, &ctx.downstream_headers, &ctx.body_bytes).await
+        } else {
+            gemini_model_from_path(&ctx.path)
+        };
+        let request_model = path_model.clone().or_else(|| body_view.model());
+        let request_capability =
+            classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope);
         let mut setup_timings = cc_lb_lifecycle::RequestSetupTimings {
             json_parse_ms: Some(body_view.json_parse_ms()),
             ..cc_lb_lifecycle::RequestSetupTimings::default()
@@ -3781,11 +3976,8 @@ impl Lifecycle {
             kind: PrincipalKind::InternalKey,
         };
         let Some(request_capability) = request_capability else {
-            let response = anthropic_error_response(
-                StatusCode::NOT_FOUND,
-                "operation_not_supported",
-                "operation is not supported by the consistency-safe proxy boundary",
-            );
+            let response =
+                unsupported_operation_response(ctx.provider_scope, &ctx.method, &ctx.path);
             if let Some(o) = observer.as_ref() {
                 o.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
             }
@@ -3805,7 +3997,13 @@ impl Lifecycle {
             }
             return Ok(response);
         }
-        let request_kind = RequestKind::from(request_capability);
+        let request_kind = if request_capability == ProviderCapability::OpenaiImages
+            && ctx.path == "/v1/images/variations"
+        {
+            RequestKind::OpenaiImageVariations
+        } else {
+            RequestKind::from(request_capability)
+        };
 
         if body_too_large.is_some() {
             if let Some(o) = observer.as_ref() {
@@ -3819,7 +4017,7 @@ impl Lifecycle {
                 None,
             ));
         }
-        if !ctx.body_bytes.is_empty() && !body_view.is_valid_json() {
+        if !ctx.body_bytes.is_empty() && !body_view.is_valid_json() && !multipart {
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
@@ -3920,15 +4118,11 @@ impl Lifecycle {
             });
         }
         ctx.cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
-        ctx.canonical_model_id = if cache_metadata.canonical_model_id.is_empty() {
-            path_model
-                .as_deref()
-                .map(canonical_model_id)
-                .unwrap_or_default()
-                .to_owned()
-        } else {
-            cache_metadata.canonical_model_id.clone()
-        };
+        ctx.canonical_model_id = path_model
+            .as_deref()
+            .map(canonical_model_id)
+            .unwrap_or(&cache_metadata.canonical_model_id)
+            .to_owned();
         ctx.thread_id = cache_metadata.thread_id.clone();
         ctx.requested_service_tier = cache_metadata.requested_service_tier.clone();
         ctx.cache_pricing = cache_pricing_summary_for_model(
@@ -4062,8 +4256,12 @@ impl Lifecycle {
             selected_cache_matches
                 .retain(|upstream_id, _| *upstream_id == affinity.target_upstream_id);
         }
-        let mut pipeline_result =
-            execute_filter_pipeline(&router_pipeline.user_filters, &ctx, &principal, candidates);
+        let mut pipeline_result = execute_filter_pipeline(
+            router_pipeline.filters_for(request_kind.provider()),
+            &ctx,
+            &principal,
+            candidates,
+        );
         // Hard affinity: provider-owned state lives on exactly one upstream.
         // Filters may only narrow the candidate set; if they (or the eligible
         // candidate set itself) exclude the owner, the request cannot be
@@ -4279,7 +4477,7 @@ impl Lifecycle {
             let replacement_request = active_limit.as_ref().and_then(|limit| {
                 let request = body_view.limit_request(
                     &ctx.canonical_model_id,
-                    classify_provider_capability(&ctx.method, &ctx.path),
+                    classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope),
                     &routed.cache_bundle.cache_breakpoints,
                 );
                 (request != limit.request).then_some(request)
@@ -4301,7 +4499,11 @@ impl Lifecycle {
                             replacement_request.unwrap_or_else(|| {
                                 body_view.limit_request(
                                     &ctx.canonical_model_id,
-                                    classify_provider_capability(&ctx.method, &ctx.path),
+                                    classify_provider_capability(
+                                        &ctx.method,
+                                        &ctx.path,
+                                        ctx.provider_scope,
+                                    ),
                                     &routed.cache_bundle.cache_breakpoints,
                                 )
                             })
@@ -4694,27 +4896,31 @@ impl Lifecycle {
         };
         let limit_request = make_limit_request();
         let max_input_estimate = limit_request.input_tokens_estimate;
-        let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
-            if let Some(input) = limit_request.local_cache_input {
-                estimator.estimate_max_with_local_cache(
-                    &limit_request.model,
-                    input,
-                    limit_request.max_tokens.max(0) as u64,
-                    limit_request.service_tier.as_deref(),
-                )
-            } else {
-                let estimated_cache_tokens = limit_request.estimated_cache_tokens;
-                let can_cross_cache_cliff = limit_request.can_cross_cache_cliff;
-                estimator.estimate_max_with_cache(
-                    &limit_request.model,
-                    max_input_estimate as u64,
-                    limit_request.max_tokens.max(0) as u64,
-                    estimated_cache_tokens,
-                    can_cross_cache_cliff,
-                    limit_request.service_tier.as_deref(),
-                )
-            }
-        });
+        let cost_estimate = if limit_request.model.is_empty() {
+            Some(0)
+        } else {
+            self.limit_cost_estimator.as_ref().and_then(|estimator| {
+                if let Some(input) = limit_request.local_cache_input {
+                    estimator.estimate_max_with_local_cache(
+                        &limit_request.model,
+                        input,
+                        limit_request.max_tokens.max(0) as u64,
+                        limit_request.service_tier.as_deref(),
+                    )
+                } else {
+                    let estimated_cache_tokens = limit_request.estimated_cache_tokens;
+                    let can_cross_cache_cliff = limit_request.can_cross_cache_cliff;
+                    estimator.estimate_max_with_cache(
+                        &limit_request.model,
+                        max_input_estimate as u64,
+                        limit_request.max_tokens.max(0) as u64,
+                        estimated_cache_tokens,
+                        can_cross_cache_cliff,
+                        limit_request.service_tier.as_deref(),
+                    )
+                }
+            })
+        };
 
         match limit_engine.reserve(
             view,
@@ -4745,8 +4951,12 @@ impl Lifecycle {
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
                 let reason_label = "limit_rejected".to_owned();
                 let mut response = limit_rejection_response(
-                    crate::provider_capability::classify(&ctx.method, &ctx.path)
-                        .unwrap_or(ProviderCapability::AnthropicMessages),
+                    crate::provider_capability::classify(
+                        &ctx.method,
+                        &ctx.path,
+                        ctx.provider_scope,
+                    )
+                    .unwrap_or(ProviderCapability::AnthropicMessages),
                     reason,
                     &limit_request.model,
                     &subject.principal_id,
@@ -4807,14 +5017,30 @@ impl Lifecycle {
         dispatch_started: Instant,
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
-        // Keep ordinary responses buffered regardless of their Content-Type.
-        // Only streaming requests without a buffered hook bypass collection.
-        let buffered_transform_required = transform_ctx.dialect.response_transform_hook().is_some();
+        // Audio endpoints also stream binary/text payloads without a JSON
+        // `stream` flag. Keep their JSON responses and ordinary JSON-protocol
+        // operations on the existing buffered path.
+        let audio_stream = response_affinity_context.capability == ProviderCapability::OpenaiAudio
+            && !response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|mime| {
+                    let mime = mime.trim();
+                    mime.eq_ignore_ascii_case("application/json")
+                        || mime
+                            .rsplit_once('+')
+                            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("json"))
+                });
+        let stream_response = stream_requested || audio_stream;
+        let buffered_transform_required =
+            transform_ctx.gemini_oauth || transform_ctx.dialect.response_transform_hook().is_some();
         if is_sse_response(
             response.headers(),
             stream_requested,
             response_affinity_context.capability,
-        ) || (stream_requested && !buffered_transform_required)
+        ) || (stream_response && !buffered_transform_required)
         {
             let response_status = response.status();
             let mut response = self.relay_response(
@@ -4846,9 +5072,9 @@ impl Lifecycle {
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
         let mut body_chunk_count: u64 = 0;
-        // Preserve the existing uncapped ordinary response path. Only newly
-        // buffered streaming transforms reuse the request path's body cap.
-        let body_cap = if stream_requested {
+        // Preserve uncapped ordinary responses. Buffering a requested stream
+        // or an audio stream for a transform uses the request path's cap.
+        let body_cap = if stream_response {
             body_cap_for_path(&self.config, &transform_ctx.request_path)
         } else {
             usize::MAX
@@ -4951,11 +5177,15 @@ impl Lifecycle {
         let response_body_json = semantic_body
             .as_ref()
             .and_then(|body| sonic_rs::from_slice::<Value>(body).ok());
-        let observation = response_body_json
-            .as_ref()
-            .map_or_else(usage_parser::NonStreamObservation::default, |value| {
-                usage_parser::observe_non_stream_json_value(value)
-            });
+        let observation = response_body_json.as_ref().map_or_else(
+            usage_parser::NonStreamObservation::default,
+            |value| {
+                usage_parser::observe_non_stream_json_value_for_shape(
+                    value,
+                    response_affinity_context.capability.usage_shape(),
+                )
+            },
+        );
         let abnormal_stop = response_body_json
             .as_ref()
             .and_then(usage_parser::detect_abnormal_stop_non_stream);
@@ -5443,8 +5673,35 @@ impl Lifecycle {
         }
     }
 
+    /// Admin-native warmup responses use their provider-specific quota parser.
+    pub fn ingest_subscription_quota_observations(
+        &self,
+        observations: &[cc_lb_quota::UnifiedQuotaObservation],
+        upstream_id: Uuid,
+        observed_at: SystemTime,
+    ) {
+        if self.subscription_quota_sink.is_none() && self.subscription_quota_cache.is_none() {
+            return;
+        }
+        let observed_at_unix_millis = system_time_to_unix_millis(observed_at);
+        for observation in observations {
+            let record = cc_lb_quota::unified_observation_to_sample(
+                upstream_id,
+                observation.clone(),
+                observed_at_unix_millis,
+            );
+            if let Some(cache) = &self.subscription_quota_cache {
+                cache.upsert_observation(&record);
+            }
+            if let Some(sink) = &self.subscription_quota_sink {
+                let _ = sink.enqueue(record);
+            }
+        }
+    }
+
     fn parse(&self, req: Request<Bytes>) -> (RequestContext, Option<Box<Response<Body>>>) {
         let (mut parts, body) = req.into_parts();
+        let provider_scope = parts.extensions.get::<ProviderScope>().copied();
         let path = parts.uri.path().to_owned();
         let cap = body_cap_for_path(&self.config, &path);
         let body_too_large = (body.len() > cap).then(|| {
@@ -5467,6 +5724,7 @@ impl Lifecycle {
             .request_id(request_id)
             .thread_id(None)
             .requested_service_tier(None)
+            .provider_scope(provider_scope.map(|scope| scope.0))
             .downstream_headers(downstream_headers)
             .method(parts.method)
             .path(path)
@@ -6152,8 +6410,11 @@ impl Lifecycle {
                                     };
                                 let raw = split_sse_event(&mut buffer, end);
                                 let parsed_event = parse_sse_event(&raw);
-                                let usage_update =
-                                    accumulate_sse_usage(&parsed_event, &mut usage);
+                                let usage_update = usage_parser::accumulate_sse_usage_for_shape(
+                                    &parsed_event,
+                                    &mut usage,
+                                    response_affinity_context.capability.usage_shape(),
+                                );
                                 downstream_drop_guard.set_keepalive_cached_tokens(
                                     usage
                                         .cache_read_input_tokens
@@ -6902,7 +7163,11 @@ impl Lifecycle {
                         while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
-                            let usage_update = accumulate_sse_usage(&parsed_event, &mut usage);
+                            let usage_update = usage_parser::accumulate_sse_usage_for_shape(
+                                &parsed_event,
+                                &mut usage,
+                                response_affinity_context.capability.usage_shape(),
+                            );
                             downstream_drop_guard.set_keepalive_cached_tokens(
                                 usage
                                     .cache_read_input_tokens
@@ -8047,11 +8312,10 @@ fn raw_passthrough_request(
     upstream: &Upstream,
     openai_oauth: bool,
 ) -> Result<ShapedRequest, RawPassthroughError> {
-    let openai_oauth_default = openai_oauth && base_url.is_none();
     let base_url = base_url.cloned().unwrap_or_else(|| match upstream {
         Upstream::AnthropicDirect { .. } => default_base_url(StorageUpstreamKind::AnthropicApiKey),
         Upstream::OpenaiDirect { .. } => {
-            if openai_oauth_default && ctx.path == "/v1/responses" {
+            if openai_oauth {
                 default_base_url(StorageUpstreamKind::OpenaiOauth)
             } else {
                 default_base_url(StorageUpstreamKind::OpenaiApiKey)
@@ -8064,7 +8328,6 @@ fn raw_passthrough_request(
         &RawPassthroughDialect {
             base_url,
             openai_oauth,
-            openai_oauth_default,
         },
         &shape_context,
         upstream,
@@ -8079,7 +8342,6 @@ fn raw_passthrough_request(
 struct RawPassthroughDialect {
     base_url: Url,
     openai_oauth: bool,
-    openai_oauth_default: bool,
 }
 
 impl UpstreamDialect for RawPassthroughDialect {
@@ -8095,19 +8357,18 @@ impl UpstreamDialect for RawPassthroughDialect {
             .as_deref()
             .map(cc_lb_upstream::scrub_query_api_key);
         let scrubbed_query = scrubbed_query.as_deref().filter(|query| !query.is_empty());
-        let url = if self.openai_oauth && context.path == "/v1/responses" {
+        let url = if let Some(suffix) = context
+            .path
+            .strip_prefix("/v1/")
+            .filter(|_| self.openai_oauth)
+        {
             let mut url = self.base_url.clone();
-            let path = format!("{}/responses", url.path().trim_end_matches('/'));
+            let path = format!("{}/{suffix}", url.path().trim_end_matches('/'));
             url.set_path(&path);
             url.set_query(scrubbed_query);
             url
         } else {
-            let base_url = if self.openai_oauth_default {
-                default_base_url(StorageUpstreamKind::OpenaiApiKey)
-            } else {
-                self.base_url.clone()
-            };
-            cc_lb_upstream::upstream_request_url(&base_url, &context.path, scrubbed_query)
+            cc_lb_upstream::upstream_request_url(&self.base_url, &context.path, scrubbed_query)
         };
         Ok(builder.shaped_request(
             url,
@@ -8119,11 +8380,58 @@ impl UpstreamDialect for RawPassthroughDialect {
 }
 
 fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
-    if path.starts_with("/v1/files") {
+    if path.starts_with("/v1/files") || is_multipart_operation(path) {
         config.files_body_cap_bytes
     } else {
         config.messages_body_cap_bytes
     }
+}
+
+pub fn is_multipart_operation(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/audio/transcriptions"
+            | "/v1/audio/translations"
+            | "/v1/images/edits"
+            | "/v1/images/variations"
+    )
+}
+
+async fn multipart_request_model(
+    _auth: &crate::authn_rail::Authenticated,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Option<String> {
+    let content_type = headers.get(http::header::CONTENT_TYPE)?.to_str().ok()?;
+    let boundary = multer::parse_boundary(content_type).ok()?;
+    let stream = Body::from(body.clone()).into_data_stream();
+    let mut multipart = multer::Multipart::new(stream, boundary);
+    while let Some(field) = multipart.next_field().await.ok()? {
+        if field.name() == Some("model") && field.file_name().is_none() {
+            return field.text().await.ok();
+        }
+    }
+    None
+}
+
+fn unsupported_operation_response(
+    scope: Option<cc_lb_domain::Provider>,
+    method: &Method,
+    path: &str,
+) -> Response<Body> {
+    let Some(provider) = scope else {
+        return anthropic_error_response(
+            StatusCode::NOT_FOUND,
+            "operation_not_supported",
+            "operation is not supported by the consistency-safe proxy boundary",
+        );
+    };
+    crate::error_format::provider_scope_error_response(
+        provider,
+        StatusCode::NOT_FOUND,
+        "operation_not_supported",
+        &format!("{method} {path} is not supported by cc-lb yet"),
+    )
 }
 
 fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -8136,14 +8444,11 @@ fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
 /// Project the upstream response headers into a `HeaderSnapshot` for the
 /// `UpstreamResponseStarted` lifecycle event.
 ///
-/// Strips `Authorization` and similar credential-bearing headers by pattern
-/// (we only copy the fields we explicitly whitelist). For Anthropic routes,
-/// `anthropic_headers` carries `anthropic-ratelimit-*` and identity slots; for
-/// OpenAI routes, it carries `x-ratelimit-*` fields. Downstream subscribers
-/// reconstruct a `HeaderMap` and parse into typed observations.
+/// (we only copy the fields explicitly whitelisted). Provider-specific quota
+/// fields are carried in separate maps and parsed by the off-path subscriber.
 fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind) -> HeaderSnapshot {
-    let mut anthropic_headers: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
+    let mut anthropic_headers = std::collections::BTreeMap::new();
+    let mut provider_headers = std::collections::BTreeMap::new();
     let is_openai = matches!(
         upstream_kind,
         StorageUpstreamKind::OpenaiApiKey | StorageUpstreamKind::OpenaiOauth
@@ -8155,18 +8460,19 @@ fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind)
     for (name, value) in headers.iter() {
         let name_lc = name.as_str();
         let Ok(val) = value.to_str() else { continue };
-        let should_capture = matches!(
+        let is_anthropic = name_lc.starts_with("anthropic-ratelimit-")
+            || cc_lb_domain::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc);
+        let is_codex = name_lc.starts_with("x-codex-");
+        let is_openai_standard = is_openai && name_lc.starts_with("x-ratelimit-");
+        let is_common = matches!(
             name_lc,
             "ratelimit-limit" | "ratelimit-remaining" | "ratelimit-reset"
-        ) || if is_openai {
-            name_lc.starts_with("x-ratelimit-")
-        } else {
-            name_lc.starts_with("anthropic-ratelimit-")
-                || cc_lb_domain::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
-                || (is_gemini && name_lc == "x-goog-request-id")
-        };
-        if should_capture {
+        );
+        if is_anthropic || is_common {
             anthropic_headers.insert(name_lc.to_owned(), val.to_owned());
+        }
+        if is_codex || is_openai_standard || (is_gemini && name_lc == "x-goog-request-id") {
+            provider_headers.insert(name_lc.to_owned(), val.to_owned());
         }
     }
     HeaderSnapshot {
@@ -8176,6 +8482,7 @@ fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind)
             .or_else(|| header_to_string(headers, "request-id"))
             .or_else(|| header_to_string(headers, "x-goog-request-id")),
         retry_after: header_to_string(headers, "retry-after"),
+        provider_headers,
         anthropic_headers,
     }
 }
@@ -8292,9 +8599,10 @@ struct LimitRequest {
     service_tier: Option<String>,
 }
 impl LimitRequest {
-    /// `fallback_model` is the request's canonical model id. It is used only
-    /// when the body carries no `model` (e.g. Gemini, where the model lives in
-    /// the request path); a body model always wins verbatim.
+    /// Native Gemini operations use the path's canonical model. Other
+    /// operations prefer the body's model and use the canonical fallback only
+    /// when that field is absent. Catalog/default-moderation operations have no
+    /// model; required-model operations retain the existing `unknown` sentinel.
     fn from_value(
         value: Option<&Value>,
         fallback_model: &str,
@@ -8304,13 +8612,39 @@ impl LimitRequest {
         let anthropic_input = value
             .filter(|_| capability == Some(ProviderCapability::AnthropicMessages))
             .map(|value| estimate_anthropic_input(value, breakpoints));
+        let body_model = value
+            .and_then(|v| v.get("model"))
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty());
+        let native_gemini = matches!(
+            capability,
+            Some(
+                ProviderCapability::GeminiGenerateContent
+                    | ProviderCapability::GeminiCountTokens
+                    | ProviderCapability::GeminiEmbedContent
+                    | ProviderCapability::GeminiPredict
+            )
+        );
+        let model_optional = matches!(
+            capability,
+            Some(
+                ProviderCapability::AnthropicModels
+                    | ProviderCapability::OpenaiModels
+                    | ProviderCapability::GeminiModels
+                    | ProviderCapability::GeminiOpenaiModels
+                    | ProviderCapability::OpenaiModerations
+                    | ProviderCapability::OpenaiCodexAuxiliary
+            )
+        );
+        let fallback = (!fallback_model.is_empty()).then_some(fallback_model);
+        let model = if native_gemini {
+            fallback.or(body_model)
+        } else {
+            body_model.or(fallback)
+        }
+        .unwrap_or(if model_optional { "" } else { "unknown" });
         Self {
-            model: value
-                .and_then(|v| v.get("model"))
-                .and_then(Value::as_str)
-                .or_else(|| (!fallback_model.is_empty()).then_some(fallback_model))
-                .unwrap_or("unknown")
-                .to_owned(),
+            model: model.to_owned(),
             max_tokens: value
                 .and_then(|v| {
                     v.get("max_tokens")
@@ -8332,7 +8666,11 @@ impl LimitRequest {
                     i64::try_from(whole).unwrap_or(i64::MAX)
                 })
                 .or_else(|| value.map(estimate_input_tokens))
-                .unwrap_or(DEFAULT_MAX_INPUT_ESTIMATE),
+                .unwrap_or(if model_optional {
+                    0
+                } else {
+                    DEFAULT_MAX_INPUT_ESTIMATE
+                }),
             local_cache_input: anthropic_input.filter(|_| !breakpoints.is_empty()),
             estimated_cache_tokens: breakpoints
                 .iter()
@@ -8396,6 +8734,64 @@ mod limit_request_estimate_tests {
         assert_eq!(request.input_tokens_estimate, 4_000);
         assert_eq!(request.max_tokens, 0);
         assert!(request.local_cache_input.is_none());
+    }
+
+    #[test]
+    fn optional_model_operations_do_not_invent_model_ids() {
+        for capability in [
+            ProviderCapability::AnthropicModels,
+            ProviderCapability::OpenaiModels,
+            ProviderCapability::GeminiModels,
+            ProviderCapability::GeminiOpenaiModels,
+            ProviderCapability::OpenaiModerations,
+            ProviderCapability::OpenaiCodexAuxiliary,
+        ] {
+            let request = LimitRequest::from_value(None, "", Some(capability), &[]);
+            assert_eq!(request.model, "", "{capability:?}");
+            assert_eq!(request.input_tokens_estimate, 0);
+            assert_eq!(request.max_tokens, 0);
+        }
+        let body = json!({"model":"omni-moderation-latest"});
+        let explicit = LimitRequest::from_value(
+            Some(&body),
+            "",
+            Some(ProviderCapability::OpenaiModerations),
+            &[],
+        );
+        assert_eq!(explicit.model, "omni-moderation-latest");
+        let missing =
+            LimitRequest::from_value(None, "", Some(ProviderCapability::OpenaiResponses), &[]);
+        assert_eq!(missing.model, "unknown");
+        let empty = json!({"model":""});
+        let empty_required = LimitRequest::from_value(
+            Some(&empty),
+            "",
+            Some(ProviderCapability::OpenaiResponses),
+            &[],
+        );
+        assert_eq!(empty_required.model, "unknown");
+    }
+
+    #[test]
+    fn native_gemini_model_is_authoritative_but_openai_compat_uses_body() {
+        let body = json!({"model":"body-model"});
+        for capability in [
+            ProviderCapability::GeminiGenerateContent,
+            ProviderCapability::GeminiCountTokens,
+            ProviderCapability::GeminiEmbedContent,
+            ProviderCapability::GeminiPredict,
+        ] {
+            let request =
+                LimitRequest::from_value(Some(&body), "path-model", Some(capability), &[]);
+            assert_eq!(request.model, "path-model");
+        }
+        for capability in [
+            ProviderCapability::OpenaiChatCompletions,
+            ProviderCapability::GeminiOpenaiChatCompletions,
+        ] {
+            let request = LimitRequest::from_value(Some(&body), "fallback", Some(capability), &[]);
+            assert_eq!(request.model, "body-model");
+        }
     }
 }
 
@@ -9947,16 +10343,11 @@ fn route_for_record(
     let raw_passthrough_base_url = record.base_url.clone().or_else(|| {
         (record.kind == StorageUpstreamKind::GeminiOauth).then(|| default_base_url(record.kind))
     });
-    let route_dialect: Arc<dyn UpstreamDialect> = Arc::new(RawPassthroughDialect {
-        base_url: raw_passthrough_base_url
-            .clone()
-            .unwrap_or_else(|| default_base_url(record.kind)),
-        openai_oauth: record.kind == StorageUpstreamKind::OpenaiOauth,
-        openai_oauth_default: record.kind == StorageUpstreamKind::OpenaiOauth
-            && record.base_url.is_none(),
-    });
     let upstream = upstream_for_record(record)?;
-    let dialect = cached.resolved_dialect(&route_dialect).clone();
+    let dialect = cached
+        .resolved_dialect(record.id)
+        .cloned()
+        .unwrap_or_else(|| native_route_dialect(record));
     Ok((
         RouteDecision {
             upstream_id: record.id,
@@ -9965,6 +10356,18 @@ fn route_for_record(
         },
         raw_passthrough_base_url,
     ))
+}
+
+/// Construct the native HTTP dialect outside request execution when composing
+/// a response-only provider plugin. OAuth path handling matches ordinary routes.
+pub fn native_route_dialect(record: &UpstreamRecord) -> Arc<dyn UpstreamDialect> {
+    Arc::new(RawPassthroughDialect {
+        base_url: record
+            .base_url
+            .clone()
+            .unwrap_or_else(|| default_base_url(record.kind)),
+        openai_oauth: record.kind == StorageUpstreamKind::OpenaiOauth,
+    })
 }
 
 /// Emit `RouteCompleted` for `routed`. A failover emits it again for the next
@@ -10102,12 +10505,11 @@ impl<'a> FailoverRouter<'a> {
         if candidates.is_empty() {
             return None;
         }
-        let mut pipeline_result = execute_filter_pipeline(
-            &self.router_pipeline.user_filters,
-            self.ctx,
-            self.principal,
-            candidates,
-        );
+        let filters = self
+            .router_pipeline
+            .filters_for(self.request_kind.provider());
+        let mut pipeline_result =
+            execute_filter_pipeline(filters, self.ctx, self.principal, candidates);
         if let Some(o) = self.observer {
             for error in pipeline_result.internal_errors.drain(..) {
                 o.record_internal_error(error);
@@ -10126,9 +10528,7 @@ impl<'a> FailoverRouter<'a> {
         // The subscription filter keeps a lone survivor even when its quota is
         // proven exhausted; on failover that would revive an account already
         // known to be spent, so relay the current failure instead.
-        if self
-            .router_pipeline
-            .user_filters
+        if filters
             .iter()
             .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
             && subscription_hard_blocked(self.ctx.canonical_model_id.as_str(), selected)
@@ -10226,7 +10626,11 @@ fn is_sse_response(
     if !headers.contains_key(CONTENT_TYPE) {
         // ChatGPT's Responses backend can omit this header. An explicit
         // Content-Type, including JSON errors, always keeps its own semantics.
-        return stream_requested && capability == ProviderCapability::OpenaiResponses;
+        return stream_requested
+            && matches!(
+                capability.usage_shape(),
+                crate::provider_capability::UsageShape::OpenaiResponses
+            );
     }
     headers
         .get(CONTENT_TYPE)
@@ -10288,11 +10692,148 @@ mod tests {
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 
     #[test]
-    fn anthropic_upstream_kinds_map_to_messages_over_http() {
-        let expected = (ProtocolId::AnthropicMessages, TransportId::Http);
+    fn operations_filter_subscription_and_api_key_credentials() {
+        use StorageRecordKind as K;
+        let all_kinds = [
+            K::AnthropicApiKey,
+            K::AnthropicOauth,
+            K::OpenaiApiKey,
+            K::OpenaiOauth,
+            K::GeminiApiKey,
+            K::GeminiOauth,
+        ];
+        let cases: &[(RequestKind, &[StorageRecordKind])] = &[
+            (
+                RequestKind::AnthropicMessages,
+                &[K::AnthropicApiKey, K::AnthropicOauth],
+            ),
+            (
+                RequestKind::OpenaiResponses,
+                &[K::OpenaiApiKey, K::OpenaiOauth],
+            ),
+            (
+                RequestKind::GeminiGenerateContent,
+                &[K::GeminiApiKey, K::GeminiOauth],
+            ),
+            (
+                RequestKind::GeminiCountTokens,
+                &[K::GeminiApiKey, K::GeminiOauth],
+            ),
+            (
+                RequestKind::AnthropicModels,
+                &[K::AnthropicApiKey, K::AnthropicOauth],
+            ),
+            (RequestKind::AnthropicComplete, &[K::AnthropicApiKey]),
+            (RequestKind::OpenaiResponsesInputTokens, &[K::OpenaiApiKey]),
+            (
+                RequestKind::OpenaiResponsesCompact,
+                &[K::OpenaiApiKey, K::OpenaiOauth],
+            ),
+            (RequestKind::OpenaiChatCompletions, &[K::OpenaiApiKey]),
+            (RequestKind::OpenaiCompletions, &[K::OpenaiApiKey]),
+            (RequestKind::OpenaiEmbeddings, &[K::OpenaiApiKey]),
+            (RequestKind::OpenaiModerations, &[K::OpenaiApiKey]),
+            (RequestKind::OpenaiAudio, &[K::OpenaiApiKey]),
+            (
+                RequestKind::OpenaiImages,
+                &[K::OpenaiApiKey, K::OpenaiOauth],
+            ),
+            (
+                RequestKind::OpenaiModels,
+                &[K::OpenaiApiKey, K::OpenaiOauth],
+            ),
+            (RequestKind::OpenaiCodexAuxiliary, &[K::OpenaiOauth]),
+            (RequestKind::GeminiEmbedContent, &[K::GeminiApiKey]),
+            (RequestKind::GeminiPredict, &[K::GeminiApiKey]),
+            (RequestKind::GeminiModels, &[K::GeminiApiKey]),
+            (RequestKind::GeminiOpenaiChatCompletions, &[K::GeminiApiKey]),
+            (RequestKind::GeminiOpenaiEmbeddings, &[K::GeminiApiKey]),
+            (RequestKind::GeminiOpenaiImages, &[K::GeminiApiKey]),
+            (RequestKind::GeminiOpenaiModels, &[K::GeminiApiKey]),
+            (RequestKind::OpenaiImageVariations, &[K::OpenaiApiKey]),
+        ];
+        for &(operation, allowed) in cases {
+            for kind in all_kinds {
+                assert_eq!(
+                    operation.matches_upstream(kind),
+                    allowed.contains(&kind),
+                    "{operation:?} {kind:?}"
+                );
+            }
+        }
+    }
 
-        assert_eq!(ids_for(StorageRecordKind::AnthropicApiKey), expected);
-        assert_eq!(ids_for(StorageRecordKind::AnthropicOauth), expected);
+    #[test]
+    fn openai_oauth_catalog_and_auxiliary_urls_preserve_client_queries() {
+        for base in [None, Some("https://gateway.example/codex/")] {
+            let root = base
+                .unwrap_or("https://chatgpt.com/backend-api/codex/")
+                .trim_end_matches('/');
+            for (method, suffix) in [
+                (Method::POST, "responses"),
+                (Method::POST, "responses/compact"),
+                (Method::GET, "models"),
+                (Method::GET, "models/gpt-test"),
+                (Method::POST, "images/generations"),
+                (Method::POST, "images/edits"),
+                (Method::POST, "alpha/search"),
+                (Method::POST, "memories/trace_summarize"),
+            ] {
+                for query in [
+                    None,
+                    Some("client_version=1.2.3&trace=a%2Fb"),
+                    Some("key=discard&client_version=2"),
+                ] {
+                    let path = format!("/v1/{suffix}");
+                    let url = provider_signed_path(
+                        StorageRecordKind::OpenaiOauth,
+                        base,
+                        method.clone(),
+                        &path,
+                        query,
+                    );
+                    let expected_query = query
+                        .map(cc_lb_upstream::scrub_query_api_key)
+                        .filter(|query| !query.is_empty());
+                    assert_eq!(
+                        url.as_str(),
+                        format!(
+                            "{root}/{suffix}{}",
+                            expected_query
+                                .map(|query| format!("?{query}"))
+                                .unwrap_or_default()
+                        ),
+                        "{path}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multipart_operations_use_files_cap_only_on_exact_paths() {
+        let config = LifecycleConfig {
+            files_body_cap_bytes: 91,
+            messages_body_cap_bytes: 17,
+            ..LifecycleConfig::default()
+        };
+        for path in [
+            "/v1/audio/transcriptions",
+            "/v1/audio/translations",
+            "/v1/images/edits",
+            "/v1/images/variations",
+        ] {
+            assert_eq!(body_cap_for_path(&config, path), 91, "{path}");
+        }
+        for path in [
+            "/v1/audio/speech",
+            "/v1/images/generations",
+            "/v1/images/edits/extra",
+            "/v1/chat/completions",
+            "/v1/messages",
+        ] {
+            assert_eq!(body_cap_for_path(&config, path), 17, "{path}");
+        }
     }
 
     fn provider_signed_path(
@@ -11696,7 +12237,6 @@ mod tests {
             RawPassthroughDialect {
                 base_url: Url::parse("https://api.anthropic.com").expect("test upstream URL"),
                 openai_oauth: false,
-                openai_oauth_default: false,
             }
             .shape(context, upstream, principal, builder)
         }
@@ -14646,6 +15186,105 @@ mod tests {
         (status, body)
     }
 
+    #[tokio::test]
+    async fn scoped_unsupported_operations_use_provider_errors_and_one_terminal_event() {
+        use cc_lb_domain::Provider;
+        for (provider, path) in [
+            (Provider::Anthropic, "/v1/files"),
+            (Provider::Openai, "/v1/responses/resp_1/cancel"),
+            (Provider::Gemini, "/v1beta/cachedContents"),
+            (Provider::Anthropic, "/v1/responses"),
+        ] {
+            let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+            let mut rx = subscribe_lifecycle(&bus);
+            let view = provenance_view(
+                failure_principal_view("principal-test", default_artifacts()),
+                Arc::new(TestSignerFactory),
+                Vec::new(),
+            );
+            let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+            let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+            let mut request = failure_request(Bytes::from_static(b"{}"));
+            *request.uri_mut() = path.parse().expect("path URI");
+            request
+                .extensions_mut()
+                .insert(crate::request_context::ProviderScope(provider));
+            let auth = lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("authenticated");
+            let response = lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("request handled");
+            let (status, body) = collect_response_body(response).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let body: Value = serde_json::from_slice(&body).expect("error JSON");
+            assert_eq!(body["error"]["type"], "operation_not_supported");
+            assert_eq!(
+                body["error"]["message"],
+                format!("POST {path} is not supported by cc-lb yet")
+            );
+            match provider {
+                Provider::Anthropic => assert_eq!(body["type"], "error"),
+                Provider::Openai => {
+                    assert_eq!(body["error"]["code"], "operation_not_supported");
+                    assert!(body["error"]["param"].is_null());
+                    assert!(body.get("type").is_none());
+                }
+                Provider::Gemini => {
+                    assert_eq!(body["error"]["code"], 404);
+                    assert_eq!(body["error"]["status"], "NOT_FOUND");
+                    assert!(body.get("type").is_none());
+                }
+            }
+            assert_eq!(dispatcher.call_count(), 0);
+            let events = drain_events(&mut rx);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                    ))
+                    .count(),
+                1,
+                "{provider:?} {path}"
+            );
+            assert_eq!(terminal_snapshot(&events).client_status, 404);
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_model_is_read_after_authentication_without_parsing_binary_as_json() {
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+        );
+        let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
+        let request = failure_request(Bytes::new());
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("authenticated");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("multipart/form-data; boundary=\"catalog-test\""),
+        );
+        let body = Bytes::from_static(
+            b"--catalog-test\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\n\x00\xffbinary\r\n--catalog-test\r\nContent-Disposition: form-data; name=\"model\"; filename=\"not-a-model\"\r\n\r\nignore-me\r\n--catalog-test\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-4o-transcribe\r\n--catalog-test--\r\n"
+        );
+        assert_eq!(
+            multipart_request_model(&auth, &headers, &body)
+                .await
+                .as_deref(),
+            Some("gpt-4o-transcribe")
+        );
+    }
+
     /// QA-AUTH-03b: authentication succeeds, then the principal disappears
     /// from the view before `handle` resolves it.
     #[tokio::test]
@@ -14737,6 +15376,7 @@ mod tests {
             user_filters: Vec::new(),
             terminal: TerminalStrategy::FirstPick,
             instantiation_error: Some(Arc::from("pipeline exploded")),
+            provider_filters: None,
         };
         let view = provenance_view(
             failure_principal_view(
@@ -14807,6 +15447,7 @@ mod tests {
             user_filters: vec![Arc::new(InvalidOutputFilter)],
             terminal: TerminalStrategy::FirstPick,
             instantiation_error: None,
+            provider_filters: None,
         };
         let view = provenance_view(
             failure_principal_view(
@@ -15018,6 +15659,76 @@ mod tests {
         assert!(!sse_event_completes_response(
             ProviderCapability::GeminiGenerateContent,
             &gemini_chunk,
+            false,
+        ));
+    }
+
+    #[test]
+    fn usage_shape_completion_keeps_provider_and_payload_boundaries() {
+        let done = parse_sse_event(b"data: [DONE]\n\n");
+        let finished =
+            parse_sse_event(b"data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n");
+        let unfinished =
+            parse_sse_event(b"data: {\"choices\":[{\"index\":0,\"finish_reason\":null}]}\n\n");
+        for capability in [
+            ProviderCapability::OpenaiChatCompletions,
+            ProviderCapability::OpenaiCompletions,
+            ProviderCapability::GeminiOpenaiChatCompletions,
+        ] {
+            assert!(sse_event_completes_response(capability, &done, false));
+            assert!(sse_event_completes_response(capability, &finished, false));
+            assert!(!sse_event_completes_response(
+                capability,
+                &unfinished,
+                false
+            ));
+            assert!(transformed_sse_completes_response(
+                capability,
+                b"data: [DONE]\n\n",
+            ));
+            assert!(!transformed_sse_completes_response(
+                capability,
+                b"data: [DONE]",
+            ));
+            assert!(!transformed_sse_completes_response(
+                capability,
+                b"data: {\"choices\":[{\"finish_reason\":null}]}\n\n",
+            ));
+        }
+        for capability in [
+            ProviderCapability::AnthropicMessages,
+            ProviderCapability::OpenaiResponses,
+            ProviderCapability::GeminiGenerateContent,
+            ProviderCapability::OpenaiEmbeddings,
+            ProviderCapability::GeminiEmbedContent,
+        ] {
+            assert!(!sse_event_completes_response(capability, &done, false));
+            assert!(!sse_event_completes_response(capability, &finished, false));
+        }
+        for raw in [
+            b"event: message_stop\ndata: {bad-json}\n\n".as_slice(),
+            b"event: message_stop\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_delta\"}\n\n",
+        ] {
+            assert!(!sse_event_completes_response(
+                ProviderCapability::AnthropicMessages,
+                &parse_sse_event(raw),
+                true,
+            ));
+        }
+        for raw in [
+            b"event: response.completed\ndata: {bad-json}\n\n".as_slice(),
+            b"event: response.completed\n\n",
+        ] {
+            assert!(!sse_event_completes_response(
+                ProviderCapability::OpenaiResponses,
+                &parse_sse_event(raw),
+                false,
+            ));
+        }
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &parse_sse_event(b"event: response.completed\ndata: {}\n\n"),
             false,
         ));
     }
@@ -15683,6 +16394,7 @@ mod tests {
             user_filters: Vec::new(),
             terminal: TerminalStrategy::Random,
             instantiation_error: None,
+            provider_filters: None,
         };
         let first_id = Uuid::from_u128(1);
         let second_id = Uuid::from_u128(2);
@@ -16031,6 +16743,7 @@ mod tests {
             user_filters: vec![filter.clone()],
             terminal: TerminalStrategy::FirstPick,
             instantiation_error: None,
+            provider_filters: None,
         };
         let records = [owner, Uuid::from_u128(72)]
             .into_iter()

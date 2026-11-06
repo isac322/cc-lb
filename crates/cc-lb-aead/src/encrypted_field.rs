@@ -137,6 +137,9 @@ pub struct OAuthTokenBundle {
     pub account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// OAuth client that issued this Google grant. Legacy bundles are Gemini CLI.
+    #[serde(default)]
+    pub oauth_profile: cc_lb_oauth_protocol::GeminiOAuthProfile,
     pub scopes: Vec<String>,
     /// `true` for long-lived (365-day) Anthropic credentials that must never be
     /// refreshed. Rotating such a grant makes Anthropic revoke the 365-day
@@ -160,6 +163,7 @@ mod tests {
     fn encrypt_decrypt_roundtrip() {
         let aead = test_service();
         let original = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "sk-test-access".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
@@ -188,6 +192,7 @@ mod tests {
     fn wrong_aad_fails_decrypt() {
         let aead = test_service();
         let bundle = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "sk-test".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
@@ -209,6 +214,7 @@ mod tests {
     fn tampered_ciphertext_fails() {
         let aead = test_service();
         let bundle = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "sk-test".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
@@ -235,6 +241,7 @@ mod tests {
     fn serde_base64_roundtrip() {
         let aead = test_service();
         let bundle = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "sk-test".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
@@ -270,6 +277,7 @@ mod tests {
     fn serde_bytes_roundtrip() {
         let aead = test_service();
         let bundle = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "sk-test".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
@@ -299,6 +307,7 @@ mod tests {
     fn debug_does_not_expose_plaintext() {
         let aead = test_service();
         let bundle = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "sk-secret-token-that-must-not-appear".to_string(),
             refresh_token: "sk-refresh-secret".to_string(),
             expires_at_unix_secs: 1234567890,
@@ -375,6 +384,7 @@ mod tests {
         let aead = test_service();
         let aad = b"upstream-account-id";
         let bundle = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "access-token".to_owned(),
             refresh_token: "refresh-token".to_owned(),
             expires_at_unix_secs: 1234567890,
@@ -403,6 +413,7 @@ mod tests {
         let aead = test_service();
         let aad = b"upstream-project-id";
         let bundle = OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: "access-token".to_owned(),
             refresh_token: "refresh-token".to_owned(),
             expires_at_unix_secs: 1234567890,

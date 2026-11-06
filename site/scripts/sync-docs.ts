@@ -5,12 +5,17 @@ const root = resolve(import.meta.dir, '..', '..');
 const siteRoot = resolve(import.meta.dir, '..');
 const blockedTerms = /Bedrock|Vertex|official|endorsed|\/Users\/|\/data\/|\.omo\/|~\/\.config\/|production-grade|enterprise-grade|battle-tested|highly available|99\.999%|\bSLA\b|\bD-(?:arch|cut|ido|meta)-\d+\b|\buniversal multi-provider(?: LLM)? gateway\b|\b(?:full|complete) (?:(?:OpenAI|Gemini|provider) )?API (?:support|compatibility)\b/i;
 const providerTerms = /OpenAI|Gemini/i;
+const providerReferenceSources: Record<string, true> = {
+  'docs/runtime-management.md': true,
+  'docs/upstream-warmup.md': true,
+  'docs/plugin-author-guide.md': true,
+};
 
 export function findBlockedTerm(content: string, sourcePath: string): string | undefined {
   const blocked = content.match(blockedTerms)?.[0];
   if (blocked) return blocked;
-  // The runtime reference documents implemented provider operations, not site-wide positioning.
-  if (sourcePath !== 'docs/runtime-management.md') return content.match(providerTerms)?.[0];
+  // Runtime, warm-up, and plugin references document implemented provider operations, not site-wide positioning.
+  if (!providerReferenceSources[sourcePath]) return content.match(providerTerms)?.[0];
   return undefined;
 }
 

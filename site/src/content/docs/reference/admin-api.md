@@ -22,7 +22,28 @@ Every mutating request should use the current ETag or revision when the endpoint
 
 ## OAuth flow
 
-For an OAuth upstream, create the resource, call the start endpoint, open the returned authorization URL, then complete the flow with the state token and authorization code. The response records the credential mode actually negotiated.
+OAuth draft start accepts `{ "provider": "anthropic" | "openai" | "gemini", "flow": "device_code" | "browser" }`. Omitting `provider` keeps Anthropic compatibility; omitting `flow` uses OpenAI's device-code flow. The browser flow is supported for OpenAI and Gemini. Paste-code providers return `flow: "paste_code"` and an `authorize_url`. OpenAI device start returns `flow: "device_code"`, a verification URL, one-time user code, polling interval, and expiry. OpenAI browser start returns `flow: "paste_code"`, `provider: "openai"`, `authorize_url`, and `state_token`; Gemini browser start returns `flow: "browser"`, `provider: "gemini"`, `authorize_url`, and `state_token`.
+
+Complete accepts `{ "state_token", "code" }` for paste flows. For OpenAI browser flow, `code` may be the full `http://localhost:1455/auth/callback?...` address copied from the browser or a bare authorization code. For Gemini browser flow, `code` may be the full `http://localhost:51121/oauth-callback?...` address or a bare authorization code. A callback URL with a different `state` returns `400 { "error": "state_mismatch" }`. OpenAI device completion may return `202` with `{ "status": "pending", "poll_interval_secs" }` until the account is authorized, then returns the credential metadata used by `from-oauth-draft`.
+
+Reconnect uses the same provider-specific flow at `/admin/v1/upstreams/{id}/oauth/start` and `/complete`, selecting the provider from the existing upstream kind. OpenAI reconnect checks the ChatGPT account id; Gemini checks the Google account email. A different account returns `409 account_mismatch` without replacing the stored credential. Missing identity returns `missing_account_identity` or `missing_existing_identity`; a changed upstream revision returns `409 stale_revision`.
+
+OpenAI device completion accepts a request containing only `state_token`. Respect `poll_interval_secs` before polling again. Provider throttling returns `429 slow_down`; expired and denied device codes return `400 device_code_expired` and `400 access_denied`. A `404` when starting device login returns `device_login_unavailable`; browser flow does not call the device endpoint.
+
+New Gemini subscription sign-ins and reconnects use the Antigravity OAuth client. After Google approval, the browser lands on `http://localhost:51121/oauth-callback`; the page does not need to load. Copy the full URL from the address bar and paste it into the completion form. Existing Gemini CLI enterprise grants retain the `gemini_cli` profile; new subscription credentials use `antigravity`, and an absent profile defaults to `gemini_cli`. Google retired Gemini CLI consumer login on June 18, 2026; see the [transition announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity/).
+
+Antigravity completion uses `loadCodeAssist` and `onboardUser` with Antigravity metadata and the daily host `https://daily-cloudcode-pa.googleapis.com`. Usage polling calls `POST /v1internal:retrieveUserQuotaSummary` with `{"project":"<project-id>"}` and uses the same parser and fallback behavior as Gemini CLI sign-ins. It reports the same four windows: Gemini models have 5-hour (`gemini_5h`) and weekly (`gemini_7d`) windows; Claude and GPT-OSS models have 5-hour (`third_party_5h`) and weekly (`third_party_7d`) windows.
+
+> [!WARNING]
+> Google Antigravity Additional Terms [§6](https://antigravity.google/terms) prohibit using third-party software, tools, or services to access the Service with Antigravity OAuth. The terms state that this is a breach and may be grounds for suspension or termination of Antigravity and/or Gemini CLI accounts. Operators decide at their own risk whether to use this integration.
+
+Creating an upstream from a completed draft stores the provider-specific credential and seeds both token refresh and subscription usage polling. OAuth endpoints remain behind admin authentication.
+
+## Warm-up
+
+`warmup_enabled` is accepted for OAuth upstreams of kind `anthropic_oauth`, `openai_oauth`, and `gemini_oauth`. OAuth sign-in creates these upstreams with warm-up enabled by default. API-key upstreams reject the field. Warm-up requires stored OAuth credentials; it does not send requests for disabled or credential-less upstreams.
+
+The admin upstream detail exposes the Warm-up toggle, status, manual **Fire now** action, and history for supported OAuth upstreams. `warmup_dialect_plugin` remains available only for `anthropic_oauth`.
 
 ## Plugin chains
 

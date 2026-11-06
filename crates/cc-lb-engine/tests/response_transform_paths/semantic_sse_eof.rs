@@ -876,6 +876,96 @@ async fn semantic_sse_eof_non_anthropic_and_non_sse_controls() -> TestResult {
 }
 
 #[tokio::test]
+async fn codex_event_name_completed_accepts_transport_close() -> TestResult {
+    let body = Bytes::from_static(
+        b"event: response.created\n\
+data: {\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n\
+event: response.completed\n\
+data: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"output_tokens\":7}}}\n\n",
+    );
+    let observed = observe(
+        Arc::new(ScriptedDispatch::identity_sse(
+            vec![body.clone()],
+            Some(std::io::ErrorKind::ConnectionReset),
+        )),
+        false,
+        upstream_record(
+            StorageUpstreamKind::OpenaiOauth,
+            "https://chatgpt.com/backend-api/",
+        ),
+        http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-5-codex","input":"hello","stream":true}"#,
+            ))?,
+    )
+    .await?;
+
+    assert_eq!(observed.body, body);
+    assert_eq!(observed.status, StatusCode::OK);
+    assert_eq!(
+        (observed.row.input_tokens, observed.row.output_tokens),
+        (Some(13), Some(7))
+    );
+    assert_eq!(observed.row.error_code, None);
+    assert_eq!(observed.row.upstream_error_type, None);
+    assert_eq!(
+        observed.row.upstream_stream_warning_type.as_deref(),
+        Some("upstream_response_body_error")
+    );
+    assert!(observed.completion().is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_missing_content_type_still_accepts_terminal_transport_close() -> TestResult {
+    let body = Bytes::from_static(
+        b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"usage\":{\"input_tokens\":13,\"output_tokens\":7}}}\n\n",
+    );
+    let observed = observe(
+        Arc::new(ScriptedDispatch {
+            version: http::Version::HTTP_2,
+            headers: HeaderMap::new(),
+            chunks: vec![body.clone()],
+            trailing_error: Some(std::io::ErrorKind::ConnectionReset),
+        }),
+        false,
+        upstream_record(
+            StorageUpstreamKind::OpenaiOauth,
+            "https://chatgpt.com/backend-api/",
+        ),
+        http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-5-codex","input":"hello","stream":true}"#,
+            ))?,
+    )
+    .await?;
+
+    assert_eq!(observed.body, body);
+    assert_eq!(observed.status, StatusCode::OK);
+    assert_eq!(observed.row.error_code, None);
+    assert_eq!(observed.row.upstream_error_type, None);
+    assert_eq!(
+        observed.row.upstream_stream_warning_type.as_deref(),
+        Some("upstream_response_body_error")
+    );
+    assert!(observed.completion().is_ok());
+    Ok(())
+}
+
+#[tokio::test]
 async fn openai_terminal_client_close_without_content_type_is_success() -> TestResult {
     let body = Bytes::from_static(
         b"event: response.created\n\

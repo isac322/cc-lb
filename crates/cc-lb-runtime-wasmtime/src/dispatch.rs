@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::cache::{call_filter_hook, call_shape_hook};
+use crate::cache::call_hook_export_scoped;
 use crate::{HookKind, PluginCell, RuntimeSlotKey, WasmtimeRuntime, WasmtimeRuntimeError};
 
 impl WasmtimeRuntime {
@@ -36,7 +36,14 @@ impl WasmtimeRuntime {
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, HookKind::Filter, |cell| {
-            call_filter_hook(cell, input)
+            let export = HookKind::Filter
+                .qualified_export_name(cc_lb_plugin_wire::schema::ProviderFamily::Anthropic);
+            let export = if cell.metadata.hooks.contains_key("filter_anthropic") {
+                export
+            } else {
+                HookKind::Filter.export_name()
+            };
+            call_hook_export_scoped(cell, input, HookKind::Filter, export, <[u8]>::to_vec)
         })
     }
 
@@ -46,7 +53,14 @@ impl WasmtimeRuntime {
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, HookKind::Shape, |cell| {
-            call_shape_hook(cell, input)
+            let export = HookKind::Shape
+                .qualified_export_name(cc_lb_plugin_wire::schema::ProviderFamily::Anthropic);
+            let export = if cell.metadata.hooks.contains_key("shape_anthropic") {
+                export
+            } else {
+                HookKind::Shape.export_name()
+            };
+            call_hook_export_scoped(cell, input, HookKind::Shape, export, <[u8]>::to_vec)
         })
     }
 }

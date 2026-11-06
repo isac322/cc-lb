@@ -613,6 +613,7 @@ fn principal_view_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<Prin
         user_filters: filters,
         terminal: TerminalStrategy::FirstPick,
         instantiation_error: None,
+        provider_filters: None,
     });
     let mut chains = HashMap::new();
     chains.insert(
@@ -633,6 +634,7 @@ fn principal_view_with_broken_pipeline() -> Arc<PrincipalView> {
         user_filters: Vec::new(),
         terminal: TerminalStrategy::FirstPick,
         instantiation_error: Some(Arc::from("broken pipeline fixture")),
+        provider_filters: None,
     });
     let mut chains = HashMap::new();
     chains.insert(

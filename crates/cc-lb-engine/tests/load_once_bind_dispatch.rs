@@ -59,6 +59,7 @@ async fn lifecycle_explicit_pipeline_fails_closed() -> Result<(), Box<dyn std::e
         user_filters: vec![Arc::new(RecordingFilter { name: "explicit" })],
         terminal: TerminalStrategy::Random,
         instantiation_error: None,
+        provider_filters: None,
     });
     let view = principal_view("principal-a", Some(explicit_pipeline));
     let state = TestState::default();

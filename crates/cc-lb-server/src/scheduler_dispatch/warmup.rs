@@ -65,7 +65,7 @@ impl SchedulerDispatch {
             }
             return Ok(JobOutcome::Skip);
         }
-        match self.quota_preflight_decision(upstream.id) {
+        match self.quota_preflight_decision(&upstream) {
             WarmupQuotaPreflightDecision::ActiveWindow { cycle_key } => {
                 self.record_warmup_window_already_active(
                     &upstream,
@@ -98,19 +98,19 @@ impl SchedulerDispatch {
             .await
     }
 
-    fn quota_preflight_decision(&self, upstream_id: uuid::Uuid) -> WarmupQuotaPreflightDecision {
+    fn quota_preflight_decision(&self, upstream: &UpstreamRecord) -> WarmupQuotaPreflightDecision {
         let view = self.dynamic_view.load();
         let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
         drop(view);
         let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
-            upstream_id,
+            upstream.id,
             now_unix_millis(&*self.clock),
             max_staleness_secs,
         );
         let Ok(now_unix_secs) = now_unix_secs_i64(&*self.clock) else {
             return WarmupQuotaPreflightDecision::Unknown;
         };
-        quota_preflight_decision_from_snapshots(&snapshots, now_unix_secs)
+        quota_preflight_decision_from_snapshots(upstream.kind, &snapshots, now_unix_secs)
     }
 
     async fn fire_warmup(
@@ -190,8 +190,12 @@ impl SchedulerDispatch {
                     WarmupDispatchResult::Response { observations, .. } => observations.as_slice(),
                     _ => &[],
                 };
-                let next_evaluation =
-                    next_warmup_evaluation_after_success(&snapshots, observations, now_unix_secs);
+                let next_evaluation = next_warmup_evaluation_after_success(
+                    upstream.kind,
+                    &snapshots,
+                    observations,
+                    now_unix_secs,
+                );
                 self.write_status_after_warmup_success(upstream.id, next_evaluation)
                     .await?;
                 if let WarmupDispatchResult::Response { observations, .. } = final_attempt.result {
@@ -225,11 +229,11 @@ impl SchedulerDispatch {
     async fn write_status_after_warmup_success(
         &self,
         upstream_id: uuid::Uuid,
-        response_resets_at_unix_secs: i64,
+        next_evaluation_at_unix_secs: i64,
     ) -> SchedulerResult<()> {
-        let response_resets_at_unix_secs =
-            u64::try_from(response_resets_at_unix_secs).map_err(|_| {
-                SchedulerError::Job("warmup response reset time before unix epoch".to_owned())
+        let next_evaluation_at_unix_secs =
+            u64::try_from(next_evaluation_at_unix_secs).map_err(|_| {
+                SchedulerError::Job("warmup next evaluation before unix epoch".to_owned())
             })?;
         let status = UpstreamStatusUpdate {
             last_warmup_at_unix_secs: Some(Some(unix_secs(self.clock.now()))),
@@ -241,7 +245,7 @@ impl SchedulerDispatch {
             tracing::warn!(upstream_id = %upstream_id, %error, "warmup status writeback failed; admin UI may show stale data");
         }
 
-        let task = next_warmup_task(upstream_id, response_resets_at_unix_secs);
+        let task = next_warmup_task(upstream_id, next_evaluation_at_unix_secs);
         match self.backend.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
             Err(error) => Err(error),

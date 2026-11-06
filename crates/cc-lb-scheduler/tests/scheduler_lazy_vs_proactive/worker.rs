@@ -164,6 +164,7 @@ async fn refresh_tokens(
     let encrypted_tokens = EncryptedOAuthTokens::encrypt(
         aead.as_ref(),
         &OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token,
             expires_at_unix_secs,

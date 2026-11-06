@@ -230,6 +230,17 @@ pub(super) fn list_request_events_query(
         builder.push(" AND r.upstream_id = ");
         builder.push_bind(upstream_id);
     }
+    if let Some(provider_upstream_ids) = query.filters.provider_upstream_ids.as_ref() {
+        if provider_upstream_ids.is_empty() {
+            return Ok(None);
+        }
+        builder.push(" AND r.upstream_id IN (");
+        let mut separated = builder.separated(", ");
+        for upstream_id in provider_upstream_ids {
+            separated.push_bind(*upstream_id);
+        }
+        separated.push_unseparated(")");
+    }
     if let Some(thread_id) = query.filters.thread_id.as_deref() {
         builder.push(" AND r.thread_id = ");
         builder.push_bind(thread_id);

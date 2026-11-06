@@ -217,7 +217,11 @@ fn apply_observations(
 
 fn header_map_from_snapshot(snapshot: &HeaderSnapshot) -> HeaderMap {
     let mut map = HeaderMap::new();
-    for (name, value) in &snapshot.anthropic_headers {
+    for (name, value) in snapshot
+        .anthropic_headers
+        .iter()
+        .chain(snapshot.provider_headers.iter())
+    {
         let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
             continue;
         };

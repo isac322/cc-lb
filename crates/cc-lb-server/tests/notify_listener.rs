@@ -257,6 +257,7 @@ async fn fixture() -> Fixture {
     let quota_cache = Arc::new(cc_lb_server::SubscriptionQuotaCache::new());
     let initial = build_dynamic_view(
         &stores,
+        None,
         aead.clone(),
         None,
         0,
@@ -302,6 +303,7 @@ async fn spawn_listener(
         prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         subscription_quota_routing_max_staleness_secs: 1800,
         clock: Arc::new(cc_lb_clock::SystemClock),
+        antigravity_config: None,
     }));
     let task = tokio::spawn(async move {
         listener.run().await;

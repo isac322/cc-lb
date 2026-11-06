@@ -4,16 +4,17 @@ use cc_lb_quota::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::{
-    UpstreamRecord, UpstreamStore, WarmupDispatchKind, WarmupPermanentFailureReason,
+    UpstreamKind, UpstreamRecord, UpstreamStore, WarmupDispatchKind, WarmupPermanentFailureReason,
     WarmupTransientFailureReason,
 };
 use http::HeaderMap;
 
-use crate::scheduler_dispatch::http::{decrypt_bundle, upstream_base_url};
+use crate::scheduler_dispatch::http::decrypt_bundle;
 use crate::scheduler_dispatch::storage::storage_scheduler_error;
 use crate::scheduler_dispatch::time::now_unix_millis;
-use crate::warmup::dispatch_warmup_attempt;
-use crate::warmup::request::WarmupRequestAttempt;
+use crate::warmup::request::{
+    ProviderWarmupDispatchParams, WarmupRequestAttempt, dispatch_provider_warmup_attempt,
+};
 
 use super::SchedulerDispatch;
 
@@ -28,6 +29,7 @@ pub(super) enum WarmupDispatchResult {
     Response {
         status: http::StatusCode,
         observations: Vec<UnifiedQuotaObservation>,
+        error_detail: Option<String>,
     },
     TransientFailure {
         reason: WarmupTransientFailureReason,
@@ -92,19 +94,18 @@ impl SchedulerDispatch {
         &self,
         upstream: &UpstreamRecord,
     ) -> WarmupDispatchAttempt {
-        if upstream.warmup_dialect_plugin.is_some()
-            && let Some(lazy_refresher) = self.lazy_refresher.as_ref()
-        {
+        if upstream.warmup_dialect_plugin.is_some() {
             let outcome = match crate::warmup::dialect::dispatch_warmup_with_dialect(
                 crate::warmup::dialect::WarmupDialectDispatchParams {
                     runtime: self.runtime.as_ref(),
                     stores: self.stores.as_ref(),
                     data_dir: self.data_dir.as_ref(),
                     aead: self.aead.clone(),
-                    lazy_refresher: lazy_refresher.clone(),
+                    lazy_refresher: self.lazy_refresher.clone(),
                     upstream,
                     http: &self.http,
                     clock: self.clock.clone(),
+                    config: self.config.as_ref(),
                 },
             )
             .await
@@ -134,43 +135,44 @@ impl SchedulerDispatch {
                 dispatch_kind: WarmupDispatchKind::DialectPlugin,
                 result: WarmupDispatchResult::Response {
                     status: outcome.status,
-                    observations: parse_headers(&outcome.headers),
+                    observations: match upstream.kind {
+                        UpstreamKind::OpenaiOauth => {
+                            cc_lb_quota::parse_openai_codex_quota_headers(&outcome.headers)
+                        }
+                        UpstreamKind::GeminiOauth => Vec::new(),
+                        _ => parse_headers(&outcome.headers),
+                    },
+                    error_detail: None,
                 },
             };
         }
-        let bundle = match decrypt_bundle(upstream, self.aead.as_ref()) {
-            Ok(bundle) => bundle,
-            Err(error) => {
-                return WarmupDispatchAttempt {
-                    dispatch_kind: WarmupDispatchKind::NotDispatched,
-                    result: WarmupDispatchResult::PermanentFailure {
-                        reason: WarmupPermanentFailureReason::CredentialDecryptFailed,
-                        error_detail: error.to_string(),
-                    },
-                };
-            }
-        };
-        let base_url = match upstream_base_url(upstream) {
-            Ok(base_url) => base_url,
-            Err(error) => {
-                return WarmupDispatchAttempt {
-                    dispatch_kind: WarmupDispatchKind::NotDispatched,
-                    result: WarmupDispatchResult::PermanentFailure {
-                        reason: WarmupPermanentFailureReason::RequestBuildFailed,
-                        error_detail: error.to_string(),
-                    },
-                };
-            }
-        };
-        match dispatch_warmup_attempt(&self.http, &bundle.access_token, &base_url).await {
+        match dispatch_provider_warmup_attempt(ProviderWarmupDispatchParams {
+            http: &self.http,
+            upstream,
+            aead: self.aead.as_ref(),
+            config: self.config.as_ref(),
+            clock: self.clock.clone(),
+        })
+        .await
+        {
             WarmupRequestAttempt::Response {
                 status,
                 observations,
+                error_detail,
+                ..
             } => WarmupDispatchAttempt {
                 dispatch_kind: WarmupDispatchKind::Http,
                 result: WarmupDispatchResult::Response {
                     status,
                     observations,
+                    error_detail,
+                },
+            },
+            WarmupRequestAttempt::CredentialDecryptFailed { error } => WarmupDispatchAttempt {
+                dispatch_kind: WarmupDispatchKind::NotDispatched,
+                result: WarmupDispatchResult::PermanentFailure {
+                    reason: WarmupPermanentFailureReason::CredentialDecryptFailed,
+                    error_detail: error,
                 },
             },
             WarmupRequestAttempt::RequestBuildFailed { error } => WarmupDispatchAttempt {

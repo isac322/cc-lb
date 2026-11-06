@@ -64,6 +64,7 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             thread_id: Some("thread-a".to_owned()),
             model: Some("claude-sonnet-4-5".to_owned()),
             upstream_id: Some(upstream_id),
+            provider_upstream_ids: None,
             event_kind: None,
             status_class: Some(StatusClass::TwoXx),
             errors_only: false,
@@ -324,6 +325,7 @@ async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
     const PREFIX_LEN: usize = 501;
     const MATCH_LEN: usize = 501;
 
+    backend.wait_for_events_visible_for_rollup(storage).await?;
     let after = storage.current_request_event_cursor().await?;
     let mut expected_rows = Vec::with_capacity(PREFIX_LEN + MATCH_LEN + 1);
     for index in 0..(PREFIX_LEN + MATCH_LEN) {
@@ -537,6 +539,7 @@ async fn assert_cursor_pages_filter_before_limit<B: ConformanceBackend>(
                 thread_id: Some("cursor-thread".to_owned()),
                 model: Some("  SoNnEt%_  ".to_owned()),
                 upstream_id: Some(Uuid::from_u128(7)),
+                provider_upstream_ids: None,
                 status_class: Some(StatusClass::FiveXx),
                 errors_only: true,
                 event_kind: Some(RequestEventKind::Messages),
@@ -589,6 +592,7 @@ async fn assert_cursor_model_filter_preserves_ascii_case<B: ConformanceBackend>(
     backend: &B,
     storage: &B::Storage,
 ) -> Result<()> {
+    backend.wait_for_events_visible_for_rollup(storage).await?;
     let after = storage.current_request_event_cursor().await?;
     let mut expected_rows = Vec::new();
     for (index, model) in ["Éclair", "ÉCLAIR-preview", "éclair"]
@@ -630,6 +634,7 @@ async fn assert_cursor_model_filter_preserves_ascii_case<B: ConformanceBackend>(
     }
 
     const PREFIX_LEN: usize = 501;
+    backend.wait_for_events_visible_for_rollup(storage).await?;
     let after = storage.current_request_event_cursor().await?;
     let mut expected_rows = Vec::with_capacity(PREFIX_LEN + 1);
     for index in 0..=PREFIX_LEN {

@@ -223,6 +223,7 @@ impl Harness {
             refresh_token_expires_at_unix_secs: None,
             account_id: None,
             project_id: None,
+            oauth_profile: Default::default(),
             scopes: vec!["messages".to_owned()],
             never_refresh: true,
         };

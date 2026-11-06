@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cc_lb_storage_api::{
-    RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, Storage, StorageError,
-    UsageRollup, UsageRollupResolution,
+    Provider, RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, Storage,
+    StorageError, UpstreamStore, UsageRollup, UsageRollupResolution,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -12,6 +12,129 @@ const HOUR_SECS: u64 = 60 * 60;
 const MAX_BUCKETS_PER_SERIES: u64 = 1_440;
 const MAX_GROUPED_SERIES: usize = 20;
 const MAX_PRINCIPAL_COST_SERIES: usize = 5;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ProviderFamily {
+    Anthropic,
+    Openai,
+    Gemini,
+}
+
+impl ProviderFamily {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Gemini => "gemini",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParseProvidersError;
+
+pub(crate) fn parse_provider_families(
+    value: Option<&str>,
+) -> Result<Option<Vec<ProviderFamily>>, ParseProvidersError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let mut families = HashSet::new();
+    for item in value.split(',').map(str::trim) {
+        let family = match item {
+            "anthropic" => ProviderFamily::Anthropic,
+            "openai" => ProviderFamily::Openai,
+            "gemini" => ProviderFamily::Gemini,
+            _ => return Err(ParseProvidersError),
+        };
+        families.insert(family);
+    }
+    if families.is_empty() {
+        return Err(ParseProvidersError);
+    }
+    let mut families = families.into_iter().collect::<Vec<_>>();
+    families.sort_by_key(|family| family.as_str());
+    Ok(Some(families))
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProviderScope {
+    pub(crate) upstream_ids: Option<Vec<Uuid>>,
+    pub(crate) family_by_upstream: HashMap<Uuid, ProviderFamily>,
+}
+
+impl ProviderScope {
+    pub(crate) fn none() -> Self {
+        Self::default()
+    }
+
+    fn matches_upstream(&self, upstream_id: Uuid) -> bool {
+        self.upstream_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&upstream_id))
+    }
+}
+
+pub(crate) async fn resolve_provider_scope(
+    storage: &dyn Storage,
+    families: Option<&[ProviderFamily]>,
+    include_all: bool,
+) -> Result<ProviderScope, StorageError> {
+    if families.is_none() && !include_all {
+        return Ok(ProviderScope::none());
+    }
+    let requested = families.map(|families| families.iter().copied().collect::<HashSet<_>>());
+    let mut after = None;
+    let mut records = Vec::new();
+    loop {
+        let page = UpstreamStore::list(storage, after, 1_000).await?;
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|record| record.id);
+        let page_len = page.len();
+        records.extend(page);
+        if page_len < 1_000 {
+            break;
+        }
+    }
+    let mut upstream_ids = families.map(|_| Vec::new());
+    let mut family_by_upstream = HashMap::new();
+    for record in records {
+        if record.deleted_at_unix_secs.is_some() {
+            continue;
+        }
+        let family = match record.kind.provider() {
+            Provider::Anthropic => ProviderFamily::Anthropic,
+            Provider::Openai => ProviderFamily::Openai,
+            Provider::Gemini => ProviderFamily::Gemini,
+        };
+        if requested
+            .as_ref()
+            .is_some_and(|requested| !requested.contains(&family))
+        {
+            continue;
+        }
+        if let Some(ids) = upstream_ids.as_mut() {
+            ids.push(record.id);
+        }
+        if include_all || families.is_some() {
+            family_by_upstream.insert(record.id, family);
+        }
+    }
+    Ok(ProviderScope {
+        upstream_ids,
+        family_by_upstream,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UsageFilter {
+    pub(crate) group_by: UsageGroupBy,
+    pub(crate) upstream_id: Option<Uuid>,
+    pub(crate) principal_id: Option<String>,
+    pub(crate) projection: UsageProjection,
+    pub(crate) provider_scope: ProviderScope,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashboardRange {
@@ -39,6 +162,7 @@ pub enum UsageGroupBy {
     Model,
     Principal,
     Upstream,
+    Provider,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +317,7 @@ pub fn parse_group_by(value: &str) -> Result<UsageGroupBy, DashboardQueryError> 
         "model" => Ok(UsageGroupBy::Model),
         "principal" => Ok(UsageGroupBy::Principal),
         "upstream" => Ok(UsageGroupBy::Upstream),
+        "provider" => Ok(UsageGroupBy::Provider),
         _ => Err(DashboardQueryError::InvalidGroupBy),
     }
 }
@@ -228,6 +353,15 @@ pub async fn build_dashboard_summary(
     range: DashboardRange,
     now_unix_secs: u64,
 ) -> Result<DashboardSummaryResponse, StorageError> {
+    build_dashboard_summary_filtered(storage, range, now_unix_secs, &ProviderScope::none()).await
+}
+
+pub(crate) async fn build_dashboard_summary_filtered(
+    storage: &dyn Storage,
+    range: DashboardRange,
+    now_unix_secs: u64,
+    provider_scope: &ProviderScope,
+) -> Result<DashboardSummaryResponse, StorageError> {
     let step = auto_step(range);
     let (window_start_unix_secs, window_end_unix_secs) = build_window(range, now_unix_secs);
     let mut buckets = zero_filled_buckets(window_start_unix_secs, window_end_unix_secs, step);
@@ -235,27 +369,33 @@ pub async fn build_dashboard_summary(
     let rollups = storage
         .query_usage_rollups_in_range(step, window_start_unix_secs, window_end_unix_secs)
         .await?;
+    let rollups = rollups
+        .into_iter()
+        .filter(|rollup| provider_scope.matches_upstream(rollup.upstream_id))
+        .collect::<Vec<_>>();
     let observed = !rollups.is_empty();
     for rollup in &rollups {
         add_rollup_to_buckets(&mut buckets, rollup, window_start_unix_secs, step);
     }
-    let excluded_errors = storage
-        .query_overview_excluded_error_buckets_in_range(
-            step,
-            window_start_unix_secs,
-            window_end_unix_secs,
-        )
-        .await?;
-    for excluded in excluded_errors {
-        let Some(offset) = excluded.bucket_start.checked_sub(window_start_unix_secs) else {
-            continue;
-        };
-        let index = (offset / step_width_secs(step)) as usize;
-        let Some(bucket) = buckets.get_mut(index) else {
-            continue;
-        };
-        if bucket.bucket_start_unix_secs == excluded.bucket_start {
-            bucket.error_count = bucket.error_count.saturating_sub(excluded.error_count);
+    if provider_scope.upstream_ids.is_none() {
+        let excluded_errors = storage
+            .query_overview_excluded_error_buckets_in_range(
+                step,
+                window_start_unix_secs,
+                window_end_unix_secs,
+            )
+            .await?;
+        for excluded in excluded_errors {
+            let Some(offset) = excluded.bucket_start.checked_sub(window_start_unix_secs) else {
+                continue;
+            };
+            let index = (offset / step_width_secs(step)) as usize;
+            let Some(bucket) = buckets.get_mut(index) else {
+                continue;
+            };
+            if bucket.bucket_start_unix_secs == excluded.bucket_start {
+                bucket.error_count = bucket.error_count.saturating_sub(excluded.error_count);
+            }
         }
     }
 
@@ -275,11 +415,14 @@ async fn build_dashboard_usage_with_projection(
     storage: &dyn Storage,
     range: DashboardRange,
     step: UsageRollupResolution,
-    group_by: UsageGroupBy,
-    upstream_id: Option<Uuid>,
+    filter: &UsageFilter,
     now_unix_secs: u64,
-    projection: UsageProjection,
 ) -> Result<DashboardUsageResponse, StorageError> {
+    let group_by = filter.group_by;
+    let upstream_id = filter.upstream_id;
+    let principal_id = filter.principal_id.as_deref();
+    let projection = filter.projection;
+    let provider_scope = &filter.provider_scope;
     let (window_start_unix_secs, window_end_unix_secs) =
         build_window_for_step(range, step, now_unix_secs);
     let rollups = storage
@@ -287,36 +430,79 @@ async fn build_dashboard_usage_with_projection(
         .await?;
     let rollups = rollups
         .into_iter()
-        .filter(|rollup| upstream_id.is_none_or(|id| rollup.upstream_id == id))
+        .filter(|rollup| {
+            upstream_id.is_none_or(|id| rollup.upstream_id == id)
+                && provider_scope.matches_upstream(rollup.upstream_id)
+                && principal_id.is_none_or(|id| rollup.principal == id)
+        })
         .collect::<Vec<_>>();
     let observed = !rollups.is_empty();
     let (mut series, truncated_series_count) = match projection {
-        UsageProjection::Full => build_usage_series(
+        _ if principal_id.is_some() && !observed => (Vec::new(), None),
+        UsageProjection::Full => build_usage_series_with_provider(
             group_by,
             &rollups,
             window_start_unix_secs,
             window_end_unix_secs,
             step,
+            &provider_scope.family_by_upstream,
         ),
-        UsageProjection::Totals => {
-            // Start from sparse rollup buckets instead of a dense window. Cost-only
-            // buckets for selected principals are seeded before enrichment below;
-            // this preserves both live-tail guardrails and recorded zero components.
-            build_usage_totals_series(group_by, &rollups, window_start_unix_secs)
-        }
+        UsageProjection::Totals => build_usage_totals_series(
+            group_by,
+            &rollups,
+            window_start_unix_secs,
+            &provider_scope.family_by_upstream,
+        ),
     };
     if group_by == UsageGroupBy::Principal && !series.is_empty() {
         let principal_keys = selected_principal_cost_keys(&series);
         let bucket_width_secs = step_width_secs(step);
-        let costs = storage
-            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
-                since_unix_secs: window_start_unix_secs,
-                until_unix_secs: window_end_unix_secs,
-                bucket_width_secs,
-                upstream_id,
-                principal_keys,
-            })
-            .await?;
+        let selected_upstream_ids = provider_scope
+            .upstream_ids
+            .as_deref()
+            .map(|ids| ids.iter().copied().map(Some).collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![upstream_id]);
+        let mut costs_by_key = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
+        for selected_upstream_id in selected_upstream_ids {
+            let costs = storage
+                .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                    since_unix_secs: window_start_unix_secs,
+                    until_unix_secs: window_end_unix_secs,
+                    bucket_width_secs,
+                    upstream_id: selected_upstream_id,
+                    principal_keys: principal_keys.clone(),
+                })
+                .await?;
+            for cost in costs {
+                let entry = costs_by_key
+                    .entry((cost.principal.clone(), cost.bucket_start_unix_secs))
+                    .or_insert_with(|| RequestEventPrincipalCostBucket {
+                        principal: cost.principal.clone(),
+                        bucket_start_unix_secs: cost.bucket_start_unix_secs,
+                        ..RequestEventPrincipalCostBucket::default()
+                    });
+                entry.total_cost_micros = entry
+                    .total_cost_micros
+                    .saturating_add(cost.total_cost_micros);
+                entry.component_costs_recorded |= cost.component_costs_recorded;
+                entry.cost_input_micros = entry
+                    .cost_input_micros
+                    .saturating_add(cost.cost_input_micros);
+                entry.cost_output_micros = entry
+                    .cost_output_micros
+                    .saturating_add(cost.cost_output_micros);
+                entry.cost_cache_creation_5m_micros = entry
+                    .cost_cache_creation_5m_micros
+                    .saturating_add(cost.cost_cache_creation_5m_micros);
+                entry.cost_cache_creation_1h_micros = entry
+                    .cost_cache_creation_1h_micros
+                    .saturating_add(cost.cost_cache_creation_1h_micros);
+                entry.cost_cache_read_micros = entry
+                    .cost_cache_read_micros
+                    .saturating_add(cost.cost_cache_read_micros);
+            }
+        }
+        let costs = costs_by_key.into_values().collect::<Vec<_>>();
         if projection == UsageProjection::Totals {
             seed_principal_cost_buckets(&mut series, &costs);
         }
@@ -342,23 +528,13 @@ pub(crate) async fn build_dashboard_usage_projected_checked(
     storage: &dyn Storage,
     range: DashboardRange,
     step: UsageRollupResolution,
-    group_by: UsageGroupBy,
-    upstream_id: Option<Uuid>,
+    filter: &UsageFilter,
     now_unix_secs: u64,
-    projection: UsageProjection,
 ) -> Result<DashboardUsageResponse, DashboardBuildError> {
     validate_step_for_range(range, step)?;
-    build_dashboard_usage_with_projection(
-        storage,
-        range,
-        step,
-        group_by,
-        upstream_id,
-        now_unix_secs,
-        projection,
-    )
-    .await
-    .map_err(Into::into)
+    build_dashboard_usage_with_projection(storage, range, step, filter, now_unix_secs)
+        .await
+        .map_err(Into::into)
 }
 
 #[derive(Debug)]
@@ -419,6 +595,7 @@ impl UsageGroupBy {
             Self::Model => "model",
             Self::Principal => "principal",
             Self::Upstream => "upstream",
+            Self::Provider => "provider",
         }
     }
 }
@@ -631,12 +808,13 @@ fn safe_avg(sum: u64, count: u64) -> f64 {
     }
 }
 
-pub(crate) fn build_usage_series(
+fn build_usage_series_with_provider(
     group_by: UsageGroupBy,
     rollups: &[UsageRollup],
     window_start_unix_secs: u64,
     window_end_unix_secs: u64,
     step: UsageRollupResolution,
+    family_by_upstream: &HashMap<Uuid, ProviderFamily>,
 ) -> (Vec<UsageSeries>, Option<u64>) {
     if group_by == UsageGroupBy::None {
         let mut buckets = zero_filled_buckets(window_start_unix_secs, window_end_unix_secs, step);
@@ -655,7 +833,9 @@ pub(crate) fn build_usage_series(
 
     let mut groups: BTreeMap<String, GroupAccumulator> = BTreeMap::new();
     for rollup in rollups {
-        let (key, upstream_name) = group_key(group_by, rollup);
+        let Some((key, upstream_name)) = group_key(group_by, rollup, family_by_upstream) else {
+            continue;
+        };
         let entry = groups.entry(key).or_insert_with(|| GroupAccumulator {
             total_request_count: 0,
             upstream_name,
@@ -673,7 +853,6 @@ pub(crate) fn build_usage_series(
             .then_with(|| left_key.cmp(right_key))
     });
 
-    // Dashboard charts are capped at the top 20 dimension series by request count.
     let truncated_count = ranked.len().saturating_sub(MAX_GROUPED_SERIES);
     let series = ranked
         .into_iter()
@@ -697,6 +876,7 @@ fn build_usage_totals_series(
     group_by: UsageGroupBy,
     rollups: &[UsageRollup],
     window_start_unix_secs: u64,
+    family_by_upstream: &HashMap<Uuid, ProviderFamily>,
 ) -> (Vec<UsageSeries>, Option<u64>) {
     if group_by == UsageGroupBy::None {
         let mut bucket = empty_bucket(window_start_unix_secs);
@@ -715,7 +895,9 @@ fn build_usage_totals_series(
 
     let mut groups = BTreeMap::<String, TotalGroupAccumulator>::new();
     for rollup in rollups {
-        let (key, upstream_name) = group_key(group_by, rollup);
+        let Some((key, upstream_name)) = group_key(group_by, rollup, family_by_upstream) else {
+            continue;
+        };
         let entry = groups.entry(key).or_insert_with(|| TotalGroupAccumulator {
             total_request_count: 0,
             upstream_name,
@@ -899,15 +1081,23 @@ fn enrich_principal_costs(series: &mut [UsageSeries], costs: Vec<RequestEventPri
     }
 }
 
-fn group_key(group_by: UsageGroupBy, rollup: &UsageRollup) -> (String, Option<String>) {
+fn group_key(
+    group_by: UsageGroupBy,
+    rollup: &UsageRollup,
+    family_by_upstream: &HashMap<Uuid, ProviderFamily>,
+) -> Option<(String, Option<String>)> {
     match group_by {
-        UsageGroupBy::None => ("all".to_owned(), None),
-        UsageGroupBy::Model => (rollup.model.clone(), None),
-        UsageGroupBy::Principal => (rollup.principal.clone(), None),
-        UsageGroupBy::Upstream => (
+        UsageGroupBy::None => Some(("all".to_owned(), None)),
+        UsageGroupBy::Model => Some((rollup.model.clone(), None)),
+        UsageGroupBy::Principal => Some((rollup.principal.clone(), None)),
+        UsageGroupBy::Upstream => Some((
             rollup.upstream_id.to_string(),
             Some(rollup.upstream_name.clone()),
-        ),
+        )),
+        UsageGroupBy::Provider => family_by_upstream.get(&rollup.upstream_id).map(|family| {
+            let family = family.as_str().to_owned();
+            (family.clone(), Some(family))
+        }),
     }
 }
 
@@ -1061,7 +1251,7 @@ mod tests {
         let rollups = [rollup(MINUTE_SECS, 1), rollup(59 * MINUTE_SECS, 2)];
 
         let (mut series, truncated_series_count) =
-            build_usage_totals_series(UsageGroupBy::Principal, &rollups, 0);
+            build_usage_totals_series(UsageGroupBy::Principal, &rollups, 0, &HashMap::new());
 
         assert_eq!(truncated_series_count, None);
         assert_eq!(series.len(), 1);

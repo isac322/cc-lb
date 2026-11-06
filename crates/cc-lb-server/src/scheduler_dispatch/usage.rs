@@ -1,9 +1,10 @@
 use cc_lb_control::anthropic_metadata::CedarEmberStatus;
 use cc_lb_engine::SubscriptionQuotaSink;
+use cc_lb_oauth_protocol::GeminiOAuthProfile;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::{
     SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, upstream::UpstreamKind,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -284,6 +285,430 @@ fn status_from_utilization(utilization: f64) -> SubscriptionQuotaStatus {
         SubscriptionQuotaStatus::AllowedWarning
     } else {
         SubscriptionQuotaStatus::Allowed
+    }
+}
+
+/// Provider identity and OAuth profile used to interpret a provider quota body.
+pub(super) struct ProviderUsageContext<'a> {
+    pub(super) upstream_id: Uuid,
+    pub(super) kind: UpstreamKind,
+    pub(super) profile: GeminiOAuthProfile,
+    pub(super) project_id: Option<&'a str>,
+}
+
+/// Parse provider-native OAuth quota responses into the shared subscription
+/// quota sample shape. This runs only in the scheduler worker.
+pub(super) fn observe_provider_usage_body(
+    context: ProviderUsageContext<'_>,
+    body: &[u8],
+    observed_at_unix_millis: u64,
+    sink: &SubscriptionQuotaSink,
+    cache: &SubscriptionQuotaCache,
+) -> SchedulerResult<()> {
+    let ProviderUsageContext {
+        upstream_id,
+        kind,
+        profile,
+        project_id,
+    } = context;
+    let value: serde_json::Value = sonic_rs::from_slice(body).map_err(|error| {
+        SchedulerError::Job(format!("provider quota JSON parse failed: {error}"))
+    })?;
+    let records = match kind {
+        UpstreamKind::OpenaiOauth => {
+            records_from_openai_api(upstream_id, &value, observed_at_unix_millis)
+        }
+        UpstreamKind::GeminiOauth => match profile {
+            GeminiOAuthProfile::GeminiCli | GeminiOAuthProfile::Antigravity => {
+                records_from_gemini_api(upstream_id, project_id, &value, observed_at_unix_millis)
+            }
+        },
+        _ => Vec::new(),
+    };
+    for record in records {
+        cache.upsert_observation(upstream_id, &record);
+        sink.enqueue(record)
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+    }
+    Ok(())
+}
+
+// Codex RateLimitStatusPayload documents `rate_limit.primary_window` and
+// `rate_limit.secondary_window` with used_percent, limit_window_seconds, reset_at.
+// Resolve slots by duration: a Pro account's primary slot may be the weekly limit.
+// Source: https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client.rs
+fn records_from_openai_api(
+    upstream_id: Uuid,
+    value: &serde_json::Value,
+    observed_at_unix_millis: u64,
+) -> Vec<SubscriptionQuotaSample> {
+    let mut records = Vec::new();
+    collect_openai_windows(value, &mut records, upstream_id, observed_at_unix_millis);
+    // A recognized window establishes a usable snapshot, not an error or an
+    // unsupported body. Omitted companion windows are explicitly absent.
+    if !records.is_empty() {
+        for window in [
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+        ] {
+            if !records.iter().any(|record| record.window == window) {
+                records.push(absent_record(upstream_id, window, observed_at_unix_millis));
+            }
+        }
+    }
+    records
+}
+
+fn collect_openai_windows(
+    value: &serde_json::Value,
+    records: &mut Vec<SubscriptionQuotaSample>,
+    upstream_id: Uuid,
+    observed_at_unix_millis: u64,
+) {
+    let Some(object) = value.as_object() else {
+        if let Some(items) = value.as_array() {
+            for item in items {
+                collect_openai_windows(item, records, upstream_id, observed_at_unix_millis);
+            }
+        }
+        return;
+    };
+    for (name, child) in object {
+        let lower = name.to_ascii_lowercase();
+        let Some(child_object) = child.as_object() else {
+            collect_openai_windows(child, records, upstream_id, observed_at_unix_millis);
+            continue;
+        };
+        let Some(window) = child_object
+            .get("limit_window_seconds")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(codex_window_from_duration_secs)
+        else {
+            collect_openai_windows(child, records, upstream_id, observed_at_unix_millis);
+            continue;
+        };
+        if (lower.contains("primary") || lower.contains("secondary"))
+            && let Some(used) = child_object
+                .get("used_percent")
+                .and_then(serde_json::Value::as_f64)
+        {
+            let utilization = Some((used / 100.0).clamp(0.0, 1.0));
+            let reset = child_object
+                .get("reset_at")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| u64::try_from(value).ok());
+            let mut record = base_record(
+                upstream_id,
+                window,
+                SubscriptionQuotaSampleKind::Sample,
+                observed_at_unix_millis,
+                utilization,
+                reset,
+                None,
+                None,
+                None,
+            );
+            record.representative_claim = Some(format!("Codex {name}"));
+            records.push(record);
+        }
+        collect_openai_windows(child, records, upstream_id, observed_at_unix_millis);
+    }
+}
+
+fn codex_window_from_duration_secs(seconds: u64) -> Option<SubscriptionQuotaWindow> {
+    match seconds {
+        18_000 => Some(SubscriptionQuotaWindow::FiveHour),
+        604_800 => Some(SubscriptionQuotaWindow::SevenDay),
+        _ => None,
+    }
+}
+
+fn records_from_gemini_api(
+    upstream_id: Uuid,
+    _project_id: Option<&str>,
+    value: &serde_json::Value,
+    observed_at_unix_millis: u64,
+) -> Vec<SubscriptionQuotaSample> {
+    if value.get("summary").is_some() {
+        let summary = value.get("summary").unwrap_or(&serde_json::Value::Null);
+        let (mut records, present) =
+            records_from_gemini_summary(upstream_id, summary, observed_at_unix_millis);
+        let fallbacks = value.get("fallback").and_then(serde_json::Value::as_object);
+        if !present.0
+            && let Some(quota) = fallbacks
+                .and_then(|fallback| fallback.get("gemini"))
+                .filter(|quota| !quota.is_null())
+        {
+            merge_gemini_records(
+                &mut records,
+                records_from_gemini_quota(
+                    upstream_id,
+                    quota,
+                    observed_at_unix_millis,
+                    GeminiQuotaGroup::Gemini,
+                ),
+            );
+        }
+        if !present.1
+            && let Some(quota) = fallbacks
+                .and_then(|fallback| fallback.get("third_party"))
+                .filter(|quota| !quota.is_null())
+        {
+            merge_gemini_records(
+                &mut records,
+                records_from_gemini_quota(
+                    upstream_id,
+                    quota,
+                    observed_at_unix_millis,
+                    GeminiQuotaGroup::ThirdParty,
+                ),
+            );
+        }
+        return records;
+    }
+    records_from_gemini_quota(
+        upstream_id,
+        value,
+        observed_at_unix_millis,
+        GeminiQuotaGroup::Unknown,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GeminiQuotaGroup {
+    Gemini,
+    ThirdParty,
+    Unknown,
+}
+
+pub(super) fn classify_gemini_summary_bucket(
+    display_name: &str,
+    bucket: &serde_json::Value,
+) -> GeminiQuotaGroup {
+    let bucket_id = bucket
+        .get("bucketId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if bucket_id.starts_with("3p-") {
+        GeminiQuotaGroup::ThirdParty
+    } else if bucket_id.starts_with("gemini-") || display_name.contains("gemini") {
+        GeminiQuotaGroup::Gemini
+    } else {
+        GeminiQuotaGroup::Unknown
+    }
+}
+
+fn records_from_gemini_summary(
+    upstream_id: Uuid,
+    value: &serde_json::Value,
+    observed_at_unix_millis: u64,
+) -> (Vec<SubscriptionQuotaSample>, (bool, bool)) {
+    let mut records = absent_gemini_records(upstream_id, observed_at_unix_millis);
+    let Some(groups) = value.get("groups").and_then(serde_json::Value::as_array) else {
+        return (records, (false, false));
+    };
+    let mut present = (false, false);
+    for group in groups {
+        let Some(buckets) = group.get("buckets").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let display_name = group
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        for bucket in buckets {
+            let group_kind = classify_gemini_summary_bucket(&display_name, bucket);
+            if group_kind == GeminiQuotaGroup::Unknown
+                || bucket
+                    .get("disabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(window) = gemini_summary_window(group_kind, bucket) else {
+                continue;
+            };
+            let Some(sample) =
+                gemini_sample_from_bucket(upstream_id, window, bucket, observed_at_unix_millis)
+            else {
+                continue;
+            };
+            replace_gemini_record(&mut records, sample);
+            match group_kind {
+                GeminiQuotaGroup::Gemini => present.0 = true,
+                GeminiQuotaGroup::ThirdParty => present.1 = true,
+                GeminiQuotaGroup::Unknown => continue,
+            }
+        }
+    }
+    (records, present)
+}
+
+fn gemini_summary_window(
+    group: GeminiQuotaGroup,
+    bucket: &serde_json::Value,
+) -> Option<SubscriptionQuotaWindow> {
+    let bucket_id = bucket
+        .get("bucketId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let window = bucket
+        .get("window")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let five_hour = bucket_id.ends_with("-5h") || window == "5h";
+    let weekly = bucket_id.ends_with("-weekly") || window == "weekly";
+    match (group, five_hour, weekly) {
+        (GeminiQuotaGroup::Gemini, true, false) => Some(SubscriptionQuotaWindow::GeminiFiveHour),
+        (GeminiQuotaGroup::Gemini, false, true) => Some(SubscriptionQuotaWindow::GeminiSevenDay),
+        (GeminiQuotaGroup::ThirdParty, true, false) => {
+            Some(SubscriptionQuotaWindow::ThirdPartyFiveHour)
+        }
+        (GeminiQuotaGroup::ThirdParty, false, true) => {
+            Some(SubscriptionQuotaWindow::ThirdPartySevenDay)
+        }
+        _ => None,
+    }
+}
+
+fn records_from_gemini_quota(
+    upstream_id: Uuid,
+    value: &serde_json::Value,
+    observed_at_unix_millis: u64,
+    expected_group: GeminiQuotaGroup,
+) -> Vec<SubscriptionQuotaSample> {
+    let mut records = absent_gemini_records(upstream_id, observed_at_unix_millis);
+    let Some(buckets) = value.get("buckets").and_then(serde_json::Value::as_array) else {
+        return records;
+    };
+    let now_unix_secs = observed_at_unix_millis / 1_000;
+    for bucket in buckets {
+        let Some(model) = bucket.get("modelId").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let model_group = if model.to_ascii_lowercase().starts_with("gemini-") {
+            GeminiQuotaGroup::Gemini
+        } else if model.to_ascii_lowercase().starts_with("claude-")
+            || model.to_ascii_lowercase().starts_with("gpt-")
+        {
+            GeminiQuotaGroup::ThirdParty
+        } else {
+            GeminiQuotaGroup::Unknown
+        };
+        let group = match expected_group {
+            GeminiQuotaGroup::Unknown => model_group,
+            expected if model_group == expected => expected,
+            _ => continue,
+        };
+        if group == GeminiQuotaGroup::Unknown {
+            continue;
+        }
+        let Some(reset) = bucket
+            .get("resetTime")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|value| u64::try_from(value.timestamp()).ok())
+        else {
+            continue;
+        };
+        let window = if reset <= now_unix_secs.saturating_add(18_000 + 300) {
+            match group {
+                GeminiQuotaGroup::Gemini => SubscriptionQuotaWindow::GeminiFiveHour,
+                GeminiQuotaGroup::ThirdParty => SubscriptionQuotaWindow::ThirdPartyFiveHour,
+                GeminiQuotaGroup::Unknown => continue,
+            }
+        } else {
+            match group {
+                GeminiQuotaGroup::Gemini => SubscriptionQuotaWindow::GeminiSevenDay,
+                GeminiQuotaGroup::ThirdParty => SubscriptionQuotaWindow::ThirdPartySevenDay,
+                GeminiQuotaGroup::Unknown => continue,
+            }
+        };
+        let Some(sample) =
+            gemini_sample_from_bucket(upstream_id, window, bucket, observed_at_unix_millis)
+        else {
+            continue;
+        };
+        replace_gemini_record(&mut records, sample);
+    }
+    records
+}
+
+fn gemini_sample_from_bucket(
+    upstream_id: Uuid,
+    window: SubscriptionQuotaWindow,
+    bucket: &serde_json::Value,
+    observed_at_unix_millis: u64,
+) -> Option<SubscriptionQuotaSample> {
+    let reset = bucket
+        .get("resetTime")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .and_then(|value| u64::try_from(value.timestamp()).ok())?;
+    let remaining = bucket
+        .get("remainingFraction")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite())?
+        .clamp(0.0, 1.0);
+    let claim = bucket
+        .get("remainingAmount")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let mut record = base_record(
+        upstream_id,
+        window,
+        SubscriptionQuotaSampleKind::Sample,
+        observed_at_unix_millis,
+        Some((1.0 - remaining).clamp(0.0, 1.0)),
+        Some(reset),
+        None,
+        None,
+        None,
+    );
+    record.representative_claim = claim;
+    Some(record)
+}
+
+fn absent_gemini_records(
+    upstream_id: Uuid,
+    observed_at_unix_millis: u64,
+) -> Vec<SubscriptionQuotaSample> {
+    [
+        SubscriptionQuotaWindow::GeminiFiveHour,
+        SubscriptionQuotaWindow::GeminiSevenDay,
+        SubscriptionQuotaWindow::ThirdPartyFiveHour,
+        SubscriptionQuotaWindow::ThirdPartySevenDay,
+    ]
+    .into_iter()
+    .map(|window| absent_record(upstream_id, window, observed_at_unix_millis))
+    .collect()
+}
+
+fn replace_gemini_record(records: &mut [SubscriptionQuotaSample], sample: SubscriptionQuotaSample) {
+    if let Some(record) = records
+        .iter_mut()
+        .find(|record| record.window == sample.window)
+    {
+        let replace = record.sample_kind != SubscriptionQuotaSampleKind::Sample
+            || sample.utilization > record.utilization;
+        if replace {
+            *record = sample;
+        }
+    }
+}
+
+fn merge_gemini_records(
+    records: &mut [SubscriptionQuotaSample],
+    additional: Vec<SubscriptionQuotaSample>,
+) {
+    for sample in additional {
+        if sample.sample_kind == SubscriptionQuotaSampleKind::Sample {
+            replace_gemini_record(records, sample);
+        }
     }
 }
 

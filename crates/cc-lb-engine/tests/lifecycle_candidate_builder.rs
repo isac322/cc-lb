@@ -247,6 +247,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         user_filters: vec![filter],
         terminal: TerminalStrategy::FirstPick,
         instantiation_error: None,
+        provider_filters: None,
     });
     let mut chains = HashMap::new();
     chains.insert(

@@ -597,6 +597,95 @@ async fn non_sse_stream_transform_never_receives_a_capped_prefix() {
 }
 
 #[tokio::test]
+async fn gemini_json_array_stream_is_transformed_once_as_a_whole() {
+    for stream_in_body in [false, true] {
+        let transform = Arc::new(BufferedToolNameTransform::default());
+        let sse_transform = Arc::new(UnchangedSseTransform::default());
+        let body = Bytes::from_static(
+            br#"[{"candidates":[{"content":{"parts":[{"functionCall":{"name":"Bash","args":{}}}]}}]},{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}]"#,
+        );
+        let lifecycle = with_test_limit_subject(lifecycle_with_record_and_config(
+            Some(transform.clone()),
+            Some(sse_transform.clone()),
+            Arc::new(ChunkedDispatch {
+                status: StatusCode::OK,
+                headers: json_headers(body.len(), false),
+                chunks: vec![body.slice(..13), body.slice(13..37), body.slice(37..)],
+            }),
+            LifecycleConfig::default(),
+            upstream_record(
+                StorageUpstreamKind::GeminiApiKey,
+                "https://generativelanguage.googleapis.com/",
+            ),
+        ));
+        let request_body = if stream_in_body {
+            Bytes::from_static(br#"{"contents":[],"stream":true}"#)
+        } else {
+            Bytes::from_static(br#"{"contents":[]}"#)
+        };
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-test:streamGenerateContent")
+            .header("x-api-key", common::managed_api_key())
+            .body(request_body)
+            .expect("Gemini streaming request builds");
+        let response = handle_authenticated(&lifecycle, request)
+            .await
+            .expect("lifecycle handles Gemini JSON array stream");
+        let (status, _headers, received) = collect_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            received,
+            replace_bytes(&body, br#""name":"Bash""#, br#""name":"bash""#),
+        );
+        assert_eq!(transform.seen_bodies(), vec![body]);
+        assert!(sse_transform.seen_events().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn gemini_oauth_non_sse_stream_unwraps_before_buffered_transform() {
+    let transform = Arc::new(BufferedToolNameTransform::default());
+    let wrapped = Bytes::from_static(
+        br#"{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"Bash","args":{}}}]}}]},"traceId":"trace"}"#,
+    );
+    let lifecycle = with_test_limit_subject(lifecycle_with_record(
+        Some(transform.clone()),
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: json_headers(wrapped.len(), false),
+            body: wrapped.clone(),
+        }),
+        upstream_record(
+            StorageUpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com/v1internal",
+        ),
+    ));
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1beta/models/gemini-test:streamGenerateContent")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(br#"{"contents":[],"stream":true}"#))
+        .expect("Gemini OAuth streaming request builds");
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles wrapped Gemini stream response");
+    let (status, _headers, received) = collect_body(response).await;
+    let wrapped_json: serde_json::Value = serde_json::from_slice(&wrapped).expect("wrapped JSON");
+    let expected = Bytes::from(
+        serde_json::to_vec(&wrapped_json["response"]).expect("unwrapped response JSON"),
+    );
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(transform.seen_bodies(), vec![expected.clone()]);
+    assert_eq!(
+        received,
+        replace_bytes(&expected, br#""name":"Bash""#, br#""name":"bash""#),
+    );
+}
+
+#[tokio::test]
 async fn ingress_cap_does_not_limit_existing_response_paths() {
     for (stream, transform_response) in [(false, false), (false, true), (true, false)] {
         let transform = Arc::new(UnchangedBufferedTransform::default());
@@ -635,6 +724,179 @@ async fn ingress_cap_does_not_limit_existing_response_paths() {
             },
         );
     }
+}
+
+#[tokio::test]
+async fn audio_json_response_preserves_the_ordinary_buffered_path() {
+    for content_type in [
+        "application/json",
+        "application/problem+json; charset=utf-8",
+    ] {
+        let transform = Arc::new(UnchangedBufferedTransform::default());
+        let body = Bytes::from(format!(r#"{{"output":"{}"}}"#, "x".repeat(256)));
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+        let lifecycle = lifecycle_with_record_and_config(
+            Some(transform.clone()),
+            None,
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers,
+                body: body.clone(),
+            }),
+            LifecycleConfig {
+                messages_body_cap_bytes: 128,
+                ..LifecycleConfig::default()
+            },
+            upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+        );
+        let response = handle_authenticated(&lifecycle, openai_audio_request("/v1/audio/speech"))
+            .await
+            .expect("audio JSON response uses the ordinary buffered path");
+        let (status, _headers, received) = collect_body(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(received, body);
+        assert_eq!(transform.seen_bodies(), vec![body]);
+    }
+}
+
+#[tokio::test]
+async fn non_json_response_relays_first_chunk_before_upstream_eof() {
+    for content_type in [
+        Some("audio/mpeg"),
+        Some("application/octet-stream"),
+        Some("image/png"),
+        Some("text/plain; charset=utf-8"),
+        None,
+    ] {
+        for path in ["/v1/audio/speech", "/v1/audio/transcriptions"] {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let lifecycle = lifecycle_with_record(
+                None,
+                Arc::new(BinaryFirstChunkThenGatedDispatch {
+                    content_type,
+                    release: release.clone(),
+                }),
+                upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+            );
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                handle_authenticated(&lifecycle, openai_audio_request(path)),
+            )
+            .await
+            .expect("binary response headers do not await upstream EOF")
+            .expect("lifecycle handles binary response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get(CONTENT_TYPE),
+                content_type.map(HeaderValue::from_static).as_ref(),
+            );
+            let mut body = response.into_body();
+            let first = tokio::time::timeout(Duration::from_secs(1), body.frame())
+                .await
+                .expect("first binary chunk does not await upstream EOF")
+                .expect("first binary frame exists")
+                .expect("first binary frame succeeds")
+                .into_data()
+                .expect("first binary frame is data");
+            assert_eq!(first, Bytes::from_static(b"\xfffirst-chunk"));
+
+            release.notify_one();
+            let rest = body
+                .collect()
+                .await
+                .expect("remaining binary body collects");
+            assert_eq!(rest.to_bytes(), Bytes::from_static(b"\x00last-chunk"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn non_json_buffered_transform_is_bounded_without_truncating_body() {
+    for content_type in ["audio/mpeg", "application/octet-stream", "image/png"] {
+        for (path, cap) in [("/v1/audio/speech", 128), ("/v1/audio/transcriptions", 192)] {
+            for body_len in [cap, cap + 1] {
+                let transform = Arc::new(UnchangedBufferedTransform::default());
+                let body = Bytes::from(vec![0xff; body_len]);
+                let mut headers = HeaderMap::new();
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+                let lifecycle = lifecycle_with_record_and_config(
+                    Some(transform.clone()),
+                    None,
+                    Arc::new(ChunkedDispatch {
+                        status: StatusCode::OK,
+                        headers,
+                        chunks: vec![body.slice(..64), body.slice(64..)],
+                    }),
+                    LifecycleConfig {
+                        messages_body_cap_bytes: 128,
+                        files_body_cap_bytes: 192,
+                        ..LifecycleConfig::default()
+                    },
+                    upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+                );
+                let response = handle_authenticated(&lifecycle, openai_audio_request(path))
+                    .await
+                    .expect("lifecycle handles bounded binary transform");
+                let (status, headers, received) = collect_body(response).await;
+
+                if body_len == cap {
+                    assert_eq!(status, StatusCode::OK);
+                    assert_eq!(received, body);
+                    assert_eq!(transform.seen_bodies(), vec![body]);
+                } else {
+                    assert_eq!(status, StatusCode::BAD_GATEWAY);
+                    assert!(transform.seen_bodies().is_empty());
+                    assert_eq!(
+                        headers.get(CONTENT_TYPE),
+                        Some(&HeaderValue::from_static("application/json; charset=utf-8")),
+                    );
+                    assert!(
+                        String::from_utf8_lossy(&received)
+                            .contains("upstream response body could not be read"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn genuine_sse_uses_event_hook_without_waiting_for_body_eof() {
+    let buffered = Arc::new(UnchangedBufferedTransform::default());
+    let sse = Arc::new(UnchangedSseTransform::default());
+    let lifecycle = with_test_limit_subject(lifecycle_with_transforms(
+        Some(buffered.clone()),
+        Some(sse.clone()),
+        Arc::new(SseFirstEventThenPendingDispatch),
+    ));
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-test","messages":[],"stream":true}"#,
+            )),
+        ),
+    )
+    .await
+    .expect("SSE response headers do not await body EOF")
+    .expect("lifecycle handles SSE stream");
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("first SSE event does not await body EOF")
+        .expect("first SSE frame exists")
+        .expect("first SSE frame succeeds")
+        .into_data()
+        .expect("first SSE frame is data");
+
+    assert_eq!(
+        first,
+        Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n"),
+    );
+    assert_eq!(sse.seen_events(), vec!["ping".to_owned()]);
+    assert!(buffered.seen_bodies().is_empty());
 }
 
 #[tokio::test]
@@ -3332,6 +3594,33 @@ async fn handle_authenticated(
     lifecycle.handle(request, &auth).await
 }
 
+fn openai_audio_request(path: &str) -> http::Request<Bytes> {
+    let (content_type, body) = if path == "/v1/audio/transcriptions" {
+        (
+            "multipart/form-data; boundary=audio",
+            Bytes::from_static(
+                b"--audio\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n--audio--\r\n",
+            ),
+        )
+    } else {
+        (
+            "application/json",
+            Bytes::from_static(br#"{"model":"tts-1","input":"hello","voice":"alloy"}"#),
+        )
+    };
+    let mut request = http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("x-api-key", common::managed_api_key())
+        .header(CONTENT_TYPE, content_type)
+        .body(body)
+        .expect("OpenAI audio request builds");
+    request
+        .extensions_mut()
+        .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+    request
+}
+
 fn lifecycle_with_transforms(
     response_transform: Option<Arc<dyn ResponseTransformHook>>,
     sse_transform: Option<Arc<dyn SseEventTransformHook>>,
@@ -3493,6 +3782,22 @@ fn lifecycle_with_options_and_keepalive(
     )
 }
 
+fn with_test_limit_subject(lifecycle: Lifecycle) -> Lifecycle {
+    lifecycle.with_static_limit_subject(
+        LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::SystemClock),
+        ),
+        "principal-test".to_owned(),
+        "key-test".to_owned(),
+        StoredApiKeyRecord {
+            key_hash_b64: "key-test".to_owned(),
+            status: KeyStatus::Active,
+            ..StoredApiKeyRecord::default()
+        },
+    )
+}
+
 struct ShapeTransformDialect {
     response_transform: Option<Arc<dyn ResponseTransformHook>>,
     sse_transform: Option<Arc<dyn SseEventTransformHook>>,
@@ -3570,6 +3875,47 @@ impl UpstreamDispatch for FixedDispatch {
     }
 }
 
+struct SseFirstEventThenPendingDispatch;
+
+#[async_trait]
+impl UpstreamDispatch for SseFirstEventThenPendingDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let stream = async_stream::stream! {
+            yield Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                b"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+            ));
+            std::future::pending::<()>().await;
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.headers_mut() = sse_headers();
+        Ok(response)
+    }
+}
+
+struct BinaryFirstChunkThenGatedDispatch {
+    content_type: Option<&'static str>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for BinaryFirstChunkThenGatedDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let release = self.release.clone();
+        let stream = async_stream::stream! {
+            yield Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"\xfffirst-chunk"));
+            release.notified().await;
+            yield Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"\x00last-chunk"));
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        if let Some(content_type) = self.content_type {
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+        }
+        Ok(response)
+    }
+}
+
 struct ChunkedDispatch {
     status: StatusCode,
     headers: HeaderMap,
@@ -3611,22 +3957,6 @@ impl UpstreamDispatch for BodyThenFrameErrorDispatch {
         *response.headers_mut() = self.headers.clone();
         Ok(response)
     }
-}
-
-fn with_test_limit_subject(lifecycle: Lifecycle) -> Lifecycle {
-    lifecycle.with_static_limit_subject(
-        LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_clock::SystemClock),
-        ),
-        "principal-test".to_owned(),
-        "key-test".to_owned(),
-        StoredApiKeyRecord {
-            key_hash_b64: "key-test".to_owned(),
-            status: KeyStatus::Active,
-            ..StoredApiKeyRecord::default()
-        },
-    )
 }
 
 #[derive(Default)]

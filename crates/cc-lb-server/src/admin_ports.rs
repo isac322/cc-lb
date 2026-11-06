@@ -149,6 +149,19 @@ impl SubscriptionQuotaIngestionPort for ServerSubscriptionQuotaIngestionPort {
         self.lifecycle
             .ingest_subscription_quota_headers(headers, upstream_id, observed_at);
     }
+
+    fn ingest_subscription_quota_observations(
+        &self,
+        observations: &[cc_lb_quota::UnifiedQuotaObservation],
+        upstream_id: uuid::Uuid,
+        observed_at: SystemTime,
+    ) {
+        self.lifecycle.ingest_subscription_quota_observations(
+            observations,
+            upstream_id,
+            observed_at,
+        );
+    }
 }
 
 #[cfg(feature = "postgres")]

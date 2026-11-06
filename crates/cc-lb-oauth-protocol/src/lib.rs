@@ -1,8 +1,53 @@
 #![forbid(unsafe_code)]
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Public installed-app client used by the OpenAI Codex device and browser flows.
+pub const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub const OPENAI_OAUTH_ISSUER_URL: &str = "https://auth.openai.com";
+pub const OPENAI_OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+pub const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub const OPENAI_OAUTH_BROWSER_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+pub const OPENAI_OAUTH_DEVICE_USERCODE_URL: &str =
+    "https://auth.openai.com/api/accounts/deviceauth/usercode";
+pub const OPENAI_OAUTH_DEVICE_TOKEN_URL: &str =
+    "https://auth.openai.com/api/accounts/deviceauth/token";
+pub const OPENAI_OAUTH_DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
+pub const OPENAI_OAUTH_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+
+/// OAuth endpoints used by the Gemini CLI OAuth flow.
+pub const GEMINI_OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+pub const GEMINI_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub const GEMINI_OAUTH_REDIRECT_URI: &str = "https://codeassist.google.com/authcode";
+pub const GEMINI_OAUTH_CODE_ASSIST_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+
+/// OAuth endpoints and request metadata used by the Antigravity Gemini subscription flow.
+pub const ANTIGRAVITY_OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+pub const ANTIGRAVITY_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub const ANTIGRAVITY_OAUTH_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
+pub const ANTIGRAVITY_OAUTH_CODE_ASSIST_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
+pub const ANTIGRAVITY_OAUTH_USERINFO_URL: &str =
+    "https://www.googleapis.com/oauth2/v2/userinfo?alt=json";
+pub const ANTIGRAVITY_OAUTH_USER_AGENT: &str =
+    "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)";
+
+pub const ANTIGRAVITY_OAUTH_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/cclog",
+    "https://www.googleapis.com/auth/experimentsandconfigs",
+];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeminiOAuthProfile {
+    #[default]
+    GeminiCli,
+    Antigravity,
+}
 
 #[derive(Debug, Error)]
 pub enum TokenEndpointParseError {
@@ -19,6 +64,61 @@ pub struct TokenEndpointResponse {
     pub scope: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
+    #[serde(default)]
+    pub id_token: Option<String>,
+}
+
+/// Display-only identity claims obtained during a provider OAuth exchange.
+/// Decoding a JWT here is not signature verification or an authentication decision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct OAuthAccountIdentity {
+    pub account_email: Option<String>,
+    pub account_id: Option<String>,
+    pub plan: Option<String>,
+    pub project_id: Option<String>,
+}
+
+pub fn openai_identity_from_token(token: &str) -> OAuthAccountIdentity {
+    let Some(claims) = token
+        .split('.')
+        .nth(1)
+        .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+        .and_then(|decoded| serde_json::from_slice::<serde_json::Value>(&decoded).ok())
+    else {
+        return OAuthAccountIdentity::default();
+    };
+    let auth = claims.get("https://api.openai.com/auth");
+    let claim = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    OAuthAccountIdentity {
+        account_email: claim(claims.get("email")).or_else(|| {
+            claim(
+                claims
+                    .get("https://api.openai.com/profile")
+                    .and_then(|value| value.get("email")),
+            )
+        }),
+        account_id: claim(auth.and_then(|value| value.get("chatgpt_account_id"))),
+        plan: claim(auth.and_then(|value| value.get("chatgpt_plan_type"))),
+        project_id: None,
+    }
+}
+
+pub fn account_id_from_id_token(id_token: &str) -> Option<String> {
+    let payload = id_token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
+    claims
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|account_id| !account_id.is_empty())
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +145,19 @@ pub fn refresh_token_form_body(client_id: &str, refresh_token: &str) -> String {
     serializer.finish()
 }
 
+pub fn gemini_refresh_token_form_body(
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("grant_type", "refresh_token");
+    serializer.append_pair("client_id", client_id);
+    serializer.append_pair("client_secret", client_secret);
+    serializer.append_pair("refresh_token", refresh_token);
+    serializer.finish()
+}
+
 pub fn refresh_token_json_body(client_id: &str, refresh_token: &str) -> String {
     serde_json::json!({
         "grant_type": "refresh_token",
@@ -62,7 +175,12 @@ pub fn parse_token_endpoint_response(
     let mut response = serde_json::from_value::<TokenEndpointResponse>(value.clone())
         .map_err(|source| TokenEndpointParseError::Json { source })?;
     if value.get("account_id").is_none() {
-        response.account_id = account_id_from_access_token(&response.access_token);
+        response.account_id = account_id_from_access_token(&response.access_token).or_else(|| {
+            response
+                .id_token
+                .as_deref()
+                .and_then(account_id_from_id_token)
+        });
     }
     Ok(response)
 }
@@ -131,6 +249,32 @@ pub fn refreshed_token_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn openai_identity_reads_email_plan_and_workspace_without_retaining_tokens()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let token = jwt_access_token(serde_json::json!({
+            "email": "alice@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "team-workspace",
+                "chatgpt_plan_type": "team"
+            }
+        }));
+        let identity = openai_identity_from_token(&token);
+        assert_eq!(identity.account_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(identity.account_id.as_deref(), Some("team-workspace"));
+        assert_eq!(identity.plan.as_deref(), Some("team"));
+        assert_eq!(identity.project_id, None);
+        assert!(!serde_json::to_string(&identity)?.contains(&token));
+        assert_eq!(
+            openai_identity_from_token("opaque"),
+            OAuthAccountIdentity::default()
+        );
+        let profile = openai_identity_from_token(&jwt_access_token(serde_json::json!({
+            "https://api.openai.com/profile": { "email": "alice@example.com" }
+        })));
+        assert_eq!(profile.account_email.as_deref(), Some("alice@example.com"));
+        Ok(())
+    }
 
     #[test]
     fn refresh_form_body_encodes_refresh_token_grant() {

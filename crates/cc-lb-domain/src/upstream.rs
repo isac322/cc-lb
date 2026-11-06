@@ -40,6 +40,28 @@ pub enum Provider {
     Gemini,
 }
 
+/// Reconciled identity bound to one selected upstream's plugin dialect.
+///
+/// Credential material is deliberately excluded. Optional Gemini metadata is
+/// copied from the stored OAuth bundle, never inferred from a URL or name.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpstreamIdentity {
+    /// Provider implemented by the selected upstream.
+    pub provider: Provider,
+    /// Stable six-kind upstream name, such as `gemini_oauth`.
+    pub credential_kind: String,
+    /// Stable identifier of the stored upstream record.
+    pub upstream_id: String,
+    /// Operator-configured upstream name.
+    pub name: String,
+    /// Operator-configured base URL, when present.
+    pub base_url: Option<String>,
+    /// Stored Gemini OAuth profile, absent for other credential kinds.
+    pub gemini_oauth_profile: Option<String>,
+    /// Stored Code Assist project identifier, when available.
+    pub code_assist_project_id: Option<String>,
+}
+
 /// Credential kind used by an upstream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

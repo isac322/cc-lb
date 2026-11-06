@@ -1,3 +1,12 @@
+use cc_lb_oauth_protocol::{
+    ANTIGRAVITY_OAUTH_AUTH_URL, ANTIGRAVITY_OAUTH_CODE_ASSIST_URL, ANTIGRAVITY_OAUTH_REDIRECT_URI,
+    ANTIGRAVITY_OAUTH_SCOPES, ANTIGRAVITY_OAUTH_TOKEN_URL, ANTIGRAVITY_OAUTH_USER_AGENT,
+    ANTIGRAVITY_OAUTH_USERINFO_URL, GEMINI_OAUTH_AUTH_URL, GEMINI_OAUTH_CODE_ASSIST_URL,
+    GEMINI_OAUTH_REDIRECT_URI, GEMINI_OAUTH_TOKEN_URL, OPENAI_CODEX_CLIENT_ID,
+    OPENAI_OAUTH_AUTHORIZE_URL, OPENAI_OAUTH_BROWSER_REDIRECT_URI,
+    OPENAI_OAUTH_DEVICE_REDIRECT_URI, OPENAI_OAUTH_DEVICE_TOKEN_URL,
+    OPENAI_OAUTH_DEVICE_USERCODE_URL, OPENAI_OAUTH_DEVICE_VERIFICATION_URL, OPENAI_OAUTH_TOKEN_URL,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -33,6 +42,8 @@ pub struct Config {
     #[serde(default)]
     pub scheduler: SchedulerConfig,
     #[serde(default)]
+    pub warmup: WarmupConfig,
+    #[serde(default)]
     pub upstream_affinity: UpstreamAffinityConfig,
     pub aead: AeadConfig,
     pub observability: ObservabilityConfig,
@@ -62,6 +73,7 @@ impl Default for Config {
             price_catalog: PriceCatalogConfig::default(),
             storage: StorageConfig::default(),
             scheduler: SchedulerConfig::default(),
+            warmup: WarmupConfig::default(),
             upstream_affinity: UpstreamAffinityConfig::default(),
             aead: AeadConfig::default(),
             observability: ObservabilityConfig::default(),
@@ -319,6 +331,22 @@ impl Default for PostgresPoolConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+pub struct WarmupConfig {
+    pub openai_model: String,
+    pub gemini_model: String,
+}
+
+impl Default for WarmupConfig {
+    fn default() -> Self {
+        Self {
+            openai_model: "gpt-6.1-sol".to_owned(),
+            gemini_model: "gemini-2.5-flash-lite".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct SchedulerConfig {
     #[serde(default)]
     pub separate_pool: SchedulerPoolConfig,
@@ -461,11 +489,122 @@ impl Default for AnthropicOAuthConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct OpenAiOAuthConfig {
+    pub client_id: String,
+    pub auth_url: Url,
+    pub authorize_url: Url,
+    pub token_url: Url,
+    pub browser_redirect_uri: Url,
+    pub device_usercode_url: Url,
+    pub device_token_url: Url,
+    pub device_verification_url: Url,
+    pub device_redirect_uri: Url,
+}
+
+impl Default for OpenAiOAuthConfig {
+    fn default() -> Self {
+        Self {
+            client_id: OPENAI_CODEX_CLIENT_ID.to_owned(),
+            auth_url: Url::parse(OPENAI_OAUTH_AUTHORIZE_URL).expect("valid url"),
+            authorize_url: Url::parse(OPENAI_OAUTH_AUTHORIZE_URL).expect("valid url"),
+            token_url: Url::parse(OPENAI_OAUTH_TOKEN_URL).expect("valid url"),
+            browser_redirect_uri: Url::parse(OPENAI_OAUTH_BROWSER_REDIRECT_URI).expect("valid url"),
+            device_usercode_url: Url::parse(OPENAI_OAUTH_DEVICE_USERCODE_URL).expect("valid url"),
+            device_token_url: Url::parse(OPENAI_OAUTH_DEVICE_TOKEN_URL).expect("valid url"),
+            device_verification_url: Url::parse(OPENAI_OAUTH_DEVICE_VERIFICATION_URL)
+                .expect("valid url"),
+            device_redirect_uri: Url::parse(OPENAI_OAUTH_DEVICE_REDIRECT_URI).expect("valid url"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct GeminiOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub auth_url: Url,
+    pub token_url: Url,
+    pub redirect_uri: Url,
+    pub code_assist_url: Url,
+    pub userinfo_url: Url,
+}
+
+impl Default for GeminiOAuthConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret: String::new(),
+            auth_url: Url::parse(GEMINI_OAUTH_AUTH_URL).expect("valid url"),
+            token_url: Url::parse(GEMINI_OAUTH_TOKEN_URL).expect("valid url"),
+            redirect_uri: Url::parse(GEMINI_OAUTH_REDIRECT_URI).expect("valid url"),
+            code_assist_url: Url::parse(GEMINI_OAUTH_CODE_ASSIST_URL).expect("valid url"),
+            userinfo_url: Url::parse("https://www.googleapis.com/oauth2/v3/userinfo")
+                .expect("valid url"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AntigravityOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub authorize_url: Url,
+    pub token_url: Url,
+    pub redirect_uri: Url,
+    pub scopes: Vec<String>,
+    pub code_assist_url: Url,
+    pub userinfo_url: Url,
+    pub user_agent: String,
+}
+
+impl Default for AntigravityOAuthConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret: String::new(),
+            authorize_url: Url::parse(ANTIGRAVITY_OAUTH_AUTH_URL).expect("valid url"),
+            token_url: Url::parse(ANTIGRAVITY_OAUTH_TOKEN_URL).expect("valid url"),
+            redirect_uri: Url::parse(ANTIGRAVITY_OAUTH_REDIRECT_URI).expect("valid url"),
+            scopes: ANTIGRAVITY_OAUTH_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_owned())
+                .collect(),
+            code_assist_url: Url::parse(ANTIGRAVITY_OAUTH_CODE_ASSIST_URL).expect("valid url"),
+            userinfo_url: Url::parse(ANTIGRAVITY_OAUTH_USERINFO_URL).expect("valid url"),
+            user_agent: ANTIGRAVITY_OAUTH_USER_AGENT.to_owned(),
+        }
+    }
+}
+
+impl AntigravityOAuthConfig {
+    pub fn missing_client_credentials(&self) -> Option<&'static str> {
+        match (
+            self.client_id.trim().is_empty(),
+            self.client_secret.trim().is_empty(),
+        ) {
+            (true, true) => Some("oauth.antigravity.client_id and oauth.antigravity.client_secret"),
+            (true, false) => Some("oauth.antigravity.client_id"),
+            (false, true) => Some("oauth.antigravity.client_secret"),
+            (false, false) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct OAuthConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic: Option<AnthropicOAuthConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAiOAuthConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini: Option<GeminiOAuthConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub antigravity: Option<AntigravityOAuthConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1051,6 +1190,23 @@ mod tests {
         let temp_file = tempfile::NamedTempFile::new().expect("create temp config");
         fs::write(temp_file.path(), toml).expect("write temp config");
         Config::load_with_overrides(temp_file.path(), ConfigOverrides::default())
+    }
+
+    #[test]
+    fn warmup_models_default_and_can_be_overridden_independently() {
+        let defaults = load_config("").expect("default config");
+        assert_eq!(defaults.warmup.openai_model, "gpt-6.1-sol");
+        assert_eq!(defaults.warmup.gemini_model, "gemini-2.5-flash-lite");
+
+        let overridden =
+            load_config("[warmup]\nopenai_model = \"custom-codex\"\n").expect("warmup config");
+        assert_eq!(overridden.warmup.openai_model, "custom-codex");
+        assert_eq!(overridden.warmup.gemini_model, "gemini-2.5-flash-lite");
+
+        let overridden =
+            load_config("[warmup]\ngemini_model = \"custom-gemini\"\n").expect("warmup config");
+        assert_eq!(overridden.warmup.openai_model, "gpt-6.1-sol");
+        assert_eq!(overridden.warmup.gemini_model, "custom-gemini");
     }
 
     #[test]

@@ -62,6 +62,7 @@ impl Parse for PluginArgs {
 
 pub(crate) struct HandlerArgs {
     pub(crate) kind: HandlerKind,
+    pub(crate) provider: Option<ProviderFamily>,
     pub(crate) wire_version: u8,
     pub(crate) description: String,
     pub(crate) usage: String,
@@ -73,6 +74,7 @@ impl Parse for HandlerArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let metas: Punctuated<Meta, Token![,]> = Punctuated::parse_terminated(input)?;
         let mut kind = None;
+        let mut provider = None;
         let mut wire_version = None;
         let mut description = None;
         let mut usage = None;
@@ -84,12 +86,22 @@ impl Parse for HandlerArgs {
                     if path.is_ident("filter")
                         || path.is_ident("shape")
                         || path.is_ident("transform_response")
-                        || path.is_ident("transform_sse_event") =>
+                        || path.is_ident("transform_sse_event")
+                        || path.is_ident("shape_envelope_gemini") =>
                 {
                     kind = Some(HandlerKind::from_path(&path).ok_or_else(|| {
                         Error::new_spanned(
                             &path,
-                            "unknown handler kind (supported: filter, shape, transform_response, transform_sse_event)",
+                            "unknown handler kind (supported: filter, shape, transform_response, transform_sse_event, shape_envelope_gemini)",
+                        )
+                    })?);
+                }
+                Meta::NameValue(nv) if nv.path.is_ident("provider") => {
+                    let value = expect_string(&nv)?;
+                    provider = Some(ProviderFamily::from_str(&value).ok_or_else(|| {
+                        Error::new_spanned(
+                            &nv.value,
+                            "expected `provider = \"anthropic\"|\"openai\"|\"gemini\"`",
                         )
                     })?);
                 }
@@ -115,7 +127,7 @@ impl Parse for HandlerArgs {
                 other => {
                     return Err(Error::new_spanned(
                         other,
-                        "expected `<kind>`, `wire = 1`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
+                        "expected `<kind>`, `provider = \"anthropic\"|\"openai\"|\"gemini\"`, `wire = 1|2`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
                     ));
                 }
             }
@@ -131,14 +143,15 @@ impl Parse for HandlerArgs {
         }
         let wire_version = wire_version
             .ok_or_else(|| Error::new(Span::call_site(), "#[handler] missing required `wire`"))?;
-        if !kind.supports_wire_version(wire_version) {
+        if !kind.supports_wire_version(wire_version, provider) {
             return Err(Error::new(
                 Span::call_site(),
-                "this hook does not support the requested wire version; all hooks require 1",
+                "this hook does not support the requested wire version/provider combination; wire 2 requires a provider-qualified existing hook, and shape_envelope_gemini requires provider = \"gemini\" and wire = 2",
             ));
         }
         Ok(Self {
             kind,
+            provider,
             wire_version,
             description: description.ok_or_else(|| {
                 Error::new(
@@ -152,6 +165,32 @@ impl Parse for HandlerArgs {
             view,
             mode,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderFamily {
+    Anthropic,
+    Openai,
+    Gemini,
+}
+
+impl ProviderFamily {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "anthropic" => Some(Self::Anthropic),
+            "openai" => Some(Self::Openai),
+            "gemini" => Some(Self::Gemini),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Gemini => "gemini",
+        }
     }
 }
 
@@ -178,12 +217,13 @@ impl HandlerMode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HandlerKind {
     Filter,
     Shape,
     TransformResponse,
     TransformSseEvent,
+    ShapeEnvelopeGemini,
 }
 
 impl HandlerKind {
@@ -193,6 +233,7 @@ impl HandlerKind {
             "shape" => Self::Shape,
             "transform_response" => Self::TransformResponse,
             "transform_sse_event" => Self::TransformSseEvent,
+            "shape_envelope_gemini" => Self::ShapeEnvelopeGemini,
             _ => return None,
         })
     }
@@ -203,6 +244,7 @@ impl HandlerKind {
             Self::Shape => "shape",
             Self::TransformResponse => "transform_response",
             Self::TransformSseEvent => "transform_sse_event",
+            Self::ShapeEnvelopeGemini => "shape_envelope_gemini",
         }
     }
 
@@ -210,16 +252,45 @@ impl HandlerKind {
         matches!(self, Self::TransformResponse | Self::TransformSseEvent)
     }
 
-    pub(crate) const fn supports_wire_version(self, wire_version: u8) -> bool {
-        wire_version == 1
+    pub(crate) const fn supports_wire_version(
+        self,
+        wire_version: u8,
+        provider: Option<ProviderFamily>,
+    ) -> bool {
+        match self {
+            Self::ShapeEnvelopeGemini => {
+                wire_version == 2 && matches!(provider, Some(ProviderFamily::Gemini))
+            }
+            Self::Filter | Self::Shape | Self::TransformResponse | Self::TransformSseEvent => {
+                wire_version == 1 || (wire_version == 2 && provider.is_some())
+            }
+        }
     }
 
-    pub(crate) fn export_name(self) -> &'static str {
-        match self {
+    pub(crate) fn export_name(self, provider: Option<ProviderFamily>) -> String {
+        let base = match self {
             Self::Filter => "cc_lb_filter",
             Self::Shape => "cc_lb_shape",
             Self::TransformResponse => "cc_lb_transform_response",
             Self::TransformSseEvent => "cc_lb_transform_sse_event",
+            Self::ShapeEnvelopeGemini => "cc_lb_shape_envelope_gemini",
+        };
+        if matches!(self, Self::ShapeEnvelopeGemini) {
+            return base.to_owned();
+        }
+        match provider {
+            Some(provider) => format!("{base}_{}", provider.as_str()),
+            None => base.to_owned(),
+        }
+    }
+
+    pub(crate) fn metadata_key(self, provider: Option<ProviderFamily>) -> String {
+        if matches!(self, Self::ShapeEnvelopeGemini) {
+            return "shape_envelope_gemini".to_owned();
+        }
+        match provider {
+            Some(provider) => format!("{}_{}", self.wire_name(), provider.as_str()),
+            None => self.wire_name().to_owned(),
         }
     }
 
@@ -227,16 +298,23 @@ impl HandlerKind {
         match (self, wire_version, view) {
             (Self::Filter, 1, false) => Some("run_filter"),
             (Self::Filter, 1, true) => Some("run_filter_view"),
+            (Self::Filter, 2, false) => Some("run_filter_v2"),
+            (Self::Filter, 2, true) => Some("run_filter_v2_view"),
             (Self::Shape, 1, false) => Some("run_shape"),
             (Self::Shape, 1, true) => Some("run_shape_view"),
+            (Self::Shape, 2, false) => Some("run_shape_v2"),
+            (Self::Shape, 2, true) => Some("run_shape_v2_view"),
             (Self::TransformResponse, 1, false) => Some("run_transform_response"),
             (Self::TransformResponse, 1, true) => Some("run_transform_response_view"),
+            (Self::TransformResponse, 2, false) => Some("run_transform_response_v2"),
+            (Self::TransformResponse, 2, true) => Some("run_transform_response_v2_view"),
             (Self::TransformSseEvent, 1, false) => Some("run_transform_sse_event"),
             (Self::TransformSseEvent, 1, true) => Some("run_transform_sse_event_view"),
-            (Self::Filter, _, _)
-            | (Self::Shape, _, _)
-            | (Self::TransformResponse, _, _)
-            | (Self::TransformSseEvent, _, _) => None,
+            (Self::TransformSseEvent, 2, false) => Some("run_transform_sse_event_v2"),
+            (Self::TransformSseEvent, 2, true) => Some("run_transform_sse_event_v2_view"),
+            (Self::ShapeEnvelopeGemini, 2, false) => Some("run_shape_envelope_gemini"),
+            (Self::ShapeEnvelopeGemini, 2, true) => Some("run_shape_envelope_gemini_view"),
+            _ => None,
         }
     }
 
@@ -254,10 +332,18 @@ impl HandlerKind {
             (Self::TransformSseEvent, 1) => {
                 Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::TransformSseEventRequest })
             }
-            (Self::Filter, _)
-            | (Self::Shape, _)
-            | (Self::TransformResponse, _)
-            | (Self::TransformSseEvent, _) => None,
+            (Self::Filter, 2) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::FilterRequest }),
+            (Self::Shape, 2) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::ShapeRequest }),
+            (Self::TransformResponse, 2) => {
+                Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::TransformResponseRequest })
+            }
+            (Self::TransformSseEvent, 2) => {
+                Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::TransformSseEventRequest })
+            }
+            (Self::ShapeEnvelopeGemini, 2) => {
+                Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::ShapeEnvelopeGeminiRequest })
+            }
+            _ => None,
         }
     }
 
@@ -267,6 +353,7 @@ impl HandlerKind {
             Self::Shape => "SHAPE",
             Self::TransformResponse => "TRANSFORM_RESPONSE",
             Self::TransformSseEvent => "TRANSFORM_SSE_EVENT",
+            Self::ShapeEnvelopeGemini => "SHAPE_ENVELOPE_GEMINI",
         }
     }
 }
@@ -274,6 +361,7 @@ impl HandlerKind {
 pub(crate) struct DiscoveredHandler {
     pub(crate) fn_ident: Ident,
     pub(crate) kind: HandlerKind,
+    pub(crate) provider: Option<ProviderFamily>,
     pub(crate) wire_version: u8,
     pub(crate) description: String,
     pub(crate) usage: String,
@@ -299,6 +387,7 @@ pub(crate) fn collect_handlers(module: &ItemMod) -> syn::Result<Vec<DiscoveredHa
             handlers.push(DiscoveredHandler {
                 fn_ident: function.sig.ident.clone(),
                 kind: args.kind,
+                provider: args.provider,
                 wire_version: args.wire_version,
                 description: args.description,
                 usage: args.usage,

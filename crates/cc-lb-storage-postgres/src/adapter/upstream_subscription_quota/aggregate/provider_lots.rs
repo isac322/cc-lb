@@ -255,6 +255,12 @@ const fn window_secs(window: SubscriptionQuotaWindow) -> Option<u64> {
         | SubscriptionQuotaWindow::SevenDaySonnet
         | SubscriptionQuotaWindow::SevenDayOpus
         | SubscriptionQuotaWindow::SevenDayFable => Some(7 * 24 * 3_600),
+        SubscriptionQuotaWindow::GeminiFiveHour | SubscriptionQuotaWindow::ThirdPartyFiveHour => {
+            Some(5 * 3_600)
+        }
+        SubscriptionQuotaWindow::GeminiSevenDay | SubscriptionQuotaWindow::ThirdPartySevenDay => {
+            Some(7 * 24 * 3_600)
+        }
         SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => None,
     }
 }

@@ -1,9 +1,7 @@
 //! ABI call wrapper for wasmtime plugin hooks.
 //!
-//! Every wasm call goes through one of [`call_filter_hook`] /
-//! [`call_shape_hook`] / the response transform hooks. They all share
-//! the same alloc → write → call → read flow; only the typed-func name
-//! differs.
+//! Every call uses a provider-specific export selector resolved during
+//! pipeline construction and shares the alloc → write → call → read flow.
 //!
 //! Each call builds a fresh [`Store`] via
 //! [`PluginCell::instance_pre`] and drops it on return — no
@@ -23,14 +21,8 @@ use cc_lb_plugin_wire::schema::HookKind;
 use crate::cell::PluginCell;
 use crate::error::WasmtimeRuntimeError;
 
-mod hooks;
 mod worker;
 
-pub(crate) use hooks::{
-    call_filter_hook, call_filter_hook_scoped, call_shape_hook, call_shape_hook_scoped,
-    call_transform_response_hook, call_transform_response_hook_scoped,
-    call_transform_sse_event_hook, call_transform_sse_event_hook_scoped,
-};
 use worker::{WorkerInstance, build_worker_instance};
 
 // RFC-0001 gap-analysis #5. Label values for the `phase` dimension
@@ -51,10 +43,11 @@ fn trap_phase_label(err: &WasmtimeRuntimeError) -> &'static str {
 /// Default archive alignment for rkyv 0.8 root types.
 const DEFAULT_ALIGN: u32 = 16;
 
-fn call_hook_scoped<R, F>(
+pub(crate) fn call_hook_export_scoped<R, F>(
     cell: &Arc<PluginCell>,
     input: &[u8],
     hook: HookKind,
+    export_name: &str,
     with_output: F,
 ) -> Result<R, WasmtimeRuntimeError>
 where
@@ -64,8 +57,19 @@ where
         .store_budget
         .try_acquire()
         .inspect_err(record_pool_saturation)?;
-    let mut wi = build_worker_instance(cell, hook).inspect_err(record_pool_saturation)?;
+    let mut wi =
+        build_worker_instance(cell, hook, export_name).inspect_err(record_pool_saturation)?;
     execute_call_scoped(&mut wi, cell, input, hook, with_output)
+}
+
+pub(crate) fn validate_hook_export(
+    cell: &Arc<PluginCell>,
+    hook: HookKind,
+    export_name: &str,
+) -> Result<(), WasmtimeRuntimeError> {
+    let _permit = cell.store_budget.try_acquire()?;
+    let _instance = build_worker_instance(cell, hook, export_name)?;
+    Ok(())
 }
 
 fn record_pool_saturation(err: &WasmtimeRuntimeError) {
@@ -134,6 +138,7 @@ where
         shape_fn,
         transform_response_fn,
         transform_sse_event_fn,
+        shape_envelope_gemini_fn,
     } = wi;
 
     let hook_fn = match hook {
@@ -141,6 +146,7 @@ where
         HookKind::Shape => shape_fn.as_ref(),
         HookKind::TransformResponse => transform_response_fn.as_ref(),
         HookKind::TransformSseEvent => transform_sse_event_fn.as_ref(),
+        HookKind::ShapeEnvelopeGemini => shape_envelope_gemini_fn.as_ref(),
     }
     .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
         reason: format!(

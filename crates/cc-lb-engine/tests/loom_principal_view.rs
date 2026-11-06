@@ -83,6 +83,7 @@ mod principal_view_swap {
                     user_filters: vec![StdArc::new(StubFilter::new(generation))],
                     terminal: TerminalStrategy::FirstPick,
                     instantiation_error: None,
+                    provider_filters: None,
                 })),
                 DialectCache::Inherit,
             ),

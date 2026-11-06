@@ -4,10 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Added API-key-only OpenAI Realtime (`/openai/v1/realtime`) and Gemini Live (`/gemini/ws/...`) WebSocket tunnels. Each connection authenticates before upgrade, selects and pins one provider upstream, relays frames without rewriting them, scrubs downstream API-key query parameters, and records reported frame usage with connection status and duration.
+
+- Provider-prefixed proxy endpoints now cover Anthropic model catalogs and legacy completions; OpenAI chat/text completions, embeddings, moderation, audio, images, model catalogs, Responses compaction/token counting, and Codex auxiliary calls; and Gemini embeddings, prediction, model catalogs, and OpenAI-compatible operations. Credential eligibility is operation-specific: API-key-only operations never select subscription upstreams. Scoped account-bound operations return provider-shaped `404 operation_not_supported` errors. Multipart audio/image requests use the files body cap, and request events classify the new endpoint families.
+- Provider-qualified Wasm plugin hooks now expose upstream credential identity and subscription quota samples; Gemini Code Assist plugins may optionally edit the final native envelope while host validation preserves the OAuth Code Assist origin.
+
+### Breaking
+
+- Plugin exports are now provider-specific: filter modules use `cc_lb_filter_{anthropic,openai,gemini}`, and shape modules use the corresponding provider-qualified shape and response-transform exports. Legacy unqualified exports, including `cc_lb_filter`, are Anthropic-only. Non-Anthropic legacy filters must add provider-qualified exports to keep handling OpenAI or Gemini traffic.
+
 ### Changed
 
 - Admin detail lookups now use `GET /admin/v1/principals/{principal_id}/cache-keepalive/detail?id=<encoded ID>` and `GET /admin/v1/events/detail?id=<encoded ID>`. The old per-ID path routes are removed; migrate direct scripts and API clients using `URLSearchParams` or an equivalent query encoder, passing the original ID without pre-encoding it. Composite IDs, authentication, principal scoping, and response shapes are unchanged. Event-detail audit entries now use the static `/admin/v1/events/detail` route and retain the original ID in `payload.event_id`. ([#1052](https://github.com/isac322/cc-lb/issues/1052))
 - Anthropic OAuth warm-up now targets both the five-hour and seven-day quota windows. It skips explicitly absent windows regardless of sample age, warms weekly-only Claude accounts through their seven-day window, preserves known active targets when another window is stale or missing, prioritizes successful response observations over older snapshots, bounds successful reevaluation by the normal cadence when a target remains unknown, and defers until reset when the weekly window is exhausted.
+
+- New Gemini subscription sign-ins and reconnects use the Antigravity OAuth client with browser sign-in and localhost callback-URL paste. Operators MUST configure `[oauth.antigravity].client_id` and `[oauth.antigravity].client_secret`; cc-lb no longer embeds Antigravity client credentials. Existing Gemini CLI enterprise grants retain their `gemini_cli` profile; refresh, signing, and quota polling use the credential's issuing profile. Added `[oauth.antigravity]` configuration. Antigravity quota polling now uses Code Assist `retrieveUserQuotaSummary`, like Gemini CLI sign-ins, and reports the same four windows: Gemini models have 5-hour (`gemini_5h`) and weekly (`gemini_7d`) windows; Claude and GPT-OSS models have 5-hour (`third_party_5h`) and weekly (`third_party_7d`) windows. Google retired Gemini CLI consumer login on [June 18, 2026](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-users-to-the-antigravity-agentic-coding-platform/).
+
+- OpenAI Responses WebSocket `response.create` frames now pass through the selected shape plugin before upstream dispatch. The plugin's shaped body is honored, while its URL and method remain host-owned; shaped headers are applied at provider connection open when possible. Upstream WebSocket event frames use the OpenAI SSE-event transform hook with unchanged, replacement, and drop semantics. Buffered response transforms do not apply to WebSocket frames.
+
+- Subscription warm-up now covers Anthropic, OpenAI ChatGPT, and Gemini OAuth upstreams, including both Gemini CLI and Antigravity profiles. New OAuth sign-ins enable it by default. The admin API exposes the toggle, status, manual fire, and history. Warm-up evaluates reported five-hour and weekly windows, ignores absent windows, and sends provider-specific minimal requests when a target is idle or unknown. Gemini warm-up covers Gemini models only. OpenAI and Gemini models are configurable with `[warmup].openai_model` and `[warmup].gemini_model`.
+- OpenAI and Gemini OAuth warm-up now support provider-qualified shape plugins. Admin create/update rejects plugins without the upstream provider's shape export. Plugins see native Responses or Gemini `generateContent` input before the normal OAuth signer and Code Assist envelope.
 
 ### Fixed
 - SQLite Apalis housekeeping now uses application storage for `cache_keepalive_sessions` while keeping Apalis `Jobs` and `Workers` in the derived scheduler SQLite file. It recovers stale running sessions, purges stale pending and expired sessions, kills stale running cache keepalive jobs, retains fresh queued/running work, and lets normal retention remove terminal rows later; no new configuration, schema, or migration is required. ([#1043](https://github.com/isac322/cc-lb/issues/1043))
@@ -16,6 +33,8 @@ All notable changes to this project will be documented in this file.
 - Logs `All kinds` now preserves `source_kind=all` through history, live, delta, and histogram requests, so keepalive renewal rows appear without sending invalid `event_kind=all`.
 - Delta and SSE event reads now filter before the 500-row matching cap, advance exhausted deltas safely, and retain the existing reset at exactly 500 matching backfill events.
 - Keep-alive session, decision, and renewal-event detail lookups no longer return route-level 404 errors behind path-normalizing reverse proxies when IDs contain `/`. Detail IDs travel in query values encoded once. ([#1052](https://github.com/isac322/cc-lb/issues/1052))
+
+- OpenAI and Gemini OAuth subscription routing now uses the same tiered quota, staleness, and pressure rules as Anthropic instead of cache-only ranking. Exhausted OAuth accounts fall back to healthy subscriptions or API keys; OpenAI Pro skips an absent five-hour window, and Gemini uses the requested model family's quota buckets.
 - Claude OAuth accounts whose provider reports no 5-hour limit are now treated as weekly-only in pooled quota aggregates, pool history, and limit-reset nudges; the 5-hour window is omitted when every account is absent. Source-filtered aggregates determine absence only from the requested source. Limit-reset nudges for absent 5-hour windows recompute `at_limit` even when the provider omits the exhausted-window list.
 - Prompt-cache keep-alive now applies cache anchor age only to the initial schedule; cache-hit renewals use the full configured TTL-minus-lead interval.
 - Disabling or clearing keep-alive now retains accounting and charges completed hit/miss renewals exactly once, then cancels without rescheduling; error and unsupported-provider outcomes retain reservation refunds.
@@ -40,6 +59,7 @@ All notable changes to this project will be documented in this file.
 ### Upgrade notes
 
 - Strict PostgreSQL URL TLS modes now apply when the corresponding pool `sslmode` is omitted. Connections may fail until the database and client TLS configuration satisfy that policy. Remove redundant `prefer` settings from `storage.pool.sslmode` and `scheduler.separate_pool.sslmode` to inherit the URL; explicit `prefer` or `disable` continues to override strict URL modes.
+- SQLite migration `0102_provider_quota_windows.sql` widens the quota-window `CHECK` constraints in place through SQLite's documented `writable_schema` procedure; it does not copy quota rows or require startup space proportional to table size. The migration remains transactional, bumps the schema version, and runs `integrity_check`; PostgreSQL uses in-place constraint changes.
 
 ## [2.2.1] - 2026-11-04
 

@@ -6,7 +6,8 @@ use axum::http::{StatusCode, header};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventStore, UsageRollupStore, normalize_usage_rollup_dimension,
+    RequestEvent, RequestEventStore, UpstreamCreate, UpstreamKind, UpstreamStore, UsageRollupStore,
+    normalize_usage_rollup_dimension,
 };
 
 use config_admin_common::{
@@ -33,6 +34,152 @@ async fn usage_returns_200_grouped_by_model() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["range"], "1h");
     assert_eq!(body["group_by"], "model");
+}
+
+#[tokio::test]
+async fn usage_principal_filter_precedes_every_grouping_and_intersects_provider_scope() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let now = current_unix_secs(clock.as_ref());
+    let principal_a = Uuid::from_u128(0xA1).to_string();
+    let principal_b = Uuid::from_u128(0xB1).to_string();
+    let anthropic_id = Uuid::from_u128(0xF1);
+    let openai_id = Uuid::from_u128(0xF2);
+    for (id, name, kind) in [
+        (anthropic_id, "anthropic", UpstreamKind::AnthropicOauth),
+        (openai_id, "openai", UpstreamKind::OpenaiOauth),
+    ] {
+        UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                id,
+                name: name.to_owned(),
+                kind,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    for (request_id, principal, upstream_id, tokens) in [
+        ("a-anthropic", &principal_a, anthropic_id, 3),
+        ("b-anthropic", &principal_b, anthropic_id, 11),
+        ("a-openai", &principal_a, openai_id, 5),
+        ("b-openai", &principal_b, openai_id, 17),
+    ] {
+        let mut event = usage_event(
+            now.saturating_sub(60),
+            request_id,
+            upstream_id,
+            "test",
+            tokens,
+        );
+        event.principal_id = Some(principal.clone());
+        storage.append_request_event(&event).await.unwrap();
+    }
+    storage.rollup_usage_once().await.unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+    for group_by in ["none", "model", "upstream", "principal", "provider"] {
+        for (provider_query, all_tokens, a_tokens, b_tokens) in
+            [("", 36, 8, 28), ("&providers=anthropic", 14, 3, 11)]
+        {
+            for (principal, expected_tokens) in [
+                (None, all_tokens),
+                (Some(principal_a.as_str()), a_tokens),
+                (Some(principal_b.as_str()), b_tokens),
+                (Some("unknown-principal"), 0),
+            ] {
+                let mut uri = format!(
+                    "/admin/v1/dashboard/usage?range=1h&step=minute&group_by={group_by}{provider_query}"
+                );
+                if let Some(principal) = principal {
+                    uri.push_str(&format!("&principal_id={principal}"));
+                }
+                let (full, totals) = usage_projection_pair(&admin_app, &uri).await;
+                assert_usage_totals_match_full_collapse(&full, &totals);
+                let total_input_tokens = totals["series"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|series| series["buckets"].as_array().unwrap())
+                    .map(|bucket| bucket["input_tokens"].as_u64().unwrap())
+                    .sum::<u64>();
+                assert_eq!(total_input_tokens, expected_tokens, "{uri}");
+                assert_eq!(full["observed"], expected_tokens > 0, "{uri}");
+                if expected_tokens == 0 {
+                    assert_eq!(full["series"], serde_json::json!([]), "{uri}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn usage_etag_isolated_by_principal_filter() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let now = current_unix_secs(clock.as_ref());
+    storage
+        .append_request_event(&usage_event(
+            now.saturating_sub(60),
+            "principal-etag",
+            Uuid::from_u128(1),
+            "test",
+            3,
+        ))
+        .await
+        .unwrap();
+    storage.rollup_usage_once().await.unwrap();
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+    let base_uri = "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=model";
+    let principal_uri = format!("{base_uri}&principal_id={}", Uuid::from_u128(0xA1));
+    let (status, headers, _) = authed_bytes(admin_app.clone(), "GET", &principal_uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let principal_etag = headers[header::ETAG].to_str().unwrap();
+    for uri in [
+        base_uri.to_owned(),
+        format!("{base_uri}&principal_id=unknown"),
+        format!("{base_uri}&principal_id=%22"),
+    ] {
+        let (status, headers, _) = authed_bytes_with_headers(
+            admin_app.clone(),
+            "GET",
+            &uri,
+            None,
+            &[(header::IF_NONE_MATCH.as_str(), principal_etag)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_ne!(
+            headers[header::ETAG].to_str().unwrap(),
+            principal_etag,
+            "{uri}"
+        );
+    }
+    let (status, _, body) = authed_bytes_with_headers(
+        admin_app,
+        "GET",
+        &principal_uri,
+        None,
+        &[(header::IF_NONE_MATCH.as_str(), principal_etag)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(body.is_empty());
 }
 
 #[tokio::test]

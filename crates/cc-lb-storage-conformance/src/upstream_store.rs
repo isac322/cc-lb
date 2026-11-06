@@ -392,6 +392,7 @@ fn tokens(label: &str) -> EncryptedOAuthTokens {
     EncryptedOAuthTokens::encrypt(
         &aead,
         &OAuthTokenBundle {
+            oauth_profile: Default::default(),
             access_token: format!("access-{label}"),
             account_id: None,
             project_id: None,

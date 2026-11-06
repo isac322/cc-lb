@@ -52,8 +52,8 @@ pub(crate) fn provider_error_body(
     message: &str,
     limit_kind: Option<&str>,
 ) -> Bytes {
-    let error = match capability {
-        ProviderCapability::AnthropicMessages => {
+    let error = match capability.provider() {
+        cc_lb_domain::Provider::Anthropic => {
             let mut error = json!({
                 "type": error_type,
                 "message": message,
@@ -63,7 +63,7 @@ pub(crate) fn provider_error_body(
             }
             json!({"type": "error", "error": error})
         }
-        ProviderCapability::OpenaiResponses => {
+        cc_lb_domain::Provider::Openai => {
             let mut error = json!({
                 "message": message,
                 "type": error_type,
@@ -75,7 +75,7 @@ pub(crate) fn provider_error_body(
             }
             json!({"error": error})
         }
-        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => {
+        cc_lb_domain::Provider::Gemini => {
             let mut error = json!({
                 "code": status.as_u16(),
                 "message": message,
@@ -107,6 +107,20 @@ pub(crate) fn provider_error_response(
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
     response
+}
+
+pub fn provider_scope_error_response(
+    provider: cc_lb_domain::Provider,
+    status: StatusCode,
+    error_type: &str,
+    message: &str,
+) -> Response<Body> {
+    let capability = match provider {
+        cc_lb_domain::Provider::Anthropic => ProviderCapability::AnthropicMessages,
+        cc_lb_domain::Provider::Openai => ProviderCapability::OpenaiResponses,
+        cc_lb_domain::Provider::Gemini => ProviderCapability::GeminiGenerateContent,
+    };
+    provider_error_response(capability, status, error_type, message, None)
 }
 
 pub(crate) fn provider_error_response_with_retry_after(

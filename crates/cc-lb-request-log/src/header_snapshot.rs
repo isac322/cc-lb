@@ -22,6 +22,10 @@ pub struct HeaderSnapshot {
     /// `Retry-After` header. Anthropic sets this on 429/503.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after: Option<String>,
+    /// Provider-owned quota headers safe for the off-path quota subscriber,
+    /// including Codex `x-codex-*` fields.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_headers: BTreeMap<String, String>,
     /// All headers matching `anthropic-ratelimit-*` (any window/field
     /// combination — the vocabulary is open-ended, so we pass through
     /// raw values keyed by their lowercased header name) plus the fixed
@@ -39,6 +43,7 @@ impl HeaderSnapshot {
             && self.content_encoding.is_none()
             && self.request_id.is_none()
             && self.retry_after.is_none()
+            && self.provider_headers.is_empty()
             && self.anthropic_headers.is_empty()
     }
 }

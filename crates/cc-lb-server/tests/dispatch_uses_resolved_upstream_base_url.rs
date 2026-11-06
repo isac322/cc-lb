@@ -159,6 +159,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         stores.as_ref(),
+        None,
         aead.clone(),
         None,
         0,
@@ -244,6 +245,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     assert_eq!(cleared.base_url, None);
     let refreshed = build_dynamic_view(
         stores.as_ref(),
+        None,
         aead,
         None,
         holder.generation(),
