@@ -25,7 +25,9 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         }
         let cutoff = u64_to_i64(cutoff_unix_secs, "keepalive history prune cutoff")?;
         let evidence_cutoff = u64_to_i64(
-            cutoff_unix_secs.saturating_mul(1_000),
+            cutoff_unix_secs
+                .saturating_sub(60 * 60)
+                .saturating_mul(1_000),
             "keepalive evidence prune cutoff",
         )?;
         let limit = u64_to_i64(batch_size as u64, "keepalive history prune batch size")?;

@@ -27,3 +27,9 @@ CREATE INDEX idx_cache_keepalive_evidence_cycle_start
     ON cache_keepalive_evidence (cycle_id, request_start_ms, evidence_id);
 CREATE INDEX idx_cache_keepalive_evidence_principal_start
     ON cache_keepalive_evidence (principal_id, request_start_ms, evidence_id);
+
+CREATE INDEX idx_cache_keepalive_evidence_principal_event_ref
+    ON cache_keepalive_evidence (principal_id, event_ref)
+    WHERE evidence_kind = 'renewal';
+CREATE INDEX idx_cache_keepalive_evidence_follow_up_prefix
+    ON cache_keepalive_evidence (principal_id, evidence_kind, prefix_hash, request_start_ms);

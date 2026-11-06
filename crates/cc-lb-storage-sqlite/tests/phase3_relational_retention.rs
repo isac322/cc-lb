@@ -432,7 +432,7 @@ async fn cache_keepalive_evidence_pruning_obeys_the_shared_batch_and_cutoff() {
 
     assert_eq!(
         storage
-            .prune_cache_keepalive_history_before(20, 1)
+            .prune_cache_keepalive_history_before(3_620, 1)
             .await
             .expect("prune one evidence row"),
         1

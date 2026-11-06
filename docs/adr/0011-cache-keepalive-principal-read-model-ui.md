@@ -44,8 +44,9 @@ cycle identity. Renewal evidence records the request start, effective prefix
 fingerprint/hash and policy/schema identity, provider TTL, model, upstream,
 cache-read usage, and exact persisted cost. Real follow-up evidence records
 the request start, every candidate prefix hash that can represent the
-effective prefix, positive cache read, and request identity. Evidence writes
-are committed atomically with their request-event or renewal projection.
+effective prefix up to a bounded candidate set, positive cache read, and
+request identity. Evidence writes are committed atomically with their
+request-event or renewal projection.
 
 A renewal receives avoided credit at most once. The first positive-cache-read
 follow-up that matches a cycle's candidate prefix hashes is attributed to the

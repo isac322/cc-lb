@@ -820,6 +820,8 @@ async fn write_finalized_rows(
     };
     metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome).increment(1);
 }
+const MAX_FOLLOW_UP_PREFIX_HASHES: usize = 32;
+
 fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
     let Some(cache_read_input_tokens) = row.cache_read_input_tokens else {
         return Vec::new();
@@ -856,10 +858,16 @@ fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
         .collect::<String>();
     let mut prefix_hashes = Vec::new();
     for breakpoint in &row.cache_breakpoints {
+        if prefix_hashes.len() >= MAX_FOLLOW_UP_PREFIX_HASHES {
+            break;
+        }
         if !prefix_hashes.contains(&breakpoint.prefix_hash) {
             prefix_hashes.push(breakpoint.prefix_hash.clone());
         }
         for lookback in &breakpoint.lookback_prefixes {
+            if prefix_hashes.len() >= MAX_FOLLOW_UP_PREFIX_HASHES {
+                break;
+            }
             if !prefix_hashes.contains(&lookback.prefix_hash) {
                 prefix_hashes.push(lookback.prefix_hash.clone());
             }
