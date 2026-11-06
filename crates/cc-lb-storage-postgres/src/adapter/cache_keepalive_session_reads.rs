@@ -512,6 +512,12 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         if prefix_hashes.is_empty() {
             return Ok(evidence);
         }
+        let follow_up_from_ms = evidence
+            .iter()
+            .filter(|entry| entry.evidence_kind == "renewal")
+            .map(|entry| entry.request_start_ms)
+            .min()
+            .unwrap_or(follow_up_from_ms);
         let mut follow_up_query = QueryBuilder::<Postgres>::new(
             "SELECT * FROM cache_keepalive_evidence \
              WHERE principal_id = ",
