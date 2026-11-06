@@ -297,7 +297,7 @@ impl tokio_tungstenite::tungstenite::handshake::server::Callback for RejectingHa
         tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
     > {
         // Keep the provider rejection a valid RFC 6455 HTTP response so the
-        // proxy can preserve its native status for the downstream handshake.
+        // proxy can preserve its provider status for the downstream handshake.
         // QA-04: an invalid wire value such as [0xff] cannot be represented by
         // a contract-faithful mock response; tungstenite rejects that response
         // before the proxy's header filtering path can be exercised.
@@ -347,6 +347,9 @@ fn assert_safe_http_rejection(response: &http::Response<Option<Vec<u8>>>, status
     assert!(!response.headers().contains_key("cookie"));
     assert!(!response.headers().contains_key("authorization"));
     let body = response.body().as_ref().expect("provider rejection body");
+    let value: serde_json::Value = serde_json::from_slice(body).expect("proxy error JSON");
+    assert_eq!(value["error"]["code"], "upstream_unavailable");
+    assert_ne!(value["error"]["code"], "authentication_error");
     assert!(
         !String::from_utf8_lossy(body).contains(PROVIDER_BODY_SENTINEL),
         "provider body must not escape the proxy"
@@ -359,6 +362,8 @@ fn assert_safe_json_rejection(
     expect_headers: bool,
 ) {
     assert_eq!(value["status"], status.as_u16());
+    assert_eq!(value["error"]["code"], "upstream_unavailable");
+    assert_ne!(value["error"]["code"], "authentication_error");
     assert!(
         !value.to_string().contains(PROVIDER_BODY_SENTINEL),
         "provider body must not escape the proxy"
@@ -507,7 +512,7 @@ async fn websocket_handshake_gemini_provider_500_opens_local_breaker() {
 }
 
 #[tokio::test]
-async fn websocket_handshake_openai_provider_401_and_429_preserve_native_status() {
+async fn websocket_handshake_openai_provider_401_and_429_preserve_status() {
     for status in [StatusCode::UNAUTHORIZED, StatusCode::TOO_MANY_REQUESTS] {
         let (address, attempts, provider_task) = rejecting_provider(status).await;
         let mut record = websocket_upstream(
@@ -541,7 +546,7 @@ async fn websocket_handshake_openai_provider_401_and_429_preserve_native_status(
 }
 
 #[tokio::test]
-async fn websocket_handshake_gemini_provider_401_and_429_preserve_native_status() {
+async fn websocket_handshake_gemini_provider_401_and_429_preserve_status() {
     for status in [StatusCode::UNAUTHORIZED, StatusCode::TOO_MANY_REQUESTS] {
         let (address, attempts, provider_task) = rejecting_provider(status).await;
         let mut record = websocket_upstream(

@@ -2873,28 +2873,12 @@ enum WsProviderEvent {
 fn provider_websocket_error_from_http(response: http::Response<Option<Vec<u8>>>) -> WebSocketError {
     let status = response.status().as_u16();
     let headers = response.headers().clone();
-    let native_code = response
-        .body()
-        .as_deref()
-        .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
-        .and_then(|value| {
-            value
-                .pointer("/error/code")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| value.get("code").and_then(serde_json::Value::as_str))
-                .filter(|code| !code.is_empty() && code.len() <= 1024)
-                .map(ToOwned::to_owned)
-        });
-    let mut error = WebSocketError::new(
+    WebSocketError::new(
         status,
         "upstream_unavailable",
         "provider WebSocket handshake rejected",
     )
-    .with_provider_headers(&headers);
-    if let Some(code) = native_code.filter(|code| code != "authentication_error") {
-        error = error.with_native_code(code);
-    }
-    error
+    .with_provider_headers(&headers)
 }
 
 async fn connect_provider_websocket(

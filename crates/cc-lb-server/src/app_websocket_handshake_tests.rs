@@ -128,16 +128,14 @@ async fn websocket_handshake_responses_provider_500_opens_local_breaker_after_fi
 }
 
 #[tokio::test]
-async fn websocket_handshake_responses_provider_401_and_429_preserve_native_status_context() {
-    for (status, native_code, body) in [
+async fn websocket_handshake_responses_provider_401_and_429_preserve_status_and_generic_code() {
+    for (status, body) in [
         (
             401,
-            "provider_auth_failed",
             r#"{"error":{"code":"provider_auth_failed","message":"provider-body-secret"}}"#,
         ),
         (
             429,
-            "provider_rate_limited",
             r#"{"error":{"code":"provider_rate_limited","message":"provider-body-secret"}}"#,
         ),
     ] {
@@ -161,7 +159,7 @@ async fn websocket_handshake_responses_provider_401_and_429_preserve_native_stat
                 .expect("response.create sends");
             let error = receive_error(&mut client).await;
             assert_eq!(error["status"], status);
-            assert_eq!(error["error"]["code"], native_code);
+            assert_eq!(error["error"]["code"], "upstream_unavailable");
             assert_ne!(error["error"]["code"], "authentication_error");
             assert_eq!(error["headers"]["retry-after"], "17");
             assert_eq!(error["headers"]["x-ratelimit-limit-requests"], "100");
