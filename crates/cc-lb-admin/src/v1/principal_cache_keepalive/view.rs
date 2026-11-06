@@ -185,13 +185,7 @@ pub(crate) fn summary_for_items(
         } else if activity.evidence_status == "observed" && evidence_status == "none" {
             evidence_status = "observed";
         }
-        let turns = batch.turns_for_item(item)?;
-        renewals_fired = renewals_fired.saturating_add(
-            turns
-                .iter()
-                .filter(|turn| turn.hit_miss.eq_ignore_ascii_case("hit"))
-                .count() as u64,
-        );
+        renewals_fired = renewals_fired.saturating_add(u64::from(activity.total_renewals));
         if let Some(pnl) = activity.pnl {
             cost_saved_micros = cost_saved_micros.saturating_add(pnl.net_micros);
             total_avoided_micros = total_avoided_micros.saturating_add(pnl.avoided_micros);
@@ -261,7 +255,6 @@ pub(super) async fn detail_for_item(
         .await?
         .map(|upstream| upstream.name);
     let row = row_from_activity(context.max_attempts, item, &loaded.activity, upstream)?;
-    let economics_known = loaded.activity.evidence_status == "observed";
     let renewal_tokens = loaded.activity.turns.iter().fold(0_u64, |total, turn| {
         total.saturating_add(turn.renewal_tokens)
     });
@@ -270,19 +263,24 @@ pub(super) async fn detail_for_item(
         .turns
         .into_iter()
         .map(|turn| {
-            let followed_up = economics_known.then_some(turn.followed_up);
+            let turn_evidence_known = turn.action != "follow-up evidence unavailable";
+            let followed_up = turn_evidence_known.then_some(turn.followed_up);
             Ok(CacheKeepaliveTurnResponse {
                 turn_number: turn.turn_number,
                 renewals: turn.renewals,
                 followed_up,
-                evidence_status: if followed_up.is_some() {
-                    "observed".to_owned()
+                evidence_status: if turn_evidence_known {
+                    if turn.pending {
+                        "pending".to_owned()
+                    } else {
+                        "observed".to_owned()
+                    }
                 } else {
-                    loaded.activity.evidence_status.clone()
+                    "unknown".to_owned()
                 },
                 label: turn.action.to_owned(),
                 time_ms: turn.time_ms,
-                pnl: if economics_known {
+                pnl: if turn_evidence_known {
                     turn.pnl
                         .map(|pnl| dollars_from_micros(pnl.net_micros))
                         .transpose()?
