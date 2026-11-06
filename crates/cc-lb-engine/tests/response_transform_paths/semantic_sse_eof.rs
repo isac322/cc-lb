@@ -1055,13 +1055,7 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
         )
         .await?;
 
-        assert_eq!(observed.status, StatusCode::OK);
-        assert_eq!(observed.row.error_code, None);
-        assert_eq!(
-            (observed.row.input_tokens, observed.row.output_tokens),
-            (Some(12), Some(7))
-        );
-        assert!(observed.completion().is_ok());
+        observed.assert_semantic_success(12, 7, false);
     }
     Ok(())
 }
@@ -1091,7 +1085,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
         None,
     )
     .await?;
-    assert_eq!(observed.status, StatusCode::from_u16(499)?);
+    assert_eq!(observed.row.status, 499);
     assert_eq!(
         observed.row.error_code.as_deref(),
         Some("client_closed_request")
