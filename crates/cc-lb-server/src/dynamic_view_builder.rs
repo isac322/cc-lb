@@ -1,9 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::{unix_millis, unix_secs};
@@ -24,9 +18,16 @@ use cc_lb_quota::plan_capacity::{
 };
 use cc_lb_routing::FilterPlugin;
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::wasm_host::{WasmtimeFilterPlugin, WasmtimeUpstreamDialect};
 use cc_lb_storage_api::upstream::UpstreamKind;
+use secrecy::ExposeSecret;
+
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
     OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
@@ -36,7 +37,10 @@ use cc_lb_storage_api::{
     UpstreamRecord, UpstreamStatusUpdate, UpstreamStore, UpstreamSubscriptionMetadataStore,
     UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
-use cc_lb_upstream::{Signer, SignerError, SignerFactory};
+use cc_lb_upstream::{
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, UpstreamError,
+};
 use parking_lot::RwLock;
 use thiserror::Error;
 use uuid::Uuid;
@@ -1113,6 +1117,7 @@ struct DbCompositeSignerFactory {
     upstream_store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    refresh_locks: cc_lb_signer_anthropic_oauth::RefreshLocks,
     router_chosen_upstream_name: Option<String>,
     clock: cc_lb_clock::ClockHandle,
     antigravity_config: Arc<cc_lb_config::AntigravityOAuthConfig>,
@@ -1132,6 +1137,7 @@ impl DbCompositeSignerFactory {
             upstream_store,
             aead,
             lazy_refresher,
+            refresh_locks: cc_lb_signer_anthropic_oauth::new_refresh_locks(),
             router_chosen_upstream_name: None,
             clock,
             antigravity_config: Arc::new(antigravity_config),
@@ -1144,6 +1150,7 @@ impl DbCompositeSignerFactory {
             upstream_store: self.upstream_store.clone(),
             aead: self.aead.clone(),
             lazy_refresher: self.lazy_refresher.clone(),
+            refresh_locks: self.refresh_locks.clone(),
             router_chosen_upstream_name: Some(router_chosen_upstream_name),
             clock: self.clock.clone(),
             antigravity_config: self.antigravity_config.clone(),
@@ -1244,12 +1251,32 @@ impl SignerFactory for DbCompositeSignerFactory {
                     .map_err(|source| SignerError::SigningFailed {
                         reason: source.to_string(),
                     })?;
-                build_subscription_signer(
+                let signer = build_subscription_signer_with_policy(
                     record,
                     &tokens,
                     self.clock.clone(),
                     Some(&self.antigravity_config),
-                )
+                    true,
+                )?;
+                if !tokens.never_refresh
+                    && let Some(refresh_handle) = self.lazy_refresher.clone()
+                {
+                    Ok(Arc::new(RefreshingSubscriptionSigner {
+                        signer,
+                        record: record.clone(),
+                        store: self.upstream_store.clone(),
+                        aead: self.aead.clone(),
+                        clock: self.clock.clone(),
+                        antigravity_config: self.antigravity_config.clone(),
+                        refresh_handle,
+                        refresh_locks: self.refresh_locks.clone(),
+                        access_token: secrecy::SecretString::new(
+                            tokens.access_token.clone().into_boxed_str(),
+                        ),
+                    }))
+                } else {
+                    Ok(signer)
+                }
             }
             UpstreamKind::AnthropicOauth => {
                 let factory =
@@ -1282,24 +1309,53 @@ pub(crate) fn build_subscription_signer(
     clock: cc_lb_clock::ClockHandle,
     antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
 ) -> Result<Arc<dyn Signer>, SignerError> {
+    build_subscription_signer_with_policy(record, tokens, clock, antigravity_config, false)
+}
+
+fn build_subscription_signer_with_policy(
+    record: &UpstreamRecord,
+    tokens: &cc_lb_aead::OAuthTokenBundle,
+    clock: cc_lb_clock::ClockHandle,
+    antigravity_config: Option<&cc_lb_config::AntigravityOAuthConfig>,
+    refreshing: bool,
+) -> Result<Arc<dyn Signer>, SignerError> {
     match record.kind {
-        UpstreamKind::OpenaiOauth => Ok(Arc::new(
-            cc_lb_signer_anthropic_key::OpenaiSubscriptionSigner::new(
-                tokens.access_token.as_str(),
-                tokens.account_id.as_deref(),
-                tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
-                clock,
-            )?,
-        )),
+        UpstreamKind::OpenaiOauth => {
+            let signer = if tokens.never_refresh || !refreshing {
+                cc_lb_signer_anthropic_key::OpenaiSubscriptionSigner::new(
+                    tokens.access_token.as_str(),
+                    tokens.account_id.as_deref(),
+                    tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                    clock,
+                )?
+            } else {
+                cc_lb_signer_anthropic_key::OpenaiSubscriptionSigner::new_refreshing(
+                    tokens.access_token.as_str(),
+                    tokens.account_id.as_deref(),
+                    tokens.expires_at_unix_secs,
+                    clock,
+                )?
+            };
+            Ok(Arc::new(signer))
+        }
         UpstreamKind::GeminiOauth => {
             let signer = match tokens.oauth_profile {
                 cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
-                    cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new(
-                        tokens.access_token.as_str(),
-                        tokens.project_id.as_deref(),
-                        tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
-                        clock,
-                    )?
+                    if tokens.never_refresh || !refreshing {
+                        cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new(
+                            tokens.access_token.as_str(),
+                            tokens.project_id.as_deref(),
+                            tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                            clock,
+                        )?
+                    } else {
+                        cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_refreshing(
+                            tokens.access_token.as_str(),
+                            tokens.project_id.as_deref(),
+                            tokens.expires_at_unix_secs,
+                            clock,
+                        )?
+                    }
                 }
                 cc_lb_aead::GeminiOAuthProfile::Antigravity => {
                     let default_config;
@@ -1315,14 +1371,25 @@ pub(crate) fn build_subscription_signer(
                         .as_ref()
                         .filter(|url| url.host_str() != Some("cloudcode-pa.googleapis.com"))
                         .unwrap_or(&antigravity_config.code_assist_url);
-                    cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_antigravity(
-                        tokens.access_token.as_str(),
-                        tokens.project_id.as_deref(),
-                        tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
-                        clock,
-                        base_url.as_str(),
-                        &antigravity_config.user_agent,
-                    )?
+                    if tokens.never_refresh || !refreshing {
+                        cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_antigravity(
+                            tokens.access_token.as_str(),
+                            tokens.project_id.as_deref(),
+                            tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                            clock,
+                            base_url.as_str(),
+                            &antigravity_config.user_agent,
+                        )?
+                    } else {
+                        cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new_antigravity_refreshing(
+                            tokens.access_token.as_str(),
+                            tokens.project_id.as_deref(),
+                            tokens.expires_at_unix_secs,
+                            clock,
+                            base_url.as_str(),
+                            &antigravity_config.user_agent,
+                        )?
+                    }
                 }
             };
             Ok(Arc::new(signer))
@@ -1330,6 +1397,142 @@ pub(crate) fn build_subscription_signer(
         _ => Err(SignerError::SigningFailed {
             reason: "subscription signer requires OpenAI or Gemini OAuth".to_owned(),
         }),
+    }
+}
+
+struct RefreshingSubscriptionSigner {
+    signer: Arc<dyn Signer>,
+    record: UpstreamRecord,
+    store: Arc<dyn UpstreamStore>,
+    aead: Arc<AeadService>,
+    clock: cc_lb_clock::ClockHandle,
+    antigravity_config: Arc<cc_lb_config::AntigravityOAuthConfig>,
+    refresh_handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>,
+    refresh_locks: cc_lb_signer_anthropic_oauth::RefreshLocks,
+    access_token: secrecy::SecretString,
+}
+
+impl RefreshingSubscriptionSigner {
+    async fn load(&self) -> Result<(UpstreamRecord, cc_lb_aead::OAuthTokenBundle), SignerError> {
+        let record = self
+            .store
+            .get_by_id(self.record.id)
+            .await
+            .map_err(|_| SignerError::StorageUnavailable {
+                reason: "storage unavailable".to_owned(),
+            })?
+            .ok_or_else(|| SignerError::MissingCredentials {
+                reason: "oauth upstream not found".to_owned(),
+            })?;
+        let encrypted =
+            record
+                .oauth_credentials
+                .as_ref()
+                .ok_or_else(|| SignerError::MissingCredentials {
+                    reason: "subscription oauth upstream has no stored credential".to_owned(),
+                })?;
+        let tokens = encrypted
+            .decrypt(&self.aead, record.id.as_bytes())
+            .map_err(|_| SignerError::SigningFailed {
+                reason: "oauth credentials could not be decrypted".to_owned(),
+            })?;
+        Ok((record, tokens))
+    }
+
+    fn wrap(
+        &self,
+        record: UpstreamRecord,
+        tokens: cc_lb_aead::OAuthTokenBundle,
+        signer: Arc<dyn Signer>,
+    ) -> Arc<dyn Signer> {
+        Arc::new(Self {
+            signer,
+            record,
+            store: self.store.clone(),
+            aead: self.aead.clone(),
+            clock: self.clock.clone(),
+            antigravity_config: self.antigravity_config.clone(),
+            refresh_handle: self.refresh_handle.clone(),
+            refresh_locks: self.refresh_locks.clone(),
+            access_token: secrecy::SecretString::new(tokens.access_token.into_boxed_str()),
+        })
+    }
+
+    async fn refresh(&self) -> Result<Arc<dyn Signer>, SignerError> {
+        let lock = cc_lb_signer_anthropic_oauth::lock_for(
+            &self.refresh_locks,
+            "upstream",
+            &self.record.id.to_string(),
+        );
+        let _guard = lock.lock().await;
+        let (record, tokens) = self.load().await?;
+        if tokens.never_refresh {
+            return Err(SignerError::ExpiredToken {
+                reason: "long-lived oauth access token rejected; reauthorization required"
+                    .to_owned(),
+            });
+        }
+        let usable = tokens.expires_at_unix_secs > unix_secs(self.clock.now()).saturating_add(30);
+        if usable && tokens.access_token != self.access_token.expose_secret() {
+            let signer = build_subscription_signer_with_policy(
+                &record,
+                &tokens,
+                self.clock.clone(),
+                Some(&self.antigravity_config),
+                true,
+            )?;
+            return Ok(self.wrap(record, tokens, signer));
+        }
+        self.refresh_handle
+            .refresh_one(self.record.id)
+            .await
+            .map_err(|_| SignerError::SigningFailed {
+                reason: "oauth refresh failed".to_owned(),
+            })?;
+        let (record, tokens) = self.load().await?;
+        if tokens.expires_at_unix_secs <= unix_secs(self.clock.now()).saturating_add(30) {
+            return Err(SignerError::ExpiredToken {
+                reason: "oauth access token expired".to_owned(),
+            });
+        }
+        let signer = build_subscription_signer_with_policy(
+            &record,
+            &tokens,
+            self.clock.clone(),
+            Some(&self.antigravity_config),
+            true,
+        )?;
+        Ok(self.wrap(record, tokens, signer))
+    }
+}
+
+#[async_trait]
+impl Signer for RefreshingSubscriptionSigner {
+    async fn sign(
+        &self,
+        shaped: ShapedRequest,
+        capability: &mut SigningCapability,
+    ) -> Result<SignedRequest, SignerError> {
+        let retry_shape = shaped.clone();
+        match self.signer.sign(shaped, capability).await {
+            Ok(signed) => Ok(signed),
+            Err(SignerError::ExpiredToken { .. }) => {
+                let refreshed = self.refresh().await?;
+                refreshed.sign(retry_shape, capability).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+        match self.refresh().await {
+            Ok(signer) => RetryDecision::Refresh { new_signer: signer },
+            Err(_) => RetryDecision::Fail,
+        }
+    }
+
+    fn scrub_secrets<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        self.signer.scrub_secrets(text)
     }
 }
 
@@ -1372,13 +1575,16 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+    use async_trait::async_trait;
     use cc_lb_clock::TestClock;
     use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_storage_api::{MetaStore, PromptCacheObservationRecord, UpstreamCreate};
     use cc_lb_storage_sqlite::SqliteStorage as Storage;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::prompt_cache_observation_sink::{
@@ -3089,5 +3295,440 @@ mod tests {
             rebuilt.generation,
             "a view built from current records must not rebuild again"
         );
+    }
+
+    struct RefreshGate {
+        entered: Notify,
+        released: std::sync::atomic::AtomicBool,
+        release: Notify,
+    }
+
+    impl RefreshGate {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: Notify::new(),
+                released: std::sync::atomic::AtomicBool::new(false),
+                release: Notify::new(),
+            })
+        }
+    }
+
+    struct DynamicRefreshHandle {
+        storage: Arc<Storage>,
+        aead: Arc<AeadService>,
+        refreshed_access_token: String,
+        calls: AtomicUsize,
+        fail: bool,
+        gate: Option<Arc<RefreshGate>>,
+    }
+
+    #[async_trait]
+    impl cc_lb_signer_anthropic_oauth::LazyRefreshHandle for DynamicRefreshHandle {
+        async fn refresh_one(
+            &self,
+            upstream_id: Uuid,
+        ) -> Result<(), cc_lb_signer_anthropic_oauth::LazyRefreshError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.gate {
+                gate.entered.notify_waiters();
+                while !gate.released.load(Ordering::SeqCst) {
+                    gate.release.notified().await;
+                }
+            }
+            if self.fail {
+                return Err(cc_lb_signer_anthropic_oauth::LazyRefreshError::Failed {
+                    reason: "scripted refresh failure".to_owned(),
+                });
+            }
+            let record = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+                .await
+                .map_err(
+                    |error| cc_lb_signer_anthropic_oauth::LazyRefreshError::Failed {
+                        reason: error.to_string(),
+                    },
+                )?
+                .expect("refresh upstream");
+            let encrypted = record
+                .oauth_credentials
+                .as_ref()
+                .expect("oauth credentials");
+            let mut tokens = encrypted
+                .decrypt(&self.aead, record.id.as_bytes())
+                .expect("decrypt oauth credentials");
+            tokens.access_token = self.refreshed_access_token.clone();
+            tokens.expires_at_unix_secs = 1_900_000_000;
+            let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                &self.aead,
+                &tokens,
+                record.id.as_bytes(),
+            )
+            .expect("encrypt refreshed oauth credentials");
+            UpstreamStore::store_oauth_tokens(
+                self.storage.as_ref(),
+                record.id,
+                record.revision,
+                encrypted,
+                false,
+            )
+            .await
+            .map_err(|error| {
+                cc_lb_signer_anthropic_oauth::LazyRefreshError::Failed {
+                    reason: error.to_string(),
+                }
+            })?;
+            Ok(())
+        }
+    }
+
+    async fn oauth_record(
+        storage: &Storage,
+        aead: &AeadService,
+        name: &str,
+        kind: UpstreamKind,
+        mut tokens: cc_lb_aead::OAuthTokenBundle,
+        base_url: Option<&str>,
+    ) -> UpstreamRecord {
+        let record = UpstreamStore::create(
+            storage,
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: name.to_owned(),
+                kind,
+                base_url: base_url.map(|url| url.parse().expect("base URL")),
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("oauth upstream");
+        tokens.scopes = vec!["openid".to_owned()];
+        let encrypted =
+            cc_lb_aead::EncryptedOAuthTokens::encrypt(aead, &tokens, record.id.as_bytes())
+                .expect("encrypt oauth credentials");
+        UpstreamStore::store_oauth_tokens(storage, record.id, record.revision, encrypted, false)
+            .await
+            .expect("store oauth credentials")
+    }
+
+    fn refreshing_factory(
+        record: UpstreamRecord,
+        storage: Arc<Storage>,
+        aead: Arc<AeadService>,
+        handle: Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>,
+        clock: cc_lb_clock::ClockHandle,
+    ) -> DbCompositeSignerFactory {
+        DbCompositeSignerFactory::new(
+            vec![record.clone()],
+            storage,
+            aead,
+            Some(handle),
+            clock,
+            cc_lb_config::AntigravityOAuthConfig {
+                user_agent: "antigravity/test".to_owned(),
+                ..Default::default()
+            },
+        )
+        .with_router_choice_state(record.name)
+    }
+
+    fn expired_tokens() -> cc_lb_aead::OAuthTokenBundle {
+        cc_lb_aead::OAuthTokenBundle {
+            access_token: "old-access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_unix_secs: 1_700_000_000,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: Some("account".to_owned()),
+            project_id: Some("project".to_owned()),
+            oauth_profile: Default::default(),
+            scopes: vec!["openid".to_owned()],
+            never_refresh: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_factory_refreshes_openai_and_reuses_storage_newer_token() {
+        let (_dir, storage) = storage_fixture(41).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let record = oauth_record(
+            &storage,
+            &aead,
+            "refresh-openai",
+            UpstreamKind::OpenaiOauth,
+            expired_tokens(),
+            None,
+        )
+        .await;
+        let handle = Arc::new(DynamicRefreshHandle {
+            storage: storage.clone(),
+            aead: aead.clone(),
+            refreshed_access_token: "new-openai".to_owned(),
+            calls: AtomicUsize::new(0),
+            fail: false,
+            gate: None,
+        });
+        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
+            .build(&Upstream::OpenaiDirect { base_url: None })
+            .await
+            .expect("OpenAI signer");
+
+        let first = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
+            .await
+            .expect("refresh and sign");
+        assert_eq!(
+            first.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer new-openai"))
+        );
+        let second = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
+            .await
+            .expect("reuse stored token and sign");
+        assert_eq!(
+            second.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer new-openai"))
+        );
+        assert_eq!(handle.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dynamic_factory_refreshes_gemini_cli_and_antigravity_without_losing_shape() {
+        for (index, profile) in [
+            cc_lb_aead::GeminiOAuthProfile::GeminiCli,
+            cc_lb_aead::GeminiOAuthProfile::Antigravity,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_dir, storage) = storage_fixture(42 + index as u8).await;
+            let aead = Arc::new(AeadService::from_master_key([19; 32]));
+            let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+            let mut tokens = expired_tokens();
+            tokens.oauth_profile = profile.clone();
+            let record = oauth_record(
+                &storage,
+                &aead,
+                "refresh-gemini",
+                UpstreamKind::GeminiOauth,
+                tokens,
+                None,
+            )
+            .await;
+            let handle = Arc::new(DynamicRefreshHandle {
+                storage: storage.clone(),
+                aead: aead.clone(),
+                refreshed_access_token: "new-gemini".to_owned(),
+                calls: AtomicUsize::new(0),
+                fail: false,
+                gate: None,
+            });
+            let signer = refreshing_factory(record, storage, aead, handle, clock)
+                .build(&Upstream::GeminiDirect { base_url: None })
+                .await
+                .expect("Gemini signer");
+            let mut shaped = shaped_request();
+            shaped.set_url(
+                "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                    .parse()
+                    .expect("Gemini URL"),
+            );
+            shaped.set_body(bytes::Bytes::from_static(br#"{"contents":[]}"#));
+            shaped.headers_mut().insert(
+                http::header::USER_AGENT,
+                http::HeaderValue::from_static("GeminiCLI/existing"),
+            );
+            let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped)
+                .await
+                .expect("refresh and sign Gemini");
+            assert_eq!(
+                signed.headers().get(http::header::AUTHORIZATION),
+                Some(&http::HeaderValue::from_static("Bearer new-gemini"))
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(signed.body()).expect("Gemini envelope");
+            assert_eq!(body["project"], "project");
+            match profile {
+                cc_lb_aead::GeminiOAuthProfile::GeminiCli => {
+                    assert!(body.get("userAgent").is_none());
+                    assert_eq!(
+                        signed.headers().get(http::header::USER_AGENT),
+                        Some(&http::HeaderValue::from_static("GeminiCLI/existing"))
+                    );
+                }
+                cc_lb_aead::GeminiOAuthProfile::Antigravity => {
+                    assert_eq!(body["userAgent"], "antigravity");
+                    assert_eq!(body["requestType"], "agent");
+                    assert_eq!(
+                        signed.headers().get(http::header::USER_AGENT),
+                        Some(&http::HeaderValue::from_static("antigravity/test"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_factory_unauthorized_refresh_returns_new_signer_for_one_retry() {
+        let (_dir, storage) = storage_fixture(44).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let mut tokens = expired_tokens();
+        tokens.expires_at_unix_secs = 1_900_000_000;
+        let record = oauth_record(
+            &storage,
+            &aead,
+            "unauthorized-refresh",
+            UpstreamKind::OpenaiOauth,
+            tokens,
+            None,
+        )
+        .await;
+        let handle = Arc::new(DynamicRefreshHandle {
+            storage: storage.clone(),
+            aead: aead.clone(),
+            refreshed_access_token: "retry-token".to_owned(),
+            calls: AtomicUsize::new(0),
+            fail: false,
+            gate: None,
+        });
+        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
+            .build(&Upstream::OpenaiDirect { base_url: None })
+            .await
+            .expect("OpenAI signer");
+        let decision = signer
+            .on_unauthorized(&UpstreamError::Unauthorized {
+                status: http::StatusCode::UNAUTHORIZED,
+                body: None,
+            })
+            .await;
+        let RetryDecision::Refresh { new_signer } = decision else {
+            panic!("401 must request one refreshed signer");
+        };
+        let signed = cc_lb_upstream::sign_request(new_signer.as_ref(), shaped_request())
+            .await
+            .expect("retry signs");
+        assert_eq!(
+            signed.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer retry-token"))
+        );
+        assert_eq!(handle.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dynamic_factory_concurrent_expired_requests_share_one_refresh() {
+        let (_dir, storage) = storage_fixture(45).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let record = oauth_record(
+            &storage,
+            &aead,
+            "concurrent-refresh",
+            UpstreamKind::OpenaiOauth,
+            expired_tokens(),
+            None,
+        )
+        .await;
+        let gate = RefreshGate::new();
+        let handle = Arc::new(DynamicRefreshHandle {
+            storage: storage.clone(),
+            aead: aead.clone(),
+            refreshed_access_token: "concurrent-token".to_owned(),
+            calls: AtomicUsize::new(0),
+            fail: false,
+            gate: Some(gate.clone()),
+        });
+        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
+            .build(&Upstream::OpenaiDirect { base_url: None })
+            .await
+            .expect("OpenAI signer");
+        let first_signer = signer.clone();
+        let entered = gate.entered.notified();
+        let first = tokio::spawn(async move {
+            cc_lb_upstream::sign_request(first_signer.as_ref(), shaped_request()).await
+        });
+        entered.await;
+        let second_signer = signer.clone();
+        let second = tokio::spawn(async move {
+            cc_lb_upstream::sign_request(second_signer.as_ref(), shaped_request()).await
+        });
+        gate.released.store(true, Ordering::SeqCst);
+        gate.release.notify_waiters();
+        assert!(first.await.expect("first task").is_ok());
+        assert!(second.await.expect("second task").is_ok());
+        assert_eq!(handle.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dynamic_factory_never_refresh_access_only_skips_refresh_handle() {
+        let (_dir, storage) = storage_fixture(47).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let mut tokens = expired_tokens();
+        tokens.never_refresh = true;
+        tokens.expires_at_unix_secs = 1_700_000_001;
+        let record = oauth_record(
+            &storage,
+            &aead,
+            "access-only-refresh",
+            UpstreamKind::OpenaiOauth,
+            tokens,
+            None,
+        )
+        .await;
+        let handle = Arc::new(DynamicRefreshHandle {
+            storage: storage.clone(),
+            aead: aead.clone(),
+            refreshed_access_token: "must-not-refresh".to_owned(),
+            calls: AtomicUsize::new(0),
+            fail: false,
+            gate: None,
+        });
+        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
+            .build(&Upstream::OpenaiDirect { base_url: None })
+            .await
+            .expect("access-only signer");
+        let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
+            .await
+            .expect("access-only request signs");
+        assert_eq!(
+            signed.headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer old-access"))
+        );
+        assert_eq!(handle.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dynamic_factory_refresh_failure_is_terminal_for_request() {
+        let (_dir, storage) = storage_fixture(46).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let record = oauth_record(
+            &storage,
+            &aead,
+            "failed-refresh",
+            UpstreamKind::OpenaiOauth,
+            expired_tokens(),
+            None,
+        )
+        .await;
+        let handle = Arc::new(DynamicRefreshHandle {
+            storage: storage.clone(),
+            aead: aead.clone(),
+            refreshed_access_token: "unused".to_owned(),
+            calls: AtomicUsize::new(0),
+            fail: true,
+            gate: None,
+        });
+        let signer = refreshing_factory(record, storage, aead, handle.clone(), clock)
+            .build(&Upstream::OpenaiDirect { base_url: None })
+            .await
+            .expect("OpenAI signer");
+        let error = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
+            .await
+            .expect_err("refresh failure must terminate signing");
+        assert!(matches!(error, SignerError::SigningFailed { .. }));
+        assert_eq!(handle.calls.load(Ordering::SeqCst), 1);
     }
 }
