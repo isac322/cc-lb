@@ -873,6 +873,114 @@ async fn active_same_cycle_hit_then_miss_shared_follow_up_has_no_credit_case() {
 }
 
 #[test]
+fn active_two_follow_ups_select_earliest_follow_up_renewal() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::active_two_follow_ups_select_earliest_follow_up_renewal";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build isolated regression runtime")
+            .block_on(active_two_follow_ups_select_earliest_follow_up_renewal_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    let session_key_hash = "active-two-follow-ups";
+    seed_session(&storage, &principal_id, session_key_hash, CYCLE_ONE, false).await;
+
+    // F1 matches only the hit R1; F2 matches only the miss R2. The HTTP
+    // read model must credit the earliest qualifying follow-up, not the miss.
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash,
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "active-two-follow-ups-r1",
+            ts: NOW_UNIX_SECS,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 6_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash,
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "active-two-follow-ups-r2",
+            ts: NOW_UNIX_SECS + 1,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 15_000,
+            hit_miss: "miss",
+            with_follow_up: true,
+        },
+    )
+    .await;
+
+    let (status, body) = get_json(
+        &state,
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?limit=10"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "two-follow-up list: {body:?}");
+    assert_eq!(body["summary"]["evidence_status"], "pending");
+    assert_json_dollars(&body["summary"]["total_spent"], 21_000);
+    assert!(body["summary"]["total_avoided"].is_null());
+    assert!(body["summary"]["cost_saved"].is_null());
+    assert_eq!(body["summary"]["retained_successful_hits"], 1);
+    let row = body["rows"]
+        .as_array()
+        .expect("two-follow-up rows")
+        .iter()
+        .find(|row| row["id"] == session_key_hash)
+        .expect("two-follow-up row");
+    assert_eq!(row["evidence_status"], "pending");
+    assert_json_dollars(&row["total_spent"], 21_000);
+    assert!(row["total_avoided"].is_null());
+    assert!(row["net_pnl"].is_null());
+
+    let (detail_status, detail) = get_json(
+        &state,
+        &keepalive_detail_uri(&principal_id, session_key_hash),
+    )
+    .await;
+    assert_eq!(
+        detail_status,
+        StatusCode::OK,
+        "two-follow-up detail: {detail:?}"
+    );
+    assert_eq!(detail["evidence_status"], "pending");
+    assert_json_dollars(&detail["total_spent"], 21_000);
+    assert!(detail["total_avoided"].is_null());
+    assert!(detail["net_pnl"].is_null());
+    assert_eq!(detail["is_last_pending"], true);
+    let turns = detail["turns"]
+        .as_array()
+        .expect("two-follow-up detail turns");
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0]["time_ms"], json!((NOW_UNIX_SECS + 1) * 1_000));
+    assert_eq!(turns[0]["label"], "waiting for follow-up");
+    assert_eq!(turns[0]["evidence_status"], "pending");
+    assert_eq!(turns[0]["pending"], true);
+    assert_eq!(turns[0]["followed_up"], false);
+    assert_json_dollars(&turns[0]["pnl"], -15_000);
+    assert_eq!(turns[1]["time_ms"], json!(NOW_UNIX_SECS * 1_000));
+    assert_eq!(turns[1]["label"], "cache used by follow-up");
+    assert_eq!(turns[1]["followed_up"], true);
+    assert_eq!(turns[1]["evidence_status"], "observed");
+    assert_eq!(turns[1]["pending"], false);
+    assert_json_dollars(&turns[1]["pnl"], 69_000);
+}
+
+#[test]
 fn active_multi_turn_and_cycle_history_keep_pending_parity() {
     const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::active_multi_turn_and_cycle_history_keep_pending_parity";
     if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {

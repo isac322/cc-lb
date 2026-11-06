@@ -1639,7 +1639,7 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
 }
 
 #[tokio::test]
-async fn summary_aggregate_multiple_follow_ups_selects_latest_qualifying_renewal() {
+async fn summary_aggregate_multiple_follow_ups_selects_first_qualifying_follow_up() {
     let (_temp_dir, storage) = storage().await;
     let cycle_id = Uuid::from_u128(1_078);
     let mut replace = request("active-multiple-follow-ups", 1_000, "agent-in-turn");
@@ -1647,9 +1647,9 @@ async fn summary_aggregate_multiple_follow_ups_selects_latest_qualifying_renewal
     storage
         .replace_from_real_request(&replace)
         .await
-        .expect("create active latest-qualifying follow-up cycle");
+        .expect("create active first-qualifying follow-up cycle");
     // Each follow-up carries its renewal's prefix hash; the cycle-wide group
-    // intentionally reports the latest qualifying renewal's retained tokens.
+    // intentionally reports the first qualifying follow-up's renewal tokens.
     append_economics_turn(
         &storage,
         EconomicsTurnParams {
@@ -1689,7 +1689,63 @@ async fn summary_aggregate_multiple_follow_ups_selects_latest_qualifying_renewal
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "pending");
     assert_eq!(aggregate.groups.len(), 1);
-    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 30_000);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 10_000);
+}
+
+#[tokio::test]
+async fn summary_aggregate_active_two_follow_ups_selects_earliest_follow_up_renewal() {
+    let (_temp_dir, storage) = storage().await;
+    let cycle_id = Uuid::from_u128(1_082);
+    let session_key_hash = "active-two-follow-ups";
+    let mut replace = request(session_key_hash, 1_000, "agent-in-turn");
+    replace.cycle_id = cycle_id;
+    storage
+        .replace_from_real_request(&replace)
+        .await
+        .expect("create two-follow-up cycle");
+
+    // F1 matches only the hit R1; F2 matches only the miss R2. The selected
+    // follow-up is the earliest one, so only R1 contributes avoided tokens.
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash,
+            cycle_id,
+            source_ref_id: "active-two-follow-ups-r1",
+            ts: 1_001,
+            hit_miss: "hit",
+            cost_micros: 6_000,
+            renewal_tokens: 20_000,
+            with_follow_up: true,
+        },
+    )
+    .await;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash,
+            cycle_id,
+            source_ref_id: "active-two-follow-ups-r2",
+            ts: 1_002,
+            hit_miss: "miss",
+            cost_micros: 15_000,
+            renewal_tokens: 20_000,
+            with_follow_up: true,
+        },
+    )
+    .await;
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate(PRINCIPAL_ID, 2_000_000)
+        .await
+        .expect("aggregate two-follow-up economics");
+    assert_eq!(aggregate.renewing_now, 1);
+    assert_eq!(aggregate.total_spent_micros, 21_000);
+    assert_eq!(aggregate.successful_hits, 1);
+    assert_eq!(aggregate.unknown_cycles, 0);
+    assert_eq!(aggregate.evidence_status, "pending");
+    assert_eq!(aggregate.groups.len(), 1);
+    assert_eq!(aggregate.groups[0].avoided_cache_read_tokens, 20_000);
 }
 
 #[tokio::test]
