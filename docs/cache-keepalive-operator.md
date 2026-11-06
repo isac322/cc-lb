@@ -157,6 +157,35 @@ bucket; it does not imply a 1-hour write.
 Request events and keep-alive turns retain that split for local cost accounting.
 The change applies to future renewals and does not rewrite historical rows.
 These are cc-lb usage records and cost estimates; the provider determines its invoice.
+## Read model, retained history, and economics
+
+The admin read model separates current live sessions from retained history.
+Retained rows and evidence are historical accounting data; they are not a
+lifetime total and do not imply that a session is still active.
+
+- `total_spent` is the exact persisted renewal spend from retained turn rows.
+  It includes misses and remains available after session reset or purge.
+- Avoided savings are credited at most once per cycle. A credit is assigned to
+  the latest renewal whose TTL window contains the first positive-cache-read
+  follow-up whose effective prefix evidence matches one of the renewal's
+  candidate prefixes.
+- Missing, legacy, malformed, or ambiguous evidence is reported as
+  `unknown`. Avoided savings and net savings are nullable when the evidence or
+  pricing is incomplete; the UI must not display a guessed zero.
+- A valid renewal with no proven follow-up has no avoided credit. It remains
+  retained spend, and may be shown as pending while its live TTL window is
+  open.
+- Summary-only requests use SQL aggregates over retained turns and evidence.
+  They do not load every session, turn, or encrypted snapshot into Rust.
+  List/detail requests load only the rows needed for their page or selected
+  session. When keep-alive is disabled, the Admin Web card does not poll the
+  summary endpoint.
+
+The base status remains one of Renewed, Scheduled, Capped, Expired, or Not
+tracked. Errors are orthogonal: a terminal dispatch/decrypt/provider error
+does not become a live Scheduled or Renewed row, and `error` is displayed
+alongside the terminal base state.
+
 
 Renewal request events retain the originating `thread_id` for thread-scoped
 sessions, including agent-scoped sessions, so thread-filtered event queries

@@ -222,6 +222,7 @@ fn turn_fixture(
         principal_id: seed.principal_id.to_owned(),
         accounting_key_id: seed.accounting_key_id.map(str::to_owned),
         upstream_id: seed.upstream_id,
+        cycle_id: None,
         model: seed.model.to_owned(),
         input_tokens: seed.input_tokens,
         output_tokens: seed.output_tokens,
@@ -255,6 +256,7 @@ fn turn_fixture(
             principal_id: record.principal_id.clone(),
             accounting_key_id: record.accounting_key_id.clone(),
             upstream_id: record.upstream_id,
+            cycle_id: record.cycle_id,
             model: record.model.clone(),
             input_tokens: record.input_tokens,
             output_tokens: record.output_tokens,
@@ -280,6 +282,7 @@ fn turn_fixture(
             last_message_at_ms: seed.ts.saturating_mul(1_000),
             ts: seed.ts,
         },
+        evidence: Vec::new(),
     };
 
     (event, projections, record)

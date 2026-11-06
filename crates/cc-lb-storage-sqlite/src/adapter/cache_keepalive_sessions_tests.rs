@@ -27,6 +27,7 @@ fn replace_request(payload: &[u8], now: u64) -> CacheKeepaliveReplaceRequest {
         principal_id: "principal".to_owned(),
         accounting_key_id: None,
         upstream_id: Uuid::from_u128(7),
+        cycle_id: Uuid::nil(),
         cache_anchor_at_unix_secs: now,
         ttl: CacheTtl::Ttl5m,
         run_at_unix_secs: now + 270,

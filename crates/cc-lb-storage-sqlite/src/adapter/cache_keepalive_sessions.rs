@@ -22,6 +22,12 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             return Ok(0);
         }
         let cutoff = u64_to_i64(cutoff_unix_secs, "keepalive history prune cutoff")?;
+        let cutoff_ms = u64_to_i64(
+            cutoff_unix_secs
+                .saturating_sub(60 * 60)
+                .saturating_mul(1_000),
+            "keepalive evidence prune cutoff",
+        )?;
         let limit =
             super::request_events::usize_to_i64(batch_size, "keepalive history prune batch size")?;
         let decisions_removed = sqlx::query(
@@ -51,7 +57,24 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         } else {
             0
         };
-        Ok(decisions_removed + turns_removed)
+        let remaining = remaining - turns_removed as i64;
+        let evidence_removed = if remaining > 0 {
+            sqlx::query(
+                "DELETE FROM cache_keepalive_evidence WHERE rowid IN ( \
+                 SELECT rowid FROM cache_keepalive_evidence \
+                 WHERE request_start_ms < ? \
+                 ORDER BY request_start_ms, evidence_id LIMIT ?)",
+            )
+            .bind(cutoff_ms)
+            .bind(remaining)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected()
+        } else {
+            0
+        };
+        Ok(decisions_removed + turns_removed + evidence_removed)
     }
 
     async fn replace_from_real_request(
@@ -183,15 +206,16 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             .unwrap_or(request.now_unix_secs);
         let job_key = cache_keepalive_job_key(&request.session_key_hash, generation);
         sqlx::query(
-            "INSERT INTO cache_keepalive_sessions
-             (session_key_hash, principal_id, accounting_key_id, upstream_id, generation, refresh_count,
+"INSERT INTO cache_keepalive_sessions
+             (session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, generation, refresh_count,
               first_scheduled_at, cache_anchor_at, run_at, ttl, status, enqueue_state, running_since_unix_secs,
               current_job_key, encrypted_payload, display_reason, error, config_snapshot, last_message_at_ms, terminal_reason, expires_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'active', 'pending', NULL, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'active', 'pending', NULL, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)
              ON CONFLICT(session_key_hash) DO UPDATE SET
               principal_id = excluded.principal_id,
               accounting_key_id = excluded.accounting_key_id,
               upstream_id = excluded.upstream_id,
+              cycle_id = excluded.cycle_id,
               generation = excluded.generation,
               refresh_count = 0,
               first_scheduled_at = excluded.first_scheduled_at,
@@ -215,6 +239,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         .bind(&request.principal_id)
         .bind(&request.accounting_key_id)
         .bind(request.upstream_id.to_string())
+        .bind(request.cycle_id.to_string())
         .bind(u64_to_i64(generation, "cache keepalive generation")?)
         .bind(u64_to_i64(
             request.cache_anchor_at_unix_secs,
@@ -612,6 +637,11 @@ pub(crate) fn row_to_record(
             &row.try_get::<String, _>("upstream_id")
                 .map_err(map_sqlx_error)?,
         )?,
+        cycle_id: row
+            .try_get::<Option<String>, _>("cycle_id")
+            .map_err(map_sqlx_error)?
+            .map(|value| uuid_from_db(&value))
+            .transpose()?,
         generation: i64_to_u64(
             row.try_get("generation").map_err(map_sqlx_error)?,
             "cache keepalive generation",

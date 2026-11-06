@@ -1,7 +1,8 @@
 use cc_lb_pricing::PriceCatalog;
 use cc_lb_storage_api::{
-    CacheKeepaliveEnqueueState, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem,
-    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus, CacheKeepaliveTurnRecord, CacheTtl,
+    CacheKeepaliveEnqueueState, CacheKeepaliveEvidenceRecord, CacheKeepaliveSessionEntrySource,
+    CacheKeepaliveSessionListItem, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
+    CacheKeepaliveTurnRecord, CacheTtl,
 };
 use uuid::Uuid;
 
@@ -41,6 +42,7 @@ fn turn(source_ref_id: &str, ts: u64) -> CacheKeepaliveTurnRecord {
         principal_id: "principal".to_owned(),
         accounting_key_id: None,
         upstream_id: Uuid::nil(),
+        cycle_id: None,
         model: "claude-sonnet-4-5".to_owned(),
         input_tokens: 0,
         output_tokens: 0,
@@ -60,6 +62,7 @@ fn session() -> CacheKeepaliveSessionRecord {
         principal_id: "principal".to_owned(),
         accounting_key_id: None,
         upstream_id: Uuid::nil(),
+        cycle_id: None,
         generation: 42,
         refresh_count: 0,
         first_scheduled_at_unix_secs: 1_730_000_000,
@@ -95,6 +98,7 @@ fn cache_keepalive_activity_orders_turns_newest_first_without_fabricating_decisi
             item: &decision,
             session: None,
             turns: &[],
+            evidence: &[],
             now_ms: 0,
         },
         catalog.as_ref(),
@@ -104,6 +108,7 @@ fn cache_keepalive_activity_orders_turns_newest_first_without_fabricating_decisi
             item: &session,
             session: None,
             turns: &turns,
+            evidence: &[],
             now_ms: 0,
         },
         catalog.as_ref(),
@@ -131,13 +136,14 @@ fn batched_cache_keepalive_turns_preserve_serialized_row_behavior() {
             item: &item,
             session: Some(&session),
             turns: &turns,
+            evidence: &[],
             now_ms: 1_730_000_100_000,
         },
         catalog.as_ref(),
     );
 
     // When: the list row consumes those records from the shared batch without the encrypted session.
-    let batch = CacheKeepaliveActivityBatch::from_turns(turns);
+    let batch = CacheKeepaliveActivityBatch::from_turns(turns, Vec::new());
     let batched_activity =
         activity_for_item(catalog.as_ref(), 1_730_000_100_000, &item, None, &batch)
             .expect("batched activity");
@@ -155,7 +161,8 @@ fn batched_cache_keepalive_turns_preserve_serialized_row_behavior() {
 
 #[test]
 fn mixed_activity_ties_order_by_source_ref_id_ascending_and_only_newest_active_turn_pending() {
-    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
     let turns = [
         turn("z-turn", 200),
         turn("a-turn", 200),
@@ -168,6 +175,7 @@ fn mixed_activity_ties_order_by_source_ref_id_ascending_and_only_newest_active_t
             item: &item,
             session: None,
             turns: &turns,
+            evidence: &[],
             now_ms: 1_730_000_100_000,
         },
         catalog.as_ref(),
@@ -189,4 +197,161 @@ fn mixed_activity_ties_order_by_source_ref_id_ascending_and_only_newest_active_t
             .collect::<Vec<_>>(),
         [3, 2, 1]
     );
+}
+#[test]
+fn cache_keepalive_hit_without_followup_evidence_is_not_counted_as_followed_up() {
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let turns = [turn("renewal-without-followup", 200)];
+    let catalog = PriceCatalog::new_empty();
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &turns,
+            evidence: &[],
+            now_ms: 1_730_000_100_000,
+        },
+        catalog.as_ref(),
+    );
+
+    assert!(!activity.turns[0].followed_up);
+}
+#[test]
+fn cache_keepalive_activity_requires_matching_followup_evidence() {
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let turns = [turn("renewal-with-followup", 200)];
+    let evidence = [
+        CacheKeepaliveEvidenceRecord {
+            evidence_id: "renewal-evidence".to_owned(),
+            cycle_id: Some(Uuid::from_u128(1)),
+            evidence_kind: "renewal".to_owned(),
+            request_start_ms: 200_000,
+            prefix_fingerprint: Some("fp".to_owned()),
+            prefix_hash: Some("hash".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: "claude-sonnet-4-5".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            cost_micros: Some(1),
+            request_ref: Some("request".to_owned()),
+            event_ref: Some("renewal-with-followup".to_owned()),
+        },
+        CacheKeepaliveEvidenceRecord {
+            evidence_id: "followup-evidence".to_owned(),
+            cycle_id: None,
+            evidence_kind: "follow_up".to_owned(),
+            request_start_ms: 201_000,
+            prefix_fingerprint: Some("extended-conversation-fp".to_owned()),
+            prefix_hash: Some("hash".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: "claude-sonnet-4-5".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            cost_micros: Some(2),
+            request_ref: Some("followup".to_owned()),
+            event_ref: Some("followup".to_owned()),
+        },
+    ];
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &turns,
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        PriceCatalog::new_empty().as_ref(),
+    );
+    assert!(activity.turns[0].followed_up);
+    assert_eq!(activity.evidence_status, "observed");
+}
+#[test]
+fn cache_keepalive_activity_credits_only_the_latest_renewal_in_a_cycle() {
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let turns = [turn("renewal-a", 200), turn("renewal-b", 240)];
+    let evidence = [
+        CacheKeepaliveEvidenceRecord {
+            evidence_id: "renewal-a-evidence".to_owned(),
+            cycle_id: Some(Uuid::from_u128(1)),
+            evidence_kind: "renewal".to_owned(),
+            request_start_ms: 200_000,
+            prefix_fingerprint: Some("a".to_owned()),
+            prefix_hash: Some("base-prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: "claude-sonnet-4-5".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            cost_micros: Some(1),
+            request_ref: Some("request-a".to_owned()),
+            event_ref: Some("renewal-a".to_owned()),
+        },
+        CacheKeepaliveEvidenceRecord {
+            evidence_id: "renewal-b-evidence".to_owned(),
+            cycle_id: Some(Uuid::from_u128(1)),
+            evidence_kind: "renewal".to_owned(),
+            request_start_ms: 240_000,
+            prefix_fingerprint: Some("b".to_owned()),
+            prefix_hash: Some("base-prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: "claude-sonnet-4-5".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            cost_micros: Some(1),
+            request_ref: Some("request-b".to_owned()),
+            event_ref: Some("renewal-b".to_owned()),
+        },
+        CacheKeepaliveEvidenceRecord {
+            evidence_id: "followup-extension".to_owned(),
+            cycle_id: None,
+            evidence_kind: "follow_up".to_owned(),
+            request_start_ms: 300_000,
+            prefix_fingerprint: Some("new-extended-request".to_owned()),
+            prefix_hash: Some("base-prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::nil(),
+            model: "claude-sonnet-4-5".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(20_000),
+            cost_micros: Some(2),
+            request_ref: Some("followup".to_owned()),
+            event_ref: Some("followup".to_owned()),
+        },
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &turns,
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        PriceCatalog::new_empty().as_ref(),
+    );
+
+    assert_eq!(activity.evidence_status, "observed");
+    assert_eq!(activity.turns[0].source_ref_id, "renewal-b");
+    assert!(activity.turns[0].followed_up);
+    assert_eq!(activity.turns[1].source_ref_id, "renewal-a");
+    assert!(!activity.turns[1].followed_up);
 }

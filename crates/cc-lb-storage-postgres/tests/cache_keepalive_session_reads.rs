@@ -253,7 +253,7 @@ async fn read_model_contract(url: &str) -> Result<()> {
     );
     assert_eq!(second.rows[0].reason, "max renewals reached");
     assert_eq!(second.rows[1].reason, "TTL expired before follow-up");
-    assert_eq!(second.rows[2].reason, "max duration reached (4h)");
+    assert_eq!(second.rows[2].reason, "max duration reached");
     assert_eq!(
         ids.iter()
             .copied()
@@ -957,8 +957,8 @@ async fn pagination_reaches_terminal_with_engine_parity_case(url: &str) -> Resul
          (source_ref_id, decision, reason, generation, ts, principal_id, session_key_hash, \
           upstream_id, error, ttl, config_snapshot, last_message_at_ms) \
          SELECT 'page-' || lpad(value::TEXT, 4, '0'), 'not_tracked', 'page', 1, \
-                2_000_000 - (value / 5), $1, NULL, $2, NULL, '5m', NULL, \
-                (2_000_000 - (value / 5)) * 1000 \
+                2000000 - (value / 5), $1, NULL, $2, NULL, '5m', NULL, \
+                (2000000 - (value / 5)) * 1000 \
          FROM generate_series(1, 1005) AS series(value)",
     )
     .bind(PRINCIPAL_ID)
@@ -1234,6 +1234,7 @@ fn turn_record(
         principal_id: principal_id.to_owned(),
         accounting_key_id: Some(format!("accounting-key-{seed}")),
         upstream_id: Uuid::from_u128(100 + u128::from(seed)),
+        cycle_id: None,
         model: format!("model-{seed}"),
         input_tokens: u64::from(seed) + 1,
         output_tokens: u64::from(seed) + 2,
@@ -1306,6 +1307,7 @@ fn request_for_principal(
         principal_id: principal_id.to_owned(),
         accounting_key_id: None,
         upstream_id: UPSTREAM_ID,
+        cycle_id: uuid::Uuid::nil(),
         cache_anchor_at_unix_secs: now_unix_secs,
         ttl: CacheTtl::Ttl5m,
         run_at_unix_secs: now_unix_secs + 270,
@@ -1359,6 +1361,7 @@ fn decision_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections 
             last_message_at_ms: ts * 1_000,
             ts,
         },
+        evidence: Vec::new(),
     }
 }
 
@@ -1370,6 +1373,7 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
             principal_id: PRINCIPAL_ID.to_owned(),
             accounting_key_id: None,
             upstream_id: UPSTREAM_ID,
+            cycle_id: None,
             model: "claude-sonnet-4-5".to_owned(),
             input_tokens: 100,
             output_tokens: 20,
@@ -1395,6 +1399,7 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
             last_message_at_ms: ts * 1_000,
             ts,
         },
+        evidence: Vec::new(),
     }
 }
 

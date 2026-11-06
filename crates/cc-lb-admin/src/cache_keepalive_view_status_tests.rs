@@ -99,7 +99,7 @@ fn cache_keepalive_status_keeps_error_orthogonal_and_uses_frozen_display_contrac
     );
     assert_eq!(
         state_from_item(&renewed_with_error),
-        CacheKeepaliveViewState::Renewed
+        CacheKeepaliveViewState::Capped
     );
     assert_eq!(
         deduplicated,

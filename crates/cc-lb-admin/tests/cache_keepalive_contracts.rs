@@ -83,7 +83,12 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
     assert!(body["summary"]["renewing_now"].is_number());
     assert!(body["summary"]["sessions_last_5m"].is_number());
     assert!(body["summary"]["renewals_fired"].is_number());
-    assert!(body["summary"]["cost_saved"].is_number());
+    assert!(body["summary"]["cost_saved"].is_null());
+    assert_eq!(body["summary"]["total_spent"], 0.0432);
+    assert!(body["summary"]["total_avoided"].is_null());
+    assert_eq!(body["summary"]["evidence_status"], "unknown");
+    assert_eq!(body["summary"]["unknown_cycles"], 3);
+    assert!(body["summary"]["retained_from_ms"].is_null());
     assert_eq!(body["rows"], serde_json::json!([]));
     assert!(body["next_cursor"].is_null());
 }
@@ -113,6 +118,7 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
             principal_id: principal_id.clone(),
             accounting_key_id: None,
             upstream_id: upstream.id,
+            cycle_id: uuid::Uuid::nil(),
             cache_anchor_at_unix_secs: NOW_UNIX_SECS,
             ttl: CacheTtl::Ttl5m,
             run_at_unix_secs: NOW_UNIX_SECS + 270,
@@ -187,7 +193,7 @@ async fn cache_keepalive_detail_returns_frozen_multi_turn_fields() {
         "renewal_tokens",
         "total_avoided",
         "total_spent",
-        "total_renewals",
+        "total_renewals_current_cycle",
         "is_last_pending",
         "turns",
         "config_snapshot",
@@ -213,7 +219,7 @@ async fn cache_keepalive_detail_query_preserves_all_state_shapes() {
         ("7b204de1c83f", "scheduled"),
         ("f4b71a0c9d52", "capped"),
         ("0b33e9f71a2c", "expired"),
-        ("error-overlaps-reason", "scheduled"),
+        ("error-overlaps-reason", "capped"),
         ("decision-2d8077e9a1c4", "not_tracked"),
     ] {
         let uri = keepalive_detail_uri(&principal_id, id);
@@ -221,7 +227,7 @@ async fn cache_keepalive_detail_query_preserves_all_state_shapes() {
             authed_json(app(state.clone()), "GET", &uri, None).await;
         assert_eq!(status, StatusCode::OK, "{id}: {body:?}");
         assert_eq!(body["id"], id);
-        assert_eq!(body["state"], expected_state);
+        assert_eq!(body["state"], expected_state, "unexpected state for {id}");
         assert!(body["turns"].is_array(), "{id}: missing turns");
         assert!(body["config_snapshot"].is_object(), "{id}: missing config");
         assert!(body["raw_record"].is_object(), "{id}: missing raw record");
@@ -368,5 +374,5 @@ async fn cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malfor
 
     // Then: detail exposes its raw record without fabricating renewal activity.
     assert_eq!(detail["raw_record"]["principal_id"], principal_id);
-    assert_eq!(detail["total_renewals"], 0);
+    assert_eq!(detail["total_renewals_current_cycle"], 0);
 }

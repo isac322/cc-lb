@@ -600,8 +600,9 @@ fn enqueue_request() -> CacheKeepaliveEnqueueRequest {
         session_key_hash: "session-hash".to_owned(),
         principal_id: "principal".to_owned(),
         accounting_key_id: Some("key-live-123".to_owned()),
-        cache_anchor_age: std::time::Duration::from_secs(30),
+        cycle_id: Uuid::nil(),
         expected_generation: None,
+        cache_anchor_age: std::time::Duration::from_secs(30),
         params: ScheduleParams {
             delay: std::time::Duration::from_secs(240),
             max_refreshes: 3,

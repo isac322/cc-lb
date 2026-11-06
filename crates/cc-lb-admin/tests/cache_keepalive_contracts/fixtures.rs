@@ -95,6 +95,7 @@ pub fn cache_keepalive_contract_seed(principal_id: &str) -> CacheKeepaliveContra
                         principal_id: principal_id.to_owned(),
                         accounting_key_id: None,
                         upstream_id: UPSTREAM_ID,
+                        cycle_id: None,
                         model: "claude-sonnet-4-5".to_owned(),
                         input_tokens: 8_000,
                         output_tokens: 20,
@@ -120,6 +121,7 @@ pub fn cache_keepalive_contract_seed(principal_id: &str) -> CacheKeepaliveContra
                         last_message_at_ms: timestamp * 1_000,
                         ts: timestamp,
                     },
+                    evidence: Vec::new(),
                 },
             )
         })
@@ -154,6 +156,7 @@ pub async fn seed_cache_keepalive_contract_rows(
                 principal_id: principal_id.to_owned(),
                 accounting_key_id: None,
                 upstream_id: UPSTREAM_ID,
+                cycle_id: uuid::Uuid::from_u128(1),
                 cache_anchor_at_unix_secs: now,
                 ttl: session.ttl,
                 run_at_unix_secs: now + 270,
@@ -240,6 +243,7 @@ pub async fn seed_cache_keepalive_contract_rows(
                     last_message_at_ms: (SEEDED_AT_UNIX_SECS + 4) * 1_000,
                     ts: SEEDED_AT_UNIX_SECS + 4,
                 },
+                evidence: Vec::new(),
             },
         )
         .await
@@ -256,6 +260,7 @@ pub fn cache_keepalive_replace_request(
         principal_id: principal_id.to_owned(),
         accounting_key_id: None,
         upstream_id: UPSTREAM_ID,
+        cycle_id: uuid::Uuid::nil(),
         cache_anchor_at_unix_secs,
         ttl: CacheTtl::Ttl5m,
         run_at_unix_secs: cache_anchor_at_unix_secs.saturating_add(270),

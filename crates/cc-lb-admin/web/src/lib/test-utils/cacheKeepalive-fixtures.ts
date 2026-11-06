@@ -17,7 +17,13 @@ export const cacheKeepaliveSummaryFixture: CacheKeepaliveSummary = {
   renewing_now: 2,
   sessions_last_5m: 5,
   renewals_fired: 128,
+  retained_successful_hits: 96,
   cost_saved: 12.47,
+  total_spent: 4.18,
+  total_avoided: 16.65,
+  evidence_status: 'observed',
+  unknown_cycles: 0,
+  retained_from_ms: BASE_MS - 7 * 24 * 60 * 60 * 1_000,
 };
 
 export function apiRowFromFixture(
@@ -28,6 +34,7 @@ export function apiRowFromFixture(
     id: fixture.id,
     last_message_at_ms: BASE_MS - index * 60_000,
     state: fixture.state,
+    is_active: fixture.state === 'renewed' || fixture.state === 'scheduled',
     ttl: fixture.ttl,
     attempts: fixture.attempts,
     max_attempts: fixture.maxAttempts,
@@ -36,6 +43,9 @@ export function apiRowFromFixture(
     upstream: 'upstream-a',
     error: fixture.error,
     net_pnl: fixture.netPnl,
+    total_spent: fixture.attempts == null ? 0 : fixture.attempts * 0.006,
+    total_avoided: fixture.state === 'not_tracked' ? null : 0.12,
+    evidence_status: fixture.state === 'not_tracked' ? 'none' : 'observed',
     session_key_hash: `hash-${fixture.id}`,
   };
 }
@@ -51,6 +61,7 @@ function apiTurnFromFixture(
     time_ms: BASE_MS,
     pnl: turn.pnl,
     pending: turn.pending,
+    evidence_status: turn.pending ? 'pending' : 'observed',
   };
 }
 
@@ -80,9 +91,7 @@ export function apiDetailFromFixture(
   return {
     ...apiRowFromFixture(fixture, index),
     renewal_tokens: 20_000,
-    total_avoided: 0.12,
-    total_spent: 0.018,
-    total_renewals: fixture.attempts ?? 0,
+    total_renewals_current_cycle: fixture.attempts ?? 0,
     is_last_pending: newestTurn.pending,
     turns: newestFirstTurns.map(apiTurnFromFixture),
     config_snapshot: {

@@ -38,9 +38,8 @@ pub fn state_from_item(item: &CacheKeepaliveSessionListItem) -> CacheKeepaliveVi
                 | CacheKeepaliveTerminalReason::MaxDuration,
             ),
         ) => CacheKeepaliveViewState::Capped,
-        (Some(CacheKeepaliveSessionStatus::Terminal), _) | (None, _) => {
-            active_state(item.refresh_count)
-        }
+        (Some(CacheKeepaliveSessionStatus::Terminal), _) => CacheKeepaliveViewState::Capped,
+        (None, _) => active_state(item.refresh_count),
     }
 }
 

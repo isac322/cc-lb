@@ -14,7 +14,8 @@ use cc_lb_request_log::{
     RequestDiagnostics, RequestDiagnosticsRecord, RequestDiagnosticsSource, RequestEventKind,
     RequestEventPartial, RequestEventUpdate,
 };
-use cc_lb_storage_api::{RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{CacheKeepaliveEvidenceRow, RequestEvent, RequestEventStore};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -733,7 +734,7 @@ async fn write_finalized_rows(
     is_orphan: bool,
 ) {
     let mut row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
-    // Diagnostic fields exist only in the log; every DB and bus reader sees the same row.
+    let evidence = follow_up_evidence(&row);
     let mut diagnostics = RequestDiagnostics::take_from(&mut row);
     if let Some(route) = partial.route.as_ref() {
         if let Some(cache_breakpoints) = route.cache_breakpoints.clone() {
@@ -759,7 +760,14 @@ async fn write_finalized_rows(
     let mut attempts: u32 = 0;
     let cursor = loop {
         attempts += 1;
-        match storage.append_request_event(&row).await {
+        let append_result = if evidence.is_empty() {
+            storage.append_request_event(&row).await
+        } else {
+            storage
+                .append_request_event_with_evidence(&row, &evidence)
+                .await
+        };
+        match append_result {
             Ok(cursor) => {
                 writer.breaker.record_success();
                 break cursor;
@@ -811,6 +819,99 @@ async fn write_finalized_rows(
         "written"
     };
     metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome).increment(1);
+}
+const MAX_FOLLOW_UP_PREFIX_HASHES: usize = 32;
+
+fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
+    let Some(cache_read_input_tokens) = row.cache_read_input_tokens else {
+        return Vec::new();
+    };
+    if cache_read_input_tokens == 0 || row.cache_breakpoints.is_empty() {
+        return Vec::new();
+    }
+    let Some(principal_id) = row.principal_id.clone() else {
+        return Vec::new();
+    };
+    let Some(upstream_id) = row.upstream_id else {
+        return Vec::new();
+    };
+    let Some(model) = row.model.clone() else {
+        return Vec::new();
+    };
+    let Some(request_start_ms) = row.ts_ms else {
+        return Vec::new();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"request-cache-breakpoint-v1");
+    for breakpoint in &row.cache_breakpoints {
+        hasher.update(breakpoint.block_index.to_le_bytes());
+        hasher.update(breakpoint.path.as_bytes());
+        hasher.update(breakpoint.prefix_hash.as_bytes());
+        if let Some(ttl) = breakpoint.ttl.as_deref() {
+            hasher.update(ttl.as_bytes());
+        }
+    }
+    let fingerprint = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut prefix_hashes = Vec::new();
+    for breakpoint in &row.cache_breakpoints {
+        if prefix_hashes.len() >= MAX_FOLLOW_UP_PREFIX_HASHES {
+            break;
+        }
+        if !prefix_hashes.contains(&breakpoint.prefix_hash) {
+            prefix_hashes.push(breakpoint.prefix_hash.clone());
+        }
+        for lookback in &breakpoint.lookback_prefixes {
+            if prefix_hashes.len() >= MAX_FOLLOW_UP_PREFIX_HASHES {
+                break;
+            }
+            if !prefix_hashes.contains(&lookback.prefix_hash) {
+                prefix_hashes.push(lookback.prefix_hash.clone());
+            }
+        }
+    }
+    prefix_hashes
+        .into_iter()
+        .enumerate()
+        .map(|(index, prefix_hash)| {
+            let ttl = row
+                .cache_breakpoints
+                .iter()
+                .find(|breakpoint| {
+                    breakpoint.prefix_hash == prefix_hash
+                        || breakpoint
+                            .lookback_prefixes
+                            .iter()
+                            .any(|lookback| lookback.prefix_hash == prefix_hash)
+                })
+                .and_then(|breakpoint| breakpoint.ttl.as_deref());
+            CacheKeepaliveEvidenceRow {
+                evidence_id: format!(
+                    "follow-up-evidence:{}:{index}",
+                    row.event_id.as_deref().unwrap_or(&row.request_id)
+                ),
+                cycle_id: None,
+                evidence_kind: "follow_up".to_owned(),
+                request_start_ms,
+                prefix_fingerprint: Some(fingerprint.clone()),
+                prefix_hash: Some(prefix_hash),
+                prefix_policy_version: Some("prompt-cache-policy-v1".to_owned()),
+                prefix_schema_version: Some("request-cache-breakpoint-v1".to_owned()),
+                principal_id: principal_id.clone(),
+                upstream_id,
+                model: model.clone(),
+                ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(ttl),
+                hit_miss: Some("hit".to_owned()),
+                cache_read_input_tokens: Some(cache_read_input_tokens),
+                cost_micros: row.cost_usd_micros,
+                request_ref: Some(row.request_id.clone()),
+                event_ref: row.source_ref_id.clone().or_else(|| row.event_id.clone()),
+            }
+        })
+        .collect()
 }
 
 async fn flush_expired_terminations(

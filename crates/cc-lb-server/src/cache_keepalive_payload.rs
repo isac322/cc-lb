@@ -57,6 +57,14 @@ struct SnapshotFrameMetadata {
     headers: Vec<SnapshotFrameHeader>,
     upstream_id: Uuid,
     ttl: cc_lb_storage_api::CacheTtl,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix_policy_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix_schema_version: Option<String>,
 }
 
 fn encode_snapshot_frame(
@@ -75,6 +83,10 @@ fn encode_snapshot_frame(
             .collect(),
         upstream_id: snapshot.upstream_id,
         ttl: snapshot.ttl,
+        prefix_fingerprint: snapshot.prefix_fingerprint.clone(),
+        prefix_hash: snapshot.prefix_hash.clone(),
+        prefix_policy_version: snapshot.prefix_policy_version.clone(),
+        prefix_schema_version: snapshot.prefix_schema_version.clone(),
     })?;
     let metadata_len =
         u64::try_from(metadata.len()).map_err(|_| CacheKeepalivePayloadError::InvalidLength)?;
@@ -138,6 +150,10 @@ fn decode_snapshot_frame(
         body: frame[body_start..body_end].to_vec(),
         upstream_id: metadata.upstream_id,
         ttl: metadata.ttl,
+        prefix_fingerprint: metadata.prefix_fingerprint,
+        prefix_hash: metadata.prefix_hash,
+        prefix_policy_version: metadata.prefix_policy_version,
+        prefix_schema_version: metadata.prefix_schema_version,
     };
     Ok(snapshot)
 }
@@ -291,6 +307,10 @@ mod tests {
             body,
             upstream_id: Uuid::from_u128(7),
             ttl: CacheTtl::Ttl5m,
+            prefix_fingerprint: None,
+            prefix_hash: None,
+            prefix_policy_version: None,
+            prefix_schema_version: None,
         }
     }
 

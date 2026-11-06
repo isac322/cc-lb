@@ -48,6 +48,7 @@ fn projections(source_ref_id: &str) -> RequestEventProjections {
             principal_id: "principal-a".to_owned(),
             accounting_key_id: None,
             upstream_id: Uuid::from_u128(7),
+            cycle_id: None,
             model: "claude-sonnet-4-5".to_owned(),
             input_tokens: 100,
             output_tokens: 20,
@@ -73,6 +74,7 @@ fn projections(source_ref_id: &str) -> RequestEventProjections {
             last_message_at_ms: 1_800_000_000_000,
             ts: 1_800_000_000,
         },
+        evidence: Vec::new(),
     }
 }
 

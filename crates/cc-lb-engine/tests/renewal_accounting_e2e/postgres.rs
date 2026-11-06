@@ -24,8 +24,9 @@ async fn postgres_renewal_storage_paths_require_live_dsn() {
             principal_id: "postgres-renewal-principal".to_owned(),
             accounting_key_id: None,
             upstream_id: Uuid::from_u128(7),
-            cache_anchor_at_unix_secs: 1_000,
+            cycle_id: Uuid::nil(),
             ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 1_000,
             run_at_unix_secs: 1_010,
             expires_at_unix_secs: 1_300,
             encrypted_payload: vec![1],
@@ -127,6 +128,7 @@ fn renewal_projections() -> RequestEventProjections {
             principal_id: "postgres-renewal-principal".to_owned(),
             accounting_key_id: None,
             upstream_id: Uuid::from_u128(7),
+            cycle_id: None,
             model: "claude-test".to_owned(),
             input_tokens: 0,
             output_tokens: 0,
@@ -152,6 +154,7 @@ fn renewal_projections() -> RequestEventProjections {
             last_message_at_ms: 1_003_000,
             ts: 1_003,
         },
+        evidence: Vec::new(),
     }
 }
 

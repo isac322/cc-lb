@@ -39,37 +39,48 @@ export type CacheKeepaliveStatusFilter = z.infer<
   typeof CacheKeepaliveStatusFilterSchema
 >;
 
-// Card metric scope is fixed by the plan and does not track drawer horizon:
-//   renewing_now      = current scheduled or mid-renewal sessions
-//   sessions_last_5m  = sessions seen in the last 5 minutes only
-//   renewals_fired    = all-time total renewals fired
-//   cost_saved        = all-time net dollars saved after renewal spend
+// Summary scope remains explicit: retained history is not the current cycle.
+export const CacheKeepaliveEvidenceStatusSchema = z.enum([
+  'observed',
+  'none',
+  'pending',
+  'unknown',
+] as const);
+export type CacheKeepaliveEvidenceStatus = z.infer<
+  typeof CacheKeepaliveEvidenceStatusSchema
+>;
+
 export const CacheKeepaliveSummarySchema = z.object({
   renewing_now: z.number(),
   sessions_last_5m: z.number(),
   renewals_fired: z.number(),
-  cost_saved: z.number(),
+  retained_successful_hits: z.number(),
+  cost_saved: z.number().nullable(),
+  total_spent: z.number(),
+  total_avoided: z.number().nullable(),
+  evidence_status: CacheKeepaliveEvidenceStatusSchema,
+  unknown_cycles: z.number(),
+  retained_from_ms: z.number().nullable(),
 });
 export type CacheKeepaliveSummary = z.infer<typeof CacheKeepaliveSummarySchema>;
 
 export const CacheKeepaliveRowSchema = z.object({
   id: z.string(),
   last_message_at_ms: z.number(),
-  // Server provides `relative_time` only when it already has a shared
-  // formatter; otherwise the frontend formats from `last_message_at_ms`.
   relative_time: z.string().optional(),
   state: CacheKeepaliveStateSchema,
+  is_active: z.boolean(),
   ttl: CacheKeepaliveTtlSchema.nullable(),
   attempts: z.number().nullable(),
   max_attempts: z.number(),
   reason: z.string(),
-  // u64 keepalive generation from the storage record, not a display string.
   generation: z.number(),
   upstream: z.string().nullable(),
   error: z.string().nullable(),
-  net_pnl: z.number(),
-  // Opaque stable-sort tiebreak id (plan: `session_key_hash ASC`); the
-  // cursor encodes it together with `last_message_at_ms`.
+  net_pnl: z.number().nullable(),
+  total_spent: z.number(),
+  total_avoided: z.number().nullable(),
+  evidence_status: CacheKeepaliveEvidenceStatusSchema,
   session_key_hash: z.string(),
 });
 export type CacheKeepaliveRow = z.infer<typeof CacheKeepaliveRowSchema>;
@@ -86,12 +97,12 @@ export type CacheKeepaliveListResponse = z.infer<
 export const CacheKeepaliveTurnSchema = z.object({
   turn_number: z.number(),
   renewals: z.number(),
-  followed_up: z.boolean(),
+  followed_up: z.boolean().nullable(),
   label: z.string(),
   time_ms: z.number(),
-  // `not_tracked` turns carry no P&L, so `pnl` is null there.
   pnl: z.number().nullable(),
   pending: z.boolean(),
+  evidence_status: CacheKeepaliveEvidenceStatusSchema,
 });
 export type CacheKeepaliveTurn = z.infer<typeof CacheKeepaliveTurnSchema>;
 
@@ -122,12 +133,9 @@ export type CacheKeepaliveRawRecord = z.infer<
 
 export const CacheKeepaliveDetailSchema = CacheKeepaliveRowSchema.extend({
   renewal_tokens: z.number(),
-  total_avoided: z.number(),
-  total_spent: z.number(),
-  total_renewals: z.number(),
+  total_renewals_current_cycle: z.number(),
   is_last_pending: z.boolean(),
   turns: z.array(CacheKeepaliveTurnSchema),
-  // Persisted or derived schedule-time config; historical rows may lack it.
   config_snapshot: CacheKeepaliveConfigSnapshotSchema.nullable(),
   raw_record: CacheKeepaliveRawRecordSchema,
 });

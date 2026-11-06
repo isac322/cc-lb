@@ -14,7 +14,13 @@ pub(crate) struct CacheKeepaliveSummaryResponse {
     pub(crate) renewing_now: u64,
     pub(crate) sessions_last_5m: u64,
     pub(crate) renewals_fired: u64,
-    pub(crate) cost_saved: f64,
+    pub(crate) retained_successful_hits: u64,
+    pub(crate) cost_saved: Option<f64>,
+    pub(crate) total_spent: f64,
+    pub(crate) total_avoided: Option<f64>,
+    pub(crate) evidence_status: String,
+    pub(crate) unknown_cycles: u64,
+    pub(crate) retained_from_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -29,7 +35,11 @@ pub(crate) struct CacheKeepaliveRowResponse {
     pub(crate) generation: u64,
     pub(crate) upstream: Option<String>,
     pub(crate) error: Option<String>,
-    pub(crate) net_pnl: f64,
+    pub(crate) is_active: bool,
+    pub(crate) net_pnl: Option<f64>,
+    pub(crate) total_spent: f64,
+    pub(crate) total_avoided: Option<f64>,
+    pub(crate) evidence_status: String,
     pub(crate) session_key_hash: String,
 }
 
@@ -38,9 +48,7 @@ pub(crate) struct CacheKeepaliveDetailResponse {
     #[serde(flatten)]
     pub(crate) row: CacheKeepaliveRowResponse,
     pub(crate) renewal_tokens: u64,
-    pub(crate) total_avoided: f64,
-    pub(crate) total_spent: f64,
-    pub(crate) total_renewals: u32,
+    pub(crate) total_renewals_current_cycle: u32,
     pub(crate) is_last_pending: bool,
     pub(crate) turns: Vec<CacheKeepaliveTurnResponse>,
     pub(crate) config_snapshot: Option<CacheKeepaliveConfigSnapshotResponse>,
@@ -51,7 +59,8 @@ pub(crate) struct CacheKeepaliveDetailResponse {
 pub(crate) struct CacheKeepaliveTurnResponse {
     pub(crate) turn_number: u32,
     pub(crate) renewals: u32,
-    pub(crate) followed_up: bool,
+    pub(crate) followed_up: Option<bool>,
+    pub(crate) evidence_status: String,
     pub(crate) label: String,
     pub(crate) time_ms: u64,
     pub(crate) pnl: Option<f64>,

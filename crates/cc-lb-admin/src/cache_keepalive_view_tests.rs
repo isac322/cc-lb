@@ -11,9 +11,7 @@ use cc_lb_storage_api::{
 use uuid::Uuid;
 
 use super::{CacheKeepaliveActivitySource, derive_activity_view};
-use crate::v1::principal_cache_keepalive::view::{
-    CacheKeepaliveActivityBatch, CacheKeepaliveSummaryResponse, summary_for_items,
-};
+use crate::v1::principal_cache_keepalive::view::{CacheKeepaliveActivityBatch, summary_for_items};
 
 use super::economics::{
     CacheKeepalivePnlRates, CacheKeepaliveTurnPnlInput, derive_turn_pnl, format_net_pnl,
@@ -126,6 +124,7 @@ fn summary_turn_with(
         principal_id: "principal".to_owned(),
         accounting_key_id: None,
         upstream_id: Uuid::nil(),
+        cycle_id: None,
         model: model.to_owned(),
         input_tokens: 0,
         output_tokens: 0,
@@ -256,45 +255,16 @@ fn batched_cache_keepalive_turns_preserve_serialized_summary_behavior() {
         NOW_MS.saturating_sub(10 * 60 * 1_000),
     );
     let turns = vec![summary_turn("older", 100), summary_turn("newer", 200)];
-    let session_activity = derive_activity_view(
-        CacheKeepaliveActivitySource {
-            item: &session,
-            session: None,
-            turns: &turns,
-            now_ms: NOW_MS,
-        },
-        catalog.as_ref(),
-    );
-    let decision_activity = derive_activity_view(
-        CacheKeepaliveActivitySource {
-            item: &decision,
-            session: None,
-            turns: &[],
-            now_ms: NOW_MS,
-        },
-        catalog.as_ref(),
-    );
-    let legacy_cost_saved_micros = session_activity
-        .pnl
-        .map_or(0, |pnl| pnl.net_micros)
-        .saturating_add(decision_activity.pnl.map_or(0, |pnl| pnl.net_micros));
-    let legacy_summary = CacheKeepaliveSummaryResponse {
-        renewing_now: 1,
-        sessions_last_5m: 1,
-        renewals_fired: 2,
-        cost_saved: legacy_cost_saved_micros as f64 / 1_000_000.0,
-    };
-
-    // When: the summary derives all activity from one grouped turn batch.
-    let batch = CacheKeepaliveActivityBatch::from_turns(turns);
-    let batched_summary = summary_for_items(catalog.as_ref(), NOW_MS, &[session, decision], &batch)
+    let batch = CacheKeepaliveActivityBatch::from_turns(turns, Vec::new());
+    let summary = summary_for_items(catalog.as_ref(), NOW_MS, &[session, decision], &batch)
         .expect("batched summary");
-
-    // Then: the complete serialized summary is byte-for-byte unchanged.
-    assert_eq!(
-        serde_json::to_vec(&batched_summary).expect("serialize batched summary"),
-        serde_json::to_vec(&legacy_summary).expect("serialize legacy summary"),
-    );
+    assert_eq!(summary.renewing_now, 1);
+    assert_eq!(summary.sessions_last_5m, 1);
+    assert_eq!(summary.renewals_fired, 2);
+    assert_eq!(summary.total_spent, 0.0);
+    assert_eq!(summary.total_avoided, None);
+    assert_eq!(summary.cost_saved, None);
+    assert_eq!(summary.evidence_status, "unknown");
 }
 #[test]
 fn unknown_pricing_stays_null_and_summary_skips_it() {
@@ -307,6 +277,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
             item: &session,
             session: None,
             turns: &turns,
+            evidence: &[],
             now_ms: NOW_MS,
         },
         catalog.as_ref(),
@@ -349,6 +320,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
             item: &session,
             session: None,
             turns: &partial_turns,
+            evidence: &[],
             now_ms: NOW_MS,
         },
         partial_catalog.as_ref(),
@@ -356,13 +328,13 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
     assert!(partial_activity.pnl.is_none());
     assert!(partial_activity.turns[0].pnl.is_none());
 
-    let batch = CacheKeepaliveActivityBatch::from_turns(turns);
+    let batch = CacheKeepaliveActivityBatch::from_turns(turns, Vec::new());
     let summary = summary_for_items(catalog.as_ref(), NOW_MS, &[session], &batch)
         .expect("unknown pricing is tolerated");
     assert_eq!(summary.renewing_now, 1);
     assert_eq!(summary.sessions_last_5m, 1);
-    assert_eq!(summary.renewals_fired, 2);
-    assert_eq!(summary.cost_saved, 0.0);
+    assert_eq!(summary.renewals_fired, 1);
+    assert_eq!(summary.cost_saved, None);
 }
 
 #[test]
@@ -429,6 +401,7 @@ fn catalog_absence_and_replacement_reprice_without_storage_change() {
             item: &session,
             session: None,
             turns: &turns,
+            evidence: &[],
             now_ms: NOW_MS,
         },
         catalog.as_ref(),
@@ -441,6 +414,7 @@ fn catalog_absence_and_replacement_reprice_without_storage_change() {
             item: &session,
             session: None,
             turns: &turns,
+            evidence: &[],
             now_ms: NOW_MS,
         },
         catalog.as_ref(),
@@ -542,12 +516,9 @@ fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
         status: CatalogStatus::Ok,
     });
     let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);
-    let batch = CacheKeepaliveActivityBatch::from_turns(vec![summary_turn_with(
-        "overflow",
-        100,
-        "overflow-model",
-        u64::MAX,
-    )]);
+    let mut overflow_turn = summary_turn_with("overflow", 100, "overflow-model", u64::MAX);
+    overflow_turn.cost_micros = i64::MAX;
+    let batch = CacheKeepaliveActivityBatch::from_turns(vec![overflow_turn], Vec::new());
     let error = summary_for_items(catalog.as_ref(), NOW_MS, &[session], &batch)
         .err()
         .expect("API dollar converter rejects the saturated amount");

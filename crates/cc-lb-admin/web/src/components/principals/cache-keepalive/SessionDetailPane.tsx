@@ -1,5 +1,6 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
+import { ApiError } from '../../../lib/api';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
 import { Badge, Button, cx, Skeleton } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
@@ -178,18 +179,43 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const [showConfig, setShowConfig] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset local disclosure state when the session identity changes
+  useEffect(() => {
+    setShowConfig(false);
+    setShowRaw(false);
+  }, [principalId, sessionId]);
+
   if (query.isLoading) {
     return <SessionDetailSkeleton onClose={onClose} />;
   }
 
-  if (query.isError || !query.data) {
+  const isNotFound =
+    query.error instanceof ApiError && query.error.status === 404;
+
+  if (isNotFound || !query.data) {
     return (
       <SessionDetailFrame onClose={onClose} testId="session-detail-error">
         <div
-          className="flex flex-1 items-center justify-center p-4 text-sm text-text-muted"
+          className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center"
           role="alert"
         >
-          Failed to load session detail.
+          <p className="text-body text-text-muted">
+            {isNotFound
+              ? 'This session is no longer available.'
+              : 'Failed to load session detail.'}
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => query.refetch()}
+            >
+              {isNotFound ? 'Retry session detail' : 'Retry'}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={onClose}>
+              Back to sessions
+            </Button>
+          </div>
         </div>
       </SessionDetailFrame>
     );
@@ -200,18 +226,22 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
 
   let pnlBreakdown = '';
   if (session.state !== 'not_tracked') {
-    pnlBreakdown = `saved $${session.total_avoided.toFixed(3)} in avoided cache re-creation · spent $${session.total_spent.toFixed(3)} on ${session.total_renewals} renewals`;
-    if (session.is_last_pending) {
-      pnlBreakdown += ` · current turn pending`;
+    const renewalCountLabel = `${session.total_renewals_current_cycle} current-cycle renewal${session.total_renewals_current_cycle === 1 ? '' : 's'}`;
+    pnlBreakdown =
+      session.total_avoided === null
+        ? `evidence ${session.evidence_status} · spent $${session.total_spent.toFixed(3)} on ${renewalCountLabel}`
+        : `saved $${session.total_avoided.toFixed(3)} in avoided cache re-creation · spent $${session.total_spent.toFixed(3)} on ${renewalCountLabel}`;
+    if (session.is_active && session.is_last_pending) {
+      pnlBreakdown += ' · current turn pending';
     }
   } else {
-    pnlBreakdown = `no renewals fired`;
+    pnlBreakdown = 'no renewals fired';
   }
 
   let netPnlColor = 'text-text';
   let netPnlSign = '';
   let netPnlFormatted = '0.00';
-  if (session.state !== 'not_tracked') {
+  if (session.net_pnl !== null) {
     netPnlColor =
       session.net_pnl >= 0 ? 'text-success-text' : 'text-danger-text';
     netPnlSign = session.net_pnl >= 0 ? '+' : '−';
@@ -220,8 +250,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
     netPnlFormatted = str.replace(/0$/, '');
   }
 
-  const isActiveSession =
-    session.state === 'renewed' || session.state === 'scheduled';
+  const isActiveSession = session.is_active;
   const latestTagLabel = isActiveSession ? 'Current turn · Live' : 'Final turn';
   const latestTagTone: 'ok' | 'neutral' | 'warn' = isActiveSession
     ? 'ok'
@@ -250,6 +279,19 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
 
   return (
     <SessionDetailFrame onClose={onClose} testId="session-detail-content">
+      {query.isError && (
+        <div
+          className="rounded-sm bg-danger/8 px-3 py-2 text-danger-text"
+          role="alert"
+        >
+          <span className="text-body">
+            Refresh failed. Showing the last successful detail.
+          </span>{' '}
+          <Button variant="ghost" size="sm" onClick={() => query.refetch()}>
+            Retry
+          </Button>
+        </div>
+      )}
       {isError && (
         <div className="rounded-sm bg-danger/8 text-danger-text px-3 py-2 flex items-start gap-2 mb-3">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -264,9 +306,11 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
       <div className="flex flex-col gap-3">
         <div className="flex justify-between items-start">
           <div className="flex flex-col gap-1">
-            <span className="text-label text-text-muted">Net P&L</span>
+            <span className="text-label text-text-muted">Net P&amp;L</span>
             <div className={cx('text-display tabular-nums', netPnlColor)}>
-              {netPnlSign}${netPnlFormatted}
+              {session.net_pnl === null
+                ? '—'
+                : `${netPnlSign}$${netPnlFormatted}`}
             </div>
           </div>
           <Badge tone={STATE_TONE[session.state]}>
@@ -303,19 +347,15 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
             )}
           </dd>
 
-          <dt className="text-text-muted">
-            {session.state === 'not_tracked'
-              ? 'Last seen'
-              : session.state === 'expired' || session.state === 'capped'
-                ? 'Expired'
-                : 'Expires'}
-          </dt>
+          <dt className="text-text-muted">Last message</dt>
           <dd className="text-text">
             <RelativeTime ts={session.last_message_at_ms} />
           </dd>
 
-          <dt className="text-text-muted">Total renewals</dt>
-          <dd className="text-text tabular-nums">{session.total_renewals}</dd>
+          <dt className="text-text-muted">Current-cycle renewals</dt>
+          <dd className="text-text tabular-nums">
+            {session.total_renewals_current_cycle}
+          </dd>
         </dl>
       </div>
 
@@ -354,10 +394,12 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
 
               let turnPnlHtml: ReactNode;
               if (turn.pending) {
+                const pendingPnl =
+                  turn.pnl === null
+                    ? '— pending'
+                    : `${turn.pnl < 0 ? '−' : '+'}$${Math.abs(turn.pnl).toFixed(3)} pending`;
                 turnPnlHtml = (
-                  <span className="text-warn-text">
-                    −${Math.abs(turn.pnl ?? 0).toFixed(3)} pending
-                  </span>
+                  <span className="text-warn-text">{pendingPnl}</span>
                 );
               } else if (turn.pnl === null) {
                 turnPnlHtml = <span className="text-text-muted">-</span>;
@@ -378,7 +420,12 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
               let followUpText = '';
               if (turn.pending) {
                 followUpText = 'waiting for follow-up';
-              } else if (turn.followed_up) {
+              } else if (
+                turn.followed_up === null ||
+                turn.evidence_status === 'unknown'
+              ) {
+                followUpText = 'follow-up unavailable (evidence unknown)';
+              } else if (turn.followed_up === true) {
                 followUpText = 'cache used by follow-up';
               } else {
                 followUpText = 'no follow-up (loss)';

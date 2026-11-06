@@ -90,7 +90,7 @@ impl CacheKeepaliveTerminalReason {
     pub const fn display_reason(self) -> &'static str {
         match self {
             Self::MaxRefreshes => "max renewals reached",
-            Self::MaxDuration => "max duration reached (4h)",
+            Self::MaxDuration => "max duration reached",
             Self::Expired => "TTL expired before follow-up",
             Self::DispatchError => "renewal dispatch unavailable",
             Self::Cancelled => "session cancelled",
@@ -108,6 +108,7 @@ pub struct CacheKeepaliveSessionRecord {
     pub principal_id: String,
     pub accounting_key_id: Option<String>,
     pub upstream_id: Uuid,
+    pub cycle_id: Option<Uuid>,
     pub generation: u64,
     pub refresh_count: u32,
     pub first_scheduled_at_unix_secs: u64,
@@ -135,6 +136,7 @@ impl fmt::Debug for CacheKeepaliveSessionRecord {
             .field("principal_id", &self.principal_id)
             .field("accounting_key_id", &self.accounting_key_id)
             .field("upstream_id", &self.upstream_id)
+            .field("cycle_id", &self.cycle_id)
             .field("generation", &self.generation)
             .field("refresh_count", &self.refresh_count)
             .field(
@@ -169,6 +171,7 @@ pub struct CacheKeepaliveReplaceRequest {
     pub principal_id: String,
     pub accounting_key_id: Option<String>,
     pub upstream_id: Uuid,
+    pub cycle_id: Uuid,
     pub cache_anchor_at_unix_secs: u64,
     pub ttl: CacheTtl,
     pub run_at_unix_secs: u64,
@@ -186,6 +189,7 @@ impl fmt::Debug for CacheKeepaliveReplaceRequest {
             .field("principal_id", &self.principal_id)
             .field("accounting_key_id", &self.accounting_key_id)
             .field("upstream_id", &self.upstream_id)
+            .field("cycle_id", &self.cycle_id)
             .field("cache_anchor_at_unix_secs", &self.cache_anchor_at_unix_secs)
             .field("ttl", &self.ttl)
             .field("run_at_unix_secs", &self.run_at_unix_secs)
@@ -404,6 +408,7 @@ mod tests {
             principal_id: "principal".to_owned(),
             accounting_key_id: Some("key-id".to_owned()),
             upstream_id: Uuid::from_u128(7),
+            cycle_id: None,
             generation: 1,
             refresh_count: 0,
             first_scheduled_at_unix_secs: 10,

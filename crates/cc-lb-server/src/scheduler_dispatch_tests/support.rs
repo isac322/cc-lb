@@ -388,8 +388,9 @@ impl Fixture {
             session_key_hash: "session-hash".to_owned(),
             principal_id: "principal".to_owned(),
             accounting_key_id: None,
-            cache_anchor_age: Duration::ZERO,
+            cycle_id: Uuid::nil(),
             expected_generation: None,
+            cache_anchor_age: Duration::ZERO,
             params: ScheduleParams {
                 delay: Duration::from_secs(1),
                 max_refreshes: 3,

@@ -140,6 +140,7 @@ pub struct CacheKeepaliveTurnRecord {
     pub principal_id: String,
     pub accounting_key_id: Option<String>,
     pub upstream_id: Uuid,
+    pub cycle_id: Option<Uuid>,
     pub model: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -151,7 +152,6 @@ pub struct CacheKeepaliveTurnRecord {
     pub hit_miss: String,
     pub ts: u64,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheKeepaliveDecisionRecord {
     pub source_ref_id: String,
@@ -166,6 +166,46 @@ pub struct CacheKeepaliveDecisionRecord {
     pub config_snapshot: Option<CacheKeepaliveConfigSnapshot>,
     pub last_message_at_ms: u64,
     pub ts: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheKeepaliveEvidenceRecord {
+    pub evidence_id: String,
+    pub cycle_id: Option<Uuid>,
+    pub evidence_kind: String,
+    pub request_start_ms: u64,
+    pub prefix_fingerprint: Option<String>,
+    pub prefix_hash: Option<String>,
+    pub prefix_policy_version: Option<String>,
+    pub prefix_schema_version: Option<String>,
+    pub principal_id: String,
+    pub upstream_id: Uuid,
+    pub model: String,
+    pub ttl: CacheTtl,
+    pub hit_miss: Option<String>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cost_micros: Option<i64>,
+    pub request_ref: Option<String>,
+    pub event_ref: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheKeepaliveSummaryGroup {
+    pub model: String,
+    pub ttl: CacheTtl,
+    pub avoided_cache_read_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheKeepaliveSummaryAggregate {
+    pub renewing_now: u64,
+    pub sessions_last_5m: u64,
+    pub recent_decisions: u64,
+    pub total_spent_micros: i64,
+    pub successful_hits: u64,
+    pub unknown_cycles: u64,
+    pub retained_from_ms: Option<u64>,
+    pub evidence_status: String,
+    pub groups: Vec<CacheKeepaliveSummaryGroup>,
 }
 
 #[async_trait]
@@ -229,4 +269,18 @@ pub trait CacheKeepaliveSessionReadStore: Send + Sync {
         principal_id: &str,
         source_ref_id: &str,
     ) -> StorageResult<Option<CacheKeepaliveDecisionRecord>>;
+    async fn list_cache_keepalive_evidence_for_activity(
+        &self,
+        principal_id: &str,
+        cycle_ids: &[Uuid],
+        source_ref_ids: &[String],
+        follow_up_from_ms: u64,
+        follow_up_until_ms: u64,
+    ) -> StorageResult<Vec<CacheKeepaliveEvidenceRecord>>;
+
+    async fn read_cache_keepalive_summary_aggregate(
+        &self,
+        principal_id: &str,
+        cutoff_ms: u64,
+    ) -> StorageResult<CacheKeepaliveSummaryAggregate>;
 }

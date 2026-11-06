@@ -7,8 +7,9 @@ use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveSessionRecord, CacheKeepaliveTerminalReason,
-    CacheKeepaliveTurnRow, RequestEvent, RequestEventProjections, RequestEventStore, UpstreamStore,
+    CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow, CacheKeepaliveSessionRecord,
+    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRow, RequestEvent, RequestEventProjections,
+    RequestEventStore, UpstreamStore,
 };
 
 use super::lifecycle::{RenewalLifecycleInput, publish_renewal_lifecycle};
@@ -62,7 +63,7 @@ impl SchedulerDispatch {
             duration_ms,
             ts,
         });
-        let projections = renewal_projections(RenewalProjectionInput {
+        let mut projections = renewal_projections(RenewalProjectionInput {
             source_ref_id: &source_ref_id,
             record,
             model,
@@ -73,6 +74,27 @@ impl SchedulerDispatch {
             generation: job.generation,
             ts,
         });
+        if let Some(cycle_id) = record.cycle_id {
+            projections.evidence.push(CacheKeepaliveEvidenceRow {
+                evidence_id: format!("renewal-evidence:{cycle_id}:{event_id}"),
+                cycle_id: Some(cycle_id),
+                evidence_kind: "renewal".to_owned(),
+                request_start_ms: finalization.request_start_ms,
+                prefix_fingerprint: snapshot.prefix_fingerprint().map(ToOwned::to_owned),
+                prefix_hash: snapshot.prefix_hash().map(ToOwned::to_owned),
+                prefix_policy_version: snapshot.prefix_policy_version().map(ToOwned::to_owned),
+                prefix_schema_version: snapshot.prefix_schema_version().map(ToOwned::to_owned),
+                principal_id: record.principal_id.clone(),
+                upstream_id: record.upstream_id,
+                model: model.to_owned(),
+                ttl: record.ttl,
+                hit_miss: Some(hit_miss.to_owned()),
+                cache_read_input_tokens: Some(finalization.usage.cache_read_input_tokens),
+                cost_micros: Some(cost.total_micros),
+                request_ref: Some(event_id.clone()),
+                event_ref: Some(source_ref_id.to_owned()),
+            });
+        }
         RequestEventStore::append_request_event_with_projections(
             self.storage.as_ref(),
             &event,
@@ -204,6 +226,7 @@ fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProject
             principal_id: input.record.principal_id.clone(),
             accounting_key_id: input.record.accounting_key_id.clone(),
             upstream_id: input.record.upstream_id,
+            cycle_id: input.record.cycle_id,
             model: input.model.to_owned(),
             input_tokens: input.usage.input_tokens,
             output_tokens: input.usage.output_tokens,
@@ -240,6 +263,7 @@ fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProject
             last_message_at_ms: input.ts.saturating_mul(1_000),
             ts: input.ts,
         },
+        evidence: Vec::new(),
     }
 }
 
