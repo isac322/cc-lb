@@ -1001,6 +1001,47 @@ data: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"o
     );
     Ok(())
 }
+#[tokio::test]
+async fn openai_incomplete_terminal_client_close_preserves_usage() -> TestResult {
+    for transform in [false, true] {
+        let body = Bytes::from_static(
+            b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n\
+event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"total_tokens\":19}}}\n\n",
+        );
+        let observed = observe_drop_after_terminal(
+            Arc::new(PendingDispatch {
+                headers: HeaderMap::new(),
+                body,
+            }),
+            upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+            http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("x-api-key", common::managed_api_key())
+                .body(Bytes::from_static(
+                    br#"{"model":"gpt-test","input":"hello","stream":true}"#,
+                ))?,
+            b"event: response.incomplete",
+            transform.then(|| {
+                Arc::new(UnchangedSseTransform::default()) as Arc<dyn SseEventTransformHook>
+            }),
+        )
+        .await?;
+
+        assert_eq!(observed.status, StatusCode::OK);
+        assert_eq!(observed.row.error_code, None);
+        assert_eq!(
+            (observed.row.input_tokens, observed.row.output_tokens),
+            (Some(12), Some(7))
+        );
+        assert!(observed.completion().is_ok());
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn non_stream_without_content_type_preserves_usage() -> TestResult {

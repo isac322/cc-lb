@@ -2534,14 +2534,19 @@ fn sse_event_completes_response(
                 .value()
                 .ok()
                 .flatten()
-                .is_some_and(|_| event.event_name() == Some(b"response.completed"))
+                .is_some_and(|_| {
+                    event.event_name() == Some(b"response.completed")
+                        || event.event_name() == Some(b"response.incomplete")
+                })
                 || event
                     .value()
                     .ok()
                     .flatten()
                     .and_then(|value| value.get("type"))
                     .and_then(serde_json::Value::as_str)
-                    == Some("response.completed")
+                    .is_some_and(|event_type| {
+                        event_type == "response.completed" || event_type == "response.incomplete"
+                    })
         }
         crate::provider_capability::UsageShape::OpenaiChatCompletions
         | crate::provider_capability::UsageShape::OpenaiCompletions => {
@@ -2597,7 +2602,8 @@ fn observe_sse_terminal_event(
     let event_name_terminal = matches!(
         capability.usage_shape(),
         crate::provider_capability::UsageShape::OpenaiResponses
-    ) && event.event_name() == Some(b"response.completed")
+    ) && (event.event_name() == Some(b"response.completed")
+        || event.event_name() == Some(b"response.incomplete"))
         && event.value().ok().flatten().is_some();
     let semantic_event_type = event
         .value()
@@ -2605,7 +2611,15 @@ fn observe_sse_terminal_event(
         .flatten()
         .and_then(|value| value.get("type"))
         .and_then(serde_json::Value::as_str);
+    let response_terminal_type = matches!(
+        capability.usage_shape(),
+        crate::provider_capability::UsageShape::OpenaiResponses
+    ) && semantic_event_type
+        .is_some_and(|event_type| {
+            event_type == "response.completed" || event_type == "response.incomplete"
+        });
     *semantic_message_stop_seen |= event_name_terminal
+        || response_terminal_type
         || semantic_terminal_event_type(capability)
             .is_some_and(|terminal| semantic_event_type == Some(terminal));
     if event.event_name() == Some(b"message_stop")
@@ -15623,6 +15637,9 @@ mod tests {
         let response_completed = usage_parser::parse_sse_event(
             b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
         );
+        let response_incomplete = usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
         let response_delta = usage_parser::parse_sse_event(
             b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
         );
@@ -15643,6 +15660,11 @@ mod tests {
         assert!(sse_event_completes_response(
             ProviderCapability::OpenaiResponses,
             &response_completed,
+            false,
+        ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete,
             false,
         ));
         assert!(!sse_event_completes_response(
