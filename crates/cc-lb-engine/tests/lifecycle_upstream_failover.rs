@@ -188,14 +188,11 @@ fn api_key(id: u128, name: &str) -> TestUpstream {
 }
 
 fn openai_api_key(id: u128, name: &str) -> TestUpstream {
-    TestUpstream::new(id, name, UpstreamKind::OpenaiApiKey).credential(
-        Credential::OpenaiApiKey {
-            key: "sk-openai-failover-test",
-        },
-    )
+    TestUpstream::new(id, name, UpstreamKind::OpenaiApiKey).credential(Credential::OpenaiApiKey {
+        key: "sk-openai-failover-test",
+    })
 }
-const OPENAI_RESPONSES_BODY: &[u8] =
-    br#"{"model":"gpt-5-codex","input":"failover regression"}"#;
+const OPENAI_RESPONSES_BODY: &[u8] = br#"{"model":"gpt-5-codex","input":"failover regression"}"#;
 
 fn openai_responses_request() -> Request<Bytes> {
     Request::builder()
@@ -1098,8 +1095,8 @@ async fn last_attempt_reserved_for_api_key() {
     assert_eq!(hosts[2], host("key"));
 }
 #[tokio::test]
-async fn openai_responses_last_attempt_reserved_for_api_key(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn openai_responses_last_attempt_reserved_for_api_key()
+-> Result<(), Box<dyn std::error::Error>> {
     let rate_limited = || vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)];
     let recorded = send_recorded(
         vec![
@@ -1115,7 +1112,11 @@ async fn openai_responses_last_attempt_reserved_for_api_key(
 
     assert_eq!(recorded.status, StatusCode::OK);
     let hosts = recorded.fixture.hosts();
-    assert_eq!(hosts.len(), 3, "the bounded cap must allow at most 3 dispatches");
+    assert_eq!(
+        hosts.len(),
+        3,
+        "the bounded cap must allow at most 3 dispatches"
+    );
     assert!(hosts[0].starts_with("openai-oauth-"));
     assert!(hosts[1].starts_with("openai-oauth-"));
     assert_ne!(hosts[0], hosts[1]);

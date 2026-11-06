@@ -17,9 +17,8 @@ use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheBreakpoint, CacheBreakpointSource,
     CacheLookbackPrefix, CachePricingSummary, CacheScore, CredentialKind, InternalError,
-    InternalErrorKind,
-    InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace, StageDecision,
-    TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
+    InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace,
+    StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
     UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_quota::build_subscription_quota_samples;
@@ -10498,9 +10497,8 @@ impl<'a> FailoverRouter<'a> {
                 .iter()
                 .any(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey)
         {
-            candidates.retain(|candidate| {
-                candidate.kind.credential_kind() == CredentialKind::ApiKey
-            });
+            candidates
+                .retain(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey);
         }
         if candidates.is_empty() {
             return None;
