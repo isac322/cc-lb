@@ -201,6 +201,8 @@ fn usage(profile: Profile) -> UsageSnapshot {
         service_tier: Some(format!("tier-{base}")),
         inference_geo: Some(format!("geo-{base}")),
         iterations: None,
+        input_image_tokens: None,
+        output_image_tokens: None,
     }
 }
 
