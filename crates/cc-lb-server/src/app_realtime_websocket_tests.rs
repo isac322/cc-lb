@@ -354,10 +354,35 @@ async fn accepting_provider() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize
             let Ok(mut provider) = tokio_tungstenite::accept_async(stream).await else {
                 continue;
             };
+            provider
+                .send(UpstreamMessage::Text(
+                    r#"{"type":"provider_ready"}"#.into(),
+                ))
+                .await
+                .expect("provider ready frame sends");
             while provider.next().await.is_some() {}
         }
     });
     (address, attempts, task)
+}
+
+fn assert_same_websocket_host(failing: &Url, healthy: &Url) {
+    assert_eq!(
+        failing.host_str(),
+        healthy.host_str(),
+        "regression requires same-host provider URLs"
+    );
+}
+
+fn assert_distinct_websocket_upstreams(failing: &UpstreamRecord, healthy: &UpstreamRecord) {
+    assert_ne!(
+        failing.id, healthy.id,
+        "regression requires distinct upstream identities"
+    );
+}
+
+fn provider_ready_message() -> UpstreamMessage {
+    UpstreamMessage::Text(r#"{"type":"provider_ready"}"#.into())
 }
 
 fn assert_safe_http_rejection(response: &http::Response<Option<Vec<u8>>>, status: StatusCode) {
@@ -539,16 +564,14 @@ async fn websocket_handshake_realtime_and_gemini_same_host_breakers_are_scoped_t
         let (failing_address, failing_attempts, failing_task) =
             rejecting_provider(StatusCode::INTERNAL_SERVER_ERROR).await;
         let (healthy_address, healthy_attempts, healthy_task) = accepting_provider().await;
-        let mut failing = websocket_upstream(
-            1,
-            "failing-credential",
-            Url::parse(&format!("http://{failing_address}/")).expect("failing provider URL"),
-        );
-        let mut healthy = websocket_upstream(
-            2,
-            "healthy-credential",
-            Url::parse(&format!("http://{healthy_address}/")).expect("healthy provider URL"),
-        );
+        let failing_url =
+            Url::parse(&format!("http://{failing_address}/")).expect("failing provider URL");
+        let healthy_url =
+            Url::parse(&format!("http://{healthy_address}/")).expect("healthy provider URL");
+        assert_same_websocket_host(&failing_url, &healthy_url);
+        let mut failing = websocket_upstream(1, "failing-credential", failing_url);
+        let mut healthy = websocket_upstream(2, "healthy-credential", healthy_url);
+        assert_distinct_websocket_upstreams(&failing, &healthy);
         failing.kind = if gemini {
             UpstreamKind::GeminiApiKey
         } else {
@@ -577,8 +600,8 @@ async fn websocket_handshake_realtime_and_gemini_same_host_breakers_are_scoped_t
         assert_eq!(failing_attempts.load(std::sync::atomic::Ordering::SeqCst), 5);
 
         replace_websocket_upstreams(&state, vec![healthy]);
-        if gemini {
-            let (mut client, response) = tokio::time::timeout(
+        let mut client = if gemini {
+            let (client, response) = tokio::time::timeout(
                 Duration::from_secs(5),
                 connect_async(realtime_request(
                     proxy,
@@ -590,14 +613,8 @@ async fn websocket_handshake_realtime_and_gemini_same_host_breakers_are_scoped_t
             .expect("healthy Gemini handshake succeeds");
             assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
             client
-                .send(UpstreamMessage::Text(
-                    r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
-                ))
-                .await
-                .expect("healthy Gemini setup sends");
-            let _ = client.close(None).await;
         } else {
-            let (mut client, response) = tokio::time::timeout(
+            let (client, response) = tokio::time::timeout(
                 Duration::from_secs(5),
                 connect_async(realtime_request(proxy, "/openai/v1/realtime?model=gpt-realtime")),
             )
@@ -605,8 +622,23 @@ async fn websocket_handshake_realtime_and_gemini_same_host_breakers_are_scoped_t
             .expect("healthy OpenAI handshake response arrives")
             .expect("healthy OpenAI handshake succeeds");
             assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
-            let _ = client.close(None).await;
+            client
+        };
+        if gemini {
+            client
+                .send(UpstreamMessage::Text(
+                    r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
+                ))
+                .await
+                .expect("healthy Gemini setup sends");
         }
+        let ready = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("healthy provider connection arrives")
+            .expect("healthy provider remains connected")
+            .expect("healthy provider frame decodes");
+        assert_eq!(ready, provider_ready_message());
+        let _ = client.close(None).await;
         assert_eq!(
             healthy_attempts.load(std::sync::atomic::Ordering::SeqCst),
             1
