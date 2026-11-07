@@ -284,6 +284,29 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
             )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+
+    fn estimate_max_with_cache_and_images(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache_and_images(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                use_image_rates,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
     fn estimate_max_with_local_cache(
         &self,
         model: &str,
@@ -293,6 +316,24 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
     ) -> Option<i64> {
         self.catalog
             .estimate_max_with_local_cache(model, input, max_output, service_tier)
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
+    fn estimate_max_with_local_cache_and_images(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache_and_images(
+                model,
+                input,
+                max_output,
+                use_image_rates,
+                service_tier,
+            )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
 }

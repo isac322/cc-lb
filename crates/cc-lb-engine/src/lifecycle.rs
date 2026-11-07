@@ -2356,6 +2356,18 @@ pub trait LimitCostEstimator: Send + Sync {
         service_tier: Option<&str>,
     ) -> Option<i64>;
 
+    fn estimate_max_with_local_cache_and_images(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        let _ = use_image_rates;
+        self.estimate_max_with_local_cache(model, input, max_output, service_tier)
+    }
+
     fn estimate_max_with_cache(
         &self,
         model: &str,
@@ -2369,6 +2381,27 @@ pub trait LimitCostEstimator: Send + Sync {
             model,
             max_input.saturating_add(estimated_cache_tokens),
             max_output,
+            service_tier,
+        )
+    }
+
+    fn estimate_max_with_cache_and_images(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        let _ = use_image_rates;
+        self.estimate_max_with_cache(
+            model,
+            max_input,
+            max_output,
+            estimated_cache_tokens,
+            can_cross_cache_cliff,
             service_tier,
         )
     }
@@ -3366,6 +3399,7 @@ impl Lifecycle {
                             &ctx.canonical_model_id,
                             Some(ProviderCapability::OpenaiResponses),
                             &routed.cache_bundle.cache_breakpoints,
+                            true,
                         )
                     },
                 )
@@ -4557,6 +4591,10 @@ impl Lifecycle {
                     &ctx.canonical_model_id,
                     classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope),
                     &routed.cache_bundle.cache_breakpoints,
+                    use_image_rates_for_admission(
+                        classify_provider_capability(&ctx.method, &ctx.path, ctx.provider_scope),
+                        &ctx.path,
+                    ),
                 );
                 (request != limit.request).then_some(request)
             });
@@ -4583,6 +4621,14 @@ impl Lifecycle {
                                         ctx.provider_scope,
                                     ),
                                     &routed.cache_bundle.cache_breakpoints,
+                                    use_image_rates_for_admission(
+                                        classify_provider_capability(
+                                            &ctx.method,
+                                            &ctx.path,
+                                            ctx.provider_scope,
+                                        ),
+                                        &ctx.path,
+                                    ),
                                 )
                             })
                         },
@@ -4979,21 +5025,23 @@ impl Lifecycle {
         } else {
             self.limit_cost_estimator.as_ref().and_then(|estimator| {
                 if let Some(input) = limit_request.local_cache_input {
-                    estimator.estimate_max_with_local_cache(
+                    estimator.estimate_max_with_local_cache_and_images(
                         &limit_request.model,
                         input,
                         limit_request.max_tokens.unwrap_or(0).max(0) as u64,
+                        limit_request.use_image_rates,
                         limit_request.service_tier.as_deref(),
                     )
                 } else {
                     let estimated_cache_tokens = limit_request.estimated_cache_tokens;
                     let can_cross_cache_cliff = limit_request.can_cross_cache_cliff;
-                    estimator.estimate_max_with_cache(
+                    estimator.estimate_max_with_cache_and_images(
                         &limit_request.model,
                         max_input_estimate as u64,
                         limit_request.max_tokens.unwrap_or(0).max(0) as u64,
                         estimated_cache_tokens,
                         can_cross_cache_cliff,
+                        limit_request.use_image_rates,
                         limit_request.service_tier.as_deref(),
                     )
                 }
@@ -8491,6 +8539,14 @@ impl UpstreamDialect for RawPassthroughDialect {
     }
 }
 
+fn use_image_rates_for_admission(capability: Option<ProviderCapability>, path: &str) -> bool {
+    matches!(
+        capability,
+        Some(ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiChatCompletions)
+    ) || (capability == Some(ProviderCapability::OpenaiImages)
+        && matches!(path, "/v1/images/edits" | "/v1/images/variations"))
+}
+
 fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
     if path.starts_with("/v1/files") || is_multipart_operation(path) {
         config.files_body_cap_bytes
@@ -8694,8 +8750,15 @@ impl RequestBodyView {
         fallback_model: &str,
         capability: Option<ProviderCapability>,
         breakpoints: &[CacheBreakpoint],
+        use_image_rates: bool,
     ) -> LimitRequest {
-        LimitRequest::from_value(self.value(), fallback_model, capability, breakpoints)
+        LimitRequest::from_value(
+            self.value(),
+            fallback_model,
+            capability,
+            breakpoints,
+            use_image_rates,
+        )
     }
 }
 
@@ -8707,6 +8770,7 @@ struct LimitRequest {
     local_cache_input: Option<cc_lb_pricing::LocalCacheInputEstimate>,
     estimated_cache_tokens: u64,
     can_cross_cache_cliff: bool,
+    use_image_rates: bool,
     stream: bool,
     service_tier: Option<String>,
 }
@@ -8720,6 +8784,7 @@ impl LimitRequest {
         fallback_model: &str,
         capability: Option<ProviderCapability>,
         breakpoints: &[CacheBreakpoint],
+        use_image_rates: bool,
     ) -> Self {
         let anthropic_input = value
             .filter(|_| capability == Some(ProviderCapability::AnthropicMessages))
@@ -8808,6 +8873,7 @@ impl LimitRequest {
                 .unwrap_or(0),
             can_cross_cache_cliff: breakpoints.is_empty()
                 && value.is_some_and(request_can_cross_cache_cliff),
+            use_image_rates,
             stream: value
                 .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
@@ -8825,6 +8891,33 @@ mod limit_request_estimate_tests {
     use super::{LimitRequest, ProviderCapability, RequestBodyView};
     use bytes::Bytes;
     use serde_json::json;
+    #[test]
+    fn image_admission_rates_are_limited_to_image_capable_routes() {
+        assert!(super::use_image_rates_for_admission(
+            Some(ProviderCapability::OpenaiResponses),
+            "/v1/responses",
+        ));
+        assert!(super::use_image_rates_for_admission(
+            Some(ProviderCapability::OpenaiChatCompletions),
+            "/v1/chat/completions",
+        ));
+        assert!(super::use_image_rates_for_admission(
+            Some(ProviderCapability::OpenaiImages),
+            "/v1/images/edits",
+        ));
+        assert!(super::use_image_rates_for_admission(
+            Some(ProviderCapability::OpenaiImages),
+            "/v1/images/variations",
+        ));
+        assert!(!super::use_image_rates_for_admission(
+            Some(ProviderCapability::OpenaiImages),
+            "/v1/images/generations",
+        ));
+        assert!(!super::use_image_rates_for_admission(
+            Some(ProviderCapability::GeminiOpenaiImages),
+            "/v1beta/openai/images/generations",
+        ));
+    }
 
     #[test]
     fn output_caps_are_capability_aware() {
@@ -8877,7 +8970,7 @@ mod limit_request_estimate_tests {
         ];
         for (capability, value, expected) in cases {
             let request =
-                LimitRequest::from_value(Some(&value), "test-model", Some(capability), &[]);
+                LimitRequest::from_value(Some(&value), "test-model", Some(capability), &[], false);
             assert_eq!(request.max_tokens, expected, "{capability:?}");
         }
         for capability in [
@@ -8893,6 +8986,7 @@ mod limit_request_estimate_tests {
                 "test-model",
                 Some(capability),
                 &[],
+                false,
             );
             assert_eq!(request.max_tokens, None, "{capability:?}");
         }
@@ -8918,7 +9012,7 @@ mod limit_request_estimate_tests {
             ),
         ] {
             let request =
-                LimitRequest::from_value(Some(&value), "test-model", Some(capability), &[]);
+                LimitRequest::from_value(Some(&value), "test-model", Some(capability), &[], false);
             assert_eq!(request.max_tokens, expected, "{capability:?}");
         }
     }
@@ -8938,6 +9032,7 @@ mod limit_request_estimate_tests {
                 "test-model",
                 Some(capability),
                 &[],
+                false,
             );
             assert_eq!(request.max_tokens, Some(0), "{capability:?}");
         }
@@ -8950,7 +9045,7 @@ mod limit_request_estimate_tests {
             ProviderCapability::OpenaiChatCompletions,
             ProviderCapability::GeminiOpenaiChatCompletions,
         ] {
-            let request = LimitRequest::from_value(Some(&body), "", Some(capability), &[]);
+            let request = LimitRequest::from_value(Some(&body), "", Some(capability), &[], false);
             assert_eq!(request.max_tokens, Some(100), "{capability:?}");
         }
     }
@@ -8962,6 +9057,7 @@ mod limit_request_estimate_tests {
             "claude-test",
             Some(ProviderCapability::AnthropicMessages),
             &[],
+            false,
         );
         assert_eq!(request.input_tokens_estimate, 4_000);
         assert_eq!(request.max_tokens, None);
@@ -8978,7 +9074,7 @@ mod limit_request_estimate_tests {
             ProviderCapability::OpenaiModerations,
             ProviderCapability::OpenaiCodexAuxiliary,
         ] {
-            let request = LimitRequest::from_value(None, "", Some(capability), &[]);
+            let request = LimitRequest::from_value(None, "", Some(capability), &[], false);
             assert_eq!(request.model, "", "{capability:?}");
             assert_eq!(request.input_tokens_estimate, 0);
             assert_eq!(request.max_tokens, Some(0));
@@ -8989,10 +9085,16 @@ mod limit_request_estimate_tests {
             "",
             Some(ProviderCapability::OpenaiModerations),
             &[],
+            false,
         );
         assert_eq!(explicit.model, "omni-moderation-latest");
-        let missing =
-            LimitRequest::from_value(None, "", Some(ProviderCapability::OpenaiResponses), &[]);
+        let missing = LimitRequest::from_value(
+            None,
+            "",
+            Some(ProviderCapability::OpenaiResponses),
+            &[],
+            false,
+        );
         assert_eq!(missing.model, "unknown");
         let empty = json!({"model":""});
         let empty_required = LimitRequest::from_value(
@@ -9000,6 +9102,7 @@ mod limit_request_estimate_tests {
             "",
             Some(ProviderCapability::OpenaiResponses),
             &[],
+            false,
         );
         assert_eq!(empty_required.model, "unknown");
     }
@@ -9014,14 +9117,15 @@ mod limit_request_estimate_tests {
             ProviderCapability::GeminiPredict,
         ] {
             let request =
-                LimitRequest::from_value(Some(&body), "path-model", Some(capability), &[]);
+                LimitRequest::from_value(Some(&body), "path-model", Some(capability), &[], false);
             assert_eq!(request.model, "path-model");
         }
         for capability in [
             ProviderCapability::OpenaiChatCompletions,
             ProviderCapability::GeminiOpenaiChatCompletions,
         ] {
-            let request = LimitRequest::from_value(Some(&body), "fallback", Some(capability), &[]);
+            let request =
+                LimitRequest::from_value(Some(&body), "fallback", Some(capability), &[], false);
             assert_eq!(request.model, "body-model");
         }
     }

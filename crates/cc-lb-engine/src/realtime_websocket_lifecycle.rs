@@ -222,14 +222,16 @@ impl Lifecycle {
                     record,
                     auth.success(),
                     || {
+                        let capability = classify_provider_capability(
+                            &ctx.method,
+                            &ctx.path,
+                            ctx.provider_scope,
+                        );
                         body_view.limit_request(
                             &ctx.canonical_model_id,
-                            classify_provider_capability(
-                                &ctx.method,
-                                &ctx.path,
-                                ctx.provider_scope,
-                            ),
+                            capability,
                             &[],
+                            use_image_rates_for_admission(capability, &ctx.path),
                         )
                     },
                 )
