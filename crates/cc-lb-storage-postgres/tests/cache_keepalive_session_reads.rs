@@ -239,14 +239,7 @@ async fn list_evidence_uses_renewal_ttl_upper_bound_case(url: &str) -> Result<()
     let follow_up_start_ms = (turn_ts + 3_600) * 1_000 + 500;
     let cycle_id = Uuid::from_u128(0x1102);
     let prefix_hash = "postgres-upper-boundary-prefix";
-    for (
-        evidence_id,
-        evidence_kind,
-        request_start_ms,
-        cycle_id,
-        event_ref,
-        cost_micros,
-    ) in [
+    for (evidence_id, evidence_kind, request_start_ms, cycle_id, event_ref, cost_micros) in [
         (
             "postgres-upper-boundary-renewal",
             "renewal",

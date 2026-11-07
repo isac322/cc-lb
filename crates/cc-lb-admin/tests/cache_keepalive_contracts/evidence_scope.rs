@@ -142,7 +142,8 @@ async fn seed_boundary_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, p
 
 #[test]
 fn list_and_detail_include_follow_up_at_turn_boundary_like_summary() {
-    const TEST_NAME: &str = "cache_keepalive_contracts::evidence_scope::list_and_detail_include_follow_up_at_turn_boundary_like_summary";
+    const TEST_NAME: &str =
+        "cache_keepalive_contracts::evidence_scope::list_and_detail_include_follow_up_at_turn_boundary_like_summary";
 
     if std::env::var("CC_LB_KEEPALIVE_EVIDENCE_SCOPE_CHILD").as_deref() == Ok("1") {
         tokio::runtime::Builder::new_current_thread()
@@ -264,11 +265,12 @@ fn list_and_detail_include_follow_up_at_subsecond_ttl_boundary() {
         return;
     }
 
-    let output = Command::new(std::env::current_exe().expect("current integration test executable"))
-        .args(["--exact", TEST_NAME, "--nocapture"])
-        .env("CC_LB_KEEPALIVE_EVIDENCE_SCOPE_UPPER_CHILD", "1")
-        .output()
-        .expect("run isolated evidence-scope upper-bound test");
+    let output =
+        Command::new(std::env::current_exe().expect("current integration test executable"))
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env("CC_LB_KEEPALIVE_EVIDENCE_SCOPE_UPPER_CHILD", "1")
+            .output()
+            .expect("run isolated evidence-scope upper-bound test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
