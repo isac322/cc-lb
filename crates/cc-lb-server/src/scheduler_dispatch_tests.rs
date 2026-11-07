@@ -890,7 +890,7 @@ async fn renewal_reconciles_real_reservation_once_before_forget() {
             &key,
             "principal",
             "claude-test",
-            0,
+            Some(0),
             3_900,
             None,
         )
@@ -902,7 +902,7 @@ async fn renewal_reconciles_real_reservation_once_before_forget() {
                 &key,
                 "principal",
                 "claude-test",
-                0,
+                Some(0),
                 1,
                 None,
             )
@@ -936,7 +936,7 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
             &key,
             "principal",
             "claude-test",
-            0,
+            Some(0),
             100,
             None,
         )
@@ -995,7 +995,7 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
             &key,
             "principal",
             "claude-test",
-            0,
+            Some(0),
             4_000,
             None,
         )
@@ -1007,7 +1007,7 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
                 &key,
                 "principal",
                 "claude-test",
-                0,
+                Some(0),
                 1,
                 None,
             )
@@ -1197,7 +1197,7 @@ async fn real_request_reseeds_observe_only_session_without_double_reserve() {
             &key,
             "principal",
             "claude-test",
-            0,
+            Some(0),
             3_900,
             None,
         )
@@ -1209,7 +1209,7 @@ async fn real_request_reseeds_observe_only_session_without_double_reserve() {
                 &key,
                 "principal",
                 "claude-test",
-                0,
+                Some(0),
                 1,
                 None,
             )
@@ -1311,7 +1311,7 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
             &key,
             "principal",
             "claude-test",
-            0,
+            Some(0),
             3_900,
             None,
         )
@@ -1431,7 +1431,7 @@ async fn assert_input_headroom(
             &key,
             "principal",
             "claude-test",
-            0,
+            Some(0),
             amount,
             None,
         )
@@ -1443,7 +1443,7 @@ async fn assert_input_headroom(
                 &key,
                 "principal",
                 "claude-test",
-                0,
+                Some(0),
                 1,
                 None
             )

@@ -5717,7 +5717,7 @@ mod tests {
                         &record,
                         TEST_PRINCIPAL,
                         "gpt-4.1",
-                        0,
+                        Some(0),
                         0,
                         Some(1_000),
                     ),
@@ -5829,7 +5829,7 @@ mod tests {
                     &record,
                     TEST_PRINCIPAL,
                     "gpt-4.1",
-                    0,
+                    Some(0),
                     0,
                     Some(1_000),
                 )

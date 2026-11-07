@@ -2880,6 +2880,64 @@ async fn responses_websocket_zero_slots_and_oversize_fail_before_dispatch() {
 }
 
 #[tokio::test]
+async fn responses_websocket_output_cap_rejects_missing_max_output_tokens_before_dispatch() {
+    let engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(cc_lb_clock::SystemClock),
+    );
+    let fixture = Fixture::with_limits(
+        vec![TestUpstream::new(
+            50_003,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )],
+        vec![Limit {
+            kind: LimitKind::OutputTokens,
+            window_secs: 60,
+            cap_micros: 4,
+        }],
+    )
+    .with_lifecycle(|lifecycle| {
+        lifecycle.with_static_limit_subject(
+            engine,
+            PRINCIPAL.to_owned(),
+            "ws-output-key".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "ws-output-key".to_owned(),
+                status: KeyStatus::Active,
+                ..Default::default()
+            },
+        )
+    });
+    let (mut gateway, dispatch) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+
+    let missing_cap = Bytes::from_static(
+        br#"{"type":"response.create","stream_id":"main","model":"gpt-5-codex","store":false,"input":"gateway regression"}"#,
+    );
+    let auth = gateway.authenticate().await.unwrap();
+    let error = gateway
+        .client_message(auth, missing_cap)
+        .await
+        .expect_err("missing max_output_tokens must be rejected");
+    assert_eq!(error.status, 400);
+    assert_eq!(error.code, "limit_rejected");
+    assert_eq!(error.stream_id.as_deref(), Some("main"));
+    assert!(
+        dispatch.hosts.lock().unwrap().is_empty(),
+        "rejected response.create must not reach an upstream"
+    );
+
+    let admitted = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .expect("explicit max_output_tokens within the cap is admitted");
+    assert_eq!(admitted.frame, websocket_create("main", None));
+    assert!(
+        dispatch.hosts.lock().unwrap().is_empty(),
+        "admission alone must not dispatch before connection send"
+    );
+}
+
+#[tokio::test]
 async fn responses_websocket_close_releases_inflight_queued_and_steer_reservations_once() {
     let concurrency = Arc::new(KeyConcurrencyManager::new());
     let limits = vec![
