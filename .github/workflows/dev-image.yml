@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - dev
+  workflow_dispatch:
 
 # A later push supersedes an older build; only the newest completed build may
 # publish the mutable dev tag.
@@ -15,6 +16,7 @@ permissions: {}
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/dev'
     name: build and verify dev image
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 240
