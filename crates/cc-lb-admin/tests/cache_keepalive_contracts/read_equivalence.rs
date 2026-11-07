@@ -1088,6 +1088,8 @@ async fn assert_unknown_evidence_does_not_fabricate_pnl() {
             model: "overflow-route-model".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(0),
             output_per_million_usd: UsdPerMillion::from_whole_usd(0),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
             by_tier: BTreeMap::new(),
         },
     );
