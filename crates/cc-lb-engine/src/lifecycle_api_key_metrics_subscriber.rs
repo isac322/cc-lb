@@ -187,6 +187,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(success),
             ..
         } => {
+            if !success.usage_present {
+                return;
+            }
             partial.input_tokens = success.usage.input_tokens;
             partial.output_tokens = success.usage.output_tokens;
             partial.cache_creation_input_tokens = success.usage.cache_creation_input_tokens;

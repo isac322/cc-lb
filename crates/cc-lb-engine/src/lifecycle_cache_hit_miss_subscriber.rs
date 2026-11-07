@@ -178,6 +178,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(success),
             ..
         } => {
+            if !success.usage_present {
+                return;
+            }
             partial.cache_read_input_tokens = success.usage.cache_read_input_tokens;
             partial.usage_seen = true;
         }
@@ -396,6 +399,18 @@ mod tests {
     }
 
     fn completed(event_id: &str, read: Result<u64, ()>) -> LifecycleEvent {
+        completed_with_presence(event_id, read, true)
+    }
+
+    fn completed_without_usage(event_id: &str, read: u64) -> LifecycleEvent {
+        completed_with_presence(event_id, Ok(read), false)
+    }
+
+    fn completed_with_presence(
+        event_id: &str,
+        read: Result<u64, ()>,
+        usage_present: bool,
+    ) -> LifecycleEvent {
         LifecycleEvent::StreamCompleted {
             event_id: eid(event_id),
             result: read
@@ -404,6 +419,7 @@ mod tests {
                         cache_read_input_tokens,
                         ..Default::default()
                     },
+                    usage_present,
                     ..Default::default()
                 })
                 .map_err(|()| StreamError {
@@ -716,6 +732,18 @@ mod tests {
                 vec![usage("usage", 10, 0), completed("usage", Ok(0))],
                 false,
                 true,
+            ),
+            (
+                "usage hit then absent stream",
+                vec![usage("usage", 10, 0), completed_without_usage("usage", 0)],
+                true,
+                true,
+            ),
+            (
+                "absent stream only",
+                vec![completed_without_usage("usage", 10)],
+                false,
+                false,
             ),
             (
                 "usage miss then stream hit",
