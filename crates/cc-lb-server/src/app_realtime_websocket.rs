@@ -106,7 +106,7 @@ pub(super) async fn openai_realtime_websocket_handler(
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error);
+                .reject_responses_websocket_authentication(&error, "/v1/realtime");
         }
     };
     let model = uri.query().and_then(|query| {
@@ -171,12 +171,17 @@ pub(super) async fn gemini_live_websocket_handler(
     let Some(guard) = state.drain_controller.try_track() else {
         return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
     };
+    let path = uri
+        .path()
+        .strip_prefix("/gemini")
+        .unwrap_or(uri.path())
+        .to_owned();
     let auth = match state.lifecycle.authenticate(&headers).await {
         Ok(auth) => auth,
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error);
+                .reject_responses_websocket_authentication(&error, &path);
         }
     };
     if uri.path()
@@ -190,11 +195,6 @@ pub(super) async fn gemini_live_websocket_handler(
         );
     }
     // OriginalUri retains the outer provider prefix even inside axum::nest.
-    let path = uri
-        .path()
-        .strip_prefix("/gemini")
-        .unwrap_or(uri.path())
-        .to_owned();
     let observation = state.lifecycle.begin_realtime_websocket(&auth, &path);
     // The setup frame supplies the model, but cannot make a disabled, unbound,
     // or OAuth-only upstream eligible for Live. Reject that structural absence
