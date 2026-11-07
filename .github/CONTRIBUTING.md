@@ -43,4 +43,4 @@ A pull request should include:
 
 The pull request template contains a short checklist for these items.
 
-For release changes, follow [the server release runbook](../docs/runbook/server-release.md). Do not publish release packages, server images, or charts from a development branch.
+For release changes, follow [the server release runbook](../docs/runbook/server-release.md). Do not publish release packages, immutable server images, or charts from a development branch. The `publish-dev-image` workflow is the documented exception: it publishes only the mutable `ghcr.io/isac322/cc-lb:dev` arm64 development image from `dev` for testing, and it is not a release artifact.

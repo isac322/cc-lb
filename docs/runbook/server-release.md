@@ -24,6 +24,12 @@ After merge, `release-server` verifies that the workspace version changed and in
 
 Stable versions publish immutable Docker tag `X.Y.Z`. Moving tags `X.Y` and `X` update only if this is the newest published stable server release for that prefix. Prereleases publish only their exact tag.
 
+## Development image
+
+The `dev` branch has a separate, mutable test image at `ghcr.io/isac322/cc-lb:dev`. The `publish-dev-image` workflow builds only `linux/arm64` and runs on every push to `dev`; it also supports a manual rebuild from that branch. The workflow records the source commit in `org.opencontainers.image.revision` and verifies the published image's platform and revision before it succeeds.
+
+This image is for development and test deployments. It is not a server release artifact, does not replace immutable versioned images, and must not be used as a stable production reference. Promote `dev` to `master` through the normal pull request process when the tested changes are ready.
+
 ## Inspect a release
 
 Set the operator-entered version and inspect all four release surfaces:
