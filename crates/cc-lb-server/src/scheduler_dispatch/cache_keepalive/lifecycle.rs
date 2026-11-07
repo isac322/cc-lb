@@ -114,6 +114,8 @@ pub(super) fn publish_renewal_lifecycle(
         event_id: input.event_id.to_owned(),
         result: Ok(StreamSuccess {
             usage: usage_snapshot,
+            // Renewals retain their affirmative snapshot contract, including zero counters.
+            usage_present: true,
             sse_event_count: 0,
             body_bytes: None,
             body_chunk_count: None,

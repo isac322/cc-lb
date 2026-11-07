@@ -28,7 +28,12 @@ const TRUNCATION_MARKER: &str = "...";
 /// SSE stream (or non-stream JSON body).
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UsageCounts {
+    /// Progress-aware presence, including lossy thinking estimates.
     pub(crate) present: bool,
+    /// Provider usage object presence, suitable for billing and reconciliation.
+    pub(crate) billable_present: bool,
+    // Internal parser marker: tracks a thinking progress frame even when its estimate is numerically zero.
+    pub(crate) thinking_progress_present: bool,
     pub(crate) input_tokens: u64,
     pub(crate) gross_input_tokens: Option<u64>,
     pub(crate) input_includes_cached: bool,
@@ -63,9 +68,8 @@ pub(crate) struct UsageCounts {
     /// This is a delta (must be summed), and the value is documented as a
     /// **lossy estimate** — `message_delta.usage.output_tokens` /
     /// `usage.output_tokens_details.thinking_tokens` remain authoritative for
-    /// billing. We track it purely to drive live-progress broadcasts and to
-    /// flip `present=true` early enough for the dashboard to see motion before
-    /// the final `message_delta` arrives.
+    /// billing. We track it purely to drive live-progress broadcasts; it does
+    /// not make `billable_present` true.
     pub(crate) estimated_thinking_progress: u64,
 }
 
@@ -99,6 +103,14 @@ impl CacheTokenEvidence {
 }
 
 impl UsageCounts {
+    /// Whether authoritative provider usage is available for pricing and
+    /// reconciliation. The fallback preserves existing internal constructors
+    /// that predate `billable_present`; parser-created progress-only state
+    /// carries `thinking_progress_present` and therefore remains non-billable.
+    pub(crate) fn has_billable_usage(&self) -> bool {
+        self.billable_present || (self.present && !self.thinking_progress_present)
+    }
+
     pub(crate) fn has_affirmative_read_only_cache_usage(&self) -> bool {
         self.cache_read_evidence == CacheTokenEvidence::Positive
             && self.cache_creation_evidence == CacheTokenEvidence::Zero
@@ -460,6 +472,7 @@ fn accumulate_sse_usage_value(
     {
         usage.estimated_thinking_progress =
             usage.estimated_thinking_progress.saturating_add(estimated);
+        usage.thinking_progress_present = true;
         usage.present = true;
     }
     let Some(reported) = usage_value_for_shape(value, shape).filter(|value| !value.is_null())
@@ -470,6 +483,8 @@ fn accumulate_sse_usage_value(
         update.message_start_usage = true;
     }
     usage.present = true;
+    usage.billable_present = true;
+    usage.thinking_progress_present = false;
     merge_usage_value(usage, reported);
     if usage.service_tier.is_none()
         && let Some(tier) = service_tier_from_envelope(value)
@@ -591,6 +606,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
     };
     let mut usage = UsageCounts {
         present: true,
+        billable_present: true,
         ..UsageCounts::default()
     };
     merge_usage_value(&mut usage, usage_value);
@@ -2109,6 +2125,10 @@ mod tests {
         assert!(!update1.message_start_usage && !update1.message_stop);
         assert!(!update2.message_start_usage && !update2.message_stop);
         assert!(usage.present);
+        assert!(
+            !usage.billable_present,
+            "thinking estimates are progress-only until provider usage arrives"
+        );
         assert_eq!(usage.estimated_thinking_progress, 46);
         assert_eq!(
             usage.thinking_tokens, 0,
@@ -2167,6 +2187,7 @@ mod tests {
         .to_string();
         let usage = observe_non_stream_json_body(body.as_bytes()).usage;
         assert!(usage.present);
+        assert!(usage.billable_present);
         assert_eq!(usage.input_tokens, 50);
         assert_eq!(usage.output_tokens, 100);
         assert_eq!(usage.thinking_tokens, 8);

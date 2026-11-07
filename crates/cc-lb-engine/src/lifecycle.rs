@@ -2510,6 +2510,73 @@ fn sse_bytes_may_carry_anthropic_provider_state(bytes: &[u8]) -> bool {
         .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
 }
 
+/// Whether an SSE frame carries user-visible streamed content for its wire
+/// protocol. This is deliberately provider-aware: relay/usage/terminal
+/// processing still sees every parsed frame, while telemetry counts only
+/// semantic text frames.
+fn is_semantic_content_frame(
+    capability: ProviderCapability,
+    event: &usage_parser::ParsedSseEvent<'_>,
+) -> bool {
+    let value = event.value().ok().flatten();
+    let non_empty_string = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    };
+
+    match capability.usage_shape() {
+        crate::provider_capability::UsageShape::AnthropicMessages => {
+            event.event_name() == Some(b"content_block_delta")
+        }
+        crate::provider_capability::UsageShape::OpenaiChatCompletions => value
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    non_empty_string(choice.get("delta").and_then(|delta| delta.get("content")))
+                })
+            }),
+        crate::provider_capability::UsageShape::OpenaiCompletions => value
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices
+                    .iter()
+                    .any(|choice| non_empty_string(choice.get("text")))
+            }),
+        crate::provider_capability::UsageShape::OpenaiResponses => {
+            event.event_type() == Some("response.output_text.delta")
+                && non_empty_string(value.and_then(|value| value.get("delta")))
+        }
+        crate::provider_capability::UsageShape::GeminiGenerateContent => {
+            let candidates = value
+                .and_then(|value| value.get("candidates"))
+                .or_else(|| value.and_then(|value| value.get("response")?.get("candidates")));
+            candidates
+                .and_then(Value::as_array)
+                .is_some_and(|candidates| {
+                    candidates.iter().any(|candidate| {
+                        candidate
+                            .get("content")
+                            .and_then(|content| content.get("parts"))
+                            .and_then(Value::as_array)
+                            .is_some_and(|parts| {
+                                parts.iter().any(|part| {
+                                    !part
+                                        .get("thought")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false)
+                                        && non_empty_string(part.get("text"))
+                                })
+                            })
+                    })
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Whether a successful SSE event is the provider's terminal success event,
 /// before which request-referenced provider state still pending a binding must
 /// be persisted. Gemini streams carry no terminal event, so their pending keys
@@ -2530,18 +2597,18 @@ fn sse_event_completes_response(
                 == Some("message_stop")
         }
         crate::provider_capability::UsageShape::OpenaiResponses => {
-            event
+            event.value().ok().flatten().is_some_and(|_| {
+                event.event_name() == Some(b"response.completed")
+                    || event.event_name() == Some(b"response.incomplete")
+            }) || event
                 .value()
                 .ok()
                 .flatten()
-                .is_some_and(|_| event.event_name() == Some(b"response.completed"))
-                || event
-                    .value()
-                    .ok()
-                    .flatten()
-                    .and_then(|value| value.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("response.completed")
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|event_type| {
+                    event_type == "response.completed" || event_type == "response.incomplete"
+                })
         }
         crate::provider_capability::UsageShape::OpenaiChatCompletions
         | crate::provider_capability::UsageShape::OpenaiCompletions => {
@@ -2601,7 +2668,8 @@ fn observe_sse_terminal_event(
     let event_name_terminal = matches!(
         capability.usage_shape(),
         crate::provider_capability::UsageShape::OpenaiResponses
-    ) && event.event_name() == Some(b"response.completed")
+    ) && (event.event_name() == Some(b"response.completed")
+        || event.event_name() == Some(b"response.incomplete"))
         && event.value().ok().flatten().is_some();
     let semantic_event_type = event
         .value()
@@ -2609,7 +2677,14 @@ fn observe_sse_terminal_event(
         .flatten()
         .and_then(|value| value.get("type"))
         .and_then(serde_json::Value::as_str);
+    let response_terminal_type = matches!(
+        capability.usage_shape(),
+        crate::provider_capability::UsageShape::OpenaiResponses
+    ) && semantic_event_type.is_some_and(|event_type| {
+        event_type == "response.completed" || event_type == "response.incomplete"
+    });
     *semantic_message_stop_seen |= event_name_terminal
+        || response_terminal_type
         || semantic_terminal_event_type(capability)
             .is_some_and(|terminal| semantic_event_type == Some(terminal));
     if event.event_name() == Some(b"message_stop")
@@ -5368,7 +5443,7 @@ impl Lifecycle {
                     .saturating_add(usage.cache_creation_input_tokens),
             );
         }
-        if usage.present
+        if usage.has_billable_usage()
             && status == StatusCode::OK
             && let Some(context) = prompt_cache_observation_context.as_ref()
         {
@@ -5397,12 +5472,16 @@ impl Lifecycle {
         }
 
         let finalize_ms = if let Some(o) = observer.as_ref() {
-            o.set_usage_counts(&usage, true);
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                event_id: o.event_id().to_owned(),
-                usage: to_usage_snapshot(&usage),
-                source: cc_lb_lifecycle::UsageSource::NonStreamBody,
-            });
+            if usage.has_billable_usage() {
+                o.set_usage_counts(&usage, true);
+            }
+            if usage.has_billable_usage() {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                    event_id: o.event_id().to_owned(),
+                    usage: to_usage_snapshot(&usage),
+                    source: cc_lb_lifecycle::UsageSource::NonStreamBody,
+                });
+            }
             let stream_result = if body_collect_failed {
                 Err(cc_lb_lifecycle::StreamError {
                     error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
@@ -5427,6 +5506,7 @@ impl Lifecycle {
             } else {
                 Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
+                    usage_present: usage.has_billable_usage(),
                     sse_event_count: 0,
                     body_bytes: Some(downstream_body.len() as u64),
                     body_chunk_count: Some(body_chunk_count),
@@ -6606,6 +6686,23 @@ impl Lifecycle {
                                 {
                                     downstream_drop_guard.observe_keepalive(&parsed_event);
                                 }
+                                let semantic_content_frame = is_semantic_content_frame(
+                                    response_affinity_context.capability,
+                                    &parsed_event,
+                                );
+                                if semantic_content_frame {
+                                    if first_content_delta_at.is_none() {
+                                        first_content_delta_at = Some(now);
+                                        if let Some(o) = observer.as_ref() {
+                                            o.set_first_content_delta_ms(duration_to_ms(
+                                                now.saturating_duration_since(relay_start),
+                                            ));
+                                        }
+                                    }
+                                    last_content_delta_at = Some(now);
+                                    content_delta_count =
+                                        content_delta_count.saturating_add(1);
+                                }
                                 match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
                                         message_start_at = Some(now);
@@ -6615,18 +6712,6 @@ impl Lifecycle {
                                         if content_block_start_at.is_none() =>
                                     {
                                         content_block_start_at = Some(now);
-                                    }
-                                    Some(b"content_block_delta") => {
-                                        if first_content_delta_at.is_none() {
-                                            first_content_delta_at = Some(now);
-                                            if let Some(o) = observer.as_ref() {
-                                                o.set_first_content_delta_ms(duration_to_ms(
-                                                    now.saturating_duration_since(relay_start),
-                                                ));
-                                            }
-                                        }
-                                        last_content_delta_at = Some(now);
-                                        content_delta_count = content_delta_count.saturating_add(1);
                                     }
                                     Some(b"ping") => {
                                         ping_count = ping_count.saturating_add(1);
@@ -6681,33 +6766,45 @@ impl Lifecycle {
                                 if !semantic_completion_observed && event_completes_response {
                                     semantic_completion_observed = true;
                                     if let Some(o) = observer.as_ref() {
-                                        o.set_usage_counts(&usage, true);
-                                        o.emit_lifecycle(
-                                            cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                                event_id: o.event_id().to_owned(),
-                                                usage: to_usage_snapshot(&usage),
-                                                source:
-                                                    cc_lb_lifecycle::UsageSource::MessageDelta,
-                                            },
-                                        );
+                                        if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, true);
+                                            o.emit_lifecycle(
+                                                cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                    event_id: o.event_id().to_owned(),
+                                                    usage: to_usage_snapshot(&usage),
+                                                    source:
+                                                        cc_lb_lifecycle::UsageSource::MessageDelta,
+                                                },
+                                            );
+                                        }
                                         o.set_success_status(status);
                                     }
                                 }
-                                if let Some(o) = observer.as_ref() {
+                                if let Some(o) = observer.as_ref()
+                                    && usage.present
+                                {
                                     if usage_update.message_start_usage {
-                                        o.set_usage_counts(&usage, false);
-                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageStart,
-                                        });
+                                        if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, false);
+                                        }
+                                        if usage.has_billable_usage() {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageStart,
+                                            });
+                                        }
                                     } else if usage_update.message_stop {
-                                        o.set_usage_counts(&usage, true);
-                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageStop,
-                                        });
+                                        if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, true);
+                                        }
+                                        if usage.has_billable_usage() {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageStop,
+                                            });
+                                        }
                                     }
                                     let force_publish = usage_update.message_start_usage
                                         || usage_update.message_stop;
@@ -6721,7 +6818,10 @@ impl Lifecycle {
                                         >= Duration::from_millis(1000)
                                         || tokens_since_last >= 100;
                                     if force_publish || throttle_ok {
-                                        if !usage_update.message_start_usage && !usage_update.message_stop {
+                                        if !usage_update.message_start_usage
+                                            && !usage_update.message_stop
+                                            && usage.has_billable_usage()
+                                        {
                                             o.set_usage_counts(&usage, false);
                                             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
@@ -7352,14 +7452,18 @@ impl Lifecycle {
                             if !semantic_completion_observed && event_completes_response {
                                 semantic_completion_observed = true;
                                 if let Some(o) = observer.as_ref() {
-                                    o.set_usage_counts(&usage, true);
-                                    o.emit_lifecycle(
-                                        cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageDelta,
-                                        },
-                                    );
+                                    if usage.has_billable_usage() {
+                                        o.set_usage_counts(&usage, true);
+                                    }
+                                    if usage.has_billable_usage() {
+                                        o.emit_lifecycle(
+                                            cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                                            },
+                                        );
+                                    }
                                     o.set_success_status(status);
                                 }
                             }
@@ -7724,7 +7828,9 @@ impl Lifecycle {
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
             {
-                if let Some(o) = observer.as_ref() {
+                if let Some(o) = observer.as_ref()
+                    && usage.has_billable_usage()
+                {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                         event_id: o.event_id().to_owned(),
                         usage: to_usage_snapshot(&usage),
@@ -7814,7 +7920,9 @@ impl Lifecycle {
                 downstream_drop_guard.mark_proxy_error(StreamTerminationCause::TransformError);
             }
             let finalize_ms = if let Some(o) = observer.as_ref() {
-                o.set_usage_counts(&usage, message_stop_at.is_some());
+                if usage.has_billable_usage() {
+                    o.set_usage_counts(&usage, message_stop_at.is_some());
+                }
                 if let Some(first_content_delta_ms) = elapsed_ms(first_content_delta_at) {
                     o.set_first_content_delta_ms(first_content_delta_ms);
                 }
@@ -7854,6 +7962,7 @@ impl Lifecycle {
                         event_id: o.event_id().to_owned(),
                         result: Ok(cc_lb_lifecycle::StreamSuccess {
                             usage: to_usage_snapshot(&usage),
+                            usage_present: usage.has_billable_usage(),
                             sse_event_count,
                             body_bytes: Some(total_bytes),
                             body_chunk_count: Some(batch_index),
@@ -15876,6 +15985,19 @@ mod tests {
         let response_completed = usage_parser::parse_sse_event(
             b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
         );
+        let response_incomplete = usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_named_without_type = usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_data_only = usage_parser::parse_sse_event(
+            b"data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_malformed =
+            usage_parser::parse_sse_event(b"event: response.incomplete\ndata: {not-json}\n\n");
+        let response_incomplete_empty =
+            usage_parser::parse_sse_event(b"event: response.incomplete\ndata:\n\n");
         let response_delta = usage_parser::parse_sse_event(
             b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
         );
@@ -15898,6 +16020,46 @@ mod tests {
             &response_completed,
             false,
         ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete,
+            false,
+        ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete_named_without_type,
+            false,
+        ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete_data_only,
+            false,
+        ));
+        for malformed in [&response_incomplete_malformed, &response_incomplete_empty] {
+            assert!(!sse_event_completes_response(
+                ProviderCapability::OpenaiResponses,
+                malformed,
+                false,
+            ));
+        }
+        for (event, expected) in [
+            (&response_incomplete_named_without_type, true),
+            (&response_incomplete_data_only, true),
+            (&response_incomplete_malformed, false),
+            (&response_incomplete_empty, false),
+        ] {
+            let mut semantic_message_stop_seen = false;
+            let mut message_stop_at = None;
+            observe_sse_terminal_event(
+                ProviderCapability::OpenaiResponses,
+                event,
+                false,
+                &mut semantic_message_stop_seen,
+                &mut message_stop_at,
+                Instant::now,
+            );
+            assert_eq!(semantic_message_stop_seen, expected);
+        }
         assert!(!sse_event_completes_response(
             ProviderCapability::OpenaiResponses,
             &message_stop,
@@ -15983,6 +16145,92 @@ mod tests {
             ProviderCapability::OpenaiResponses,
             &parse_sse_event(b"event: response.completed\ndata: {}\n\n"),
             false,
+        ));
+    }
+
+    #[test]
+    fn semantic_content_classifier_matches_provider_wire_shapes() {
+        let anthropic = parse_sse_event(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::AnthropicMessages,
+            &anthropic
+        ));
+
+        let chat_text = parse_sse_event(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}},{\"delta\":{\"content\":null}}]}\n\n",
+        );
+        let chat_metadata =
+            parse_sse_event(b"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n");
+        let chat_tool = parse_sse_event(
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\"}]}}]}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiChatCompletions,
+            &chat_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::OpenaiChatCompletions,
+            &chat_metadata
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiOpenaiChatCompletions,
+            &chat_tool
+        ));
+
+        let completion = parse_sse_event(b"data: {\"choices\":[{\"text\":\"legacy\"}]}\n\n");
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiCompletions,
+            &completion
+        ));
+
+        let response_text = parse_sse_event(
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+        );
+        let response_reasoning = parse_sse_event(
+            b"event: response.reasoning.delta\ndata: {\"type\":\"response.reasoning.delta\",\"delta\":\"hidden\"}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiResponses,
+            &response_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::OpenaiResponses,
+            &response_reasoning
+        ));
+
+        let gemini_text = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"one\"},{\"text\":\"two\"}]}},{\"content\":{\"parts\":[{\"text\":\"three\"}]}}]}\n\n",
+        );
+        let gemini_oauth_text = parse_sse_event(
+            b"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"wrapped\"}]}}]}}\n\n",
+        );
+        let gemini_oauth_thought = parse_sse_event(
+            b"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"hidden\"}]}}]}}\n\n",
+        );
+        let gemini_thought = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"hidden\"}]}}]}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_text
+        ));
+        assert!(is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_oauth_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_oauth_thought
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_thought
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiOpenaiChatCompletions,
+            &gemini_text
         ));
     }
 

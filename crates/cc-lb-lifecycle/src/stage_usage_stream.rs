@@ -52,6 +52,9 @@ pub enum UsageSource {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StreamSuccess {
     pub usage: UsageSnapshot,
+    /// Whether `usage` contains measured counters, including explicit numeric zero.
+    #[serde(default)]
+    pub usage_present: bool,
     /// Number of SSE events observed on the tap.
     pub sse_event_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,4 +91,37 @@ pub struct StreamSuccess {
 pub struct StreamError {
     pub error_type: String,
     pub error_message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StreamSuccess, UsageSnapshot};
+
+    #[test]
+    fn stream_success_without_usage_presence_deserializes_as_unmeasured() {
+        let success: StreamSuccess = serde_json::from_value(serde_json::json!({
+            "usage": UsageSnapshot::default(),
+            "sse_event_count": 0,
+        }))
+        .expect("legacy success payload deserializes");
+
+        assert!(!success.usage_present);
+        assert_eq!(success, StreamSuccess::default());
+    }
+
+    #[test]
+    fn stream_success_roundtrip_preserves_measured_zero_usage() {
+        let success = StreamSuccess {
+            usage_present: true,
+            ..Default::default()
+        };
+
+        let payload = serde_json::to_value(&success).expect("success payload serializes");
+        let restored: StreamSuccess =
+            serde_json::from_value(payload).expect("success payload deserializes");
+
+        assert!(restored.usage_present);
+        assert_eq!(restored.usage, UsageSnapshot::default());
+        assert_eq!(restored, success);
+    }
 }
