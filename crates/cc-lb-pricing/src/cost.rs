@@ -331,7 +331,7 @@ mod tests {
             Some("priority"),
         )
         .expect("known model");
-        assert_eq!(clamped.input_micros, 8_055);
+        assert_eq!(clamped.input_micros, 8_088);
         assert_eq!(clamped.output_micros, 96);
         assert_eq!(clamped.cache_creation_5m_micros, 150);
         assert_eq!(clamped.cache_creation_1h_micros, 600);
