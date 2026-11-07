@@ -78,7 +78,9 @@ pub(crate) fn extract_request_affinity_keys(
 ) -> Result<Vec<UpstreamAffinityKey>, UpstreamAffinityExtractionError> {
     let mut collector = KeyCollector::new(capability, principal_id);
     match capability {
-        ProviderCapability::AnthropicMessages => collector.anthropic_message(value)?,
+        ProviderCapability::AnthropicMessages | ProviderCapability::AnthropicCountTokens => {
+            collector.anthropic_message(value)?
+        }
         ProviderCapability::OpenaiResponses
         | ProviderCapability::OpenaiResponsesInputTokens
         | ProviderCapability::OpenaiResponsesCompact => {
@@ -837,6 +839,51 @@ mod tests {
         assert!(request_enables_anthropic_web_search(&serde_json::json!({
             "tools": [{"type": "code_execution_20250825", "name": "code_execution"}]
         })));
+    }
+
+    #[test]
+    fn preserves_anthropic_count_tokens_file_and_container_affinity() {
+        let body = serde_json::json!({
+            "container": "container_count_tokens",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "document", "source": {"type": "file", "file_id": "file_count_tokens"}},
+                    {"type": "container_upload", "file_id": "upload_count_tokens"}
+                ]
+            }]
+        });
+        let message_keys = extract_request_affinity_keys(
+            ProviderCapability::AnthropicMessages,
+            &body,
+            "principal",
+        )
+        .expect("extracts message affinity");
+        let count_tokens_keys = extract_request_affinity_keys(
+            ProviderCapability::AnthropicCountTokens,
+            &body,
+            "principal",
+        )
+        .expect("extracts count_tokens affinity");
+
+        assert_eq!(count_tokens_keys, message_keys);
+        assert_eq!(
+            kinds_and_digests(&count_tokens_keys),
+            HashSet::from([
+                (
+                    UpstreamAffinityKind::AnthropicContainerId,
+                    digest("container_count_tokens")
+                ),
+                (
+                    UpstreamAffinityKind::AnthropicFileId,
+                    digest("file_count_tokens")
+                ),
+                (
+                    UpstreamAffinityKind::AnthropicFileId,
+                    digest("upload_count_tokens")
+                ),
+            ])
+        );
     }
 
     #[test]

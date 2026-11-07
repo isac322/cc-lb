@@ -8,6 +8,7 @@ use serde_json::Value;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderCapability {
     AnthropicMessages,
+    AnthropicCountTokens,
     OpenaiResponses,
     GeminiGenerateContent,
     GeminiCountTokens,
@@ -48,9 +49,10 @@ pub(crate) enum UsageShape {
 impl ProviderCapability {
     pub(crate) const fn provider(self) -> Provider {
         match self {
-            Self::AnthropicMessages | Self::AnthropicModels | Self::AnthropicComplete => {
-                Provider::Anthropic
-            }
+            Self::AnthropicMessages
+            | Self::AnthropicCountTokens
+            | Self::AnthropicModels
+            | Self::AnthropicComplete => Provider::Anthropic,
             Self::OpenaiResponses
             | Self::OpenaiResponsesInputTokens
             | Self::OpenaiResponsesCompact
@@ -85,7 +87,8 @@ impl ProviderCapability {
             Self::OpenaiEmbeddings | Self::GeminiOpenaiEmbeddings => UsageShape::OpenaiEmbeddings,
             Self::GeminiGenerateContent => UsageShape::GeminiGenerateContent,
             Self::GeminiEmbedContent => UsageShape::GeminiEmbed,
-            Self::AnthropicModels
+            Self::AnthropicCountTokens
+            | Self::AnthropicModels
             | Self::AnthropicComplete
             | Self::OpenaiResponsesInputTokens
             | Self::OpenaiModerations
@@ -112,8 +115,9 @@ pub(crate) fn classify(
     use ProviderCapability as C;
     let legacy = if method == Method::POST {
         match path {
-            "/v1/messages" | "/v1/messages/count_tokens" => Some(C::AnthropicMessages),
             "/v1/responses" => Some(C::OpenaiResponses),
+            "/v1/messages" => Some(C::AnthropicMessages),
+            "/v1/messages/count_tokens" => Some(C::AnthropicCountTokens),
             path if legacy_gemini_action(path, "countTokens") => Some(C::GeminiCountTokens),
             path if legacy_gemini_action(path, "generateContent")
                 || legacy_gemini_action(path, "streamGenerateContent") =>
@@ -236,7 +240,7 @@ mod tests {
             ("/v1/messages", ProviderCapability::AnthropicMessages),
             (
                 "/v1/messages/count_tokens",
-                ProviderCapability::AnthropicMessages,
+                ProviderCapability::AnthropicCountTokens,
             ),
             ("/v1/responses", ProviderCapability::OpenaiResponses),
             (
