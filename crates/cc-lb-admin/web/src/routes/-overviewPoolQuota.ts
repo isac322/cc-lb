@@ -24,6 +24,12 @@ export function poolQuotaWindowsPresent(
   return POOL_QUOTA_WINDOWS.filter((window) => returned.has(window));
 }
 
+function clampPoolQuotaPercent(used: number | null | undefined): number | null {
+  return used != null && Number.isFinite(used)
+    ? Math.min(100, Math.max(0, used))
+    : null;
+}
+
 /**
  * Pool history as used percent: each bucket plots the pool utilization,
  * clamped to 0-100 so an over-limit reading pins to the top of the plot
@@ -48,11 +54,7 @@ export function buildPoolQuotaChartData(
           row[returnedWindow] = null;
         }
       }
-      const used = point.utilization_percent;
-      row[window] =
-        used != null && Number.isFinite(used)
-          ? Math.min(100, Math.max(0, used))
-          : null;
+      row[window] = clampPoolQuotaPercent(point.utilization_percent);
       buckets.set(point.snapshot_at_unix_secs, row);
     }
   }
@@ -89,11 +91,42 @@ export function latestPoolQuotaSnapshotUnix(
   return latestUnix;
 }
 
+function buildCarriedPoolQuotaRow(
+  baseRow: PoolQuotaChartRow,
+  targetUnix: number,
+  rangeEndUnix: number,
+  windows?: readonly PoolHistoryWindowResponse[],
+): PoolQuotaChartRow {
+  if (!windows) {
+    return { ...baseRow, unix: targetUnix };
+  }
+  const carried: PoolQuotaChartRow = { unix: targetUnix };
+  for (const window of POOL_QUOTA_WINDOWS) {
+    if (!(window in baseRow)) continue;
+    if (baseRow[window] == null) {
+      carried[window] = null;
+      continue;
+    }
+    const latest = windows.find((entry) => entry.window === window)?.latest;
+    const latestUnix = latest?.snapshot_at_unix_secs;
+    const windowLatestIsFresh =
+      typeof latestUnix === 'number' &&
+      Number.isFinite(latestUnix) &&
+      latestUnix <= rangeEndUnix &&
+      rangeEndUnix - latestUnix <= POOL_QUOTA_HEARTBEAT_CARRY_SECS;
+    carried[window] = windowLatestIsFresh
+      ? clampPoolQuotaPercent(latest?.utilization_percent)
+      : null;
+  }
+  return carried;
+}
+
 export function visiblePoolQuotaChartData(
   rows: readonly PoolQuotaChartRow[],
   rangeStartUnix: number,
   rangeEndUnix: number,
   latestSnapshotUnixSecs?: number | null,
+  windows?: readonly PoolHistoryWindowResponse[],
 ): PoolQuotaChartRow[] {
   if (!rows.length || rangeStartUnix > rangeEndUnix) return [];
 
@@ -127,7 +160,17 @@ export function visiblePoolQuotaChartData(
       : latestIsFresh &&
         rangeStartUnix - leadingRow.unix <= POOL_QUOTA_HEARTBEAT_CARRY_SECS;
     if (canClampLeading) {
-      visible.unshift({ ...leadingRow, unix: rangeStartUnix });
+      const clampedRow = firstInRange
+        ? { ...leadingRow, unix: rangeStartUnix }
+        : buildCarriedPoolQuotaRow(
+            leadingRow,
+            rangeStartUnix,
+            rangeEndUnix,
+            windows,
+          );
+      if (hasPoolQuotaValue(clampedRow)) {
+        visible.unshift(clampedRow);
+      }
     }
   }
 
@@ -138,7 +181,15 @@ export function visiblePoolQuotaChartData(
     hasPoolQuotaValue(lastRow) &&
     latestIsFresh
   ) {
-    visible.push({ ...lastRow, unix: rangeEndUnix });
+    const tailRow = buildCarriedPoolQuotaRow(
+      lastRow,
+      rangeEndUnix,
+      rangeEndUnix,
+      windows,
+    );
+    if (hasPoolQuotaValue(tailRow)) {
+      visible.push(tailRow);
+    }
   }
 
   return visible;

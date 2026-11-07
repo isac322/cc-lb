@@ -848,6 +848,56 @@ describe('Overview pool quota usage', () => {
     );
   });
 
+  it('carries the raw latest utilization at the right edge when the final bucket preserves a higher peak', () => {
+    const now = POOL_HISTORY_NOW;
+    const bucketStart = now - 120;
+    const latestAt = now - 30;
+    const aggregate = aggregateResponse(now, 20);
+    aggregate.windows = aggregate.windows.filter(
+      (entry) => entry.window === '7d_fable',
+    );
+    const history = poolHistoryResponse(now, 40, bucketStart, 86400);
+    history.windows = history.windows
+      .filter((entry) => entry.window === '7d_fable')
+      .map((entry) => ({
+        ...entry,
+        latest: entry.latest
+          ? {
+              ...entry.latest,
+              snapshot_at_unix_secs: latestAt,
+              utilization: 0.2,
+              utilization_percent: 20,
+            }
+          : null,
+        series: [
+          {
+            snapshot_at_unix_secs: bucketStart,
+            utilization_percent: 40,
+          },
+        ],
+      }));
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: history,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    expect(
+      screen.getByTestId('pool-quota-area-7d_fable').getAttribute('d'),
+    ).toBe(`${bucketStart}:40|${now}:20`);
+    expect(screen.getByTestId('pool-quota-legend-slot').textContent).toBe(
+      '7d (Fable) · 20% used · resets in 1h',
+    );
+  });
+
   it('clamps a pre-range pool snapshot across an idle 1h range', () => {
     routerMock.search = { range: '1h' };
     const now = POOL_HISTORY_NOW;

@@ -1697,12 +1697,14 @@ function OverviewPage() {
         poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
         poolHistoryNowUnixSecs,
         latestSnapshotUnixSecs,
+        quotaPoolHistory.data?.windows,
       ),
     [
       chartData,
       displayedPoolHistoryRangeSecs,
       latestSnapshotUnixSecs,
       poolHistoryNowUnixSecs,
+      quotaPoolHistory.data,
     ],
   );
 

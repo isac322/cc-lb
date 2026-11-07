@@ -241,6 +241,44 @@ describe('Overview pooled quota history', () => {
       ),
     ).toEqual([{ unix: rangeStart + 120, '5h': 40 }]);
   });
+
+  it('carries the raw latest utilization instead of a higher final-bucket peak', () => {
+    const windows = [
+      {
+        window: '7d_fable',
+        latest: {
+          snapshot_at_unix_secs: 240,
+          utilization: 0.2,
+          utilization_percent: 20,
+          contributing_upstreams: 1,
+          eligible_upstreams: 1,
+          stale_upstreams: 0,
+          max_observed_at_unix_millis: 240_000,
+        },
+        series: [
+          { snapshot_at_unix_secs: 0, utilization_percent: 10 },
+          { snapshot_at_unix_secs: 90, utilization_percent: 20 },
+          { snapshot_at_unix_secs: 180, utilization_percent: 40 },
+        ],
+      },
+    ];
+    const rows = buildPoolQuotaChartData(windows);
+
+    expect(
+      visiblePoolQuotaChartData(
+        rows,
+        60,
+        300,
+        latestPoolQuotaSnapshotUnix(windows),
+        windows,
+      ),
+    ).toEqual([
+      { unix: 60, '7d_fable': 10 },
+      { unix: 90, '7d_fable': 20 },
+      { unix: 180, '7d_fable': 40 },
+      { unix: 300, '7d_fable': 20 },
+    ]);
+  });
 });
 
 function lot(
