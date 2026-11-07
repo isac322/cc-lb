@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.3.0...cc-lb-runtime-wasmtime-v0.4.0) - 2026-11-07
+
+### Added
+
+- [**breaking**] add OpenAI and Gemini upstream support ([#1069](https://github.com/isac322/cc-lb/pull/1069))
+
+### Other
+
+- *(deps)* [**breaking**] upgrade Rust dependencies, Apalis 1.0, Wasmtime 50, reqwest 0.13, and CI/container pins ([#989](https://github.com/isac322/cc-lb/pull/989))
+
 ### Added
 
 - Admit optional provider-qualified filter, request, buffered-response, and SSE exports with `cc_lb.plugin.v2` metadata. Wire V1 layouts and schema fingerprints remain unchanged.
