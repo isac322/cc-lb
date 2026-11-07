@@ -2897,12 +2897,11 @@ async fn connect_provider_websocket(
     ),
     WebSocketError,
 > {
-    let breaker = state
-        .breaker(
-            websocket_breaker_key(upstream_id),
-            state.breaker_config,
-            state.clock.clone(),
-        );
+    let breaker = state.breaker_registry.breaker(
+        websocket_breaker_key(upstream_id),
+        state.breaker_config,
+        state.clock.clone(),
+    );
     let permit = breaker.permit().map_err(|_| {
         WebSocketError::new(
             502,
