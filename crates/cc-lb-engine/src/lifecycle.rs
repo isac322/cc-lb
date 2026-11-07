@@ -2510,6 +2510,73 @@ fn sse_bytes_may_carry_anthropic_provider_state(bytes: &[u8]) -> bool {
         .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
 }
 
+/// Whether an SSE frame carries user-visible streamed content for its wire
+/// protocol. This is deliberately provider-aware: relay/usage/terminal
+/// processing still sees every parsed frame, while telemetry counts only
+/// semantic text frames.
+fn is_semantic_content_frame(
+    capability: ProviderCapability,
+    event: &usage_parser::ParsedSseEvent<'_>,
+) -> bool {
+    let value = event.value().ok().flatten();
+    let non_empty_string = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    };
+
+    match capability.usage_shape() {
+        crate::provider_capability::UsageShape::AnthropicMessages => {
+            event.event_name() == Some(b"content_block_delta")
+        }
+        crate::provider_capability::UsageShape::OpenaiChatCompletions => value
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    non_empty_string(choice.get("delta").and_then(|delta| delta.get("content")))
+                })
+            }),
+        crate::provider_capability::UsageShape::OpenaiCompletions => value
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices
+                    .iter()
+                    .any(|choice| non_empty_string(choice.get("text")))
+            }),
+        crate::provider_capability::UsageShape::OpenaiResponses => {
+            event.event_type() == Some("response.output_text.delta")
+                && non_empty_string(value.and_then(|value| value.get("delta")))
+        }
+        crate::provider_capability::UsageShape::GeminiGenerateContent => {
+            let candidates = value
+                .and_then(|value| value.get("candidates"))
+                .or_else(|| value.and_then(|value| value.get("response")?.get("candidates")));
+            candidates
+                .and_then(Value::as_array)
+                .is_some_and(|candidates| {
+                    candidates.iter().any(|candidate| {
+                        candidate
+                            .get("content")
+                            .and_then(|content| content.get("parts"))
+                            .and_then(Value::as_array)
+                            .is_some_and(|parts| {
+                                parts.iter().any(|part| {
+                                    !part
+                                        .get("thought")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false)
+                                        && non_empty_string(part.get("text"))
+                                })
+                            })
+                    })
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Whether a successful SSE event is the provider's terminal success event,
 /// before which request-referenced provider state still pending a binding must
 /// be persisted. Gemini streams carry no terminal event, so their pending keys
@@ -6614,6 +6681,23 @@ impl Lifecycle {
                                 {
                                     downstream_drop_guard.observe_keepalive(&parsed_event);
                                 }
+                                let semantic_content_frame = is_semantic_content_frame(
+                                    response_affinity_context.capability,
+                                    &parsed_event,
+                                );
+                                if semantic_content_frame {
+                                    if first_content_delta_at.is_none() {
+                                        first_content_delta_at = Some(now);
+                                        if let Some(o) = observer.as_ref() {
+                                            o.set_first_content_delta_ms(duration_to_ms(
+                                                now.saturating_duration_since(relay_start),
+                                            ));
+                                        }
+                                    }
+                                    last_content_delta_at = Some(now);
+                                    content_delta_count =
+                                        content_delta_count.saturating_add(1);
+                                }
                                 match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
                                         message_start_at = Some(now);
@@ -6623,18 +6707,6 @@ impl Lifecycle {
                                         if content_block_start_at.is_none() =>
                                     {
                                         content_block_start_at = Some(now);
-                                    }
-                                    Some(b"content_block_delta") => {
-                                        if first_content_delta_at.is_none() {
-                                            first_content_delta_at = Some(now);
-                                            if let Some(o) = observer.as_ref() {
-                                                o.set_first_content_delta_ms(duration_to_ms(
-                                                    now.saturating_duration_since(relay_start),
-                                                ));
-                                            }
-                                        }
-                                        last_content_delta_at = Some(now);
-                                        content_delta_count = content_delta_count.saturating_add(1);
                                     }
                                     Some(b"ping") => {
                                         ping_count = ping_count.saturating_add(1);
@@ -16068,6 +16140,92 @@ mod tests {
             ProviderCapability::OpenaiResponses,
             &parse_sse_event(b"event: response.completed\ndata: {}\n\n"),
             false,
+        ));
+    }
+
+    #[test]
+    fn semantic_content_classifier_matches_provider_wire_shapes() {
+        let anthropic = parse_sse_event(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::AnthropicMessages,
+            &anthropic
+        ));
+
+        let chat_text = parse_sse_event(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}},{\"delta\":{\"content\":null}}]}\n\n",
+        );
+        let chat_metadata =
+            parse_sse_event(b"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n");
+        let chat_tool = parse_sse_event(
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\"}]}}]}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiChatCompletions,
+            &chat_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::OpenaiChatCompletions,
+            &chat_metadata
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiOpenaiChatCompletions,
+            &chat_tool
+        ));
+
+        let completion = parse_sse_event(b"data: {\"choices\":[{\"text\":\"legacy\"}]}\n\n");
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiCompletions,
+            &completion
+        ));
+
+        let response_text = parse_sse_event(
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+        );
+        let response_reasoning = parse_sse_event(
+            b"event: response.reasoning.delta\ndata: {\"type\":\"response.reasoning.delta\",\"delta\":\"hidden\"}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiResponses,
+            &response_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::OpenaiResponses,
+            &response_reasoning
+        ));
+
+        let gemini_text = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"one\"},{\"text\":\"two\"}]}},{\"content\":{\"parts\":[{\"text\":\"three\"}]}}]}\n\n",
+        );
+        let gemini_oauth_text = parse_sse_event(
+            b"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"wrapped\"}]}}]}}\n\n",
+        );
+        let gemini_oauth_thought = parse_sse_event(
+            b"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"hidden\"}]}}]}}\n\n",
+        );
+        let gemini_thought = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"hidden\"}]}}]}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_text
+        ));
+        assert!(is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_oauth_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_oauth_thought
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_thought
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiOpenaiChatCompletions,
+            &gemini_text
         ));
     }
 
