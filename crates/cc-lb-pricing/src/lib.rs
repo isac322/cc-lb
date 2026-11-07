@@ -285,6 +285,36 @@ impl PriceCatalog {
         can_cross_cache_cliff: bool,
         service_tier: Option<&str>,
     ) -> Option<u64> {
+        self.estimate_max_with_cache_and_images(
+            model,
+            max_input,
+            max_output,
+            estimated_cache_tokens,
+            can_cross_cache_cliff,
+            false,
+            service_tier,
+        )
+    }
+
+    /// Conservatively estimates admission cost, optionally pricing all estimated
+    /// non-cache input and output tokens at the catalog's image rates.
+    ///
+    /// Image token counts are not available for every request shape at admission.
+    /// When `use_image_rates` is true, the image rate is therefore applied to the
+    /// complete estimated non-cache region, using the larger of the image rate
+    /// and the generic rate resolved for the request's tier and threshold band.
+    /// Cache regions always retain their generic/cache pricing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_max_with_cache_and_images(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<u64> {
         let normalized = normalize_model_id(model);
         let snapshot = self.current();
         let Some((model_key, base_pricing)) = snapshot
@@ -344,13 +374,23 @@ impl PriceCatalog {
                 cache_unit_price = candidate;
             }
         }
+        let non_cache_input_price = if use_image_rates {
+            max_price(input_price, base_pricing.input_image_per_million_usd)
+        } else {
+            input_price
+        };
+        let non_cache_output_price = if use_image_rates {
+            max_price(output_price, base_pricing.output_image_per_million_usd)
+        } else {
+            output_price
+        };
         let input_cost =
-            u128::from(max_input) * u128::from(input_price.as_micros_usd()) / 1_000_000;
+            u128::from(max_input) * u128::from(non_cache_input_price.as_micros_usd()) / 1_000_000;
         let cache_cost = u128::from(effective_cache_tokens)
             * u128::from(cache_unit_price.as_micros_usd())
             / 1_000_000;
         let output_cost =
-            u128::from(max_output) * u128::from(output_price.as_micros_usd()) / 1_000_000;
+            u128::from(max_output) * u128::from(non_cache_output_price.as_micros_usd()) / 1_000_000;
         let total = input_cost
             .saturating_add(cache_cost)
             .saturating_add(output_cost);
@@ -362,6 +402,19 @@ impl PriceCatalog {
         model: &str,
         input: LocalCacheInputEstimate,
         max_output: u64,
+        service_tier: Option<&str>,
+    ) -> Option<u64> {
+        self.estimate_max_with_local_cache_and_images(model, input, max_output, false, service_tier)
+    }
+
+    /// Conservatively estimates admission cost for disjoint cache regions,
+    /// optionally applying image rates to the estimated uncached input and output.
+    pub fn estimate_max_with_local_cache_and_images(
+        &self,
+        model: &str,
+        input: LocalCacheInputEstimate,
+        max_output: u64,
+        use_image_rates: bool,
         service_tier: Option<&str>,
     ) -> Option<u64> {
         let normalized = normalize_model_id(model);
@@ -421,9 +474,19 @@ impl PriceCatalog {
         if derived_1h_price.as_micros_usd() > cache_1h_unit_price.as_micros_usd() {
             cache_1h_unit_price = derived_1h_price;
         }
+        let non_cache_input_price = if use_image_rates {
+            max_price(input_price, base_pricing.input_image_per_million_usd)
+        } else {
+            input_price
+        };
+        let non_cache_output_price = if use_image_rates {
+            max_price(output_price, base_pricing.output_image_per_million_usd)
+        } else {
+            output_price
+        };
 
         let input_cost = u128::from(input.uncached_input_tokens)
-            * u128::from(input_price.as_micros_usd())
+            * u128::from(non_cache_input_price.as_micros_usd())
             / 1_000_000;
         let cache_5m_cost = u128::from(input.cache_prefix_5m_tokens)
             * u128::from(cache_5m_unit_price.as_micros_usd())
@@ -432,7 +495,7 @@ impl PriceCatalog {
             * u128::from(cache_1h_unit_price.as_micros_usd())
             / 1_000_000;
         let output_cost =
-            u128::from(max_output) * u128::from(output_price.as_micros_usd()) / 1_000_000;
+            u128::from(max_output) * u128::from(non_cache_output_price.as_micros_usd()) / 1_000_000;
         let total = input_cost
             .saturating_add(cache_5m_cost)
             .saturating_add(cache_1h_cost)
@@ -443,6 +506,12 @@ impl PriceCatalog {
     pub fn status(&self) -> CatalogStatus {
         self.current().status
     }
+}
+
+fn max_price(generic: UsdPerMillion, image: Option<UsdPerMillion>) -> UsdPerMillion {
+    image
+        .filter(|candidate| candidate.as_micros_usd() > generic.as_micros_usd())
+        .unwrap_or(generic)
 }
 
 static GLOBAL_CATALOG: OnceLock<Arc<PriceCatalog>> = OnceLock::new();
@@ -484,6 +553,19 @@ mod tests {
             input_image_per_million_usd: None,
             output_image_per_million_usd: None,
             by_tier: BTreeMap::new(),
+        }
+    }
+    fn pricing_with_images(
+        model: &str,
+        input_usd: u64,
+        output_usd: u64,
+        input_image_usd: Option<u64>,
+        output_image_usd: Option<u64>,
+    ) -> Pricing {
+        Pricing {
+            input_image_per_million_usd: input_image_usd.map(UsdPerMillion::from_whole_usd),
+            output_image_per_million_usd: output_image_usd.map(UsdPerMillion::from_whole_usd),
+            ..pricing(model, input_usd, output_usd)
         }
     }
 
@@ -644,6 +726,136 @@ mod tests {
         assert_eq!(
             catalog.estimate_max("claude-3-5-sonnet-20241022", 2_000_000, 1_000_000, None),
             Some(21_000_000)
+        );
+    }
+
+    #[test]
+    fn estimate_max_with_images_prices_non_cache_regions_at_image_rates() {
+        let catalog = PriceCatalog::new_empty();
+        let model = "image-admission";
+        catalog.install_snapshot(snapshot_with(
+            model,
+            pricing_with_images(model, 2, 8, Some(9), Some(30)),
+        ));
+
+        assert_eq!(
+            catalog.estimate_max(model, 1_000_000, 1_000_000, None),
+            Some(10_000_000)
+        );
+        assert_eq!(
+            catalog.estimate_max_with_cache_and_images(
+                model, 1_000_000, 1_000_000, 0, false, true, None,
+            ),
+            Some(39_000_000)
+        );
+    }
+
+    #[test]
+    fn estimate_max_with_images_falls_back_to_generic_rates_when_missing() {
+        let catalog = PriceCatalog::new_empty();
+        let model = "image-admission-fallback";
+        catalog.install_snapshot(snapshot_with(
+            model,
+            pricing_with_images(model, 2, 8, None, None),
+        ));
+
+        let generic = catalog.estimate_max(model, 1_000_000, 1_000_000, None);
+        let image_mode = catalog
+            .estimate_max_with_cache_and_images(model, 1_000_000, 1_000_000, 0, false, true, None);
+        assert_eq!(image_mode, generic);
+    }
+
+    #[test]
+    fn estimate_max_with_images_does_not_apply_image_rates_to_cache_regions() {
+        let catalog = PriceCatalog::new_empty();
+        let model = "image-admission-cache";
+        let snapshot = snapshot_with_cache_prices(
+            model,
+            pricing_with_images(model, 2, 8, Some(9), Some(30)),
+            Some(UsdPerMillion::from_whole_usd(4)),
+            Some(UsdPerMillion::from_whole_usd(7)),
+        );
+        catalog.install_snapshot(snapshot);
+
+        assert_eq!(
+            catalog.estimate_max_with_cache_and_images(
+                model, 1_000_000, 1_000_000, 1_000_000, false, true, None,
+            ),
+            Some(46_000_000)
+        );
+        assert_eq!(
+            catalog.estimate_max_with_local_cache_and_images(
+                model,
+                LocalCacheInputEstimate {
+                    uncached_input_tokens: 1_000_000,
+                    cache_prefix_5m_tokens: 1_000_000,
+                    cache_prefix_1h_tokens: 0,
+                },
+                1_000_000,
+                true,
+                None,
+            ),
+            Some(46_000_000)
+        );
+    }
+
+    #[test]
+    fn estimate_max_with_images_uses_tier_and_threshold_generic_max() {
+        let catalog = PriceCatalog::new_empty();
+        let model = "image-admission-tier-threshold";
+        let mut snap = snapshot_with(
+            model,
+            Pricing {
+                model: model.to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: Some(UsdPerMillion::from_whole_usd(6)),
+                output_image_per_million_usd: Some(UsdPerMillion::from_whole_usd(20)),
+                by_tier: BTreeMap::from([(
+                    "priority".to_owned(),
+                    TierRate {
+                        input_per_million_usd: UsdPerMillion::from_whole_usd(4),
+                        output_per_million_usd: UsdPerMillion::from_whole_usd(12),
+                    },
+                )]),
+            },
+        );
+        snap.above_tokens_rates.insert(
+            model.to_owned(),
+            BTreeMap::from([(
+                0,
+                ThresholdBand {
+                    default: ThresholdRate {
+                        input_per_million_usd: None,
+                        output_per_million_usd: None,
+                        cache_creation_per_million_usd: None,
+                        cache_read_per_million_usd: None,
+                    },
+                    by_tier: BTreeMap::from([(
+                        "priority".to_owned(),
+                        ThresholdRate {
+                            input_per_million_usd: Some(UsdPerMillion::from_whole_usd(9)),
+                            output_per_million_usd: Some(UsdPerMillion::from_whole_usd(15)),
+                            cache_creation_per_million_usd: None,
+                            cache_read_per_million_usd: None,
+                        },
+                    )]),
+                },
+            )]),
+        );
+        catalog.install_snapshot(snap);
+
+        assert_eq!(
+            catalog.estimate_max_with_cache_and_images(
+                model,
+                1_000_000,
+                1_000_000,
+                0,
+                false,
+                true,
+                Some("priority"),
+            ),
+            Some(29_000_000)
         );
     }
 

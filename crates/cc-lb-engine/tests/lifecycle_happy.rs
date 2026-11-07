@@ -610,18 +610,69 @@ fn oauth_upstream_record() -> UpstreamRecord {
 
 // USD limit admission boundary.
 //
-// Every priced test model costs $1/M input and $10/M output, so with the
+// Most priced test models cost $1/M input and $10/M output, so with the
 // lifecycle's fixed 4,000-token input estimate a request reserves
-// `4_000 + 10 * max_output` micros. A 2,000-token output cap therefore
-// reserves 24,000 micros; no output cap reserves 4,000 micros.
+// `4_000 + 10 * max_output` micros. The image model below costs $5/M generic
+// input and $8/M image input.
 const PRICED_GEMINI_MODEL: &str = "gemini-limit-test";
 const UNPRICED_GEMINI_MODEL: &str = "gemini-unpriced-test";
 const PRICED_OPENAI_MODEL: &str = "gpt-limit-test";
+const PRICED_OPENAI_IMAGE_MODEL: &str = "gpt-image-limit-test";
+
 /// Rolling alias whose canonical dated form is deliberately left unpriced: a
 /// limit lookup that canonicalizes the raw body model misses the price.
 const PRICED_RAW_CLAUDE_ALIAS: &str = "claude-sonnet-4-5";
 const COST_WITH_2000_OUTPUT_MICROS: i64 = 24_000;
 const COST_WITHOUT_OUTPUT_MICROS: i64 = 4_000;
+
+#[tokio::test]
+async fn openai_image_multipart_admission_uses_image_rate_floor() {
+    for path in ["/v1/images/edits", "/v1/images/variations"] {
+        for (cap_micros, expected_status, expected_calls) in [
+            (31_999, StatusCode::TOO_MANY_REQUESTS, 0),
+            (32_000, StatusCode::OK, 1),
+        ] {
+            let state = TestState::default();
+            let lifecycle =
+                usd_limited_lifecycle(StorageUpstreamKind::OpenaiApiKey, cap_micros, &state);
+            let body = Bytes::from(format!(
+                "--image-boundary\r\n\
+                 Content-Disposition: form-data; name=\"model\"\r\n\r\n\
+                 {PRICED_OPENAI_IMAGE_MODEL}\r\n\
+                 --image-boundary\r\n\
+                 Content-Disposition: form-data; name=\"file\"; filename=\"input.png\"\r\n\
+                 Content-Type: image/png\r\n\r\n\
+                 image-bytes\r\n\
+                 --image-boundary--\r\n"
+            ));
+            let mut request = http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("x-api-key", managed_api_key())
+                .header(
+                    http::header::CONTENT_TYPE,
+                    "multipart/form-data; boundary=image-boundary",
+                )
+                .body(body)
+                .expect("OpenAI Images multipart request builds");
+            request
+                .extensions_mut()
+                .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+            let response = handle(&lifecycle, request).await;
+            if expected_status == StatusCode::OK {
+                let (status, _headers, body) = collect_body(response).await;
+                assert_eq!(status, expected_status, "path {path}, body: {body:?}");
+            } else {
+                assert_cost_rate_limited(response).await;
+            }
+            assert_eq!(
+                state.upstream_calls.load(Ordering::Relaxed),
+                expected_calls,
+                "path {path}, cap {cap_micros}"
+            );
+        }
+    }
+}
 
 #[tokio::test]
 async fn gemini_url_model_with_nested_output_cap_is_admitted_under_usd_limit() {
@@ -1224,6 +1275,29 @@ impl LimitCostEstimator for CatalogLimitCostEstimator {
             )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+
+    fn estimate_max_with_cache_and_images(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache_and_images(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                use_image_rates,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
     fn estimate_max_with_local_cache(
         &self,
         model: &str,
@@ -1235,23 +1309,48 @@ impl LimitCostEstimator for CatalogLimitCostEstimator {
             .estimate_max_with_local_cache(model, input, max_output, service_tier)
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+    fn estimate_max_with_local_cache_and_images(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache_and_images(
+                model,
+                input,
+                max_output,
+                use_image_rates,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
 }
 
 fn priced_catalog() -> Arc<PriceCatalog> {
     let models = [
         PRICED_GEMINI_MODEL,
         PRICED_OPENAI_MODEL,
+        PRICED_OPENAI_IMAGE_MODEL,
         PRICED_RAW_CLAUDE_ALIAS,
     ]
     .into_iter()
     .map(|model| {
+        let image_rate =
+            (model == PRICED_OPENAI_IMAGE_MODEL).then(|| UsdPerMillion::from_whole_usd(8));
         (
             model.to_owned(),
             Pricing {
                 model: model.to_owned(),
-                input_per_million_usd: UsdPerMillion::from_whole_usd(1),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(if image_rate.is_some() {
+                    5
+                } else {
+                    1
+                }),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(10),
-                input_image_per_million_usd: None,
+                input_image_per_million_usd: image_rate,
                 output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
             },
