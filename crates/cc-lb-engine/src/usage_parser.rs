@@ -2928,7 +2928,6 @@ mod tests {
         assert_eq!(image_usage.output_tokens, 3);
         assert_eq!(image_usage.input_image_tokens, Some(7));
         assert_eq!(image_usage.output_image_tokens, Some(2));
-        
 
         let audio = serde_json::json!({
             "text": "transcribed",
@@ -2963,14 +2962,12 @@ mod tests {
             }
         });
         let non_image_usage =
-            observe_non_stream_json_value_for_shape(&non_image, UsageShape::OpenaiEmbeddings)
-                .usage;
+            observe_non_stream_json_value_for_shape(&non_image, UsageShape::OpenaiEmbeddings).usage;
         assert_eq!(non_image_usage.input_image_tokens, None);
         assert_eq!(non_image_usage.output_image_tokens, None);
     }
     #[test]
     fn openai_image_details_retain_only_numeric_cumulative_values() {
-        let mut usage = UsageCounts::default();
         let first = serde_json::json!({
             "usage": {
                 "input_tokens": 20,
@@ -2979,7 +2976,7 @@ mod tests {
                 "output_tokens_details": {"image_tokens": 3}
             }
         });
-        usage = observe_non_stream_json_value_for_shape(&first, UsageShape::OpenaiImages).usage;
+        let mut usage = observe_non_stream_json_value_for_shape(&first, UsageShape::OpenaiImages).usage;
         assert_eq!(usage.input_image_tokens, Some(6));
         assert_eq!(usage.output_image_tokens, Some(3));
 
@@ -3022,7 +3019,6 @@ mod tests {
         assert_eq!(usage.input_image_tokens, Some(6));
         assert_eq!(usage.output_image_tokens, Some(3));
     }
-
 
     #[test]
     fn image_and_audio_usage_shapes_decode_streamed_usage() {
