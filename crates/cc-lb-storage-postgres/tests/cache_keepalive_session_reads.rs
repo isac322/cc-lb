@@ -221,6 +221,94 @@ fn scalar_session_reads_project_current_cycle_and_null_decision_cycle() {
     });
 }
 
+#[test]
+fn list_evidence_uses_renewal_ttl_upper_bound() {
+    run_postgres_case("renewal TTL upper-bound evidence", |url| async move {
+        list_evidence_uses_renewal_ttl_upper_bound_case(&url).await
+    });
+}
+
+async fn list_evidence_uses_renewal_ttl_upper_bound_case(url: &str) -> Result<()> {
+    let fixture = Fixture::create(url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+
+    let turn_ts = 1_730_000_100 - 3_605;
+    let turn_start_ms = turn_ts * 1_000;
+    let renewal_start_ms = turn_start_ms + 900;
+    let follow_up_start_ms = (turn_ts + 3_600) * 1_000 + 500;
+    let cycle_id = Uuid::from_u128(0x1102);
+    let prefix_hash = "postgres-upper-boundary-prefix";
+    for (evidence_id, evidence_kind, request_start_ms, cycle_id, event_ref, cost_micros) in [
+        (
+            "postgres-upper-boundary-renewal",
+            "renewal",
+            renewal_start_ms,
+            Some(cycle_id),
+            Some("postgres-upper-boundary-turn"),
+            Some(6_000_i64),
+        ),
+        (
+            "postgres-upper-boundary-follow-up",
+            "follow_up",
+            follow_up_start_ms,
+            None,
+            Some("postgres-upper-boundary-follow-up"),
+            None,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence
+             (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+              prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+              upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+              request_ref, event_ref, created_at_ms)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+        )
+        .bind(evidence_id)
+        .bind(cycle_id)
+        .bind(evidence_kind)
+        .bind(i64::try_from(request_start_ms)?)
+        .bind("upper-boundary-fingerprint")
+        .bind(prefix_hash)
+        .bind("policy-v1")
+        .bind("schema-v1")
+        .bind(PRINCIPAL_ID)
+        .bind(UPSTREAM_ID)
+        .bind("claude-sonnet-4-5")
+        .bind("1h")
+        .bind("hit")
+        .bind(20_000_i64)
+        .bind(cost_micros)
+        .bind(format!("request-{evidence_id}"))
+        .bind(event_ref)
+        .bind(i64::try_from(request_start_ms)?)
+        .execute(storage.pool())
+        .await?;
+    }
+
+    let evidence = storage
+        .list_cache_keepalive_evidence_for_activity(
+            PRINCIPAL_ID,
+            &[cycle_id],
+            &[String::from("postgres-upper-boundary-turn")],
+            turn_start_ms,
+            turn_start_ms + 3_600_000,
+        )
+        .await?;
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|entry| entry.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "postgres-upper-boundary-renewal",
+            "postgres-upper-boundary-follow-up"
+        ]
+    );
+    fixture.drop_schema().await
+}
+
 async fn read_model_contract(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));

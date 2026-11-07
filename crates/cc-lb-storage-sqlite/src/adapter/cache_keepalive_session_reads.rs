@@ -412,6 +412,16 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             .map(|entry| entry.request_start_ms)
             .min()
             .unwrap_or(follow_up_from_ms);
+        let follow_up_until_ms = evidence
+            .iter()
+            .filter(|entry| entry.evidence_kind == "renewal")
+            .map(|entry| {
+                entry
+                    .request_start_ms
+                    .saturating_add(entry.ttl.as_secs().saturating_mul(1_000))
+            })
+            .max()
+            .unwrap_or(follow_up_until_ms);
         let mut follow_up_query = QueryBuilder::<Sqlite>::new(
             "SELECT * FROM cache_keepalive_evidence \
              WHERE principal_id = ",
