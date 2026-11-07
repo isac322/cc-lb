@@ -799,6 +799,179 @@ describe('Overview pool quota usage', () => {
     );
   });
 
+  it('carries unchanged pool usage through a polling refresh to the new right edge', () => {
+    const initialNow = POOL_HISTORY_NOW;
+    const refreshedNow = initialNow + 60;
+    const snapshot = initialNow - 300;
+    const initialAggregate = aggregateResponse(initialNow, 24);
+    const initialHistory = poolHistoryResponse(initialNow, 24, snapshot, 86400);
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: initialAggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: initialHistory,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    const { rerender } = render(<OverviewPage />);
+    expect(screen.getByTestId('pool-quota-area-5h').getAttribute('d')).toBe(
+      `${snapshot}:24|${initialNow}:24`,
+    );
+    expect(screen.getByTestId('pool-quota-captions').textContent).toContain(
+      '1 snapshots ·',
+    );
+    const refreshedAggregate = aggregateResponse(refreshedNow, 24);
+    const refreshedHistory = poolHistoryResponse(
+      refreshedNow,
+      24,
+      snapshot,
+      86400,
+    );
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: refreshedAggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: refreshedHistory,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    rerender(<OverviewPage />);
+
+    expect(screen.getByTestId('pool-quota-area-5h').getAttribute('d')).toBe(
+      `${snapshot}:24|${refreshedNow}:24`,
+    );
+  });
+
+  it('carries the raw latest utilization at the right edge when the final bucket preserves a higher peak', () => {
+    const now = POOL_HISTORY_NOW;
+    const bucketStart = now - 120;
+    const latestAt = now - 30;
+    const aggregate = aggregateResponse(now, 20);
+    aggregate.windows = aggregate.windows.filter(
+      (entry) => entry.window === '7d_fable',
+    );
+    const history = poolHistoryResponse(now, 40, bucketStart, 86400);
+    history.windows = history.windows
+      .filter((entry) => entry.window === '7d_fable')
+      .map((entry) => ({
+        ...entry,
+        latest: entry.latest
+          ? {
+              ...entry.latest,
+              snapshot_at_unix_secs: latestAt,
+              utilization: 0.2,
+              utilization_percent: 20,
+            }
+          : null,
+        series: [
+          {
+            snapshot_at_unix_secs: bucketStart,
+            utilization_percent: 40,
+          },
+        ],
+      }));
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: history,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    expect(
+      screen.getByTestId('pool-quota-area-7d_fable').getAttribute('d'),
+    ).toBe(`${bucketStart}:40|${now}:20`);
+    expect(screen.getByTestId('pool-quota-legend-slot').textContent).toBe(
+      '7d (Fable) · 20% used · resets in 1h',
+    );
+  });
+
+  it('clamps a pre-range pool snapshot across an idle 1h range', () => {
+    routerMock.search = { range: '1h' };
+    const now = POOL_HISTORY_NOW;
+    const rangeSecs = 3600;
+    const rangeStart = now - rangeSecs;
+    const snapshot = rangeStart - 300;
+    const aggregate = aggregateResponse(now, 27);
+    aggregate.windows = aggregate.windows.filter(
+      (entry) => entry.window === '5h',
+    );
+    const history = poolHistoryResponse(now, 27, snapshot, rangeSecs);
+    history.windows = history.windows.filter((entry) => entry.window === '5h');
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: history,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    const card = screen.getByTestId('pool-quota-card');
+    expect(screen.getByTestId('pool-quota-area-5h').getAttribute('d')).toBe(
+      `${rangeStart}:27|${now}:27`,
+    );
+    expect(
+      card.querySelector('[data-testid="pool-quota-legend-slot"]')?.textContent,
+    ).toBe('5h · 27% used · resets in 1h');
+    expect(card.textContent).not.toContain(
+      'No timeline data yet for this range',
+    );
+    expect(card.textContent).not.toContain('No reading');
+  });
+
+  it('does not carry an outage-old snapshot to the right edge or across an idle range', () => {
+    routerMock.search = { range: '1h' };
+    const now = POOL_HISTORY_NOW;
+    const rangeSecs = 3600;
+    const staleSnapshot = now - 7200;
+    const aggregate = aggregateResponse(now, 27);
+    const history = poolHistoryResponse(now, 27, now - 3900, rangeSecs);
+    history.windows = history.windows.map((entry) => ({
+      ...entry,
+      latest: entry.latest
+        ? {
+            ...entry.latest,
+            snapshot_at_unix_secs: staleSnapshot,
+            max_observed_at_unix_millis: staleSnapshot * 1000,
+          }
+        : null,
+    }));
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: history,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    const card = screen.getByTestId('pool-quota-card');
+    expect(card.textContent).toContain('No timeline data yet for this range');
+  });
+
   it('omits the absent 5h window from the pool legend and chart', () => {
     const returnedWindows: Record<string, true> = {
       '7d': true,
