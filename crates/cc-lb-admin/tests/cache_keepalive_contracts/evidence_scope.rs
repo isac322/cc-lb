@@ -142,8 +142,7 @@ async fn seed_boundary_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, p
 
 #[test]
 fn list_and_detail_include_follow_up_at_turn_boundary_like_summary() {
-    const TEST_NAME: &str =
-        "cache_keepalive_contracts::evidence_scope::list_and_detail_include_follow_up_at_turn_boundary_like_summary";
+    const TEST_NAME: &str = "cache_keepalive_contracts::evidence_scope::list_and_detail_include_follow_up_at_turn_boundary_like_summary";
 
     if std::env::var("CC_LB_KEEPALIVE_EVIDENCE_SCOPE_CHILD").as_deref() == Ok("1") {
         tokio::runtime::Builder::new_current_thread()
@@ -253,8 +252,7 @@ async fn list_and_detail_include_follow_up_at_turn_boundary_like_summary_async()
 
 #[test]
 fn list_and_detail_include_follow_up_at_subsecond_ttl_boundary() {
-    const TEST_NAME: &str =
-        "cache_keepalive_contracts::evidence_scope::list_and_detail_include_follow_up_at_subsecond_ttl_boundary";
+    const TEST_NAME: &str = "cache_keepalive_contracts::evidence_scope::list_and_detail_include_follow_up_at_subsecond_ttl_boundary";
 
     if std::env::var("CC_LB_KEEPALIVE_EVIDENCE_SCOPE_UPPER_CHILD").as_deref() == Ok("1") {
         tokio::runtime::Builder::new_current_thread()
