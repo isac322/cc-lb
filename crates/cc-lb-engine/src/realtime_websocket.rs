@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::responses_websocket::WebSocketCandidate;
 use crate::terminal_observer::{LifecycleContext, UpstreamErrorCode};
-use crate::usage_parser::{merge_usage_value, merge_usage_value_for_shape, UsageCounts};
+use crate::usage_parser::{UsageCounts, merge_usage_value, merge_usage_value_for_shape};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RealtimeWebSocketKind {
@@ -300,7 +300,6 @@ mod tests {
         assert_eq!(counts.input_image_tokens, None);
         assert_eq!(counts.output_image_tokens, None);
     }
-
 
     #[test]
     fn realtime_usage_subtracts_cached_input_tokens() {

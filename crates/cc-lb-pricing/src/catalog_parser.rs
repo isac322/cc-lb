@@ -245,7 +245,6 @@ fn parse_optional_cost(
         .unwrap_or(Ok(None))
 }
 
-
 fn discover_tier_costs<'a>(object: &'a Map<String, Value>, base: &str) -> RawTierCosts<'a> {
     object
         .iter()

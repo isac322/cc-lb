@@ -2976,7 +2976,8 @@ mod tests {
                 "output_tokens_details": {"image_tokens": 3}
             }
         });
-        let mut usage = observe_non_stream_json_value_for_shape(&first, UsageShape::OpenaiImages).usage;
+        let mut usage =
+            observe_non_stream_json_value_for_shape(&first, UsageShape::OpenaiImages).usage;
         assert_eq!(usage.input_image_tokens, Some(6));
         assert_eq!(usage.output_image_tokens, Some(3));
 

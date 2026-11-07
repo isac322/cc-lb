@@ -128,13 +128,8 @@ pub fn virtual_cost_micros_full_with_context_and_images(
     );
     let input_image_tokens = input_image_tokens.min(input);
     let output_image_tokens = output_image_tokens.min(output);
-    let input_image_price = pricing
-        .input_image_per_million_usd
-        .unwrap_or(input_price);
-    let output_image_price = pricing
-        .output_image_per_million_usd
-        .unwrap_or(output_price);
-
+    let input_image_price = pricing.input_image_per_million_usd.unwrap_or(input_price);
+    let output_image_price = pricing.output_image_per_million_usd.unwrap_or(output_price);
 
     let generic_creation = cache_creation_input_tokens
         .saturating_sub(cache_creation_5m_input.saturating_add(cache_creation_1h_input));
@@ -368,17 +363,13 @@ mod tests {
             status: CatalogStatus::Ok,
         });
 
-        let context = virtual_cost_micros_full_with_context(
-            model, 11, 3, 0, 0, 0, 0, None,
-        )
-        .expect("known model");
-        let modality = virtual_cost_micros_full_with_context_and_images(
-            model, 11, 3, 0, 0, 0, 0, 0, 0, None,
-        )
-        .expect("known model");
+        let context = virtual_cost_micros_full_with_context(model, 11, 3, 0, 0, 0, 0, None)
+            .expect("known model");
+        let modality =
+            virtual_cost_micros_full_with_context_and_images(model, 11, 3, 0, 0, 0, 0, 0, 0, None)
+                .expect("known model");
         assert_eq!(modality, context);
     }
-
 
     #[test]
     fn threshold_rates_activate_only_above_the_cliff_and_inherit_sparse_fields() {
