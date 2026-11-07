@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub use cost::{
     cache_creation_1h_micros_from_input, virtual_cost_micros_full,
-    virtual_cost_micros_full_with_context,
+    virtual_cost_micros_full_with_context, virtual_cost_micros_full_with_context_and_images,
 };
 use cost::{record_missing_price_field, resolved_cache_creation_1h_price};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
@@ -54,6 +54,10 @@ pub struct Pricing {
     pub model: String,
     pub input_per_million_usd: UsdPerMillion,
     pub output_per_million_usd: UsdPerMillion,
+    #[serde(default)]
+    pub input_image_per_million_usd: Option<UsdPerMillion>,
+    #[serde(default)]
+    pub output_image_per_million_usd: Option<UsdPerMillion>,
     #[serde(default)]
     pub by_tier: BTreeMap<String, TierRate>,
 }
@@ -477,6 +481,8 @@ mod tests {
             model: model.to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(input_usd),
             output_per_million_usd: UsdPerMillion::from_whole_usd(output_usd),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
             by_tier: BTreeMap::new(),
         }
     }

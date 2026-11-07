@@ -1330,6 +1330,8 @@ mod cache_score_tests {
                         output_per_million_usd: UsdPerMillion::from_whole_usd(12),
                     },
                 )]),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
             },
         );
         snapshot
@@ -10941,6 +10943,8 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
     cc_lb_lifecycle::UsageSnapshot {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
+        input_image_tokens: u.input_image_tokens,
+        output_image_tokens: u.output_image_tokens,
         tool_use_prompt_tokens: u.tool_use_prompt_tokens,
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_creation_input_tokens_5m: u.cache_creation_input_tokens_5m,

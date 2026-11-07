@@ -1589,10 +1589,12 @@ impl ResponsesWebSocketGateway {
             if let (Some(engine), Some(usage)) =
                 (turn.prepared.limit_engine.as_ref(), turn.usage.as_ref())
             {
-                let cost = cc_lb_pricing::virtual_cost_micros_full_with_context(
+                let cost = cc_lb_pricing::virtual_cost_micros_full_with_context_and_images(
                     &turn.prepared.model,
                     usage.input_tokens,
                     usage.output_tokens,
+                    usage.input_image_tokens.unwrap_or(0),
+                    usage.output_image_tokens.unwrap_or(0),
                     usage.cache_creation_input_tokens,
                     usage.cache_creation_input_tokens_5m,
                     usage.cache_creation_input_tokens_1h,
@@ -1887,6 +1889,8 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
     UsageSnapshot {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
+        input_image_tokens: usage.input_image_tokens,
+        output_image_tokens: usage.output_image_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
