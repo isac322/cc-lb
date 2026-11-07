@@ -2373,6 +2373,8 @@ fn claude_default_snapshot(clock: &dyn cc_lb_clock::Clock) -> cc_lb_pricing::Cat
                 model: (*name).to_owned(),
                 input_per_million_usd: UsdPerMillion::from_micros_usd(*input),
                 output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: Default::default(),
             },
         );
@@ -4115,6 +4117,8 @@ mod tests {
                 model: TIER_PRICING_TEST_MODEL.to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier,
             },
         );
@@ -5008,6 +5012,8 @@ mod tests {
                 model: "operator-model-a".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: Default::default(),
             },
         );
