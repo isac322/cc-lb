@@ -338,6 +338,28 @@ async fn rejecting_provider(
     (address, attempts, task)
 }
 
+async fn accepting_provider() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider listener");
+    let address = listener.local_addr().expect("provider address");
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_attempts = attempts.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            observed_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let Ok(mut provider) = tokio_tungstenite::accept_async(stream).await else {
+                continue;
+            };
+            while provider.next().await.is_some() {}
+        }
+    });
+    (address, attempts, task)
+}
+
 fn assert_safe_http_rejection(response: &http::Response<Option<Vec<u8>>>, status: StatusCode) {
     assert_eq!(response.status(), status);
     assert_eq!(response.headers()["retry-after"], "17");
@@ -509,6 +531,90 @@ async fn websocket_handshake_gemini_provider_500_opens_local_breaker() {
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 5);
     task.abort();
     provider_task.abort();
+}
+
+#[tokio::test]
+async fn websocket_handshake_realtime_and_gemini_same_host_breakers_are_scoped_to_upstream() {
+    for gemini in [false, true] {
+        let (failing_address, failing_attempts, failing_task) =
+            rejecting_provider(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let (healthy_address, healthy_attempts, healthy_task) = accepting_provider().await;
+        let mut failing = websocket_upstream(
+            1,
+            "failing-credential",
+            Url::parse(&format!("http://{failing_address}/")).expect("failing provider URL"),
+        );
+        let mut healthy = websocket_upstream(
+            2,
+            "healthy-credential",
+            Url::parse(&format!("http://{healthy_address}/")).expect("healthy provider URL"),
+        );
+        failing.kind = if gemini {
+            UpstreamKind::GeminiApiKey
+        } else {
+            UpstreamKind::OpenaiApiKey
+        };
+        healthy.kind = failing.kind;
+        let state = websocket_test_state(
+            vec![failing],
+            TerminalStrategy::FirstPick,
+            DrainController::new(),
+            Arc::new(RealtimeKeySignerFactory),
+            Arc::new(FixtureKeyStore),
+            vec!["*".to_owned()],
+        )
+        .await;
+        let router = proxy_router(state.clone(), 30);
+        let (proxy, task) = spawn_proxy_router(router).await;
+
+        for _ in 0..5 {
+            if gemini {
+                gemini_rejection_attempt(proxy, StatusCode::INTERNAL_SERVER_ERROR, true).await;
+            } else {
+                openai_rejection_attempt(proxy, StatusCode::INTERNAL_SERVER_ERROR).await;
+            }
+        }
+        assert_eq!(failing_attempts.load(std::sync::atomic::Ordering::SeqCst), 5);
+
+        replace_websocket_upstreams(&state, vec![healthy]);
+        if gemini {
+            let (mut client, response) = tokio::time::timeout(
+                Duration::from_secs(5),
+                connect_async(realtime_request(
+                    proxy,
+                    "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                )),
+            )
+            .await
+            .expect("healthy Gemini handshake response arrives")
+            .expect("healthy Gemini handshake succeeds");
+            assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+            client
+                .send(UpstreamMessage::Text(
+                    r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
+                ))
+                .await
+                .expect("healthy Gemini setup sends");
+            let _ = client.close(None).await;
+        } else {
+            let (mut client, response) = tokio::time::timeout(
+                Duration::from_secs(5),
+                connect_async(realtime_request(proxy, "/openai/v1/realtime?model=gpt-realtime")),
+            )
+            .await
+            .expect("healthy OpenAI handshake response arrives")
+            .expect("healthy OpenAI handshake succeeds");
+            assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+            let _ = client.close(None).await;
+        }
+        assert_eq!(
+            healthy_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        task.abort();
+        failing_task.abort();
+        healthy_task.abort();
+    }
 }
 
 #[tokio::test]

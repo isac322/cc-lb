@@ -71,6 +71,45 @@ Set-Cookie: provider-secret-cookie\r\n\r\n{}",
     )
 }
 
+async fn spawn_responses_success_provider() -> (Url, Arc<AtomicUsize>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("provider listener binds");
+    let address = listener
+        .local_addr()
+        .expect("provider listener has an address");
+    let requests = Arc::new(AtomicUsize::new(0));
+    let requests_for_task = requests.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener.accept().await else {
+                break;
+            };
+            requests_for_task.fetch_add(1, Ordering::SeqCst);
+            let Ok(mut provider) = accept_async(socket).await else {
+                continue;
+            };
+            while let Some(Ok(message)) = provider.next().await {
+                if message.is_text() {
+                    provider
+                        .send(UpstreamMessage::Text(
+                            r#"{"type":"response.created","response":{"id":"healthy","store":false}}"#
+                                .into(),
+                        ))
+                        .await
+                        .expect("healthy provider sends response");
+                    break;
+                }
+            }
+        }
+    });
+    (
+        Url::parse(&format!("http://{address}/")).expect("provider URL parses"),
+        requests,
+        task,
+    )
+}
+
 async fn receive_error(client: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> Value {
     let message = tokio::time::timeout(Duration::from_secs(5), client.next())
         .await
@@ -267,4 +306,72 @@ async fn websocket_handshake_responses_candidate_loop_falls_back_after_provider_
         first_task.abort();
         let _ = tokio::time::timeout(Duration::from_secs(5), second_task).await;
     }
+}
+
+#[tokio::test]
+async fn websocket_handshake_responses_same_host_breakers_are_scoped_to_upstream() {
+    let (failing_url, failing_requests, failing_task) = spawn_http_error_provider(
+        500,
+        r#"{"error":{"code":"provider_server_error","message":"provider-body-secret"}}"#
+            .to_owned(),
+    )
+    .await;
+    let (healthy_url, healthy_requests, healthy_task) = spawn_responses_success_provider().await;
+    let failing = websocket_upstream(1, "failing-credential", failing_url);
+    let healthy = websocket_upstream(2, "healthy-credential", healthy_url);
+    let state = websocket_test_state(
+        vec![failing],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(WebSocketTestSignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    let router = proxy_router(state.clone(), 30);
+    let (proxy_address, proxy_task) = spawn_proxy_router(router).await;
+
+    for _ in 0..5 {
+        let (mut client, response) = connect_async(websocket_request(proxy_address))
+            .await
+            .expect("downstream handshake succeeds");
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        client
+            .send(UpstreamMessage::Text(RESPONSE_CREATE.into()))
+            .await
+            .expect("response.create sends");
+        let error = receive_error(&mut client).await;
+        assert_eq!(error["status"], 500);
+        let _ = client.close(None).await;
+    }
+    assert_eq!(failing_requests.load(Ordering::SeqCst), 5);
+
+    replace_websocket_upstreams(&state, vec![healthy]);
+    for _ in 0..10 {
+        let (mut client, response) = connect_async(websocket_request(proxy_address))
+            .await
+            .expect("healthy downstream handshake succeeds");
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        client
+            .send(UpstreamMessage::Text(RESPONSE_CREATE.into()))
+            .await
+            .expect("response.create sends");
+        let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("healthy response arrives")
+            .expect("healthy downstream remains open")
+            .expect("healthy response decodes");
+        assert_eq!(
+            message,
+            UpstreamMessage::Text(
+                r#"{"type":"response.created","response":{"id":"healthy","store":false}}"#
+                    .into(),
+            )
+        );
+        let _ = client.close(None).await;
+    }
+    assert_eq!(healthy_requests.load(Ordering::SeqCst), 10);
+    proxy_task.abort();
+    failing_task.abort();
+    healthy_task.abort();
 }

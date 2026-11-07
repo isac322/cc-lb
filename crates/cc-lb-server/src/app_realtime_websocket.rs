@@ -83,8 +83,7 @@ async fn connect_realtime_provider(
                     "could not build provider WebSocket request",
                 )
             })?;
-        let host = session.url.host_str().unwrap_or("unknown").to_owned();
-        connect_provider_websocket(state, host, request, guard).await
+        connect_provider_websocket(state, session.candidate.upstream_id, request, guard).await
     };
     tokio::select! {
         result = operation => result,
