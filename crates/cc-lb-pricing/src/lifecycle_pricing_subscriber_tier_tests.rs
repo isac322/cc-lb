@@ -91,6 +91,7 @@ fn stream_completed_batch_tier_is_used_for_actual_cost() {
                     service_tier: Some("batch".to_owned()),
                     ..UsageSnapshot::default()
                 },
+                usage_present: true,
                 ..StreamSuccess::default()
             }),
         },

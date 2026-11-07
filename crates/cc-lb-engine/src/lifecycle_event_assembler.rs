@@ -1351,12 +1351,14 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         LifecycleEvent::StreamCompleted { result, .. } => match result {
             Ok(success) => {
-                let prior_tool_use_prompt_tokens = partial.usage.tool_use_prompt_tokens;
-                let incoming_tool_use_prompt_tokens = success.usage.tool_use_prompt_tokens;
-                partial.usage = success.usage;
-                partial.usage.tool_use_prompt_tokens =
-                    incoming_tool_use_prompt_tokens.or(prior_tool_use_prompt_tokens);
-                partial.usage_seen = true;
+                if success.usage_present {
+                    let prior_tool_use_prompt_tokens = partial.usage.tool_use_prompt_tokens;
+                    let incoming_tool_use_prompt_tokens = success.usage.tool_use_prompt_tokens;
+                    partial.usage = success.usage;
+                    partial.usage.tool_use_prompt_tokens =
+                        incoming_tool_use_prompt_tokens.or(prior_tool_use_prompt_tokens);
+                    partial.usage_seen = true;
+                }
                 partial.stream_success = Some(success.sse_event_count);
                 partial.stream_body_bytes = success.body_bytes;
                 partial.stream_body_chunk_count = success.body_chunk_count;
@@ -1870,6 +1872,72 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(partial.cost_options().total, Some(4242));
+    }
+
+    #[test]
+    fn stream_success_usage_presence_preserves_measurement_state() {
+        let event_id = eid("stream-success-usage-presence");
+        let mut partial = Partial::default();
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: event_id.clone(),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_tokens: 99,
+                        output_tokens: 101,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(!partial.usage_seen);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::UsageObserved {
+                event_id: event_id.clone(),
+                usage: UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                },
+                source: UsageSource::MessageDelta,
+            },
+        );
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: event_id.clone(),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_tokens: 99,
+                        output_tokens: 101,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(partial.usage_seen);
+        assert_eq!(partial.usage.input_tokens, 7);
+        assert_eq!(partial.usage.output_tokens, 11);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id,
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot::default(),
+                    usage_present: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(partial.usage_seen);
+        assert_eq!(partial.usage, UsageSnapshot::default());
     }
 
     #[test]
@@ -4041,6 +4109,7 @@ mod tests {
                     cache_read_input_tokens: 4,
                     ..UsageSnapshot::default()
                 },
+                usage_present: true,
                 sse_event_count: 3,
                 first_body_chunk_ms: Some(11),
                 body_bytes: Some(456),
