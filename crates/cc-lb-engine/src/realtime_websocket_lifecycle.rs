@@ -222,6 +222,7 @@ impl Lifecycle {
                     record,
                     auth.success(),
                     || {
+                        let use_image_rates = matches!(kind, RealtimeWebSocketKind::Openai);
                         let capability = classify_provider_capability(
                             &ctx.method,
                             &ctx.path,
@@ -231,7 +232,7 @@ impl Lifecycle {
                             &ctx.canonical_model_id,
                             capability,
                             &[],
-                            use_image_rates_for_admission(capability, &ctx.path),
+                            use_image_rates || use_image_rates_for_admission(capability, &ctx.path),
                         )
                     },
                 )
