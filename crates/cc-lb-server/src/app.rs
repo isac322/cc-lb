@@ -2881,9 +2881,13 @@ fn provider_websocket_error_from_http(response: http::Response<Option<Vec<u8>>>)
     .with_provider_headers(&headers)
 }
 
+fn websocket_breaker_key(upstream_id: uuid::Uuid) -> String {
+    format!("websocket:{upstream_id}")
+}
+
 async fn connect_provider_websocket(
     state: &ProxyState,
-    host: String,
+    upstream_id: uuid::Uuid,
     request: http::Request<()>,
     bulkhead_guard: cc_lb_engine::OwnedBulkheadGuard,
 ) -> Result<
@@ -2893,9 +2897,11 @@ async fn connect_provider_websocket(
     ),
     WebSocketError,
 > {
-    let breaker = state
-        .breaker_registry
-        .breaker(host, state.breaker_config, state.clock.clone());
+    let breaker = state.breaker_registry.breaker(
+        websocket_breaker_key(upstream_id),
+        state.breaker_config,
+        state.clock.clone(),
+    );
     let permit = breaker.permit().map_err(|_| {
         WebSocketError::new(
             502,
@@ -2956,7 +2962,6 @@ const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct ResponsesProviderParams<'a> {
     state: &'a ProxyState,
-    host: String,
     request: http::Request<()>,
     connection_id: u64,
     upstream_id: uuid::Uuid,
@@ -2970,7 +2975,6 @@ async fn start_responses_provider(
 ) -> Result<WsProviderConnection, WebSocketError> {
     let ResponsesProviderParams {
         state,
-        host,
         request,
         connection_id,
         upstream_id,
@@ -2979,7 +2983,7 @@ async fn start_responses_provider(
         events,
     } = params;
     let (upstream, bulkhead_guard) =
-        connect_provider_websocket(state, host, request, bulkhead_guard).await?;
+        connect_provider_websocket(state, upstream_id, request, bulkhead_guard).await?;
     let (sink, mut stream) = upstream.split();
     let task = tokio::spawn(async move {
         let reason = loop {
@@ -3174,7 +3178,6 @@ async fn dispatch_responses_websocket(
                 continue;
             }
         };
-        let host = prepared.0.host_str().unwrap_or("unknown").to_owned();
         let request = match responses_websocket_request(prepared.0, prepared.1) {
             Ok(request) => request,
             Err(error) => {
@@ -3194,7 +3197,6 @@ async fn dispatch_responses_websocket(
         *next_connection_id = next_id;
         let connection = match start_responses_provider(ResponsesProviderParams {
             state,
-            host,
             request,
             connection_id,
             upstream_id: candidate.upstream_id,
@@ -5539,6 +5541,15 @@ mod tests {
                 acquire_timeout: Duration::from_secs(1),
             },
         }
+    }
+
+    fn replace_websocket_upstreams(state: &ProxyState, records: Vec<UpstreamRecord>) {
+        let view = state.dynamic_view.load();
+        state.dynamic_view.store(
+            cc_lb_control::DynamicViewBuilder::from_view(&view)
+                .upstream_records(records)
+                .build(),
+        );
     }
 
     async fn spawn_proxy_router(router: Router) -> (SocketAddr, JoinHandle<()>) {
