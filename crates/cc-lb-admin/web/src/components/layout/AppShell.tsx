@@ -1,13 +1,13 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Popover as BasePopover } from '@base-ui/react/popover';
-import { useRouterState } from '@tanstack/react-router';
 import { HelpCircle, Search, UserRound, X } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
+import { useDesignNavigation } from '../../designs/registry';
 import { useAuthSessionContext } from '../../lib/authSession';
+import { PreviewControls } from '../../lib/previewControls';
 import { useHealth } from '../../lib/queries';
 import { ThemeToggle } from '../ThemeToggle';
 import { cx, Hint, ShellPageTitleProvider } from '../ui/primitives';
-import { navItemForPath } from './navItems';
 import {
   BrandMark,
   SidebarBrand,
@@ -30,8 +30,7 @@ const BREAK_GLASS_HELP =
  * a background tab still signals the incident.
  */
 function useDocumentTitle() {
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const pageLabel = navItemForPath(pathname)?.label ?? null;
+  const pageLabel = useDesignNavigation().current?.label ?? null;
   const attention = useUpstreamOAuthAttention().nudges.size;
 
   useEffect(() => {
@@ -55,8 +54,7 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
     return localStorage.getItem(SIDEBAR_KEY) === '1';
   });
   const [mobileOpen, setMobileOpen] = useState(false);
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const pageLabel = navItemForPath(pathname)?.label ?? null;
+  const pageLabel = useDesignNavigation().current?.label ?? null;
   const health = useHealth();
   useDocumentTitle();
 
@@ -133,8 +131,12 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
             <div className="overflow-y-auto min-h-0 pb-8">
               <SidebarNav
                 collapsed={false}
+                mobile
                 onNavigate={() => setMobileOpen(false)}
               />
+              <div className="px-3 pb-4">
+                <PreviewControls embedded />
+              </div>
             </div>
             <SidebarFooter collapsed={false} version={version} />
           </BaseDialog.Popup>
@@ -159,11 +161,7 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
           </ShellPageTitleProvider>
         </main>
       </div>
-      <SidebarTabBar
-        pathname={pathname}
-        moreOpen={mobileOpen}
-        onMore={() => setMobileOpen(true)}
-      />
+      <SidebarTabBar moreOpen={mobileOpen} onMore={() => setMobileOpen(true)} />
     </div>
   );
 }

@@ -49,6 +49,20 @@ export class ApiError extends Error {
   }
 }
 
+export function apiErrorDetail(error: ApiError): string | null {
+  if (!error.body || typeof error.body !== 'object') return null;
+  const body = error.body as Record<string, unknown>;
+  const source =
+    body.error && typeof body.error === 'object'
+      ? (body.error as Record<string, unknown>)
+      : body;
+  for (const key of ['detail', 'message', 'reason']) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return null;
+}
+
 export function getUnauthorizedAuthMode(error: unknown): AdminAuthMode | null {
   if (!(error instanceof ApiError) || error.status !== 401) {
     return null;
@@ -393,6 +407,16 @@ export interface UsageSeries {
   key: string;
   buckets: UsageBucket[];
 }
+/** Provider grouping uses family keys: anthropic, openai, gemini.
+ * `providers=<comma-separated families>` is supported by summary, usage and
+ * request-event list/delta/stream/histogram endpoints; absent means no filter.
+ */
+export type DashboardUsageGroup =
+  | 'none'
+  | 'model'
+  | 'principal'
+  | 'upstream'
+  | 'provider';
 
 export interface DashboardUsageResponse {
   range: string;
@@ -457,6 +481,14 @@ export const RequestEventKindSchema = z.enum([
   'openai_responses',
   'gemini_generate_content',
   'gemini_count_tokens',
+  'chat_completions',
+  'completions',
+  'embeddings',
+  'moderations',
+  'audio',
+  'images',
+  'codex_auxiliary',
+  'gemini_predict',
   'models',
   'files',
   'other',
@@ -673,21 +705,35 @@ export interface EventsHistogramPayload {
   bucket_ms: number;
   bucket_count: number;
 }
-
 export interface EventsHistogramRange {
   readonly sinceSecs: number;
   readonly untilSecs: number;
   readonly bucketMs: number;
 }
 
+export type QueryFilterValue = string | readonly string[] | undefined;
+
+export function appendQueryParams(
+  params: URLSearchParams,
+  filters: Record<string, QueryFilterValue>,
+): void {
+  for (const [key, value] of Object.entries(filters)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item) params.append(key, item);
+      }
+    } else if (typeof value === 'string' && (value || key === 'providers')) {
+      params.set(key, value);
+    }
+  }
+}
+
 export function fetchEventsHistogram(
-  filters: Record<string, string | undefined>,
+  filters: Record<string, QueryFilterValue>,
   range: EventsHistogramRange,
 ): Promise<EventsHistogramPayload> {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filters)) {
-    if (value) params.set(key, value);
-  }
+  appendQueryParams(params, filters);
   params.set('since_unix_secs', String(range.sinceSecs));
   params.set('until_unix_secs', String(range.untilSecs));
   params.set('bucket_ms', String(range.bucketMs));
@@ -1143,11 +1189,22 @@ export function keyUsageProvenance(
   };
 }
 
+export const UpstreamKindSchema = z.enum([
+  'anthropic_api_key',
+  'anthropic_oauth',
+  'openai_api_key',
+  'openai_oauth',
+  'gemini_api_key',
+  'gemini_oauth',
+]);
+export type UpstreamKind = z.infer<typeof UpstreamKindSchema>;
+
 export const UpstreamSchema = z.object({
   id: z.string(),
   name: z.string(),
-  kind: z.enum(['anthropic_api_key', 'anthropic_oauth']),
+  kind: UpstreamKindSchema,
   enabled: z.boolean(),
+
   base_url: z.string().nullable(),
 
   /** `anthropic_api_key` upstreams only; absent on rows never checked. */
@@ -1167,6 +1224,21 @@ export const UpstreamSchema = z.object({
     last_warmup_at_unix_secs: z.number().int().nonnegative().nullable(),
   }),
 });
+
+export type UpstreamProvider = 'Anthropic' | 'OpenAI' | 'Gemini';
+
+export function upstreamProvider(kind: UpstreamKind): UpstreamProvider {
+  if (kind.startsWith('openai_')) return 'OpenAI';
+  if (kind.startsWith('gemini_')) return 'Gemini';
+  return 'Anthropic';
+}
+
+export function upstreamKindLabel(kind: UpstreamKind): string {
+  const provider = upstreamProvider(kind);
+  return kind.endsWith('_oauth')
+    ? `${provider} Subscription`
+    : `${provider} API key`;
+}
 
 export type Upstream = z.infer<typeof UpstreamSchema>;
 
@@ -1212,6 +1284,10 @@ export interface UpstreamOAuthStatusResponse {
   mode: OAuthTokenMode | null;
   can_refresh: boolean;
   scopes: string[];
+  account_email?: string | null;
+  account_id?: string | null;
+  plan?: string | null;
+  project_id?: string | null;
 }
 
 export interface SubscriptionMetadataInner {
@@ -1252,6 +1328,10 @@ export interface SubscriptionMetadataResponse {
   upstream_id: string;
   subscription_metadata: SubscriptionMetadataInner | null;
   organization_metadata: OrganizationMetadataInner | null;
+  account_email?: string | null;
+  account_id?: string | null;
+  plan?: string | null;
+  project_id?: string | null;
 }
 
 export function triggerSubscriptionMetadataRefresh(
@@ -1292,25 +1372,63 @@ export interface AuditQueryResponse {
 /**
  * Quota windows the web UI knows how to present. The backend may report
  * others — notably `unified`, the account restriction envelope, which still
- * exists on the wire and in admin payloads — but they are never requested or
- * rendered here and are filtered out by the visibility selectors.
+ * exists on the wire and in admin payloads — but it is never rendered here
+ * and is filtered out by the visibility selectors.
  */
 export type SubscriptionQuotaWindow =
   | '5h'
   | '7d'
+  | 'gemini_5h'
+  | 'gemini_7d'
+  | 'third_party_5h'
+  | 'third_party_7d'
   | '7d_sonnet'
   | '7d_opus'
   | '7d_fable'
   | 'overage';
 
+export interface WindowLabelOptions {
+  /** Use the complete model-family name for titles and accessible names. */
+  long?: boolean;
+}
+
+/** Canonical names for every quota window on the wire. */
 export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
   '5h': '5h',
   '7d': '7d',
+  gemini_5h: 'Gemini models · 5-hour limit',
+  gemini_7d: 'Gemini models · weekly limit',
+  third_party_5h: 'Claude and GPT-OSS models · 5-hour limit',
+  third_party_7d: 'Claude and GPT-OSS models · weekly limit',
   '7d_sonnet': '7d (Sonnet)',
   '7d_opus': '7d (Opus)',
   '7d_fable': '7d (Fable)',
   overage: 'Extra usage',
 };
+
+const WINDOW_SHORT_LABELS: Partial<Record<SubscriptionQuotaWindow, string>> = {
+  gemini_5h: 'Gemini 5h',
+  gemini_7d: 'Gemini 7d',
+  third_party_5h: 'Claude·OSS 5h',
+  third_party_7d: 'Claude·OSS 7d',
+};
+
+/**
+ * Returns the compact label used in quota UI, or its complete name for titles
+ * and accessible names.
+ */
+export function windowLabel(
+  window: string,
+  { long = false }: WindowLabelOptions = {},
+): string {
+  if (window in WINDOW_LABELS) {
+    return long
+      ? WINDOW_LABELS[window as keyof typeof WINDOW_LABELS]
+      : (WINDOW_SHORT_LABELS[window as SubscriptionQuotaWindow] ??
+          WINDOW_LABELS[window as keyof typeof WINDOW_LABELS]);
+  }
+  return window;
+}
 
 export type SubscriptionQuotaDataState =
   | 'fresh'
@@ -1446,6 +1564,21 @@ export interface PoolHistoryResponse {
   now_unix_secs: number;
   windows: PoolHistoryWindowResponse[];
 }
+export type OAuthProvider = 'anthropic' | 'openai' | 'gemini';
+export type OAuthFlow = 'paste_code' | 'device_code' | 'browser';
+export type OAuthStartFlow = 'device_code' | 'browser';
+
+export interface OAuthStartResponse {
+  authorize_url: string | null;
+  state_token: string;
+  provider: OAuthProvider;
+  flow: OAuthFlow;
+  verification_url?: string;
+  user_code?: string;
+  poll_interval_secs?: number;
+  expires_at_unix_secs?: number;
+}
+
 export interface DraftCompleteResponse {
   state_token: string;
   suggested_name: string;
@@ -1455,19 +1588,32 @@ export interface DraftCompleteResponse {
   long_lived_fallback: boolean;
   fallback_reason: OAuthFallbackReason | null;
   granted_expires_in_secs: number | null;
+  provider?: OAuthProvider;
+  account_email?: string | null;
+  account_id?: string | null;
+  plan?: string | null;
+  project_id?: string | null;
 }
 
-export function startOauthDraft(): Promise<{
-  authorize_url: string;
-  state_token: string;
-}> {
-  return postJson('/admin/v1/oauth/draft/start', {});
+export type OAuthCompletePendingResponse = {
+  status: 'pending';
+  poll_interval_secs: number;
+};
+
+export function startOauthDraft(
+  provider: OAuthProvider = 'anthropic',
+  flow?: OAuthStartFlow,
+): Promise<OAuthStartResponse> {
+  return postJson('/admin/v1/oauth/draft/start', {
+    provider,
+    ...(flow ? { flow } : {}),
+  });
 }
 
 export function completeOauthDraft(body: {
   state_token: string;
-  code: string;
-}): Promise<DraftCompleteResponse> {
+  code?: string;
+}): Promise<DraftCompleteResponse | OAuthCompletePendingResponse> {
   return postJson('/admin/v1/oauth/draft/complete', body);
 }
 

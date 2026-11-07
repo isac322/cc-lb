@@ -30,6 +30,7 @@ type PluginFixture = {
   uploaded_at_unix_secs: number;
   metadata: null;
   supported_slots: string[];
+  hook_metadata: Record<string, { wire_version: number; description: string; usage: string; mode: 'active' | 'noop' }>;
 };
 
 type WarmupAttemptFixture = {
@@ -179,6 +180,9 @@ function shapePlugin(id = 'anthropic-shape-v2'): PluginFixture {
     uploaded_at_unix_secs: 1718380800,
     metadata: null,
     supported_slots: ['shape'],
+    hook_metadata: {
+      shape: { wire_version: 1, description: 'Warmup shape', usage: 'Warmup fixture', mode: 'active' },
+    },
   };
 }
 

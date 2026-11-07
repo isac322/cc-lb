@@ -63,6 +63,11 @@ vi.mock('../../lib/queries', () => ({
     isPending: gcIsPending,
     mutate: gcMutate,
   }),
+  useUpstreams: () => ({
+    data: { upstreams: [] },
+    isLoading: false,
+    isPending: false,
+  }),
   useUploadWasm: () => ({
     isPending: false,
     mutate: uploadMutate,

@@ -1,13 +1,20 @@
 import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QuotaSnapshot } from '../../lib/api';
 import { QuotaWindowRow, QuotaWindowRows } from './QuotaWindowRows';
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
+  window.localStorage.removeItem('cclb.locale');
 });
 
 const NOW = Math.floor(Date.now() / 1000);
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW * 1000);
+});
 
 function snap(overrides: Partial<QuotaSnapshot>): QuotaSnapshot {
   return {
@@ -43,7 +50,7 @@ describe('QuotaWindowRow', () => {
     const row = renderRow(snap({}));
     expect(row.textContent).toContain('5h');
     expect(row.textContent).toContain('42% used');
-    expect(row.textContent).toContain('Resets in');
+    expect(row.textContent).toContain('Resets in 1h');
     // Resets in 1h of a 5h window: 4h elapsed is 80% even pace.
     const meter = screen.getByRole('meter');
     expect(meter.getAttribute('aria-valuetext')).toBe(
@@ -57,6 +64,100 @@ describe('QuotaWindowRow', () => {
     expect(row.textContent).toContain('42% used');
     expect(screen.getByRole('meter')).not.toBeNull();
   });
+
+  it('aligns reset parts in shared content-sized columns', () => {
+    render(
+      <QuotaWindowRows>
+        <QuotaWindowRow
+          snap={snap({ resets_at_unix_secs: NOW + 2 * 3600 + 40 * 60 })}
+          nowUnixSecs={NOW}
+        />
+        <QuotaWindowRow
+          snap={snap({ resets_at_unix_secs: NOW + 3600 })}
+          nowUnixSecs={NOW}
+        />
+        <QuotaWindowRow
+          snap={snap({ window: '7d', resets_at_unix_secs: null })}
+          nowUnixSecs={NOW}
+        />
+      </QuotaWindowRows>,
+    );
+    const rows = screen.getAllByRole('listitem');
+    const prefixes = rows
+      .slice(0, 2)
+      .map((row) => row.querySelector('[data-slot="window-reset-prefix"]'));
+    expect(
+      prefixes.every((cell) => cell?.className === prefixes[0]?.className),
+    ).toBe(true);
+    expect(screen.getByTestId('quota-snapshot-grid').className).toContain(
+      'grid-cols-[minmax(0,max-content)_minmax(0,1fr)_max-content_max-content_max-content]',
+    );
+    expect(screen.getByTestId('quota-snapshot-grid').className).not.toContain(
+      '20ch',
+    );
+    expect(
+      rows[2].querySelector('[data-slot="window-reset-value"]')?.textContent,
+    ).toBe('');
+    expect(
+      rows[2].querySelector('[data-slot="window-reset-suffix"]')?.textContent,
+    ).toBe('');
+  });
+
+  it('does not reserve a trailing gap for English reset text', () => {
+    const row = renderRow(snap({}));
+    const grid = screen.getByTestId('quota-snapshot-grid');
+    const suffix = row.querySelector('[data-slot="window-reset-suffix"]');
+    expect(grid.className).not.toContain('gap-x-');
+    expect(suffix?.className).not.toContain('ml-3');
+    expect(suffix?.className).not.toContain('@[40rem]:ml-6');
+  });
+
+  it('keeps the not-started status separate from empty reset cells', () => {
+    const row = renderRow(snap({ utilization: 0, resets_at_unix_secs: null }));
+    expect(row.textContent).toContain('Not started');
+    expect(row.querySelector('[data-slot="window-facts"]')?.textContent).toBe(
+      'Not started',
+    );
+    expect(
+      row.querySelector('[data-slot="window-reset-value"]')?.textContent,
+    ).toBe('');
+  });
+
+  it('aligns the Korean reset suffix against the shared value edge', () => {
+    window.localStorage.setItem('cclb.locale', 'ko-KR');
+    const row = renderRow(snap({ resets_at_unix_secs: NOW + 2 * 3600 }));
+    expect(row.textContent).toContain('2시간 후 초기화');
+    expect(
+      row.querySelector('[data-slot="window-reset-value"]')?.className,
+    ).toContain('text-right');
+    expect(
+      row.querySelector('[data-slot="window-reset-suffix"]')?.className,
+    ).toContain('text-left');
+  });
+  it.each([
+    ['gemini_5h', 'Gemini 5h', 'Gemini models · 5-hour limit'],
+    ['gemini_7d', 'Gemini 7d', 'Gemini models · weekly limit'],
+    [
+      'third_party_5h',
+      'Claude·OSS 5h',
+      'Claude and GPT-OSS models · 5-hour limit',
+    ],
+    [
+      'third_party_7d',
+      'Claude·OSS 7d',
+      'Claude and GPT-OSS models · weekly limit',
+    ],
+  ] as const)(
+    'uses the compact provider label and full accessible name for %s',
+    (window, label, longLabel) => {
+      const row = renderRow(snap({ window }));
+      expect(row.textContent).toContain(label);
+      expect(row.querySelector(`[title="${longLabel}"]`)).not.toBeNull();
+      expect(screen.getByRole('meter').getAttribute('aria-label')).toBe(
+        longLabel,
+      );
+    },
+  );
 
   it('paces a 7d window over seven days', () => {
     const row = renderRow(
@@ -134,7 +235,6 @@ describe('QuotaWindowRow', () => {
     expect(row.textContent).not.toContain('Resets in');
     expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
   });
-
   it('renders nothing for the backend-only unified window', () => {
     // `unified` is not a SubscriptionQuotaWindow; the backend may still
     // report it on the wire for routing, but the row must not render.

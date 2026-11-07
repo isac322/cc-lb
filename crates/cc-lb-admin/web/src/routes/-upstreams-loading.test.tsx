@@ -458,9 +458,11 @@ async function openCreateToSignIn() {
   return continueToSignIn();
 }
 
-/** From the open "New upstream" dialog's kind step to the sign-in step. */
+/** From the open "New upstream" dialog's provider step to the sign-in step. */
 async function continueToSignIn() {
   const dialog = screen.getByRole('dialog', { name: 'New upstream' });
+  fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic/ }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
   fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
   // The 'Link valid for' timer only renders once the draft session is ready.
   await within(dialog).findByText(/Link valid for/);
@@ -588,6 +590,260 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe('/upstreams disabled list rows', () => {
+  test.each([false, true])(
+    'keeps disabled state accessible and quota hidden when selected=%s',
+    (selected) => {
+      const disabledUpstream = { ...upstream, enabled: false };
+      searchState = selected ? { selectedId: upstream.id } : {};
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        queryResult({ upstreams: [disabledUpstream, apiKeyUpstream] }),
+      );
+      vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+        queryResult(quotaLatestData(disabledUpstream, 0.42)),
+      );
+      vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+        queryResult({ organization_metadata: null }),
+      );
+      renderRoute();
+
+      const row = screen.getByRole('button', {
+        name: /OAuth Primary.*Disabled/,
+      });
+      const label = within(row).getByText('Disabled', { exact: true });
+      expect(label.className).toBe('sr-only');
+      expect(row.querySelector('svg.lucide-power-off')).not.toBeNull();
+      expect(row.querySelector('.grayscale.opacity-40')).not.toBeNull();
+      expect(within(row).queryByTestId('upstream-row-quota')).toBeNull();
+      expect(row.textContent).not.toContain('42%');
+      expect(row.querySelector('[class*="opacity-80"]')).toBeNull();
+      expect(row.querySelector('[class*="opacity-70"]')).toBeNull();
+      expect(within(row).getByText(upstream.name).className).toContain(
+        selected ? 'text-text' : 'text-text-muted',
+      );
+      expect(row.getAttribute('aria-current')).toBe(selected ? 'true' : null);
+      const visibleCopy = row.cloneNode(true) as HTMLElement;
+      visibleCopy.querySelector('.sr-only')?.remove();
+      expect(visibleCopy.textContent).not.toContain('Disabled');
+    },
+  );
+
+  test('enabled rows keep their quota facts without a disabled marker', () => {
+    searchState = {};
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+      queryResult(quotaLatestData(upstream, 0.42)),
+    );
+    renderRoute();
+
+    const row = screen.getByRole('button', { name: /OAuth Primary/ });
+    expect(within(row).getByTestId('upstream-row-quota')).toBeDefined();
+    expect(row.querySelector('svg.lucide-power-off')).toBeNull();
+    expect(within(row).queryByText('Disabled', { exact: true })).toBeNull();
+  });
+});
+
+describe('/upstreams provider account metadata', () => {
+  test.each([
+    ['openai_oauth', 'OpenAI', 'Team', 'Workspace', 'account-team-123'],
+    [
+      'gemini_oauth',
+      'Gemini',
+      'Standard Tier',
+      'Project',
+      'gemini-project-123',
+    ],
+  ] as const)(
+    'shows the stored provider identity for %s',
+    (kind, provider, plan, scope, scopeId) => {
+      const subscription = { ...upstream, kind };
+      vi.mocked(queries.useUpstreams).mockReturnValue({
+        data: { upstreams: [subscription] },
+        isLoading: false,
+        isPending: false,
+      } as never);
+      vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+        queryResult({
+          organization_metadata: null,
+          subscription_metadata: null,
+          account_email: 'operator@example.com',
+          account_id: kind === 'openai_oauth' ? scopeId : null,
+          project_id: kind === 'gemini_oauth' ? scopeId : null,
+          plan: kind === 'openai_oauth' ? 'team' : 'standard-tier',
+        }),
+      );
+
+      renderRoute();
+
+      expect(screen.getByRole('heading', { name: 'Connection' })).toBeDefined();
+      expect(screen.getByText('operator@example.com')).toBeDefined();
+      expect(screen.getByText(plan)).toBeDefined();
+      expect(screen.getByText(scope)).toBeDefined();
+      expect(screen.getByText(scopeId)).toBeDefined();
+      expect(
+        screen.queryByText(`Not available for ${provider} subscriptions.`),
+      ).toBeNull();
+      expect(
+        screen.queryByRole('button', { name: 'Refresh subscription metadata' }),
+      ).toBeNull();
+    },
+  );
+});
+
+describe('/upstreams Gemini list geometry', () => {
+  test('keeps the subscription caption above a fixed two-by-two quota grid', () => {
+    const gemini: Upstream = {
+      ...upstream,
+      id: 'gemini-1',
+      name: 'Google AI Ultra',
+      kind: 'gemini_oauth',
+    };
+    const geminiApiKey: Upstream = {
+      ...apiKeyUpstream,
+      id: 'gemini-api',
+      name: 'Gemini API',
+      kind: 'gemini_api_key',
+    };
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({ upstreams: [gemini, geminiApiKey, upstream] }),
+    );
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+      queryResult({
+        now_unix_secs: NOW_UNIX_SECS,
+        max_staleness_secs: 300,
+        upstreams: [
+          {
+            upstream_id: gemini.id,
+            upstream_name: gemini.name,
+            windows: [
+              { ...quotaSnapshot('5h', 0.25), window: 'gemini_5h' },
+              { ...quotaSnapshot('7d', 0.5), window: 'third_party_7d' },
+            ],
+          },
+        ],
+      }),
+    );
+    renderRoute();
+
+    const row = screen.getByRole('button', { name: /Google AI Ultra/ });
+    const quota = within(row).getByTestId('upstream-row-quota');
+    expect(quota.className).toContain('grid-cols-2');
+    expect(quota.className).not.toMatch(/(?:md|lg|xl|2xl):grid-cols/);
+    expect(quota.parentElement?.parentElement?.className).toContain('flex-col');
+    const caption = quota.parentElement?.previousElementSibling;
+    expect(caption?.className).toContain('shrink-0');
+    expect(caption?.textContent).toBe('Subscription');
+    expect(caption?.querySelector('svg')).not.toBeNull();
+    expect(
+      Array.from(quota.children, (cell) => cell.getAttribute('data-window')),
+    ).toEqual(['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d']);
+    expect(
+      quota.querySelector('[data-window="gemini_7d"]')?.className,
+    ).toContain('invisible');
+    expect(quota.textContent).not.toContain('—');
+    const apiKeyRow = screen.getByRole('button', { name: /Gemini API/ });
+    expect(within(apiKeyRow).queryByTestId('upstream-row-quota')).toBeNull();
+    const anthropicRow = screen.getByRole('button', { name: /OAuth Primary/ });
+    const anthropicQuota =
+      within(anthropicRow).getByTestId('upstream-row-quota');
+    expect(
+      anthropicQuota.parentElement?.parentElement?.className,
+    ).not.toContain('flex-col');
+  });
+
+  test('shows Gemini quota slots and peak usage', () => {
+    searchState = {};
+    const gemini: Upstream = {
+      ...upstream,
+      id: 'antigravity-1',
+      name: 'Antigravity account',
+      kind: 'gemini_oauth',
+    };
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({ upstreams: [gemini] }),
+    );
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+      queryResult({
+        now_unix_secs: NOW_UNIX_SECS,
+        max_staleness_secs: 300,
+        upstreams: [
+          {
+            upstream_id: gemini.id,
+            upstream_name: gemini.name,
+            windows: [
+              { ...quotaSnapshot('5h', 0.5), window: 'third_party_5h' },
+              { ...quotaSnapshot('5h', 0.25), window: 'gemini_7d' },
+              { ...quotaSnapshot('5h', 0.75), window: 'gemini_5h' },
+              { ...quotaSnapshot('5h', 0.5), window: 'third_party_7d' },
+            ],
+          },
+        ],
+      }),
+    );
+    renderRoute();
+    const row = screen.getByRole('button', { name: /Antigravity account/ });
+    const quota = within(row).getByTestId('upstream-row-quota');
+    expect(
+      Array.from(quota.children, (cell) => cell.getAttribute('data-window')),
+    ).toEqual(['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d']);
+    expect(within(quota).getByText('Gemini 5h')).toBeDefined();
+    expect(within(quota).getByText('Gemini 7d')).toBeDefined();
+    expect(within(quota).getByText('Claude·OSS 5h')).toBeDefined();
+    expect(within(quota).getByText('Claude·OSS 7d')).toBeDefined();
+    expect(row.textContent).toContain('75%');
+  });
+});
+
+describe('/upstreams provider-scoped quota windows', () => {
+  test('keeps an accessible inert 5h cell for a mixed Anthropic fleet', () => {
+    const weekly = {
+      ...upstream,
+      id: 'weekly-claude',
+      name: 'Weekly Claude',
+    };
+    const normal = {
+      ...secondOauthUpstream,
+      name: 'Normal Claude',
+    };
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({ upstreams: [weekly, normal] }),
+    );
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+      queryResult({
+        now_unix_secs: NOW_UNIX_SECS,
+        max_staleness_secs: 300,
+        upstreams: [
+          {
+            upstream_id: weekly.id,
+            upstream_name: weekly.name,
+            windows: [
+              { ...quotaSnapshot('5h', 0), state: 'absent', utilization: null },
+              quotaSnapshot('7d', 0.2),
+            ],
+          },
+          {
+            upstream_id: normal.id,
+            upstream_name: normal.name,
+            windows: [quotaSnapshot('5h', 0.4), quotaSnapshot('7d', 0.3)],
+          },
+        ],
+      }),
+    );
+
+    renderRoute();
+
+    const weeklyRow = screen.getByRole('button', { name: /Weekly Claude/ });
+    const weeklyQuota = within(weeklyRow).getByTestId('upstream-row-quota');
+    expect(
+      Array.from(weeklyQuota.children, (cell) =>
+        cell.getAttribute('data-window'),
+      ),
+    ).toEqual(['5h', '7d', '7d_fable']);
+    expect(within(weeklyQuota).getByText('No 5h window')).toBeDefined();
+    const normalRow = screen.getByRole('button', { name: /Normal Claude/ });
+    expect(within(normalRow).getByText('5h')).toBeDefined();
+  });
 });
 
 describe('/upstreams quota request cadence', () => {
@@ -1228,9 +1484,9 @@ describe('/upstreams mutation pending UX', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
 
     let dialog = screen.getByRole('dialog', { name: 'New upstream' });
-    fireEvent.click(
-      within(dialog).getByRole('radio', { name: /Anthropic API key/ }),
-    );
+    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    fireEvent.click(within(dialog).getByRole('radio', { name: /API key/ }));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
     fireEvent.change(within(dialog).getByPlaceholderText(/sk-ant-/), {
       target: { value: 'sk-ant-api03-test' },
@@ -1249,6 +1505,7 @@ describe('/upstreams mutation pending UX', () => {
         within(dialog).getByRole('button', { name: 'Check key' }),
       );
     });
+    await within(dialog).findByRole('heading', { name: 'Key verified' });
     expect(api.preflightApiKey).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.preflightApiKey).mock.calls[0]?.[0]).toEqual({
       api_key_value: 'sk-ant-api03-test',
@@ -1939,6 +2196,235 @@ describe('/upstreams OAuth card', () => {
       );
     },
   );
+});
+
+describe('/upstreams essential provider connection facts', () => {
+  function mockProviderCredential(
+    kind: 'openai_oauth' | 'gemini_oauth',
+    overrides: Record<string, unknown> = {},
+    lastApplyError: string | null = null,
+  ) {
+    const subscription: Upstream = {
+      ...upstream,
+      kind,
+      status: { ...upstream.status, last_apply_error: lastApplyError },
+    };
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({ upstreams: [subscription] }),
+    );
+    vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+      queryResult({
+        organization_metadata: null,
+        subscription_metadata: null,
+        account_email: 'operator@example.com',
+        account_id: kind === 'openai_oauth' ? 'workspace-123' : null,
+        project_id: kind === 'gemini_oauth' ? 'project-123' : null,
+        plan: kind === 'openai_oauth' ? 'team' : 'standard-tier',
+      }),
+    );
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(subscription, 'openid profile email', {
+          expires_at_unix_secs: NOW_UNIX_SECS + 3600,
+          refresh_token_expires_at_unix_secs: null,
+          ...overrides,
+        }),
+      ),
+    );
+  }
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s shows only account identity and endpoint when healthy',
+    (kind) => {
+      mockProviderCredential(kind);
+      renderRoute();
+
+      const connection = screen.getByTestId('provider-oauth-connection');
+      expect(
+        within(connection).getByText('operator@example.com'),
+      ).toBeDefined();
+      expect(
+        within(connection).getByText(
+          kind === 'openai_oauth' ? 'Team' : 'Standard Tier',
+        ),
+      ).toBeDefined();
+      expect(
+        within(connection).getByText(
+          kind === 'openai_oauth' ? 'workspace-123' : 'project-123',
+        ),
+      ).toBeDefined();
+      expect(within(connection).getByText('Endpoint')).toBeDefined();
+      expect(connection.textContent).not.toMatch(
+        /connected|refresh|token|expir|rotate|scope|client|profile|Antigravity|Gemini CLI|long-lived/i,
+      );
+      expect(screen.queryByRole('heading', { name: 'Credential' })).toBeNull();
+      expect(
+        screen.queryByRole('heading', { name: 'Account metadata' }),
+      ).toBeNull();
+      expect(screen.queryByTestId('oauth-current-status')).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s keeps a valid access-only import free of renewal and reconnect warnings',
+    (kind) => {
+      mockProviderCredential(kind, {
+        status: 'active',
+        mode: 'long_lived_365d',
+        can_refresh: false,
+        refresh_token_present: false,
+        refresh_token_expires_at_unix_secs: null,
+        expires_at_unix_secs: NOW_UNIX_SECS + 3600,
+      });
+      renderRoute();
+
+      expect(screen.getByTestId('provider-oauth-connection')).toBeDefined();
+      expect(screen.queryByText('Sign-in incomplete')).toBeNull();
+      expect(screen.queryByText('Renewal unavailable')).toBeNull();
+      expect(screen.queryByTestId('oauth-current-status')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Reconnect' })).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s does not expose an automatically renewed access-token deadline',
+    (kind) => {
+      mockProviderCredential(kind, {
+        status: 'expired',
+        expires_at_unix_secs: NOW_UNIX_SECS - 1,
+      });
+      renderRoute();
+
+      expect(screen.queryByText(/Expires|Renewing|Deadline:/)).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s omits unreported account fields rather than placeholder facts',
+    (kind) => {
+      mockProviderCredential(kind);
+      vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+        queryResult({
+          organization_metadata: null,
+          subscription_metadata: null,
+          account_email: null,
+          account_id: null,
+          project_id: null,
+          plan: null,
+        }),
+      );
+      renderRoute();
+
+      const connection = screen.getByTestId('provider-oauth-connection');
+      expect(connection.textContent).not.toMatch(
+        /Not reported|Email|Plan|Tier|Workspace|Project/,
+      );
+      expect(within(connection).getByText('Endpoint')).toBeDefined();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s shows one concise refresh-failure notice without requiring reconnect',
+    (kind) => {
+      mockProviderCredential(kind, {}, 'network');
+      renderRoute();
+
+      const notice = screen
+        .getByText('The latest account refresh failed.')
+        .closest('[role="status"]') as HTMLElement;
+      expect(within(notice).getByText('Refresh failing')).toBeDefined();
+      expect(notice.textContent).toContain(
+        'The latest account refresh failed.',
+      );
+      expect(within(notice).queryByRole('button')).toBeNull();
+      expect(screen.queryByText('Last apply failed')).toBeNull();
+      expect(screen.queryByText('network')).toBeNull();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s shows an actionable sign-in deadline once, without renewal mechanics',
+    (kind) => {
+      mockProviderCredential(kind, {
+        refresh_token_expires_at_unix_secs: NOW_UNIX_SECS + 2 * 86_400,
+      });
+      renderRoute();
+
+      const notice = statusNoticeNamed('Sign-in expires soon');
+      expect(within(notice).getByText('Sign-in expires soon')).toBeDefined();
+      expect(notice.textContent).toContain('Deadline:');
+      expect(
+        within(notice).getByRole('button', { name: 'Reconnect' }),
+      ).toBeDefined();
+      expect(notice.textContent).not.toMatch(/token|renew|rotate|OAuth/i);
+      expect(screen.queryByTestId('oauth-refresh-token-expiry')).toBeNull();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s keeps a rejected sign-in actionable with one plain-word reason',
+    (kind) => {
+      mockProviderCredential(kind, {}, 'status_401');
+      renderRoute();
+
+      const notice = screen.getByRole('alert');
+      expect(within(notice).getByText('Sign-in rejected')).toBeDefined();
+      expect(notice.textContent).toContain(
+        'The provider rejected this account sign-in.',
+      );
+      expect(notice.textContent).not.toMatch(
+        /token|renew|rotate|OAuth|status_401/i,
+      );
+      const reconnect = within(notice).getByRole('button', {
+        name: 'Reconnect',
+      });
+      expect(screen.getAllByRole('button', { name: 'Reconnect' })).toHaveLength(
+        1,
+      );
+      fireEvent.click(reconnect);
+      expect(screen.getByRole('dialog')).toBeDefined();
+    },
+  );
+
+  test.each(['openai_oauth', 'gemini_oauth'] as const)(
+    '%s reports unavailable status without inventing a healthy connection',
+    (kind) => {
+      mockProviderCredential(kind);
+      vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+        queryResult(undefined, { isError: true }),
+      );
+      renderRoute();
+
+      expect(
+        screen.getByText(/Connection status could not be loaded/),
+      ).toBeDefined();
+      expect(screen.queryByText('Connected')).toBeNull();
+      expect(screen.queryByText('Account not connected')).toBeNull();
+    },
+  );
+
+  test('keeps Anthropic refreshing copy unchanged', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(oauthStatusData(upstream, 'user:inference')),
+    );
+    renderRoute();
+
+    const credential = screen.getByTestId('oauth-status-loaded-grid');
+    expect(
+      within(credential).getByText(
+        'Auto-refreshes; reauthorize about every 30 days',
+      ),
+    ).toBeDefined();
+    expect(
+      within(credential).getByText(
+        'Renews automatically while the refresh token is valid.',
+      ),
+    ).toBeDefined();
+    expect(credential.textContent).not.toMatch(/OpenAI sign-in|Google sign-in/);
+  });
 });
 
 describe('/upstreams long-lived OAuth credential', () => {

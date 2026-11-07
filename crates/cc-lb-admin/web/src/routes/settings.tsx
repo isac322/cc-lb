@@ -21,6 +21,7 @@ import {
   TableHeadCell,
   TableRow,
 } from '../components/ui/Table';
+import { useDesign } from '../designs/registry';
 import { type ConfigHistoryResponse, downloadJson } from '../lib/api';
 import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
 import { useConfigHistory } from '../lib/queries';
@@ -201,6 +202,7 @@ export const Route = createFileRoute('/settings')({
 });
 
 function SettingsPage() {
+  const { SystemWideNotice } = useDesign();
   const configHistory = useConfigHistory();
   const [downloadingDatabaseSnapshot, setDownloadingDatabaseSnapshot] =
     useState(false);
@@ -252,6 +254,7 @@ function SettingsPage() {
       {/* The top bar already names the page: the h1 stays for assistive
       tech only, with no visible header block above the first section. */}
       <PageHeader title="Settings" />
+      {SystemWideNotice ? <SystemWideNotice /> : null}
 
       <Section
         title="Localization"

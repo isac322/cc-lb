@@ -1,10 +1,17 @@
 import { useQueryClient } from '@tanstack/react-query';
 import {
   createFileRoute,
+  Link,
   stripSearchParams,
   useNavigate,
 } from '@tanstack/react-router';
-import { ExternalLink, KeyRound, Plus, RefreshCw } from 'lucide-react';
+import {
+  ExternalLink,
+  KeyRound,
+  Plus,
+  PowerOff,
+  RefreshCw,
+} from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
@@ -44,6 +51,7 @@ import {
   type EntityListViewConfig,
   useEntityListView,
 } from '../components/ui/EntityList';
+import { ProviderLogo } from '../components/ui/ProviderLogo';
 import {
   Badge,
   Button,
@@ -91,7 +99,6 @@ import {
   QuotaWindowRow,
   QuotaWindowRowSkeleton,
   QuotaWindowRows,
-  windowLabel,
 } from '../components/upstreams/QuotaWindowRows';
 import {
   selectQuotaCardSnapshots,
@@ -99,9 +106,10 @@ import {
 } from '../components/upstreams/quotaWindowVisibility';
 import { UpstreamPlanCaption } from '../components/upstreams/UpstreamPlanCaption';
 import {
+  countReconnectNudges,
   formatQuotaStamp,
   subscriptionPlanLabel,
-  UPSTREAM_LATEST_WINDOWS,
+  UPSTREAM_LATEST_WINDOWS_BY_PROVIDER,
   type UpstreamUsageRow,
   useUpstreamUsageData,
 } from '../components/upstreams/UpstreamUsageTable';
@@ -117,6 +125,7 @@ import {
   type OrganizationMetadataInner,
   type SubscriptionMetadataResponse,
   type UpstreamOAuthStatusResponse,
+  windowLabel,
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import { fmtChartTooltipTs, formatCount } from '../lib/format';
@@ -127,6 +136,17 @@ import {
   type OAuthReconnectNudge,
   REFRESH_EXPIRING_SOON_SECS,
 } from '../lib/oauthReconnect';
+import { useEffectiveProviders } from '../lib/previewControls';
+import {
+  capabilitiesOf,
+  PROVIDER_FAMILIES,
+  PROVIDER_LABELS,
+  type ProviderFamily,
+  providerOf,
+  upstreamAttentionReason,
+  upstreamKindLabel,
+  upstreamTypeLabel,
+} from '../lib/providers';
 import {
   qk,
   type UpdateUpstreamWarmupSettingsRequest,
@@ -175,7 +195,7 @@ const UPSTREAM_VIEW_DEFAULTS = {
   q: '',
   filter: 'all',
   sort: 'attention',
-} as const satisfies EntityListView<UpstreamFilter, UpstreamSort>;
+} as const;
 
 const upstreamSearchSchema = z.object({
   selectedId: z.string().optional(),
@@ -199,7 +219,7 @@ const UPSTREAM_FILTER_OPTIONS: readonly {
   { value: 'all', label: 'All upstreams' },
   { value: 'attention', label: 'Needs attention' },
   { value: 'disabled', label: 'Disabled' },
-  { value: 'oauth', label: 'Subscription (OAuth)' },
+  { value: 'oauth', label: 'Subscription' },
   { value: 'api_key', label: 'API key' },
 ];
 const UPSTREAM_SORT_OPTIONS: readonly {
@@ -211,20 +231,76 @@ const UPSTREAM_SORT_OPTIONS: readonly {
   { value: 'name', label: 'Name' },
 ];
 
-/** The row's window facts, in reading order, with their compact names. */
-const ROW_WINDOWS = [
-  ['5h', '5h'],
-  ['7d', '7d'],
-  ['7d_fable', 'Fable'],
-] as const;
-// Facts share fixed columns across the fleet. Keep empty cells aligned in
-// mixed fleets, but drop 5h when every OAuth row explicitly reports it absent.
-const ROW_FACTS_CLASS = 'grid gap-x-2.5';
+/** The row's provider-specific window facts, in reading order. */
+const ROW_WINDOWS_BY_PROVIDER: Record<
+  ProviderFamily,
+  readonly (readonly [string, string])[]
+> = {
+  anthropic: [
+    ['5h', '5h'],
+    ['7d', '7d'],
+    ['7d_fable', 'Fable'],
+  ],
+  openai: [
+    ['5h', '5h'],
+    ['7d', '7d'],
+  ],
+  gemini: [
+    ['gemini_5h', windowLabel('gemini_5h')],
+    ['gemini_7d', windowLabel('gemini_7d')],
+    ['third_party_5h', windowLabel('third_party_5h')],
+    ['third_party_7d', windowLabel('third_party_7d')],
+  ],
+};
+
+/** Hide provider windows only when every OAuth row proves them absent. */
+function visibleRowWindowsByProvider(
+  rows: readonly UpstreamUsageRow[],
+): Record<ProviderFamily, readonly (readonly [string, string])[]> {
+  const visible: Record<
+    ProviderFamily,
+    readonly (readonly [string, string])[]
+  > = {
+    anthropic: ROW_WINDOWS_BY_PROVIDER.anthropic,
+    openai: ROW_WINDOWS_BY_PROVIDER.openai,
+    gemini: ROW_WINDOWS_BY_PROVIDER.gemini,
+  };
+
+  for (const provider of PROVIDER_FAMILIES) {
+    const oauthRows = rows.filter(
+      (row) =>
+        providerOf(row.upstream.kind) === provider &&
+        row.upstream.kind.endsWith('_oauth'),
+    );
+    if (oauthRows.length === 0) continue;
+    visible[provider] = ROW_WINDOWS_BY_PROVIDER[provider].filter(
+      ([windowName]) =>
+        oauthRows.some(
+          (row) =>
+            row.windows.find((snapshot) => snapshot.window === windowName)
+              ?.state !== 'absent',
+        ),
+    );
+  }
+
+  return visible;
+}
+
+const ROW_FACTS_CLASS_BY_COUNT: Record<number, string> = {
+  1: 'grid grid-cols-[repeat(1,auto)] gap-x-2.5',
+  2: 'grid grid-cols-[repeat(2,auto)] gap-x-2.5',
+  3: 'grid grid-cols-[repeat(3,auto)] gap-x-2.5',
+  4: 'grid grid-cols-2 gap-x-2.5 gap-y-0.5',
+};
 const ROW_FACT_CLASS = 'grid grid-cols-[auto_4.5ch] items-baseline gap-x-1';
 /** Windows whose utilization counts toward a row's peak. */
 const PEAK_WINDOWS: ReadonlySet<string> = new Set([
   '5h',
   '7d',
+  'gemini_5h',
+  'gemini_7d',
+  'third_party_5h',
+  'third_party_7d',
   '7d_sonnet',
   '7d_opus',
   '7d_fable',
@@ -275,13 +351,23 @@ function rowProblem(
 ): { tone: 'warn' | 'danger'; label: string } | null {
   if (row.nudge) return { tone: row.nudge.tone, label: row.nudge.label };
   if (
+    row.upstream.kind !== 'anthropic_oauth' &&
+    row.upstream.kind.endsWith('_oauth') &&
+    (row.upstream.status.last_apply_error || row.runtimeError)
+  )
+    return { tone: 'warn', label: 'Refresh failing' };
+  if (
     row.upstream.enabled &&
     (row.health.tone === 'danger' || row.health.tone === 'warn')
   )
     return { tone: row.health.tone, label: row.health.label };
-  // A row without a snapshot was saved before key checks: unverified too.
-  if (row.upstream.enabled && apiKeyAccessOf(row.upstream)?.verified === false)
+  const attentionReason = upstreamAttentionReason(row.upstream);
+  if (attentionReason === 'apply_error')
+    return { tone: 'danger', label: 'Last apply failed' };
+  if (attentionReason === 'key_unverified')
     return { tone: 'warn', label: 'Key not verified' };
+  if (attentionReason === 'credential_check')
+    return { tone: 'warn', label: 'Credential check failed' };
   return null;
 }
 
@@ -333,6 +419,7 @@ function upstreamRowId(row: UpstreamUsageRow): string {
 
 function UpstreamsPage() {
   const search = Route.useSearch();
+  const providerScope = useEffectiveProviders();
   const { selectedId, action } = search;
   const view: EntityListView<UpstreamFilter, UpstreamSort> = {
     q: search.q ?? '',
@@ -345,15 +432,10 @@ function UpstreamsPage() {
   // 7-day spend in one place; the DetailView polls /latest with the same
   // key, so TanStack dedups it into one request.
   const upstreamUsage = useUpstreamUsageData();
-  const showFiveHourFacts = upstreamUsage.rows.some(
-    (row) =>
-      row.upstream.kind === 'anthropic_oauth' &&
-      row.windows.find((snap) => snap.window === '5h')?.state !== 'absent',
+  const rowWindowsByProvider = useMemo(
+    () => visibleRowWindowsByProvider(upstreamUsage.rows),
+    [upstreamUsage.rows],
   );
-  const rowWindows = ROW_WINDOWS.filter(
-    ([windowName]) => windowName !== '5h' || showFiveHourFacts,
-  );
-
   // One dialog serves every entry point: "Add upstream" (header, empty state,
   // and the ?action=new deep link used by the command palette) and
   // Connect/Reconnect on an OAuth upstream (card button, reconnect notice,
@@ -399,7 +481,7 @@ function UpstreamsPage() {
         return [
           upstream.name,
           upstream.id,
-          oauth ? 'Subscription OAuth' : 'API key',
+          upstreamKindLabel(upstream.kind),
           plan,
         ];
       },
@@ -408,8 +490,8 @@ function UpstreamsPage() {
         all: () => true,
         attention: (row) => needsAttention(row, nowUnixSecs),
         disabled: (row) => !row.upstream.enabled,
-        oauth: (row) => row.upstream.kind === 'anthropic_oauth',
-        api_key: (row) => row.upstream.kind !== 'anthropic_oauth',
+        oauth: (row) => row.upstream.kind.endsWith('_oauth'),
+        api_key: (row) => row.upstream.kind.endsWith('_api_key'),
       },
       sorts: {
         attention: (a, b) =>
@@ -421,16 +503,40 @@ function UpstreamsPage() {
     }),
     [queryClient, nowUnixSecs],
   );
-  const listView = useEntityListView(upstreamUsage.rows, view, viewConfig);
+  const scopedRows = upstreamUsage.rows.filter(
+    (row) =>
+      providerScope === undefined ||
+      providerScope.includes(providerOf(row.upstream.kind)),
+  );
+  const reconnectCount = countReconnectNudges(scopedRows);
+  const flatListView = useEntityListView(scopedRows, view, viewConfig);
+  const providerCount = new Set(
+    scopedRows.map((row) => providerOf(row.upstream.kind)),
+  ).size;
+  const groupByProvider = providerCount > 1;
+  const listView = groupByProvider
+    ? {
+        ...flatListView,
+        visible: [...flatListView.visible].sort(
+          (a, b) =>
+            PROVIDER_FAMILIES.indexOf(providerOf(a.upstream.kind)) -
+              PROVIDER_FAMILIES.indexOf(providerOf(b.upstream.kind)) ||
+            Number(b.upstream.kind.endsWith('_oauth')) -
+              Number(a.upstream.kind.endsWith('_oauth')),
+        ),
+      }
+    : flatListView;
 
   const selected =
-    upstreamUsage.rows.find((row) => row.upstream.id === selectedId)
-      ?.upstream ?? null;
+    scopedRows.find((row) => row.upstream.id === selectedId)?.upstream ?? null;
   // `resetScroll: false`: the router's scroll restoration would otherwise
   // snap the list pane back to its top on every selection, so arrowing to
   // a row below the fold would leave it out of view.
   const select = (id: string | undefined) =>
-    navigate({ search: { selectedId: id, ...view }, resetScroll: false });
+    navigate({
+      search: { selectedId: id, ...view },
+      resetScroll: false,
+    });
   const changeView = (
     patch: Partial<EntityListView<UpstreamFilter, UpstreamSort>>,
   ) =>
@@ -460,7 +566,7 @@ function UpstreamsPage() {
     }
   }, [sortInputsPending, selected, firstVisibleId, navigate]);
 
-  const total = upstreamUsage.rows.length;
+  const total = scopedRows.length;
 
   return (
     <div className="h-shell min-h-0 flex w-full max-w-[90rem] mx-auto">
@@ -471,13 +577,18 @@ function UpstreamsPage() {
         )}
         title="Upstreams"
         noun="upstreams"
+        groupLabel={
+          groupByProvider
+            ? (row) => PROVIDER_LABELS[providerOf(row.upstream.kind)]
+            : undefined
+        }
         countLine={
           upstreamUsage.isLoading
             ? null
             : [
                 `${formatCount(total)} ${total === 1 ? 'upstream' : 'upstreams'}`,
-                upstreamUsage.reconnectCount > 0
-                  ? `${formatCount(upstreamUsage.reconnectCount)} need${upstreamUsage.reconnectCount === 1 ? 's' : ''} reconnect`
+                reconnectCount > 0
+                  ? `${formatCount(reconnectCount)} need${reconnectCount === 1 ? 's' : ''} reconnect`
                   : null,
               ]
                 .filter(Boolean)
@@ -506,24 +617,25 @@ function UpstreamsPage() {
         getId={upstreamRowId}
         renderRow={(row) => {
           const { upstream } = row;
-          const oauth = upstream.kind === 'anthropic_oauth';
+          const provider = providerOf(upstream.kind);
+          const rowWindows = rowWindowsByProvider[provider];
+          const oauth = upstream.kind.endsWith('_oauth');
           const quotaPending = oauth && upstreamUsage.quotaPending;
-          const fiveHourAbsent = row.windows.some(
-            (snap) => snap.window === '5h' && snap.state === 'absent',
-          );
           const peakSnap = oauth ? peakSnapshot(row) : null;
           const peak =
             peakSnap?.utilization == null ? null : peakSnap.utilization * 100;
           const problem = rowProblem(row);
           const facts = oauth
-            ? rowWindows.flatMap(([windowName, label]) => {
+            ? rowWindows.flatMap(([windowName]) => {
                 const snap = row.windows.find((s) => s.window === windowName);
-                return snap?.state === 'absent' || snap?.utilization == null
+                return snap?.state === 'absent' ||
+                  snap?.state === 'unobserved' ||
+                  snap?.utilization == null ||
+                  !Number.isFinite(snap.utilization)
                   ? []
                   : [
                       {
                         window: windowName,
-                        label,
                         used: snap.utilization * 100,
                         severity: snapshotQuotaSeverity(snap, nowUnixSecs),
                       },
@@ -531,21 +643,41 @@ function UpstreamsPage() {
               })
             : [];
           const factsText = facts
-            .map((f) => `${f.label} ${formatQuotaPercent(f.used)}`)
+            .map(
+              (f) =>
+                `${windowLabel(f.window, { long: true })} ${formatQuotaPercent(f.used)}`,
+            )
             .join(' · ');
           return {
+            leading: upstream.enabled ? (
+              <ProviderLogo provider={provider} size={16} />
+            ) : (
+              <span className="inline-flex items-center gap-2">
+                <ProviderLogo
+                  provider={provider}
+                  size={16}
+                  className="grayscale opacity-40"
+                />
+                <PowerOff
+                  aria-hidden="true"
+                  className="size-3.5"
+                  strokeWidth={1.75}
+                />
+              </span>
+            ),
             name: upstream.name,
             muted: !upstream.enabled,
+            srOnly: upstream.enabled ? undefined : 'Disabled',
             title: [
               upstream.name,
               !upstream.enabled ? 'Disabled' : null,
               problem?.label,
               factsText ? `${factsText} used` : null,
-              row.runtimeError,
+              oauth && provider !== 'anthropic' ? null : row.runtimeError,
             ]
               .filter(Boolean)
               .join('\n'),
-            trailing: quotaPending ? (
+            trailing: !upstream.enabled ? null : quotaPending ? (
               <Skeleton as="span" className="inline-block h-4 w-8" />
             ) : peakSnap != null && peak != null ? (
               <>
@@ -561,53 +693,50 @@ function UpstreamsPage() {
                 <span className="sr-only"> used</span>
               </>
             ) : null,
-            caption: problem ? (
+            caption: (
               <>
-                {!upstream.enabled ? (
-                  <span className="text-text-muted">Disabled · </span>
+                <UpstreamPlanCaption upstream={upstream} />
+                {problem ? (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className={cx('status-dot shrink-0', problem.tone)}
+                    />
+                    <span
+                      className={cx(
+                        'truncate',
+                        problem.tone === 'danger'
+                          ? 'text-danger-text'
+                          : 'text-warn-text',
+                      )}
+                    >
+                      {problem.label}
+                    </span>
+                  </>
                 ) : null}
-                <span
-                  aria-hidden="true"
-                  className={cx('status-dot shrink-0', problem.tone)}
-                />
-                <span
-                  className={cx(
-                    'truncate',
-                    problem.tone === 'danger'
-                      ? 'text-danger-text'
-                      : 'text-warn-text',
-                  )}
-                >
-                  {problem.label}
-                </span>
               </>
-            ) : !upstream.enabled ? (
-              <span className="text-text-muted">Disabled</span>
-            ) : (
-              <UpstreamPlanCaption upstream={upstream} />
             ),
-            captionTrailing: quotaPending ? (
+            captionTrailingBelow:
+              upstream.enabled && provider === 'gemini' && oauth,
+            captionTrailing: !upstream.enabled ? null : quotaPending ? (
               <Skeleton as="span" className="inline-block h-3 w-24" />
-            ) : oauth &&
-              (facts.length > 0 || (showFiveHourFacts && fiveHourAbsent)) ? (
+            ) : oauth && rowWindows.length > 0 ? (
               <span
-                className={cx(
-                  ROW_FACTS_CLASS,
-                  showFiveHourFacts
-                    ? 'grid-cols-[repeat(3,auto)]'
-                    : 'grid-cols-[repeat(2,auto)]',
-                )}
+                className={ROW_FACTS_CLASS_BY_COUNT[rowWindows.length]}
                 data-testid="upstream-row-quota"
               >
                 {rowWindows.map(([windowName, label]) => {
-                  if (windowName === '5h' && fiveHourAbsent) {
+                  const snap = row.windows.find(
+                    (candidate) => candidate.window === windowName,
+                  );
+                  if (snap?.state === 'absent') {
                     return (
                       <span
                         key={windowName}
                         className={ROW_FACT_CLASS}
                         data-window={windowName}
                       >
-                        <span className="sr-only">No 5h window</span>
+                        <span className="sr-only">No {label} window</span>
                         <span aria-hidden="true" className="invisible">
                           {label}
                         </span>
@@ -623,7 +752,12 @@ function UpstreamsPage() {
                       className={cx(ROW_FACT_CLASS, !fact && 'invisible')}
                       data-window={windowName}
                     >
-                      <span className="text-text-faint">{label}</span>
+                      <span
+                        className="text-text-faint"
+                        title={windowLabel(windowName, { long: true })}
+                      >
+                        {windowLabel(windowName)}
+                      </span>
                       <span
                         className={cx(
                           'text-right',
@@ -632,7 +766,7 @@ function UpstreamsPage() {
                             : 'text-text-muted',
                         )}
                       >
-                        {fact ? formatQuotaPercent(fact.used) : '—'}
+                        {fact ? formatQuotaPercent(fact.used) : ''}
                       </span>
                     </span>
                   );
@@ -707,14 +841,19 @@ const QUOTA_HISTORY_RANGE_ITEM_CLASS =
 const QUOTA_CHART_HEIGHT = 280;
 
 /**
- * Windows that keep a gradient fill in the quota-history chart: the three
- * live subscription windows. Legacy model windows, unified and overage draw
- * as bare strokes so five-plus overlapping windows stay readable instead of
- * stacking into a tinted wash.
+ * Windows that keep a gradient fill in the quota-history chart: the two
+ * shared windows, Gemini's two model-family windows and Anthropic's Fable
+ * window. Legacy model windows, unified and overage draw as bare strokes so
+ * five-plus overlapping windows stay readable instead of stacking into a
+ * tinted wash.
  */
 const QUOTA_FILL_WINDOWS: Record<string, true> = {
   '5h': true,
   '7d': true,
+  gemini_5h: true,
+  gemini_7d: true,
+  third_party_5h: true,
+  third_party_7d: true,
   '7d_fable': true,
 };
 
@@ -861,10 +1000,11 @@ function oauthBadge(
     };
   if (entry.mode == null || entry.expires_at_unix_secs == null)
     return { tone: 'neutral', label: 'Unknown' };
-  if (entry.mode === 'long_lived_365d')
+  if (entry.kind === 'anthropic_oauth' && entry.mode === 'long_lived_365d')
     return { tone: 'ok', label: 'Long-lived' };
-  if (!entry.can_refresh) return { tone: 'warn', label: 'Renewal unavailable' };
-  if (entry.expires_at_unix_secs <= nowUnixSecs)
+  if (entry.kind === 'anthropic_oauth' && !entry.can_refresh)
+    return { tone: 'warn', label: 'Renewal unavailable' };
+  if (entry.can_refresh && entry.expires_at_unix_secs <= nowUnixSecs)
     return { tone: 'warn', label: 'Renewing' };
   return { tone: 'ok', label: 'Connected' };
 }
@@ -947,18 +1087,24 @@ export function DetailView({
 }: {
   upstream: Upstream;
   onBack: () => void;
-  /** Opens the shared connect dialog at the Claude sign-in step. */
+  /** Opens the shared connect dialog for this provider. */
   onConnect: () => void;
 }) {
   const { action } = Route.useSearch();
+  const capabilities = capabilitiesOf(upstream.kind);
+  const isOauth = capabilities.oauthBrowserConnect;
+  const isSubscription = upstream.kind.endsWith('_oauth');
+  const isApiKey = upstream.kind.endsWith('_api_key');
   const navigate = useNavigate({ from: Route.fullPath });
   const toggle = useUpdateUpstreamWarmupSettings();
   const del = useDeleteUpstream();
-  const subscriptionMetadataQ = useUpstreamSubscriptionMetadata(upstream.id);
+  const subscriptionMetadataQ = useUpstreamSubscriptionMetadata(
+    isSubscription ? upstream.id : null,
+  );
   const triggerSubscriptionMetadataRefresh =
     useTriggerSubscriptionMetadataRefresh();
   const upstreamOAuthQ = useUpstreamOAuthStatus(
-    upstream.kind === 'anthropic_oauth' ? upstream.id : null,
+    isSubscription ? upstream.id : null,
   );
   const statusQ = useStatus();
   const principalNameMap = usePrincipalNameMap();
@@ -979,7 +1125,6 @@ export function DetailView({
   const { range, setRange } = useSharedTimeRange();
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
   const chartId = useChartId();
-  const isOauth = upstream.kind === 'anthropic_oauth';
 
   // ?action=reconnect deep link: consume the param exactly once, then open the
   // connect dialog. The ref survives StrictMode's double effect pass;
@@ -997,8 +1142,8 @@ export function DetailView({
       replace: true,
       search: (previous) => ({ ...previous, action: undefined }),
     });
-    if (isOauth) onConnect();
-  }, [action, isOauth, onConnect, navigate]);
+    if (isSubscription) onConnect();
+  }, [action, isSubscription, onConnect, navigate]);
 
   // Keep a separate wall clock for snapshot freshness/countdowns. Series
   // requests use stable range keys and resolve their own absolute bounds
@@ -1057,11 +1202,15 @@ export function DetailView({
         ).length,
       }
     : null;
+  const quotaWindows =
+    UPSTREAM_LATEST_WINDOWS_BY_PROVIDER[providerOf(upstream.kind)];
+  const quotaSkeletonRows = providerOf(upstream.kind) === 'anthropic' ? 3 : 2;
   const quotaLatest = useSubscriptionQuotaLatest({
     upstreamIds: allUpstreamIds,
-    windows: UPSTREAM_LATEST_WINDOWS,
+    windows: quotaWindows,
     source: 'merged',
     refetchInterval: 5_000,
+    enabled: capabilities.subscriptionQuota,
   });
   const selectedLatest = useMemo(
     () =>
@@ -1071,10 +1220,11 @@ export function DetailView({
   );
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
-    windows: '5h,7d,7d_sonnet,7d_opus,7d_fable,overage',
+    windows: quotaWindows,
     source: 'merged',
     rangeSecs,
     bucketSecs: bucketSecsForRange,
+    enabled: capabilities.quotaHistory,
   });
   const seriesSinceUnixSecs =
     quotaSeries.data?.since_unix_secs ?? nowUnixSecs - rangeSecs;
@@ -1086,7 +1236,7 @@ export function DetailView({
     'tokens',
   );
   const apiUsageQ = useUpstreamKeyUsage(
-    upstream.kind === 'anthropic_oauth' ? null : upstream.id,
+    isApiKey ? upstream.id : null,
     range,
     range === '7d' || range === '24h' ? 'hour' : 'minute',
   );
@@ -1148,7 +1298,12 @@ export function DetailView({
   const feed = useRequestEventsFeed({
     filters: {
       upstream_id: upstream.id,
-      event_kind: 'messages',
+      event_kind:
+        providerOf(upstream.kind) === 'openai'
+          ? 'openai_responses'
+          : providerOf(upstream.kind) === 'gemini'
+            ? 'gemini_generate_content'
+            : 'messages',
     },
     mode: 'infinite',
     initialHistoryLimit: 500,
@@ -1166,14 +1321,16 @@ export function DetailView({
     quotaLatestPending ||
     (quotaSeries.data === undefined && quotaSeries.isPending);
   const oauthStatusPending =
-    isOauth && upstreamOAuthQ.data === undefined && upstreamOAuthQ.isPending;
+    isSubscription &&
+    upstreamOAuthQ.data === undefined &&
+    upstreamOAuthQ.isPending;
   const subMeta = subscriptionMetadataQ.data?.subscription_metadata;
   const orgMeta = subscriptionMetadataQ.data?.organization_metadata;
   const principalEntry = upstreamOAuthQ.data?.has_credentials
     ? upstreamOAuthQ.data
     : null;
   const hasBoundToken = Boolean(principalEntry);
-  const reconnectNudge = isOauth
+  const reconnectNudge = isSubscription
     ? classifyOAuthReconnect(
         upstreamOAuthQ.data,
         upstream.status.last_apply_error,
@@ -1217,8 +1374,8 @@ export function DetailView({
     : null;
 
   const planLabel = isOauth
-    ? (subscriptionPlanLabel(orgMeta) ?? 'Claude subscription')
-    : 'API key';
+    ? (subscriptionPlanLabel(orgMeta) ?? 'Subscription')
+    : upstreamTypeLabel(upstream.kind);
   // The header carries plan, account and organization; the collapsed
   // metadata section keeps only what the header does not say. API-key
   // endpoint and key status live in Access, where they are edited.
@@ -1317,7 +1474,7 @@ export function DetailView({
     </DetailSection>
   );
 
-  const quotaWindows = (
+  const quotaWindowsSection = (
     <DetailSection
       span="full"
       title="Quota"
@@ -1333,19 +1490,21 @@ export function DetailView({
         </span>
       }
       action={
-        <LimitResetAction
-          key={upstream.id}
-          upstream={upstream}
-          credentialsStored={upstreamOAuthQ.data?.has_credentials}
-          quotaWindows={
-            quotaLatest.isError ? [] : (selectedLatest?.windows ?? [])
-          }
-        />
+        capabilities.limitReset ? (
+          <LimitResetAction
+            key={upstream.id}
+            upstream={upstream}
+            credentialsStored={upstreamOAuthQ.data?.has_credentials}
+            quotaWindows={
+              quotaLatest.isError ? [] : (selectedLatest?.windows ?? [])
+            }
+          />
+        ) : undefined
       }
     >
       {quotaLatestPending ? (
         <QuotaWindowRows>
-          {Array.from({ length: 3 }).map((_, index) => (
+          {Array.from({ length: quotaSkeletonRows }).map((_, index) => (
             <QuotaWindowRowSkeleton key={index} />
           ))}
         </QuotaWindowRows>
@@ -1355,6 +1514,7 @@ export function DetailView({
         <QuotaWindowRows>
           {selectQuotaCardSnapshots({
             latestWindows: selectedLatest.windows,
+            provider: providerOf(upstream.kind),
           }).map((snap) => (
             <QuotaWindowRow
               key={snap.window}
@@ -1429,6 +1589,7 @@ export function DetailView({
                   />
                   <span
                     className={dimmed ? 'text-text-faint' : 'text-text-muted'}
+                    title={windowLabel(windowName, { long: true })}
                   >
                     {windowLabel(windowName)}
                   </span>
@@ -1519,7 +1680,10 @@ export function DetailView({
                               key={i}
                               className="flex items-center justify-between gap-4 py-px"
                             >
-                              <span className="flex items-center gap-1.5 text-text-muted">
+                              <span
+                                className="flex items-center gap-1.5 text-text-muted"
+                                title={windowLabel(key, { long: true })}
+                              >
                                 <span
                                   aria-hidden="true"
                                   className="size-2.5 shrink-0 rounded-xs"
@@ -1628,7 +1792,19 @@ export function DetailView({
                     previousTs = group.ts;
                     previousRaised = raised;
                     const firstWindow = group.windows[0] ?? '';
-                    const names = group.windows.map(windowLabel).join(', ');
+                    const names = group.windows
+                      .map((window) => windowLabel(window))
+                      .join(', ');
+                    const markerLabel =
+                      group.kind === 'start'
+                        ? `${names} start`
+                        : `${names} reset`;
+                    const markerAnchor: 'start' | 'middle' | 'end' =
+                      group.ts >= seriesUntilUnixSecs - span * 0.2
+                        ? 'end'
+                        : group.ts <= seriesSinceUnixSecs + span * 0.2
+                          ? 'start'
+                          : 'middle';
                     return (
                       <ReferenceLine
                         key={`marker-${group.kind}-${group.ts}`}
@@ -1638,12 +1814,9 @@ export function DetailView({
                         strokeDasharray={group.kind === 'start' ? '4 6' : '2 4'}
                       >
                         <Label
-                          value={
-                            group.kind === 'start'
-                              ? `${names} start`
-                              : `${names} reset`
-                          }
+                          value={markerLabel}
                           position={raised ? 'top' : 'insideTop'}
+                          textAnchor={markerAnchor}
                           fontSize={12}
                           fill="var(--color-text-muted)"
                         />
@@ -1710,16 +1883,27 @@ export function DetailView({
 
   const titleId = 'upstream-detail-title';
   const hasBillingNotice =
-    isOauth &&
+    capabilities.credits &&
     (orgMeta?.claude_code_trial_ends_at ||
       orgMeta?.payment_auth_hosted_invoice_url ||
       orgMeta?.overage_credit_granted ||
       orgMeta?.overage_credit_eligible ||
       (orgMeta?.overage_credit_amount_minor_units != null &&
         orgMeta.overage_credit_amount_minor_units > 0));
-  const applyError = isOauth ? null : upstreamRuntimeStatus?.last_apply_error;
+  const applyError = isSubscription
+    ? null
+    : upstreamRuntimeStatus?.last_apply_error;
+  const refreshFailing =
+    isSubscription &&
+    upstream.kind !== 'anthropic_oauth' &&
+    !reconnectNudge &&
+    Boolean(
+      upstream.status.last_apply_error ||
+        upstreamRuntimeStatus?.last_apply_error,
+    );
   const hasNotices =
     reconnectNudge != null ||
+    refreshFailing ||
     keyNotice != null ||
     !!applyError ||
     !!hasBillingNotice ||
@@ -1733,7 +1917,12 @@ export function DetailView({
           <DetailHeader
             backLabel="All upstreams"
             onBack={onBack}
-            title={<InlineNameEditor upstream={upstream} />}
+            title={
+              <span className="flex min-w-0 items-center gap-2">
+                <ProviderLogo provider={providerOf(upstream.kind)} size={16} />
+                <InlineNameEditor upstream={upstream} />
+              </span>
+            }
             titleId={titleId}
             badge={
               metadataPending ? (
@@ -1772,6 +1961,11 @@ export function DetailView({
                   nudge={reconnectNudge}
                   onReconnect={onConnect}
                 />
+              ) : null}
+              {refreshFailing ? (
+                <Notice tone="warning" title="Refresh failing">
+                  The latest account refresh failed.
+                </Notice>
               ) : null}
               {keyNotice ? (
                 <ApiKeyNotice
@@ -1813,12 +2007,12 @@ export function DetailView({
         }
       >
         <DetailSectionGrid>
-          {isOauth ? (
+          {capabilities.subscriptionQuota ? (
             <>
-              {quotaWindows}
-              {quotaHistory}
+              {quotaWindowsSection}
+              {capabilities.quotaHistory ? quotaHistory : null}
             </>
-          ) : (
+          ) : isApiKey ? (
             <ApiUsageCard
               data={apiUsageQ.data}
               isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
@@ -1834,6 +2028,23 @@ export function DetailView({
               }
               usageModeShown={apiKeyUsable(keyAccess)}
             />
+          ) : (
+            <DetailSection title="Usage" description="Selected range">
+              <p role="status" className="text-body-sm font-medium text-text">
+                Provider quota not collected for{' '}
+                {PROVIDER_LABELS[providerOf(upstream.kind)]}{' '}
+                {upstreamTypeLabel(upstream.kind)}.
+              </p>
+              <p className="mt-2 text-body-sm text-text-muted">
+                <Link
+                  to="/"
+                  className="text-accent-text underline underline-offset-2"
+                >
+                  Open Overview
+                </Link>{' '}
+                → compare recorded requests, tokens and estimated list price.
+              </p>
+            </DetailSection>
           )}
 
           <DetailSection
@@ -1853,249 +2064,334 @@ export function DetailView({
                 cost: true,
                 tokens: true,
               }}
+              showProviderLogo={false}
               tableContainerClassName="glass min-h-48 h-96 max-h-[60vh] overflow-auto rounded-md"
               emptyTitle="No recent requests for this upstream"
             />
           </DetailSection>
 
-          {isOauth ? (
+          {isSubscription ? (
             <>
-              <DetailSection
-                title="Credential"
-                description={
-                  oauthStatusPending ? (
-                    <Skeleton className="h-3 w-32" />
-                  ) : upstreamOAuthQ.isError || !upstreamOAuthQ.data ? (
-                    'Credential status unavailable'
-                  ) : hasBoundToken ? (
-                    'OAuth token bound on this upstream'
-                  ) : (
-                    'Not connected'
-                  )
-                }
-                action={
-                  oauthStatusPending ? (
-                    <>
-                      <Skeleton className="h-5 w-24" />
-                      <Skeleton className="h-7 w-24" />
-                    </>
-                  ) : (
-                    <>
-                      <span data-testid="oauth-current-status">
-                        <StatusBadge
-                          tone={oauthStatusBadge.tone}
-                          label={oauthStatusBadge.label}
-                        />
-                      </span>
-                      <Button
-                        size="sm"
-                        iconLeft={<KeyRound />}
-                        onClick={onConnect}
-                      >
-                        {hasBoundToken ? 'Reconnect' : 'Connect'}
-                      </Button>
-                    </>
-                  )
-                }
-              >
-                <div
-                  data-testid="oauth-status-card-body"
-                  className="text-body-sm"
-                >
-                  {oauthStatusPending ? (
-                    <div
-                      data-testid="oauth-status-loading-grid"
-                      className="space-y-3"
-                    >
-                      <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
-                        {Array.from({ length: 3 }).map((_, index) => (
-                          <div key={index}>
-                            <Skeleton className="h-3 w-20" />
-                            <Skeleton className="mt-1 h-5 w-28" />
-                          </div>
-                        ))}
-                      </div>
-                      <div>
-                        <Skeleton className="h-3 w-16" />
-                        <Skeleton className="mt-1 h-3 w-full max-w-56" />
-                      </div>
-                    </div>
-                  ) : upstreamOAuthQ.isError || !upstreamOAuthQ.data ? (
-                    <p className="text-body-sm text-danger-text">
-                      Credential status could not be loaded. Refresh this page
-                      to try again.
-                    </p>
-                  ) : !hasBoundToken ? (
-                    <p className="text-body-sm text-text-muted">
-                      Use Connect to authorize this upstream with a Claude
-                      account.
-                    </p>
-                  ) : principalEntry ? (
-                    <div
-                      data-testid="oauth-status-loaded-grid"
-                      className="space-y-3"
-                    >
-                      <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
-                        <div>
-                          <div className="text-label text-text-faint">
-                            Access token
-                          </div>
-                          <div className="mt-1">
-                            {principalEntry.expires_at_unix_secs ? (
-                              <span>
-                                Expires{' '}
-                                <RelativeTime
-                                  ts={
-                                    new Date(
-                                      principalEntry.expires_at_unix_secs *
-                                        1000,
-                                    )
-                                  }
-                                />
-                              </span>
-                            ) : (
-                              <span className="text-text-faint">—</span>
-                            )}
-                          </div>
-                          {principalEntry.mode === 'refreshing' ? (
-                            <div className="mt-0.5 text-caption text-text-faint">
-                              Renews automatically while the refresh token is
-                              valid.
-                            </div>
+              {upstream.kind === 'anthropic_oauth' ? (
+                <>
+                  <DetailSection
+                    title="Credential"
+                    description={
+                      oauthStatusPending ? (
+                        <Skeleton className="h-3 w-32" />
+                      ) : upstreamOAuthQ.isError || !upstreamOAuthQ.data ? (
+                        'Credential status unavailable'
+                      ) : hasBoundToken ? (
+                        'Subscription token bound on this upstream'
+                      ) : (
+                        'Not connected'
+                      )
+                    }
+                    action={
+                      oauthStatusPending ? (
+                        <>
+                          <Skeleton className="h-5 w-24" />
+                          {isOauth ? <Skeleton className="h-7 w-24" /> : null}
+                        </>
+                      ) : (
+                        <>
+                          <span data-testid="oauth-current-status">
+                            <StatusBadge
+                              tone={oauthStatusBadge.tone}
+                              label={oauthStatusBadge.label}
+                            />
+                          </span>
+                          {isOauth ? (
+                            <Button
+                              size="sm"
+                              iconLeft={<KeyRound />}
+                              onClick={onConnect}
+                            >
+                              {hasBoundToken ? 'Reconnect' : 'Connect'}
+                            </Button>
                           ) : null}
-                        </div>
-                        <div>
-                          <div className="text-label text-text-faint">
-                            Credential mode
+                        </>
+                      )
+                    }
+                  >
+                    <div
+                      data-testid="oauth-status-card-body"
+                      className="text-body-sm"
+                    >
+                      {oauthStatusPending ? (
+                        <div
+                          data-testid="oauth-status-loading-grid"
+                          className="space-y-3"
+                        >
+                          <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
+                            {Array.from({ length: 3 }).map((_, index) => (
+                              <div key={index}>
+                                <Skeleton className="h-3 w-20" />
+                                <Skeleton className="mt-1 h-5 w-28" />
+                              </div>
+                            ))}
                           </div>
-                          <div
-                            data-testid="oauth-credential-mode"
-                            className="mt-1"
-                          >
-                            {principalEntry.mode === 'long_lived_365d' ? (
-                              <>
-                                <span>365-day token</span>
-                                <div className="mt-0.5 text-caption text-text-faint">
-                                  Never refreshed — reauthorize once a year
-                                </div>
-                              </>
-                            ) : principalEntry.mode === 'refreshing' ? (
-                              <>
-                                <span>Refreshing</span>
-                                <div className="mt-0.5 text-caption text-text-faint">
-                                  Auto-refreshes; reauthorize about every 30
-                                  days
-                                </div>
-                              </>
-                            ) : (
-                              <span className="text-text-faint">Unknown</span>
-                            )}
+                          <div>
+                            <Skeleton className="h-3 w-16" />
+                            <Skeleton className="mt-1 h-3 w-full max-w-56" />
                           </div>
                         </div>
-                        <div>
-                          <div className="text-label text-text-faint">
-                            Refresh token
-                          </div>
-                          <div className="mt-1">
-                            {principalEntry.can_refresh ? (
-                              principalEntry.refresh_token_present ? (
-                                'Present'
-                              ) : (
-                                <span className="text-warn-text">Missing</span>
-                              )
-                            ) : principalEntry.refresh_token_present ? (
-                              <span className="text-text-muted">
-                                Stored, unused
-                              </span>
-                            ) : (
-                              <span className="text-text-muted">
-                                Not stored
-                              </span>
-                            )}
-                          </div>
-                          {/* The refresh-token clock only matters when the
+                      ) : upstreamOAuthQ.isError || !upstreamOAuthQ.data ? (
+                        <p className="text-body-sm text-danger-text">
+                          Credential status could not be loaded. Refresh this
+                          page to try again.
+                        </p>
+                      ) : !hasBoundToken ? (
+                        <p className="text-body-sm text-text-muted">
+                          {isOauth
+                            ? 'Use Connect to authorize this upstream with a Claude account.'
+                            : `No ${PROVIDER_LABELS[providerOf(upstream.kind)]} subscription credential is bound.`}
+                        </p>
+                      ) : principalEntry ? (
+                        <div
+                          data-testid="oauth-status-loaded-grid"
+                          className="space-y-3"
+                        >
+                          <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
+                            <div>
+                              <div className="text-label text-text-faint">
+                                Access token
+                              </div>
+                              <div className="mt-1">
+                                {principalEntry.expires_at_unix_secs ? (
+                                  <span>
+                                    Expires{' '}
+                                    <RelativeTime
+                                      ts={
+                                        new Date(
+                                          principalEntry.expires_at_unix_secs *
+                                            1000,
+                                        )
+                                      }
+                                    />
+                                  </span>
+                                ) : (
+                                  <span className="text-text-faint">—</span>
+                                )}
+                              </div>
+                              {principalEntry.mode === 'refreshing' ? (
+                                <div className="mt-0.5 text-caption text-text-faint">
+                                  Renews automatically while the refresh token
+                                  is valid.
+                                </div>
+                              ) : null}
+                            </div>
+                            <div>
+                              <div className="text-label text-text-faint">
+                                Credential mode
+                              </div>
+                              <div
+                                data-testid="oauth-credential-mode"
+                                className="mt-1"
+                              >
+                                {upstream.kind === 'anthropic_oauth' &&
+                                principalEntry.mode === 'long_lived_365d' ? (
+                                  <>
+                                    <span>365-day token</span>
+                                    <div className="mt-0.5 text-caption text-text-faint">
+                                      Never refreshed — reauthorize once a year
+                                    </div>
+                                  </>
+                                ) : principalEntry.mode === 'refreshing' ? (
+                                  <>
+                                    <span>Refreshing</span>
+                                    <div className="mt-0.5 text-caption text-text-faint">
+                                      Auto-refreshes; reauthorize about every 30
+                                      days
+                                    </div>
+                                  </>
+                                ) : (
+                                  <span className="text-text-faint">
+                                    Unknown
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-label text-text-faint">
+                                Refresh token
+                              </div>
+                              <div className="mt-1">
+                                {principalEntry.can_refresh ? (
+                                  principalEntry.refresh_token_present ? (
+                                    'Present'
+                                  ) : (
+                                    <span className="text-warn-text">
+                                      Missing
+                                    </span>
+                                  )
+                                ) : principalEntry.refresh_token_present ? (
+                                  <span className="text-text-muted">
+                                    Stored, unused
+                                  </span>
+                                ) : (
+                                  <span className="text-text-muted">
+                                    Not stored
+                                  </span>
+                                )}
+                              </div>
+                              {/* The refresh-token clock only matters when the
                             credential can actually be refreshed; for a
                             long-lived credential it would paint a false
                             danger badge. */}
-                          {principalEntry.can_refresh &&
-                          principalEntry.refresh_token_expires_at_unix_secs !=
-                            null ? (
-                            <div
-                              data-testid="oauth-refresh-token-expiry"
-                              className="mt-0.5 text-caption text-text-faint"
-                            >
-                              Expires{' '}
-                              <span
-                                className={
-                                  {
-                                    ok: 'text-text-muted',
-                                    warn: 'text-warn-text',
-                                    danger: 'text-danger-text',
-                                  }[
-                                    refreshTokenExpiryTone(
-                                      principalEntry.refresh_token_expires_at_unix_secs,
-                                    )
-                                  ]
-                                }
-                              >
-                                <RelativeTime
-                                  ts={
-                                    new Date(
-                                      principalEntry.refresh_token_expires_at_unix_secs *
-                                        1000,
-                                    )
-                                  }
-                                />
-                              </span>
+                              {principalEntry.can_refresh &&
+                              principalEntry.refresh_token_expires_at_unix_secs !=
+                                null ? (
+                                <div
+                                  data-testid="oauth-refresh-token-expiry"
+                                  className="mt-0.5 text-caption text-text-faint"
+                                >
+                                  Expires{' '}
+                                  <span
+                                    className={
+                                      {
+                                        ok: 'text-text-muted',
+                                        warn: 'text-warn-text',
+                                        danger: 'text-danger-text',
+                                      }[
+                                        refreshTokenExpiryTone(
+                                          principalEntry.refresh_token_expires_at_unix_secs,
+                                        )
+                                      ]
+                                    }
+                                  >
+                                    <RelativeTime
+                                      ts={
+                                        new Date(
+                                          principalEntry.refresh_token_expires_at_unix_secs *
+                                            1000,
+                                        )
+                                      }
+                                    />
+                                  </span>
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                          {principalEntry.scopes.length ? (
+                            <div>
+                              <div className="text-label text-text-faint">
+                                Scopes
+                              </div>
+                              <div className="mt-1 break-all font-mono text-data text-text-muted">
+                                {principalEntry.scopes.join(', ')}
+                              </div>
                             </div>
                           ) : null}
                         </div>
-                      </div>
-                      {principalEntry.scopes.length ? (
-                        <div>
-                          <div className="text-label text-text-faint">
-                            Scopes
-                          </div>
-                          <div className="mt-1 break-all font-mono text-data text-text-muted">
-                            {principalEntry.scopes.join(', ')}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <p className="text-body-sm text-text-muted">
-                      Token is bound on the upstream but no credential details
-                      are available right now.
-                    </p>
-                  )}
-                  {/* The effective endpoint closes the Credential body in
+                      ) : (
+                        <p className="text-body-sm text-text-muted">
+                          Token is bound on the upstream but no credential
+                          details are available right now.
+                        </p>
+                      )}
+                      {/* The effective endpoint closes the Credential body in
                       every state, as Access row 1 does for API keys. */}
-                  <DetailRows className="mt-3">
+                      <DetailRows className="mt-3">
+                        {oauthStatusPending ? (
+                          <DetailRow label="Endpoint">
+                            <Skeleton className="h-4 w-36" />
+                          </DetailRow>
+                        ) : (
+                          <EndpointRow
+                            upstream={upstream}
+                            kind="oauth"
+                            editing={activeEditor === 'endpoint'}
+                            onEditingChange={editorToggle('endpoint')}
+                          />
+                        )}
+                      </DetailRows>
+                    </div>
+                  </DetailSection>
+                  {identity}
+                </>
+              ) : (
+                <DetailSection title="Connection" span="full">
+                  <div
+                    data-testid="provider-oauth-connection"
+                    className="space-y-3"
+                  >
                     {oauthStatusPending ? (
-                      <DetailRow label="Endpoint">
-                        <Skeleton className="h-4 w-36" />
-                      </DetailRow>
+                      <Skeleton className="h-4 w-36" />
+                    ) : (upstreamOAuthQ.isError || !upstreamOAuthQ.data) &&
+                      !reconnectNudge ? (
+                      <p className="text-body-sm text-danger-text">
+                        Connection status could not be loaded. Refresh this page
+                        to try again.
+                      </p>
+                    ) : null}
+                    {subscriptionMetadataQ.data === undefined &&
+                    subscriptionMetadataQ.isPending ? (
+                      <IdentitySkeleton />
+                    ) : subscriptionMetadataQ.isError ? (
+                      <p className="text-body-sm text-danger-text">
+                        Account details could not be loaded. Try again later.
+                      </p>
                     ) : (
+                      <DetailFacts>
+                        {subscriptionMetadataQ.data?.account_email ? (
+                          <DetailFact label="Email">
+                            {subscriptionMetadataQ.data.account_email}
+                          </DetailFact>
+                        ) : null}
+                        {subscriptionMetadataQ.data?.plan ? (
+                          <DetailFact
+                            label={
+                              upstream.kind === 'openai_oauth' ? 'Plan' : 'Tier'
+                            }
+                          >
+                            {subscriptionMetadataQ.data.plan
+                              .replace(/[_-]/g, ' ')
+                              .replace(/\b\w/g, (letter) =>
+                                letter.toUpperCase(),
+                              )}
+                          </DetailFact>
+                        ) : null}
+                        {(
+                          upstream.kind === 'openai_oauth'
+                            ? subscriptionMetadataQ.data?.account_id
+                            : subscriptionMetadataQ.data?.project_id
+                        ) ? (
+                          <DetailFact
+                            label={
+                              upstream.kind === 'openai_oauth'
+                                ? 'Workspace'
+                                : 'Project'
+                            }
+                          >
+                            <span className="break-all font-mono text-data">
+                              {upstream.kind === 'openai_oauth'
+                                ? subscriptionMetadataQ.data?.account_id
+                                : subscriptionMetadataQ.data?.project_id}
+                            </span>
+                          </DetailFact>
+                        ) : null}
+                      </DetailFacts>
+                    )}
+                    <DetailRows>
                       <EndpointRow
                         upstream={upstream}
                         kind="oauth"
                         editing={activeEditor === 'endpoint'}
                         onEditingChange={editorToggle('endpoint')}
                       />
-                    )}
-                  </DetailRows>
-                </div>
-              </DetailSection>
-              {/* Account metadata pairs beside Credential in the row above;
-                  Warm-up keeps the full row below — half-width pairing with
-                  these two sections always leaves a dead column gap. */}
-              {identity}
-              <WarmupCardMinimal
-                upstream={upstream}
-                credentialNoticeShown={reconnectNudge != null}
-              />
+                    </DetailRows>
+                  </div>
+                </DetailSection>
+              )}
+              {capabilities.warmup ? (
+                <WarmupCardMinimal
+                  upstream={upstream}
+                  credentialNoticeShown={reconnectNudge != null}
+                />
+              ) : null}
             </>
-          ) : (
+          ) : isApiKey ? (
             <ApiKeyAccessSection
               upstream={upstream}
               workspaceEditing={activeEditor === 'workspace'}
@@ -2106,11 +2402,25 @@ export function DetailView({
               usageReportsStopped={usageReportsStopped}
               usageAttribution={keyUsage?.attribution}
             />
+          ) : (
+            <DetailSection
+              title="Credential"
+              description={upstreamKindLabel(upstream.kind)}
+            >
+              <DetailRows>
+                <EndpointRow
+                  upstream={upstream}
+                  kind={upstream.kind.endsWith('_oauth') ? 'oauth' : 'api_key'}
+                  editing={activeEditor === 'endpoint'}
+                  onEditingChange={editorToggle('endpoint')}
+                />
+              </DetailRows>
+            </DetailSection>
           )}
         </DetailSectionGrid>
       </DetailPane>
 
-      {isOauth ? null : (
+      {isSubscription || !isApiKey ? null : (
         <UpstreamConnectDialog
           target={replaceOpen ? { mode: 'replace', upstream } : null}
           onClose={() => setReplaceOpen(false)}
@@ -2157,7 +2467,7 @@ export function DetailView({
             <>
               <span className="font-medium text-text">{upstream.name}</span>{' '}
               will start receiving requests again.
-              {upstream.warmup_enabled
+              {!capabilities.warmup || upstream.warmup_enabled
                 ? null
                 : ' Warm-up is turned back on too.'}
             </>
@@ -2165,7 +2475,9 @@ export function DetailView({
             <>
               <span className="font-medium text-text">{upstream.name}</span>{' '}
               will stop receiving requests.
-              {upstream.warmup_enabled ? ' Warm-up is turned off too.' : null}
+              {capabilities.warmup && upstream.warmup_enabled
+                ? ' Warm-up is turned off too.'
+                : null}
               {poolImpact ? (
                 <span
                   className="block mt-2 text-text-muted"
@@ -2188,7 +2500,7 @@ export function DetailView({
           const body: UpdateUpstreamWarmupSettingsRequest = {
             enabled: nextEnabled,
           };
-          if (upstream.warmup_enabled !== nextEnabled) {
+          if (capabilities.warmup && upstream.warmup_enabled !== nextEnabled) {
             body.warmup_enabled = nextEnabled;
           }
           toggle.mutate(

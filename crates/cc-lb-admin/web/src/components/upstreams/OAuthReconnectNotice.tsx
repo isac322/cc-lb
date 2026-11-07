@@ -9,7 +9,7 @@ import {
   type OAuthReconnectNudge,
   useOAuthReconnectNudges,
 } from '../../lib/oauthReconnect';
-import { useUpstreams } from '../../lib/queries';
+import { useStatus, useUpstreams } from '../../lib/queries';
 import { Button, Notice } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
 
@@ -138,6 +138,51 @@ export function OAuthReconnectSummary() {
       }
     >
       {summary}
+    </Notice>
+  );
+}
+
+/** Global banner for upstream apply failures, independent of OAuth nudges. */
+export function UpstreamApplyFailureSummary() {
+  const upstreams = useUpstreams();
+  const status = useStatus();
+  const failures = useMemo(
+    () =>
+      (status.data?.upstreams ?? [])
+        .map((entry) => {
+          const upstream = upstreams.data?.upstreams.find(
+            (item) => item.id === entry.id,
+          );
+          return entry.last_apply_error && upstream
+            ? {
+                id: entry.id,
+                name: upstream.name,
+                error: entry.last_apply_error,
+              }
+            : null;
+        })
+        .filter(
+          (entry): entry is { id: string; name: string; error: string } =>
+            entry != null,
+        ),
+    [status.data, upstreams.data],
+  );
+  if (failures.length === 0) return null;
+  return (
+    <Notice
+      variant="banner"
+      tone="danger"
+      title={
+        failures.length === 1
+          ? '1 upstream apply failed'
+          : `${failures.length} upstream applies failed`
+      }
+    >
+      <span>
+        {failures
+          .map((failure) => `${failure.name}: ${failure.error}`)
+          .join(' · ')}
+      </span>
     </Notice>
   );
 }

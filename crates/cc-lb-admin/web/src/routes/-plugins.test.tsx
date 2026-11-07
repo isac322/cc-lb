@@ -77,9 +77,8 @@ vi.mock('../lib/queries', async () => {
     useUploadWasm: vi.fn(),
     useDeletePlugin: vi.fn(),
     useGcPlugins: vi.fn(),
-    usePrincipals: vi.fn(),
-    usePluginChain: vi.fn(),
     usePluginReferences: vi.fn(),
+    useUpstreams: vi.fn(),
   };
 });
 
@@ -152,6 +151,11 @@ function mockPluginPageDependencies() {
   vi.mocked(queries.usePluginReferences).mockReturnValue({
     data: null,
     isLoading: false,
+  } as never);
+  vi.mocked(queries.useUpstreams).mockReturnValue({
+    data: { upstreams: [] },
+    isLoading: false,
+    isPending: false,
   } as never);
 }
 

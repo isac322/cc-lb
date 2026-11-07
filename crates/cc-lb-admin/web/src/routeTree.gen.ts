@@ -16,6 +16,7 @@ import { Route as PluginsRouteImport } from './routes/plugins'
 import { Route as PrincipalsRouteImport } from './routes/principals'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as UpstreamsRouteImport } from './routes/upstreams'
+import { Route as ProvidersProviderRouteImport } from './routes/providers.$provider'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -52,6 +53,11 @@ const UpstreamsRoute = UpstreamsRouteImport.update({
   path: '/upstreams',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProvidersProviderRoute = ProvidersProviderRouteImport.update({
+  id: '/providers/$provider',
+  path: '/providers/$provider',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -61,6 +67,7 @@ export interface FileRoutesByFullPath {
   '/principals': typeof PrincipalsRoute
   '/settings': typeof SettingsRoute
   '/upstreams': typeof UpstreamsRoute
+  '/providers/$provider': typeof ProvidersProviderRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -70,6 +77,7 @@ export interface FileRoutesByTo {
   '/principals': typeof PrincipalsRoute
   '/settings': typeof SettingsRoute
   '/upstreams': typeof UpstreamsRoute
+  '/providers/$provider': typeof ProvidersProviderRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -80,6 +88,7 @@ export interface FileRoutesById {
   '/principals': typeof PrincipalsRoute
   '/settings': typeof SettingsRoute
   '/upstreams': typeof UpstreamsRoute
+  '/providers/$provider': typeof ProvidersProviderRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -91,6 +100,7 @@ export interface FileRouteTypes {
     | '/principals'
     | '/settings'
     | '/upstreams'
+    | '/providers/$provider'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -100,6 +110,7 @@ export interface FileRouteTypes {
     | '/principals'
     | '/settings'
     | '/upstreams'
+    | '/providers/$provider'
   id:
     | '__root__'
     | '/'
@@ -109,6 +120,7 @@ export interface FileRouteTypes {
     | '/principals'
     | '/settings'
     | '/upstreams'
+    | '/providers/$provider'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -119,6 +131,7 @@ export interface RootRouteChildren {
   PrincipalsRoute: typeof PrincipalsRoute
   SettingsRoute: typeof SettingsRoute
   UpstreamsRoute: typeof UpstreamsRoute
+  ProvidersProviderRoute: typeof ProvidersProviderRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -172,6 +185,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UpstreamsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/providers/$provider': {
+      id: '/providers/$provider'
+      path: '/providers/$provider'
+      fullPath: '/providers/$provider'
+      preLoaderRoute: typeof ProvidersProviderRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -183,6 +203,7 @@ const rootRouteChildren: RootRouteChildren = {
   PrincipalsRoute: PrincipalsRoute,
   SettingsRoute: SettingsRoute,
   UpstreamsRoute: UpstreamsRoute,
+  ProvidersProviderRoute: ProvidersProviderRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -1,6 +1,7 @@
 import { Copy } from 'lucide-react';
 import { useRef } from 'react';
 import { fmtBytes, fmtMs } from '../../lib/format';
+import type { ProviderFamily } from '../../lib/providers';
 import { useRequestEventDetail } from '../../lib/queries';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { useCopyButton } from '../../lib/useCopyButton';
@@ -20,10 +21,12 @@ export function RequestEventDrawer({
   event,
   principalName,
   onClose,
+  providerByUpstream,
 }: {
   event: RequestEventWithPhase | null;
   principalName: string | null;
   onClose: () => void;
+  providerByUpstream?: ReadonlyMap<string, ProviderFamily>;
 }) {
   return (
     <Drawer
@@ -35,7 +38,11 @@ export function RequestEventDrawer({
       width="lg"
     >
       {event ? (
-        <RequestDetail event={event} principalName={principalName} />
+        <RequestDetail
+          event={event}
+          principalName={principalName}
+          providerByUpstream={providerByUpstream}
+        />
       ) : null}
     </Drawer>
   );
@@ -44,9 +51,11 @@ export function RequestEventDrawer({
 function RequestDetail({
   event,
   principalName,
+  providerByUpstream,
 }: {
   event: RequestEventWithPhase;
   principalName: string | null;
+  providerByUpstream?: ReadonlyMap<string, ProviderFamily>;
 }) {
   const { copy } = useCopyButton();
   const isPartial = event._phase === 'partial';
@@ -138,6 +147,11 @@ function RequestDetail({
           principalLabel={principalLabel}
           isPartial={isPartial}
           isDetailPending={isDetailPending}
+          provider={
+            merged.upstream_id == null
+              ? undefined
+              : providerByUpstream?.get(merged.upstream_id)
+          }
         />
 
         {merged._phase === 'final' && hasUpstreamFailure ? (

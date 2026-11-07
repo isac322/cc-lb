@@ -62,6 +62,9 @@ export function Tabs<T extends string>({
     );
   }, []);
 
+  // Category items can arrive after the first render; their count is the
+  // content-size trigger that re-measures the edge fade.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: items.length is the intentional async content re-measure trigger.
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
@@ -70,7 +73,7 @@ export function Tabs<T extends string>({
     const observer = new ResizeObserver(updateFade);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [updateFade]);
+  }, [items.length, updateFade]);
 
   const activeIndex = items.findIndex((item) => item.value === value);
 
@@ -87,7 +90,8 @@ export function Tabs<T extends string>({
     } else if (right > el.scrollLeft + el.clientWidth) {
       el.scrollLeft = right - el.clientWidth + 24;
     }
-  }, [activeIndex]);
+    updateFade();
+  }, [activeIndex, updateFade]);
 
   const isTabs = mode === 'tabs';
   const tabbableIndex = activeIndex === -1 ? 0 : activeIndex;
@@ -189,12 +193,30 @@ export function Tabs<T extends string>({
     </div>
   );
 
+  const listWithFade = (
+    <div className="relative">
+      {list}
+      {fade.start ? (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r from-panel via-panel/90 to-transparent"
+        />
+      ) : null}
+      {fade.end ? (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 right-0 z-10 w-6 bg-gradient-to-l from-panel via-panel/90 to-transparent"
+        />
+      ) : null}
+    </div>
+  );
+
   return isTabs ? (
     <div
       className={cx('border-b border-subtle', className)}
       data-testid={testId}
     >
-      {list}
+      {listWithFade}
     </div>
   ) : (
     <nav
@@ -202,7 +224,7 @@ export function Tabs<T extends string>({
       className={cx('border-b border-subtle', className)}
       data-testid={testId}
     >
-      {list}
+      {listWithFade}
     </nav>
   );
 }

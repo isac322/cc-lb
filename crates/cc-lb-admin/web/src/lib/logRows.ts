@@ -4,6 +4,7 @@ import {
   RequestEventKindSchema,
   type RequestEventPartial,
 } from './api';
+import type { ProviderFamily } from './providers';
 import type { RequestEventWithPhase } from './RequestEventTypes';
 import type { LiveEventMap } from './upsertReducer';
 
@@ -20,13 +21,14 @@ export const LOG_STATUS_FILTER_VALUES = [
   'errors',
 ] as const;
 export type LogStatusFilter = (typeof LOG_STATUS_FILTER_VALUES)[number];
+export type RequestEventFilterKind = RequestEventKind | 'generation';
 export interface LogRowFilters {
   readonly principal_id?: string;
   readonly upstream_id?: string;
   readonly session?: string;
   readonly model?: string;
   readonly status?: LogStatusFilter;
-  readonly event_kind?: RequestEventKind;
+  readonly event_kind?: RequestEventFilterKind;
 }
 
 export type { RequestEventKind } from './api';
@@ -41,6 +43,14 @@ export const REQUEST_EVENT_KIND_LABELS: Record<RequestEventKind, string> = {
   openai_responses: 'OpenAI Responses',
   gemini_generate_content: 'Gemini generateContent',
   gemini_count_tokens: 'Gemini countTokens',
+  chat_completions: 'Chat completions',
+  completions: 'Text completions',
+  embeddings: 'Embeddings',
+  moderations: 'Moderations',
+  audio: 'Audio',
+  images: 'Images',
+  codex_auxiliary: 'Codex auxiliary',
+  gemini_predict: 'Gemini prediction',
   models: 'Models',
   files: 'Files',
   other: 'Other proxy requests',
@@ -76,6 +86,24 @@ export function isMessagesRequestEvent(event: {
   readonly event_kind?: string | null;
 }): boolean {
   return effectiveRequestEventKind(event) === 'messages';
+}
+
+/** Whether a row is a user-visible model generation request. */
+export function isGenerationRequestEvent(event: {
+  readonly source_kind?: string | null;
+  readonly event_kind?: string | null;
+}): boolean {
+  const kind = effectiveRequestEventKind(event);
+  return (
+    kind === 'messages' ||
+    kind === 'openai_responses' ||
+    kind === 'gemini_generate_content' ||
+    kind === 'chat_completions' ||
+    kind === 'completions' ||
+    kind === 'audio' ||
+    kind === 'images' ||
+    kind === 'gemini_predict'
+  );
 }
 
 type EventIdentity = {
@@ -155,6 +183,18 @@ export function isErrorLogRow(row: RequestEventWithPhase): boolean {
   }
   return (row.upstream_response_status ?? 0) >= 400;
 }
+/** Claude model IDs identify Anthropic when inventory is unavailable. A known
+ * compatible provider's Claude-shaped alias keeps its complete identifier.
+ */
+export function requestModelLabel(
+  model: string,
+  provider?: ProviderFamily,
+): string {
+  return (provider === undefined || provider === 'anthropic') &&
+    model.startsWith('claude-')
+    ? model.slice(7)
+    : model;
+}
 
 /** The one vendor prefix the model search ignores. */
 const MODEL_VENDOR_PREFIX = 'claude-';
@@ -210,9 +250,12 @@ export function filterLogRows(
     if (!modelFilterMatches(filters.model, row.model)) {
       return false;
     }
+    const effectiveKind = effectiveRequestEventKind(row);
     if (
-      filters.event_kind !== undefined &&
-      effectiveRequestEventKind(row) !== filters.event_kind
+      filters.event_kind === 'generation'
+        ? !isGenerationRequestEvent(row)
+        : filters.event_kind !== undefined &&
+          effectiveKind !== filters.event_kind
     ) {
       return false;
     }

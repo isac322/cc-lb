@@ -107,6 +107,97 @@ describe('useLiveEventStream connection lifecycle', () => {
     vi.clearAllMocks();
   });
 
+  it('retires only the partial named by a scoped failover removal', () => {
+    const client = new QueryClient();
+    const { result } = renderHook(
+      () => useLiveEventStream({ upstream_id: 'upstream-a' }),
+      { wrapper: makeWrapper(client) },
+    );
+    const options = eventSourceOptionsAt(0);
+    const partial: EventSourceMessage = {
+      data: JSON.stringify({
+        phase: 'partial',
+        payload: {
+          event_id: 'partial-a',
+          request_id: 'request-a',
+          upstream_id: 'upstream-a',
+        },
+      }),
+    };
+    act(() => {
+      options.onMessage?.(partial);
+      options.onMessage?.({
+        data: JSON.stringify({
+          phase: 'partial',
+          payload: { event_id: 'partial-b', request_id: 'request-b' },
+        }),
+      });
+      options.onMessage?.(makeFinalMessage(7));
+    });
+    expect(result.current.eventsMap.size).toBe(3);
+    act(() => {
+      options.onMessage?.({
+        event: 'remove',
+        id: '6',
+        data: JSON.stringify({ event_id: 'partial-a' }),
+      });
+      // A queued old partial cannot resurrect a request finalized elsewhere.
+      options.onMessage?.(partial);
+      options.onMessage?.({
+        event: 'remove',
+        data: JSON.stringify({ event_id: 'event-7' }),
+      });
+    });
+    expect(result.current.eventsMap.has('partial-a')).toBe(false);
+    expect(result.current.eventsMap.get('partial-b')?.phase).toBe('partial');
+    expect(result.current.eventsMap.get('event-7')?.phase).toBe('final');
+    expect(result.current.lastCursor).toBe('6');
+    expect(result.current.malformedFrameCount).toBe(0);
+  });
+
+  it('rejects malformed removal frames without removing rows', () => {
+    const client = new QueryClient();
+    const { result } = renderHook(() => useLiveEventStream({}), {
+      wrapper: makeWrapper(client),
+    });
+    const options = eventSourceOptionsAt(0);
+    act(() => {
+      options.onMessage?.(makeFinalMessage(7));
+      for (const data of ['{}', 'null', '{"event_id":7}', '{"event_id":""}']) {
+        options.onMessage?.({ event: 'remove', id: '8', data });
+      }
+      // Publish the mutable malformed count through a regular upsert.
+      options.onMessage?.(makeFinalMessage(9));
+    });
+    expect(result.current.eventsMap.size).toBe(2);
+    expect(result.current.malformedFrameCount).toBe(4);
+  });
+
+  it.each([false, true])(
+    'on reconnect clears unresolvable scoped partials only (scoped=%s)',
+    (scoped) => {
+      const client = new QueryClient();
+      const { result } = renderHook(
+        () => useLiveEventStream(scoped ? { upstream_id: 'upstream-a' } : {}),
+        { wrapper: makeWrapper(client) },
+      );
+      const options = eventSourceOptionsAt(0);
+      act(() => {
+        options.onMessage?.({
+          data: JSON.stringify({
+            phase: 'partial',
+            payload: { event_id: 'partial-a', request_id: 'request-a' },
+          }),
+        });
+        options.onMessage?.(makeFinalMessage(7));
+      });
+      act(() => result.current.forceReconnect());
+      act(() => eventSourceOptionsAt(1).onConnect?.());
+      expect(result.current.eventsMap.has('partial-a')).toBe(!scoped);
+      expect(result.current.eventsMap.get('event-7')?.phase).toBe('final');
+    },
+  );
+
   it('reconnects a stalled stream with the latest filters', () => {
     const client = new QueryClient();
     const { result, rerender } = renderHook(
@@ -381,5 +472,33 @@ describe('useLiveEventStream connection lifecycle', () => {
     expect(result.current.version).toBe(version);
     expect(result.current.eventsMap).toBe(eventsMap);
     expect(result.current.lastCursor).toBe('3');
+  });
+  it('coalesces live event revisions while preserving every event', () => {
+    const client = new QueryClient();
+    const { result } = renderHook(() => useLiveEventStream({}), {
+      wrapper: makeWrapper(client),
+    });
+    const options = eventSourceOptionsAt(0);
+    const initialVersion = result.current.version;
+
+    act(() => {
+      for (let cursor = 1; cursor <= 5; cursor += 1) {
+        options.onMessage?.(makeFinalMessage(cursor));
+      }
+    });
+
+    expect(result.current.eventsMap).toHaveLength(5);
+    expect(result.current.version).toBe(initialVersion);
+
+    act(() => {
+      vi.advanceTimersByTime(199);
+    });
+    expect(result.current.version).toBe(initialVersion);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(result.current.version).toBe(initialVersion + 1);
+    expect(result.current.eventsMap).toHaveLength(5);
   });
 });
