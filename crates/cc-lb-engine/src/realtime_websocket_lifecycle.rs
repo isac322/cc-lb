@@ -222,7 +222,7 @@ impl Lifecycle {
                     record,
                     auth.success(),
                     || {
-                        let use_image_rates = matches!(kind, RealtimeWebSocketKind::Openai);
+                        let use_image_rates = realtime_use_image_rates(kind);
                         let capability = classify_provider_capability(
                             &ctx.method,
                             &ctx.path,
@@ -335,5 +335,20 @@ impl Lifecycle {
             });
         }
         result
+    }
+}
+
+fn realtime_use_image_rates(kind: RealtimeWebSocketKind) -> bool {
+    matches!(kind, RealtimeWebSocketKind::Openai)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realtime_admission_uses_image_rates_only_for_openai() {
+        assert!(realtime_use_image_rates(RealtimeWebSocketKind::Openai));
+        assert!(!realtime_use_image_rates(RealtimeWebSocketKind::Gemini));
     }
 }
