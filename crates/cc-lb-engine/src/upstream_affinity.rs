@@ -93,6 +93,7 @@ pub(crate) fn extract_request_affinity_keys(
                     UpstreamAffinityKind::OpenaiConversationId,
                     object.get("conversation"),
                 )?;
+                collector.openai_reasoning_tree(object.get("input"))?;
             }
         }
         ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => {
@@ -162,6 +163,9 @@ pub(crate) fn extract_response_affinity_keys_from_sse_event(
         ) if event_type.starts_with(OPENAI_RESPONSE_EVENT_PREFIX) => {
             if let Some(response) = value.get("response") {
                 collector.openai_response(response)?;
+            }
+            if event_type == "response.output_item.done" {
+                collector.openai_reasoning_tree(value.get("item"))?;
             }
         }
         _ => {}
@@ -251,7 +255,39 @@ impl<'a> KeyCollector<'a> {
         self.reference(
             UpstreamAffinityKind::OpenaiConversationId,
             object.get("conversation"),
-        )
+        )?;
+        self.openai_reasoning_tree(object.get("output"))
+    }
+
+    fn openai_reasoning_tree(
+        &mut self,
+        value: Option<&Value>,
+    ) -> Result<(), UpstreamAffinityExtractionError> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    self.openai_reasoning_tree(Some(item))?;
+                }
+            }
+            Value::Object(object) => {
+                if object.get("type").and_then(Value::as_str) == Some("reasoning") {
+                    self.reference(
+                        UpstreamAffinityKind::OpenaiResponseId,
+                        object.get("encrypted_content"),
+                    )?;
+                }
+                for child in object.values() {
+                    if matches!(child, Value::Array(_) | Value::Object(_)) {
+                        self.openai_reasoning_tree(Some(child))?;
+                    }
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+        Ok(())
     }
 
     fn anthropic_message(
@@ -558,7 +594,15 @@ mod tests {
                 "previous_response_id": "resp_1",
                 "conversation": {"id": "conv_1"},
                 "store": true,
-                "input": [{"type": "input_text", "text": "resp_ignored"}]
+                "input": [
+                    {"type": "input_text", "text": "resp_ignored", "encrypted_content": "not-state"},
+                    {
+                        "type": "reasoning",
+                        "id": "rs_1",
+                        "summary": [],
+                        "encrypted_content": "opaque-reasoning-1"
+                    }
+                ]
             }),
             "principal-openai",
         )
@@ -570,6 +614,10 @@ mod tests {
             HashSet::from([
                 (UpstreamAffinityKind::OpenaiResponseId, digest("resp_1")),
                 (UpstreamAffinityKind::OpenaiConversationId, digest("conv_1")),
+                (
+                    UpstreamAffinityKind::OpenaiResponseId,
+                    digest("opaque-reasoning-1")
+                ),
             ])
         );
         assert!(
@@ -587,7 +635,17 @@ mod tests {
     fn binds_stored_openai_responses_from_body_and_sse_snapshots() {
         let stored = extract_response_affinity_keys(
             ProviderCapability::OpenaiResponses,
-            &serde_json::json!({"id": "resp_2", "object": "response", "conversation": {"id": "conv_2"}}),
+            &serde_json::json!({
+                "id": "resp_2",
+                "object": "response",
+                "conversation": {"id": "conv_2"},
+                "output": [{
+                    "type": "reasoning",
+                    "id": "rs_2",
+                    "summary": [],
+                    "encrypted_content": "opaque-reasoning-2"
+                }]
+            }),
             "principal-openai",
         )
         .expect("extracts");
@@ -596,6 +654,10 @@ mod tests {
             HashSet::from([
                 (UpstreamAffinityKind::OpenaiResponseId, digest("resp_2")),
                 (UpstreamAffinityKind::OpenaiConversationId, digest("conv_2")),
+                (
+                    UpstreamAffinityKind::OpenaiResponseId,
+                    digest("opaque-reasoning-2")
+                ),
             ])
         );
         let unstored = extract_response_affinity_keys(
@@ -629,6 +691,22 @@ mod tests {
         assert_eq!(
             kinds_and_digests(&keys),
             HashSet::from([(UpstreamAffinityKind::OpenaiResponseId, digest("resp_sse"))])
+        );
+        let reasoning = crate::usage_parser::parse_sse_event(
+            b"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"opaque-sse-reasoning\"}}\n\n",
+        );
+        let keys = extract_response_affinity_keys_from_sse_event(
+            ProviderCapability::OpenaiResponses,
+            &reasoning,
+            "principal-openai",
+        )
+        .expect("extracts");
+        assert_eq!(
+            kinds_and_digests(&keys),
+            HashSet::from([(
+                UpstreamAffinityKind::OpenaiResponseId,
+                digest("opaque-sse-reasoning")
+            )])
         );
         let delta = crate::usage_parser::parse_sse_event(
             b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hi\"}\n\n",

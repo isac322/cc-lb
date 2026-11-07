@@ -33,7 +33,7 @@ Provider-prefixed routes select the provider explicitly: `/anthropic/v1/...`, `/
 Provider-owned state referenced inside a supported HTTP generation request is forwarded unchanged and kept on its owning upstream through upstream affinity. cc-lb records a SHA-256 digest of each state id together with the upstream that created it, and routes later requests that reference the id only to that upstream:
 
 - Anthropic Messages: web-search `encrypted_content`, file ids in `file` / `container_upload` blocks, and container ids.
-- OpenAI HTTP Responses: response ids, observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
+- OpenAI HTTP Responses: response ids and stateless reasoning `encrypted_content` items observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
 - Gemini generateContent / countTokens: `cachedContent` references (including nested `generateContentRequest.cachedContent`). `thoughtSignature` is forwarded but is not treated as affinity state.
 
 A request whose durable state resolves to an upstream that is disabled, unhealthy, or removed by routing filters fails with `503 upstream_affinity_unavailable` instead of falling back to another upstream; cross-upstream failover is disabled for pinned requests. Prompt-cache analysis and cache-aware routing apply only to Anthropic Messages; OpenAI and Gemini requests carry neutral cache metadata.

@@ -122,6 +122,8 @@ describe('RequestEventPartialSchema', () => {
     request_id: 'r',
     ts: null,
     ts_ms: null,
+    input_tokens: 100,
+    output_tokens: 200,
   };
 
   it('parses valid partial object with thinking_budget_tokens as number', () => {
@@ -147,7 +149,37 @@ describe('RequestEventPartialSchema', () => {
     const result = RequestEventPartialSchema.safeParse(baseFixture);
     expect(result.success).toBe(true);
   });
+  it('parses tool_use_prompt_tokens as a number', () => {
+    const result = RequestEventPartialSchema.safeParse({
+      ...baseFixture,
+      tool_use_prompt_tokens: 42,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tool_use_prompt_tokens).toBe(42);
+    }
+  });
 
+  it('parses tool_use_prompt_tokens as null', () => {
+    const result = RequestEventPartialSchema.safeParse({
+      ...baseFixture,
+      tool_use_prompt_tokens: null,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tool_use_prompt_tokens).toBeNull();
+    }
+  });
+
+  it('parses an omitted tool_use_prompt_tokens value', () => {
+    const result = RequestEventPartialSchema.safeParse(baseFixture);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.input_tokens).toBe(100);
+      expect(result.data.output_tokens).toBe(200);
+      expect(result.data.tool_use_prompt_tokens).toBeUndefined();
+    }
+  });
   it('accepts a recorded event_kind and tolerates it missing', () => {
     const withKind = RequestEventPartialSchema.safeParse({
       ...baseFixture,

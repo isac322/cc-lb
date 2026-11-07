@@ -28,7 +28,12 @@ const TRUNCATION_MARKER: &str = "...";
 /// SSE stream (or non-stream JSON body).
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UsageCounts {
+    /// Progress-aware presence, including lossy thinking estimates.
     pub(crate) present: bool,
+    /// Provider usage object presence, suitable for billing and reconciliation.
+    pub(crate) billable_present: bool,
+    // Internal parser marker: tracks a thinking progress frame even when its estimate is numerically zero.
+    pub(crate) thinking_progress_present: bool,
     pub(crate) input_tokens: u64,
     pub(crate) gross_input_tokens: Option<u64>,
     pub(crate) input_includes_cached: bool,
@@ -42,6 +47,12 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_creation_evidence: CacheTokenEvidence,
     pub(crate) cache_read_evidence: CacheTokenEvidence,
     pub(crate) thinking_tokens: u64,
+    /// Gemini's cumulative prompt tokens attributed to tool use, when reported.
+    ///
+    /// This remains distinct from `input_tokens`: Gemini's `promptTokenCount`
+    /// continues to drive input accounting, while this optional component is
+    /// propagated for usage attribution.
+    pub(crate) tool_use_prompt_tokens: Option<u64>,
     /// Last Gemini candidates snapshot, kept separately from billable output
     /// so partial updates can retain it without adding cumulative counts.
     pub(crate) last_candidates_tokens: u64,
@@ -57,9 +68,8 @@ pub(crate) struct UsageCounts {
     /// This is a delta (must be summed), and the value is documented as a
     /// **lossy estimate** — `message_delta.usage.output_tokens` /
     /// `usage.output_tokens_details.thinking_tokens` remain authoritative for
-    /// billing. We track it purely to drive live-progress broadcasts and to
-    /// flip `present=true` early enough for the dashboard to see motion before
-    /// the final `message_delta` arrives.
+    /// billing. We track it purely to drive live-progress broadcasts; it does
+    /// not make `billable_present` true.
     pub(crate) estimated_thinking_progress: u64,
 }
 
@@ -93,6 +103,14 @@ impl CacheTokenEvidence {
 }
 
 impl UsageCounts {
+    /// Whether authoritative provider usage is available for pricing and
+    /// reconciliation. The fallback preserves existing internal constructors
+    /// that predate `billable_present`; parser-created progress-only state
+    /// carries `thinking_progress_present` and therefore remains non-billable.
+    pub(crate) fn has_billable_usage(&self) -> bool {
+        self.billable_present || (self.present && !self.thinking_progress_present)
+    }
+
     pub(crate) fn has_affirmative_read_only_cache_usage(&self) -> bool {
         self.cache_read_evidence == CacheTokenEvidence::Positive
             && self.cache_creation_evidence == CacheTokenEvidence::Zero
@@ -454,6 +472,7 @@ fn accumulate_sse_usage_value(
     {
         usage.estimated_thinking_progress =
             usage.estimated_thinking_progress.saturating_add(estimated);
+        usage.thinking_progress_present = true;
         usage.present = true;
     }
     let Some(reported) = usage_value_for_shape(value, shape).filter(|value| !value.is_null())
@@ -464,6 +483,8 @@ fn accumulate_sse_usage_value(
         update.message_start_usage = true;
     }
     usage.present = true;
+    usage.billable_present = true;
+    usage.thinking_progress_present = false;
     merge_usage_value(usage, reported);
     if usage.service_tier.is_none()
         && let Some(tier) = service_tier_from_envelope(value)
@@ -581,6 +602,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
     };
     let mut usage = UsageCounts {
         present: true,
+        billable_present: true,
         ..UsageCounts::default()
     };
     merge_usage_value(&mut usage, usage_value);
@@ -726,6 +748,12 @@ pub(crate) fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
         .and_then(Value::as_u64)
     {
         usage.thinking_tokens = reasoning_tokens;
+    }
+    if let Some(tool_use_prompt_tokens) = reported
+        .get("toolUsePromptTokenCount")
+        .and_then(Value::as_u64)
+    {
+        usage.tool_use_prompt_tokens = Some(tool_use_prompt_tokens);
     }
     if reported.get("output_tokens").is_none() {
         let candidates_tokens = reported.get("candidatesTokenCount").and_then(Value::as_u64);
@@ -2093,6 +2121,10 @@ mod tests {
         assert!(!update1.message_start_usage && !update1.message_stop);
         assert!(!update2.message_start_usage && !update2.message_stop);
         assert!(usage.present);
+        assert!(
+            !usage.billable_present,
+            "thinking estimates are progress-only until provider usage arrives"
+        );
         assert_eq!(usage.estimated_thinking_progress, 46);
         assert_eq!(
             usage.thinking_tokens, 0,
@@ -2151,6 +2183,7 @@ mod tests {
         .to_string();
         let usage = observe_non_stream_json_body(body.as_bytes()).usage;
         assert!(usage.present);
+        assert!(usage.billable_present);
         assert_eq!(usage.input_tokens, 50);
         assert_eq!(usage.output_tokens, 100);
         assert_eq!(usage.thinking_tokens, 8);
@@ -2203,7 +2236,8 @@ mod tests {
                 "promptTokenCount": 120,
                 "candidatesTokenCount": 48,
                 "cachedContentTokenCount": 17,
-                "thoughtsTokenCount": 12
+                "thoughtsTokenCount": 12,
+                "toolUsePromptTokenCount": 9
             }
         });
 
@@ -2214,6 +2248,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
     }
 
     #[test]
@@ -2229,7 +2264,8 @@ mod tests {
                     "promptTokenCount": 120,
                     "candidatesTokenCount": 48,
                     "cachedContentTokenCount": 17,
-                    "thoughtsTokenCount": 12
+                    "thoughtsTokenCount": 12,
+                    "toolUsePromptTokenCount": 9
                 }
             }
         });
@@ -2241,6 +2277,73 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
+    }
+    #[test]
+    fn gm_use_05_tool_use_prompt_tokens_non_stream_presence_states() {
+        for (tool_use_prompt_tokens, expected) in
+            [(Some(37), Some(37)), (None, None), (Some(0), Some(0))]
+        {
+            let usage_metadata = match tool_use_prompt_tokens {
+                Some(value) => serde_json::json!({
+                    "promptTokenCount": 120,
+                    "candidatesTokenCount": 48,
+                    "toolUsePromptTokenCount": value
+                }),
+                None => serde_json::json!({
+                    "promptTokenCount": 120,
+                    "candidatesTokenCount": 48
+                }),
+            };
+            let usage = observe_non_stream_json_value(&serde_json::json!({
+                "usageMetadata": usage_metadata
+            }))
+            .usage;
+            assert_eq!(usage.tool_use_prompt_tokens, expected);
+            assert_eq!(usage.input_tokens, 120);
+            assert_eq!(usage.output_tokens, 48);
+        }
+
+        let null = observe_non_stream_json_value(&serde_json::json!({
+            "usageMetadata": {
+                "promptTokenCount": 120,
+                "candidatesTokenCount": 48,
+                "toolUsePromptTokenCount": null
+            }
+        }))
+        .usage;
+        assert_eq!(null.tool_use_prompt_tokens, None);
+    }
+
+    #[test]
+    fn gm_sse_06_tool_use_prompt_tokens_replace_and_retain_cumulative_snapshots() {
+        let mut usage = UsageCounts::default();
+        for (payload, expected) in [
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48,"toolUsePromptTokenCount":37}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":49}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":50,"toolUsePromptTokenCount":null}}"#,
+                Some(37),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":51,"toolUsePromptTokenCount":0}}"#,
+                Some(0),
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":52,"toolUsePromptTokenCount":11}}"#,
+                Some(11),
+            ),
+        ] {
+            let frame = format!("data: {payload}\n\n");
+            accumulate_raw_sse_usage(frame.as_bytes(), &mut usage);
+            assert_eq!(usage.tool_use_prompt_tokens, expected, "{payload}");
+        }
     }
 
     #[test]
@@ -2477,7 +2580,7 @@ mod tests {
     fn gm_sse_01_stream_generate_content_reports_terminal_usage() {
         let first =
             b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n";
-        let terminal = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":120,\"candidatesTokenCount\":48,\"cachedContentTokenCount\":17,\"thoughtsTokenCount\":12}}\n\n";
+        let terminal = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":120,\"candidatesTokenCount\":48,\"cachedContentTokenCount\":17,\"thoughtsTokenCount\":12,\"toolUsePromptTokenCount\":9}}\n\n";
         let mut usage = UsageCounts::default();
 
         let first_update = accumulate_raw_sse_usage(first, &mut usage);
@@ -2494,6 +2597,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 60);
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.tool_use_prompt_tokens, Some(9));
         assert!(usage.thinking_tokens < usage.output_tokens);
     }
 

@@ -349,6 +349,10 @@ impl Partial {
             upstream_response_status: self.upstream_response_status,
             input_tokens: self.usage_seen.then_some(self.usage.input_tokens),
             output_tokens: self.usage_seen.then_some(self.usage.output_tokens),
+            tool_use_prompt_tokens: self
+                .usage_seen
+                .then_some(self.usage.tool_use_prompt_tokens)
+                .flatten(),
             cache_creation_input_tokens: (self.usage_seen
                 && self.usage.cache_creation_input_tokens > 0)
                 .then_some(self.usage.cache_creation_input_tokens),
@@ -1338,13 +1342,23 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             source: _source,
             ..
         } => {
+            let prior_tool_use_prompt_tokens = partial.usage.tool_use_prompt_tokens;
+            let incoming_tool_use_prompt_tokens = usage.tool_use_prompt_tokens;
             partial.usage = usage;
+            partial.usage.tool_use_prompt_tokens =
+                incoming_tool_use_prompt_tokens.or(prior_tool_use_prompt_tokens);
             partial.usage_seen = true;
         }
         LifecycleEvent::StreamCompleted { result, .. } => match result {
             Ok(success) => {
-                partial.usage = success.usage;
-                partial.usage_seen = true;
+                if success.usage_present {
+                    let prior_tool_use_prompt_tokens = partial.usage.tool_use_prompt_tokens;
+                    let incoming_tool_use_prompt_tokens = success.usage.tool_use_prompt_tokens;
+                    partial.usage = success.usage;
+                    partial.usage.tool_use_prompt_tokens =
+                        incoming_tool_use_prompt_tokens.or(prior_tool_use_prompt_tokens);
+                    partial.usage_seen = true;
+                }
                 partial.stream_success = Some(success.sse_event_count);
                 partial.stream_body_bytes = success.body_bytes;
                 partial.stream_body_chunk_count = success.body_chunk_count;
@@ -1502,6 +1516,10 @@ fn finalize_base(
         upstream_stream_warning_message: diagnostics.and_then(|d| d.warning_message.clone()),
         input_tokens: partial.usage_seen.then_some(partial.usage.input_tokens),
         output_tokens: partial.usage_seen.then_some(partial.usage.output_tokens),
+        tool_use_prompt_tokens: partial
+            .usage_seen
+            .then_some(partial.usage.tool_use_prompt_tokens)
+            .flatten(),
         cache_creation_input_tokens: (partial.usage_seen
             && partial.usage.cache_creation_input_tokens > 0)
             .then_some(partial.usage.cache_creation_input_tokens),
@@ -1854,6 +1872,72 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(partial.cost_options().total, Some(4242));
+    }
+
+    #[test]
+    fn stream_success_usage_presence_preserves_measurement_state() {
+        let event_id = eid("stream-success-usage-presence");
+        let mut partial = Partial::default();
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: event_id.clone(),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_tokens: 99,
+                        output_tokens: 101,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(!partial.usage_seen);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::UsageObserved {
+                event_id: event_id.clone(),
+                usage: UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                },
+                source: UsageSource::MessageDelta,
+            },
+        );
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: event_id.clone(),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_tokens: 99,
+                        output_tokens: 101,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(partial.usage_seen);
+        assert_eq!(partial.usage.input_tokens, 7);
+        assert_eq!(partial.usage.output_tokens, 11);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id,
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot::default(),
+                    usage_present: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(partial.usage_seen);
+        assert_eq!(partial.usage, UsageSnapshot::default());
     }
 
     #[test]
@@ -3995,6 +4079,7 @@ mod tests {
                 output_tokens: 20,
                 cache_creation_input_tokens: 3,
                 cache_read_input_tokens: 4,
+                tool_use_prompt_tokens: Some(7),
                 ..UsageSnapshot::default()
             },
             source: UsageSource::MessageStart,
@@ -4024,6 +4109,7 @@ mod tests {
                     cache_read_input_tokens: 4,
                     ..UsageSnapshot::default()
                 },
+                usage_present: true,
                 sse_event_count: 3,
                 first_body_chunk_ms: Some(11),
                 body_bytes: Some(456),
@@ -4128,6 +4214,11 @@ mod tests {
         assert_eq!(terminated.response_body_process_ms, Some(1.5));
         assert_eq!(terminated.response_body_downstream_poll_gap_ms, Some(4.125));
         assert_eq!(terminated.retry_overhead_ms, None);
+        assert!(
+            partials
+                .iter()
+                .any(|partial| partial.tool_use_prompt_tokens == Some(7))
+        );
 
         let finals: Vec<_> = updates
             .iter()
@@ -4143,6 +4234,7 @@ mod tests {
         assert_eq!(finals[0].event.request_body_bytes, Some(128));
         assert_eq!(finals[0].event.finalize_ms, Some(3));
         assert_eq!(finals[0].event.upstream_body_ms, Some(12));
+        assert_eq!(finals[0].event.tool_use_prompt_tokens, Some(7));
         assert_eq!(
             finals[0].event.request_body_first_chunk_ms,
             terminated.request_body_first_chunk_ms
