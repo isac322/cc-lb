@@ -2385,6 +2385,7 @@ pub trait LimitCostEstimator: Send + Sync {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn estimate_max_with_cache_and_images(
         &self,
         model: &str,

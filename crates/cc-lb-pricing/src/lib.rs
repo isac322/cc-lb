@@ -304,6 +304,7 @@ impl PriceCatalog {
     /// complete estimated non-cache region, using the larger of the image rate
     /// and the generic rate resolved for the request's tier and threshold band.
     /// Cache regions always retain their generic/cache pricing.
+    #[allow(clippy::too_many_arguments)]
     pub fn estimate_max_with_cache_and_images(
         &self,
         model: &str,
