@@ -25,6 +25,7 @@ pub(crate) fn list_item_from_row(row: PgRow) -> StorageResult<CacheKeepaliveSess
         id,
         source,
         session_key_hash: row.try_get("session_key_hash").map_err(map_sqlx_error)?,
+        cycle_id: row.try_get("cycle_id").map_err(map_sqlx_error)?,
         principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
         upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
         last_message_at_ms: i64_to_u64(

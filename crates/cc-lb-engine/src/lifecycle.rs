@@ -16,9 +16,9 @@ use cc_lb_config::{PromptCacheShadowConfig, UpstreamAffinityConfig};
 use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheBreakpoint, CacheBreakpointSource,
-    CacheLookbackPrefix, CachePricingSummary, CacheScore, InternalError, InternalErrorKind,
-    InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace, StageDecision,
-    TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
+    CacheLookbackPrefix, CachePricingSummary, CacheScore, CredentialKind, InternalError,
+    InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace,
+    StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
     UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_quota::build_subscription_quota_samples;
@@ -556,11 +556,12 @@ impl From<ProviderCapability> for RequestKind {
     fn from(capability: ProviderCapability) -> Self {
         match capability {
             ProviderCapability::AnthropicMessages => Self::AnthropicMessages,
-            ProviderCapability::OpenaiResponses => Self::OpenaiResponses,
+            ProviderCapability::AnthropicCountTokens => Self::AnthropicMessages,
             ProviderCapability::GeminiGenerateContent => Self::GeminiGenerateContent,
             ProviderCapability::GeminiCountTokens => Self::GeminiCountTokens,
             ProviderCapability::AnthropicModels => Self::AnthropicModels,
             ProviderCapability::AnthropicComplete => Self::AnthropicComplete,
+            ProviderCapability::OpenaiResponses => Self::OpenaiResponses,
             ProviderCapability::OpenaiResponsesInputTokens => Self::OpenaiResponsesInputTokens,
             ProviderCapability::OpenaiResponsesCompact => Self::OpenaiResponsesCompact,
             ProviderCapability::OpenaiChatCompletions => Self::OpenaiChatCompletions,
@@ -2510,6 +2511,73 @@ fn sse_bytes_may_carry_anthropic_provider_state(bytes: &[u8]) -> bool {
         .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
 }
 
+/// Whether an SSE frame carries user-visible streamed content for its wire
+/// protocol. This is deliberately provider-aware: relay/usage/terminal
+/// processing still sees every parsed frame, while telemetry counts only
+/// semantic text frames.
+fn is_semantic_content_frame(
+    capability: ProviderCapability,
+    event: &usage_parser::ParsedSseEvent<'_>,
+) -> bool {
+    let value = event.value().ok().flatten();
+    let non_empty_string = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    };
+
+    match capability.usage_shape() {
+        crate::provider_capability::UsageShape::AnthropicMessages => {
+            event.event_name() == Some(b"content_block_delta")
+        }
+        crate::provider_capability::UsageShape::OpenaiChatCompletions => value
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    non_empty_string(choice.get("delta").and_then(|delta| delta.get("content")))
+                })
+            }),
+        crate::provider_capability::UsageShape::OpenaiCompletions => value
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices
+                    .iter()
+                    .any(|choice| non_empty_string(choice.get("text")))
+            }),
+        crate::provider_capability::UsageShape::OpenaiResponses => {
+            event.event_type() == Some("response.output_text.delta")
+                && non_empty_string(value.and_then(|value| value.get("delta")))
+        }
+        crate::provider_capability::UsageShape::GeminiGenerateContent => {
+            let candidates = value
+                .and_then(|value| value.get("candidates"))
+                .or_else(|| value.and_then(|value| value.get("response")?.get("candidates")));
+            candidates
+                .and_then(Value::as_array)
+                .is_some_and(|candidates| {
+                    candidates.iter().any(|candidate| {
+                        candidate
+                            .get("content")
+                            .and_then(|content| content.get("parts"))
+                            .and_then(Value::as_array)
+                            .is_some_and(|parts| {
+                                parts.iter().any(|part| {
+                                    !part
+                                        .get("thought")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false)
+                                        && non_empty_string(part.get("text"))
+                                })
+                            })
+                    })
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Whether a successful SSE event is the provider's terminal success event,
 /// before which request-referenced provider state still pending a binding must
 /// be persisted. Gemini streams carry no terminal event, so their pending keys
@@ -2530,18 +2598,18 @@ fn sse_event_completes_response(
                 == Some("message_stop")
         }
         crate::provider_capability::UsageShape::OpenaiResponses => {
-            event
+            event.value().ok().flatten().is_some_and(|_| {
+                event.event_name() == Some(b"response.completed")
+                    || event.event_name() == Some(b"response.incomplete")
+            }) || event
                 .value()
                 .ok()
                 .flatten()
-                .is_some_and(|_| event.event_name() == Some(b"response.completed"))
-                || event
-                    .value()
-                    .ok()
-                    .flatten()
-                    .and_then(|value| value.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("response.completed")
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|event_type| {
+                    event_type == "response.completed" || event_type == "response.incomplete"
+                })
         }
         crate::provider_capability::UsageShape::OpenaiChatCompletions
         | crate::provider_capability::UsageShape::OpenaiCompletions => {
@@ -2550,6 +2618,8 @@ fn sse_event_completes_response(
         crate::provider_capability::UsageShape::GeminiGenerateContent
         | crate::provider_capability::UsageShape::GeminiEmbed
         | crate::provider_capability::UsageShape::OpenaiEmbeddings
+        | crate::provider_capability::UsageShape::OpenaiAudio
+        | crate::provider_capability::UsageShape::OpenaiImages
         | crate::provider_capability::UsageShape::None => false,
     }
 }
@@ -2576,6 +2646,8 @@ const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<
         crate::provider_capability::UsageShape::OpenaiChatCompletions
         | crate::provider_capability::UsageShape::OpenaiCompletions
         | crate::provider_capability::UsageShape::OpenaiEmbeddings
+        | crate::provider_capability::UsageShape::OpenaiAudio
+        | crate::provider_capability::UsageShape::OpenaiImages
         | crate::provider_capability::UsageShape::GeminiGenerateContent
         | crate::provider_capability::UsageShape::GeminiEmbed
         | crate::provider_capability::UsageShape::None => None,
@@ -2597,7 +2669,8 @@ fn observe_sse_terminal_event(
     let event_name_terminal = matches!(
         capability.usage_shape(),
         crate::provider_capability::UsageShape::OpenaiResponses
-    ) && event.event_name() == Some(b"response.completed")
+    ) && (event.event_name() == Some(b"response.completed")
+        || event.event_name() == Some(b"response.incomplete"))
         && event.value().ok().flatten().is_some();
     let semantic_event_type = event
         .value()
@@ -2605,7 +2678,14 @@ fn observe_sse_terminal_event(
         .flatten()
         .and_then(|value| value.get("type"))
         .and_then(serde_json::Value::as_str);
+    let response_terminal_type = matches!(
+        capability.usage_shape(),
+        crate::provider_capability::UsageShape::OpenaiResponses
+    ) && semantic_event_type.is_some_and(|event_type| {
+        event_type == "response.completed" || event_type == "response.incomplete"
+    });
     *semantic_message_stop_seen |= event_name_terminal
+        || response_terminal_type
         || semantic_terminal_event_type(capability)
             .is_some_and(|terminal| semantic_event_type == Some(terminal));
     if event.event_name() == Some(b"message_stop")
@@ -3087,13 +3167,11 @@ impl Lifecycle {
     }
 
     /// Allocate observation state without recording a successful upgrade as a turn.
-    pub(crate) fn websocket_observer(&self) -> (Option<LifecycleContext>, String) {
+    pub(crate) fn websocket_observer(&self, path: &str) -> (Option<LifecycleContext>, String) {
         let request_id = next_request_id();
         let observer = self.event_bus.as_ref().map(|bus| {
             let observer = LifecycleContext::new(request_id.clone(), Arc::clone(bus), &self.clock);
-            observer.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(
-                "/v1/responses",
-            ));
+            observer.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(path));
             observer
         });
         (observer, request_id)
@@ -3102,8 +3180,9 @@ impl Lifecycle {
     pub fn reject_responses_websocket_authentication(
         &self,
         error: &BuiltinAuthError,
+        path: &str,
     ) -> Response<Body> {
-        let (observer, _) = self.websocket_observer();
+        let (observer, _) = self.websocket_observer(path);
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
@@ -3283,11 +3362,7 @@ impl Lifecycle {
                     || {
                         body_view.limit_request(
                             &ctx.canonical_model_id,
-                            classify_provider_capability(
-                                &ctx.method,
-                                &ctx.path,
-                                ctx.provider_scope,
-                            ),
+                            Some(ProviderCapability::OpenaiResponses),
                             &routed.cache_bundle.cache_breakpoints,
                         )
                     },
@@ -3324,9 +3399,9 @@ impl Lifecycle {
                             .and_then(|limit| limit.reservation.as_ref())
                             .map(|reservation| reservation.id().to_owned())
                             .unwrap_or_default(),
-                        amount: active_limit
-                            .as_ref()
-                            .map_or(0, |limit| limit.request.max_tokens.max(0) as u64),
+                        amount: active_limit.as_ref().map_or(0, |limit| {
+                            limit.request.max_tokens.unwrap_or(0).max(0) as u64
+                        }),
                         limit_reserve_ms: Some(duration_to_ms(reserve_started.elapsed())),
                     },
                 });
@@ -4081,10 +4156,11 @@ impl Lifecycle {
             }
             None => None,
         };
-        let mut cache_metadata = request_cache_metadata_from_value_with_analysis(
+        let mut cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
             &ctx.downstream_headers,
             body_view.value(),
             prompt_cache_analysis,
+            Some(request_capability),
         );
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
@@ -4550,9 +4626,9 @@ impl Lifecycle {
                                 .and_then(|limit| limit.reservation.as_ref())
                                 .map(|reservation| reservation.id().to_owned())
                                 .unwrap_or_default(),
-                            amount: active_limit
-                                .as_ref()
-                                .map_or(0, |limit| limit.request.max_tokens as u64),
+                            amount: active_limit.as_ref().map_or(0, |limit| {
+                                limit.request.max_tokens.unwrap_or(0).max(0) as u64
+                            }),
                             limit_reserve_ms: Some(limit_reserve_ms),
                         },
                     });
@@ -4904,7 +4980,7 @@ impl Lifecycle {
                     estimator.estimate_max_with_local_cache(
                         &limit_request.model,
                         input,
-                        limit_request.max_tokens.max(0) as u64,
+                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
                         limit_request.service_tier.as_deref(),
                     )
                 } else {
@@ -4913,7 +4989,7 @@ impl Lifecycle {
                     estimator.estimate_max_with_cache(
                         &limit_request.model,
                         max_input_estimate as u64,
-                        limit_request.max_tokens.max(0) as u64,
+                        limit_request.max_tokens.unwrap_or(0).max(0) as u64,
                         estimated_cache_tokens,
                         can_cross_cache_cliff,
                         limit_request.service_tier.as_deref(),
@@ -5363,7 +5439,7 @@ impl Lifecycle {
                     .saturating_add(usage.cache_creation_input_tokens),
             );
         }
-        if usage.present
+        if usage.has_billable_usage()
             && status == StatusCode::OK
             && let Some(context) = prompt_cache_observation_context.as_ref()
         {
@@ -5392,12 +5468,16 @@ impl Lifecycle {
         }
 
         let finalize_ms = if let Some(o) = observer.as_ref() {
-            o.set_usage_counts(&usage, true);
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                event_id: o.event_id().to_owned(),
-                usage: to_usage_snapshot(&usage),
-                source: cc_lb_lifecycle::UsageSource::NonStreamBody,
-            });
+            if usage.has_billable_usage() {
+                o.set_usage_counts(&usage, true);
+            }
+            if usage.has_billable_usage() {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                    event_id: o.event_id().to_owned(),
+                    usage: to_usage_snapshot(&usage),
+                    source: cc_lb_lifecycle::UsageSource::NonStreamBody,
+                });
+            }
             let stream_result = if body_collect_failed {
                 Err(cc_lb_lifecycle::StreamError {
                     error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
@@ -5422,6 +5502,7 @@ impl Lifecycle {
             } else {
                 Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
+                    usage_present: usage.has_billable_usage(),
                     sse_event_count: 0,
                     body_bytes: Some(downstream_body.len() as u64),
                     body_chunk_count: Some(body_chunk_count),
@@ -6601,6 +6682,23 @@ impl Lifecycle {
                                 {
                                     downstream_drop_guard.observe_keepalive(&parsed_event);
                                 }
+                                let semantic_content_frame = is_semantic_content_frame(
+                                    response_affinity_context.capability,
+                                    &parsed_event,
+                                );
+                                if semantic_content_frame {
+                                    if first_content_delta_at.is_none() {
+                                        first_content_delta_at = Some(now);
+                                        if let Some(o) = observer.as_ref() {
+                                            o.set_first_content_delta_ms(duration_to_ms(
+                                                now.saturating_duration_since(relay_start),
+                                            ));
+                                        }
+                                    }
+                                    last_content_delta_at = Some(now);
+                                    content_delta_count =
+                                        content_delta_count.saturating_add(1);
+                                }
                                 match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
                                         message_start_at = Some(now);
@@ -6610,18 +6708,6 @@ impl Lifecycle {
                                         if content_block_start_at.is_none() =>
                                     {
                                         content_block_start_at = Some(now);
-                                    }
-                                    Some(b"content_block_delta") => {
-                                        if first_content_delta_at.is_none() {
-                                            first_content_delta_at = Some(now);
-                                            if let Some(o) = observer.as_ref() {
-                                                o.set_first_content_delta_ms(duration_to_ms(
-                                                    now.saturating_duration_since(relay_start),
-                                                ));
-                                            }
-                                        }
-                                        last_content_delta_at = Some(now);
-                                        content_delta_count = content_delta_count.saturating_add(1);
                                     }
                                     Some(b"ping") => {
                                         ping_count = ping_count.saturating_add(1);
@@ -6676,33 +6762,45 @@ impl Lifecycle {
                                 if !semantic_completion_observed && event_completes_response {
                                     semantic_completion_observed = true;
                                     if let Some(o) = observer.as_ref() {
-                                        o.set_usage_counts(&usage, true);
-                                        o.emit_lifecycle(
-                                            cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                                event_id: o.event_id().to_owned(),
-                                                usage: to_usage_snapshot(&usage),
-                                                source:
-                                                    cc_lb_lifecycle::UsageSource::MessageDelta,
-                                            },
-                                        );
+                                        if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, true);
+                                            o.emit_lifecycle(
+                                                cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                    event_id: o.event_id().to_owned(),
+                                                    usage: to_usage_snapshot(&usage),
+                                                    source:
+                                                        cc_lb_lifecycle::UsageSource::MessageDelta,
+                                                },
+                                            );
+                                        }
                                         o.set_success_status(status);
                                     }
                                 }
-                                if let Some(o) = observer.as_ref() {
+                                if let Some(o) = observer.as_ref()
+                                    && usage.present
+                                {
                                     if usage_update.message_start_usage {
-                                        o.set_usage_counts(&usage, false);
-                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageStart,
-                                        });
+                                        if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, false);
+                                        }
+                                        if usage.has_billable_usage() {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageStart,
+                                            });
+                                        }
                                     } else if usage_update.message_stop {
-                                        o.set_usage_counts(&usage, true);
-                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageStop,
-                                        });
+                                        if usage.has_billable_usage() {
+                                            o.set_usage_counts(&usage, true);
+                                        }
+                                        if usage.has_billable_usage() {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageStop,
+                                            });
+                                        }
                                     }
                                     let force_publish = usage_update.message_start_usage
                                         || usage_update.message_stop;
@@ -6716,7 +6814,10 @@ impl Lifecycle {
                                         >= Duration::from_millis(1000)
                                         || tokens_since_last >= 100;
                                     if force_publish || throttle_ok {
-                                        if !usage_update.message_start_usage && !usage_update.message_stop {
+                                        if !usage_update.message_start_usage
+                                            && !usage_update.message_stop
+                                            && usage.has_billable_usage()
+                                        {
                                             o.set_usage_counts(&usage, false);
                                             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
@@ -7347,14 +7448,18 @@ impl Lifecycle {
                             if !semantic_completion_observed && event_completes_response {
                                 semantic_completion_observed = true;
                                 if let Some(o) = observer.as_ref() {
-                                    o.set_usage_counts(&usage, true);
-                                    o.emit_lifecycle(
-                                        cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_lifecycle::UsageSource::MessageDelta,
-                                        },
-                                    );
+                                    if usage.has_billable_usage() {
+                                        o.set_usage_counts(&usage, true);
+                                    }
+                                    if usage.has_billable_usage() {
+                                        o.emit_lifecycle(
+                                            cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                                            },
+                                        );
+                                    }
                                     o.set_success_status(status);
                                 }
                             }
@@ -7719,7 +7824,9 @@ impl Lifecycle {
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
             {
-                if let Some(o) = observer.as_ref() {
+                if let Some(o) = observer.as_ref()
+                    && usage.has_billable_usage()
+                {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                         event_id: o.event_id().to_owned(),
                         usage: to_usage_snapshot(&usage),
@@ -7809,7 +7916,9 @@ impl Lifecycle {
                 downstream_drop_guard.mark_proxy_error(StreamTerminationCause::TransformError);
             }
             let finalize_ms = if let Some(o) = observer.as_ref() {
-                o.set_usage_counts(&usage, message_stop_at.is_some());
+                if usage.has_billable_usage() {
+                    o.set_usage_counts(&usage, message_stop_at.is_some());
+                }
                 if let Some(first_content_delta_ms) = elapsed_ms(first_content_delta_at) {
                     o.set_first_content_delta_ms(first_content_delta_ms);
                 }
@@ -7849,6 +7958,7 @@ impl Lifecycle {
                         event_id: o.event_id().to_owned(),
                         result: Ok(cc_lb_lifecycle::StreamSuccess {
                             usage: to_usage_snapshot(&usage),
+                            usage_present: usage.has_billable_usage(),
                             sse_event_count,
                             body_bytes: Some(total_bytes),
                             body_chunk_count: Some(batch_index),
@@ -8590,7 +8700,7 @@ impl RequestBodyView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LimitRequest {
     model: String,
-    max_tokens: i64,
+    max_tokens: Option<i64>,
     input_tokens_estimate: i64,
     local_cache_input: Option<cc_lb_pricing::LocalCacheInputEstimate>,
     estimated_cache_tokens: u64,
@@ -8643,20 +8753,37 @@ impl LimitRequest {
             body_model.or(fallback)
         }
         .unwrap_or(if model_optional { "" } else { "unknown" });
+        let max_tokens = match capability {
+            Some(ProviderCapability::OpenaiResponses) => value
+                .and_then(|v| v.get("max_output_tokens"))
+                .and_then(Value::as_i64),
+            Some(ProviderCapability::AnthropicMessages) => value
+                .and_then(|v| v.get("max_tokens"))
+                .and_then(Value::as_i64),
+            Some(ProviderCapability::AnthropicComplete) => value
+                .and_then(|v| v.get("max_tokens_to_sample"))
+                .and_then(Value::as_i64),
+            Some(
+                ProviderCapability::OpenaiChatCompletions
+                | ProviderCapability::GeminiOpenaiChatCompletions,
+            ) => value.and_then(|v| {
+                ["max_completion_tokens", "max_tokens"]
+                    .into_iter()
+                    .filter_map(|key| v.get(key).and_then(Value::as_i64))
+                    .max()
+            }),
+            Some(ProviderCapability::OpenaiCompletions) => value
+                .and_then(|v| v.get("max_tokens"))
+                .and_then(Value::as_i64),
+            Some(ProviderCapability::GeminiGenerateContent) => value
+                .and_then(|v| v.get("generationConfig"))
+                .and_then(|config| config.get("maxOutputTokens"))
+                .and_then(Value::as_i64),
+            _ => Some(0),
+        };
         Self {
             model: model.to_owned(),
-            max_tokens: value
-                .and_then(|v| {
-                    v.get("max_tokens")
-                        .or_else(|| v.get("max_output_tokens"))
-                        .and_then(Value::as_i64)
-                        .or_else(|| {
-                            v.get("generationConfig")
-                                .and_then(|config| config.get("maxOutputTokens"))
-                                .and_then(Value::as_i64)
-                        })
-                })
-                .unwrap_or(0),
+            max_tokens,
             input_tokens_estimate: anthropic_input
                 .map(|input| {
                     let whole = input
@@ -8698,28 +8825,131 @@ mod limit_request_estimate_tests {
     use serde_json::json;
 
     #[test]
-    fn zero_and_negative_output_caps_keep_existing_top_level_precedence() {
-        for (value, expected) in [
+    fn output_caps_are_capability_aware() {
+        let cases = [
             (
-                json!({"max_tokens":0, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
-                0,
+                ProviderCapability::AnthropicMessages,
+                json!({"max_tokens": 0, "max_output_tokens": 99}),
+                Some(0),
             ),
             (
-                json!({"max_tokens":-1, "max_output_tokens":99, "generationConfig":{"maxOutputTokens":88}}),
-                -1,
+                ProviderCapability::AnthropicMessages,
+                json!({"max_tokens": -1, "max_output_tokens": 99}),
+                Some(-1),
             ),
             (
-                json!({"max_output_tokens":-2, "generationConfig":{"maxOutputTokens":88}}),
-                -2,
+                ProviderCapability::AnthropicComplete,
+                json!({"max_tokens": 99, "max_tokens_to_sample": 37}),
+                Some(37),
             ),
+            (
+                ProviderCapability::OpenaiResponses,
+                json!({"max_tokens": 0, "max_output_tokens": 99}),
+                Some(99),
+            ),
+            (
+                ProviderCapability::OpenaiResponses,
+                json!({"max_output_tokens": -2, "max_tokens": 99}),
+                Some(-2),
+            ),
+            (
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"max_completion_tokens": -2, "max_tokens": -3}),
+                Some(-2),
+            ),
+            (
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"max_completion_tokens": 40, "max_tokens": 99}),
+                Some(99),
+            ),
+            (
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig":{"maxOutputTokens": 88}, "max_tokens": 99}),
+                Some(88),
+            ),
+            (
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig":{"maxOutputTokens": -3}, "max_tokens": 99}),
+                Some(-3),
+            ),
+        ];
+        for (capability, value, expected) in cases {
+            let request =
+                LimitRequest::from_value(Some(&value), "test-model", Some(capability), &[]);
+            assert_eq!(request.max_tokens, expected, "{capability:?}");
+        }
+        for capability in [
+            ProviderCapability::OpenaiResponses,
+            ProviderCapability::AnthropicMessages,
+            ProviderCapability::AnthropicComplete,
+            ProviderCapability::OpenaiChatCompletions,
+            ProviderCapability::OpenaiCompletions,
+            ProviderCapability::GeminiGenerateContent,
         ] {
             let request = LimitRequest::from_value(
-                Some(&value),
-                "claude-test",
-                Some(ProviderCapability::AnthropicMessages),
+                Some(&json!({"max_tokens": "wrong", "max_output_tokens": null})),
+                "test-model",
+                Some(capability),
                 &[],
             );
-            assert_eq!(request.max_tokens, expected);
+            assert_eq!(request.max_tokens, None, "{capability:?}");
+        }
+    }
+
+    #[test]
+    fn zero_and_negative_output_caps_remain_visible_for_fail_closed_rejection() {
+        for (capability, value, expected) in [
+            (
+                ProviderCapability::AnthropicMessages,
+                json!({"max_tokens": 0, "max_completion_tokens": 99, "max_output_tokens": 99}),
+                Some(0),
+            ),
+            (
+                ProviderCapability::AnthropicMessages,
+                json!({"max_tokens": -1, "max_completion_tokens": 99, "max_output_tokens": 99}),
+                Some(-1),
+            ),
+            (
+                ProviderCapability::OpenaiResponses,
+                json!({"max_output_tokens": -2, "max_tokens": 99}),
+                Some(-2),
+            ),
+        ] {
+            let request =
+                LimitRequest::from_value(Some(&value), "test-model", Some(capability), &[]);
+            assert_eq!(request.max_tokens, expected, "{capability:?}");
+        }
+    }
+
+    #[test]
+    fn non_generation_operations_reserve_zero_output_tokens() {
+        for capability in [
+            ProviderCapability::AnthropicCountTokens,
+            ProviderCapability::GeminiCountTokens,
+            ProviderCapability::OpenaiEmbeddings,
+            ProviderCapability::OpenaiModerations,
+            ProviderCapability::OpenaiModels,
+            ProviderCapability::GeminiModels,
+        ] {
+            let request = LimitRequest::from_value(
+                Some(&json!({"max_tokens": 99, "max_output_tokens": 88})),
+                "test-model",
+                Some(capability),
+                &[],
+            );
+            assert_eq!(request.max_tokens, Some(0), "{capability:?}");
+        }
+    }
+
+    #[test]
+    fn openai_chat_completions_accept_max_completion_tokens() {
+        let body = json!({"model":"gpt-test","max_completion_tokens":100});
+        for capability in [
+            ProviderCapability::OpenaiChatCompletions,
+            ProviderCapability::GeminiOpenaiChatCompletions,
+        ] {
+            let request = LimitRequest::from_value(Some(&body), "", Some(capability), &[]);
+            assert_eq!(request.max_tokens, Some(100), "{capability:?}");
         }
     }
 
@@ -8732,7 +8962,7 @@ mod limit_request_estimate_tests {
             &[],
         );
         assert_eq!(request.input_tokens_estimate, 4_000);
-        assert_eq!(request.max_tokens, 0);
+        assert_eq!(request.max_tokens, None);
         assert!(request.local_cache_input.is_none());
     }
 
@@ -8749,7 +8979,7 @@ mod limit_request_estimate_tests {
             let request = LimitRequest::from_value(None, "", Some(capability), &[]);
             assert_eq!(request.model, "", "{capability:?}");
             assert_eq!(request.input_tokens_estimate, 0);
-            assert_eq!(request.max_tokens, 0);
+            assert_eq!(request.max_tokens, Some(0));
         }
         let body = json!({"model":"omni-moderation-latest"});
         let explicit = LimitRequest::from_value(
@@ -9131,10 +9361,11 @@ mod prompt_cache_policy_tests {
                 literal_cacheable_breakpoint_prefix_keys: Vec::new(),
                 timings: PromptCacheAnalysisTimings::default(),
             };
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             assert_eq!(metadata.bundles.official.cache_breakpoints.len(), 1);
             assert_eq!(metadata.bundles.literal.cache_breakpoints.len(), 1);
@@ -9174,10 +9405,11 @@ mod prompt_cache_policy_tests {
             )
             .await;
         assert!(output.analysis.breakpoints.is_empty());
-        let metadata = request_cache_metadata_from_value_with_analysis(
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
             &HeaderMap::new(),
             Some(&request),
             Some(output),
+            None,
         );
         assert!(metadata.bundles.official.cache_breakpoints.is_empty());
         let literal = &metadata.bundles.literal;
@@ -9336,7 +9568,7 @@ impl RequestCacheMetadata {
                 message_index: breakpoint.message_index.map(saturating_u64_to_u32),
                 prefix_hash: breakpoint.prefix_hash.clone(),
                 // Produced in-process by the current estimator (see
-                // `request_cache_metadata_from_value_with_analysis`).
+                // `request_cache_metadata_from_value_with_analysis_for_capability`).
                 prefix_bytes: PrefixBytes::new(breakpoint.prefix_token_count),
                 requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
                 lookback_prefixes: breakpoint
@@ -9604,13 +9836,73 @@ fn request_cache_metadata_from_value(
             timings: PromptCacheAnalysisTimings::default(),
         }
     });
-    request_cache_metadata_from_value_with_analysis(headers, value, analysis)
+    request_cache_metadata_from_value_with_analysis_for_capability(headers, value, analysis, None)
 }
 
-fn request_cache_metadata_from_value_with_analysis(
+fn request_reasoning_metadata(
+    value: &Value,
+    capability: Option<ProviderCapability>,
+) -> (Option<u64>, Option<String>) {
+    let anthropic_thinking_budget = || {
+        value
+            .get("thinking")
+            .filter(|thinking| thinking.get("type").and_then(Value::as_str) == Some("enabled"))
+            .and_then(|thinking| thinking.get("budget_tokens"))
+            .and_then(Value::as_u64)
+            .filter(|budget| *budget <= 9_007_199_254_740_991)
+    };
+    let anthropic_reasoning_effort = || {
+        value
+            .get("output_config")
+            .and_then(|config| config.get("effort"))
+            .and_then(Value::as_str)
+            .filter(|effort| !effort.is_empty() && effort.len() <= 64)
+            .map(str::to_owned)
+    };
+    match capability {
+        // Callers without a capability retain the historical Anthropic-shaped
+        // extraction used by cache and preview metadata.
+        None | Some(ProviderCapability::AnthropicMessages) => {
+            (anthropic_thinking_budget(), anthropic_reasoning_effort())
+        }
+        Some(
+            ProviderCapability::OpenaiChatCompletions
+            | ProviderCapability::GeminiOpenaiChatCompletions,
+        ) => (
+            None,
+            value
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .filter(|effort| !effort.is_empty() && effort.len() <= 64)
+                .map(str::to_owned),
+        ),
+        Some(ProviderCapability::OpenaiResponses) => (
+            None,
+            value
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(Value::as_str)
+                .filter(|effort| !effort.is_empty() && effort.len() <= 64)
+                .map(str::to_owned),
+        ),
+        Some(ProviderCapability::GeminiGenerateContent) => (
+            value
+                .get("generationConfig")
+                .and_then(|config| config.get("thinkingConfig"))
+                .and_then(|thinking| thinking.get("thinkingBudget"))
+                .and_then(Value::as_u64)
+                .filter(|budget| *budget <= 9_007_199_254_740_991),
+            None,
+        ),
+        _ => (None, None),
+    }
+}
+
+fn request_cache_metadata_from_value_with_analysis_for_capability(
     headers: &HeaderMap,
     value: Option<&Value>,
     analysis: Option<PromptCacheAnalysisOutput>,
+    capability: Option<ProviderCapability>,
 ) -> RequestCacheMetadata {
     let identity = request_identity_metadata(headers, value);
     let thread_id = identity.thread_id.clone();
@@ -9701,20 +9993,9 @@ fn request_cache_metadata_from_value_with_analysis(
         .collect::<Vec<_>>();
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
-
     let cache_control_block_count = raw_cache_breakpoints.len() as u64;
-    let thinking_budget_tokens = value
-        .get("thinking")
-        .filter(|t| t.get("type").and_then(Value::as_str) == Some("enabled"))
-        .and_then(|t| t.get("budget_tokens"))
-        .and_then(Value::as_u64)
-        .filter(|v| *v <= 9_007_199_254_740_991);
-    let reasoning_effort = value
-        .get("output_config")
-        .and_then(|c| c.get("effort"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.len() <= 64)
-        .map(str::to_owned);
+
+    let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
@@ -10117,10 +10398,22 @@ fn limit_rejection_response(
             format!("API key limit window {window_secs}s is unsupported"),
             None,
         ),
+        RejectReason::InvalidOutputCap { requested } => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!("requested output token bound {requested} must be zero or greater"),
+            None,
+        ),
         RejectReason::OutputCapExceeded { cap, requested } => (
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             format!("max_tokens {requested} exceeds key output limit {cap}"),
+            None,
+        ),
+        RejectReason::OutputCapRequired { cap } => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!("provider output limit is required for configured cap {cap}"),
             None,
         ),
     };
@@ -10165,7 +10458,9 @@ fn limit_retry_after_secs(reason: RejectReason) -> Option<u64> {
         | RejectReason::ModelNotAllowed
         | RejectReason::CostUnavailable
         | RejectReason::UnsupportedLimitWindow { .. }
+        | RejectReason::InvalidOutputCap { .. }
         | RejectReason::OutputCapExceeded { .. }
+        | RejectReason::OutputCapRequired { .. }
         | RejectReason::Unsatisfiable { .. } => None,
     }
 }
@@ -10185,7 +10480,9 @@ fn limit_violation_name(reason: &RejectReason) -> Option<&'static str> {
         | RejectReason::ModelNotAllowed
         | RejectReason::CostUnavailable
         | RejectReason::UnsupportedLimitWindow { .. }
-        | RejectReason::OutputCapExceeded { .. } => None,
+        | RejectReason::InvalidOutputCap { .. }
+        | RejectReason::OutputCapExceeded { .. }
+        | RejectReason::OutputCapRequired { .. } => None,
     }
 }
 
@@ -10489,18 +10786,16 @@ impl<'a> FailoverRouter<'a> {
                 &*lifecycle.clock,
             );
         candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
-        // The last allowed attempt goes to an API key when one remains, so
-        // the attempt cap never strands a request on exhausted OAuth accounts.
-        if self.request_kind == RequestKind::AnthropicMessages {
-            let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
-            if last_attempt
-                && candidates
-                    .iter()
-                    .any(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey)
-            {
-                candidates
-                    .retain(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey);
-            }
+        // The last allowed attempt goes to an API key when one remains, so the
+        // attempt cap never strands a request on exhausted OAuth accounts.
+        let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
+        if last_attempt
+            && candidates
+                .iter()
+                .any(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey)
+        {
+            candidates
+                .retain(|candidate| candidate.kind.credential_kind() == CredentialKind::ApiKey);
         }
         if candidates.is_empty() {
             return None;
@@ -10646,6 +10941,7 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
     cc_lb_lifecycle::UsageSnapshot {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
+        tool_use_prompt_tokens: u.tool_use_prompt_tokens,
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_creation_input_tokens_5m: u.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: u.cache_creation_input_tokens_1h,
@@ -12120,10 +12416,11 @@ mod tests {
                     Some(1_024),
                 )
                 .await;
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
             let context = PromptCacheObservationContext {
@@ -12184,10 +12481,11 @@ mod tests {
                 )
                 .await;
             assert!(output.cacheable_breakpoint_prefix_keys.is_empty());
-            let metadata = request_cache_metadata_from_value_with_analysis(
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
                 &HeaderMap::new(),
                 Some(&request),
                 Some(output),
+                None,
             );
             let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
             let mut context = PromptCacheObservationContext {
@@ -12830,6 +13128,185 @@ mod tests {
                 "{case} must preserve only valid reasoning effort"
             );
         }
+    }
+
+    #[test]
+    fn request_cache_metadata_extracts_http_provider_reasoning_shapes() {
+        let cases = [
+            (
+                "openai chat",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({
+                    "reasoning_effort": "high",
+                    "reasoning": {"effort": "wrong-shape"},
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 99}}
+                }),
+                None,
+                Some("high"),
+            ),
+            (
+                "gemini openai chat",
+                ProviderCapability::GeminiOpenaiChatCompletions,
+                json!({"reasoning_effort": "high"}),
+                None,
+                Some("high"),
+            ),
+            (
+                "openai responses",
+                ProviderCapability::OpenaiResponses,
+                json!({
+                    "reasoning": {"effort": "medium"},
+                    "reasoning_effort": "wrong-shape",
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 99}}
+                }),
+                None,
+                Some("medium"),
+            ),
+            (
+                "gemini buffered",
+                ProviderCapability::GeminiGenerateContent,
+                json!({
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 8192}},
+                    "reasoning_effort": "wrong-shape",
+                    "reasoning": {"effort": "wrong-shape"}
+                }),
+                Some(8192),
+                None,
+            ),
+            (
+                "gemini streaming",
+                ProviderCapability::GeminiGenerateContent,
+                json!({
+                    "stream": true,
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 16384}}
+                }),
+                Some(16384),
+                None,
+            ),
+            (
+                "anthropic",
+                ProviderCapability::AnthropicMessages,
+                json!({
+                    "thinking": {"type": "enabled", "budget_tokens": 18000},
+                    "output_config": {"effort": "max"},
+                    "reasoning_effort": "wrong-shape",
+                    "reasoning": {"effort": "wrong-shape"},
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 99}}
+                }),
+                Some(18000),
+                Some("max"),
+            ),
+        ];
+
+        for (case, capability, request, expected_budget, expected_effort) in cases {
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(capability),
+            );
+            assert_eq!(
+                metadata.thinking_budget_tokens, expected_budget,
+                "{case} budget"
+            );
+            assert_eq!(
+                metadata.reasoning_effort.as_deref(),
+                expected_effort,
+                "{case} effort"
+            );
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_ignores_invalid_http_provider_reasoning_values() {
+        let cases = [
+            (
+                "openai chat null",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"reasoning_effort": null}),
+            ),
+            (
+                "openai chat wrong type",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"reasoning_effort": 3}),
+            ),
+            (
+                "openai chat empty",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"reasoning_effort": ""}),
+            ),
+            (
+                "openai chat overlong",
+                ProviderCapability::OpenaiChatCompletions,
+                json!({"reasoning_effort": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}),
+            ),
+            (
+                "openai responses empty",
+                ProviderCapability::OpenaiResponses,
+                json!({"reasoning": {"effort": ""}}),
+            ),
+            (
+                "openai responses overlong",
+                ProviderCapability::OpenaiResponses,
+                json!({"reasoning": {"effort": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}),
+            ),
+            (
+                "openai responses wrong type",
+                ProviderCapability::OpenaiResponses,
+                json!({"reasoning": {"effort": false}}),
+            ),
+            (
+                "gemini string budget",
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig": {"thinkingConfig": {"thinkingBudget": "8192"}}}),
+            ),
+            (
+                "gemini negative budget",
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig": {"thinkingConfig": {"thinkingBudget": -1}}}),
+            ),
+            (
+                "gemini fractional budget",
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig": {"thinkingConfig": {"thinkingBudget": 1.5}}}),
+            ),
+            (
+                "gemini unsafe budget",
+                ProviderCapability::GeminiGenerateContent,
+                json!({"generationConfig": {"thinkingConfig": {"thinkingBudget": 9007199254740992_u64}}}),
+            ),
+        ];
+
+        for (case, capability, request) in cases {
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(capability),
+            );
+            assert_eq!(metadata.thinking_budget_tokens, None, "{case} budget");
+            assert_eq!(metadata.reasoning_effort, None, "{case} effort");
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_without_capability_preserves_legacy_anthropic_shape() {
+        let request = json!({
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "output_config": {"effort": "low"},
+            "reasoning_effort": "wrong-shape",
+            "reasoning": {"effort": "wrong-shape"},
+            "generationConfig": {"thinkingConfig": {"thinkingBudget": 99}}
+        });
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &HeaderMap::new(),
+            Some(&request),
+            None,
+            None,
+        );
+
+        assert_eq!(metadata.thinking_budget_tokens, Some(4096));
+        assert_eq!(metadata.reasoning_effort.as_deref(), Some("low"));
     }
 
     #[test]
@@ -15067,6 +15544,32 @@ mod tests {
         ))
     }
 
+    fn limited_failure_principal_view(
+        limit: cc_lb_storage_api::principal::Limit,
+    ) -> Arc<PrincipalView> {
+        Arc::new(PrincipalView::for_tests(
+            "principal-test",
+            true,
+            vec!["*".to_owned()],
+            vec![limit],
+            HashMap::new(),
+        ))
+    }
+
+    fn upstream_record_with_kind(kind: StorageRecordKind) -> UpstreamRecord {
+        UpstreamRecord {
+            id: Uuid::new_v4(),
+            name: "upstream-test".to_owned(),
+            kind,
+            enabled: true,
+            revision: 1,
+            oauth_token_generation: 0,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+            ..UpstreamRecord::default()
+        }
+    }
+
     fn default_artifacts() -> cc_lb_control::api_keys::principal_view::PrincipalRoutingArtifacts {
         (
             None,
@@ -15252,6 +15755,73 @@ mod tests {
                 "{provider:?} {path}"
             );
             assert_eq!(terminal_snapshot(&events).client_status, 404);
+        }
+    }
+
+    #[tokio::test]
+    async fn negative_generation_bounds_reject_before_provider_dispatch() {
+        use cc_lb_domain::Provider;
+
+        for (provider, path, body, upstream_kind) in [
+            (
+                Provider::Openai,
+                "/v1/responses",
+                br#"{"model":"gpt-test","max_output_tokens":-1,"input":[]}"#.as_slice(),
+                StorageRecordKind::OpenaiApiKey,
+            ),
+            (
+                Provider::Gemini,
+                "/v1beta/models/gemini-test:generateContent",
+                br#"{"contents":[],"generationConfig":{"maxOutputTokens":-1}}"#.as_slice(),
+                StorageRecordKind::GeminiApiKey,
+            ),
+        ] {
+            let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+            let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+            let view = provenance_view(
+                limited_failure_principal_view(cc_lb_storage_api::principal::Limit {
+                    kind: cc_lb_storage_api::principal::LimitKind::OutputTokens,
+                    window_secs: 60,
+                    cap_micros: 100,
+                }),
+                Arc::new(TestSignerFactory),
+                vec![upstream_record_with_kind(upstream_kind)],
+            );
+            let limit_engine = cc_lb_control::api_keys::limit_engine::LimitEngine::new(
+                Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+                Arc::new(cc_lb_clock::SystemClock),
+            );
+            let fixture = failure_key_fixture();
+            let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus)
+                .with_static_limit_subject(
+                    limit_engine,
+                    "principal-test".to_owned(),
+                    fixture.key_id.clone(),
+                    fixture.record.clone(),
+                );
+            let mut request = failure_request(Bytes::from_static(body));
+            *request.uri_mut() = path.parse().expect("provider path");
+            request
+                .extensions_mut()
+                .insert(crate::request_context::ProviderScope(provider));
+            let auth = lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("authenticated");
+            let response = lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("request handled");
+            let (status, body) = collect_response_body(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{provider:?}");
+            let body: Value = serde_json::from_slice(&body).expect("error JSON");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("zero or greater"))
+            );
+            assert_eq!(dispatcher.call_count(), 0, "{provider:?}");
         }
     }
 
@@ -15623,6 +16193,19 @@ mod tests {
         let response_completed = usage_parser::parse_sse_event(
             b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
         );
+        let response_incomplete = usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_named_without_type = usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_data_only = usage_parser::parse_sse_event(
+            b"data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_malformed =
+            usage_parser::parse_sse_event(b"event: response.incomplete\ndata: {not-json}\n\n");
+        let response_incomplete_empty =
+            usage_parser::parse_sse_event(b"event: response.incomplete\ndata:\n\n");
         let response_delta = usage_parser::parse_sse_event(
             b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
         );
@@ -15645,6 +16228,46 @@ mod tests {
             &response_completed,
             false,
         ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete,
+            false,
+        ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete_named_without_type,
+            false,
+        ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete_data_only,
+            false,
+        ));
+        for malformed in [&response_incomplete_malformed, &response_incomplete_empty] {
+            assert!(!sse_event_completes_response(
+                ProviderCapability::OpenaiResponses,
+                malformed,
+                false,
+            ));
+        }
+        for (event, expected) in [
+            (&response_incomplete_named_without_type, true),
+            (&response_incomplete_data_only, true),
+            (&response_incomplete_malformed, false),
+            (&response_incomplete_empty, false),
+        ] {
+            let mut semantic_message_stop_seen = false;
+            let mut message_stop_at = None;
+            observe_sse_terminal_event(
+                ProviderCapability::OpenaiResponses,
+                event,
+                false,
+                &mut semantic_message_stop_seen,
+                &mut message_stop_at,
+                Instant::now,
+            );
+            assert_eq!(semantic_message_stop_seen, expected);
+        }
         assert!(!sse_event_completes_response(
             ProviderCapability::OpenaiResponses,
             &message_stop,
@@ -15730,6 +16353,92 @@ mod tests {
             ProviderCapability::OpenaiResponses,
             &parse_sse_event(b"event: response.completed\ndata: {}\n\n"),
             false,
+        ));
+    }
+
+    #[test]
+    fn semantic_content_classifier_matches_provider_wire_shapes() {
+        let anthropic = parse_sse_event(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::AnthropicMessages,
+            &anthropic
+        ));
+
+        let chat_text = parse_sse_event(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}},{\"delta\":{\"content\":null}}]}\n\n",
+        );
+        let chat_metadata =
+            parse_sse_event(b"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n");
+        let chat_tool = parse_sse_event(
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\"}]}}]}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiChatCompletions,
+            &chat_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::OpenaiChatCompletions,
+            &chat_metadata
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiOpenaiChatCompletions,
+            &chat_tool
+        ));
+
+        let completion = parse_sse_event(b"data: {\"choices\":[{\"text\":\"legacy\"}]}\n\n");
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiCompletions,
+            &completion
+        ));
+
+        let response_text = parse_sse_event(
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+        );
+        let response_reasoning = parse_sse_event(
+            b"event: response.reasoning.delta\ndata: {\"type\":\"response.reasoning.delta\",\"delta\":\"hidden\"}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::OpenaiResponses,
+            &response_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::OpenaiResponses,
+            &response_reasoning
+        ));
+
+        let gemini_text = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"one\"},{\"text\":\"two\"}]}},{\"content\":{\"parts\":[{\"text\":\"three\"}]}}]}\n\n",
+        );
+        let gemini_oauth_text = parse_sse_event(
+            b"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"wrapped\"}]}}]}}\n\n",
+        );
+        let gemini_oauth_thought = parse_sse_event(
+            b"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"hidden\"}]}}]}}\n\n",
+        );
+        let gemini_thought = parse_sse_event(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"hidden\"}]}}]}\n\n",
+        );
+        assert!(is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_text
+        ));
+        assert!(is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_oauth_text
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_oauth_thought
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_thought
+        ));
+        assert!(!is_semantic_content_frame(
+            ProviderCapability::GeminiOpenaiChatCompletions,
+            &gemini_text
         ));
     }
 
@@ -16457,7 +17166,7 @@ mod tests {
 
         let body = Arc::new(json!({"model": "gpt-test", "store": false}));
         let frame = Bytes::from(serde_json::to_vec(body.as_ref()).expect("test frame serializes"));
-        let (observer, request_id) = lifecycle.websocket_observer();
+        let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
         assert!(
             drain_events(&mut events).is_empty(),
             "allocating an observer is not a turn"
@@ -16537,7 +17246,7 @@ mod tests {
             cc_lb_lifecycle::LifecycleEvent::ParseCompleted { result: Ok(info), .. }
                 if info.method == "GET" && info.path == "/v1/responses" && info.stream && info.body_bytes == frame.len() as u64
         )));
-        let (observer, next_request_id) = lifecycle.websocket_observer();
+        let (observer, next_request_id) = lifecycle.websocket_observer("/v1/responses");
         assert_ne!(request_id, next_request_id);
         let local_body = Arc::new(
             json!({"model": "gpt-test", "store": false, "previous_response_id": "resp_local"}),
@@ -16776,7 +17485,7 @@ mod tests {
             .expect("request authenticates");
         let body =
             Arc::new(serde_json::from_slice::<Value>(&frame).expect("original frame parses"));
-        let (observer, request_id) = lifecycle.websocket_observer();
+        let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
         let turn = lifecycle
             .prepare_websocket_turn(
                 &auth,
@@ -16814,7 +17523,7 @@ mod tests {
             .expect_err("a retained connection does not bypass changed filter eligibility");
         assert_eq!(error.code, error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
         assert!(drain_events(&mut events).is_empty());
-        let (observer, request_id) = lifecycle.websocket_observer();
+        let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
         assert!(
             lifecycle
                 .prepare_websocket_turn(
@@ -16881,7 +17590,7 @@ mod tests {
             let body = Arc::new(json!({"model":"gpt-test","store":false}));
             let frame =
                 Bytes::from(serde_json::to_vec(body.as_ref()).expect("test frame serializes"));
-            let (observer, request_id) = lifecycle.websocket_observer();
+            let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
             let prepared = lifecycle
                 .prepare_websocket_turn(
                     &auth,
@@ -16921,7 +17630,7 @@ mod tests {
                 })),
                 records,
             ));
-            let (observer, request_id) = lifecycle.websocket_observer();
+            let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
             let turn = lifecycle
                 .prepare_websocket_turn(
                     &auth,
@@ -16957,8 +17666,10 @@ mod tests {
         );
         let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
         let mut events = subscribe_lifecycle(&bus);
-        let response =
-            lifecycle.reject_responses_websocket_authentication(&BuiltinAuthError::InvalidFormat);
+        let response = lifecycle.reject_responses_websocket_authentication(
+            &BuiltinAuthError::InvalidFormat,
+            "/v1/responses",
+        );
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let rejected = drain_events(&mut events);
         assert_eq!(
@@ -16981,6 +17692,61 @@ mod tests {
                 .count(),
             1
         );
+        assert!(rejected.iter().any(|event| matches!(
+            event,
+            cc_lb_lifecycle::LifecycleEvent::RequestStarted {
+                event_kind: Some(cc_lb_request_log::RequestEventKind::OpenaiResponses),
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn websocket_authentication_rejection_uses_attempted_route_kind() {
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+        );
+        let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
+        let mut events = subscribe_lifecycle(&bus);
+        for (path, expected) in [
+            (
+                "/v1/realtime",
+                cc_lb_request_log::RequestEventKind::OpenaiResponses,
+            ),
+            (
+                "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                cc_lb_request_log::RequestEventKind::GeminiGenerateContent,
+            ),
+            (
+                "/ws/unsupported",
+                cc_lb_request_log::RequestEventKind::Other,
+            ),
+        ] {
+            let response = lifecycle
+                .reject_responses_websocket_authentication(&BuiltinAuthError::InvalidFormat, path);
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let rejected = drain_events(&mut events);
+            assert!(rejected.iter().any(|event| matches!(
+                event,
+                cc_lb_lifecycle::LifecycleEvent::RequestStarted {
+                    event_kind: Some(kind),
+                    ..
+                } if *kind == expected
+            )));
+            assert_eq!(
+                rejected
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                    ))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

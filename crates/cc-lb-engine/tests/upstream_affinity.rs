@@ -322,6 +322,24 @@ fn upstream_record(id: Uuid, name: &str, enabled: bool) -> cc_lb_storage_api::Up
         workspace_id: None,
     }
 }
+fn openai_upstream_record(
+    id: Uuid,
+    name: &str,
+    enabled: bool,
+) -> cc_lb_storage_api::UpstreamRecord {
+    let mut record = upstream_record(id, name, enabled);
+    record.kind = cc_lb_storage_api::upstream::UpstreamKind::OpenaiApiKey;
+    record
+}
+
+fn responses_request(body: Value) -> Request<Bytes> {
+    Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/responses")
+        .header("x-api-key", crate::common::managed_api_key())
+        .body(Bytes::from(body.to_string()))
+        .expect("Responses request builds")
+}
 
 fn lifecycle(
     records: Vec<cc_lb_storage_api::UpstreamRecord>,
@@ -649,6 +667,96 @@ async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
         store.upstream_for(&affinity_key("opaque-pending")),
         Some(origin)
     );
+}
+#[tokio::test]
+async fn stateless_openai_reasoning_replay_stays_with_owner_and_fails_closed_when_disabled() {
+    let origin = Uuid::parse_str("00000000-0000-0000-0000-00000000000a").unwrap();
+    let fallback = Uuid::parse_str("00000000-0000-0000-0000-00000000000b").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    let learning_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp-origin",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "reasoning",
+            "id": "rs-origin",
+            "summary": [],
+            "encrypted_content": "opaque-origin-reasoning"
+        }]
+    })));
+    let learning = lifecycle(
+        vec![openai_upstream_record(origin, "origin", true)],
+        learning_dispatch,
+        Some(store.clone()),
+    );
+    let first = handle_authenticated(
+        &learning,
+        responses_request(json!({
+            "model": "gpt-5",
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "input": [{"role": "user", "content": "first"}]
+        })),
+    )
+    .await
+    .expect("OpenAI learning request handled");
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let reasoning_replay = json!({
+        "model": "gpt-5",
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+        "input": [{
+            "type": "reasoning",
+            "id": "rs-origin",
+            "summary": [],
+            "encrypted_content": "opaque-origin-reasoning"
+        }, {
+            "role": "user",
+            "content": "second"
+        }]
+    });
+    let owner_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "id": "resp-owner-follow-up",
+        "object": "response",
+        "output": []
+    })));
+    let owner = lifecycle(
+        vec![
+            openai_upstream_record(origin, "origin", true),
+            openai_upstream_record(fallback, "fallback", true),
+        ],
+        owner_dispatch.clone(),
+        Some(store.clone()),
+    );
+    let owner_response = handle_authenticated(&owner, responses_request(reasoning_replay.clone()))
+        .await
+        .expect("owner replay handled");
+    assert_eq!(owner_response.status(), StatusCode::OK);
+    assert_eq!(
+        owner_dispatch
+            .urls
+            .lock()
+            .expect("dispatch URL lock")
+            .as_slice(),
+        &["http://origin.local/v1/responses".to_owned()]
+    );
+
+    let disabled_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let disabled_owner = lifecycle(
+        vec![
+            openai_upstream_record(origin, "origin", false),
+            openai_upstream_record(fallback, "fallback", true),
+        ],
+        disabled_dispatch.clone(),
+        Some(store),
+    );
+    let disabled_response =
+        handle_authenticated(&disabled_owner, responses_request(reasoning_replay))
+            .await
+            .expect("disabled owner replay handled");
+    assert_eq!(disabled_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(disabled_dispatch.call_count(), 0);
 }
 
 #[tokio::test]

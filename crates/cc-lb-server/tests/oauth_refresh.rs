@@ -74,6 +74,8 @@ mod lazy_mode;
 mod scheduled_mode;
 #[path = "oauth_refresh/scheduler_restart.rs"]
 mod scheduler_restart;
+#[path = "oauth_refresh/subscription_dispatch.rs"]
+mod subscription_dispatch;
 
 struct Fixture {
     _dir: tempfile::TempDir,

@@ -953,7 +953,7 @@ async fn insert_request_event_in_tx(
         "created_at, key_id, model, upstream_name, thread_id, input_tokens, ",
         "output_tokens, cache_creation_input_tokens, cache_read_input_tokens, ",
         "event_id, error_code, upstream_error_type, upstream_error_message, ",
-        "thinking_tokens, service_tier, cache_creation_input_tokens_5m, ",
+        "thinking_tokens, tool_use_prompt_tokens, service_tier, cache_creation_input_tokens_5m, ",
         "cache_creation_input_tokens_1h, token_estimate_source, ",
         "thinking_budget_tokens, reasoning_effort, list_ts_ms, ",
         "list_event_key, list_status, list_duration_ms, list_auth_ms, ",
@@ -986,7 +986,7 @@ async fn insert_request_event_in_tx(
         "upstream_stream_warning_type, upstream_stream_warning_message",
         ") VALUES (",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -1031,6 +1031,10 @@ async fn insert_request_event_in_tx(
     .bind(option_u64_to_i64(
         event.thinking_tokens,
         "request event thinking_tokens",
+    )?)
+    .bind(option_u64_to_i64(
+        event.tool_use_prompt_tokens,
+        "request event tool_use_prompt_tokens",
     )?)
     .bind(event.service_tier.as_deref())
     .bind(option_u64_to_i64(

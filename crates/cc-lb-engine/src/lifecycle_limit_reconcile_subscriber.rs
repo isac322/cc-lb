@@ -3,8 +3,8 @@
 //! Reconciles limit reservations by consuming `LifecycleEvent`s instead
 //! of running inline on the handler. Tracks (per `event_id`):
 //! - the reservation id carried on [`LifecycleEvent::LimitDecision`],
-//! - the latest [`UsageSnapshot`] observed on
-//!   [`LifecycleEvent::UsageObserved`] and [`LifecycleEvent::StreamCompleted`],
+//! - the latest measured [`UsageSnapshot`] observed on
+//!   [`LifecycleEvent::UsageObserved`] or a usage-present [`LifecycleEvent::StreamCompleted`],
 //! - the cost breakdown carried on [`LifecycleEvent::Priced`].
 //!
 //! On [`LifecycleEvent::RequestTerminated`], the subscriber settles the
@@ -304,8 +304,10 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(success),
             ..
         } => {
-            partial.usage = success.usage;
-            partial.usage_seen = true;
+            if success.usage_present {
+                partial.usage = success.usage;
+                partial.usage_seen = true;
+            }
         }
         LifecycleEvent::Priced { cost, .. } => {
             partial.cost_micros = cost.total_micros;
@@ -399,7 +401,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
-    use cc_lb_lifecycle::{LimitDecisionKind, UsageSource};
+    use cc_lb_lifecycle::{LimitDecisionKind, StreamSuccess, UsageSource};
 
     fn build_engine() -> Arc<LimitEngine> {
         LimitEngine::new(
@@ -468,7 +470,7 @@ mod tests {
             record,
             "ws-accounting-principal",
             "gpt-5-codex",
-            100,
+            Some(100),
             0,
             Some(200),
         ) else {
@@ -521,6 +523,72 @@ mod tests {
     }
 
     #[test]
+    fn stream_success_usage_presence_preserves_reconciliation_measurement() {
+        let event_id = eid("stream-success-usage-presence");
+        let mut partial = Partial::default();
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: event_id.clone(),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_tokens: 99,
+                        output_tokens: 101,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(!partial.usage_seen);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::UsageObserved {
+                event_id: event_id.clone(),
+                usage: UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                },
+                source: UsageSource::MessageDelta,
+            },
+        );
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: event_id.clone(),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_tokens: 99,
+                        output_tokens: 101,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(partial.usage_seen);
+        assert_eq!(partial.usage.input_tokens, 7);
+        assert_eq!(partial.usage.output_tokens, 11);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id,
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot::default(),
+                    usage_present: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(partial.usage_seen);
+        assert_eq!(partial.usage, UsageSnapshot::default());
+    }
+
+    #[test]
     fn websocket_interrupted_turn_reconciles_observed_usage_and_cost_once() {
         use cc_lb_control::api_keys::limit_engine::RejectReason;
 
@@ -560,7 +628,7 @@ mod tests {
                     &record,
                     "ws-accounting-principal",
                     "gpt-5-codex",
-                    0,
+                    Some(0),
                     0,
                     Some(976),
                 ),
@@ -917,7 +985,7 @@ mod tests {
                 &record,
                 "ws-accounting-principal",
                 "gpt-5-codex",
-                0,
+                Some(0),
                 0,
                 Some(1_000),
             );

@@ -492,6 +492,7 @@ export const RequestEventPartialSchema = z.looseObject({
   upstream_response_status: z.number().nullable().optional(),
   input_tokens: z.number().nullable().optional(),
   output_tokens: z.number().nullable().optional(),
+  tool_use_prompt_tokens: z.number().nullable().optional(),
   cache_creation_input_tokens: z.number().nullable().optional(),
   cache_creation_input_tokens_5m: z.number().nullable().optional(),
   cache_creation_input_tokens_1h: z.number().nullable().optional(),
@@ -595,6 +596,7 @@ export interface RequestEvent {
   cache_creation_input_tokens?: number;
   cache_creation_input_tokens_5m?: number;
   cache_creation_input_tokens_1h?: number;
+  tool_use_prompt_tokens?: number | null;
   cache_read_input_tokens?: number;
   cost_usd_micros?: number;
   cost_input_micros?: number;

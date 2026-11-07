@@ -2,7 +2,7 @@
 //!
 //! Transport I/O lives in the server. This single-owner state machine keeps
 //! connection-local continuation separate from durable response ownership.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
@@ -31,6 +31,7 @@ pub struct WebSocketError {
     pub native_code: Option<String>,
     pub message: String,
     pub stream_id: Option<String>,
+    provider_headers: Vec<(String, String)>,
 }
 
 impl WebSocketError {
@@ -41,6 +42,7 @@ impl WebSocketError {
             native_code: None,
             message: message.into(),
             stream_id: None,
+            provider_headers: Vec::new(),
         }
     }
 
@@ -51,6 +53,31 @@ impl WebSocketError {
 
     pub fn with_stream(mut self, stream_id: Option<String>) -> Self {
         self.stream_id = stream_id;
+        self
+    }
+
+    /// Retain only bounded, non-sensitive provider response headers.
+    pub fn with_provider_headers(mut self, headers: &HeaderMap) -> Self {
+        for (name, value) in headers {
+            if self.provider_headers.len() >= 32 {
+                break;
+            }
+            let name = name.as_str().to_ascii_lowercase();
+            if name != "retry-after"
+                && !name.starts_with("x-ratelimit-")
+                && !name.starts_with("anthropic-ratelimit-")
+                && !name.starts_with("ratelimit-")
+            {
+                continue;
+            }
+            let Ok(value) = value.to_str() else {
+                continue;
+            };
+            if value.len() > 1024 {
+                continue;
+            }
+            self.provider_headers.push((name, value.to_owned()));
+        }
         self
     }
 
@@ -72,7 +99,26 @@ impl WebSocketError {
         if let Some(stream_id) = self.stream_id.as_ref() {
             error["stream_id"] = Value::String(stream_id.clone());
         }
+        if !self.provider_headers.is_empty() {
+            let headers = self
+                .provider_headers
+                .iter()
+                .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+                .collect::<BTreeMap<_, _>>();
+            error["headers"] = serde_json::to_value(headers)
+                .expect("serialized provider headers contain only JSON values");
+        }
         Bytes::from(serde_json::to_vec(&error).expect("WebSocket error contains only JSON values"))
+    }
+    pub fn copy_provider_headers(&self, headers: &mut http::HeaderMap) {
+        for (name, value) in &self.provider_headers {
+            if let (Ok(name), Ok(value)) = (
+                http::HeaderName::from_bytes(name.as_bytes()),
+                http::HeaderValue::from_str(value),
+            ) {
+                headers.append(name, value);
+            }
+        }
     }
 }
 
@@ -243,7 +289,7 @@ impl ResponsesWebSocketGateway {
     }
 
     pub fn reject_authentication(&self, error: &BuiltinAuthError) -> WebSocketError {
-        let (observer, _) = self.lifecycle.websocket_observer();
+        let (observer, _) = self.lifecycle.websocket_observer("/v1/responses");
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
@@ -256,7 +302,7 @@ impl ResponsesWebSocketGateway {
     }
 
     pub fn reject_protocol(&self, error: &WebSocketError) {
-        let (observer, _) = self.lifecycle.websocket_observer();
+        let (observer, _) = self.lifecycle.websocket_observer("/v1/responses");
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
             terminate_error(observer, error);
@@ -276,7 +322,7 @@ impl ResponsesWebSocketGateway {
                     .and_then(Value::as_str)
                     .is_some_and(|parent| self.successor_for_parent(parent).is_some())
         });
-        let (observer, request_id) = self.lifecycle.websocket_observer();
+        let (observer, request_id) = self.lifecycle.websocket_observer("/v1/responses");
         let mut auth_info = observer
             .as_ref()
             .map(|_| self.lifecycle.websocket_auth_info(&auth));
@@ -1846,6 +1892,7 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
         cache_read_input_tokens: usage.cache_read_input_tokens,
         thinking_tokens: usage.thinking_tokens,
+        tool_use_prompt_tokens: usage.tool_use_prompt_tokens,
         web_search_requests: usage.web_search_requests,
         web_fetch_requests: usage.web_fetch_requests,
         service_tier: usage.service_tier,

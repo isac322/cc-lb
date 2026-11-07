@@ -226,9 +226,15 @@ pub enum RejectReason {
     UnsupportedLimitWindow {
         window_secs: u64,
     },
+    InvalidOutputCap {
+        requested: i64,
+    },
     OutputCapExceeded {
         cap: i64,
         requested: i64,
+    },
+    OutputCapRequired {
+        cap: i64,
     },
     Unsatisfiable {
         kind: LimitKind,
@@ -427,7 +433,7 @@ impl LimitEngine {
         record: &StoredApiKeyRecord,
         principal_id: &str,
         model: &str,
-        max_tokens: i64,
+        max_tokens: Option<i64>,
         max_input_estimate: i64,
         cost_estimate_micros: Option<i64>,
     ) -> Result<Reservation, RejectReason> {
@@ -450,6 +456,10 @@ impl LimitEngine {
             .is_some_and(|expires_at| now_sec > expires_at)
         {
             return Err(RejectReason::Expired);
+        }
+
+        if let Some(requested) = max_tokens.filter(|value| *value < 0) {
+            return Err(RejectReason::InvalidOutputCap { requested });
         }
 
         if !model.is_empty() && !view.is_model_allowed(principal_id, model) {
@@ -480,9 +490,18 @@ impl LimitEngine {
         for limit in &effective_limits {
             let requested = match limit.kind {
                 LimitKind::Requests => 1,
-                LimitKind::OutputTokens => max_tokens,
+                LimitKind::OutputTokens => match max_tokens {
+                    Some(value) => value,
+                    None => {
+                        return Err(RejectReason::OutputCapRequired {
+                            cap: limit.cap_micros,
+                        });
+                    }
+                },
                 LimitKind::InputTokens => max_input_estimate,
-                LimitKind::TotalTokens => max_input_estimate.saturating_add(max_tokens),
+                LimitKind::TotalTokens => {
+                    max_input_estimate.saturating_add(max_tokens.unwrap_or(0))
+                }
                 LimitKind::CostUsd => match cost_estimate_micros {
                     Some(amount) => amount,
                     None => continue,
@@ -524,7 +543,8 @@ impl LimitEngine {
                     });
                 }
                 LimitKind::OutputTokens => {
-                    if self.current_total(&key_id, limit.kind, window_sec, now_sec) + max_tokens
+                    let amount = max_tokens.unwrap_or(0);
+                    if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
                         > admission_cap
                     {
                         return Err(RejectReason::TokenRateLimit { kind: limit.kind });
@@ -532,7 +552,7 @@ impl LimitEngine {
                     reserved.push(ReservedAmount {
                         kind: limit.kind,
                         window_sec,
-                        amount: max_tokens,
+                        amount,
                     });
                 }
                 LimitKind::InputTokens => {
@@ -549,7 +569,7 @@ impl LimitEngine {
                     });
                 }
                 LimitKind::TotalTokens => {
-                    let amount = max_input_estimate.saturating_add(max_tokens);
+                    let amount = max_input_estimate.saturating_add(max_tokens.unwrap_or(0));
                     if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
                         > admission_cap
                     {
@@ -1674,23 +1694,157 @@ mod tests {
     }
 
     #[test]
+    fn negative_output_cap_is_rejected_before_output_reservation() {
+        let (engine, view, record) = engine_with_output_token_limit(100);
+        assert_eq!(
+            engine
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    Some(-1),
+                    0,
+                    None
+                )
+                .err(),
+            Some(RejectReason::InvalidOutputCap { requested: -1 }),
+        );
+        assert_eq!(
+            engine.current_total(
+                &key_id_for(&record),
+                LimitKind::OutputTokens,
+                60,
+                unix_secs(engine.inner.clock.now()),
+            ),
+            0,
+        );
+    }
+
+    #[test]
+    fn missing_output_cap_is_rejected_before_output_reservation() {
+        let (engine, view, record) = engine_with_output_token_limit(100);
+        assert_eq!(
+            engine
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    None,
+                    0,
+                    None
+                )
+                .err(),
+            Some(RejectReason::OutputCapRequired { cap: 100 }),
+        );
+        assert_eq!(
+            engine.current_total(
+                &key_id_for(&record),
+                LimitKind::OutputTokens,
+                60,
+                unix_secs(engine.inner.clock.now()),
+            ),
+            0,
+        );
+    }
+
+    #[test]
+    fn explicit_zero_output_cap_still_reserves_successfully() {
+        let (engine, view, record) = engine_with_output_token_limit(100);
+        let reservation = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None,
+            )
+            .expect("explicit zero output cap remains valid");
+        assert_eq!(
+            engine.current_total(
+                &key_id_for(&record),
+                LimitKind::OutputTokens,
+                60,
+                unix_secs(engine.inner.clock.now()),
+            ),
+            0,
+        );
+        drop(reservation);
+    }
+
+    #[test]
+    fn missing_output_cap_is_allowed_when_only_total_tokens_is_limited() {
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_clock::SystemClock),
+        );
+        let view = PrincipalView::for_tests(
+            "principal-a",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 100,
+            }],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            index_hash: [8u8; 32],
+            ..StoredApiKeyRecord::default()
+        };
+        let reservation = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                None,
+                7,
+                None,
+            )
+            .expect("input-only request can use the total-token limit");
+        assert_eq!(
+            engine.current_total(
+                &key_id_for(&record),
+                LimitKind::TotalTokens,
+                60,
+                unix_secs(engine.inner.clock.now()),
+            ),
+            7,
+        );
+        drop(reservation);
+    }
+
+    #[test]
     fn model_less_operations_skip_only_model_authorization() {
         let (engine, view, record) = engine_with_output_token_limit(100);
         assert!(
             engine
-                .reserve(&view, &record, "principal-a", "", 0, 0, Some(0))
+                .reserve(&view, &record, "principal-a", "", Some(0), 0, Some(0))
                 .is_ok()
         );
         assert!(matches!(
-            engine.reserve(&view, &record, "principal-a", "unknown", 0, 0, Some(0)),
+            engine.reserve(
+                &view,
+                &record,
+                "principal-a",
+                "unknown",
+                Some(0),
+                0,
+                Some(0)
+            ),
             Err(RejectReason::ModelNotAllowed)
         ));
         assert!(matches!(
-            engine.reserve(&view, &record, "principal-a", "", 101, 0, Some(0)),
+            engine.reserve(&view, &record, "principal-a", "", Some(101), 0, Some(0)),
             Err(RejectReason::OutputCapExceeded { .. })
         ));
         assert!(matches!(
-            engine.reserve(&view, &record, "missing-principal", "", 0, 0, Some(0)),
+            engine.reserve(&view, &record, "missing-principal", "", Some(0), 0, Some(0)),
             Err(RejectReason::PrincipalMissing)
         ));
     }
@@ -1717,10 +1871,10 @@ mod tests {
             ..Default::default()
         };
         let _reservation = engine
-            .reserve(&view, &record, "principal-a", "", 0, 0, Some(0))
+            .reserve(&view, &record, "principal-a", "", Some(0), 0, Some(0))
             .expect("model-less request is admitted");
         assert!(matches!(
-            engine.reserve(&view, &record, "principal-a", "", 0, 0, Some(0)),
+            engine.reserve(&view, &record, "principal-a", "", Some(0), 0, Some(0)),
             Err(RejectReason::RequestsRateLimit)
         ));
     }
@@ -1729,7 +1883,15 @@ mod tests {
     fn swept_reservation_cannot_authorize_a_queued_dispatch() {
         let (engine, view, record) = engine_with_output_token_limit(1_000);
         let reservation = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 100, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(100),
+                0,
+                None,
+            )
             .unwrap();
         assert!(reservation.is_active());
         sweep_expired(&engine, Duration::ZERO);
@@ -1767,7 +1929,15 @@ mod tests {
             ..Default::default()
         };
         let first = engine
-            .reserve(&view, &record, "principal-a", "gpt-test", 100, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "gpt-test",
+                Some(100),
+                0,
+                None,
+            )
             .unwrap();
         let first_id = first.id().to_owned();
         assert_eq!(concurrency.current(&record.key_hash_b64), 1);
@@ -1781,7 +1951,15 @@ mod tests {
             100
         );
         let next = engine
-            .reserve(&view, &record, "principal-a", "gpt-test", 100, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "gpt-test",
+                Some(100),
+                0,
+                None,
+            )
             .unwrap();
         assert_eq!(concurrency.current(&record.key_hash_b64), 1);
         assert!(engine.reconcile_by_id(&first_id, 0, 40, 0));
@@ -1803,10 +1981,26 @@ mod tests {
     fn reserve_returns_stable_unique_ids() {
         let (engine, view, record) = engine_with_output_token_limit(1_000_000);
         let a = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 10, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(10),
+                0,
+                None,
+            )
             .expect("reserve a");
         let b = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 10, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(10),
+                0,
+                None,
+            )
             .expect("reserve b");
         assert_ne!(a.id(), b.id());
         assert!(!a.id().is_empty());
@@ -1819,7 +2013,15 @@ mod tests {
         let key_id = key_id_for(&record);
         let now_sec = unix_secs(engine.inner.clock.now());
         let res = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 100, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(100),
+                0,
+                None,
+            )
             .expect("reserve");
         assert_eq!(
             engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
@@ -1846,7 +2048,15 @@ mod tests {
         let key_id = key_id_for(&record);
         let now_sec = unix_secs(engine.inner.clock.now());
         let res = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 100, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(100),
+                0,
+                None,
+            )
             .expect("reserve");
         let id = res.id().to_owned();
         std::mem::forget(res);
@@ -1865,7 +2075,15 @@ mod tests {
         let key_id = key_id_for(&record);
         let now_sec = unix_secs(engine.inner.clock.now());
         let res = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 55, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(55),
+                0,
+                None,
+            )
             .expect("reserve");
         assert_eq!(
             engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
@@ -1888,7 +2106,15 @@ mod tests {
         let now_sec = unix_secs(engine.inner.clock.now());
         {
             let _res = engine
-                .reserve(&view, &record, "principal-a", "claude-3-opus", 25, 0, None)
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    Some(25),
+                    0,
+                    None,
+                )
                 .expect("reserve");
             assert_eq!(
                 engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
@@ -1908,7 +2134,15 @@ mod tests {
         let key_id = key_id_for(&record);
         let now_sec = unix_secs(engine.inner.clock.now());
         let res = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 33, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(33),
+                0,
+                None,
+            )
             .expect("reserve");
         let id = res.id().to_owned();
         std::mem::forget(res);
@@ -1933,7 +2167,15 @@ mod tests {
         let key_id = key_id_for(&record);
         let now_sec = unix_secs(engine.inner.clock.now());
         let res = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 33, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(33),
+                0,
+                None,
+            )
             .expect("reserve");
         let id = res.id().to_owned();
         std::mem::forget(res);
@@ -2057,11 +2299,11 @@ mod tests {
         );
 
         for (index, (kind, max_output, max_input, cost)) in [
-            (LimitKind::Requests, 0, 0, None),
-            (LimitKind::InputTokens, 0, 11, None),
-            (LimitKind::OutputTokens, 11, 0, None),
-            (LimitKind::TotalTokens, 6, 5, None),
-            (LimitKind::CostUsd, 0, 0, Some(11)),
+            (LimitKind::Requests, Some(0), 0, None),
+            (LimitKind::InputTokens, Some(0), 11, None),
+            (LimitKind::OutputTokens, Some(11), 0, None),
+            (LimitKind::TotalTokens, Some(6), 5, None),
+            (LimitKind::CostUsd, Some(0), 0, Some(11)),
         ]
         .into_iter()
         .enumerate()
@@ -2080,7 +2322,15 @@ mod tests {
                 (0..10)
                     .map(|_| {
                         engine
-                            .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                            .reserve(
+                                &view,
+                                &record,
+                                "principal-a",
+                                "claude-3-opus",
+                                Some(0),
+                                0,
+                                None,
+                            )
                             .expect("positive cold request allowance")
                     })
                     .collect()
@@ -2141,7 +2391,7 @@ mod tests {
                     &unsupported_record,
                     "principal-a",
                     "claude-3-opus",
-                    0,
+                    Some(0),
                     0,
                     None,
                 )
@@ -2151,7 +2401,15 @@ mod tests {
             }),
         ));
         let reason = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None,
+            )
             .err()
             .expect("configured zero cannot admit even the cold minimum of one");
         assert!(
@@ -2210,13 +2468,29 @@ mod tests {
         complete_reserved_request(
             &engine_a,
             engine_a
-                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    Some(0),
+                    0,
+                    None,
+                )
                 .expect("engine A cold allowance"),
         );
         complete_reserved_request(
             &engine_b,
             engine_b
-                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    Some(0),
+                    0,
+                    None,
+                )
                 .expect("engine B cold allowance"),
         );
 
@@ -2259,13 +2533,29 @@ mod tests {
             complete_reserved_request(
                 &engine_a,
                 engine_a
-                    .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                    .reserve(
+                        &view,
+                        &record,
+                        "principal-a",
+                        "claude-3-opus",
+                        Some(0),
+                        0,
+                        None,
+                    )
                     .expect("shared request budget remains"),
             );
         }
         assert_eq!(
             engine_a
-                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    Some(0),
+                    0,
+                    None
+                )
                 .err(),
             Some(RejectReason::RequestsRateLimit),
         );
@@ -2278,7 +2568,15 @@ mod tests {
             .expect("refresh engine B final usage");
         assert_eq!(
             engine_b
-                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    Some(0),
+                    0,
+                    None
+                )
                 .err(),
             Some(RejectReason::RequestsRateLimit),
         );
@@ -2441,11 +2739,27 @@ mod tests {
         };
 
         let first = engine
-            .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+            .reserve(
+                &view,
+                &record,
+                "principal-a",
+                "claude-3-opus",
+                Some(0),
+                0,
+                None,
+            )
             .expect("first reservation takes the local slot");
         assert_eq!(
             engine
-                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-a",
+                    "claude-3-opus",
+                    Some(0),
+                    0,
+                    None
+                )
                 .err(),
             Some(RejectReason::ConcurrentRateLimit),
             "local cap must still reject the second reservation",

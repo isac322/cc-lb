@@ -6,10 +6,14 @@ use crate::config_admin_common;
 mod cursor_window;
 #[path = "cache_keepalive_contracts/empty.rs"]
 mod empty;
+#[path = "cache_keepalive_contracts/evidence_scope.rs"]
+mod evidence_scope;
 #[path = "cache_keepalive_contracts/fixtures.rs"]
 mod fixtures;
 #[path = "cache_keepalive_contracts/read_equivalence.rs"]
 mod read_equivalence;
+#[path = "cache_keepalive_contracts/read_model_regressions.rs"]
+mod read_model_regressions;
 
 use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};

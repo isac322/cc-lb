@@ -18,7 +18,7 @@ const METADATA_SKELETON_ROWS = [
   ['Generation', 'w-8'],
   ['First seen', 'w-24'],
   [null, 'w-24'],
-  ['Total renewals', 'w-8'],
+  ['Current-cycle renewals', 'w-8'],
 ] as const;
 
 interface SessionDetailFrameProps extends Pick<Props, 'onClose'> {
@@ -227,10 +227,11 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   let pnlBreakdown = '';
   if (session.state !== 'not_tracked') {
     const renewalCountLabel = `${session.total_renewals_current_cycle} current-cycle renewal${session.total_renewals_current_cycle === 1 ? '' : 's'}`;
+    const retainedSpend = `spent $${session.total_spent.toFixed(3)} across retained history`;
     pnlBreakdown =
       session.total_avoided === null
-        ? `evidence ${session.evidence_status} · spent $${session.total_spent.toFixed(3)} on ${renewalCountLabel}`
-        : `saved $${session.total_avoided.toFixed(3)} in avoided cache re-creation · spent $${session.total_spent.toFixed(3)} on ${renewalCountLabel}`;
+        ? `evidence ${session.evidence_status} · ${retainedSpend} · ${renewalCountLabel}`
+        : `saved $${session.total_avoided.toFixed(3)} in avoided cache re-creation · ${retainedSpend} · ${renewalCountLabel}`;
     if (session.is_active && session.is_last_pending) {
       pnlBreakdown += ' · current turn pending';
     }

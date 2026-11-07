@@ -275,11 +275,21 @@ impl SignerFactory for ProviderKeySignerFactory {
 
 fn check_access_token_expiry(
     expires_at_unix_secs: Option<u64>,
+    never_refresh: bool,
     clock: &dyn Clock,
 ) -> Result<(), SignerError> {
-    if expires_at_unix_secs.is_some_and(|deadline| deadline <= unix_secs(clock.now())) {
-        return Err(SignerError::SigningFailed {
-            reason: "oauth access token expired; reauthorization required".to_owned(),
+    let skew = if never_refresh { 0 } else { 30 };
+    if expires_at_unix_secs
+        .is_some_and(|deadline| deadline <= unix_secs(clock.now()).saturating_add(skew))
+    {
+        return Err(if never_refresh {
+            SignerError::SigningFailed {
+                reason: "oauth access token expired; reauthorization required".to_owned(),
+            }
+        } else {
+            SignerError::ExpiredToken {
+                reason: "oauth access token expired".to_owned(),
+            }
         });
     }
     Ok(())
@@ -295,16 +305,42 @@ pub struct OpenaiSubscriptionSigner {
     authorization_header: HeaderValue,
     account_header: Option<HeaderValue>,
     expires_at_unix_secs: Option<u64>,
+    never_refresh: bool,
     clock: ClockHandle,
 }
 
 impl OpenaiSubscriptionSigner {
-    /// Access-only imports supply their expiry; refreshing credentials keep
-    /// their existing refresh policy by leaving it unset.
+    /// Builds a signer for an access-only credential.
     pub fn new(
         access_token: &str,
         account_id: Option<&str>,
         expires_at_unix_secs: Option<u64>,
+        clock: ClockHandle,
+    ) -> Result<Self, SignerError> {
+        Self::new_with_policy(access_token, account_id, expires_at_unix_secs, true, clock)
+    }
+
+    /// Builds a signer for a rotating OAuth credential.
+    pub fn new_refreshing(
+        access_token: &str,
+        account_id: Option<&str>,
+        expires_at_unix_secs: u64,
+        clock: ClockHandle,
+    ) -> Result<Self, SignerError> {
+        Self::new_with_policy(
+            access_token,
+            account_id,
+            Some(expires_at_unix_secs),
+            false,
+            clock,
+        )
+    }
+
+    fn new_with_policy(
+        access_token: &str,
+        account_id: Option<&str>,
+        expires_at_unix_secs: Option<u64>,
+        never_refresh: bool,
         clock: ClockHandle,
     ) -> Result<Self, SignerError> {
         let mut authorization_header = HeaderValue::from_str(&format!("Bearer {access_token}"))
@@ -324,6 +360,7 @@ impl OpenaiSubscriptionSigner {
             authorization_header,
             account_header,
             expires_at_unix_secs,
+            never_refresh,
             clock,
         })
     }
@@ -345,7 +382,11 @@ impl Signer for OpenaiSubscriptionSigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
-        check_access_token_expiry(self.expires_at_unix_secs, self.clock.as_ref())?;
+        check_access_token_expiry(
+            self.expires_at_unix_secs,
+            self.never_refresh,
+            self.clock.as_ref(),
+        )?;
         let headers = shaped.headers_mut();
         strip_provider_credential_headers(headers);
         headers.insert(AUTHORIZATION, self.authorization_header.clone());
@@ -380,6 +421,7 @@ pub struct GeminiSubscriptionSigner {
     authorization_header: HeaderValue,
     project_id: Option<String>,
     expires_at_unix_secs: Option<u64>,
+    never_refresh: bool,
     clock: ClockHandle,
     antigravity: Option<AntigravityRequestProfile>,
 }
@@ -392,12 +434,37 @@ struct AntigravityRequestProfile {
 }
 
 impl GeminiSubscriptionSigner {
-    /// Access-only imports supply their expiry; refreshing credentials keep
-    /// their existing refresh policy by leaving it unset.
+    /// Access-only imports supply their expiry; rotating credentials use
+    /// [`Self::new_refreshing`] so expiry is checked with refresh skew.
     pub fn new(
         access_token: &str,
         project_id: Option<&str>,
         expires_at_unix_secs: Option<u64>,
+        clock: ClockHandle,
+    ) -> Result<Self, SignerError> {
+        Self::new_with_policy(access_token, project_id, expires_at_unix_secs, true, clock)
+    }
+
+    pub fn new_refreshing(
+        access_token: &str,
+        project_id: Option<&str>,
+        expires_at_unix_secs: u64,
+        clock: ClockHandle,
+    ) -> Result<Self, SignerError> {
+        Self::new_with_policy(
+            access_token,
+            project_id,
+            Some(expires_at_unix_secs),
+            false,
+            clock,
+        )
+    }
+
+    fn new_with_policy(
+        access_token: &str,
+        project_id: Option<&str>,
+        expires_at_unix_secs: Option<u64>,
+        never_refresh: bool,
         clock: ClockHandle,
     ) -> Result<Self, SignerError> {
         let mut authorization_header = HeaderValue::from_str(&format!("Bearer {access_token}"))
@@ -410,6 +477,7 @@ impl GeminiSubscriptionSigner {
             authorization_header,
             project_id: project_id.map(str::to_owned),
             expires_at_unix_secs,
+            never_refresh,
             clock,
             antigravity: None,
         })
@@ -424,6 +492,45 @@ impl GeminiSubscriptionSigner {
         code_assist_url: &str,
         user_agent: &str,
     ) -> Result<Self, SignerError> {
+        Self::new_antigravity_with_policy(
+            access_token,
+            project_id,
+            expires_at_unix_secs,
+            true,
+            clock,
+            code_assist_url,
+            user_agent,
+        )
+    }
+
+    pub fn new_antigravity_refreshing(
+        access_token: &str,
+        project_id: Option<&str>,
+        expires_at_unix_secs: u64,
+        clock: ClockHandle,
+        code_assist_url: &str,
+        user_agent: &str,
+    ) -> Result<Self, SignerError> {
+        Self::new_antigravity_with_policy(
+            access_token,
+            project_id,
+            Some(expires_at_unix_secs),
+            false,
+            clock,
+            code_assist_url,
+            user_agent,
+        )
+    }
+
+    fn new_antigravity_with_policy(
+        access_token: &str,
+        project_id: Option<&str>,
+        expires_at_unix_secs: Option<u64>,
+        never_refresh: bool,
+        clock: ClockHandle,
+        code_assist_url: &str,
+        user_agent: &str,
+    ) -> Result<Self, SignerError> {
         let base_url = Url::parse(code_assist_url).map_err(|_| SignerError::SigningFailed {
             reason: "antigravity Code Assist URL is invalid".to_owned(),
         })?;
@@ -432,7 +539,13 @@ impl GeminiSubscriptionSigner {
                 reason: "antigravity user agent is not a valid header value".to_owned(),
             })?;
         let content_type = HeaderValue::from_static("application/json");
-        let mut signer = Self::new(access_token, project_id, expires_at_unix_secs, clock)?;
+        let mut signer = Self::new_with_policy(
+            access_token,
+            project_id,
+            expires_at_unix_secs,
+            never_refresh,
+            clock,
+        )?;
         signer.antigravity = Some(AntigravityRequestProfile {
             base_url,
             user_agent,
@@ -629,7 +742,11 @@ impl Signer for GeminiSubscriptionSigner {
         let mut url = shaped.url().clone();
         scrub_url_query_api_key(&mut url);
         shaped.set_url(url);
-        check_access_token_expiry(self.expires_at_unix_secs, self.clock.as_ref())?;
+        check_access_token_expiry(
+            self.expires_at_unix_secs,
+            self.never_refresh,
+            self.clock.as_ref(),
+        )?;
         let wrapped = wrap_gemini_code_assist_request(
             &mut shaped,
             self.project_id.as_deref(),
@@ -1040,6 +1157,114 @@ mod tests {
         assert!(rendered.contains("[REDACTED]"));
     }
     #[tokio::test]
+    async fn refreshing_subscription_signers_reject_near_expiry_with_refreshable_error() {
+        let clock = Arc::new(cc_lb_clock::SystemClock);
+        let deadline = unix_secs(clock.now()).saturating_add(1);
+        let signer = OpenaiSubscriptionSigner::new_refreshing(
+            "openai-access-token",
+            Some("account-123"),
+            deadline,
+            clock,
+        )
+        .expect("signer");
+        let error = sign_request(&signer, shaped_request())
+            .await
+            .expect_err("near-expiry rotating token must request refresh");
+        assert!(matches!(error, SignerError::ExpiredToken { .. }));
+    }
+
+    #[tokio::test]
+    async fn refreshing_gemini_signer_rejects_near_expiry_with_refreshable_error() {
+        let clock = Arc::new(cc_lb_clock::SystemClock);
+        let deadline = unix_secs(clock.now()).saturating_add(1);
+        let signer = GeminiSubscriptionSigner::new_refreshing(
+            "gemini-access-token",
+            Some("project-123"),
+            deadline,
+            clock,
+        )
+        .expect("signer");
+        let error = sign_request(&signer, shaped_request())
+            .await
+            .expect_err("near-expiry rotating token must request refresh");
+        assert!(matches!(error, SignerError::ExpiredToken { .. }));
+    }
+
+    #[tokio::test]
+    async fn oauth_expiry_skew_boundary_is_exact_and_access_only_has_no_skew() {
+        let now = 1_700_000_000;
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(now));
+
+        for deadline in [now + 30, now + 31] {
+            let signer = OpenaiSubscriptionSigner::new_refreshing(
+                "openai-access-token",
+                Some("account-123"),
+                deadline,
+                clock.clone(),
+            )
+            .expect("OpenAI signer");
+            let result = sign_request(&signer, shaped_request()).await;
+            if deadline == now + 30 {
+                assert!(matches!(result, Err(SignerError::ExpiredToken { .. })));
+            } else {
+                assert!(result.is_ok(), "one second beyond skew must be usable");
+            }
+        }
+
+        let access_only = OpenaiSubscriptionSigner::new(
+            "access-only-token",
+            Some("account-123"),
+            Some(now + 30),
+            clock.clone(),
+        )
+        .expect("access-only signer");
+        assert!(sign_request(&access_only, shaped_request()).await.is_ok());
+        clock.set_unix_secs(now + 30);
+        assert!(matches!(
+            sign_request(&access_only, shaped_request()).await,
+            Err(SignerError::SigningFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn antigravity_refreshing_constructor_uses_refresh_skew_boundary() {
+        let now = 1_700_000_000;
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(now));
+        for deadline in [now + 30, now + 31] {
+            let signer = GeminiSubscriptionSigner::new_antigravity_refreshing(
+                "antigravity-access-token",
+                Some("project-123"),
+                deadline,
+                clock.clone(),
+                "https://daily-cloudcode-pa.googleapis.com",
+                "antigravity/test",
+            )
+            .expect("Antigravity signer");
+            let mut shaped = shaped_request();
+            shaped.set_url(
+                "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-3-pro:generateContent"
+                    .parse()
+                    .expect("URL"),
+            );
+            shaped.set_body(Bytes::from_static(br#"{"contents":[]}"#));
+            let result = sign_request(&signer, shaped).await;
+            if deadline == now + 30 {
+                assert!(matches!(result, Err(SignerError::ExpiredToken { .. })));
+            } else {
+                let signed = result.expect("one second beyond skew must sign");
+                assert_eq!(
+                    signed.headers().get(USER_AGENT),
+                    Some(&HeaderValue::from_static("antigravity/test"))
+                );
+                let body: Value = serde_json::from_slice(signed.body()).expect("envelope");
+                assert_eq!(body["userAgent"], "antigravity");
+                assert_eq!(body["requestType"], "agent");
+            }
+        }
+    }
+
+    #[tokio::test]
+
     async fn openai_subscription_signer_sets_bearer_optional_account_and_preserves_body() {
         let mut shaped = shaped_request();
         shaped

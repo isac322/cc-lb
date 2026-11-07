@@ -23,6 +23,7 @@ SELECT
     session_key_hash,
     principal_id,
     upstream_id,
+    cycle_id,
     last_message_at_ms,
     ttl,
     generation,
@@ -49,6 +50,7 @@ SELECT
     session_key_hash,
     principal_id,
     upstream_id,
+    CAST(NULL AS TEXT) AS cycle_id,
     last_message_at_ms,
     ttl,
     generation,
@@ -404,6 +406,22 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         if prefix_hashes.is_empty() {
             return Ok(evidence);
         }
+        let follow_up_from_ms = evidence
+            .iter()
+            .filter(|entry| entry.evidence_kind == "renewal")
+            .map(|entry| entry.request_start_ms)
+            .min()
+            .unwrap_or(follow_up_from_ms);
+        let follow_up_until_ms = evidence
+            .iter()
+            .filter(|entry| entry.evidence_kind == "renewal")
+            .map(|entry| {
+                entry
+                    .request_start_ms
+                    .saturating_add(entry.ttl.as_secs().saturating_mul(1_000))
+            })
+            .max()
+            .unwrap_or(follow_up_until_ms);
         let mut follow_up_query = QueryBuilder::<Sqlite>::new(
             "SELECT * FROM cache_keepalive_evidence \
              WHERE principal_id = ",
@@ -457,13 +475,99 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             "value exceeds i64::MAX",
         )?;
         let row = sqlx::query(
-            "SELECT
+            "WITH active_current_turns AS (
+                SELECT s.principal_id, s.session_key_hash, s.cycle_id, t.source_ref_id,
+                       t.upstream_id, t.model,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY s.principal_id, s.session_key_hash
+                           ORDER BY t.ts DESC, t.source_ref_id ASC
+                       ) AS rn
+                FROM cache_keepalive_sessions s
+                JOIN cache_keepalive_turns t
+                  ON t.principal_id = s.principal_id
+                 AND t.session_key_hash = s.session_key_hash
+                 AND (
+                     t.cycle_id = s.cycle_id
+                     OR (
+                         t.cycle_id IS NULL
+                         AND EXISTS (
+                             SELECT 1
+                             FROM cache_keepalive_evidence e
+                             WHERE e.principal_id = t.principal_id
+                               AND e.evidence_kind = 'renewal'
+                               AND e.event_ref = t.source_ref_id
+                               AND e.upstream_id = t.upstream_id
+                               AND e.model = t.model
+                               AND (e.cycle_id IS NULL OR e.cycle_id = s.cycle_id)
+                         )
+                     )
+                 )
+                WHERE s.principal_id = ? AND s.status = 'active' AND s.cycle_id IS NOT NULL
+            ),
+            current_renewals AS (
+                SELECT a.principal_id, a.session_key_hash, a.source_ref_id,
+                       e.cycle_id, e.upstream_id, e.model
+                FROM active_current_turns a
+                JOIN cache_keepalive_evidence e
+                  ON e.principal_id = a.principal_id
+                 AND e.evidence_kind = 'renewal'
+                 AND e.event_ref = a.source_ref_id
+                 AND e.upstream_id = a.upstream_id
+                 AND e.model = a.model
+                 AND e.cycle_id = a.cycle_id
+                 AND e.prefix_hash IS NOT NULL
+                 AND e.prefix_policy_version IS NOT NULL
+                 AND e.prefix_schema_version IS NOT NULL
+                WHERE a.rn = 1
+            ),
+            attributed_follow_ups AS (
+                SELECT a.principal_id, a.session_key_hash, r.event_ref,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY a.principal_id, a.session_key_hash
+                           ORDER BY f.request_start_ms ASC, f.evidence_id ASC,
+                                    r.request_start_ms DESC, r.evidence_id DESC
+                       ) AS rn
+                FROM current_renewals a
+                JOIN cache_keepalive_evidence r
+                  ON r.principal_id = a.principal_id
+                 AND r.evidence_kind = 'renewal'
+                 AND r.cycle_id = a.cycle_id
+                 AND r.upstream_id = a.upstream_id
+                 AND r.model = a.model
+                 AND r.prefix_hash IS NOT NULL
+                 AND r.prefix_policy_version IS NOT NULL
+                 AND r.prefix_schema_version IS NOT NULL
+                JOIN cache_keepalive_evidence f
+                  ON f.principal_id = r.principal_id
+                 AND f.evidence_kind = 'follow_up'
+                 AND f.upstream_id = r.upstream_id
+                 AND f.model = r.model
+                 AND COALESCE(f.cache_read_input_tokens, 0) > 0
+                 AND f.prefix_hash = r.prefix_hash
+                 AND f.request_start_ms > r.request_start_ms
+                 AND f.request_start_ms <= r.request_start_ms
+                     + CASE r.ttl WHEN '1h' THEN 3_600_000 ELSE 300_000 END
+            ),
+            pending_current AS (
+                SELECT a.principal_id, a.source_ref_id
+                FROM current_renewals a
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM attributed_follow_ups f
+                    WHERE f.principal_id = a.principal_id
+                      AND f.session_key_hash = a.session_key_hash
+                      AND f.rn = 1
+                      AND f.event_ref = a.source_ref_id
+                )
+            )
+            SELECT
                 (SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND status = 'active') AS renewing_now,
                 ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND last_message_at_ms >= ?)
                  + (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = ? AND last_message_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id))) AS sessions_last_5m,
                 (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = ? AND last_message_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id)) AS recent_decisions,
                 (SELECT COALESCE(SUM(cost_micros), 0) FROM cache_keepalive_turns WHERE principal_id = ?) AS total_spent_micros,
                 (SELECT COUNT(*) FROM cache_keepalive_turns WHERE principal_id = ? AND lower(hit_miss) = 'hit') AS successful_hits,
+                (SELECT COUNT(*) FROM pending_current WHERE principal_id = ?) AS pending_evidence,
                 (SELECT COUNT(*) FROM cache_keepalive_turns t
                  WHERE t.principal_id = ?
                    AND NOT EXISTS (
@@ -473,17 +577,20 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                          AND e.event_ref = t.source_ref_id
                    )) +
                 COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND (cycle_id IS NULL OR prefix_hash IS NULL OR prefix_policy_version IS NULL OR prefix_schema_version IS NULL) THEN 1 ELSE 0 END), 0) AS unknown_cycles,
+                COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND cycle_id IS NOT NULL AND prefix_hash IS NOT NULL AND prefix_policy_version IS NOT NULL AND prefix_schema_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS observed_evidence,
                 MIN(request_start_ms) AS retained_from_ms
              FROM cache_keepalive_evidence
              WHERE principal_id = ?",
         )
         .bind(principal_id)
         .bind(principal_id)
-        .bind(cutoff_ms)
         .bind(principal_id)
         .bind(cutoff_ms)
         .bind(principal_id)
         .bind(cutoff_ms)
+        .bind(principal_id)
+        .bind(cutoff_ms)
+        .bind(principal_id)
         .bind(principal_id)
         .bind(principal_id)
         .bind(principal_id)
@@ -491,6 +598,13 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .fetch_one(self.pool())
         .await
         .map_err(map_sqlx_error)?;
+        let pending_evidence: u64 = row
+            .try_get::<i64, _>("pending_evidence")
+            .map_err(map_sqlx_error)?
+            .try_into()
+            .map_err(|_| StorageError::Corrupted {
+                message: "negative cache keepalive pending evidence count".to_owned(),
+            })?;
         let unknown_cycles: u64 = row
             .try_get::<i64, _>("unknown_cycles")
             .map_err(map_sqlx_error)?
@@ -498,28 +612,66 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             .map_err(|_| StorageError::Corrupted {
                 message: "negative cache keepalive unknown cycle count".to_owned(),
             })?;
+        let observed_evidence: u64 = row
+            .try_get::<i64, _>("observed_evidence")
+            .map_err(map_sqlx_error)?
+            .try_into()
+            .map_err(|_| StorageError::Corrupted {
+                message: "negative cache keepalive observed evidence count".to_owned(),
+            })?;
         let group_rows = sqlx::query(
-            "WITH proven AS (
+"WITH renewals AS (
+                SELECT *
+                FROM cache_keepalive_evidence
+                WHERE principal_id = ? AND evidence_kind = 'renewal' AND cycle_id IS NOT NULL
+             ),
+             qualifying_follow_ups AS (
+                SELECT r.cycle_id, r.principal_id, r.upstream_id, r.model,
+                       f.prefix_hash,
+                       f.request_start_ms AS follow_up_request_start_ms,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY r.cycle_id
+                           ORDER BY f.request_start_ms ASC, f.evidence_id ASC
+                       ) AS follow_up_rn
+                FROM renewals r
+                JOIN cache_keepalive_evidence f
+                  ON f.principal_id = r.principal_id
+                 AND f.evidence_kind = 'follow_up'
+                 AND f.upstream_id = r.upstream_id
+                 AND f.model = r.model
+                 AND COALESCE(f.cache_read_input_tokens, 0) > 0
+                 AND f.prefix_hash = r.prefix_hash
+                 AND f.request_start_ms > r.request_start_ms
+                 AND f.request_start_ms <= r.request_start_ms
+                     + CASE r.ttl WHEN '1h' THEN 3_600_000 ELSE 300_000 END
+             ),
+             selected_follow_ups AS (
+                SELECT cycle_id, principal_id, upstream_id, model, prefix_hash,
+                       follow_up_request_start_ms
+                FROM qualifying_follow_ups
+                WHERE follow_up_rn = 1
+             ),
+             proven AS (
                 SELECT r.*,
-                       ROW_NUMBER() OVER (PARTITION BY r.cycle_id ORDER BY r.request_start_ms DESC, r.evidence_id) AS rn
-                FROM cache_keepalive_evidence r
-                WHERE r.principal_id = ? AND r.evidence_kind = 'renewal' AND r.cycle_id IS NOT NULL
-                  AND EXISTS (
-                      SELECT 1 FROM cache_keepalive_evidence f
-                      WHERE f.principal_id = r.principal_id
-                        AND f.evidence_kind = 'follow_up'
-                        AND f.upstream_id = r.upstream_id
-                        AND f.model = r.model
-                        AND COALESCE(f.cache_read_input_tokens, 0) > 0
-                        AND f.prefix_hash = r.prefix_hash
-                        AND f.request_start_ms > r.request_start_ms
-                        AND f.request_start_ms <= r.request_start_ms + CASE r.ttl WHEN '1h' THEN 3_600_000 ELSE 300_000 END
-                  )
+                       ROW_NUMBER() OVER (
+                           PARTITION BY r.cycle_id
+                           ORDER BY r.request_start_ms DESC, r.evidence_id DESC
+                       ) AS rn
+                FROM renewals r
+                JOIN selected_follow_ups f
+                  ON f.cycle_id = r.cycle_id
+                 AND f.principal_id = r.principal_id
+                 AND f.upstream_id = r.upstream_id
+                 AND f.model = r.model
+                 AND f.prefix_hash = r.prefix_hash
+                 AND f.follow_up_request_start_ms > r.request_start_ms
+                 AND f.follow_up_request_start_ms <= r.request_start_ms
+                     + CASE r.ttl WHEN '1h' THEN 3_600_000 ELSE 300_000 END
              )
              SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0) AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
              FROM proven r
-             WHERE r.rn = 1
+             WHERE r.rn = 1 AND lower(r.hit_miss) = 'hit'
              GROUP BY r.model, r.ttl
              ORDER BY r.model, r.ttl",
         )
@@ -584,7 +736,9 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 .transpose()?,
             evidence_status: if unknown_cycles > 0 {
                 "unknown".to_owned()
-            } else if observed_cycles > 0 {
+            } else if pending_evidence > 0 {
+                "pending".to_owned()
+            } else if observed_evidence > 0 {
                 "observed".to_owned()
             } else {
                 "none".to_owned()

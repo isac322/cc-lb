@@ -128,6 +128,24 @@ impl RealtimeWebSocketSession {
             );
         }
     }
+
+    /// Finish a failed provider handshake without treating HTTP errors as a
+    /// successful relay response.
+    pub fn finish_handshake(mut self, status: StatusCode) {
+        if let Some(observer) = &self.observer {
+            if let Some(reservation) = self.reservation.take() {
+                reservation.handoff_after_response();
+            }
+            if status.is_client_error() {
+                observer.set_upstream_error(status, UpstreamErrorCode::Upstream4xx);
+            } else if status.is_server_error() {
+                observer.set_upstream_error(status, UpstreamErrorCode::Upstream5xx);
+            } else {
+                observer.set_success_status(status);
+            }
+            observer.finish();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -156,11 +174,13 @@ impl RealtimeUsage {
                 };
                 let mut normalized = UsageCounts {
                     present: true,
+                    billable_present: true,
                     ..Default::default()
                 };
                 merge_usage_value(&mut normalized, usage);
                 let counts = self.counts.get_or_insert_with(UsageCounts::default);
                 counts.present = true;
+                counts.billable_present = true;
                 counts.input_tokens = counts.input_tokens.saturating_add(normalized.input_tokens);
                 counts.output_tokens = counts
                     .output_tokens
@@ -176,12 +196,14 @@ impl RealtimeUsage {
                 };
                 let mut normalized = UsageCounts {
                     present: true,
+                    billable_present: true,
                     ..Default::default()
                 };
                 merge_usage_value(&mut normalized, usage);
                 // Live usageMetadata is cumulative for the session, unlike Realtime response.done.
                 self.counts = Some(UsageCounts {
                     present: true,
+                    billable_present: true,
                     input_tokens: normalized.input_tokens,
                     output_tokens: number(usage, "responseTokenCount")
                         .saturating_add(number(usage, "thoughtsTokenCount")),
@@ -219,6 +241,8 @@ mod tests {
             usage.observe(RealtimeWebSocketKind::Openai, &Bytes::from_static(br#"{"type":"response.done","response":{"usage":{"input_tokens":10,"output_tokens":3,"input_token_details":{"cached_tokens":4}}}}"#));
         }
         let counts = usage.counts.unwrap();
+        assert!(counts.present);
+        assert!(counts.billable_present);
         assert_eq!(
             (
                 counts.input_tokens,

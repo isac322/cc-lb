@@ -40,6 +40,8 @@ mod request_events_cursor;
 mod request_events_reasoning_effort;
 #[path = "request_events_thinking_budget_tokens.rs"]
 mod request_events_thinking_budget_tokens;
+#[path = "request_events_tool_use_prompt_tokens.rs"]
+mod request_events_tool_use_prompt_tokens;
 #[path = "router_singleton_dropped.rs"]
 mod router_singleton_dropped;
 #[path = "upstream_affinity.rs"]

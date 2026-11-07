@@ -38,5 +38,7 @@ mod request_events_event_kind;
 mod request_events_reasoning_effort;
 #[path = "request_events_thinking_budget_tokens.rs"]
 mod request_events_thinking_budget_tokens;
+#[path = "request_events_tool_use_prompt_tokens.rs"]
+mod request_events_tool_use_prompt_tokens;
 #[path = "upstream_affinity.rs"]
 mod upstream_affinity;

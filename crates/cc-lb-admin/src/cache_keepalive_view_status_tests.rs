@@ -21,6 +21,7 @@ fn item(
         session_key_hash: Some("session".to_owned()),
         principal_id: "principal".to_owned(),
         upstream_id: Uuid::nil(),
+        cycle_id: None,
         last_message_at_ms: 1_730_000_000_000,
         ttl: CacheTtl::Ttl5m,
         generation: 42,

@@ -10,9 +10,8 @@ impl Lifecycle {
         auth: &crate::Authenticated,
         path: &str,
     ) -> RealtimeWebSocketObservation {
-        let (observer, request_id) = self.websocket_observer();
+        let (observer, request_id) = self.websocket_observer(path);
         if let Some(observer) = observer.as_ref() {
-            observer.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(path));
             observer.mark_authn_reached();
             observer.emit_request_started(true);
             observer.set_success_status(StatusCode::SWITCHING_PROTOCOLS);
@@ -251,9 +250,9 @@ impl Lifecycle {
                             .and_then(|limit| limit.reservation.as_ref())
                             .map(|reservation| reservation.id().to_owned())
                             .unwrap_or_default(),
-                        amount: limit
-                            .as_ref()
-                            .map_or(0, |limit| limit.request.max_tokens.max(0) as u64),
+                        amount: limit.as_ref().map_or(0, |limit| {
+                            limit.request.max_tokens.unwrap_or(0).max(0) as u64
+                        }),
                         limit_reserve_ms: None,
                     },
                 });

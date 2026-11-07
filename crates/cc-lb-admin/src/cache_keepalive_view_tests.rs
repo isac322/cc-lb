@@ -24,7 +24,6 @@ const CACHE_CREATE_1H_MICROS_PER_MILLION: u64 = 6_000_000;
 
 fn rates(cache_create_micros_per_million: u64) -> CacheKeepalivePnlRates {
     CacheKeepalivePnlRates {
-        cache_read_micros_per_million: CACHE_READ_MICROS_PER_MILLION,
         avoided_create_micros_per_million: cache_create_micros_per_million,
     }
 }
@@ -92,6 +91,7 @@ fn summary_item(
             .then(|| "session".to_owned()),
         principal_id: "principal".to_owned(),
         upstream_id: Uuid::nil(),
+        cycle_id: None,
         last_message_at_ms,
         ttl: CacheTtl::Ttl5m,
         generation: 1,
@@ -143,54 +143,54 @@ fn cache_keepalive_pnl_matches_the_frozen_multi_turn_examples() {
     // Given: the frozen mockup rates and three independently terminal outcomes.
     let renewed = [
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 20_000,
-            renewals: 2,
+            renewal_tokens: 20000,
+            spent_micros: 12000,
             followed_up: true,
             pending: false,
         },
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 20_000,
-            renewals: 3,
+            renewal_tokens: 20000,
+            spent_micros: 18000,
             followed_up: true,
             pending: false,
         },
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 20_000,
-            renewals: 3,
+            renewal_tokens: 20000,
+            spent_micros: 18000,
             followed_up: false,
             pending: true,
         },
     ];
     let capped = [
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 24_000,
-            renewals: 2,
+            renewal_tokens: 24000,
+            spent_micros: 14400,
             followed_up: true,
             pending: false,
         },
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 24_000,
-            renewals: 4,
+            renewal_tokens: 24000,
+            spent_micros: 28800,
             followed_up: true,
             pending: false,
         },
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 24_000,
-            renewals: 6,
+            renewal_tokens: 24000,
+            spent_micros: 43200,
             followed_up: false,
             pending: false,
         },
     ];
     let expired = [
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 32_000,
-            renewals: 3,
+            renewal_tokens: 32000,
+            spent_micros: 28800,
             followed_up: true,
             pending: false,
         },
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 32_000,
-            renewals: 5,
+            renewal_tokens: 32000,
+            spent_micros: 48000,
             followed_up: false,
             pending: false,
         },
@@ -202,8 +202,8 @@ fn cache_keepalive_pnl_matches_the_frozen_multi_turn_examples() {
     let expired_net = pnl_sum(&expired, rates(CACHE_CREATE_1H_MICROS_PER_MILLION));
     let over_renewed = derive_turn_pnl(
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 20_000,
-            renewals: 14,
+            renewal_tokens: 20000,
+            spent_micros: 84000,
             followed_up: true,
             pending: false,
         },
@@ -223,8 +223,8 @@ fn cache_keepalive_pnl_uses_catalog_rates_and_exact_surface_formats() {
     let catalog = priced_catalog();
     let pending = derive_turn_pnl(
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 20_000,
-            renewals: 3,
+            renewal_tokens: 20000,
+            spent_micros: 18000,
             followed_up: false,
             pending: true,
         },
@@ -338,24 +338,24 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
 }
 
 #[test]
-fn pricing_preserves_per_turn_integer_truncation() {
+fn pricing_preserves_persisted_spend() {
     let rates = rates(CACHE_CREATE_5M_MICROS_PER_MILLION);
     let named = derive_turn_pnl(
         CacheKeepaliveTurnPnlInput {
-            renewal_tokens: 20_000,
-            renewals: 3,
+            renewal_tokens: 20000,
+            spent_micros: 18_001,
             followed_up: false,
             pending: true,
         },
         rates,
     );
-    assert_eq!(named.spent_micros, 18_000);
+    assert_eq!(named.spent_micros, 18_001);
 
     let tiny_turns = [
         derive_turn_pnl(
             CacheKeepaliveTurnPnlInput {
                 renewal_tokens: 2,
-                renewals: 1,
+                spent_micros: 7,
                 followed_up: false,
                 pending: false,
             },
@@ -364,29 +364,29 @@ fn pricing_preserves_per_turn_integer_truncation() {
         derive_turn_pnl(
             CacheKeepaliveTurnPnlInput {
                 renewal_tokens: 2,
-                renewals: 1,
+                spent_micros: 0,
                 followed_up: false,
                 pending: false,
             },
             rates,
         ),
     ];
-    assert_eq!(tiny_turns[0].spent_micros, 0);
+    assert_eq!(tiny_turns[0].spent_micros, 7);
     assert_eq!(tiny_turns[1].spent_micros, 0);
-    assert_eq!(super::economics::sum_turn_pnl(&tiny_turns).spent_micros, 0);
+    assert_eq!(super::economics::sum_turn_pnl(&tiny_turns).spent_micros, 7);
     assert_eq!(
         derive_turn_pnl(
             CacheKeepaliveTurnPnlInput {
                 renewal_tokens: 4,
-                renewals: 1,
+                spent_micros: 99,
                 followed_up: false,
                 pending: false,
             },
             rates,
         )
         .spent_micros,
-        1,
-        "summing tokens before pricing would change the accounting result"
+        99,
+        "persisted spend remains authoritative rather than being recomputed from tokens"
     );
 }
 
@@ -419,7 +419,7 @@ fn catalog_absence_and_replacement_reprice_without_storage_change() {
         },
         catalog.as_ref(),
     );
-    assert_eq!(after.pnl.map(|pnl| pnl.net_micros), Some(-6_000));
+    assert_eq!(after.pnl.map(|pnl| pnl.net_micros), Some(0));
     assert_eq!(turns[0].source_ref_id, "same-stored-turn");
     assert_eq!(turns[0].cache_read_input_tokens, 20_000);
 }
@@ -430,24 +430,22 @@ fn pnl_format_rounding_does_not_change_micro_accounting() {
         derive_turn_pnl(
             CacheKeepaliveTurnPnlInput {
                 renewal_tokens: 1,
-                renewals: 1,
+                spent_micros: 49,
                 followed_up: false,
                 pending: false,
             },
             CacheKeepalivePnlRates {
-                cache_read_micros_per_million: 49_000_000,
                 avoided_create_micros_per_million: 0,
             },
         ),
         derive_turn_pnl(
             CacheKeepaliveTurnPnlInput {
                 renewal_tokens: 1,
-                renewals: 1,
+                spent_micros: 50,
                 followed_up: false,
                 pending: false,
             },
             CacheKeepalivePnlRates {
-                cache_read_micros_per_million: 50_000_000,
                 avoided_create_micros_per_million: 0,
             },
         ),
@@ -463,13 +461,12 @@ fn pnl_format_rounding_does_not_change_micro_accounting() {
 fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
     const NOW_MS: u64 = 1_730_000_100_000;
     let rates = CacheKeepalivePnlRates {
-        cache_read_micros_per_million: u64::MAX,
         avoided_create_micros_per_million: u64::MAX,
     };
     let saturated_turn = derive_turn_pnl(
         CacheKeepaliveTurnPnlInput {
             renewal_tokens: u64::MAX,
-            renewals: u32::MAX,
+            spent_micros: i64::MAX,
             followed_up: false,
             pending: true,
         },
