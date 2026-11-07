@@ -107,6 +107,7 @@ import {
   buildPoolQuotaChartData,
   formatAgo,
   formatResetIn,
+  latestPoolQuotaSnapshotUnix,
   missingCapacityUpstreams,
   oldestProviderObservation,
   POOL_QUOTA_WINDOWS,
@@ -117,6 +118,7 @@ import {
   poolQuotaWindowsPresent,
   poolTooltipRows,
   poolWindowResets,
+  visiblePoolQuotaChartData,
 } from './-overviewPoolQuota';
 
 const overviewSearchSchema = z.object({
@@ -1131,6 +1133,7 @@ function UpstreamsUsageSection() {
 
 type PoolQuotaChartProps = {
   data: PoolQuotaChartRow[];
+  snapshots?: readonly PoolQuotaChartRow[];
   rangeStartUnix: number;
   rangeEndUnix: number;
   latest: PoolQuotaLatest;
@@ -1212,11 +1215,12 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   const provider = oldestProviderObservation(aggregate);
   const missingCapacity = missingCapacityUpstreams(aggregate);
   const serverNow = aggregate?.now_unix_secs ?? null;
-  const first = chart.data[0];
-  const last = chart.data.at(-1);
+  const snapshots = chart.snapshots ?? chart.data;
+  const first = snapshots[0];
+  const last = snapshots.at(-1);
   const proof =
     first && last
-      ? `${formatCount(chart.data.length)} snapshots · ${formatMonthDayTime(first.unix, timeZone)} → ${formatMonthDayTime(last.unix, timeZone)}`
+      ? `${formatCount(snapshots.length)} snapshots · ${formatMonthDayTime(first.unix, timeZone)} → ${formatMonthDayTime(last.unix, timeZone)}`
       : null;
   return (
     <div aria-busy={loading} className="min-w-0" data-testid="pool-quota-card">
@@ -1673,7 +1677,7 @@ function OverviewPage() {
   const displayedPoolWindows = quotaLoading
     ? POOL_QUOTA_WINDOWS
     : returnedPoolWindows;
-  const visibleChartData = useMemo(
+  const recordedChartData = useMemo(
     () =>
       chartData.filter(
         (row) =>
@@ -1681,6 +1685,25 @@ function OverviewPage() {
           row.unix <= poolHistoryNowUnixSecs,
       ),
     [chartData, poolHistoryNowUnixSecs, displayedPoolHistoryRangeSecs],
+  );
+  const latestSnapshotUnixSecs = useMemo(
+    () => latestPoolQuotaSnapshotUnix(quotaPoolHistory.data?.windows),
+    [quotaPoolHistory.data],
+  );
+  const visibleChartData = useMemo(
+    () =>
+      visiblePoolQuotaChartData(
+        chartData,
+        poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+        poolHistoryNowUnixSecs,
+        latestSnapshotUnixSecs,
+      ),
+    [
+      chartData,
+      displayedPoolHistoryRangeSecs,
+      latestSnapshotUnixSecs,
+      poolHistoryNowUnixSecs,
+    ],
   );
 
   const chartLatest = useMemo(
@@ -1691,6 +1714,7 @@ function OverviewPage() {
   const poolQuotaChart = useMemo<PoolQuotaChartProps>(
     () => ({
       data: visibleChartData,
+      snapshots: recordedChartData,
       rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
       rangeEndUnix: poolHistoryNowUnixSecs,
       latest: chartLatest,
@@ -1701,6 +1725,7 @@ function OverviewPage() {
       displayedPoolHistoryRangeSecs,
       displayedPoolWindows,
       poolHistoryNowUnixSecs,
+      recordedChartData,
       visibleChartData,
     ],
   );

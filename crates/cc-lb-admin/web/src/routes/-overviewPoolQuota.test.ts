@@ -8,11 +8,14 @@ import {
   buildPoolQuotaChartData,
   formatAgo,
   formatResetIn,
+  latestPoolQuotaSnapshotUnix,
   missingCapacityUpstreams,
   oldestProviderObservation,
+  POOL_QUOTA_HEARTBEAT_CARRY_SECS,
   poolQuotaResponseLatest,
   poolQuotaWindowsPresent,
   poolWindowResets,
+  visiblePoolQuotaChartData,
 } from './-overviewPoolQuota';
 
 function historyWindow(
@@ -82,6 +85,161 @@ describe('Overview pooled quota history', () => {
       '7d': 35,
       '7d_fable': 75,
     });
+  });
+
+  it('extends the latest in-range point to rangeEndUnix when usage does not change', () => {
+    const rows = buildPoolQuotaChartData([
+      historyWindow('5h', [
+        [100, 12],
+        [200, 25],
+      ]),
+      historyWindow('7d', [
+        [100, 40],
+        [200, 40],
+      ]),
+      historyWindow('7d_fable', [
+        [100, 80],
+        [200, 80],
+      ]),
+    ]);
+
+    expect(visiblePoolQuotaChartData(rows, 50, 500)).toEqual([
+      { unix: 100, '5h': 12, '7d': 40, '7d_fable': 80 },
+      { unix: 200, '5h': 25, '7d': 40, '7d_fable': 80 },
+      { unix: 500, '5h': 25, '7d': 40, '7d_fable': 80 },
+    ]);
+  });
+
+  it('clamps the latest pre-range observation to rangeStartUnix and carries across an idle range', () => {
+    const rows = buildPoolQuotaChartData([
+      historyWindow('5h', [
+        [10, 10],
+        [80, 20],
+        [150, 30],
+      ]),
+      historyWindow('7d', [
+        [10, 35],
+        [80, 45],
+        [150, 55],
+      ]),
+    ]);
+
+    expect(visiblePoolQuotaChartData(rows, 100, 200)).toEqual([
+      { unix: 100, '5h': 20, '7d': 45 },
+      { unix: 150, '5h': 30, '7d': 55 },
+      { unix: 200, '5h': 30, '7d': 55 },
+    ]);
+
+    expect(visiblePoolQuotaChartData(rows, 160, 220)).toEqual([
+      { unix: 160, '5h': 30, '7d': 55 },
+      { unix: 220, '5h': 30, '7d': 55 },
+    ]);
+  });
+
+  it('does not duplicate boundary points or fabricate readings for empty, null, or absent windows', () => {
+    const sparseRows = buildPoolQuotaChartData([
+      historyWindow('7d', [[100, 40]]),
+      historyWindow('7d_fable', [[100, 80]]),
+    ]);
+
+    expect(visiblePoolQuotaChartData(sparseRows, 100, 100)).toEqual([
+      { unix: 100, '7d': 40, '7d_fable': 80 },
+    ]);
+    expect(visiblePoolQuotaChartData(sparseRows, 100, 200)).toEqual([
+      { unix: 100, '7d': 40, '7d_fable': 80 },
+      { unix: 200, '7d': 40, '7d_fable': 80 },
+    ]);
+    expect(
+      visiblePoolQuotaChartData(sparseRows, 80, 200).every(
+        (row) => !('5h' in row),
+      ),
+    ).toBe(true);
+
+    const allNullRows = buildPoolQuotaChartData([
+      historyWindow('5h', [[100, null]]),
+      historyWindow('7d', [[100, null]]),
+    ]);
+    expect(visiblePoolQuotaChartData(allNullRows, 50, 200)).toEqual([
+      { unix: 100, '5h': null, '7d': null },
+    ]);
+    expect(visiblePoolQuotaChartData(allNullRows, 120, 200)).toEqual([]);
+
+    const partialNullRows = buildPoolQuotaChartData([
+      historyWindow('5h', [[100, 25]]),
+      historyWindow('7d', [[100, null]]),
+    ]);
+    expect(visiblePoolQuotaChartData(partialNullRows, 80, 200)).toEqual([
+      { unix: 100, '5h': 25, '7d': null },
+      { unix: 200, '5h': 25, '7d': null },
+    ]);
+
+    expect(visiblePoolQuotaChartData([], 100, 200)).toEqual([]);
+    expect(visiblePoolQuotaChartData(sparseRows, 200, 100)).toEqual([]);
+    expect(visiblePoolQuotaChartData(sparseRows, 10, 50)).toEqual([]);
+  });
+
+  it('does not carry stale outage snapshots or bridge multi-hour leading outages', () => {
+    const staleLatestUnix = 100;
+    const rangeStart = 10_000;
+    const rangeEnd = 13_600;
+    const anchorOnlyRows = buildPoolQuotaChartData([
+      historyWindow('5h', [[rangeStart - 300, 40]], 40),
+    ]);
+
+    expect(
+      visiblePoolQuotaChartData(
+        anchorOnlyRows,
+        rangeStart,
+        rangeEnd,
+        staleLatestUnix,
+      ),
+    ).toEqual([]);
+
+    expect(
+      visiblePoolQuotaChartData(
+        anchorOnlyRows,
+        rangeStart,
+        rangeEnd,
+        rangeEnd - POOL_QUOTA_HEARTBEAT_CARRY_SECS,
+      ),
+    ).toEqual([
+      { unix: rangeStart, '5h': 40 },
+      { unix: rangeEnd, '5h': 40 },
+    ]);
+
+    const wideRangeEnd = rangeStart + 21_600;
+    const leadingOutageRows = buildPoolQuotaChartData([
+      historyWindow('5h', [
+        [rangeStart - 600, 15],
+        [rangeStart + POOL_QUOTA_HEARTBEAT_CARRY_SECS + 60, 35],
+      ]),
+    ]);
+    expect(
+      visiblePoolQuotaChartData(
+        leadingOutageRows,
+        rangeStart,
+        wideRangeEnd,
+        wideRangeEnd - 60,
+      ),
+    ).toEqual([
+      { unix: rangeStart + POOL_QUOTA_HEARTBEAT_CARRY_SECS + 60, '5h': 35 },
+      { unix: wideRangeEnd, '5h': 35 },
+    ]);
+
+    const staleTailWindows = [
+      historyWindow('5h', [[rangeStart + 120, 40]], 40),
+    ];
+    expect(latestPoolQuotaSnapshotUnix(staleTailWindows)).toBe(
+      rangeStart + 120,
+    );
+    expect(
+      visiblePoolQuotaChartData(
+        buildPoolQuotaChartData(staleTailWindows),
+        rangeStart,
+        rangeStart + POOL_QUOTA_HEARTBEAT_CARRY_SECS + 500,
+        latestPoolQuotaSnapshotUnix(staleTailWindows),
+      ),
+    ).toEqual([{ unix: rangeStart + 120, '5h': 40 }]);
   });
 });
 
