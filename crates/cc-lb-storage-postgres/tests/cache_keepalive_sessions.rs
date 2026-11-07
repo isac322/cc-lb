@@ -34,6 +34,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
     storage.initialize().await?;
 
+    replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences(&storage).await?;
     replace_from_real_request_bumps_generation_and_resets_counters(&storage).await?;
     replace_roundtrips_optional_accounting_key_id(&storage).await?;
     update_payload_only_mutates_matching_pending_generation(&storage).await?;
@@ -62,6 +63,186 @@ async fn run_conformance(url: &str) -> Result<()> {
         .await?;
 
     fixture.drop_schema().await
+}
+
+async fn replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let none_key = "fenced-cycle-id-none";
+    let none_first_cycle_id = Uuid::from_u128(11);
+    let none_second_cycle_id = Uuid::from_u128(12);
+    let mut none_first_request = replace_request(none_key, b"fenced-none-first", 100);
+    none_first_request.cycle_id = none_first_cycle_id;
+
+    let none_first = storage
+        .replace_from_real_request_fenced(&none_first_request, None)
+        .await?
+        .expect("fenced None fresh insert");
+    assert_eq!(none_first.cycle_id, Some(none_first_cycle_id));
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(none_key)
+            .await?
+            .expect("fenced None fresh session")
+            .cycle_id,
+        Some(none_first_cycle_id)
+    );
+
+    let mut none_stale_request = replace_request(none_key, b"fenced-none-stale", 99);
+    none_stale_request.cycle_id = none_second_cycle_id;
+    assert!(
+        storage
+            .replace_from_real_request_fenced(&none_stale_request, None)
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(none_key)
+            .await?
+            .expect("fenced None session after stale request"),
+        none_first
+    );
+
+    let mut none_replacement_request = replace_request(none_key, b"fenced-none-replacement", 101);
+    none_replacement_request.cycle_id = none_second_cycle_id;
+    let none_replacement = storage
+        .replace_from_real_request_fenced(&none_replacement_request, None)
+        .await?
+        .expect("fenced None newer replacement");
+    assert_eq!(none_replacement.generation, none_first.generation + 1);
+    assert_eq!(none_replacement.cycle_id, Some(none_second_cycle_id));
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(none_key)
+            .await?
+            .expect("fenced None replacement session"),
+        none_replacement
+    );
+
+    let ticketed_key = "fenced-cycle-id-ticketed";
+    let ticketed_first_cycle_id = Uuid::from_u128(21);
+    let ticketed_second_cycle_id = Uuid::from_u128(22);
+    let ticketed_first_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(ticketed_key)
+        .await?;
+    let mut ticketed_first_request = replace_request(ticketed_key, b"fenced-ticketed-first", 100);
+    ticketed_first_request.cycle_id = ticketed_first_cycle_id;
+    let ticketed_first = storage
+        .replace_from_real_request_fenced(&ticketed_first_request, Some(ticketed_first_ticket))
+        .await?
+        .expect("fenced ticketed fresh insert");
+    assert_eq!(ticketed_first.cycle_id, Some(ticketed_first_cycle_id));
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(ticketed_key)
+            .await?
+            .expect("fenced ticketed fresh session")
+            .cycle_id,
+        Some(ticketed_first_cycle_id)
+    );
+
+    let mut ticketed_replay_request = replace_request(ticketed_key, b"fenced-ticketed-replay", 101);
+    ticketed_replay_request.cycle_id = ticketed_second_cycle_id;
+    assert!(
+        storage
+            .replace_from_real_request_fenced(
+                &ticketed_replay_request,
+                Some(ticketed_first_ticket),
+            )
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(ticketed_key)
+            .await?
+            .expect("fenced ticketed session after replay"),
+        ticketed_first
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                ticketed_key
+            ))
+            .await?,
+        Some(format!("{ticketed_first_ticket}:{ticketed_first_ticket}"))
+    );
+
+    let ticketed_replacement_ticket = storage
+        .allocate_cache_keepalive_completion_ticket(ticketed_key)
+        .await?;
+    let mut ticketed_stale_request = replace_request(ticketed_key, b"fenced-ticketed-stale", 99);
+    ticketed_stale_request.cycle_id = ticketed_second_cycle_id;
+    assert!(
+        storage
+            .replace_from_real_request_fenced(
+                &ticketed_stale_request,
+                Some(ticketed_replacement_ticket),
+            )
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(ticketed_key)
+            .await?
+            .expect("fenced ticketed session after stale request"),
+        ticketed_first
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                ticketed_key
+            ))
+            .await?,
+        Some(format!(
+            "{ticketed_replacement_ticket}:{}",
+            ticketed_first_ticket
+        ))
+    );
+
+    let mut ticketed_replacement_request =
+        replace_request(ticketed_key, b"fenced-ticketed-replacement", 101);
+    ticketed_replacement_request.cycle_id = ticketed_second_cycle_id;
+    let ticketed_replacement = storage
+        .replace_from_real_request_fenced(
+            &ticketed_replacement_request,
+            Some(ticketed_replacement_ticket),
+        )
+        .await?
+        .expect("fenced ticketed newer replacement");
+    assert_eq!(
+        ticketed_replacement.generation,
+        ticketed_first.generation + 1
+    );
+    assert_eq!(
+        ticketed_replacement.cycle_id,
+        Some(ticketed_second_cycle_id)
+    );
+    assert_eq!(
+        storage
+            .get_cache_keepalive_session(ticketed_key)
+            .await?
+            .expect("fenced ticketed replacement session"),
+        ticketed_replacement
+    );
+    assert_eq!(
+        storage
+            .get_meta_value(&cc_lb_storage_api::cache_keepalive_order_meta_key(
+                ticketed_key
+            ))
+            .await?,
+        Some(format!(
+            "{ticketed_replacement_ticket}:{ticketed_replacement_ticket}"
+        ))
+    );
+
+    let healthy = storage
+        .replace_from_real_request(&replace_request("fenced-healthy", b"healthy", 200))
+        .await?;
+    assert_eq!(healthy.cycle_id, Some(Uuid::nil()));
+    Ok(())
 }
 
 async fn replace_from_real_request_bumps_generation_and_resets_counters(

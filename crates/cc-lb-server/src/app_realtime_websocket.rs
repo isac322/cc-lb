@@ -25,6 +25,7 @@ type RealtimeProvider = WebSocketStream<MaybeTlsStream<TcpStream>>;
 fn websocket_http_error(error: &WebSocketError) -> Response<Body> {
     let mut response = Response::new(Body::from(error.to_bytes()));
     *response.status_mut() = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    error.copy_provider_headers(response.headers_mut());
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
@@ -82,30 +83,8 @@ async fn connect_realtime_provider(
                     "could not build provider WebSocket request",
                 )
             })?;
-        let (upstream, _) = tokio::time::timeout(
-            WS_PROVIDER_CONNECT_TIMEOUT,
-            connect_async_with_config(
-                request,
-                Some(responses_websocket_config(state.body_caps.messages)),
-                false,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            WebSocketError::new(
-                504,
-                "upstream_unavailable",
-                "provider WebSocket connection timed out",
-            )
-        })?
-        .map_err(|_| {
-            WebSocketError::new(
-                502,
-                "upstream_unavailable",
-                "provider WebSocket connection failed",
-            )
-        })?;
-        Ok((upstream, guard))
+        let host = session.url.host_str().unwrap_or("unknown").to_owned();
+        connect_provider_websocket(state, host, request, guard).await
     };
     tokio::select! {
         result = operation => result,
@@ -161,7 +140,7 @@ pub(super) async fn openai_realtime_websocket_handler(
         Ok(connection) => connection,
         Err(error) => {
             let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
-            session.finish(RealtimeUsage::default(), status);
+            session.finish_handshake(status);
             return websocket_http_error(&error);
         }
     };
@@ -313,7 +292,7 @@ pub(super) async fn gemini_live_websocket_handler(
                 Err(error) => {
                     let status =
                         StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
-                    session.finish(RealtimeUsage::default(), status);
+                    session.finish_handshake(status);
                     let _ = downstream.send(websocket_error_message(&error)).await;
                     let _ = downstream.send(Message::Close(None)).now_or_never();
                     return;
