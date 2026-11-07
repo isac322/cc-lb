@@ -289,7 +289,7 @@ impl ResponsesWebSocketGateway {
     }
 
     pub fn reject_authentication(&self, error: &BuiltinAuthError) -> WebSocketError {
-        let (observer, _) = self.lifecycle.websocket_observer();
+        let (observer, _) = self.lifecycle.websocket_observer("/v1/responses");
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
@@ -302,7 +302,7 @@ impl ResponsesWebSocketGateway {
     }
 
     pub fn reject_protocol(&self, error: &WebSocketError) {
-        let (observer, _) = self.lifecycle.websocket_observer();
+        let (observer, _) = self.lifecycle.websocket_observer("/v1/responses");
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
             terminate_error(observer, error);
@@ -322,7 +322,7 @@ impl ResponsesWebSocketGateway {
                     .and_then(Value::as_str)
                     .is_some_and(|parent| self.successor_for_parent(parent).is_some())
         });
-        let (observer, request_id) = self.lifecycle.websocket_observer();
+        let (observer, request_id) = self.lifecycle.websocket_observer("/v1/responses");
         let mut auth_info = observer
             .as_ref()
             .map(|_| self.lifecycle.websocket_auth_info(&auth));
