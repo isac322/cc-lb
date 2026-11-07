@@ -514,6 +514,10 @@ fn usage_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Option<&Va
                 .get("response")
                 .and_then(|response| response.get("usage"))
         }),
+        Some(UsageShape::OpenaiAudio) => value
+            .get("usage")
+            .filter(|usage| usage.get("type").and_then(Value::as_str) == Some("tokens")),
+        Some(UsageShape::OpenaiImages) => value.get("usage"),
         Some(
             UsageShape::AnthropicMessages
             | UsageShape::OpenaiChatCompletions
@@ -2864,6 +2868,67 @@ mod tests {
                 .usage
                 .present
         );
+    }
+
+    #[test]
+    fn usage_shapes_decode_openai_image_and_token_audio_responses() {
+        let image = serde_json::json!({
+            "created": 1,
+            "data": [{"b64_json": "encoded"}],
+            "usage": {"input_tokens": 11, "output_tokens": 3, "total_tokens": 14}
+        });
+        let image_usage =
+            observe_non_stream_json_value_for_shape(&image, UsageShape::OpenaiImages).usage;
+        assert!(image_usage.present);
+        assert_eq!(image_usage.input_tokens, 11);
+        assert_eq!(image_usage.output_tokens, 3);
+
+        let audio = serde_json::json!({
+            "text": "transcribed",
+            "usage": {
+                "type": "tokens",
+                "input_tokens": 11,
+                "output_tokens": 3,
+                "total_tokens": 14
+            }
+        });
+        let audio_usage =
+            observe_non_stream_json_value_for_shape(&audio, UsageShape::OpenaiAudio).usage;
+        assert!(audio_usage.present);
+        assert_eq!(audio_usage.input_tokens, 11);
+        assert_eq!(audio_usage.output_tokens, 3);
+
+        let duration_audio = serde_json::json!({
+            "text": "transcribed",
+            "usage": {"type": "duration", "seconds": 12.5}
+        });
+        assert!(
+            !observe_non_stream_json_value_for_shape(&duration_audio, UsageShape::OpenaiAudio)
+                .usage
+                .present
+        );
+    }
+
+    #[test]
+    fn image_and_audio_usage_shapes_decode_streamed_usage() {
+        for (shape, usage_json) in [
+            (
+                UsageShape::OpenaiImages,
+                r#"{"input_tokens":11,"output_tokens":3,"total_tokens":14}"#,
+            ),
+            (
+                UsageShape::OpenaiAudio,
+                r#"{"type":"tokens","input_tokens":11,"output_tokens":3,"total_tokens":14}"#,
+            ),
+        ] {
+            let raw = format!("data: {{\"usage\":{usage_json}}}\n\n");
+            let event = parse_sse_event(raw.as_bytes());
+            let mut usage = UsageCounts::default();
+            accumulate_sse_usage_for_shape(&event, &mut usage, shape);
+            assert!(usage.present);
+            assert_eq!(usage.input_tokens, 11);
+            assert_eq!(usage.output_tokens, 3);
+        }
     }
 
     #[test]

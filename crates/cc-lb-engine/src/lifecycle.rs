@@ -2618,6 +2618,8 @@ fn sse_event_completes_response(
         crate::provider_capability::UsageShape::GeminiGenerateContent
         | crate::provider_capability::UsageShape::GeminiEmbed
         | crate::provider_capability::UsageShape::OpenaiEmbeddings
+        | crate::provider_capability::UsageShape::OpenaiAudio
+        | crate::provider_capability::UsageShape::OpenaiImages
         | crate::provider_capability::UsageShape::None => false,
     }
 }
@@ -2644,6 +2646,8 @@ const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<
         crate::provider_capability::UsageShape::OpenaiChatCompletions
         | crate::provider_capability::UsageShape::OpenaiCompletions
         | crate::provider_capability::UsageShape::OpenaiEmbeddings
+        | crate::provider_capability::UsageShape::OpenaiAudio
+        | crate::provider_capability::UsageShape::OpenaiImages
         | crate::provider_capability::UsageShape::GeminiGenerateContent
         | crate::provider_capability::UsageShape::GeminiEmbed
         | crate::provider_capability::UsageShape::None => None,

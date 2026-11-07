@@ -1,11 +1,13 @@
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_control::RequestEventBus;
-use cc_lb_engine::{BreakerRegistry, DispatchError, LifecycleConfig, UpstreamDispatch};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
+use cc_lb_engine::{BreakerRegistry, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
+use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
@@ -13,8 +15,109 @@ use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 
 use crate::common::{
-    TestAuthn, TestLifecycleBus, TestState, lifecycle_with_parts, messages_request,
+    TestAuthn, TestLifecycleBus, TestState, lifecycle_with_parts, managed_api_key, messages_request,
 };
+
+#[tokio::test]
+async fn openai_image_and_transcription_usage_persist_in_request_events()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut update_rx = test_bus.bus.subscribe();
+    let state = TestState::default();
+    let authn = TestAuthn::new(state);
+    let upstream_id = uuid::Uuid::from_u128(1_093_001);
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![UpstreamRecord {
+            id: upstream_id,
+            name: "openai-usage-events".to_owned(),
+            kind: StorageUpstreamKind::OpenaiApiKey,
+            base_url: Some("https://api.openai.com/".parse()?),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    let dispatcher = OpenAiUsageDispatch {
+        responses: Arc::new(Mutex::new(VecDeque::from([
+            Bytes::from_static(
+                br#"{"created":1,"data":[],"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14}}"#,
+            ),
+            Bytes::from_static(
+                br#"{"text":"transcribed","usage":{"type":"tokens","input_tokens":17,"output_tokens":5,"total_tokens":22}}"#,
+            ),
+        ]))),
+    };
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(dispatcher),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    for (path, body) in [
+        (
+            "/v1/images/generations",
+            br#"{"model":"gpt-image-1"}"#.as_slice(),
+        ),
+        (
+            "/v1/audio/transcriptions",
+            br#"{"model":"whisper-1"}"#.as_slice(),
+        ),
+    ] {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", managed_api_key())
+            .header("content-type", "application/json")
+            .body(Bytes::from_static(body))?;
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("OpenAI request authenticates");
+        let response = lifecycle.handle(request, &auth).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{path} response");
+        response.into_body().collect().await?;
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    update_rx.recv().await.expect("request update delivered"),
+                    cc_lb_request_log::RequestEventUpdate::Final(_)
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("OpenAI final request event arrives");
+    }
+
+    let events = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(events.len(), 2);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.input_tokens == Some(11) && event.output_tokens == Some(3)),
+        "image usage persists in the request event"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.input_tokens == Some(17) && event.output_tokens == Some(5)),
+        "transcription usage persists in the request event"
+    );
+
+    Ok(())
+}
 
 #[test]
 fn lifecycle_request_events_current_registry_smoke() {
@@ -237,6 +340,30 @@ impl UpstreamDispatch for CapturingDispatch {
             br#"{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}"#,
         )));
         *response.status_mut() = StatusCode::OK;
+        Ok(response)
+    }
+}
+
+#[derive(Clone)]
+struct OpenAiUsageDispatch {
+    responses: Arc<Mutex<VecDeque<Bytes>>>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for OpenAiUsageDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let body = self
+            .responses
+            .lock()
+            .expect("OpenAI response queue lock")
+            .pop_front()
+            .expect("one mocked response per request");
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
         Ok(response)
     }
 }

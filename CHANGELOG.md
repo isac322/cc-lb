@@ -62,6 +62,7 @@ All notable changes to this project will be documented in this file.
 - Client closes after Anthropic `message_stop` or OpenAI Responses `response.completed` or `response.incomplete` now finalize streams with observed usage and limit reconciliation instead of 499 cancellations. Abnormal Anthropic stops retain refusal or context-window classification, while upstream and proxy errors keep precedence. OpenAI Responses streams are recognized as SSE when the upstream omits `Content-Type`.
 - Mid-stream `error: null` fields no longer classify OpenAI Responses completion events as provider errors.
 - Cache keep-alive turn claims now accept a published `pending` session once its encrypted payload is stored, preventing a due worker from acknowledging the job `Done` as a no-op before the producer's post-publish `enqueued` mark completes.
+- OpenAI `gpt-image-1` image responses and token-billed audio transcription responses now retain documented input and output token usage in request events; duration-based audio usage, binary speech responses, and image models without documented token usage remain unchanged. ([#1093](https://github.com/isac322/cc-lb/issues/1093))
 
 - Gemini tool-use prompt token usage is now preserved as a separate optional request-event component, while ordinary input/output and billing semantics remain unchanged. ([#1090](https://github.com/isac322/cc-lb/issues/1090))
 

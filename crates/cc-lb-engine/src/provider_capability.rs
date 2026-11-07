@@ -41,6 +41,8 @@ pub(crate) enum UsageShape {
     OpenaiChatCompletions,
     OpenaiCompletions,
     OpenaiEmbeddings,
+    OpenaiAudio,
+    OpenaiImages,
     GeminiGenerateContent,
     GeminiEmbed,
     None,
@@ -85,6 +87,8 @@ impl ProviderCapability {
             }
             Self::OpenaiCompletions => UsageShape::OpenaiCompletions,
             Self::OpenaiEmbeddings | Self::GeminiOpenaiEmbeddings => UsageShape::OpenaiEmbeddings,
+            Self::OpenaiAudio => UsageShape::OpenaiAudio,
+            Self::OpenaiImages => UsageShape::OpenaiImages,
             Self::GeminiGenerateContent => UsageShape::GeminiGenerateContent,
             Self::GeminiEmbedContent => UsageShape::GeminiEmbed,
             Self::AnthropicCountTokens
@@ -92,8 +96,6 @@ impl ProviderCapability {
             | Self::AnthropicComplete
             | Self::OpenaiResponsesInputTokens
             | Self::OpenaiModerations
-            | Self::OpenaiAudio
-            | Self::OpenaiImages
             | Self::OpenaiModels
             | Self::OpenaiCodexAuxiliary
             | Self::GeminiCountTokens
