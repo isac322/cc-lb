@@ -116,7 +116,7 @@ jobs:
               echo "::error::published image platform is ${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}; expected linux/arm64" >&2
               exit 1
             fi
-            labels=$(jq -c '.config.labels // {}' <<<"$image_info")
+            labels=$(jq -c '.config.Labels // {}' <<<"$image_info")
           fi
 
           revision=$(jq -r '."org.opencontainers.image.revision" // empty' <<<"$labels")
