@@ -45,6 +45,7 @@ pub fn virtual_cost_micros_full(
     .unwrap_or_else(ComputedCostBreakdown::unknown)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn virtual_cost_micros_full_with_context(
     model: &str,
     input: u64,
