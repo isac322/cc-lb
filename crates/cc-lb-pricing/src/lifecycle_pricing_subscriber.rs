@@ -64,6 +64,8 @@ struct Partial {
     service_tier: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
+    input_image_tokens: Option<u64>,
+    output_image_tokens: Option<u64>,
     cache_creation_input_tokens: u64,
     cache_creation_5m: u64,
     cache_creation_1h: u64,
@@ -176,6 +178,8 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::UsageObserved { usage, .. } => {
             partial.input_tokens = usage.input_tokens;
             partial.output_tokens = usage.output_tokens;
+            partial.input_image_tokens = usage.input_image_tokens;
+            partial.output_image_tokens = usage.output_image_tokens;
             partial.cache_creation_input_tokens = usage.cache_creation_input_tokens;
             partial.cache_creation_5m = usage.cache_creation_input_tokens_5m;
             partial.cache_creation_1h = usage.cache_creation_input_tokens_1h;
@@ -189,6 +193,8 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         } if success.usage_present => {
             partial.input_tokens = success.usage.input_tokens;
             partial.output_tokens = success.usage.output_tokens;
+            partial.input_image_tokens = success.usage.input_image_tokens;
+            partial.output_image_tokens = success.usage.output_image_tokens;
             partial.cache_creation_input_tokens = success.usage.cache_creation_input_tokens;
             partial.cache_creation_5m = success.usage.cache_creation_input_tokens_5m;
             partial.cache_creation_1h = success.usage.cache_creation_input_tokens_1h;
@@ -205,10 +211,12 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         return None;
     }
     let model = partial.model.as_deref()?;
-    let breakdown = crate::virtual_cost_micros_full_with_context(
+    let breakdown = crate::virtual_cost_micros_full_with_context_and_images(
         model,
         partial.input_tokens,
         partial.output_tokens,
+        partial.input_image_tokens.unwrap_or_default(),
+        partial.output_image_tokens.unwrap_or_default(),
         partial.cache_creation_input_tokens,
         partial.cache_creation_5m,
         partial.cache_creation_1h,
@@ -369,6 +377,44 @@ mod tests {
         assert!(partial.usage_seen);
         assert_eq!(partial.input_tokens, 0);
         assert_eq!(partial.output_tokens, 0);
+    }
+
+    #[test]
+    fn usage_image_tokens_propagate_from_observed_and_completed_events() {
+        let mut partial = Partial::default();
+
+        merge(
+            &mut partial,
+            LifecycleEvent::UsageObserved {
+                event_id: eid("image-usage"),
+                usage: UsageSnapshot {
+                    input_image_tokens: Some(17),
+                    output_image_tokens: Some(5),
+                    ..Default::default()
+                },
+                source: UsageSource::NonStreamBody,
+            },
+        );
+        assert_eq!(partial.input_image_tokens, Some(17));
+        assert_eq!(partial.output_image_tokens, Some(5));
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id: eid("image-usage"),
+                result: Ok(StreamSuccess {
+                    usage: UsageSnapshot {
+                        input_image_tokens: Some(23),
+                        output_image_tokens: Some(8),
+                        ..Default::default()
+                    },
+                    usage_present: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        assert_eq!(partial.input_image_tokens, Some(23));
+        assert_eq!(partial.output_image_tokens, Some(8));
     }
 
     #[tokio::test(flavor = "current_thread")]
