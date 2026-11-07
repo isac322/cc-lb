@@ -692,6 +692,11 @@ function mockManyPrincipals() {
         request_count: index + 1,
         input_tokens: 1_000 - Math.abs(index - 14) * 10,
         virtual_cost_micros: (30 - index) * 100_000,
+        cost_input_micros: (30 - index) * 40_000,
+        cost_output_micros: (30 - index) * 30_000,
+        cost_cache_creation_5m_micros: (30 - index) * 10_000,
+        cost_cache_creation_1h_micros: (30 - index) * 10_000,
+        cost_cache_read_micros: (30 - index) * 10_000,
       }),
     ],
   }));
@@ -1115,6 +1120,10 @@ describe('Overview loading geometry', () => {
     rows = within(group).getAllByTestId('top-principal-row');
     expect(rows).toHaveLength(30);
     expect(rows[29]?.textContent).toContain('Team 30');
+    for (const name of ['Team 06', 'Team 11', 'Team 30']) {
+      expect(costBar(costTrigger(name))).not.toEqual([]);
+      expect(within(group).queryByText(COST_NOTE)).toBeNull();
+    }
     const filter = within(group).getByRole('searchbox', {
       name: 'Filter principals by name',
     });

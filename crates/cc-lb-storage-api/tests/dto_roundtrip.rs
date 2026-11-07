@@ -231,6 +231,12 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         upstream_body_ms_count: 0,
         upstream_body_ms_sum: 0,
         virtual_cost_micros: 123_456,
+        cost_input_micros: 40_000,
+        cost_output_micros: 60_000,
+        cost_cache_creation_5m_micros: 10_000,
+        cost_cache_creation_1h_micros: 10_000,
+        cost_cache_read_micros: 3_456,
+        cost_components_event_count: 4,
     });
     assert_json_roundtrip(UsageRollupRun {
         processed_events: 10,

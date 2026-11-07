@@ -11,11 +11,10 @@ use cc_lb_storage_conformance::{
         anthropic_compatibility_kv_store, atomicity, cache_keepalive_session_reads, managed_keys,
         organization_metadata_store, plan_tier_store, plugin_registry_store,
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
-        request_event_list, request_event_principal_costs, storage_roundtrips,
-        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
-        storage_roundtrips_upstream_diagnostics, upstream_api_key_store, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
-        warmup_attempts_store,
+        request_event_list, storage_roundtrips, storage_roundtrips_cache_split,
+        storage_roundtrips_latency_stages, storage_roundtrips_upstream_diagnostics,
+        upstream_api_key_store, upstream_rate_limit_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store, usage_rollup_principal_costs, warmup_attempts_store,
     },
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -226,10 +225,10 @@ fn request_event_kind_sets_filter_before_pagination_sqlite() {
 }
 
 #[test]
-fn request_event_principal_cost_components_sqlite() {
+fn usage_rollup_principal_cost_components_sqlite() {
     run_sqlite_scenario(
-        "request_event_principal_cost_components",
-        request_event_principal_costs::principal_cost_components_aggregate_without_fabrication,
+        "usage_rollup_principal_cost_components",
+        usage_rollup_principal_costs::principal_cost_components_aggregate_without_fabrication,
     );
 }
 

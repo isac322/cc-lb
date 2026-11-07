@@ -211,7 +211,7 @@ Once the insert commits, the assembler publishes `RequestEventUpdate::Final` on 
 
 **Dashboards: materialized.** `GET /admin/v1/dashboard/summary` reads only usage rollups. These are updated by the `usage_rollup` job, which runs every 30 s with 3 s jitter by default. On Postgres the rollup only takes events whose transactions are below the current snapshot `xmin`, so a long-open transaction elsewhere delays it.
 
-`GET /admin/v1/dashboard/usage` reads the same rollups. For principal totals it also reads per-principal costs from the request event rows, and caches that result per process for 2 s (`PRINCIPAL_TOTALS_CACHE_TTL`).
+`GET /admin/v1/dashboard/usage` reads the same rollups. Per-principal category costs come directly from `usage_rollups_v2`; principal totals use a 2 s in-process coalescing cache (`PRINCIPAL_TOTALS_CACHE_TTL`).
 
 ## Subscription quota observations
 
