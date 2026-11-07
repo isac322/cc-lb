@@ -279,6 +279,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             event_id,
             result: Ok(StreamSuccess {
                 usage: usage(profile),
+                usage_present: true,
                 sse_event_count: profile.token_base(),
                 first_body_chunk_ms: Some(profile.token_base() + 6),
                 ..StreamSuccess::default()
