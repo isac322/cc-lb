@@ -477,6 +477,8 @@ fn install_test_pricing() {
         model: model.to_owned(),
         input_per_million_usd: UsdPerMillion::from_whole_usd(5),
         output_per_million_usd: UsdPerMillion::from_whole_usd(25),
+        input_image_per_million_usd: None,
+        output_image_per_million_usd: None,
         by_tier: Default::default(),
     };
     let mut models = HashMap::new();

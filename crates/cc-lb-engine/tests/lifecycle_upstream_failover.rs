@@ -1444,6 +1444,8 @@ fn policy_limit_cost_estimator() -> Arc<dyn LimitCostEstimator> {
                 model: "claude-test".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(1),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(10),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: Default::default(),
             },
         )]),
