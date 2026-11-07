@@ -1,0 +1,128 @@
+name: publish-dev-image
+
+on:
+  push:
+    branches:
+      - dev
+
+# A later push supersedes an older build; only the newest completed build may
+# publish the mutable dev tag.
+concurrency:
+  group: publish-dev-image-dev
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  publish:
+    name: build and verify dev image
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out triggering revision
+        uses: actions/checkout@v7
+        with:
+          # github.sha is the immutable commit that caused this push event.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve source metadata
+        id: source
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push arm64 dev image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: distroless
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/isac322/cc-lb:dev
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+          build-args: |
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            CARGO_BUILD_JOBS=4
+            SCCACHE_LOCAL_MOUNT=0
+            REQUIRE_SCCACHE=0
+          # Avoid an unknown/unknown attestation entry in the mutable tag. The
+          # remote verification below must see exactly one runnable platform.
+          provenance: false
+
+      - name: Verify remote image platform and revision
+        env:
+          IMAGE: ghcr.io/isac322/cc-lb:dev
+          EXPECTED_REVISION: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          raw_file="$RUNNER_TEMP/dev-image-manifest.json"
+          if ! docker buildx imagetools inspect "$IMAGE" --raw > "$raw_file"; then
+            echo "::error::could not inspect published image $IMAGE" >&2
+            exit 1
+          fi
+
+          labels=
+          if jq -e 'has("manifests")' "$raw_file" > /dev/null; then
+            manifest_count=$(jq '.manifests | length' "$raw_file")
+            if [ "$manifest_count" -ne 1 ]; then
+              echo "::error::published image has $manifest_count manifests; expected exactly one linux/arm64 manifest" >&2
+              exit 1
+            fi
+
+            platform_os=$(jq -r '.manifests[0].platform.os // empty' "$raw_file")
+            platform_arch=$(jq -r '.manifests[0].platform.architecture // empty' "$raw_file")
+            platform_variant=$(jq -r '.manifests[0].platform.variant // empty' "$raw_file")
+            if [ "$platform_os" != "linux" ] || [ "$platform_arch" != "arm64" ] || {
+              [ -n "$platform_variant" ] && [ "$platform_variant" != "v8" ];
+            }; then
+              echo "::error::published image platform is ${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}; expected linux/arm64" >&2
+              exit 1
+            fi
+
+            digest=$(jq -r '.manifests[0].digest // empty' "$raw_file")
+            if [ -z "$digest" ]; then
+              echo "::error::published image manifest has no digest" >&2
+              exit 1
+            fi
+            labels=$(docker buildx imagetools inspect "${IMAGE%@*}@$digest" \
+              --format '{{json .Image.Config.Labels}}')
+          else
+            image_info=$(docker buildx imagetools inspect "$IMAGE" \
+              --format '{{json .Image}}')
+            platform_os=$(jq -r '.os // empty' <<<"$image_info")
+            platform_arch=$(jq -r '.architecture // empty' <<<"$image_info")
+            platform_variant=$(jq -r '.variant // empty' <<<"$image_info")
+            if [ "$platform_os" != "linux" ] || [ "$platform_arch" != "arm64" ] || {
+              [ -n "$platform_variant" ] && [ "$platform_variant" != "v8" ];
+            }; then
+              echo "::error::published image platform is ${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}; expected linux/arm64" >&2
+              exit 1
+            fi
+            labels=$(jq -c '.config.labels // {}' <<<"$image_info")
+          fi
+
+          revision=$(jq -r '."org.opencontainers.image.revision" // empty' <<<"$labels")
+          if [ "$revision" != "$EXPECTED_REVISION" ]; then
+            echo "::error::published image revision '$revision' does not match '$EXPECTED_REVISION'" >&2
+            exit 1
+          fi
+
+          echo "verified $IMAGE: linux/arm64 at revision $revision"
