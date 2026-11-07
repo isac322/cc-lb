@@ -70,6 +70,16 @@ pub(crate) fn parse_litellm_json(
         let input_per_million_usd = usd_per_token_to_per_million(&model, input_field, input_cost)?;
         let output_per_million_usd =
             usd_per_token_to_per_million(&model, output_field, output_cost)?;
+        let input_image_per_million_usd = if image_generation {
+            parse_optional_cost(&model, object, "input_cost_per_image_token")?
+        } else {
+            None
+        };
+        let output_image_per_million_usd = if image_generation {
+            parse_optional_cost(&model, object, "output_cost_per_image_token")?
+        } else {
+            None
+        };
 
         if let Some(cache_creation_cost) = object
             .get("cache_creation_input_token_cost")
@@ -177,6 +187,8 @@ pub(crate) fn parse_litellm_json(
                 model,
                 input_per_million_usd,
                 output_per_million_usd,
+                input_image_per_million_usd,
+                output_image_per_million_usd,
                 by_tier,
             },
         );
@@ -221,6 +233,18 @@ fn preferred_cost(
                 .map(|cost| (image_field, cost))
         })
 }
+fn parse_optional_cost(
+    model: &str,
+    object: &Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<UsdPerMillion>, LoaderError> {
+    object
+        .get(field)
+        .and_then(Value::as_f64)
+        .map(|cost| usd_per_token_to_per_million(model, field, cost).map(Some))
+        .unwrap_or(Ok(None))
+}
+
 
 fn discover_tier_costs<'a>(object: &'a Map<String, Value>, base: &str) -> RawTierCosts<'a> {
     object
@@ -392,9 +416,16 @@ mod tests {
                     "input_cost_per_image_token": 0.0000025,
                     "output_cost_per_image_token": 0.000008
                 },
+                "image-only": {
+                    "mode": "image_generation",
+                    "input_cost_per_image_token": 0.000004,
+                    "output_cost_per_image_token": 0.000009
+                },
                 "regular-model": {
                     "input_cost_per_token": 0.000003,
-                    "output_cost_per_token": 0.000015
+                    "output_cost_per_token": 0.000015,
+                    "input_cost_per_image_token": 0.000099,
+                    "output_cost_per_image_token": 0.000099
                 }
             }"#,
             &cc_lb_clock::TestClock::new_at_secs(1_700_000_000),
@@ -412,6 +443,40 @@ mod tests {
         assert_eq!(
             image_pricing.output_per_million_usd,
             UsdPerMillion::from_micros_usd(8_000_000)
+        );
+        assert_eq!(
+            image_pricing.input_image_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(2_500_000))
+        );
+        assert_eq!(
+            image_pricing.output_image_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(8_000_000))
+        );
+        let regular_pricing = snapshot
+            .models
+            .get("regular-model")
+            .expect("regular model should be retained");
+        assert_eq!(regular_pricing.input_image_per_million_usd, None);
+        assert_eq!(regular_pricing.output_image_per_million_usd, None);
+        let image_only = snapshot
+            .models
+            .get("image-only")
+            .expect("image-only model should be retained");
+        assert_eq!(
+            image_only.input_per_million_usd,
+            UsdPerMillion::from_micros_usd(4_000_000)
+        );
+        assert_eq!(
+            image_only.output_per_million_usd,
+            UsdPerMillion::from_micros_usd(9_000_000)
+        );
+        assert_eq!(
+            image_only.input_image_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(4_000_000))
+        );
+        assert_eq!(
+            image_only.output_image_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(9_000_000))
         );
 
         let catalog = crate::PriceCatalog::new_empty();

@@ -45,11 +45,37 @@ pub fn virtual_cost_micros_full(
     .unwrap_or_else(ComputedCostBreakdown::unknown)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn virtual_cost_micros_full_with_context(
     model: &str,
     input: u64,
     output: u64,
+    cache_creation_input_tokens: u64,
+    cache_creation_5m_input: u64,
+    cache_creation_1h_input: u64,
+    cache_read_input: u64,
+    service_tier: Option<&str>,
+) -> Option<ComputedCostBreakdown> {
+    virtual_cost_micros_full_with_context_and_images(
+        model,
+        input,
+        output,
+        0,
+        0,
+        cache_creation_input_tokens,
+        cache_creation_5m_input,
+        cache_creation_1h_input,
+        cache_read_input,
+        service_tier,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn virtual_cost_micros_full_with_context_and_images(
+    model: &str,
+    input: u64,
+    output: u64,
+    input_image_tokens: u64,
+    output_image_tokens: u64,
     cache_creation_input_tokens: u64,
     cache_creation_5m_input: u64,
     cache_creation_1h_input: u64,
@@ -99,14 +125,26 @@ pub fn virtual_cost_micros_full_with_context(
         Some(&mut cache_creation_price),
         Some(&mut cache_read_price),
     );
+    let input_image_tokens = input_image_tokens.min(input);
+    let output_image_tokens = output_image_tokens.min(output);
+    let input_image_price = pricing
+        .input_image_per_million_usd
+        .unwrap_or(input_price);
+    let output_image_price = pricing
+        .output_image_per_million_usd
+        .unwrap_or(output_price);
+
 
     let generic_creation = cache_creation_input_tokens
         .saturating_sub(cache_creation_5m_input.saturating_add(cache_creation_1h_input));
-    let input_micros = component_cost(input, input_price).saturating_add(component_cost(
-        generic_creation,
-        cache_creation_price.unwrap_or(input_price),
-    ));
-    let output_micros = component_cost(output, output_price);
+    let input_micros = component_cost(input.saturating_sub(input_image_tokens), input_price)
+        .saturating_add(component_cost(input_image_tokens, input_image_price))
+        .saturating_add(component_cost(
+            generic_creation,
+            cache_creation_price.unwrap_or(input_price),
+        ));
+    let output_micros = component_cost(output.saturating_sub(output_image_tokens), output_price)
+        .saturating_add(component_cost(output_image_tokens, output_image_price));
 
     let (cc_5m_micros, cc_1h_micros) = if let Some(price_5m) = cache_creation_price {
         let price_1h = resolved_cache_creation_1h_price(input_price);
@@ -197,6 +235,8 @@ mod tests {
                     model: model.to_owned(),
                     input_per_million_usd: base_input_price,
                     output_per_million_usd: UsdPerMillion::from_micros_usd(15_000_000),
+                    input_image_per_million_usd: None,
+                    output_image_per_million_usd: None,
                     by_tier: BTreeMap::new(),
                 },
             )]),
@@ -216,6 +256,128 @@ mod tests {
 
         assert_eq!(breakdown.cache_creation_1h_micros, 6_000_000);
     }
+    #[test]
+    fn modality_final_cost_uses_image_rates_tiers_and_cache_pricing() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "modality-final-cost-test";
+        global_catalog().install_snapshot(CatalogSnapshot {
+            payload_hash: String::new(),
+            fetched_at_ms: 1,
+            models: HashMap::from([(
+                model.to_owned(),
+                Pricing {
+                    model: model.to_owned(),
+                    input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                    output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                    input_image_per_million_usd: Some(UsdPerMillion::from_whole_usd(8)),
+                    output_image_per_million_usd: Some(UsdPerMillion::from_whole_usd(32)),
+                    by_tier: BTreeMap::from([(
+                        "priority".to_owned(),
+                        TierRate {
+                            input_per_million_usd: UsdPerMillion::from_whole_usd(5),
+                            output_per_million_usd: UsdPerMillion::from_whole_usd(10),
+                        },
+                    )]),
+                },
+            )]),
+            raw_json: b"{}".to_vec(),
+            cache_creation_per_million_usd: HashMap::from([(
+                model.to_owned(),
+                UsdPerMillion::from_micros_usd(3_750_000),
+            )]),
+            cache_read_per_million_usd: HashMap::from([(
+                model.to_owned(),
+                UsdPerMillion::from_micros_usd(1_250_000),
+            )]),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
+            status: CatalogStatus::Ok,
+        });
+
+        let breakdown = virtual_cost_micros_full_with_context_and_images(
+            model,
+            1_011,
+            3,
+            1_000,
+            3,
+            100,
+            40,
+            60,
+            50,
+            Some("priority"),
+        )
+        .expect("known model");
+
+        assert_eq!(breakdown.input_micros, 8_055);
+        assert_eq!(breakdown.output_micros, 96);
+        assert_eq!(breakdown.cache_creation_5m_micros, 150);
+        assert_eq!(breakdown.cache_creation_1h_micros, 600);
+        assert_eq!(breakdown.cache_read_micros, 62);
+        assert_eq!(breakdown.total_micros, 8_963);
+
+        let clamped = virtual_cost_micros_full_with_context_and_images(
+            model,
+            1_011,
+            3,
+            5_000,
+            99,
+            100,
+            40,
+            60,
+            50,
+            Some("priority"),
+        )
+        .expect("known model");
+        assert_eq!(clamped.input_micros, 8_055);
+        assert_eq!(clamped.output_micros, 96);
+        assert_eq!(clamped.cache_creation_5m_micros, 150);
+        assert_eq!(clamped.cache_creation_1h_micros, 600);
+        assert_eq!(clamped.cache_read_micros, 62);
+    }
+
+    #[test]
+    fn modality_final_cost_matches_context_cost_when_image_tokens_are_zero() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "modality-text-equivalence-test";
+        global_catalog().install_snapshot(CatalogSnapshot {
+            payload_hash: String::new(),
+            fetched_at_ms: 1,
+            models: HashMap::from([(
+                model.to_owned(),
+                Pricing {
+                    model: model.to_owned(),
+                    input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                    output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                    input_image_per_million_usd: Some(UsdPerMillion::from_whole_usd(99)),
+                    output_image_per_million_usd: Some(UsdPerMillion::from_whole_usd(99)),
+                    by_tier: BTreeMap::new(),
+                },
+            )]),
+            raw_json: b"{}".to_vec(),
+            cache_creation_per_million_usd: HashMap::new(),
+            cache_read_per_million_usd: HashMap::new(),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
+            status: CatalogStatus::Ok,
+        });
+
+        let context = virtual_cost_micros_full_with_context(
+            model, 11, 3, 0, 0, 0, 0, None,
+        )
+        .expect("known model");
+        let modality = virtual_cost_micros_full_with_context_and_images(
+            model, 11, 3, 0, 0, 0, 0, 0, 0, None,
+        )
+        .expect("known model");
+        assert_eq!(modality, context);
+    }
+
 
     #[test]
     fn threshold_rates_activate_only_above_the_cliff_and_inherit_sparse_fields() {
@@ -245,6 +407,8 @@ mod tests {
                     model: model.to_owned(),
                     input_per_million_usd: base_input,
                     output_per_million_usd: base_output,
+                    input_image_per_million_usd: None,
+                    output_image_per_million_usd: None,
                     by_tier: BTreeMap::new(),
                 },
             )]),
@@ -318,6 +482,8 @@ mod tests {
                     model: model.to_owned(),
                     input_per_million_usd: UsdPerMillion::from_whole_usd(2),
                     output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                    input_image_per_million_usd: None,
+                    output_image_per_million_usd: None,
                     by_tier,
                 },
             )]),
@@ -390,6 +556,8 @@ mod tests {
                     model: model.to_owned(),
                     input_per_million_usd: UsdPerMillion::from_whole_usd(3),
                     output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                    input_image_per_million_usd: None,
+                    output_image_per_million_usd: None,
                     by_tier: BTreeMap::new(),
                 },
             )]),
@@ -423,6 +591,8 @@ mod tests {
                     model: model.to_owned(),
                     input_per_million_usd: UsdPerMillion::from_micros_usd(3_000_000),
                     output_per_million_usd: UsdPerMillion::from_micros_usd(15_000_000),
+                    input_image_per_million_usd: None,
+                    output_image_per_million_usd: None,
                     by_tier: BTreeMap::new(),
                 },
             )]),
@@ -513,6 +683,8 @@ mod tests {
                 model: model.to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(3),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
             },
             Some(UsdPerMillion::from_micros_usd(3_750_000)),
@@ -548,6 +720,8 @@ mod tests {
                 model: model.to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(3),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
             },
             None,
@@ -583,6 +757,8 @@ mod tests {
                 model: model.to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(3),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
             },
             Some(UsdPerMillion::from_micros_usd(4_250_000)),
@@ -638,6 +814,8 @@ mod tests {
                 model: model.to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: BTreeMap::from([(
                     "priority".to_owned(),
                     TierRate {
@@ -716,6 +894,8 @@ mod tests {
                 model: model.to_owned(),
                 input_per_million_usd: UsdPerMillion::from_micros_usd(u64::MAX),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(1),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
             },
             None,
