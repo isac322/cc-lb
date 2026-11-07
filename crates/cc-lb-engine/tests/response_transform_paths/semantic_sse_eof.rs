@@ -364,6 +364,27 @@ impl UpstreamDispatch for PendingDispatch {
     }
 }
 
+struct TerminalThenPendingDispatch {
+    headers: HeaderMap,
+    chunks: Vec<Bytes>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for TerminalThenPendingDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let chunks = self.chunks.clone();
+        let stream = async_stream::stream! {
+            for chunk in chunks {
+                yield Ok::<Bytes, std::convert::Infallible>(chunk);
+            }
+            std::future::pending::<()>().await;
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.headers_mut() = self.headers.clone();
+        Ok(response)
+    }
+}
+
 async fn anthropic(
     body: Bytes,
     status: StatusCode,
@@ -1044,6 +1065,91 @@ data: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"o
     assert_eq!(
         (observed.row.input_tokens, observed.row.output_tokens),
         (Some(13), Some(7))
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn openai_incomplete_terminal_client_close_preserves_usage() -> TestResult {
+    for transform in [false, true] {
+        let first = Bytes::from_static(
+            b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n",
+        );
+        let terminal = Bytes::from_static(
+            b"event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"total_tokens\":19}}}\n\n",
+        );
+        let observed = observe_drop_after_terminal(
+            Arc::new(TerminalThenPendingDispatch {
+                headers: HeaderMap::new(),
+                chunks: vec![first, terminal],
+            }),
+            upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+            http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("x-api-key", common::managed_api_key())
+                .body(Bytes::from_static(
+                    br#"{"model":"gpt-test","input":"hello","stream":true}"#,
+                ))?,
+            b"event: response.incomplete",
+            transform.then(|| {
+                Arc::new(UnchangedSseTransform::default()) as Arc<dyn SseEventTransformHook>
+            }),
+        )
+        .await?;
+
+        observed.assert_semantic_success(12, 7, false);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn openai_responses_preterminal_client_close_refunds_without_usage() -> TestResult {
+    let first = Bytes::from_static(
+        b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+    );
+    let observed = observe_drop_after_terminal(
+        Arc::new(PendingDispatch {
+            headers: sse_headers(),
+            body: first,
+        }),
+        upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+        http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-test","input":"hello","stream":true}"#,
+            ))?,
+        b"event: response.output_text.delta",
+        None,
+    )
+    .await?;
+    assert_eq!(observed.row.status, 499);
+    assert_eq!(
+        observed.row.error_code.as_deref(),
+        Some("client_closed_request")
+    );
+    assert!(
+        observed.events.iter().all(|event| !matches!(
+            event,
+            LifecycleEvent::UsageObserved { usage, .. }
+                if (usage.input_tokens, usage.output_tokens) == (12, 7)
+        )),
+        "pre-terminal close must not observe terminal usage from the undispatched terminal"
+    );
+    assert!(
+        observed
+            .events
+            .iter()
+            .all(|event| !matches!(event, LifecycleEvent::StreamCompleted { .. })),
+        "pre-terminal close must not settle the stream"
     );
     Ok(())
 }
@@ -1840,6 +1946,151 @@ async fn semantic_client_close_reconciles_limits_and_preterminal_cancel_refunds(
         );
         assert_eq!(concurrency.current("key-test"), 0);
     }
+    Ok(())
+}
+#[tokio::test]
+async fn openai_responses_incomplete_terminal_close_reconciles_limits() -> TestResult {
+    use cc_lb_storage_api::principal::{Limit, LimitKind};
+
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "responses-incomplete-limits.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut events = test_bus.bus.subscribe_lifecycle();
+    let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let reconcile =
+        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+    let upstream = Bytes::from_static(
+        b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n\
+event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"total_tokens\":19}}}\n\n",
+    );
+    let lifecycle = lifecycle_with_options(
+        None,
+        None,
+        Arc::new(TerminalThenPendingDispatch {
+            headers: sse_headers(),
+            chunks: vec![
+                Bytes::from_static(
+                    b"event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+                ),
+                upstream,
+            ],
+        }),
+        LifecycleConfig::default(),
+        upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+        true,
+        vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 1_000_000,
+            },
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 2,
+            },
+        ],
+    )
+    .with_static_limit_subject(
+        engine.clone(),
+        "principal-test".to_owned(),
+        "key-test".to_owned(),
+        StoredApiKeyRecord {
+            key_hash_b64: "key-test".to_owned(),
+            status: KeyStatus::Active,
+            ..StoredApiKeyRecord::default()
+        },
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let response = handle_authenticated(
+        &lifecycle,
+        http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-test","input":"hello","stream":true}"#,
+            ))?,
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut received = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await?
+            .expect("upstream frame")
+            .expect("upstream frame succeeds")
+            .into_data()
+            .expect("upstream frame carries data");
+        received.extend_from_slice(&frame);
+        if received
+            .windows(b"response.incomplete".len())
+            .any(|window| window == b"response.incomplete")
+        {
+            break;
+        }
+    }
+    drop(body);
+
+    let (reason, client_status) = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let LifecycleEvent::RequestTerminated {
+                reason,
+                client_status,
+                ..
+            } = events.recv().await.expect("lifecycle event delivered")
+            {
+                break (reason, client_status);
+            }
+        }
+    })
+    .await?;
+    reconcile.shutdown().await;
+    assert_eq!(client_status, 200);
+    assert_eq!(reason, TerminationReason::Success);
+
+    let mut rows = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].input_tokens, rows[0].output_tokens),
+        (Some(12), Some(7))
+    );
+    let headers = engine.headers_for("key-test", "principal-test");
+    let remaining = |name: &str| -> i64 {
+        headers
+            .iter()
+            .find(|(header, _)| header == name)
+            .and_then(|(_, value)| value.parse().ok())
+            .expect("remaining limit header")
+    };
+    assert_eq!(
+        remaining("anthropic-ratelimit-requests-remaining"),
+        9,
+        "terminal incomplete response consumes its request reservation"
+    );
+    assert_eq!(
+        remaining("anthropic-ratelimit-tokens-remaining"),
+        999_981,
+        "terminal incomplete response settles measured 12+7 tokens"
+    );
+    assert_eq!(concurrency.current("key-test"), 0);
+    rows.clear();
     Ok(())
 }
 

@@ -2530,18 +2530,18 @@ fn sse_event_completes_response(
                 == Some("message_stop")
         }
         crate::provider_capability::UsageShape::OpenaiResponses => {
-            event
+            event.value().ok().flatten().is_some_and(|_| {
+                event.event_name() == Some(b"response.completed")
+                    || event.event_name() == Some(b"response.incomplete")
+            }) || event
                 .value()
                 .ok()
                 .flatten()
-                .is_some_and(|_| event.event_name() == Some(b"response.completed"))
-                || event
-                    .value()
-                    .ok()
-                    .flatten()
-                    .and_then(|value| value.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("response.completed")
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|event_type| {
+                    event_type == "response.completed" || event_type == "response.incomplete"
+                })
         }
         crate::provider_capability::UsageShape::OpenaiChatCompletions
         | crate::provider_capability::UsageShape::OpenaiCompletions => {
@@ -2597,7 +2597,8 @@ fn observe_sse_terminal_event(
     let event_name_terminal = matches!(
         capability.usage_shape(),
         crate::provider_capability::UsageShape::OpenaiResponses
-    ) && event.event_name() == Some(b"response.completed")
+    ) && (event.event_name() == Some(b"response.completed")
+        || event.event_name() == Some(b"response.incomplete"))
         && event.value().ok().flatten().is_some();
     let semantic_event_type = event
         .value()
@@ -2605,7 +2606,14 @@ fn observe_sse_terminal_event(
         .flatten()
         .and_then(|value| value.get("type"))
         .and_then(serde_json::Value::as_str);
+    let response_terminal_type = matches!(
+        capability.usage_shape(),
+        crate::provider_capability::UsageShape::OpenaiResponses
+    ) && semantic_event_type.is_some_and(|event_type| {
+        event_type == "response.completed" || event_type == "response.incomplete"
+    });
     *semantic_message_stop_seen |= event_name_terminal
+        || response_terminal_type
         || semantic_terminal_event_type(capability)
             .is_some_and(|terminal| semantic_event_type == Some(terminal));
     if event.event_name() == Some(b"message_stop")
@@ -15901,6 +15909,19 @@ mod tests {
         let response_completed = usage_parser::parse_sse_event(
             b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
         );
+        let response_incomplete = usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_named_without_type = usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_data_only = usage_parser::parse_sse_event(
+            b"data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n",
+        );
+        let response_incomplete_malformed =
+            usage_parser::parse_sse_event(b"event: response.incomplete\ndata: {not-json}\n\n");
+        let response_incomplete_empty =
+            usage_parser::parse_sse_event(b"event: response.incomplete\ndata:\n\n");
         let response_delta = usage_parser::parse_sse_event(
             b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
         );
@@ -15923,6 +15944,46 @@ mod tests {
             &response_completed,
             false,
         ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete,
+            false,
+        ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete_named_without_type,
+            false,
+        ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_incomplete_data_only,
+            false,
+        ));
+        for malformed in [&response_incomplete_malformed, &response_incomplete_empty] {
+            assert!(!sse_event_completes_response(
+                ProviderCapability::OpenaiResponses,
+                malformed,
+                false,
+            ));
+        }
+        for (event, expected) in [
+            (&response_incomplete_named_without_type, true),
+            (&response_incomplete_data_only, true),
+            (&response_incomplete_malformed, false),
+            (&response_incomplete_empty, false),
+        ] {
+            let mut semantic_message_stop_seen = false;
+            let mut message_stop_at = None;
+            observe_sse_terminal_event(
+                ProviderCapability::OpenaiResponses,
+                event,
+                false,
+                &mut semantic_message_stop_seen,
+                &mut message_stop_at,
+                Instant::now,
+            );
+            assert_eq!(semantic_message_stop_seen, expected);
+        }
         assert!(!sse_event_completes_response(
             ProviderCapability::OpenaiResponses,
             &message_stop,
