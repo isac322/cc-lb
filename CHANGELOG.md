@@ -26,6 +26,7 @@ All notable changes to this project will be documented in this file.
 
 - Subscription warm-up now covers Anthropic, OpenAI ChatGPT, and Gemini OAuth upstreams, including both Gemini CLI and Antigravity profiles. New OAuth sign-ins enable it by default. The admin API exposes the toggle, status, manual fire, and history. Warm-up evaluates reported five-hour and weekly windows, ignores absent windows, and sends provider-specific minimal requests when a target is idle or unknown. Gemini warm-up covers Gemini models only. OpenAI and Gemini models are configurable with `[warmup].openai_model` and `[warmup].gemini_model`.
 - OpenAI and Gemini OAuth warm-up now support provider-qualified shape plugins. Admin create/update rejects plugins without the upstream provider's shape export. Plugins see native Responses or Gemini `generateContent` input before the normal OAuth signer and Code Assist envelope.
+- Realtime and Gemini Live WebSocket request events now classify under the existing event kinds: OpenAI Realtime WebSocket events as `openai_responses` and Gemini Live WebSocket events as `gemini_generate_content`. Route-aware authentication failures retain those route classifications.
 
 - OpenAI Responses stateless reasoning `encrypted_content` items now retain upstream affinity across buffered and streaming responses, preventing replay from silently crossing to another credential when the owning upstream is unavailable. ([#1077](https://github.com/isac322/cc-lb/issues/1077))
 ### Fixed

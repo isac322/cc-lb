@@ -3162,13 +3162,11 @@ impl Lifecycle {
     }
 
     /// Allocate observation state without recording a successful upgrade as a turn.
-    pub(crate) fn websocket_observer(&self) -> (Option<LifecycleContext>, String) {
+    pub(crate) fn websocket_observer(&self, path: &str) -> (Option<LifecycleContext>, String) {
         let request_id = next_request_id();
         let observer = self.event_bus.as_ref().map(|bus| {
             let observer = LifecycleContext::new(request_id.clone(), Arc::clone(bus), &self.clock);
-            observer.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(
-                "/v1/responses",
-            ));
+            observer.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(path));
             observer
         });
         (observer, request_id)
@@ -3177,8 +3175,9 @@ impl Lifecycle {
     pub fn reject_responses_websocket_authentication(
         &self,
         error: &BuiltinAuthError,
+        path: &str,
     ) -> Response<Body> {
-        let (observer, _) = self.websocket_observer();
+        let (observer, _) = self.websocket_observer(path);
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
@@ -16954,7 +16953,7 @@ mod tests {
 
         let body = Arc::new(json!({"model": "gpt-test", "store": false}));
         let frame = Bytes::from(serde_json::to_vec(body.as_ref()).expect("test frame serializes"));
-        let (observer, request_id) = lifecycle.websocket_observer();
+        let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
         assert!(
             drain_events(&mut events).is_empty(),
             "allocating an observer is not a turn"
@@ -17034,7 +17033,7 @@ mod tests {
             cc_lb_lifecycle::LifecycleEvent::ParseCompleted { result: Ok(info), .. }
                 if info.method == "GET" && info.path == "/v1/responses" && info.stream && info.body_bytes == frame.len() as u64
         )));
-        let (observer, next_request_id) = lifecycle.websocket_observer();
+        let (observer, next_request_id) = lifecycle.websocket_observer("/v1/responses");
         assert_ne!(request_id, next_request_id);
         let local_body = Arc::new(
             json!({"model": "gpt-test", "store": false, "previous_response_id": "resp_local"}),
@@ -17273,7 +17272,7 @@ mod tests {
             .expect("request authenticates");
         let body =
             Arc::new(serde_json::from_slice::<Value>(&frame).expect("original frame parses"));
-        let (observer, request_id) = lifecycle.websocket_observer();
+        let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
         let turn = lifecycle
             .prepare_websocket_turn(
                 &auth,
@@ -17311,7 +17310,7 @@ mod tests {
             .expect_err("a retained connection does not bypass changed filter eligibility");
         assert_eq!(error.code, error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
         assert!(drain_events(&mut events).is_empty());
-        let (observer, request_id) = lifecycle.websocket_observer();
+        let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
         assert!(
             lifecycle
                 .prepare_websocket_turn(
@@ -17378,7 +17377,7 @@ mod tests {
             let body = Arc::new(json!({"model":"gpt-test","store":false}));
             let frame =
                 Bytes::from(serde_json::to_vec(body.as_ref()).expect("test frame serializes"));
-            let (observer, request_id) = lifecycle.websocket_observer();
+            let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
             let prepared = lifecycle
                 .prepare_websocket_turn(
                     &auth,
@@ -17418,7 +17417,7 @@ mod tests {
                 })),
                 records,
             ));
-            let (observer, request_id) = lifecycle.websocket_observer();
+            let (observer, request_id) = lifecycle.websocket_observer("/v1/responses");
             let turn = lifecycle
                 .prepare_websocket_turn(
                     &auth,
@@ -17454,8 +17453,10 @@ mod tests {
         );
         let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
         let mut events = subscribe_lifecycle(&bus);
-        let response =
-            lifecycle.reject_responses_websocket_authentication(&BuiltinAuthError::InvalidFormat);
+        let response = lifecycle.reject_responses_websocket_authentication(
+            &BuiltinAuthError::InvalidFormat,
+            "/v1/responses",
+        );
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let rejected = drain_events(&mut events);
         assert_eq!(
@@ -17478,6 +17479,61 @@ mod tests {
                 .count(),
             1
         );
+        assert!(rejected.iter().any(|event| matches!(
+            event,
+            cc_lb_lifecycle::LifecycleEvent::RequestStarted {
+                event_kind: Some(cc_lb_request_log::RequestEventKind::OpenaiResponses),
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn websocket_authentication_rejection_uses_attempted_route_kind() {
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+        );
+        let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
+        let mut events = subscribe_lifecycle(&bus);
+        for (path, expected) in [
+            (
+                "/v1/realtime",
+                cc_lb_request_log::RequestEventKind::OpenaiResponses,
+            ),
+            (
+                "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                cc_lb_request_log::RequestEventKind::GeminiGenerateContent,
+            ),
+            (
+                "/ws/unsupported",
+                cc_lb_request_log::RequestEventKind::Other,
+            ),
+        ] {
+            let response = lifecycle
+                .reject_responses_websocket_authentication(&BuiltinAuthError::InvalidFormat, path);
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let rejected = drain_events(&mut events);
+            assert!(rejected.iter().any(|event| matches!(
+                event,
+                cc_lb_lifecycle::LifecycleEvent::RequestStarted {
+                    event_kind: Some(kind),
+                    ..
+                } if *kind == expected
+            )));
+            assert_eq!(
+                rejected
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                    ))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
