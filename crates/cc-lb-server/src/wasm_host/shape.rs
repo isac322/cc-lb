@@ -1296,7 +1296,7 @@ mod tests {
                 assert_eq!(direction, expected_direction);
                 assert_eq!(kind, expected_kind);
                 assert_eq!(upstream_id, "upstream-42");
-                assert_eq!(archived.payload.as_slice(), payload.as_ref());
+                assert_eq!(archived.payload.as_ref(), payload.as_ref());
             }
         }
     }
