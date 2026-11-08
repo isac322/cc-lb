@@ -581,7 +581,13 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
         horizon_start_ms: Option<u64>,
     ) -> StorageResult<cc_lb_storage_api::CacheKeepaliveSummaryAggregate> {
         let horizon_start_ms = horizon_start_ms
-            .map(|value| query_u64_to_i64(value, "cache_keepalive_summary_horizon_start_ms", "value exceeds i64::MAX"))
+            .map(|value| {
+                query_u64_to_i64(
+                    value,
+                    "cache_keepalive_summary_horizon_start_ms",
+                    "value exceeds i64::MAX",
+                )
+            })
             .transpose()?;
         let cutoff_ms = query_u64_to_i64(
             cutoff_ms,
