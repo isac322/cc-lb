@@ -70,6 +70,11 @@ jobs:
   # win (fan-out of run time, not N-times-duplicated build time).
   coverage-build:
     runs-on: ubuntu-26.04
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -101,7 +106,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-nextest-archive
-          path: nextest-archive.tar.zst
+          path: |
+            nextest-archive.tar.zst
+            crates/cc-lb-admin/web/dist/**
+            target/wasm32-unknown-unknown/release/*.wasm
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -138,6 +146,7 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+          --tmpfs /var/lib/postgresql:rw,size=2g
 
     env:
       # Keep this coverage env in sync with ci.yml's nextest-cov job.
@@ -185,6 +194,8 @@ jobs:
 
       - name: Run test shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
         run: |
+          mkdir -p target/llvm-cov-target
+          ln -sfn target/debug target/llvm-cov-target/debug
           cargo llvm-cov nextest \
             --archive-file nextest-archive.tar.zst \
             --partition slice:${{ matrix.shard }}/${{ env.SHARD_TOTAL }} \
@@ -228,6 +239,7 @@ jobs:
 
       - name: Generate workspace lcov report
         run: |
+          tar --use-compress-program=unzstd -xf nextest-archive.tar.zst -C target/llvm-cov-target
           cargo llvm-cov report \
             --nextest-archive-file nextest-archive.tar.zst \
             --lcov \
