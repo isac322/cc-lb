@@ -577,7 +577,6 @@ export interface RequestNativeCacheObservation {
   analysis_ms?: number;
 }
 
-
 export interface RequestEvent {
   ts: number | null;
   ts_ms?: number | null;
