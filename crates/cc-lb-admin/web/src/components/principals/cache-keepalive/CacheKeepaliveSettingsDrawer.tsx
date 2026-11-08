@@ -87,8 +87,7 @@ export function CacheKeepaliveSettingsDrawer({
   const [snapshotBytes, setSnapshotBytes] = useState<number | null>(8_388_608);
   const [extraTools, setExtraTools] = useState<string[]>([]);
   const [treatAmbiguous, setTreatAmbiguous] = useState(false);
-  const [openaiResponsesEnabled, setOpenaiResponsesEnabled] =
-    useState(false);
+  const [openaiResponsesEnabled, setOpenaiResponsesEnabled] = useState(false);
   const [newTool, setNewTool] = useState('');
   const toolInputId = useId();
   const toolHintId = useId();
