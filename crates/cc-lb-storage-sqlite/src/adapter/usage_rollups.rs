@@ -555,7 +555,10 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
             delta.cost_cache_creation_1h_micros,
             "rollup cost_cache_creation_1h_micros",
         )?)
-        .bind(u64_to_i64(delta.cost_cache_read_micros, "rollup cost_cache_read_micros")?)
+        .bind(u64_to_i64(
+            delta.cost_cache_read_micros,
+            "rollup cost_cache_read_micros",
+        )?)
         .bind(u64_to_i64(
             delta.cost_cache_write_30m_micros,
             "rollup cost_cache_write_30m_micros",
