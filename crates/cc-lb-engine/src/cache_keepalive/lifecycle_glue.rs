@@ -858,7 +858,7 @@ impl StreamingKeepaliveResponse {
             return;
         }
         match event.event_name() {
-            Some(b"response.completed") => {
+            Some(b"response.completed" | b"response.incomplete") => {
                 self.openai_response = value.get("response").cloned();
             }
             Some(b"message_start") => {
@@ -1486,6 +1486,15 @@ mod tests {
             assert_eq!(response.into_value().unwrap()["model"], "gpt-5.6");
         }
     }
+    #[test]
+    fn streaming_named_incomplete_without_type_becomes_response_body() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe(&crate::usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"response\":{\"model\":\"gpt-5.6\",\"usage\":{\"input_tokens\":12}}}\n\n",
+        ));
+        assert_eq!(response.into_value().unwrap()["model"], "gpt-5.6");
+    }
+
     #[test]
     fn emitted_sse_batch_observes_every_transformed_content_block() {
         let mut response = StreamingKeepaliveResponse::default();
