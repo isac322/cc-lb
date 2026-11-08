@@ -667,7 +667,12 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
-                     + CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                     + CASE r.ttl
+                           WHEN '1h' THEN 3_600_000
+                           WHEN '30m' THEN 1_800_000
+                           WHEN '12h' THEN 43_200_000
+                           ELSE 300_000
+                       END
             ),
             pending_current AS (
                 SELECT a.principal_id, a.source_ref_id
@@ -786,7 +791,12 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
-                     + CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                     + CASE r.ttl
+                           WHEN '1h' THEN 3_600_000
+                           WHEN '30m' THEN 1_800_000
+                           WHEN '12h' THEN 43_200_000
+                           ELSE 300_000
+                       END
              ),
              selected_follow_ups AS (
                 SELECT cycle_id, principal_id, upstream_id, model, prefix_hash,
@@ -809,7 +819,12 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.prefix_hash = r.prefix_hash
                  AND f.follow_up_request_start_ms > r.request_start_ms
                  AND f.follow_up_request_start_ms <= r.request_start_ms
-                     + CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                     + CASE r.ttl
+                           WHEN '1h' THEN 3_600_000
+                           WHEN '30m' THEN 1_800_000
+                           WHEN '12h' THEN 43_200_000
+                           ELSE 300_000
+                       END
              )
              SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0)::BIGINT AS avoided_cache_read_tokens,
                     COUNT(*) AS observed_cycles
@@ -838,9 +853,9 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                 );
                 Ok(cc_lb_storage_api::CacheKeepaliveSummaryGroup {
                     model: row.try_get("model").map_err(map_sqlx_error)?,
-                    ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(Some(
+                    ttl: ttl_from_evidence_db(
                         &row.try_get::<String, _>("ttl").map_err(map_sqlx_error)?,
-                    )),
+                    )?,
                     avoided_cache_read_tokens: u64::try_from(
                         row.try_get::<i64, _>("avoided_cache_read_tokens")
                             .map_err(map_sqlx_error)?,
@@ -899,6 +914,18 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
     }
 }
 
+fn ttl_from_evidence_db(value: &str) -> StorageResult<cc_lb_storage_api::CacheTtl> {
+    match value {
+        "5m" => Ok(cc_lb_storage_api::CacheTtl::Ttl5m),
+        "1h" => Ok(cc_lb_storage_api::CacheTtl::Ttl1h),
+        "30m" => Ok(cc_lb_storage_api::CacheTtl::Ttl30m),
+        "12h" => Ok(cc_lb_storage_api::CacheTtl::Ttl12h),
+        _ => Err(StorageError::Corrupted {
+            message: format!("invalid cache keepalive evidence ttl {value}"),
+        }),
+    }
+}
+
 fn postgres_evidence_from_row(
     row: sqlx::postgres::PgRow,
 ) -> StorageResult<cc_lb_storage_api::CacheKeepaliveEvidenceRecord> {
@@ -925,9 +952,7 @@ fn postgres_evidence_from_row(
         principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
         upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
         model: row.try_get("model").map_err(map_sqlx_error)?,
-        ttl: cc_lb_storage_api::CacheTtl::from_ttl_str(Some(
-            &row.try_get::<String, _>("ttl").map_err(map_sqlx_error)?,
-        )),
+        ttl: ttl_from_evidence_db(&row.try_get::<String, _>("ttl").map_err(map_sqlx_error)?)?,
         hit_miss: row.try_get("hit_miss").map_err(map_sqlx_error)?,
         cache_read_input_tokens: row
             .try_get::<Option<i64>, _>("cache_read_input_tokens")

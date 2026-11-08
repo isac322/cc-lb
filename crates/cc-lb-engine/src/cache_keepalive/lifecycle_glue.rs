@@ -315,7 +315,10 @@ impl LifecycleKeepalive {
         };
         let compaction_boundary =
             super::classifier::HeuristicClassifier::is_compaction_boundary(response_body_json);
-        if cache_metadata.cache_breakpoints.is_empty() && !compaction_boundary {
+        if cache_metadata.cache_breakpoints.is_empty()
+            && !compaction_boundary
+            && cache_metadata.cache_keepalive_surface.is_none()
+        {
             return;
         }
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
@@ -488,29 +491,28 @@ impl LifecycleKeepalive {
             KEEPALIVE_SNAPSHOT_URL
         };
         let url = Url::parse(snapshot_url).expect("cache keep-alive snapshot URL is valid");
-        let snapshot_result = if cache_metadata.cache_keepalive_surface.as_deref()
-            == Some("responses")
-        {
-            RequestSnapshot::capture_openai(
-                url,
-                http::Method::POST,
-                keepalive_forward_headers(downstream_headers),
-                shaped_body,
-                upstream_id,
-                ttl,
-                config.snapshot_max_bytes as usize,
-            )
-        } else {
-            RequestSnapshot::capture(
-                url,
-                http::Method::POST,
-                keepalive_forward_headers(downstream_headers),
-                shaped_body,
-                upstream_id,
-                ttl,
-                config.snapshot_max_bytes as usize,
-            )
-        };
+        let snapshot_result =
+            if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses") {
+                RequestSnapshot::capture_openai(
+                    url,
+                    http::Method::POST,
+                    keepalive_forward_headers(downstream_headers),
+                    shaped_body,
+                    upstream_id,
+                    ttl,
+                    config.snapshot_max_bytes as usize,
+                )
+            } else {
+                RequestSnapshot::capture(
+                    url,
+                    http::Method::POST,
+                    keepalive_forward_headers(downstream_headers),
+                    shaped_body,
+                    upstream_id,
+                    ttl,
+                    config.snapshot_max_bytes as usize,
+                )
+            };
         let snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
             Err(super::SnapshotError::TooLarge { actual, max }) => {

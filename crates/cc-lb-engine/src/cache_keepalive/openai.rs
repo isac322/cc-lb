@@ -75,7 +75,10 @@ pub fn parse_lifetime_conservative(value: &Value) -> Option<Lifetime> {
     let mut declared = Vec::new();
     collect_lifetimes(value, false, &mut declared);
     let first = declared.first().copied()?;
-    declared.iter().all(|lifetime| *lifetime == first).then_some(first)
+    declared
+        .iter()
+        .all(|lifetime| *lifetime == first)
+        .then_some(first)
 }
 
 pub fn is_gpt56_or_newer(model: &str) -> bool {
@@ -98,7 +101,9 @@ pub fn eligible_prefix(model: &str, prefix_tokens: u64, lifetime: Option<Lifetim
 
 pub fn visible_prefix_tokens(value: &Value) -> u64 {
     let input = value.get("input").or_else(|| value.get("messages"));
-    let bytes = input.map_or(0, |input| sonic_rs::to_vec(input).map_or(0, |raw| raw.len()));
+    let bytes = input.map_or(0, |input| {
+        sonic_rs::to_vec(input).map_or(0, |raw| raw.len())
+    });
     (bytes as u64 / 4).min(10_000_000)
 }
 
@@ -143,8 +148,14 @@ pub fn cache_write_tokens(value: &Value) -> Option<(u64, u64)> {
     let lifetime = details
         .get("cache_write_tokens_details")
         .and_then(|details| {
-            let thirty = details.get("ttl_30m_tokens").and_then(Value::as_u64).unwrap_or(0);
-            let twelve = details.get("ttl_12h_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let thirty = details
+                .get("ttl_30m_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let twelve = details
+                .get("ttl_12h_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             (thirty > 0 || twelve > 0).then_some(thirty.saturating_add(twelve))
         });
     match (write, lifetime) {
@@ -188,26 +199,52 @@ mod tests {
 
     #[test]
     fn openai_gpt56_minimum_prefix_eligibility() {
-        assert!(!eligible_prefix("gpt-5.5", MIN_PREFIX_TOKENS, Some(Lifetime::ThirtyMinutes)));
-        assert!(!eligible_prefix("gpt-5.6", MIN_PREFIX_TOKENS - 1, Some(Lifetime::ThirtyMinutes)));
-        assert!(eligible_prefix("gpt-5.6", MIN_PREFIX_TOKENS, Some(Lifetime::ThirtyMinutes)));
+        assert!(!eligible_prefix(
+            "gpt-5.5",
+            MIN_PREFIX_TOKENS,
+            Some(Lifetime::ThirtyMinutes)
+        ));
+        assert!(!eligible_prefix(
+            "gpt-5.6",
+            MIN_PREFIX_TOKENS - 1,
+            Some(Lifetime::ThirtyMinutes)
+        ));
+        assert!(eligible_prefix(
+            "gpt-5.6",
+            MIN_PREFIX_TOKENS,
+            Some(Lifetime::ThirtyMinutes)
+        ));
     }
 
     #[test]
     fn openai_keepalive_read_refresh_cost_break_even() {
-        assert_eq!(read_break_even_reads("gpt-5.6", Lifetime::TwelveHours), Some(25));
-        assert_eq!(read_break_even_reads("gpt-6.1-sol", Lifetime::TwelveHours), Some(50));
+        assert_eq!(
+            read_break_even_reads("gpt-5.6", Lifetime::TwelveHours),
+            Some(25)
+        );
+        assert_eq!(
+            read_break_even_reads("gpt-6.1-sol", Lifetime::TwelveHours),
+            Some(50)
+        );
     }
 
     #[test]
     fn openai_keepalive_does_not_reanchor_12h() {
         assert_eq!(Lifetime::TwelveHours.seconds(), 43_200);
-        assert_ne!(Lifetime::ThirtyMinutes.seconds(), Lifetime::TwelveHours.seconds());
+        assert_ne!(
+            Lifetime::ThirtyMinutes.seconds(),
+            Lifetime::TwelveHours.seconds()
+        );
     }
 
     #[test]
     fn missing_or_ambiguous_usage_is_not_a_hit() {
         assert_eq!(cached_tokens(&json!({"usage":{}})), None);
-        assert_eq!(cache_write_tokens(&json!({"usage":{"input_tokens_details":{"cache_write_tokens":1,"cache_write_tokens_details":{"ttl_30m_tokens":2}}}})), None);
+        assert_eq!(
+            cache_write_tokens(
+                &json!({"usage":{"input_tokens_details":{"cache_write_tokens":1,"cache_write_tokens_details":{"ttl_30m_tokens":2}}}})
+            ),
+            None
+        );
     }
 }

@@ -12,10 +12,10 @@
 mod aead_compat;
 mod classifier;
 mod dispatcher;
-pub(crate) mod openai;
 mod display_reason;
 mod lifecycle_glue;
 mod metrics;
+pub(crate) mod openai;
 mod request_snapshot;
 mod scheduler;
 mod session_key;

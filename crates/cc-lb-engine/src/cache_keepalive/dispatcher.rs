@@ -133,9 +133,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
         context: KeepaliveDispatchContext,
     ) -> DispatchOutcome {
         let upstream = match self.upstream_store.get_by_id(snapshot.upstream_id).await {
-            Ok(Some(upstream))
-                if upstream.deleted_at_unix_secs.is_none() && upstream.enabled =>
-            {
+            Ok(Some(upstream)) if upstream.deleted_at_unix_secs.is_none() && upstream.enabled => {
                 upstream
             }
             Ok(Some(_)) | Ok(None) => return DispatchOutcome::Error("upstream gone".to_owned()),

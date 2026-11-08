@@ -255,7 +255,12 @@ impl SchedulerDispatch {
         let input_estimate = snapshot.cache_input_token_estimate();
         let cost_estimate_micros = self
             .price_catalog
-            .estimate_max(model, input_estimate, u64::try_from(max_tokens).unwrap_or(0), None)
+            .estimate_max(
+                model,
+                input_estimate,
+                u64::try_from(max_tokens).unwrap_or(0),
+                None,
+            )
             .map(|cost| i64::try_from(cost).unwrap_or(i64::MAX));
         let view = self.dynamic_view.load();
         self.limit_engine
