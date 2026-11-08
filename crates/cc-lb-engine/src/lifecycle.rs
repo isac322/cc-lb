@@ -10009,19 +10009,23 @@ fn request_reasoning_metadata(
         _ => (None, None),
     }
 }
+fn bounded_openai_replay_identity(prefix: &str, raw: &str) -> Option<String> {
+    (raw.len() <= 512 && !raw.is_empty()).then(|| format!("{prefix}:{raw}"))
+}
+
 fn openai_replay_identity(value: &Value) -> Option<String> {
     if let Some(key) = value.get("prompt_cache_key").and_then(Value::as_str)
-        && !key.is_empty()
+        && let Some(identity) = bounded_openai_replay_identity("prompt-cache-key", key)
     {
-        return Some(format!("prompt-cache-key:{key}"));
+        return Some(identity);
     }
     if let Some(conversation_id) = value
         .get("conversation")
         .and_then(|conversation| conversation.get("id"))
         .and_then(Value::as_str)
-        && !conversation_id.is_empty()
+        && let Some(identity) = bounded_openai_replay_identity("conversation", conversation_id)
     {
-        return Some(format!("conversation:{conversation_id}"));
+        return Some(identity);
     }
     let input = value.get("input")?;
     let bytes = sonic_rs::to_vec(input).ok()?;

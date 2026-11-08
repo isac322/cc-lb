@@ -1036,17 +1036,18 @@ fn cache_keepalive_session_key(
         None => (cache_metadata.request_kind.as_deref() == Some("subagent"))
             .then(|| "subagent".to_owned()),
     };
+    if let Some(thread_id) = cache_metadata.thread_id.clone() {
+        return Some(
+            SessionKey::from_thread_id(principal_id, thread_id)
+                .with_agent_scope(agent_scope.clone()),
+        );
+    }
     if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
         && let Some(identity) = cache_metadata.openai_replay_identity.clone()
     {
         return Some(
             SessionKey::from_cache_prefix_hash(principal_id, format!("openai-replay:{identity}"))
                 .with_agent_scope(agent_scope.clone()),
-        );
-    }
-    if let Some(thread_id) = cache_metadata.thread_id.clone() {
-        return Some(
-            SessionKey::from_thread_id(principal_id, thread_id).with_agent_scope(agent_scope),
         );
     }
     cache_metadata.cache_prefix_hash.clone().map(|prefix_hash| {
@@ -1623,6 +1624,28 @@ mod tests {
         assert_ne!(
             key,
             cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn openai_replay_identity_does_not_override_stable_thread_identity() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut first = RequestCacheMetadata::default();
+        first.cache_keepalive_surface = Some("responses".to_owned());
+        first.thread_id = Some("session-1".to_owned());
+        first.openai_replay_identity = Some("input-sha256:first".to_owned());
+        let mut next = first.clone();
+        next.openai_replay_identity = Some("input-sha256:next".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &first)
+                .unwrap()
+                .to_string(),
+            cache_keepalive_session_key(&principal, &next)
                 .unwrap()
                 .to_string()
         );
