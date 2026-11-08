@@ -166,6 +166,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         _ => {}
     }
 }
+
 fn apply_native_usage(
     native: &mut Option<cc_lb_request_log::RequestNativeCacheObservation>,
     usage: &UsageSnapshot,
@@ -190,7 +191,6 @@ fn apply_native_usage(
         _ => None,
     };
 }
-
 
 fn derive_cache_state(partial: &Partial) -> RequestCacheState {
     if let Some(native) = partial.native_cache.as_ref() {

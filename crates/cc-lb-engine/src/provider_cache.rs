@@ -297,7 +297,11 @@ fn openai_scope(headers: &http::HeaderMap) -> Option<String> {
     match (organization, region) {
         (None, None) => None,
         (organization, region) => Some(truncate(
-            &format!("org={};region={}", organization.unwrap_or(""), region.unwrap_or("")),
+            &format!(
+                "org={};region={}",
+                organization.unwrap_or(""),
+                region.unwrap_or("")
+            ),
             MAX_SCOPE_BYTES,
         )),
     }

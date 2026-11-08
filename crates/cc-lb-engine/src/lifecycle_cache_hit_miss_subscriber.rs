@@ -191,6 +191,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         _ => {}
     }
 }
+
 fn apply_native_usage(
     native: &mut Option<cc_lb_request_log::RequestNativeCacheObservation>,
     usage: &cc_lb_lifecycle::UsageSnapshot,
@@ -216,7 +217,6 @@ fn apply_native_usage(
         _ => None,
     };
 }
-
 
 fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: u16) {
     if status != 200 {

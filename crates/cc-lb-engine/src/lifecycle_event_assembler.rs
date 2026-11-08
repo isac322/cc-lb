@@ -1427,10 +1427,12 @@ fn native_cache_with_usage(
                 .parse
                 .as_ref()
                 .and_then(|parse| parse.model.as_deref());
-            partial.usage_seen.then_some(crate::provider_cache::normalize_cached_tokens(
-                model,
-                partial.usage.cache_read_input_tokens,
-            ))
+            partial.usage_seen.then_some(
+                crate::provider_cache::normalize_cached_tokens(
+                    model,
+                    partial.usage.cache_read_input_tokens,
+                ),
+            )
         }
         cc_lb_request_log::RequestCacheEvidence::Unreported
         | cc_lb_request_log::RequestCacheEvidence::Invalid => None,
