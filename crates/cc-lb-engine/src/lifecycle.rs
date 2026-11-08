@@ -3421,6 +3421,7 @@ impl Lifecycle {
             stream_first_output_ms = tracing::field::Empty,
             stream_last_output_ms = tracing::field::Empty,
             stream_event_count = tracing::field::Empty,
+            stream_total_ms = tracing::field::Empty,
             stream_inter_output_avg_ms = tracing::field::Empty,
             provider_session_id = tracing::field::Empty,
             provider_connection_id = tracing::field::Empty,

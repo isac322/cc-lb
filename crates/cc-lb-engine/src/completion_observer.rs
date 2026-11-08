@@ -244,6 +244,10 @@ impl StreamLatency {
             self.provider_connection_id.as_deref(),
         );
         span.record(
+            "stream_total_ms",
+            numeric_attribute(Some(self.stream_total_ms)).as_value(),
+        );
+        span.record(
             "sse_event_count",
             numeric_attribute(Some(self.sse_event_count)).as_value(),
         );
