@@ -571,7 +571,7 @@ export interface RequestNativeCacheObservation {
   evidence_source?: string;
   cached_tokens?: number;
   write_tokens?: number;
-  evidence: "unreported" | "zero" | "positive" | "invalid";
+  evidence: 'unreported' | 'zero' | 'positive' | 'invalid';
   retention_secs?: number;
   expires_at_unix_secs?: number;
   analysis_ms?: number;
