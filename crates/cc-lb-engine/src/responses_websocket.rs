@@ -1160,35 +1160,45 @@ impl ResponsesWebSocketGateway {
     }
 
     fn observe_provider_metrics(&mut self, connection_id: u64, frame: &Bytes) {
-        let lane = sonic_rs::get_from_slice(frame, &["stream_id"])
-            .ok()
-            .and_then(|value| value.as_str());
-        let response_id = sonic_rs::get_from_slice(frame, &["response", "id"])
-            .ok()
-            .and_then(|value| value.as_str())
-            .or_else(|| {
-                sonic_rs::get_from_slice(frame, &["response_id"])
-                    .ok()
-                    .and_then(|value| value.as_str())
-            });
-        let parent_response_id =
-            sonic_rs::get_from_slice(frame, &["response", "previous_response_id"])
-                .ok()
-                .and_then(|value| value.as_str())
-                .or_else(|| {
-                    sonic_rs::get_from_slice(frame, &["steer", "previous_response_id"])
-                        .ok()
-                        .and_then(|value| value.as_str())
-                });
+        let bounded = |value: Option<sonic_rs::LazyValue<'_>>, max_len| {
+            value.and_then(|value| {
+                let value = value.as_str()?;
+                (!value.is_empty() && value.len() <= max_len).then(|| value.to_owned())
+            })
+        };
+        let lane = bounded(
+            sonic_rs::get_from_slice(frame, &["stream_id"]).ok(),
+            256,
+        );
+        let response_id = bounded(
+            sonic_rs::get_from_slice(frame, &["response", "id"]).ok(),
+            512,
+        )
+        .or_else(|| {
+            bounded(
+                sonic_rs::get_from_slice(frame, &["response_id"]).ok(),
+                512,
+            )
+        });
+        let parent_response_id = bounded(
+            sonic_rs::get_from_slice(frame, &["response", "previous_response_id"]).ok(),
+            512,
+        )
+        .or_else(|| {
+            bounded(
+                sonic_rs::get_from_slice(frame, &["steer", "previous_response_id"]).ok(),
+                512,
+            )
+        });
         let is_error = sonic_rs::get_from_slice(frame, &["type"])
             .ok()
             .and_then(|value| value.as_str())
             == Some("error");
         let Some(turn_id) = self.resolve_provider_turn_id(
             connection_id,
-            response_id,
-            parent_response_id,
-            lane,
+            response_id.as_deref(),
+            parent_response_id.as_deref(),
+            lane.as_deref(),
             is_error,
         ) else {
             return;
