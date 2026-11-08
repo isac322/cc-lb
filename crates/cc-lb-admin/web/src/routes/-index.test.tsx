@@ -1104,9 +1104,9 @@ describe('Overview pool quota usage', () => {
     expect(
       screen.getByTestId('pool-quota-area-7d_fable').getAttribute('d'),
     ).toBe(`${bucketStart}:40|${now}:20`);
-    expect(screen.getByTestId('pool-quota-legend-slot').textContent).toBe(
-      '7d (Fable) · 20% used · resets in 1h',
-    );
+    expect(
+      screen.getByTestId('pool-quota-legend-slot').getAttribute('aria-label'),
+    ).toBe('7-day (Fable) window, 20% used, resets in 1h');
   });
 
   it('clamps a pre-range pool snapshot across an idle 1h range', () => {
@@ -1140,8 +1140,10 @@ describe('Overview pool quota usage', () => {
       `${rangeStart}:27|${now}:27`,
     );
     expect(
-      card.querySelector('[data-testid="pool-quota-legend-slot"]')?.textContent,
-    ).toBe('5h · 27% used · resets in 1h');
+      card
+        .querySelector('[data-testid="pool-quota-legend-slot"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('5-hour window, 27% used, resets in 1h');
     expect(card.textContent).not.toContain(
       'No timeline data yet for this range',
     );
