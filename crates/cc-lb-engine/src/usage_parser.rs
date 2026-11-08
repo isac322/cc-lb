@@ -41,6 +41,7 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_creation_input_tokens_5m: u64,
     pub(crate) cache_creation_input_tokens_1h: u64,
+    pub(crate) cache_creation_evidence: CacheTokenEvidence,
     pub(crate) cache_read_input_tokens: u64,
     /// Provider-native OpenAI cache writes, retained separately from
     /// Anthropic cache-creation buckets. `None` means the provider did not
@@ -48,6 +49,10 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_write_input_tokens: Option<u64>,
     pub(crate) cache_write_input_tokens_30m: Option<u64>,
     pub(crate) cache_write_input_tokens_12h: Option<u64>,
+    /// Numeric OpenAI input image-token details, when reported.
+    pub(crate) input_image_tokens: Option<u64>,
+    /// Numeric OpenAI output image-token details, when reported.
+    pub(crate) output_image_tokens: Option<u64>,
     pub(crate) cache_read_evidence: CacheTokenEvidence,
     pub(crate) thinking_tokens: u64,
     /// Gemini's cumulative prompt tokens attributed to tool use, when reported.
@@ -778,20 +783,21 @@ pub(crate) fn merge_usage_value_for_shape(
                 }
             }
         }
-    } else if let Some(cache_write_tokens) = reported
-        .get("input_tokens_details")
-        .and_then(|details| details.get("cache_write_tokens"))
-        .or_else(|| {
-            reported
-                .get("input_token_details")
-                .and_then(|details| details.get("cache_write_tokens"))
-        })
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            reported
-                .get("cacheCreationTokenCount")
-                .and_then(Value::as_u64)
-        })
+    } else if !matches!(shape, Some(UsageShape::GeminiGenerateContent))
+        && let Some(cache_write_tokens) = reported
+            .get("input_tokens_details")
+            .and_then(|details| details.get("cache_write_tokens"))
+            .or_else(|| {
+                reported
+                    .get("input_token_details")
+                    .and_then(|details| details.get("cache_write_tokens"))
+            })
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                reported
+                    .get("cacheCreationTokenCount")
+                    .and_then(Value::as_u64)
+            })
     {
         usage.cache_creation_input_tokens = cache_write_tokens;
         usage.input_includes_cached = true;
@@ -1737,18 +1743,20 @@ mod tests {
     }
 
     #[test]
-    fn gemini_cache_creation_tokens_are_subtracted_from_gross_input() {
+    fn gemini_cache_creation_tokens_are_not_synthesized_as_writes() {
         let mut usage = UsageCounts::default();
-        merge_usage_value(
+        merge_usage_value_for_shape(
             &mut usage,
             &serde_json::json!({
                 "promptTokenCount": 100,
                 "cachedContentTokenCount": 20,
                 "cacheCreationTokenCount": 30,
             }),
+            Some(UsageShape::GeminiGenerateContent),
         );
-        assert_eq!(usage.cache_creation_input_tokens, 30);
-        assert_eq!(usage.input_tokens, 50);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_write_input_tokens, None);
+        assert_eq!(usage.input_tokens, 80);
     }
 
     #[test]

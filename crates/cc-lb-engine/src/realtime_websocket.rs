@@ -92,6 +92,9 @@ impl RealtimeWebSocketSession {
                         input_image_tokens: counts.input_image_tokens,
                         output_image_tokens: counts.output_image_tokens,
                         cache_read_input_tokens: counts.cache_read_input_tokens,
+                        cache_write_input_tokens: counts.cache_write_input_tokens,
+                        cache_write_input_tokens_30m: counts.cache_write_input_tokens_30m,
+                        cache_write_input_tokens_12h: counts.cache_write_input_tokens_12h,
                         ..Default::default()
                     },
                     source: UsageSource::NonStreamBody,
@@ -196,6 +199,30 @@ impl RealtimeUsage {
                 counts.cache_read_input_tokens = counts
                     .cache_read_input_tokens
                     .saturating_add(normalized.cache_read_input_tokens);
+                if let Some(value) = normalized.cache_write_input_tokens {
+                    counts.cache_write_input_tokens = Some(
+                        counts
+                            .cache_write_input_tokens
+                            .unwrap_or_default()
+                            .saturating_add(value),
+                    );
+                }
+                if let Some(value) = normalized.cache_write_input_tokens_30m {
+                    counts.cache_write_input_tokens_30m = Some(
+                        counts
+                            .cache_write_input_tokens_30m
+                            .unwrap_or_default()
+                            .saturating_add(value),
+                    );
+                }
+                if let Some(value) = normalized.cache_write_input_tokens_12h {
+                    counts.cache_write_input_tokens_12h = Some(
+                        counts
+                            .cache_write_input_tokens_12h
+                            .unwrap_or_default()
+                            .saturating_add(value),
+                    );
+                }
                 if let Some(image_tokens) = normalized.input_image_tokens {
                     counts.input_image_tokens = Some(
                         counts

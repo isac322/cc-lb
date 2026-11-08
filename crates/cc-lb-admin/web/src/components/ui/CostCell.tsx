@@ -12,6 +12,7 @@ import {
 
 type CostBreakdownT = {
   components: CostComponentMicros;
+  available: Record<keyof CostComponentMicros, boolean>;
   total: number;
   hasComponents: boolean;
 };
@@ -26,16 +27,18 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
     cache_write_30m: e.cost_cache_write_30m_micros ?? 0,
     cache_write_12h: e.cost_cache_write_12h_micros ?? 0,
   };
-  const hasComponents =
-    e.cost_input_micros != null ||
-    e.cost_output_micros != null ||
-    e.cost_cache_creation_5m_micros != null ||
-    e.cost_cache_creation_1h_micros != null ||
-    e.cost_cache_read_micros != null ||
-    e.cost_cache_write_30m_micros != null ||
-    e.cost_cache_write_12h_micros != null;
+  const available = {
+    input: e.cost_input_micros != null,
+    output: e.cost_output_micros != null,
+    cache_create_5m: e.cost_cache_creation_5m_micros != null,
+    cache_create_1h: e.cost_cache_creation_1h_micros != null,
+    cache_read: e.cost_cache_read_micros != null,
+    cache_write_30m: e.cost_cache_write_30m_micros != null,
+    cache_write_12h: e.cost_cache_write_12h_micros != null,
+  };
+  const hasComponents = Object.values(available).some(Boolean);
   const total = e.cost_usd_micros ?? sumCostMicros(components);
-  return { components, total, hasComponents };
+  return { components, available, total, hasComponents };
 }
 
 /*
@@ -63,8 +66,12 @@ export function CostCell({
   isPartial?: boolean;
   className?: string;
 }) {
+
   const c = costBreakdown(event);
-  const segments = costCategorySegments(c.components);
+  const segments = costCategorySegments(c.components).filter(
+    (segment) =>
+      segment.key !== 'unattributed' && c.available[segment.key],
+  );
 
   const cellClassName = cx(className, COST_EDGE_CLASS);
 
@@ -80,6 +87,7 @@ export function CostCell({
         label: segment.label,
         value: segment.value,
         color: segment.color,
+        available: true,
         fmt: formatCostMicros,
       }))}
       footer={{ label: 'Total', value: c.total, fmt: formatCostMicros }}

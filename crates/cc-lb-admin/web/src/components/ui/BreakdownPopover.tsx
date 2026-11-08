@@ -6,6 +6,8 @@ interface PopoverRow {
   value: number;
   color: string;
   fmt: (v: number) => string;
+  /** Whether zero is an explicitly reported value rather than unavailable. */
+  available?: boolean;
 }
 
 /** Digits after the decimal point of a formatted figure, or 0 without one. */
@@ -59,7 +61,9 @@ export function BreakdownPopover({
   /** Replaces the em dash when no row is visible: why the rows are missing. */
   note?: string;
 }) {
-  const visible = showZeroRows ? rows : rows.filter((r) => r.value > 0);
+  const visible = showZeroRows
+    ? rows
+    : rows.filter((r) => r.value > 0 || r.available === true);
   const total = rows.reduce((a, r) => a + r.value, 0);
   const rowTexts = visible.map((r) =>
     r.value <= 0 && isPartial ? '—' : r.fmt(r.value),

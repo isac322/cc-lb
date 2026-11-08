@@ -80,6 +80,9 @@ describe('serviceTierBadgeText', () => {
   it('returns null for standard', () => {
     expect(serviceTierBadgeText('standard')).toBeNull();
   });
+  it('returns null for Gemini unspecified', () => {
+    expect(serviceTierBadgeText('unspecified')).toBeNull();
+  });
 
   it('returns null for empty string', () => {
     expect(serviceTierBadgeText('')).toBeNull();

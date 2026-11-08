@@ -220,6 +220,8 @@ pub struct UsageBucket {
     pub cache_write_input_tokens_30m: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_input_tokens_12h: Option<u64>,
+    pub error_count: u64,
+    pub virtual_cost_micros: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_input_micros: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,6 +236,7 @@ pub struct UsageBucket {
     pub cost_cache_write_30m_micros: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_cache_write_12h_micros: Option<u64>,
+    pub latency_ms_sum: u64,
     pub latency_count: u64,
     pub latency_ms_min: Option<u64>,
     pub latency_ms_max: Option<u64>,
@@ -608,6 +611,7 @@ pub(crate) fn empty_bucket(bucket_start_unix_secs: u64) -> UsageBucket {
         cost_cache_read_micros: None,
         cost_cache_write_30m_micros: None,
         cost_cache_write_12h_micros: None,
+        latency_ms_sum: 0,
         latency_count: 0,
         latency_ms_min: None,
         latency_ms_max: None,

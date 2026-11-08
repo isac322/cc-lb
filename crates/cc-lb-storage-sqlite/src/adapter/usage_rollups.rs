@@ -36,6 +36,9 @@ struct RollupDelta {
     output_tokens: u64,
     cache_creation_input_tokens: u64,
     cache_read_input_tokens: u64,
+    cache_write_input_tokens: Option<u64>,
+    cache_write_input_tokens_30m: Option<u64>,
+    cache_write_input_tokens_12h: Option<u64>,
     error_count: u64,
     latency_count: u64,
     latency_ms_sum: u64,
@@ -57,6 +60,8 @@ struct RollupDelta {
     cost_cache_creation_5m_micros: u64,
     cost_cache_creation_1h_micros: u64,
     cost_cache_read_micros: u64,
+    cost_cache_write_30m_micros: u64,
+    cost_cache_write_12h_micros: u64,
     cost_components_event_count: u64,
 }
 
@@ -75,6 +80,15 @@ impl RollupDelta {
         self.cache_read_input_tokens = self
             .cache_read_input_tokens
             .saturating_add(event.cache_read_input_tokens.unwrap_or(0));
+        add_optional(&mut self.cache_write_input_tokens, event.cache_write_input_tokens);
+        add_optional(
+            &mut self.cache_write_input_tokens_30m,
+            event.cache_write_input_tokens_30m,
+        );
+        add_optional(
+            &mut self.cache_write_input_tokens_12h,
+            event.cache_write_input_tokens_12h,
+        );
         if event.status >= 400 {
             self.error_count = self.error_count.saturating_add(1);
         }
@@ -114,6 +128,8 @@ impl RollupDelta {
             || event.cost_cache_creation_5m_micros.is_some()
             || event.cost_cache_creation_1h_micros.is_some()
             || event.cost_cache_read_micros.is_some()
+            || event.cost_cache_write_30m_micros.is_some()
+            || event.cost_cache_write_12h_micros.is_some()
         {
             self.cost_components_event_count = self.cost_components_event_count.saturating_add(1);
             self.cost_input_micros = self
@@ -131,6 +147,12 @@ impl RollupDelta {
             self.cost_cache_read_micros = self
                 .cost_cache_read_micros
                 .saturating_add(event.cost_cache_read_micros.unwrap_or(0).max(0) as u64);
+            self.cost_cache_write_30m_micros = self
+                .cost_cache_write_30m_micros
+                .saturating_add(event.cost_cache_write_30m_micros.unwrap_or(0).max(0) as u64);
+            self.cost_cache_write_12h_micros = self
+                .cost_cache_write_12h_micros
+                .saturating_add(event.cost_cache_write_12h_micros.unwrap_or(0).max(0) as u64);
         }
     }
 }
@@ -210,13 +232,15 @@ impl UsageRollupStore for SqliteStorage {
         let rows = sqlx::query(
             "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
               request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
-              cache_read_input_tokens, error_count, latency_count, latency_ms_sum, \
+              cache_read_input_tokens, cache_write_input_tokens, cache_write_input_tokens_30m, \
+              cache_write_input_tokens_12h, error_count, latency_count, latency_ms_sum, \
               latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
               shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
               upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
               upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
               cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
-              cost_cache_read_micros, cost_components_event_count \
+              cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
+              cost_components_event_count \
               FROM usage_rollups_v2 \
               WHERE resolution = ? AND bucket_start_unix_secs >= ? AND bucket_start_unix_secs < ? \
               ORDER BY bucket_start_unix_secs ASC",
@@ -356,10 +380,12 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     let rows = sqlx::query(
         "SELECT id, ts, list_ts_ms, source_kind, event_kind, principal_id, upstream_id, \
          upstream_name, model, list_status, error_code, input_tokens, output_tokens, \
-         cache_creation_input_tokens, cache_read_input_tokens, list_cost_usd_micros, \
+         cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, \
+         cache_write_input_tokens_30m, cache_write_input_tokens_12h, list_cost_usd_micros, \
          list_cost_input_micros, list_cost_output_micros, \
          list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-         list_cost_cache_read_micros, list_duration_ms, list_proxy_setup_ms, \
+         list_cost_cache_read_micros, list_cost_cache_write_30m_micros, \
+         list_cost_cache_write_12h_micros, list_duration_ms, list_proxy_setup_ms, \
          list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms \
          FROM request_events_v1 WHERE id > ? ORDER BY id ASC LIMIT ?",
     )
@@ -373,10 +399,12 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         sqlx::query(
             "SELECT id, ts, list_ts_ms, source_kind, event_kind, principal_id, upstream_id, \
              upstream_name, model, list_status, error_code, input_tokens, output_tokens, \
-             cache_creation_input_tokens, cache_read_input_tokens, list_cost_usd_micros, \
+             cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, \
+             cache_write_input_tokens_30m, cache_write_input_tokens_12h, list_cost_usd_micros, \
              list_cost_input_micros, list_cost_output_micros, \
              list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-             list_cost_cache_read_micros, list_duration_ms, list_proxy_setup_ms, \
+             list_cost_cache_read_micros, list_cost_cache_write_30m_micros, \
+             list_cost_cache_write_12h_micros, list_duration_ms, list_proxy_setup_ms, \
              list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms \
              FROM request_events_v1 WHERE id > ? AND id <= ? ORDER BY id ASC LIMIT ?",
         )
@@ -613,14 +641,16 @@ async fn upsert_rollup_delta(
         "INSERT INTO usage_rollups_v2 \
           (resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
            request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
-           cache_read_input_tokens, error_count, latency_count, latency_ms_sum, \
+           cache_read_input_tokens, cache_write_input_tokens, cache_write_input_tokens_30m, \
+           cache_write_input_tokens_12h, error_count, latency_count, latency_ms_sum, \
            latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
            shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
            upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
            upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
            cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
-           cost_cache_read_micros, cost_components_event_count, updated_at) \
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch()) \
+           cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
+           cost_components_event_count, updated_at) \
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch()) \
           ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) DO UPDATE \
           SET upstream_name = excluded.upstream_name, \
               request_count = usage_rollups_v2.request_count + excluded.request_count, \
@@ -674,6 +704,18 @@ async fn upsert_rollup_delta(
         "rollup cache_creation_input_tokens",
     )?)
     .bind(u64_to_i64(delta.cache_read_input_tokens, "rollup cache_read_input_tokens")?)
+    .bind(option_u64_to_i64(
+        delta.cache_write_input_tokens,
+        "rollup cache_write_input_tokens",
+    )?)
+    .bind(option_u64_to_i64(
+        delta.cache_write_input_tokens_30m,
+        "rollup cache_write_input_tokens_30m",
+    )?)
+    .bind(option_u64_to_i64(
+        delta.cache_write_input_tokens_12h,
+        "rollup cache_write_input_tokens_12h",
+    )?)
     .bind(u64_to_i64(delta.error_count, "rollup error_count")?)
     .bind(u64_to_i64(delta.latency_count, "rollup latency_count")?)
     .bind(u64_to_i64(delta.latency_ms_sum, "rollup latency_ms_sum")?)
@@ -753,6 +795,9 @@ fn rollup_event_from_row(
         output_tokens: optional_u64("output_tokens")?,
         cache_creation_input_tokens: optional_u64("cache_creation_input_tokens")?,
         cache_read_input_tokens: optional_u64("cache_read_input_tokens")?,
+        cache_write_input_tokens: optional_u64("cache_write_input_tokens")?,
+        cache_write_input_tokens_30m: optional_u64("cache_write_input_tokens_30m")?,
+        cache_write_input_tokens_12h: optional_u64("cache_write_input_tokens_12h")?,
         cost_usd_micros: row
             .try_get("list_cost_usd_micros")
             .map_err(map_sqlx_error)?,
@@ -770,6 +815,12 @@ fn rollup_event_from_row(
             .map_err(map_sqlx_error)?,
         cost_cache_read_micros: row
             .try_get("list_cost_cache_read_micros")
+            .map_err(map_sqlx_error)?,
+        cost_cache_write_30m_micros: row
+            .try_get("list_cost_cache_write_30m_micros")
+            .map_err(map_sqlx_error)?,
+        cost_cache_write_12h_micros: row
+            .try_get("list_cost_cache_write_12h_micros")
             .map_err(map_sqlx_error)?,
         duration_ms: optional_u64("list_duration_ms")?.unwrap_or(0),
         proxy_setup_ms: optional_u64("list_proxy_setup_ms")?,
@@ -921,9 +972,21 @@ fn row_to_usage_rollup(row: SqliteRow) -> StorageResult<UsageRollup> {
                 .map_err(map_sqlx_error)?,
             "rollup cache_read_input_tokens",
         )?,
-        cache_write_input_tokens: None,
-        cache_write_input_tokens_30m: None,
-        cache_write_input_tokens_12h: None,
+        cache_write_input_tokens: row
+            .try_get::<Option<i64>, _>("cache_write_input_tokens")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "rollup cache_write_input_tokens"))
+            .transpose()?,
+        cache_write_input_tokens_30m: row
+            .try_get::<Option<i64>, _>("cache_write_input_tokens_30m")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "rollup cache_write_input_tokens_30m"))
+            .transpose()?,
+        cache_write_input_tokens_12h: row
+            .try_get::<Option<i64>, _>("cache_write_input_tokens_12h")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "rollup cache_write_input_tokens_12h"))
+            .transpose()?,
         error_count: i64_to_u64(
             row.try_get("error_count").map_err(map_sqlx_error)?,
             "rollup error_count",
@@ -1018,6 +1081,16 @@ fn row_to_usage_rollup(row: SqliteRow) -> StorageResult<UsageRollup> {
                 .map_err(map_sqlx_error)?,
             "rollup cost_cache_read_micros",
         )?,
+        cost_cache_write_30m_micros: i64_to_u64(
+            row.try_get("cost_cache_write_30m_micros")
+                .map_err(map_sqlx_error)?,
+            "rollup cost_cache_write_30m_micros",
+        )?,
+        cost_cache_write_12h_micros: i64_to_u64(
+            row.try_get("cost_cache_write_12h_micros")
+                .map_err(map_sqlx_error)?,
+            "rollup cost_cache_write_12h_micros",
+        )?,
         cost_components_event_count: i64_to_u64(
             row.try_get("cost_components_event_count")
                 .map_err(map_sqlx_error)?,
@@ -1076,6 +1149,12 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     u64::try_from(value).map_err(|_| StorageError::Corrupted {
         message: format!("{field} is negative in sqlite storage"),
     })
+}
+
+fn add_optional(target: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *target = Some(target.unwrap_or_default().saturating_add(value));
+    }
 }
 
 fn min_option(current: Option<u64>, next: Option<u64>) -> Option<u64> {
