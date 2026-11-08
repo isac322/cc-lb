@@ -17,7 +17,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import net from 'node:net';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -343,6 +343,146 @@ async function startCollectorWithCorrelationIds({ port, controlPort, outputFile 
   return mod.startOtlpReceiver({ port, controlPort, outputFile });
 }
 
+function providerRegressionRequest(spec) {
+  if (spec.provider === 'openai') {
+    return {
+      path: '/v1/responses',
+      body: Buffer.from('{"model":"gpt-test","input":[],"stream":true}'),
+    };
+  }
+  return {
+    path: `/v1beta/models/${encodeURIComponent(spec.model)}:streamGenerateContent?alt=sse`,
+    body: Buffer.from('{"contents":[],"stream":true}'),
+  };
+}
+
+async function runProviderRegression(spec, workDir, offset, selectedUpstream) {
+  const root = path.join(workDir, spec.id);
+  const keyPath = path.join(root, 'client', 'key');
+  const reportPath = path.join(root, 'regression.json');
+  const report = {
+    provider: spec.provider,
+    selected_upstream: selectedUpstream ?? null,
+    relay: { kind: 'owned-loopback-fault-relay', listen: null },
+    invalid_proxy_credential: null,
+    stream_fault: null,
+  };
+  if (!existsSync(keyPath)) {
+    report.status = 'BLOCKED';
+    report.reason = 'proxy_key_file_missing';
+    writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    return report;
+  }
+  const proxyPort = spec.basePorts[0] + offset;
+  const validKey = readFileSync(keyPath, 'utf8').trim();
+  const requestSpec = providerRegressionRequest(spec);
+  let mode = 'forward';
+  const relay = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const headers = { ...req.headers, host: `127.0.0.1:${proxyPort}` };
+      if (mode === 'fault') headers['x-api-key'] = validKey;
+      const upstream = http.request(
+        {
+          host: '127.0.0.1',
+          port: proxyPort,
+          method: req.method,
+          path: req.url,
+          headers,
+        },
+        (upstreamResponse) => {
+          let sent = false;
+            if (mode === 'fault' && !sent) {
+              sent = true;
+              res.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+              res.write(chunk);
+              upstream.destroy();
+              res.destroy();
+            } else if (mode !== 'fault') {
+              if (!sent) {
+                sent = true;
+                res.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+              }
+              res.write(chunk);
+            }
+          });
+          upstreamResponse.on('end', () => {
+            if (mode !== 'fault') {
+              if (!sent) res.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+              res.end();
+            }
+          });
+        },
+      );
+      upstream.on('error', () => {
+        if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { type: 'relay_upstream_error' } }));
+      });
+      upstream.end(Buffer.concat(chunks));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    relay.once('error', reject);
+    relay.listen(0, '127.0.0.1', resolve);
+  });
+  const relayPort = relay.address().port;
+  report.relay.listen = `127.0.0.1:${relayPort}`;
+
+  const call = (apiKey, fault) =>
+    new Promise((resolve) => {
+      mode = fault ? 'fault' : 'forward';
+      const request = http.request(
+        {
+          host: '127.0.0.1',
+          port: relayPort,
+          method: 'POST',
+          path: requestSpec.path,
+          headers: {
+            'content-type': 'application/json',
+            'content-length': requestSpec.body.length,
+            'x-api-key': apiKey,
+          },
+        },
+        (response) => {
+          const chunks = [];
+          response.on('data', (chunk) => chunks.push(chunk));
+          response.on('end', () =>
+            resolve({
+              status: response.statusCode ?? 0,
+              selected_upstream: selectedUpstream ?? null,
+              request_id: response.headers['request-id'] ?? response.headers['x-request-id'] ?? null,
+              content_type: response.headers['content-type'] ?? null,
+              body_sha256: sha256(Buffer.concat(chunks)),
+              terminal: fault ? 'relay_truncated_after_first_frame' : 'http_eof',
+            }),
+          );
+        },
+      );
+      request.on('error', (error) =>
+        resolve({
+          status: 0,
+          selected_upstream: selectedUpstream ?? null,
+          request_id: null,
+          content_type: null,
+          body_sha256: null,
+          terminal: fault ? 'relay_truncated_after_first_frame' : `client_error:${error.code ?? 'unknown'}`,
+        }),
+      );
+      request.end(requestSpec.body);
+    });
+
+  report.invalid_proxy_credential = await call('invalid-proxy-credential', false);
+  report.stream_fault = await call(validKey, true);
+  await new Promise((resolve) => relay.close(resolve));
+  report.status =
+    report.invalid_proxy_credential.status === 401 && report.stream_fault.terminal === 'relay_truncated_after_first_frame'
+      ? 'PASS'
+      : 'FAIL';
+  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  return report;
+}
+
 function stageWorkDir(workDir, ccLbBin, ccLbSha, ledgerPath, credentialsObj, offset = 0) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   for (const rel of [
@@ -536,13 +676,21 @@ async function runLiveSuite(opts) {
 
       const summaryPath = path.join(workDir, spec.id, 'summary.json');
       const summary = existsSync(summaryPath) ? JSON.parse(readFileSync(summaryPath, 'utf8')) : null;
-      const verdict =
+      const driverVerdict =
         summary?.verdict ??
         (summary?.verdicts && Object.values(summary.verdicts).every((v) => v === 'PASS')
           ? 'PASS'
           : summary?.scenarios && Object.values(summary.scenarios).every((v) => v?.verdict === 'PASS')
             ? 'PASS'
             : 'FAIL');
+      const regression =
+        spec.regression && exitCode === 0
+          ? await runProviderRegression(spec, workDir, offset, summary?.upstream_id)
+          : spec.regression
+            ? { status: 'BLOCKED', reason: 'provider-driver-failed' }
+            : null;
+      const verdict =
+        driverVerdict === 'PASS' && (!regression || regression.status === 'PASS') ? 'PASS' : driverVerdict;
 
       results.push({
         case: spec.alias,
@@ -550,6 +698,7 @@ async function runLiveSuite(opts) {
         exitCode,
         verdict,
         summaryPath,
+        ...(regression ? { regression } : {}),
       });
     }
   } finally {

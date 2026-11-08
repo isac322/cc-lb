@@ -21,8 +21,7 @@ use cc_lb_domain::{
     InternalError, InternalErrorKind, InternalErrorStage, Principal, TerminalStrategy, TtlClass,
     Upstream,
 };
-use cc_lb_engine::{InternalFailure, Lifecycle, LifecycleConfig, LifecycleContext};
-use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
+use cc_lb_engine::{InternalFailure, Lifecycle, LifecycleConfig, LifecycleContext, ProviderScope};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
@@ -41,14 +40,344 @@ use http_body_util::BodyExt;
 use client_disconnect_support::{
     assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_stream_error,
     assert_success_terminal, canonical_error_frame, encoded_sse_dispatch, json_dispatch, lifecycle,
-    lifecycle_receiver, normal_sse_frame, pending_sse, persistent_upstream_frame_error,
+    lifecycle_receiver, lifecycle_with_upstream_kind, normal_sse_frame, pending_sse,
+    persistent_upstream_frame_error,
     refusal_sse_body, sqlite_storage, sse_dispatch, transform_body, transform_lifecycle,
+    transform_lifecycle_with_kind,
     upstream_frame_error, upstream_frame_error_after,
 };
 use common::{TestAuthn, TestLifecycleBus, TestState, messages_request};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc};
 use url::Url;
+
+#[tokio::test]
+async fn native_provider_stream_bytes_and_terminal_classification_are_preserved() {
+    let cases = [
+        (
+            StorageUpstreamKind::OpenaiApiKey,
+            cc_lb_domain::Provider::Openai,
+            "/v1/responses",
+            br#"{"model":"gpt-test","input":[],"stream":true}"# as &'static [u8],
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n".as_slice(),
+        ),
+        (
+            StorageUpstreamKind::OpenaiApiKey,
+            cc_lb_domain::Provider::Openai,
+            "/v1/chat/completions",
+            br#"{"model":"gpt-test","messages":[],"stream":true}"# as &'static [u8],
+            b"data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n".as_slice(),
+        ),
+        (
+            StorageUpstreamKind::GeminiApiKey,
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-test:streamGenerateContent?alt=sse",
+            br#"{"contents":[],"stream":true}"# as &'static [u8],
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2}}\n\n".as_slice(),
+        ),
+    ];
+
+    for (kind, provider, path, request_body, upstream_body) in cases {
+        let test_bus = TestLifecycleBus::new();
+        let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+        let lifecycle = lifecycle_with_upstream_kind(
+            sse_dispatch(
+                StatusCode::OK,
+                Body::from(Bytes::from_static(upstream_body)),
+            ),
+            kind,
+        );
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(request_body))
+            .expect("native provider stream request builds");
+        request
+            .extensions_mut()
+            .insert(ProviderScope(provider));
+
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("native provider request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("native provider stream is handled");
+        assert_eq!(response.status(), StatusCode::OK, "{provider:?} status");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("native provider stream body collects")
+            .to_bytes();
+        assert_eq!(
+            body.as_ref(),
+            upstream_body,
+            "{provider:?} stream bytes must remain unchanged",
+        );
+        assert_success_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16()).await;
+    }
+}
+
+#[tokio::test]
+async fn native_provider_stream_fault_emits_one_relay_error_and_terminal() {
+    let cases = [
+        (
+            StorageUpstreamKind::OpenaiApiKey,
+            cc_lb_domain::Provider::Openai,
+            "/v1/responses",
+            br#"{"model":"gpt-test","input":[],"stream":true}"# as &'static [u8],
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n".as_slice(),
+        ),
+        (
+            StorageUpstreamKind::GeminiApiKey,
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-test:streamGenerateContent?alt=sse",
+            br#"{"contents":[],"stream":true}"# as &'static [u8],
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n".as_slice(),
+        ),
+    ];
+
+    for (kind, provider, path, request_body, first_frame) in cases {
+        let test_bus = TestLifecycleBus::new();
+        let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+        let lifecycle = lifecycle_with_upstream_kind(
+            sse_dispatch(
+                StatusCode::OK,
+                upstream_frame_error_after(Bytes::from_static(first_frame)),
+            ),
+            &test_bus,
+            kind,
+        );
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(request_body))
+            .expect("native provider fault request builds");
+        request
+            .extensions_mut()
+            .insert(ProviderScope(provider));
+
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("native provider fault request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("native provider fault stream is handled");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("native provider fault body collects")
+            .to_bytes();
+        let text = std::str::from_utf8(&body).expect("native provider fault body is UTF-8");
+        assert_eq!(
+            text.matches("event: error\n").count(),
+            1,
+            "{provider:?} must receive exactly one proxy error frame",
+        );
+        assert!(
+            text.contains("\"api_error\""),
+            "{provider:?} proxy error frame must use the provider error envelope: {text:?}",
+        );
+        assert_error_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16(), "upstream_stream_error")
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn native_provider_error_body_is_forwarded_without_rewrite() {
+    let cases = [
+        (
+            StorageUpstreamKind::OpenaiApiKey,
+            cc_lb_domain::Provider::Openai,
+            "/v1/responses",
+            br#"{"model":"gpt-test","input":[]}"# as &'static [u8],
+            br#"{"error":{"message":"provider failed","type":"invalid_request_error","code":"bad_request"}}"# as &'static [u8],
+        ),
+        (
+            StorageUpstreamKind::GeminiApiKey,
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-test:generateContent",
+            br#"{"contents":[]}"# as &'static [u8],
+            br#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}"# as &'static [u8],
+        ),
+    ];
+
+    for (kind, provider, path, request_body, error_body) in cases {
+        let test_bus = TestLifecycleBus::new();
+        let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+        let lifecycle = lifecycle_with_upstream_kind(
+            json_dispatch(StatusCode::TOO_MANY_REQUESTS, Bytes::from_static(error_body)),
+            &test_bus,
+            kind,
+        );
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(request_body))
+            .expect("native provider error request builds");
+        request
+            .extensions_mut()
+            .insert(ProviderScope(provider));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("native provider error request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("native provider error response is handled");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("native provider error body collects")
+            .to_bytes();
+        assert_eq!(body.as_ref(), error_body, "{provider:?} body must be unchanged");
+        assert_error_terminal(
+            &mut lifecycle_rx,
+            StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            "upstream_4xx",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn native_provider_affinity_failure_is_terminal_without_dispatch() {
+    let cases = [
+        (
+            StorageUpstreamKind::OpenaiApiKey,
+            cc_lb_domain::Provider::Openai,
+            "/v1/responses",
+            br#"{"model":"gpt-test","input":[],"previous_response_id":"resp-owner"}"# as &'static [u8],
+        ),
+        (
+            StorageUpstreamKind::GeminiApiKey,
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-test:generateContent",
+            br#"{"contents":[],"cachedContent":"cachedContents/owner"}"# as &'static [u8],
+        ),
+    ];
+
+    for (kind, provider, path, request_body) in cases {
+        let test_bus = TestLifecycleBus::new();
+        let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+        let lifecycle = lifecycle_with_upstream_kind(
+            json_dispatch(StatusCode::OK, Bytes::from_static(br#"{}"#)),
+            &test_bus,
+            kind,
+        );
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(request_body))
+            .expect("native provider affinity request builds");
+        request
+            .extensions_mut()
+            .insert(ProviderScope(provider));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("native provider affinity request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("native provider affinity failure is handled");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("native provider affinity body collects")
+            .to_bytes();
+        assert!(
+            body.windows(b"upstream affinity is unavailable".len())
+                .any(|window| window == b"upstream affinity is unavailable"),
+            "{provider:?} affinity failure body: {body:?}",
+        );
+        assert_error_terminal(
+            &mut lifecycle_rx,
+            StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            "upstream_affinity_unavailable",
+        )
+        .await;
+        assert!(
+            !std::iter::from_fn(|| lifecycle_rx.try_recv().ok()).any(|event| matches!(
+                event,
+                LifecycleEvent::UpstreamAttempt { .. }
+            )),
+            "{provider:?} affinity failure must not dispatch",
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_provider_transform_failure_is_terminal_once() {
+    let cases = [
+        (
+            StorageUpstreamKind::OpenaiApiKey,
+            cc_lb_domain::Provider::Openai,
+            "/v1/responses",
+            br#"{"model":"gpt-test","input":[],"stream":true}"# as &'static [u8],
+        ),
+        (
+            StorageUpstreamKind::GeminiApiKey,
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-test:streamGenerateContent?alt=sse",
+            br#"{"contents":[],"stream":true}"# as &'static [u8],
+        ),
+    ];
+
+    for (kind, provider, path, request_body) in cases {
+        let test_bus = TestLifecycleBus::new();
+        let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+        let lifecycle = transform_lifecycle_with_kind(
+            sse_dispatch(StatusCode::OK, transform_body()),
+            &test_bus,
+            kind,
+        );
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from_static(request_body))
+            .expect("native provider transform request builds");
+        request
+            .extensions_mut()
+            .insert(ProviderScope(provider));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("native provider transform request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("native provider transform failure is handled");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("native provider transform body collects")
+            .to_bytes();
+        let text = std::str::from_utf8(&body).expect("native provider transform body is UTF-8");
+        assert!(
+            text.contains("event: error\n"),
+            "{provider:?} transform failure must relay a provider error frame: {text:?}",
+        );
+        assert_error_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16(), "upstream_stream_error")
+            .await;
+    }
+}
 
 #[tokio::test]
 async fn unpolled_stream_body_drop_persists_one_client_closed_final()

@@ -170,6 +170,7 @@ fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cc_lb_control::RequestEventBus;
     use http_body_util::BodyExt;
     use serde_json::Value;
 
@@ -269,6 +270,68 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+ 
+    #[tokio::test]
+    async fn provider_rejections_emit_one_auth_failure_and_terminal_event() {
+        for provider in [
+            cc_lb_domain::Provider::Anthropic,
+            cc_lb_domain::Provider::Openai,
+            cc_lb_domain::Provider::Gemini,
+        ] {
+            let bus = std::sync::Arc::new(cc_lb_control::InMemoryBus::new());
+            let mut events = bus.subscribe_lifecycle();
+            let clock: cc_lb_clock::ClockHandle =
+                std::sync::Arc::new(cc_lb_clock::SystemClock);
+            let observer = LifecycleContext::new(
+                format!("auth-rejection-{provider:?}"),
+                bus.clone() as std::sync::Arc<dyn cc_lb_control::RequestEventBus>,
+                &clock,
+            );
+            observer.mark_authn_reached();
+            let response = reject_unauthenticated_for_provider(
+                &BuiltinAuthError::MissingHeader,
+                Some(provider),
+                Some(&observer),
+            );
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            drop(observer);
+
+            let events = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                            result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed { .. }),
+                            ..
+                        }
+                    ))
+                    .count(),
+                1,
+                "{provider:?} must emit exactly one auth failure event",
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                    ))
+                    .count(),
+                1,
+                "{provider:?} must emit exactly one terminal event",
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt { .. }
+                        | cc_lb_lifecycle::LifecycleEvent::RouteCompleted { .. }
+                )),
+                "{provider:?} rejection must not dispatch or route: {events:?}",
+            );
         }
     }
 }
