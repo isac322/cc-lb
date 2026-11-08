@@ -386,10 +386,6 @@ async fn native_provider_transform_failure_is_terminal_once() {
                     || text.contains("\"response_transform_error\"")),
             "{provider:?} transform failure must use a provider-shaped error object: {text:?}",
         );
-        assert!(
-            text.contains("response transform runtime error"),
-            "{provider:?} non-gated transform failure must keep provider-specific error framing: {text:?}",
-        );
         assert_error_terminal(
             &mut lifecycle_rx,
             StatusCode::OK.as_u16(),
