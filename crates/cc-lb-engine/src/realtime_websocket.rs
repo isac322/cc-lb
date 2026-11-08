@@ -4,7 +4,7 @@ use crate::downstream_stream_drop_guard::record_stream_termination_metric;
 use crate::responses_websocket::WebSocketCandidate;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
-    UpstreamErrorCode,
+    UpstreamErrorCode, record_websocket_terminal_span,
 };
 use crate::usage_parser::{UsageCounts, merge_usage_value, merge_usage_value_for_shape};
 use bytes::Bytes;
@@ -295,6 +295,26 @@ impl RealtimeWebSocketSession {
             cause,
             &self.candidate.upstream_name,
             Some(&self.model),
+        );
+        let (error_type, error_message) = if complete {
+            (None, None)
+        } else {
+            (
+                Some(match termination {
+                    RealtimeWebSocketTermination::DownstreamCancelled => "client_closed_request",
+                    RealtimeWebSocketTermination::ProxyRelayError => "proxy_relay_error",
+                    RealtimeWebSocketTermination::ProviderClosed
+                    | RealtimeWebSocketTermination::Completed => "realtime_stream_incomplete",
+                }),
+                Some("realtime WebSocket stream ended before completion"),
+            )
+        };
+        record_websocket_terminal_span(
+            &self.stream_span,
+            outcome,
+            cause,
+            error_type,
+            error_message,
         );
         if let Some(observer) = &self.observer {
             if let Some(counts) = usage.counts.as_ref() {

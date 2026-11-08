@@ -24,7 +24,7 @@ use crate::lifecycle::Lifecycle;
 use crate::response_transform::ResponseTransformContext;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
-    UpstreamErrorCode,
+    UpstreamErrorCode, record_websocket_terminal_span,
 };
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value};
 use cc_lb_upstream::{SseEvent, TransformSseEventRequest, TransformSseEventResult};
@@ -1113,11 +1113,89 @@ impl ResponsesWebSocketGateway {
         ready
     }
 
+    fn resolve_provider_turn_id(
+        &self,
+        connection_id: u64,
+        response_id: Option<&str>,
+        parent_response_id: Option<&str>,
+        lane: Option<&str>,
+        is_error: bool,
+    ) -> Option<u64> {
+        let mut turn_id = response_id
+            .and_then(|id| self.owners.get(id))
+            .map(|owner| owner.turn_id);
+        if turn_id.is_none() && !is_error {
+            let active = self
+                .lanes
+                .iter()
+                .find_map(|(candidate, lane_state)| {
+                    (candidate.as_deref() == lane).then_some(lane_state.active)
+                })
+                .flatten();
+            turn_id = parent_response_id
+                .and_then(|parent| self.successor_for_parent(parent))
+                .or_else(|| {
+                    active
+                        .and_then(|active| self.turns.get(&active))
+                        .and_then(|active| active.response_id.as_deref())
+                        .and_then(|parent| self.successor_for_parent(parent))
+                })
+                .or(active);
+        }
+        if is_error && turn_id.is_none() {
+            turn_id = self
+                .lanes
+                .iter()
+                .find_map(|(candidate, lane_state)| {
+                    (candidate.as_deref() == lane).then_some(lane_state.active)
+                })
+                .flatten()
+                .filter(|id| {
+                    self.turns
+                        .get(id)
+                        .is_some_and(|turn| turn.connection_id == Some(connection_id) && turn.sent)
+                });
+        }
+        turn_id
+    }
+
     fn observe_provider_metrics(&mut self, connection_id: u64, frame: &Bytes) {
-        if let Some(turn) = self
-            .turns
-            .values_mut()
-            .find(|turn| turn.connection_id == Some(connection_id) && turn.sent)
+        let lane = sonic_rs::get_from_slice(frame, &["stream_id"])
+            .ok()
+            .and_then(|value| value.as_str());
+        let response_id = sonic_rs::get_from_slice(frame, &["response", "id"])
+            .ok()
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                sonic_rs::get_from_slice(frame, &["response_id"])
+                    .ok()
+                    .and_then(|value| value.as_str())
+            });
+        let parent_response_id =
+            sonic_rs::get_from_slice(frame, &["response", "previous_response_id"])
+                .ok()
+                .and_then(|value| value.as_str())
+                .or_else(|| {
+                    sonic_rs::get_from_slice(frame, &["steer", "previous_response_id"])
+                        .ok()
+                        .and_then(|value| value.as_str())
+                });
+        let is_error = sonic_rs::get_from_slice(frame, &["type"])
+            .ok()
+            .and_then(|value| value.as_str())
+            == Some("error");
+        let Some(turn_id) = self.resolve_provider_turn_id(
+            connection_id,
+            response_id,
+            parent_response_id,
+            lane,
+            is_error,
+        ) else {
+            return;
+        };
+        if let Some(turn) = self.turns.get_mut(&turn_id)
+            && turn.connection_id == Some(connection_id)
+            && turn.sent
         {
             turn.metrics.observe(frame);
         }
@@ -1302,35 +1380,16 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane));
         }
-        let mut turn_id = response_id
-            .and_then(|id| self.owners.get(id))
-            .map(|owner| owner.turn_id);
-        if turn_id.is_none() && !matches!(kind, "error") {
-            let active = self.lanes.get(&lane).and_then(|lane| lane.active);
-            let parent = response
-                .and_then(|response| response.get("previous_response_id"))
-                .and_then(Value::as_str);
-            turn_id = parent
-                .and_then(|parent| self.successor_for_parent(parent))
-                .or_else(|| {
-                    active
-                        .and_then(|active| self.turns.get(&active))
-                        .and_then(|active| active.response_id.as_deref())
-                        .and_then(|parent| self.successor_for_parent(parent))
-                })
-                .or(active);
-        }
-        if kind == "error" && turn_id.is_none() {
-            turn_id = self
-                .lanes
-                .get(&lane)
-                .and_then(|lane| lane.active)
-                .filter(|id| {
-                    self.turns
-                        .get(id)
-                        .is_some_and(|turn| turn.connection_id == Some(connection_id) && turn.sent)
-                });
-        }
+        let parent_response_id = response
+            .and_then(|response| response.get("previous_response_id"))
+            .and_then(Value::as_str);
+        let turn_id = self.resolve_provider_turn_id(
+            connection_id,
+            response_id,
+            parent_response_id,
+            lane.as_deref(),
+            kind == "error",
+        );
         let Some(turn_id) = turn_id else {
             // Never open a second settlement from an unowned or replayed id.
             return Err(WebSocketError::new(
@@ -1674,6 +1733,13 @@ impl ResponsesWebSocketGateway {
                 .map(|candidate| candidate.upstream_name.as_str())
                 .unwrap_or("unknown"),
             Some(&turn.prepared.model),
+        );
+        record_websocket_terminal_span(
+            &turn.prepared.span,
+            outcome,
+            cause,
+            error.map(|error| error.code),
+            error.map(|error| error.message.as_str()),
         );
         let latency = turn
             .metrics
