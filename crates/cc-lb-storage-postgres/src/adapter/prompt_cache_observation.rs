@@ -113,7 +113,7 @@ impl PromptCacheObservationStore for PostgresStorage {
         not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<ProviderPromptCacheObservationRecord>> {
         let rows = sqlx::query(
-            "SELECT upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at FROM provider_native_cache_observations WHERE upstream_id = $1 AND provider = $2 AND canonical_model_id = $3 AND mode = $4 AND isolation_scope = $5 AND identity_hash = $6 AND expires_at > $7 ORDER BY boundary",
+            "SELECT upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at FROM provider_native_cache_observations WHERE upstream_id = $1 AND provider = $2 AND canonical_model_id = $3 AND mode = $4 AND isolation_scope = $5 AND identity_hash = $6 AND expires_at IS NOT NULL AND expires_at > $7 ORDER BY boundary",
         )
         .bind(upstream_id)
         .bind(provider)
@@ -230,11 +230,11 @@ impl PromptCacheObservationStore for PostgresStorage {
             let provider_row = sqlx::query(
                 "WITH candidates AS MATERIALIZED ( \
                      SELECT ctid FROM provider_native_cache_observations \
-                     WHERE expires_at IS NULL OR expires_at < $1 LIMIT $2 \
+                     WHERE expires_at < $1 LIMIT $2 \
                  ), deleted AS ( \
                      DELETE FROM provider_native_cache_observations \
                      WHERE ctid IN (SELECT ctid FROM candidates) \
-                       AND (expires_at IS NULL OR expires_at < $1) \
+                       AND expires_at < $1 \
                      RETURNING 1 \
                  ) \
                  SELECT \

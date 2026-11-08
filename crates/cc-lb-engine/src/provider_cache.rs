@@ -22,7 +22,6 @@ enum OpenaiCacheMode {
 const MAX_LOOKBACK_BOUNDARIES: usize = 20;
 const MAX_BOUNDARY_BYTES: usize = 512;
 const MAX_SCOPE_BYTES: usize = 256;
-const OPENAI_DEFAULT_RETENTION_SECS: u64 = 30 * 60;
 const OPENAI_LONG_RETENTION_SECS: u64 = 12 * 60 * 60;
 
 /// Analyze only the supported provider-native request paths.
@@ -257,12 +256,7 @@ fn openai_retention_secs(
         }
         breakpoint_ttl = Some(parsed);
     }
-    Some(
-        breakpoint_ttl
-            .or(retention)
-            .or(options_ttl)
-            .or(Some(OPENAI_DEFAULT_RETENTION_SECS)),
-    )
+    Some(breakpoint_ttl.or(retention).or(options_ttl))
 }
 
 fn parse_ttl_secs(value: &Value) -> Option<u64> {
@@ -475,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_metadata_breakpoint_is_not_cache_boundary() {
+    fn openai_metadata_breakpoint_is_not_cache_boundary_or_retention() {
         let observed = analyze(
             ProviderCapability::OpenaiResponses,
             &json!({
@@ -487,7 +481,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observed.mode, "implicit");
-        assert_eq!(observed.retention_secs, Some(30 * 60));
+        assert_eq!(observed.retention_secs, None);
     }
 
     #[test]

@@ -577,6 +577,10 @@ prompt_cache_observation_postgres_test!(
     purge_expired_before_removes_only_expired
 );
 prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_provider_unknown_expiry_is_retained_and_not_active_postgres,
+    provider_unknown_expiry_is_retained_and_not_active
+);
+prompt_cache_observation_postgres_test!(
     prompt_cache_observation_hydrate_after_restart_filters_expired_postgres,
     hydrate_after_restart_filters_expired
 );

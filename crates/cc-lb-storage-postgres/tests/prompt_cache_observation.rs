@@ -104,7 +104,7 @@ async fn postgres_prompt_cache_purge_removes_expired() -> TestResult<()> {
 
 #[tokio::test]
 #[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
-async fn postgres_provider_cache_unknown_or_expired_rows_are_not_active_and_are_purged()
+async fn postgres_provider_cache_unknown_or_expired_rows_are_not_active_and_only_expired_are_purged()
 -> TestResult<()> {
     let Some(fixture) = Fixture::create().await? else {
         return Ok(());
@@ -152,7 +152,7 @@ async fn postgres_provider_cache_unknown_or_expired_rows_are_not_active_and_are_
 
     assert_eq!(
         PromptCacheObservationStore::purge_expired_before(&store, 200).await?,
-        2
+        1
     );
     let after_purge = PromptCacheObservationStore::list_active_provider_observations(
         &store,

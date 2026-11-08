@@ -428,6 +428,10 @@ prompt_cache_observation_sqlite_test!(
     purge_expired_before_removes_only_expired
 );
 prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_provider_unknown_expiry_is_retained_and_not_active_sqlite,
+    provider_unknown_expiry_is_retained_and_not_active
+);
+prompt_cache_observation_sqlite_test!(
     prompt_cache_observation_hydrate_after_restart_filters_expired_sqlite,
     hydrate_after_restart_filters_expired
 );

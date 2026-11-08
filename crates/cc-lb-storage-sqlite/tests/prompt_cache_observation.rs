@@ -121,7 +121,7 @@ async fn prompt_cache_v3_stale_upsert_does_not_regress_fresh_row() {
 }
 
 #[tokio::test]
-async fn provider_cache_unknown_or_expired_rows_are_not_active_and_are_purged() {
+async fn provider_cache_unknown_or_expired_rows_are_not_active_and_only_expired_are_purged() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -184,7 +184,7 @@ async fn provider_cache_unknown_or_expired_rows_are_not_active_and_are_purged() 
             .purge_expired_before(200)
             .await
             .expect("purge provider observations"),
-        2
+        1
     );
     let after_purge = storage
         .list_active_provider_observations(

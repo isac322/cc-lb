@@ -125,7 +125,7 @@ impl PromptCacheObservationStore for SqliteStorage {
         let rows = sqlx::query(
             "SELECT upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at \
              FROM provider_native_cache_observations WHERE upstream_id = ? AND provider = ? AND canonical_model_id = ? AND mode = ? AND isolation_scope = ? AND identity_hash = ? \
-             AND expires_at > ? ORDER BY boundary",
+             AND expires_at IS NOT NULL AND expires_at > ? ORDER BY boundary",
         )
         .bind(upstream_id.to_string())
         .bind(provider)
@@ -243,10 +243,10 @@ impl PromptCacheObservationStore for SqliteStorage {
 
             let provider_removed = sqlx::query(
                 "DELETE FROM provider_native_cache_observations \
-                 WHERE (expires_at IS NULL OR expires_at < ?) \
+                 WHERE expires_at < ? \
                    AND rowid IN ( \
                        SELECT rowid FROM provider_native_cache_observations \
-                       WHERE expires_at IS NULL OR expires_at < ? LIMIT ? \
+                       WHERE expires_at < ? LIMIT ? \
                    )",
             )
             .bind(cutoff)

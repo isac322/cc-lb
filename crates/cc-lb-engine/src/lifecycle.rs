@@ -11901,6 +11901,40 @@ mod tests {
     }
 
     #[test]
+    fn provider_observation_without_lifetime_keeps_expiry_unknown() {
+        let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1_126),
+            canonical_model_id: "gpt-5.6".to_owned(),
+            cache_breakpoints: Vec::new(),
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: None,
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                evidence: cc_lb_request_log::RequestCacheEvidence::Positive,
+                cached_tokens: Some(128),
+                ..Default::default()
+            }),
+            sink: sink.clone(),
+            grace_margin_secs: 0,
+        };
+
+        publish_provider_cache_observation(
+            &context,
+            PromptCacheUsage::default(),
+            1_800_000_000,
+        );
+
+        let records = sink.provider_upserts();
+        let [record] = records.as_slice() else {
+            panic!("expected one provider observation");
+        };
+        assert_eq!(record.retention_secs, None);
+        assert_eq!(record.expires_at_unix_secs, None);
+    }
+
+    #[test]
     fn hit_observation_uses_sliding_ttl_from_now() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000224").unwrap();
         let now = 1_800_000_000;
@@ -14588,6 +14622,7 @@ mod tests {
 
     struct RecordingPromptCacheObservationSink {
         records: Mutex<Vec<PromptCacheObservationRecord>>,
+        provider_records: Mutex<Vec<ProviderPromptCacheObservationRecord>>,
         clock_now: u64,
         grace_secs: u64,
     }
@@ -14595,6 +14630,7 @@ mod tests {
         fn new(_entries: Vec<WarmCacheEntry>) -> Self {
             Self {
                 records: Mutex::new(Vec::new()),
+                provider_records: Mutex::new(Vec::new()),
                 clock_now: 0,
                 grace_secs: 30,
             }
@@ -14610,6 +14646,12 @@ mod tests {
         fn upserts(&self) -> Vec<PromptCacheObservationRecord> {
             self.records.lock().expect("records lock").clone()
         }
+        fn provider_upserts(&self) -> Vec<ProviderPromptCacheObservationRecord> {
+            self.provider_records
+                .lock()
+                .expect("provider records lock")
+                .clone()
+        }
         fn clock_now_unix_secs(&self) -> u64 {
             self.clock_now
         }
@@ -14623,6 +14665,16 @@ mod tests {
             record: PromptCacheObservationRecord,
         ) -> Result<(), PromptCacheObservationEnqueueError> {
             self.records.lock().expect("records lock").push(record);
+            Ok(())
+        }
+        fn enqueue_provider(
+            &self,
+            record: ProviderPromptCacheObservationRecord,
+        ) -> Result<(), PromptCacheObservationEnqueueError> {
+            self.provider_records
+                .lock()
+                .expect("provider records lock")
+                .push(record);
             Ok(())
         }
     }
