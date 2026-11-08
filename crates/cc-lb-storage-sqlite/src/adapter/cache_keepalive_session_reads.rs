@@ -469,6 +469,25 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         principal_id: &str,
         cutoff_ms: u64,
     ) -> StorageResult<cc_lb_storage_api::CacheKeepaliveSummaryAggregate> {
+        self.read_cache_keepalive_summary_aggregate_for_horizon(principal_id, cutoff_ms, None)
+            .await
+    }
+
+    async fn read_cache_keepalive_summary_aggregate_for_horizon(
+        &self,
+        principal_id: &str,
+        cutoff_ms: u64,
+        horizon_start_ms: Option<u64>,
+    ) -> StorageResult<cc_lb_storage_api::CacheKeepaliveSummaryAggregate> {
+        let horizon_start_ms = horizon_start_ms
+            .map(|value| {
+                u64_to_i64(
+                    value,
+                    "cache_keepalive_summary_horizon_start_ms",
+                    "value exceeds i64::MAX",
+                )
+            })
+            .transpose()?;
         let cutoff_ms = u64_to_i64(
             cutoff_ms,
             "cache_keepalive_summary_cutoff_ms",
@@ -503,6 +522,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                      )
                  )
                 WHERE s.principal_id = ? AND s.status = 'active' AND s.cycle_id IS NOT NULL
+                  AND (? IS NULL OR t.ts * 1000 >= ?)
             ),
             current_renewals AS (
                 SELECT a.principal_id, a.session_key_hash, a.source_ref_id,
@@ -565,24 +585,34 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND last_message_at_ms >= ?)
                  + (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = ? AND last_message_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id))) AS sessions_last_5m,
                 (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = ? AND last_message_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id)) AS recent_decisions,
-                (SELECT COALESCE(SUM(cost_micros), 0) FROM cache_keepalive_turns WHERE principal_id = ?) AS total_spent_micros,
-                (SELECT COUNT(*) FROM cache_keepalive_turns WHERE principal_id = ? AND lower(hit_miss) = 'hit') AS successful_hits,
+                (SELECT COALESCE(SUM(cost_micros), 0) FROM cache_keepalive_turns WHERE principal_id = ? AND (? IS NULL OR ts * 1000 >= ?)) AS total_spent_micros,
+                (SELECT COUNT(*) FROM cache_keepalive_turns WHERE principal_id = ? AND lower(hit_miss) = 'hit' AND (? IS NULL OR ts * 1000 >= ?)) AS successful_hits,
                 (SELECT COUNT(*) FROM pending_current WHERE principal_id = ?) AS pending_evidence,
                 (SELECT COUNT(*) FROM cache_keepalive_turns t
                  WHERE t.principal_id = ?
+                   AND (? IS NULL OR t.ts * 1000 >= ?)
                    AND NOT EXISTS (
                        SELECT 1 FROM cache_keepalive_evidence e
                        WHERE e.principal_id = t.principal_id
                          AND e.evidence_kind = 'renewal'
                          AND e.event_ref = t.source_ref_id
                    )) +
-                COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND (cycle_id IS NULL OR prefix_hash IS NULL OR prefix_policy_version IS NULL OR prefix_schema_version IS NULL) THEN 1 ELSE 0 END), 0) AS unknown_cycles,
-                COALESCE(SUM(CASE WHEN evidence_kind = 'renewal' AND cycle_id IS NOT NULL AND prefix_hash IS NOT NULL AND prefix_policy_version IS NOT NULL AND prefix_schema_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS observed_evidence,
-                MIN(request_start_ms) AS retained_from_ms
-             FROM cache_keepalive_evidence
-             WHERE principal_id = ?",
+                COALESCE(SUM(CASE WHEN e_summary.cycle_id IS NULL OR e_summary.prefix_hash IS NULL OR e_summary.prefix_policy_version IS NULL OR e_summary.prefix_schema_version IS NULL THEN 1 ELSE 0 END), 0) AS unknown_cycles,
+                COALESCE(SUM(CASE WHEN e_summary.cycle_id IS NOT NULL AND e_summary.prefix_hash IS NOT NULL AND e_summary.prefix_policy_version IS NOT NULL AND e_summary.prefix_schema_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS observed_evidence,
+                MIN(e_summary.request_start_ms) AS retained_from_ms
+             FROM cache_keepalive_evidence e_summary
+             WHERE e_summary.principal_id = ?
+               AND e_summary.evidence_kind = 'renewal'
+               AND (? IS NULL OR e_summary.request_start_ms >= ? OR EXISTS (
+                   SELECT 1 FROM cache_keepalive_turns t
+                   WHERE t.principal_id = e_summary.principal_id
+                     AND t.source_ref_id = e_summary.event_ref
+                     AND t.ts * 1000 >= ?
+               ))",
         )
         .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
         .bind(principal_id)
         .bind(principal_id)
         .bind(cutoff_ms)
@@ -591,10 +621,19 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .bind(principal_id)
         .bind(cutoff_ms)
         .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
+        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
         .bind(principal_id)
         .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
         .bind(principal_id)
-        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
         .fetch_one(self.pool())
         .await
         .map_err(map_sqlx_error)?;
@@ -624,6 +663,12 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 SELECT *
                 FROM cache_keepalive_evidence
                 WHERE principal_id = ? AND evidence_kind = 'renewal' AND cycle_id IS NOT NULL
+                  AND (? IS NULL OR request_start_ms >= ? OR EXISTS (
+                      SELECT 1 FROM cache_keepalive_turns t
+                      WHERE t.principal_id = cache_keepalive_evidence.principal_id
+                        AND t.source_ref_id = cache_keepalive_evidence.event_ref
+                        AND t.ts * 1000 >= ?
+                  ))
              ),
              qualifying_follow_ups AS (
                 SELECT r.cycle_id, r.principal_id, r.upstream_id, r.model,
@@ -676,6 +721,9 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
              ORDER BY r.model, r.ttl",
         )
         .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
         .fetch_all(self.pool())
         .await
         .map_err(map_sqlx_error)?;

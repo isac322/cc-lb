@@ -84,16 +84,18 @@ async fn list_cache_keepalive(
             Err(error) => return storage_error(error),
         }
     };
-    let aggregate = match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_aggregate(
-        storage,
-        &principal_id,
-        now_ms.saturating_sub(FIVE_MINUTES_MS),
-    )
-    .await
-    {
-        Ok(aggregate) => aggregate,
-        Err(error) => return storage_error(error),
-    };
+    let aggregate =
+        match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_aggregate_for_horizon(
+            storage,
+            &principal_id,
+            now_ms.saturating_sub(FIVE_MINUTES_MS),
+            query.storage.horizon_start_ms,
+        )
+        .await
+        {
+            Ok(aggregate) => aggregate,
+            Err(error) => return storage_error(error),
+        };
     let mut avoided_micros = 0_i64;
     let mut pricing_complete = true;
     for group in &aggregate.groups {
