@@ -15,6 +15,7 @@ use cc_lb_upstream::{
 use crate::lifecycle::RequestEventContext;
 use crate::provider_capability::ProviderCapability;
 use crate::sse_error_frame::make_provider_error_frame;
+use crate::strip_hop_by_hop;
 
 #[derive(Clone)]
 pub(crate) struct ResponseTransformContext {
