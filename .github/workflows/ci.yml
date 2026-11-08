@@ -386,8 +386,8 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           exec docker run --rm \
+            --user 0:0 \
             --entrypoint /bin/promtool \
-            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
             --volume /tmp:/tmp \
             --workdir /workspace \
             prom/prometheus:v3.15.0 "$@"
