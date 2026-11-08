@@ -242,6 +242,34 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     );
   });
 
+  it('enables OpenAI Responses keepalive from the default-off toggle', () => {
+    const principal = freshPrincipal();
+    principal.cache_keepalive!.classifier!.openai_responses_enabled = false;
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={principal}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole('switch', {
+        name: 'OpenAI Responses GPT-5.6+ keepalive',
+      }),
+    );
+    fireEvent.click(screen.getAllByText('Save changes').at(-1)!);
+    expect(mutateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cache_keepalive: expect.objectContaining({
+          classifier: expect.objectContaining({
+            openai_responses_enabled: true,
+          }),
+        }),
+      }),
+      expect.any(Object),
+    );
+  });
+
   it('keeps a same-principal draft and its opening revision until the drawer is reopened', () => {
     const latestPrincipal: queries.Principal = {
       ...mockPrincipal,

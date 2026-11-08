@@ -540,6 +540,15 @@ export function CacheKeepaliveSettingsDrawer({
             onChange={(e) => setTreatAmbiguous(e.target.checked)}
             disabled={busy}
           />
+          <ToggleSwitch
+            role="switch"
+            label="OpenAI Responses GPT-5.6+ keepalive"
+            description="Opt in to cost-aware 30m prompt-cache read refreshes for OpenAI Responses only. Off by default."
+            aria-label="OpenAI Responses GPT-5.6+ keepalive"
+            checked={openaiResponsesEnabled}
+            onChange={(e) => setOpenaiResponsesEnabled(e.target.checked)}
+            disabled={busy}
+          />
         </div>
       </fieldset>
     </Drawer>
