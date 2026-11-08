@@ -730,7 +730,9 @@ pub(crate) fn merge_usage_value_for_shape(
             CacheTokenEvidence::Positive
         });
     } else if let Some(cached_tokens) = reported.get("cachedContentTokenCount") {
-        usage.cache_read_evidence.merge(CacheTokenEvidence::from_value(cached_tokens));
+        usage
+            .cache_read_evidence
+            .merge(CacheTokenEvidence::from_value(cached_tokens));
         if let Some(cached_tokens) = cached_tokens.as_u64() {
             if usage.gross_input_tokens.is_some() {
                 usage.input_includes_cached = true;

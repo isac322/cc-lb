@@ -68,11 +68,34 @@ impl PromptCacheObservationStore for PostgresStorage {
         .bind(&record.identity_hash)
         .bind(&record.boundary)
         .bind(&record.evidence_source)
-        .bind(record.observed_cached_tokens.map(|value| u64_to_i64(value, "native cached tokens")).transpose()?)
-        .bind(record.observed_write_tokens.map(|value| u64_to_i64(value, "native write tokens")).transpose()?)
-        .bind(record.retention_secs.map(|value| u64_to_i64(value, "native retention")).transpose()?)
-        .bind(record.expires_at_unix_secs.map(|value| u64_to_i64(value, "native expiry")).transpose()?)
-        .bind(u64_to_i64(record.last_observed_at_unix_secs, "native observed_at")?)
+        .bind(
+            record
+                .observed_cached_tokens
+                .map(|value| u64_to_i64(value, "native cached tokens"))
+                .transpose()?,
+        )
+        .bind(
+            record
+                .observed_write_tokens
+                .map(|value| u64_to_i64(value, "native write tokens"))
+                .transpose()?,
+        )
+        .bind(
+            record
+                .retention_secs
+                .map(|value| u64_to_i64(value, "native retention"))
+                .transpose()?,
+        )
+        .bind(
+            record
+                .expires_at_unix_secs
+                .map(|value| u64_to_i64(value, "native expiry"))
+                .transpose()?,
+        )
+        .bind(u64_to_i64(
+            record.last_observed_at_unix_secs,
+            "native observed_at",
+        )?)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -113,11 +136,30 @@ impl PromptCacheObservationStore for PostgresStorage {
                     identity_hash: row.try_get("identity_hash").map_err(map_sqlx_error)?,
                     boundary: row.try_get("boundary").map_err(map_sqlx_error)?,
                     evidence_source: row.try_get("evidence_source").map_err(map_sqlx_error)?,
-                    observed_cached_tokens: row.try_get::<Option<i64>, _>("observed_cached_tokens").map_err(map_sqlx_error)?.map(|value| i64_to_u64(value, "native cached tokens")).transpose()?,
-                    observed_write_tokens: row.try_get::<Option<i64>, _>("observed_write_tokens").map_err(map_sqlx_error)?.map(|value| i64_to_u64(value, "native write tokens")).transpose()?,
-                    retention_secs: row.try_get::<Option<i64>, _>("retention_secs").map_err(map_sqlx_error)?.map(|value| i64_to_u64(value, "native retention")).transpose()?,
-                    expires_at_unix_secs: row.try_get::<Option<i64>, _>("expires_at").map_err(map_sqlx_error)?.map(|value| i64_to_u64(value, "native expiry")).transpose()?,
-                    last_observed_at_unix_secs: i64_to_u64(row.try_get("last_observed_at").map_err(map_sqlx_error)?, "native observed_at")?,
+                    observed_cached_tokens: row
+                        .try_get::<Option<i64>, _>("observed_cached_tokens")
+                        .map_err(map_sqlx_error)?
+                        .map(|value| i64_to_u64(value, "native cached tokens"))
+                        .transpose()?,
+                    observed_write_tokens: row
+                        .try_get::<Option<i64>, _>("observed_write_tokens")
+                        .map_err(map_sqlx_error)?
+                        .map(|value| i64_to_u64(value, "native write tokens"))
+                        .transpose()?,
+                    retention_secs: row
+                        .try_get::<Option<i64>, _>("retention_secs")
+                        .map_err(map_sqlx_error)?
+                        .map(|value| i64_to_u64(value, "native retention"))
+                        .transpose()?,
+                    expires_at_unix_secs: row
+                        .try_get::<Option<i64>, _>("expires_at")
+                        .map_err(map_sqlx_error)?
+                        .map(|value| i64_to_u64(value, "native expiry"))
+                        .transpose()?,
+                    last_observed_at_unix_secs: i64_to_u64(
+                        row.try_get("last_observed_at").map_err(map_sqlx_error)?,
+                        "native observed_at",
+                    )?,
                 })
             })
             .collect()
