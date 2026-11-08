@@ -26,6 +26,9 @@ pub struct ParseInfo {
     pub cache_breakpoints: Vec<cc_lb_request_log::RequestCacheBreakpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
+    /// Provider-native cache analysis, when this request shape is supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
