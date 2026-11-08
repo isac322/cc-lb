@@ -7179,6 +7179,7 @@ impl Lifecycle {
                                                     "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget before transform output"
                                                 )
                                             },
+                                        };
                                         let frame = make_response_transform_error_frame(
                                             response_affinity_context.capability,
                                             &error,
@@ -7688,6 +7689,7 @@ impl Lifecycle {
                                                 "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget before transform output"
                                             )
                                         },
+                                    };
                                     let frame = make_response_transform_error_frame(
                                         response_affinity_context.capability,
                                         &error,
@@ -7850,6 +7852,7 @@ impl Lifecycle {
                                         "streaming response decode failed before transform output: {error}"
                                     )
                                 },
+                            };
                             let frame = make_response_transform_error_frame(
                                 response_affinity_context.capability,
                                 &transform_error,
