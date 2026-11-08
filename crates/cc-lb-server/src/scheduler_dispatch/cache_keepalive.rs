@@ -247,15 +247,15 @@ impl SchedulerDispatch {
             ));
         };
         let model = snapshot.keepalive_model();
-        let max_tokens = 0;
+        let max_tokens = if snapshot.surface() == Some("responses") {
+            16
+        } else {
+            0
+        };
+        let input_estimate = snapshot.cache_input_token_estimate();
         let cost_estimate_micros = self
             .price_catalog
-            .estimate_max(
-                model,
-                4_000,
-                u64::try_from(max_tokens.max(0)).unwrap_or(0),
-                None,
-            )
+            .estimate_max(model, input_estimate, u64::try_from(max_tokens).unwrap_or(0), None)
             .map(|cost| i64::try_from(cost).unwrap_or(i64::MAX));
         let view = self.dynamic_view.load();
         self.limit_engine
@@ -265,7 +265,7 @@ impl SchedulerDispatch {
                 &record.principal_id,
                 model,
                 Some(max_tokens),
-                4_000,
+                i64::try_from(input_estimate).unwrap_or(i64::MAX),
                 cost_estimate_micros,
             )
             .map(Some)
@@ -301,11 +301,11 @@ impl SchedulerDispatch {
         }
 
         let lead_secs = match record.ttl {
-            cc_lb_storage_api::CacheTtl::Ttl5m => record
+            cc_lb_storage_api::CacheTtl::Ttl5m | cc_lb_storage_api::CacheTtl::Ttl30m => record
                 .config_snapshot
                 .as_ref()
                 .map_or(30, |config| config.refresh_lead_time_5m_secs),
-            cc_lb_storage_api::CacheTtl::Ttl1h => record
+            cc_lb_storage_api::CacheTtl::Ttl1h | cc_lb_storage_api::CacheTtl::Ttl12h => record
                 .config_snapshot
                 .as_ref()
                 .map_or(300, |config| config.refresh_lead_time_1h_secs),

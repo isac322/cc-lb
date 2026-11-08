@@ -4296,7 +4296,8 @@ impl Lifecycle {
         let keepalive_response_enabled =
             self.cache_keepalive_enqueuer.is_some() && cached.cache_keepalive().is_some();
         let track_keepalive_response = keepalive_response_enabled
-            && (!cache_metadata.bundles.official.cache_breakpoints.is_empty()
+            && (cache_metadata.cache_keepalive_surface.is_some()
+                || !cache_metadata.bundles.official.cache_breakpoints.is_empty()
                 || !cache_metadata.bundles.literal.cache_breakpoints.is_empty());
         if track_keepalive_response {
             cache_metadata.request_json = body_view.value().cloned();
@@ -9650,6 +9651,8 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) parent_session_id: Option<String>,
     pub(crate) client_app: Option<String>,
     pub(crate) session_id_source: Option<String>,
+    pub(crate) cache_keepalive_surface: Option<String>,
+    pub(crate) cache_keepalive_ttl: Option<cc_lb_storage_api::CacheTtl>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
@@ -10101,11 +10104,38 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
     let cache_control_block_count = raw_cache_breakpoints.len() as u64;
-
     let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
+    let (cache_keepalive_surface, cache_keepalive_ttl) =
+        if capability == Some(ProviderCapability::OpenaiResponses) {
+            let lifetime = crate::cache_keepalive::openai::parse_lifetime_conservative(value);
+            let eligible = lifetime.is_some_and(|lifetime| {
+                crate::cache_keepalive::openai::eligible_prefix(
+                    &canonical_model_id,
+                    crate::cache_keepalive::openai::visible_prefix_tokens(value),
+                    Some(lifetime),
+                )
+            });
+            if eligible {
+                (
+                    Some("responses".to_owned()),
+                    lifetime.map(|lifetime| match lifetime {
+                        crate::cache_keepalive::openai::Lifetime::ThirtyMinutes => {
+                            cc_lb_storage_api::CacheTtl::Ttl30m
+                        }
+                        crate::cache_keepalive::openai::Lifetime::TwelveHours => {
+                            cc_lb_storage_api::CacheTtl::Ttl12h
+                        }
+                    }),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
 
     RequestCacheMetadata {
         request_json: None,
@@ -10118,6 +10148,8 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         parent_session_id,
         client_app,
         session_id_source,
+        cache_keepalive_surface,
+        cache_keepalive_ttl,
         requested_service_tier,
         message_id,
         message_index,

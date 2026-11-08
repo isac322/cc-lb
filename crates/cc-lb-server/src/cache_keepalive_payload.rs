@@ -65,6 +65,8 @@ struct SnapshotFrameMetadata {
     prefix_policy_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prefix_schema_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    surface: Option<String>,
 }
 
 fn encode_snapshot_frame(
@@ -87,6 +89,7 @@ fn encode_snapshot_frame(
         prefix_hash: snapshot.prefix_hash.clone(),
         prefix_policy_version: snapshot.prefix_policy_version.clone(),
         prefix_schema_version: snapshot.prefix_schema_version.clone(),
+        surface: snapshot.surface.clone(),
     })?;
     let metadata_len =
         u64::try_from(metadata.len()).map_err(|_| CacheKeepalivePayloadError::InvalidLength)?;
@@ -154,6 +157,7 @@ fn decode_snapshot_frame(
         prefix_hash: metadata.prefix_hash,
         prefix_policy_version: metadata.prefix_policy_version,
         prefix_schema_version: metadata.prefix_schema_version,
+        surface: metadata.surface,
     };
     Ok(snapshot)
 }

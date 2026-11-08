@@ -375,11 +375,14 @@ impl LifecycleKeepalive {
         let Some(config) = cached.cache_keepalive().filter(|config| config.enabled) else {
             return;
         };
+        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
+            return;
+        };
         let compaction_boundary = HeuristicClassifier::is_compaction_boundary(response_body_json);
-        if compaction_boundary && cache_metadata.cache_breakpoints.is_empty() {
-            let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-                return;
-            };
+        if compaction_boundary
+            && cache_metadata.cache_breakpoints.is_empty()
+            && cache_metadata.cache_keepalive_surface.is_none()
+        {
             let principal_name: Arc<str> = Arc::from(principal.id.as_str());
             let session_key_hash = session_key.to_string();
             let mut shard = self.session_shard(&session_key).lock().await;
@@ -415,13 +418,13 @@ impl LifecycleKeepalive {
         let Some(request_json) = cache_metadata.request_json.as_ref() else {
             return;
         };
-        let Some(first_breakpoint) = cache_metadata.cache_breakpoints.first() else {
-            return;
-        };
-        let ttl = CacheTtl::from_ttl_str(first_breakpoint.ttl.as_deref());
-        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-            return;
-        };
+        let ttl = cache_metadata.cache_keepalive_ttl.unwrap_or_else(|| {
+            cache_metadata
+                .cache_breakpoints
+                .first()
+                .map(|breakpoint| CacheTtl::from_ttl_str(breakpoint.ttl.as_deref()))
+                .unwrap_or(CacheTtl::Ttl5m)
+        });
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
         let session_key_hash = session_key.to_string();
         let mut shard = self.session_shard(&session_key).lock().await;
@@ -452,7 +455,9 @@ impl LifecycleKeepalive {
                     return;
                 }
             };
-        if let Some(reason) = zero_token_renewal_unsupported_reason(&renewal_request_json) {
+        if cache_metadata.cache_keepalive_surface.is_none()
+            && let Some(reason) = zero_token_renewal_unsupported_reason(&renewal_request_json)
+        {
             self.record_not_tracked(
                 &session_key,
                 principal,
@@ -475,17 +480,37 @@ impl LifecycleKeepalive {
             }
             return;
         }
-        let url =
-            Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
-        let snapshot = match RequestSnapshot::capture(
-            url,
-            http::Method::POST,
-            keepalive_forward_headers(downstream_headers),
-            shaped_body,
-            upstream_id,
-            ttl,
-            config.snapshot_max_bytes as usize,
-        ) {
+        let snapshot_url = if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+        {
+            KEEPALIVE_OPENAI_SNAPSHOT_URL
+        } else {
+            KEEPALIVE_SNAPSHOT_URL
+        };
+        let url = Url::parse(snapshot_url).expect("cache keep-alive snapshot URL is valid");
+        let snapshot_result = if cache_metadata.cache_keepalive_surface.as_deref()
+            == Some("responses")
+        {
+            RequestSnapshot::capture_openai(
+                url,
+                http::Method::POST,
+                keepalive_forward_headers(downstream_headers),
+                shaped_body,
+                upstream_id,
+                ttl,
+                config.snapshot_max_bytes as usize,
+            )
+        } else {
+            RequestSnapshot::capture(
+                url,
+                http::Method::POST,
+                keepalive_forward_headers(downstream_headers),
+                shaped_body,
+                upstream_id,
+                ttl,
+                config.snapshot_max_bytes as usize,
+            )
+        };
+        let snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
             Err(super::SnapshotError::TooLarge { actual, max }) => {
                 tracing::warn!(
@@ -529,8 +554,12 @@ impl LifecycleKeepalive {
         };
         let (fingerprint, hash, policy, schema) = cache_prefix_evidence(cache_metadata);
         let snapshot = snapshot.with_prefix_evidence(fingerprint, hash, policy, schema);
-        let classifier = HeuristicClassifier::new(&config.classifier);
-        match classifier.classify(request_json, response_body_json) {
+        let decision = if cache_metadata.cache_keepalive_surface.is_some() {
+            super::TurnDecision::AgentInTurn
+        } else {
+            HeuristicClassifier::new(&config.classifier).classify(request_json, response_body_json)
+        };
+        match decision {
             super::TurnDecision::AgentInTurn => {
                 if cached_tokens < config.min_cache_tokens {
                     let reason = CacheKeepaliveDisplayReason::CachedPrefixTooSmall {
@@ -564,6 +593,18 @@ impl LifecycleKeepalive {
                     return;
                 }
                 if !is_latest {
+                    return;
+                }
+                if ttl == CacheTtl::Ttl12h {
+                    self.record_not_tracked(
+                        &session_key,
+                        principal,
+                        upstream_id,
+                        ttl,
+                        config,
+                        "openai 12h retention is recorded without read re-anchoring",
+                    )
+                    .await;
                     return;
                 }
                 let params =
@@ -959,6 +1000,7 @@ fn cache_keepalive_principal_uuid(principal_id: &str) -> Uuid {
 }
 
 const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
+const KEEPALIVE_OPENAI_SNAPSHOT_URL: &str = "https://api.openai.com/v1/responses";
 
 #[cfg(test)]
 mod tests {

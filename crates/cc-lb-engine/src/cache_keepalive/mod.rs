@@ -12,6 +12,7 @@
 mod aead_compat;
 mod classifier;
 mod dispatcher;
+pub(crate) mod openai;
 mod display_reason;
 mod lifecycle_glue;
 mod metrics;
