@@ -27,6 +27,13 @@ pub trait PromptCacheObservationSinkLike: Send + Sync {
         &self,
         record: cc_lb_storage_api::PromptCacheObservationRecord,
     ) -> Result<(), PromptCacheObservationEnqueueError>;
+
+    fn enqueue_provider(
+        &self,
+        _record: cc_lb_storage_api::ProviderPromptCacheObservationRecord,
+    ) -> Result<(), PromptCacheObservationEnqueueError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +49,13 @@ impl PromptCacheObservationSinkLike for NoopPromptCacheObservationSink {
     fn enqueue(
         &self,
         _record: cc_lb_storage_api::PromptCacheObservationRecord,
+    ) -> Result<(), PromptCacheObservationEnqueueError> {
+        Ok(())
+    }
+
+    fn enqueue_provider(
+        &self,
+        _record: cc_lb_storage_api::ProviderPromptCacheObservationRecord,
     ) -> Result<(), PromptCacheObservationEnqueueError> {
         Ok(())
     }
