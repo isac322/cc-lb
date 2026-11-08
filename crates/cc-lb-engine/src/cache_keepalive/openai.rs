@@ -34,47 +34,48 @@ impl Lifetime {
 /// Parses the request-level retention option. Any mixed or unknown values
 /// fail closed instead of guessing which provider lifetime was requested.
 pub fn parse_lifetime(value: &Value) -> Option<Lifetime> {
-    let retention = value
-        .get("prompt_cache_retention")
-        .or_else(|| value.get("prompt_cache_options").and_then(|v| v.get("retention")))
-        .and_then(Value::as_str)?;
-    match retention.to_ascii_lowercase().as_str() {
+    let mut declared = Vec::new();
+    collect_lifetimes(value, false, &mut declared);
+    declared.into_iter().next()
+}
+
+fn parse_lifetime_value(raw: &str) -> Option<Lifetime> {
+    match raw.to_ascii_lowercase().as_str() {
         "30m" | "30_min" | "thirty_minutes" => Some(Lifetime::ThirtyMinutes),
         "12h" | "12_hr" | "twelve_hours" => Some(Lifetime::TwelveHours),
         _ => None,
     }
 }
 
-/// Returns the lifetime only when all configured breakpoints agree. OpenAI
-/// currently exposes a single request-level policy; multiple conflicting
-/// retention declarations are intentionally rejected.
-pub fn parse_lifetime_conservative(value: &Value) -> Option<Lifetime> {
-    let lifetime = parse_lifetime(value)?;
-    let mut seen = 0u8;
-    fn walk(value: &Value, lifetime: Lifetime, seen: &mut u8) -> bool {
-        match value {
-            Value::Object(map) => map.iter().all(|(key, child)| {
-                if key == "prompt_cache_retention" {
-                    child.as_str().is_some_and(|raw| {
-                        let normalized = raw.to_ascii_lowercase();
-                        let matches = match lifetime {
-                            Lifetime::ThirtyMinutes =>
-                                matches!(normalized.as_str(), "30m" | "30_min" | "thirty_minutes"),
-                            Lifetime::TwelveHours =>
-                                matches!(normalized.as_str(), "12h" | "12_hr" | "twelve_hours"),
-                        };
-                        *seen = seen.saturating_add(1);
-                        matches
-                    })
-                } else {
-                    walk(child, lifetime, seen)
+fn collect_lifetimes(value: &Value, in_options: bool, declared: &mut Vec<Lifetime>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if key == "prompt_cache_retention" || (in_options && key == "retention") {
+                    if let Some(raw) = child.as_str() {
+                        if let Some(lifetime) = parse_lifetime_value(raw) {
+                            declared.push(lifetime);
+                        }
+                    }
                 }
-            }),
-            Value::Array(values) => values.iter().all(|child| walk(child, lifetime, seen)),
-            _ => true,
+                collect_lifetimes(child, key == "prompt_cache_options", declared);
+            }
         }
+        Value::Array(values) => {
+            for child in values {
+                collect_lifetimes(child, in_options, declared);
+            }
+        }
+        _ => {}
     }
-    walk(value, lifetime, &mut seen).then_some(lifetime)
+}
+
+/// Returns the lifetime only when all configured retention declarations agree.
+pub fn parse_lifetime_conservative(value: &Value) -> Option<Lifetime> {
+    let mut declared = Vec::new();
+    collect_lifetimes(value, false, &mut declared);
+    let first = declared.first().copied()?;
+    declared.iter().all(|lifetime| *lifetime == first).then_some(first)
 }
 
 pub fn is_gpt56_or_newer(model: &str) -> bool {
@@ -161,9 +162,28 @@ mod tests {
 
     #[test]
     fn openai_gpt56_cache_lifetime_parsing() {
-        assert_eq!(parse_lifetime(&json!({"prompt_cache_retention":"30m"})), Some(Lifetime::ThirtyMinutes));
-        assert_eq!(parse_lifetime(&json!({"prompt_cache_retention":"12h"})), Some(Lifetime::TwelveHours));
-        assert_eq!(parse_lifetime_conservative(&json!({"prompt_cache_retention":"30m","input":[{"prompt_cache_retention":"12h"}]})), None);
+        assert_eq!(
+            parse_lifetime(&json!({"prompt_cache_retention":"30m"})),
+            Some(Lifetime::ThirtyMinutes)
+        );
+        assert_eq!(
+            parse_lifetime(&json!({"prompt_cache_retention":"12h"})),
+            Some(Lifetime::TwelveHours)
+        );
+        assert_eq!(
+            parse_lifetime_conservative(&json!({
+                "prompt_cache_retention":"30m",
+                "prompt_cache_options":{"retention":"12h"}
+            })),
+            None
+        );
+        assert_eq!(
+            parse_lifetime_conservative(&json!({
+                "prompt_cache_retention":"30m",
+                "input":[{"prompt_cache_retention":"12h"}]
+            })),
+            None
+        );
     }
 
     #[test]

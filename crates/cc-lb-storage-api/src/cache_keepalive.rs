@@ -229,8 +229,9 @@ impl CacheTtl {
     pub fn from_ttl_str(ttl: Option<&str>) -> Self {
         match ttl {
             Some("1h") => Self::Ttl1h,
-            Some("30m") => Self::Ttl30m,
-            Some("12h") => Self::Ttl12h,
+            // OpenAI retention strings are parsed by its provider-specific
+            // dialect; this Anthropic helper preserves its historical
+            // fallback semantics.
             _ => Self::Ttl5m,
         }
     }
@@ -304,6 +305,8 @@ mod tests {
         assert_eq!(CacheTtl::from_ttl_str(None), CacheTtl::Ttl5m);
         assert_eq!(CacheTtl::from_ttl_str(Some("garbage")), CacheTtl::Ttl5m);
         assert_eq!(CacheTtl::from_ttl_str(Some("5m")), CacheTtl::Ttl5m);
+        assert_eq!(CacheTtl::from_ttl_str(Some("30m")), CacheTtl::Ttl5m);
+        assert_eq!(CacheTtl::from_ttl_str(Some("12h")), CacheTtl::Ttl5m);
         assert_eq!(CacheTtl::from_ttl_str(Some("1h")), CacheTtl::Ttl1h);
     }
 

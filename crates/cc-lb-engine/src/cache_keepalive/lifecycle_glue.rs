@@ -230,7 +230,8 @@ impl LifecycleKeepalive {
         };
         if cache_metadata.explicit_auxiliary
             || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
-            || cache_metadata.cache_breakpoints.is_empty()
+            || (cache_metadata.cache_breakpoints.is_empty()
+                && cache_metadata.cache_keepalive_surface.is_none())
         {
             return;
         }
