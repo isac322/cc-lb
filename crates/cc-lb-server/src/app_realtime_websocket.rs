@@ -34,6 +34,9 @@ fn transform_realtime_message(
     direction: cc_lb_upstream::RealtimeFrameDirection,
     message: UpstreamMessage,
 ) -> Result<Option<UpstreamMessage>, ()> {
+    if !session.has_frame_transform() {
+        return Ok(Some(message));
+    }
     let (kind, payload) = match &message {
         UpstreamMessage::Text(frame) => (
             realtime_payload_kind(frame.as_bytes(), false),
@@ -60,9 +63,6 @@ fn transform_realtime_message(
     }
 }
 
-fn realtime_client_closed() -> StatusCode {
-    StatusCode::from_u16(499).expect("valid client-closed status")
-}
 type RealtimeProvider = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 fn websocket_http_error(error: &WebSocketError) -> Response<Body> {
@@ -348,7 +348,11 @@ pub(super) async fn gemini_live_websocket_handler(
             ) {
                 Ok(Some(first)) => first,
                 Ok(None) | Err(()) => {
-                    session.finish(RealtimeUsage::default(), StatusCode::BAD_GATEWAY);
+                    session.finish(
+                        RealtimeUsage::default(),
+                        RealtimeStreamMetrics::new(),
+                        RealtimeWebSocketTermination::ProxyRelayError,
+                    );
                     let _ = downstream.send(Message::Close(None)).now_or_never();
                     return;
                 }
@@ -358,7 +362,11 @@ pub(super) async fn gemini_live_websocket_handler(
                 _ = state.drain_controller.wait_for_draining() => false,
             };
             if !sent {
-                session.finish(RealtimeUsage::default(), StatusCode::BAD_GATEWAY);
+                session.finish(
+                    RealtimeUsage::default(),
+                    RealtimeStreamMetrics::new(),
+                    RealtimeWebSocketTermination::ProxyRelayError,
+                );
                 return;
             }
             relay_realtime_websocket(
@@ -384,6 +392,7 @@ async fn relay_realtime_websocket(
     // Usage frames are already marker-filtered, so an unbounded handoff keeps
     // accounting lossless without ever blocking the media relay task.
     let (usage_tx, usage_worker) = spawn_realtime_usage_worker(kind);
+    let mut metrics = RealtimeStreamMetrics::new();
     let relay = async {
         loop {
             tokio::select! {
@@ -397,9 +406,9 @@ async fn relay_realtime_websocket(
                             let frame = frame.map(downstream_close_frame);
                             let _ = upstream.send(UpstreamMessage::Close(frame)).await;
                             let _ = downstream.flush().await;
-                            return realtime_client_closed();
+                            return RealtimeWebSocketTermination::DownstreamCancelled;
                         }
-                        Some(Err(_)) | None => return realtime_client_closed(),
+                        Some(Err(_)) | None => return RealtimeWebSocketTermination::DownstreamCancelled,
                     };
                     let message = match transform_realtime_message(
                         &session,
@@ -408,38 +417,45 @@ async fn relay_realtime_websocket(
                     ) {
                         Ok(Some(message)) => message,
                         Ok(None) => continue,
-                        Err(()) => return StatusCode::BAD_GATEWAY,
+                        Err(()) => return RealtimeWebSocketTermination::ProxyRelayError,
                     };
-                    if upstream.send(message).await.is_err() { return StatusCode::BAD_GATEWAY; }
+                    if upstream.send(message).await.is_err() {
+                        return RealtimeWebSocketTermination::ProxyRelayError;
+                    }
                 }
                 message = upstream.next() => {
                     let message = match message {
                         Some(Ok(message @ UpstreamMessage::Text(_))) => {
-                            if let UpstreamMessage::Text(frame) = &message
-                                && kind.may_report_usage(frame.as_bytes())
-                            {
-                                let _ = usage_tx.send(Bytes::from(frame.clone()));
+                            if let UpstreamMessage::Text(frame) = &message {
+                                metrics.observe_frame(frame.as_bytes());
+                                if kind.may_report_usage(frame.as_bytes()) {
+                                    let _ = usage_tx.send(Bytes::from(frame.clone()));
+                                }
                             }
                             message
                         }
                         Some(Ok(message @ UpstreamMessage::Binary(_))) => {
-                            if let UpstreamMessage::Binary(frame) = &message
-                                && kind.may_report_usage(frame)
-                            {
-                                let _ = usage_tx.send(frame.clone());
+                            if let UpstreamMessage::Binary(frame) = &message {
+                                metrics.observe_frame(frame);
+                                if kind.may_report_usage(frame) {
+                                    let _ = usage_tx.send(frame.clone());
+                                }
                             }
                             message
                         }
-                        Some(Ok(message @ UpstreamMessage::Ping(_))) => message,
+                        Some(Ok(message @ UpstreamMessage::Ping(_))) => {
+                            metrics.observe_ping();
+                            message
+                        }
                         Some(Ok(message @ UpstreamMessage::Pong(_))) => message,
                         Some(Ok(UpstreamMessage::Close(frame))) => {
                             let frame = frame.map(upstream_close_frame);
                             let _ = downstream.send(Message::Close(frame)).await;
                             let _ = upstream.flush().await;
-                            return StatusCode::SWITCHING_PROTOCOLS;
+                            return RealtimeWebSocketTermination::ProviderClosed;
                         }
                         Some(Ok(UpstreamMessage::Frame(_))) => continue,
-                        Some(Err(_)) | None => return StatusCode::BAD_GATEWAY,
+                        Some(Err(_)) | None => return RealtimeWebSocketTermination::ProxyRelayError,
                     };
                     let message = match transform_realtime_message(
                         &session,
@@ -448,7 +464,7 @@ async fn relay_realtime_websocket(
                     ) {
                         Ok(Some(message)) => message,
                         Ok(None) => continue,
-                        Err(()) => return StatusCode::BAD_GATEWAY,
+                        Err(()) => return RealtimeWebSocketTermination::ProxyRelayError,
                     };
                     let message = match message {
                         UpstreamMessage::Text(frame) => {
@@ -459,20 +475,22 @@ async fn relay_realtime_websocket(
                         UpstreamMessage::Pong(frame) => Message::Pong(frame),
                         UpstreamMessage::Close(_) | UpstreamMessage::Frame(_) => continue,
                     };
-                    if downstream.send(message).await.is_err() { return realtime_client_closed(); }
+                    if downstream.send(message).await.is_err() {
+                        return RealtimeWebSocketTermination::DownstreamCancelled;
+                    }
                 }
             }
         }
     };
-    let status = tokio::select! {
-        status = relay => status,
-        _ = state.drain_controller.wait_for_draining() => StatusCode::SERVICE_UNAVAILABLE,
+    let termination = tokio::select! {
+        termination = relay => termination,
+        _ = state.drain_controller.wait_for_draining() => RealtimeWebSocketTermination::DownstreamCancelled,
     };
     let _ = upstream.send(UpstreamMessage::Close(None)).now_or_never();
     let _ = downstream.send(Message::Close(None)).now_or_never();
     drop(usage_tx);
     let usage = usage_worker.await.unwrap_or_default();
-    session.finish(usage, status);
+    session.finish(usage, metrics, termination);
 }
 
 #[cfg(test)]

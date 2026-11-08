@@ -23,6 +23,7 @@ impl Lifecycle {
         }
         RealtimeWebSocketObservation {
             observer,
+            completion_observer: Arc::clone(&self.completion_observer),
             request_id,
         }
     }
@@ -40,8 +41,16 @@ impl Lifecycle {
         let RealtimeWebSocketTarget { path, query, model } = target;
         let RealtimeWebSocketObservation {
             observer,
+            completion_observer,
             request_id,
         } = observation;
+        let session_id = headers
+            .get("x-claude-code-session-id")
+            .or_else(|| headers.get("x-claude-session-id"))
+            .or_else(|| headers.get("x-session-affinity"))
+            .or_else(|| headers.get("x-session-id"))
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         if let Some(observer) = observer.as_ref() {
             observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: observer.event_id().to_owned(),
@@ -56,14 +65,18 @@ impl Lifecycle {
                     reasoning_effort: None,
                     cache_breakpoints: Vec::new(),
                     cache_prefix_hash: None,
-                    thread_id: None,
-                    observed_session_id: None,
-                    request_kind: None,
+                    thread_id: session_id.clone(),
+                    observed_session_id: session_id.clone(),
+                    request_kind: Some(match kind {
+                        RealtimeWebSocketKind::Openai => "realtime",
+                        RealtimeWebSocketKind::Gemini => "live",
+                    }
+                    .to_owned()),
                     claude_agent_id: None,
                     claude_parent_agent_id: None,
                     parent_session_id: None,
                     client_app: None,
-                    session_id_source: None,
+                    session_id_source: session_id.as_ref().map(|_| "header".to_owned()),
                     message_id: None,
                     message_index: None,
                     message_count: None,
@@ -317,6 +330,15 @@ impl Lifecycle {
                 url,
                 headers: signed_headers,
                 observer: observer.clone(),
+                completion_observer: Arc::clone(&completion_observer),
+                stream_span: tracing::info_span!(
+                    "proxy.realtime_stream",
+                    upstream_id = %id,
+                    upstream_name = %record.name,
+                    provider = ?kind.provider(),
+                    principal_id = %principal.id,
+                    model = %model.unwrap_or_default(),
+                ),
                 reservation: limit.as_mut().and_then(|limit| limit.reservation.take()),
                 limit_engine: self.limit_engine.clone(),
                 model: model.unwrap_or_default().to_owned(),
