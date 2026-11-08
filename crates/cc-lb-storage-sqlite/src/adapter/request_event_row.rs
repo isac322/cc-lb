@@ -5,8 +5,7 @@ use uuid::Uuid;
 use super::request_events::i64_to_u64;
 use crate::map_sqlx_error;
 
-pub(super) const REQUEST_EVENT_COLUMNS: &str = "id, ts, request_id, source_kind, source_ref_id, event_kind, list_ts_ms, principal_id, key_id, principal_kind, upstream_id, upstream_name, model, list_status, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, thread_id, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, thinking_budget_tokens, reasoning_effort, token_estimate_source, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, list_auth_ms, list_route_ms, list_limit_reserve_ms, list_json_parse_ms, list_cache_structure_ms, list_cache_token_key_ms, list_cache_count_lookup_ms, list_cache_tokenizer_queue_ms, list_cache_serialize_ms, list_cache_tokenize_ms, list_prepare_signer_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused, list_request_body_read_ms, list_request_body_first_chunk_ms, list_request_body_receive_ms, list_request_body_wait_ms, list_request_body_process_ms, list_request_body_chunk_count, list_request_body_bytes, list_duration_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms, list_response_body_wait_ms, list_response_body_process_ms, list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms, list_finalize_ms, body_chunk_count, body_bytes, stream_message_start_ms, stream_content_block_start_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms, stream_message_stop_ms, stream_last_chunk_ms, stream_total_ms, sse_event_count, content_delta_count, ping_count, list_inter_token_avg_ms, error_code, event_id, thinking_tokens, tool_use_prompt_tokens, service_tier, upstream_error_type, upstream_error_message, upstream_http_version, upstream_request_id, upstream_content_encoding, upstream_content_length, upstream_body_bytes, upstream_body_end, upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, upstream_stream_warning_type, upstream_stream_warning_message";
-
+pub(super) const REQUEST_EVENT_COLUMNS: &str = "id, ts, request_id, source_kind, source_ref_id, event_kind, list_ts_ms, principal_id, key_id, principal_kind, upstream_id, upstream_name, model, list_status, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h, thread_id, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, thinking_budget_tokens, reasoning_effort, token_estimate_source, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, list_cost_cache_write_micros, list_cost_cache_write_30m_micros, list_cost_cache_write_12h_micros, list_auth_ms, list_route_ms, list_limit_reserve_ms, list_json_parse_ms, list_cache_structure_ms, list_cache_token_key_ms, list_cache_count_lookup_ms, list_cache_tokenizer_queue_ms, list_cache_serialize_ms, list_cache_tokenize_ms, list_prepare_signer_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused, list_request_body_read_ms, list_request_body_first_chunk_ms, list_request_body_receive_ms, list_request_body_wait_ms, list_request_body_process_ms, list_request_body_chunk_count, list_request_body_bytes, list_duration_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms, list_response_body_wait_ms, list_response_body_process_ms, list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms, list_finalize_ms, body_chunk_count, body_bytes, stream_message_start_ms, stream_content_block_start_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms, stream_message_stop_ms, stream_last_chunk_ms, stream_total_ms, sse_event_count, content_delta_count, ping_count, list_inter_token_avg_ms, error_code, event_id, thinking_tokens, tool_use_prompt_tokens, service_tier, upstream_error_type, upstream_error_message, upstream_http_version, upstream_request_id, upstream_content_encoding, upstream_content_length, upstream_body_bytes, upstream_body_end, upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, upstream_stream_warning_type, upstream_stream_warning_message";
 pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEvent> {
     Ok(RequestEvent {
         ts: i64_to_u64(
@@ -53,6 +52,9 @@ pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEven
         cache_creation_input_tokens_5m: optional_u64(row, "cache_creation_input_tokens_5m")?,
         cache_creation_input_tokens_1h: optional_u64(row, "cache_creation_input_tokens_1h")?,
         cache_read_input_tokens: optional_u64(row, "cache_read_input_tokens")?,
+        cache_write_input_tokens: optional_u64(row, "cache_write_input_tokens")?,
+        cache_write_input_tokens_30m: optional_u64(row, "cache_write_input_tokens_30m")?,
+        cache_write_input_tokens_12h: optional_u64(row, "cache_write_input_tokens_12h")?,
         thread_id: row.try_get("thread_id").map_err(map_sqlx_error)?,
         observed_session_id: row.try_get("observed_session_id").map_err(map_sqlx_error)?,
         request_kind: row.try_get("request_kind").map_err(map_sqlx_error)?,
@@ -85,6 +87,15 @@ pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEven
             .map_err(map_sqlx_error)?,
         cost_cache_read_micros: row
             .try_get("list_cost_cache_read_micros")
+            .map_err(map_sqlx_error)?,
+        cost_cache_write_micros: row
+            .try_get("list_cost_cache_write_micros")
+            .map_err(map_sqlx_error)?,
+        cost_cache_write_30m_micros: row
+            .try_get("list_cost_cache_write_30m_micros")
+            .map_err(map_sqlx_error)?,
+        cost_cache_write_12h_micros: row
+            .try_get("list_cost_cache_write_12h_micros")
             .map_err(map_sqlx_error)?,
         auth_ms: optional_u64(row, "list_auth_ms")?,
         route_ms: optional_u64(row, "list_route_ms")?,

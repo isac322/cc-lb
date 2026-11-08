@@ -60,4 +60,11 @@ pub struct CostBreakdown {
     pub cache_creation_5m_micros: Option<i64>,
     pub cache_creation_1h_micros: Option<i64>,
     pub cache_read_micros: Option<i64>,
+    /// Provider-native OpenAI cache-write costs. `None` means unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_30m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_12h_micros: Option<i64>,
 }

@@ -650,16 +650,21 @@ describe('RequestEventsTable', () => {
       const tooltips = await screen.findAllByText('Cost');
       expect(tooltips.length).toBeGreaterThan(0);
 
-      // Zero and absent categories stay out of the popover.
-      expect(screen.queryByText('Cache create 5m')).toBeNull();
-      expect(screen.queryByText('Cache create 1h')).toBeNull();
+      // Explicitly reported zero categories remain visible so the tooltip
+      // distinguishes a measured zero from an unavailable component.
+      expect(screen.getByText('Cache create 5m')).toBeDefined();
+      expect(screen.getByText('Cache create 1h')).toBeDefined();
+
+      // Absent categories stay out of the popover.
+      expect(screen.queryByText('Cache write 30m')).toBeNull();
+      expect(screen.queryByText('Cache write 12h')).toBeNull();
 
       // Check values
       expect(screen.getAllByText('$0.0010').length).toBeGreaterThan(0);
       expect(screen.getAllByText('$0.0020').length).toBeGreaterThan(0);
       expect(screen.getAllByText('$0.0005').length).toBeGreaterThan(0);
 
-      // No zero-value rows are rendered.
+      // Reported zero-value rows remain visible; unavailable categories do not.
       // Check total
       expect(screen.getAllByText('Total').length).toBeGreaterThan(0);
       // The exact total remains in the accessible trigger and tooltip.
@@ -713,12 +718,18 @@ describe('RequestEventsTable', () => {
       const tooltips = await screen.findAllByText('Estimated cost');
       expect(tooltips.length).toBeGreaterThan(0);
 
-      // A partial zero estimate has no positive categories to list.
-      expect(screen.queryByText('Input')).toBeNull();
-      expect(screen.queryByText('Output')).toBeNull();
-      expect(screen.queryByText('Cache create 5m')).toBeNull();
-      expect(screen.queryByText('Cache create 1h')).toBeNull();
-      expect(screen.queryByText('Cache read')).toBeNull();
+      // Partial rows retain their component labels, while zero estimates use
+      // the em dash marker instead of presenting a measured value.
+      for (const label of [
+        'Input',
+        'Output',
+        'Cache create 5m',
+        'Cache create 1h',
+        'Cache read',
+      ]) {
+        const labelElement = screen.getByText(label);
+        expect(labelElement.parentElement?.textContent).toContain('—');
+      }
     });
   });
 
@@ -880,6 +891,31 @@ describe('RequestEventsTable', () => {
 
       expect(screen.getByText('flex')).toBeDefined();
       expect(screen.queryByText('priority')).toBeNull();
+    });
+
+    it('hides the Gemini unspecified service tier badge', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_gemini_unspecified',
+          request_id: 'req_gemini_unspecified',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'gemini-2.5-pro',
+          service_tier: 'unspecified',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+        />,
+      );
+
+      expect(screen.queryByText('unspecified')).toBeNull();
     });
 
     it('renders no priority badge when service_tier is omitted', () => {

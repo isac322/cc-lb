@@ -92,6 +92,10 @@ impl RealtimeWebSocketSession {
                         input_image_tokens: counts.input_image_tokens,
                         output_image_tokens: counts.output_image_tokens,
                         cache_read_input_tokens: counts.cache_read_input_tokens,
+                        cache_write_input_tokens: counts.cache_write_input_tokens,
+                        cache_write_input_tokens_30m: counts.cache_write_input_tokens_30m,
+                        cache_write_input_tokens_12h: counts.cache_write_input_tokens_12h,
+                        thinking_tokens: counts.thinking_tokens,
                         ..Default::default()
                     },
                     source: UsageSource::NonStreamBody,
@@ -111,17 +115,20 @@ impl RealtimeWebSocketSession {
             self.reservation.take(),
             usage.counts.as_ref(),
         ) {
-            let cost = cc_lb_pricing::virtual_cost_micros_full_with_context_and_images(
+            let cost = cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
                 &self.model,
                 counts.input_tokens,
                 counts.output_tokens,
                 counts.input_image_tokens.unwrap_or(0),
                 counts.output_image_tokens.unwrap_or(0),
-                0,
-                0,
-                0,
+                counts.cache_creation_input_tokens,
+                counts.cache_creation_input_tokens_5m,
+                counts.cache_creation_input_tokens_1h,
                 counts.cache_read_input_tokens,
-                None,
+                counts.cache_write_input_tokens,
+                counts.cache_write_input_tokens_30m,
+                counts.cache_write_input_tokens_12h,
+                counts.service_tier.as_deref(),
             )
             .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown);
             engine.reconcile(
@@ -196,6 +203,30 @@ impl RealtimeUsage {
                 counts.cache_read_input_tokens = counts
                     .cache_read_input_tokens
                     .saturating_add(normalized.cache_read_input_tokens);
+                if let Some(value) = normalized.cache_write_input_tokens {
+                    counts.cache_write_input_tokens = Some(
+                        counts
+                            .cache_write_input_tokens
+                            .unwrap_or_default()
+                            .saturating_add(value),
+                    );
+                }
+                if let Some(value) = normalized.cache_write_input_tokens_30m {
+                    counts.cache_write_input_tokens_30m = Some(
+                        counts
+                            .cache_write_input_tokens_30m
+                            .unwrap_or_default()
+                            .saturating_add(value),
+                    );
+                }
+                if let Some(value) = normalized.cache_write_input_tokens_12h {
+                    counts.cache_write_input_tokens_12h = Some(
+                        counts
+                            .cache_write_input_tokens_12h
+                            .unwrap_or_default()
+                            .saturating_add(value),
+                    );
+                }
                 if let Some(image_tokens) = normalized.input_image_tokens {
                     counts.input_image_tokens = Some(
                         counts
@@ -299,6 +330,23 @@ mod tests {
         let counts = gemini.counts.unwrap();
         assert_eq!(counts.input_image_tokens, None);
         assert_eq!(counts.output_image_tokens, None);
+    }
+
+    #[test]
+    fn realtime_openai_usage_preserves_provider_cache_write_lifetimes() {
+        let mut usage = RealtimeUsage::default();
+        usage.observe(
+            RealtimeWebSocketKind::Openai,
+            &Bytes::from_static(
+                br#"{"type":"response.done","response":{"usage":{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cache_write_tokens":30,"cache_write_tokens_details":{"ttl_30m_tokens":20,"ttl_12h_tokens":10}}}}}"#,
+            ),
+        );
+        let counts = usage
+            .counts
+            .expect("provider cache writes should be present");
+        assert_eq!(counts.cache_write_input_tokens, Some(30));
+        assert_eq!(counts.cache_write_input_tokens_30m, Some(20));
+        assert_eq!(counts.cache_write_input_tokens_12h, Some(10));
     }
 
     #[test]

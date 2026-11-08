@@ -214,6 +214,12 @@ pub struct UsageBucket {
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,
     pub cache_read_input_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
     pub error_count: u64,
     pub virtual_cost_micros: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -226,6 +232,10 @@ pub struct UsageBucket {
     pub cost_cache_creation_1h_micros: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_cache_read_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_30m_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_12h_micros: Option<u64>,
     pub latency_ms_sum: u64,
     pub latency_count: u64,
     pub latency_ms_min: Option<u64>,
@@ -589,6 +599,9 @@ pub(crate) fn empty_bucket(bucket_start_unix_secs: u64) -> UsageBucket {
         output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
+        cache_write_input_tokens: None,
+        cache_write_input_tokens_30m: None,
+        cache_write_input_tokens_12h: None,
         error_count: 0,
         virtual_cost_micros: 0,
         cost_input_micros: None,
@@ -596,6 +609,8 @@ pub(crate) fn empty_bucket(bucket_start_unix_secs: u64) -> UsageBucket {
         cost_cache_creation_5m_micros: None,
         cost_cache_creation_1h_micros: None,
         cost_cache_read_micros: None,
+        cost_cache_write_30m_micros: None,
+        cost_cache_write_12h_micros: None,
         latency_ms_sum: 0,
         latency_count: 0,
         latency_ms_min: None,
@@ -645,6 +660,18 @@ fn add_rollup_to_bucket(
     bucket.output_tokens += rollup.output_tokens;
     bucket.cache_creation_input_tokens += rollup.cache_creation_input_tokens;
     bucket.cache_read_input_tokens += rollup.cache_read_input_tokens;
+    if let Some(value) = rollup.cache_write_input_tokens {
+        bucket.cache_write_input_tokens =
+            Some(bucket.cache_write_input_tokens.unwrap_or_default() + value);
+    }
+    if let Some(value) = rollup.cache_write_input_tokens_30m {
+        bucket.cache_write_input_tokens_30m =
+            Some(bucket.cache_write_input_tokens_30m.unwrap_or_default() + value);
+    }
+    if let Some(value) = rollup.cache_write_input_tokens_12h {
+        bucket.cache_write_input_tokens_12h =
+            Some(bucket.cache_write_input_tokens_12h.unwrap_or_default() + value);
+    }
     bucket.error_count += rollup.error_count;
     bucket.virtual_cost_micros += rollup.virtual_cost_micros;
     if include_cost_components && rollup.cost_components_event_count > 0 {
@@ -663,6 +690,14 @@ fn add_rollup_to_bucket(
         bucket.cost_cache_read_micros = sum_optional(
             bucket.cost_cache_read_micros,
             Some(rollup.cost_cache_read_micros),
+        );
+        bucket.cost_cache_write_30m_micros = sum_optional(
+            bucket.cost_cache_write_30m_micros,
+            Some(rollup.cost_cache_write_30m_micros),
+        );
+        bucket.cost_cache_write_12h_micros = sum_optional(
+            bucket.cost_cache_write_12h_micros,
+            Some(rollup.cost_cache_write_12h_micros),
         );
     }
     bucket.latency_ms_sum += rollup.latency_ms_sum;
@@ -1111,6 +1146,9 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_write_input_tokens: None,
+            cache_write_input_tokens_30m: None,
+            cache_write_input_tokens_12h: None,
             error_count: 0,
             latency_count: request_count,
             latency_ms_sum: request_count * 10,
@@ -1132,6 +1170,8 @@ mod tests {
             cost_cache_creation_5m_micros: 0,
             cost_cache_creation_1h_micros: 0,
             cost_cache_read_micros: 0,
+            cost_cache_write_30m_micros: 0,
+            cost_cache_write_12h_micros: 0,
             cost_components_event_count: 0,
         }
     }

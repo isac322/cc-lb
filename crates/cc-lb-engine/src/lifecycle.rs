@@ -11491,6 +11491,9 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
             }
         },
         cache_read_input_tokens: u.cache_read_input_tokens,
+        cache_write_input_tokens: u.cache_write_input_tokens,
+        cache_write_input_tokens_30m: u.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: u.cache_write_input_tokens_12h,
         thinking_tokens: u.thinking_tokens,
         web_search_requests: u.web_search_requests,
         web_fetch_requests: u.web_fetch_requests,

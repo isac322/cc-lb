@@ -79,6 +79,8 @@ export function TokenBreakdown({ event }: { event: RequestEventWithPhase }) {
     cache_read: event.cache_read_input_tokens ?? 0,
     cache_create_5m: event.cache_creation_input_tokens_5m ?? 0,
     cache_create_1h: event.cache_creation_input_tokens_1h ?? 0,
+    cache_write_30m: event.cache_write_input_tokens_30m ?? 0,
+    cache_write_12h: event.cache_write_input_tokens_12h ?? 0,
     input: event.input_tokens ?? 0,
     output: event.output_tokens ?? 0,
   };
@@ -107,6 +109,8 @@ export function CostBreakdown({ event }: { event: RequestEventWithPhase }) {
     cache_read: event.cost_cache_read_micros ?? 0,
     cache_create_5m: event.cost_cache_creation_5m_micros ?? 0,
     cache_create_1h: event.cost_cache_creation_1h_micros ?? 0,
+    cache_write_30m: event.cost_cache_write_30m_micros ?? 0,
+    cache_write_12h: event.cost_cache_write_12h_micros ?? 0,
     input: event.cost_input_micros ?? 0,
     output: event.cost_output_micros ?? 0,
   };

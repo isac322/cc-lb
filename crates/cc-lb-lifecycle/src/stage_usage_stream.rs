@@ -33,6 +33,14 @@ pub struct UsageSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
     pub thinking_tokens: u64,
+    /// Provider-native cache writes. `None` means unavailable; `Some(0)` is
+    /// an explicitly reported zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
     pub web_search_requests: u64,
     pub web_fetch_requests: u64,
     pub service_tier: Option<String>,

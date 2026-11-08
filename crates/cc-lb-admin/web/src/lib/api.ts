@@ -371,6 +371,9 @@ export interface UsageBucket {
   cost_cache_creation_5m_micros?: number | null;
   cost_cache_creation_1h_micros?: number | null;
   cost_cache_read_micros?: number | null;
+  cost_cache_write_micros?: number | null;
+  cost_cache_write_30m_micros?: number | null;
+  cost_cache_write_12h_micros?: number | null;
   latency_ms_sum: number;
   latency_count: number;
 }
@@ -497,6 +500,9 @@ export const RequestEventPartialSchema = z.looseObject({
   cache_creation_input_tokens_5m: z.number().nullable().optional(),
   cache_creation_input_tokens_1h: z.number().nullable().optional(),
   cache_read_input_tokens: z.number().nullable().optional(),
+  cache_write_input_tokens: z.number().nullable().optional(),
+  cache_write_input_tokens_30m: z.number().nullable().optional(),
+  cache_write_input_tokens_12h: z.number().nullable().optional(),
   thinking_tokens: z.number().nullable().optional(),
   thinking_budget_tokens: z.number().nullable().optional(),
   reasoning_effort: z.string().nullable().optional(),
@@ -507,6 +513,9 @@ export const RequestEventPartialSchema = z.looseObject({
   cost_cache_creation_5m_micros: z.number().nullable().optional(),
   cost_cache_creation_1h_micros: z.number().nullable().optional(),
   cost_cache_read_micros: z.number().nullable().optional(),
+  cost_cache_write_micros: z.number().nullable().optional(),
+  cost_cache_write_30m_micros: z.number().nullable().optional(),
+  cost_cache_write_12h_micros: z.number().nullable().optional(),
   auth_ms: z.number().nullable().optional(),
   route_ms: z.number().nullable().optional(),
   limit_reserve_ms: z.number().nullable().optional(),
@@ -610,6 +619,9 @@ export interface RequestEvent {
   cache_creation_input_tokens?: number;
   cache_creation_input_tokens_5m?: number;
   cache_creation_input_tokens_1h?: number;
+  cache_write_input_tokens?: number | null;
+  cache_write_input_tokens_30m?: number | null;
+  cache_write_input_tokens_12h?: number | null;
   tool_use_prompt_tokens?: number | null;
   cache_read_input_tokens?: number;
   native_cache?: RequestNativeCacheObservation | null;
@@ -619,6 +631,9 @@ export interface RequestEvent {
   cost_cache_creation_5m_micros?: number;
   cost_cache_creation_1h_micros?: number;
   cost_cache_read_micros?: number;
+  cost_cache_write_micros?: number | null;
+  cost_cache_write_30m_micros?: number | null;
+  cost_cache_write_12h_micros?: number | null;
   duration_ms: number;
   elapsed_ms?: number | null;
   request_body_read_ms?: number | null;
