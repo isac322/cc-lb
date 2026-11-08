@@ -18,7 +18,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::authn_rail::Authenticated;
-use crate::lifecycle::Lifecycle;
+use crate::lifecycle::{Lifecycle, PromptCacheObservationContext};
 use crate::response_transform::ResponseTransformContext;
 use crate::terminal_observer::{InternalFailure, LifecycleContext, UpstreamErrorCode};
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value};
@@ -147,6 +147,7 @@ pub(crate) struct WebSocketIngress<'a> {
 pub(crate) struct PreparedWebSocketTurn {
     pub candidates: Vec<WebSocketCandidate>,
     pub observer: Option<LifecycleContext>,
+    pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
     pub reservation: Option<Reservation>,
     pub limit_engine: Option<Arc<LimitEngine>>,
     pub principal_id: String,
@@ -1561,6 +1562,13 @@ impl ResponsesWebSocketGateway {
                 lane.active = successor.filter(|successor| !lane.queued.contains(successor));
             }
             lane.queued.retain(|id| *id != turn_id);
+        }
+        if let (Some(context), Some(usage)) = (
+            turn.prepared.prompt_cache_observation_context.take(),
+            turn.usage.as_ref(),
+        ) {
+            self.lifecycle
+                .publish_websocket_provider_cache_observation(&context, usage);
         }
         if let Some(observer) = turn.prepared.observer.as_ref() {
             if let Some(usage) = turn.usage.take() {

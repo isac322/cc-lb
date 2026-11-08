@@ -4063,6 +4063,18 @@ impl Lifecycle {
         )
     }
 
+    pub(crate) fn publish_websocket_provider_cache_observation(
+        &self,
+        context: &PromptCacheObservationContext,
+        usage: &UsageCounts,
+    ) {
+        publish_provider_cache_observation(
+            context,
+            PromptCacheUsage::from(usage),
+            unix_secs(self.clock.now()),
+        );
+    }
+
     /// Route and reserve one logical create; never dispatch an HTTP request.
     /// The gateway records authentication before parsing any client frame.
     pub(crate) async fn prepare_websocket_turn(
@@ -4215,6 +4227,20 @@ impl Lifecycle {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            let prompt_cache_observation_context = prompt_cache_observation_context(
+                &view,
+                selected_id,
+                &ctx.canonical_model_id,
+                &[],
+                &HashSet::new(),
+                None,
+                provider_cache::analyze(
+                    ProviderCapability::OpenaiResponses,
+                    body.as_ref(),
+                    &ctx.canonical_model_id,
+                    ingress.headers,
+                ),
+            );
             span.record("gen_ai.request.model", model.as_str());
             span.record("cc_lb.upstream.id", tracing::field::display(selected_id));
             let route_info = route_info_for_routed(&routed, Some(&model));
@@ -4308,6 +4334,7 @@ impl Lifecycle {
                 candidates,
                 route_info,
                 observer: observer.clone(),
+                prompt_cache_observation_context,
                 reservation: active_limit
                     .as_mut()
                     .and_then(|limit| limit.reservation.take()),
@@ -13156,6 +13183,43 @@ mod tests {
         };
         assert_eq!(record.retention_secs, None);
         assert_eq!(record.expires_at_unix_secs, None);
+    }
+
+    #[test]
+    fn websocket_native_observation_publication_uses_lifecycle_clock() {
+        let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+        let lifecycle =
+            read_inference_lifecycle(upstream_response(StatusCode::OK, b""), sink.clone(), None);
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1_126),
+            canonical_model_id: "gpt-5.6".to_owned(),
+            cache_breakpoints: Vec::new(),
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: None,
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                ..Default::default()
+            }),
+            sink: sink.clone(),
+            grace_margin_secs: 0,
+        };
+        let usage = UsageCounts {
+            cache_read_input_tokens: 128,
+            cache_read_evidence: usage_parser::CacheTokenEvidence::Positive,
+            ..UsageCounts::default()
+        };
+
+        lifecycle.publish_websocket_provider_cache_observation(&context, &usage);
+
+        let records = sink.provider_upserts();
+        let [record] = records.as_slice() else {
+            panic!("expected one provider observation");
+        };
+        assert_eq!(record.upstream_id, context.upstream_id);
+        assert_eq!(record.canonical_model_id, context.canonical_model_id);
+        assert_eq!(record.observed_cached_tokens, Some(128));
+        assert_eq!(record.last_observed_at_unix_secs, 1_800_000_000);
     }
 
     #[test]
