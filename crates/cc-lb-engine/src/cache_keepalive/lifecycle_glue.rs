@@ -850,6 +850,13 @@ impl StreamingKeepaliveResponse {
         let Ok(Some(value)) = event.value() else {
             return;
         };
+        if matches!(
+            value.get("type").and_then(Value::as_str),
+            Some("response.completed" | "response.incomplete")
+        ) {
+            self.openai_response = value.get("response").cloned();
+            return;
+        }
         match event.event_name() {
             Some(b"response.completed") => {
                 self.openai_response = value.get("response").cloned();
@@ -1458,6 +1465,18 @@ mod tests {
             value["usage"]["input_tokens_details"]["cached_tokens"],
             1100
         );
+    }
+
+    #[test]
+    fn streaming_openai_data_only_terminals_become_response_bodies() {
+        for event in [
+            br#"data: {"type":"response.completed","response":{"model":"gpt-5.6","usage":{"input_tokens":10}}}"# as &[u8],
+            br#"data: {"type":"response.incomplete","response":{"model":"gpt-5.6","usage":{"input_tokens":11}}}"#,
+        ] {
+            let mut response = StreamingKeepaliveResponse::default();
+            response.observe(&crate::usage_parser::parse_sse_event(event));
+            assert_eq!(response.into_value().unwrap()["model"], "gpt-5.6");
+        }
     }
     #[test]
     fn emitted_sse_batch_observes_every_transformed_content_block() {

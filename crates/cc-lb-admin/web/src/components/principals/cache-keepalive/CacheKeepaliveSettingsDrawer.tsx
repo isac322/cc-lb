@@ -117,6 +117,7 @@ export function CacheKeepaliveSettingsDrawer({
     setExtraTools(snapshot.extraTools);
     setTreatAmbiguous(snapshot.treatAmbiguous);
     setOpenaiResponsesEnabled(snapshot.openaiResponsesEnabled);
+    setNewTool('');
   }, [open, principal.id]);
 
   const reset = () => {
@@ -132,6 +133,7 @@ export function CacheKeepaliveSettingsDrawer({
     setExtraTools(snapshot.extraTools);
     setTreatAmbiguous(snapshot.treatAmbiguous);
     setOpenaiResponsesEnabled(snapshot.openaiResponsesEnabled);
+    setNewTool('');
   };
   const latestPrincipal =
     conflictPrincipal ??
@@ -149,6 +151,7 @@ export function CacheKeepaliveSettingsDrawer({
       snapshotBytes,
       extraTools,
       treatAmbiguous,
+      openaiResponsesEnabled,
     };
     const next =
       preserveDraft && initial
@@ -186,6 +189,10 @@ export function CacheKeepaliveSettingsDrawer({
               current.treatAmbiguous !== initial.treatAmbiguous
                 ? current.treatAmbiguous
                 : server.treatAmbiguous,
+            openaiResponsesEnabled:
+              current.openaiResponsesEnabled !== initial.openaiResponsesEnabled
+                ? current.openaiResponsesEnabled
+                : server.openaiResponsesEnabled,
           }
         : server;
 
@@ -199,6 +206,7 @@ export function CacheKeepaliveSettingsDrawer({
     setSnapshotBytes(next.snapshotBytes);
     setExtraTools(next.extraTools);
     setTreatAmbiguous(next.treatAmbiguous);
+    setOpenaiResponsesEnabled(next.openaiResponsesEnabled);
     if (!preserveDraft) initialDraftRef.current = server;
     setConflict(false);
     setConflictPrincipal(null);

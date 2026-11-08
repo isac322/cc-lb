@@ -668,10 +668,10 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
                      + CASE r.ttl
-                           WHEN '1h' THEN 3_600_000
-                           WHEN '30m' THEN 1_800_000
-                           WHEN '12h' THEN 43_200_000
-                           ELSE 300_000
+                           WHEN '1h' THEN 3600000
+                           WHEN '30m' THEN 1800000
+                           WHEN '12h' THEN 43200000
+                           ELSE 300000
                        END
             ),
             pending_current AS (
@@ -792,10 +792,10 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.request_start_ms > r.request_start_ms
                  AND f.request_start_ms <= r.request_start_ms
                      + CASE r.ttl
-                           WHEN '1h' THEN 3_600_000
-                           WHEN '30m' THEN 1_800_000
-                           WHEN '12h' THEN 43_200_000
-                           ELSE 300_000
+                           WHEN '1h' THEN 3600000
+                           WHEN '30m' THEN 1800000
+                           WHEN '12h' THEN 43200000
+                           ELSE 300000
                        END
              ),
              selected_follow_ups AS (
@@ -820,10 +820,10 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                  AND f.follow_up_request_start_ms > r.request_start_ms
                  AND f.follow_up_request_start_ms <= r.request_start_ms
                      + CASE r.ttl
-                           WHEN '1h' THEN 3_600_000
-                           WHEN '30m' THEN 1_800_000
-                           WHEN '12h' THEN 43_200_000
-                           ELSE 300_000
+                           WHEN '1h' THEN 3600000
+                           WHEN '30m' THEN 1800000
+                           WHEN '12h' THEN 43200000
+                           ELSE 300000
                        END
              )
              SELECT r.model, r.ttl, COALESCE(SUM(r.cache_read_input_tokens), 0)::BIGINT AS avoided_cache_read_tokens,
