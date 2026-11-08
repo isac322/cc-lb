@@ -671,6 +671,21 @@ async fn upsert_rollup_delta(
               output_tokens = usage_rollups_v2.output_tokens + excluded.output_tokens, \
               cache_creation_input_tokens = usage_rollups_v2.cache_creation_input_tokens + excluded.cache_creation_input_tokens, \
               cache_read_input_tokens = usage_rollups_v2.cache_read_input_tokens + excluded.cache_read_input_tokens, \
+              cache_write_input_tokens = CASE \
+                  WHEN usage_rollups_v2.cache_write_input_tokens IS NULL THEN excluded.cache_write_input_tokens \
+                  WHEN excluded.cache_write_input_tokens IS NULL THEN usage_rollups_v2.cache_write_input_tokens \
+                  ELSE usage_rollups_v2.cache_write_input_tokens + excluded.cache_write_input_tokens \
+              END, \
+              cache_write_input_tokens_30m = CASE \
+                  WHEN usage_rollups_v2.cache_write_input_tokens_30m IS NULL THEN excluded.cache_write_input_tokens_30m \
+                  WHEN excluded.cache_write_input_tokens_30m IS NULL THEN usage_rollups_v2.cache_write_input_tokens_30m \
+                  ELSE usage_rollups_v2.cache_write_input_tokens_30m + excluded.cache_write_input_tokens_30m \
+              END, \
+              cache_write_input_tokens_12h = CASE \
+                  WHEN usage_rollups_v2.cache_write_input_tokens_12h IS NULL THEN excluded.cache_write_input_tokens_12h \
+                  WHEN excluded.cache_write_input_tokens_12h IS NULL THEN usage_rollups_v2.cache_write_input_tokens_12h \
+                  ELSE usage_rollups_v2.cache_write_input_tokens_12h + excluded.cache_write_input_tokens_12h \
+              END, \
               error_count = usage_rollups_v2.error_count + excluded.error_count, \
               latency_count = usage_rollups_v2.latency_count + excluded.latency_count, \
               latency_ms_sum = usage_rollups_v2.latency_ms_sum + excluded.latency_ms_sum, \
