@@ -8,7 +8,10 @@
 use std::{error::Error, str::FromStr};
 
 use cc_lb_domain::TtlClass;
-use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
+use cc_lb_storage_api::{
+    PromptCacheObservationRecord, PromptCacheObservationStore,
+    ProviderPromptCacheObservationRecord,
+};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe,
@@ -95,6 +98,75 @@ async fn postgres_prompt_cache_purge_removes_expired() -> TestResult<()> {
         vec![active]
     );
     assert_eq!(PromptCacheObservationStore::count(&store).await?, 1);
+
+    fixture.drop_schema().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn postgres_provider_cache_unknown_or_expired_rows_are_not_active_and_are_purged()
+-> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let store = fixture.store();
+    let upstream_id = Uuid::new_v4();
+    let base = ProviderPromptCacheObservationRecord {
+        upstream_id,
+        provider: "gemini".to_owned(),
+        canonical_model_id: "gemini-2.5-pro".to_owned(),
+        mode: "explicit".to_owned(),
+        isolation_scope: "scope".to_owned(),
+        identity_hash: "sha256:identity".to_owned(),
+        boundary: "resource".to_owned(),
+        evidence_source: "provider_usage_metadata".to_owned(),
+        observed_cached_tokens: Some(256),
+        observed_write_tokens: None,
+        retention_secs: None,
+        expires_at_unix_secs: None,
+        last_observed_at_unix_secs: 100,
+    };
+    let mut expired = base.clone();
+    expired.boundary = "expired".to_owned();
+    expired.expires_at_unix_secs = Some(100);
+    let mut active = base.clone();
+    active.boundary = "active".to_owned();
+    active.expires_at_unix_secs = Some(300);
+    for record in [&base, &expired, &active] {
+        PromptCacheObservationStore::upsert_provider_observation(&store, record).await?;
+    }
+
+    let before_purge = PromptCacheObservationStore::list_active_provider_observations(
+        &store,
+        upstream_id,
+        "gemini",
+        "gemini-2.5-pro",
+        "explicit",
+        "scope",
+        "sha256:identity",
+        200,
+    )
+    .await?;
+    assert_eq!(before_purge.len(), 1);
+    assert_eq!(before_purge[0].boundary, "active");
+
+    assert_eq!(
+        PromptCacheObservationStore::purge_expired_before(&store, 200).await?,
+        2
+    );
+    let after_purge = PromptCacheObservationStore::list_active_provider_observations(
+        &store,
+        upstream_id,
+        "gemini",
+        "gemini-2.5-pro",
+        "explicit",
+        "scope",
+        "sha256:identity",
+        200,
+    )
+    .await?;
+    assert_eq!(after_purge, vec![active]);
 
     fixture.drop_schema().await?;
     Ok(())

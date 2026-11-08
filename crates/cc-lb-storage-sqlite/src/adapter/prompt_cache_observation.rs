@@ -125,7 +125,7 @@ impl PromptCacheObservationStore for SqliteStorage {
         let rows = sqlx::query(
             "SELECT upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at \
              FROM provider_native_cache_observations WHERE upstream_id = ? AND provider = ? AND canonical_model_id = ? AND mode = ? AND isolation_scope = ? AND identity_hash = ? \
-             AND (expires_at IS NULL OR expires_at > ?) ORDER BY boundary",
+             AND expires_at > ? ORDER BY boundary",
         )
         .bind(upstream_id.to_string())
         .bind(provider)
@@ -240,7 +240,26 @@ impl PromptCacheObservationStore for SqliteStorage {
             .map_err(map_sqlx_error)?
             .rows_affected();
             total_removed = total_removed.saturating_add(removed);
-            if removed < PURGE_BATCH_SIZE as u64 {
+
+            let provider_removed = sqlx::query(
+                "DELETE FROM provider_native_cache_observations \
+                 WHERE (expires_at IS NULL OR expires_at < ?) \
+                   AND rowid IN ( \
+                       SELECT rowid FROM provider_native_cache_observations \
+                       WHERE expires_at IS NULL OR expires_at < ? LIMIT ? \
+                   )",
+            )
+            .bind(cutoff)
+            .bind(cutoff)
+            .bind(PURGE_BATCH_SIZE)
+            .execute(self.pool())
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected();
+            total_removed = total_removed.saturating_add(provider_removed);
+            if removed < PURGE_BATCH_SIZE as u64
+                && provider_removed < PURGE_BATCH_SIZE as u64
+            {
                 break;
             }
         }

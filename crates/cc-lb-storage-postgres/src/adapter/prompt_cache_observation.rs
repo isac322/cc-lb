@@ -113,7 +113,7 @@ impl PromptCacheObservationStore for PostgresStorage {
         not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<ProviderPromptCacheObservationRecord>> {
         let rows = sqlx::query(
-            "SELECT upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at FROM provider_native_cache_observations WHERE upstream_id = $1 AND provider = $2 AND canonical_model_id = $3 AND mode = $4 AND isolation_scope = $5 AND identity_hash = $6 AND (expires_at IS NULL OR expires_at > $7) ORDER BY boundary",
+            "SELECT upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at FROM provider_native_cache_observations WHERE upstream_id = $1 AND provider = $2 AND canonical_model_id = $3 AND mode = $4 AND isolation_scope = $5 AND identity_hash = $6 AND expires_at > $7 ORDER BY boundary",
         )
         .bind(upstream_id)
         .bind(provider)
@@ -226,7 +226,39 @@ impl PromptCacheObservationStore for PostgresStorage {
                 deleted_count,
                 "prompt cache purge deleted count",
             )?);
-            if candidate_count < PURGE_BATCH_SIZE {
+
+            let provider_row = sqlx::query(
+                "WITH candidates AS MATERIALIZED ( \
+                     SELECT ctid FROM provider_native_cache_observations \
+                     WHERE expires_at IS NULL OR expires_at < $1 LIMIT $2 \
+                 ), deleted AS ( \
+                     DELETE FROM provider_native_cache_observations \
+                     WHERE ctid IN (SELECT ctid FROM candidates) \
+                       AND (expires_at IS NULL OR expires_at < $1) \
+                     RETURNING 1 \
+                 ) \
+                 SELECT \
+                     (SELECT count(*) FROM candidates) AS candidate_count, \
+                     (SELECT count(*) FROM deleted) AS deleted_count",
+            )
+            .bind(cutoff)
+            .bind(PURGE_BATCH_SIZE)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            let provider_candidate_count: i64 = provider_row
+                .try_get("candidate_count")
+                .map_err(map_sqlx_error)?;
+            let provider_deleted_count: i64 = provider_row
+                .try_get("deleted_count")
+                .map_err(map_sqlx_error)?;
+            total_removed = total_removed.saturating_add(i64_to_u64(
+                provider_deleted_count,
+                "provider cache purge deleted count",
+            )?);
+            if candidate_count < PURGE_BATCH_SIZE
+                && provider_candidate_count < PURGE_BATCH_SIZE
+            {
                 break;
             }
         }

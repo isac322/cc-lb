@@ -1427,12 +1427,22 @@ fn native_cache_with_usage(
                 .parse
                 .as_ref()
                 .and_then(|parse| parse.model.as_deref());
-            partial
-                .usage_seen
-                .then_some(crate::provider_cache::normalize_cached_tokens(
+            partial.usage_seen.then_some({
+                let tokens = crate::provider_cache::normalize_cached_tokens(
                     model,
                     partial.usage.cache_read_input_tokens,
-                ))
+                );
+                // Older OpenAI cache contracts round token counts down to 128-token
+                // boundaries, but a reported positive observation must remain
+                // positive in durable request evidence.
+                if evidence == cc_lb_request_log::RequestCacheEvidence::Positive
+                    && partial.usage.cache_read_input_tokens > 0
+                {
+                    tokens.max(1)
+                } else {
+                    tokens
+                }
+            })
         }
         cc_lb_request_log::RequestCacheEvidence::Unreported
         | cc_lb_request_log::RequestCacheEvidence::Invalid => None,
@@ -5438,4 +5448,29 @@ mod tests {
             "sink shutdown runs once, after every offer"
         );
     }
+    #[test]
+    fn positive_older_openai_cached_tokens_never_serialize_zero() {
+        let mut partial = Partial::default();
+        partial.parse = Some(ParseInfo {
+            model: Some("gpt-5".to_owned()),
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        partial.usage_seen = true;
+        partial.usage.cache_read_input_tokens = 64;
+        partial.usage.cache_read_evidence =
+            Some(cc_lb_request_log::RequestCacheEvidence::Positive);
+
+        let native = native_cache_with_usage(&partial).expect("native cache observation");
+        assert_eq!(native.cached_tokens, Some(1));
+        assert_eq!(
+            native.evidence,
+            cc_lb_request_log::RequestCacheEvidence::Positive
+        );
+    }
+
 }

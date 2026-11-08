@@ -642,9 +642,15 @@ pub(crate) fn merge_usage_value_for_shape(
     reported: &Value,
     shape: Option<UsageShape>,
 ) {
+    let anthropic_cache_creation_evidence = cache_creation_evidence(reported);
     usage
         .cache_creation_evidence
-        .merge(cache_creation_evidence(reported));
+        .merge(anthropic_cache_creation_evidence);
+    if !has_anthropic_cache_creation_fields(reported) {
+        usage
+            .cache_creation_evidence
+            .merge(provider_cache_creation_evidence(reported));
+    }
     usage.cache_read_evidence.merge(
         reported
             .get("cache_read_input_tokens")
@@ -1087,6 +1093,49 @@ fn bounded_upstream_error(
     )
 }
 
+fn has_anthropic_cache_creation_fields(usage: &Value) -> bool {
+    [
+        "cache_creation_input_tokens",
+        "cache_creation",
+        "cache_creation_input_tokens_5m",
+        "cache_creation_input_tokens_1h",
+    ]
+    .into_iter()
+    .any(|field| usage.get(field).is_some())
+}
+
+fn provider_cache_creation_evidence(usage: &Value) -> CacheTokenEvidence {
+    let values = [
+        usage
+            .get("input_tokens_details")
+            .and_then(|details| details.get("cache_write_tokens")),
+        usage
+            .get("input_token_details")
+            .and_then(|details| details.get("cache_write_tokens")),
+        usage.get("cacheCreationTokenCount"),
+    ];
+    let mut invalid = false;
+    for value in values.into_iter().flatten() {
+        if value.is_null() {
+            continue;
+        }
+        match CacheTokenEvidence::from_value(value) {
+            CacheTokenEvidence::Unreported => unreachable!("value is present"),
+            evidence @ (CacheTokenEvidence::Zero | CacheTokenEvidence::Positive) => {
+                return evidence;
+            }
+            CacheTokenEvidence::Invalid => invalid = true,
+        }
+    }
+    if invalid {
+        CacheTokenEvidence::Invalid
+    } else {
+        CacheTokenEvidence::Unreported
+    }
+}
+
+/// Parse Anthropic's cache-creation fields, which require a complete
+/// representation when split buckets are used.
 fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
     let flat = usage
         .get("cache_creation_input_tokens")
@@ -1675,6 +1724,40 @@ mod tests {
         );
         assert_eq!(usage.cache_creation_input_tokens, 30);
         assert_eq!(usage.input_tokens, 50);
+    }
+
+    #[test]
+    fn provider_cache_write_evidence_distinguishes_zero_positive_and_invalid() {
+        for (reported, expected) in [
+            (
+                serde_json::json!({"input_tokens_details": {"cache_write_tokens": 0}}),
+                CacheTokenEvidence::Zero,
+            ),
+            (
+                serde_json::json!({"input_token_details": {"cache_write_tokens": 7}}),
+                CacheTokenEvidence::Positive,
+            ),
+            (
+                serde_json::json!({"cacheCreationTokenCount": 0}),
+                CacheTokenEvidence::Zero,
+            ),
+            (
+                serde_json::json!({"cacheCreationTokenCount": 11}),
+                CacheTokenEvidence::Positive,
+            ),
+            (
+                serde_json::json!({"cacheCreationTokenCount": "7"}),
+                CacheTokenEvidence::Invalid,
+            ),
+            (
+                serde_json::json!({}),
+                CacheTokenEvidence::Unreported,
+            ),
+        ] {
+            let mut usage = UsageCounts::default();
+            merge_usage_value(&mut usage, &reported);
+            assert_eq!(usage.cache_creation_evidence, expected, "{reported}");
+        }
     }
 
     #[test]
