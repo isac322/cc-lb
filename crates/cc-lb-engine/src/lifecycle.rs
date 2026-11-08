@@ -3258,11 +3258,26 @@ impl Lifecycle {
         error: &BuiltinAuthError,
         path: &str,
     ) -> Response<Body> {
+        self.reject_responses_websocket_authentication_for_provider(error, path, None)
+    }
+
+    pub fn reject_responses_websocket_authentication_for_provider(
+        &self,
+        error: &BuiltinAuthError,
+        path: &str,
+        provider: Option<cc_lb_domain::Provider>,
+    ) -> Response<Body> {
         let (observer, _) = self.websocket_observer(path);
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
-        crate::authn_rail::reject_unauthenticated(error, observer.as_ref())
+        crate::authn_rail::reject_unauthenticated_for_route(
+            error,
+            &http::Method::GET,
+            path,
+            provider,
+            observer.as_ref(),
+        )
     }
 
     /// Route and reserve one logical create; never dispatch an HTTP request.

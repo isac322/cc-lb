@@ -2831,6 +2831,7 @@ async fn responses_websocket_handler(
     State(state): State<ProxyState>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
     // WebSocket routes intentionally bypass the normal drain middleware.
@@ -2852,7 +2853,11 @@ async fn responses_websocket_handler(
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error, "/v1/responses");
+                .reject_responses_websocket_authentication_for_provider(
+                    &error,
+                    uri.path(),
+                    provider_scope.as_ref().map(|scope| scope.0.0),
+                );
         }
     };
     let slots: usize = state
@@ -2867,6 +2872,7 @@ async fn responses_websocket_handler(
         state.body_caps.messages,
         slots,
     )
+    .with_provider(provider_scope.as_ref().map(|scope| scope.0.0))
     .with_downstream_query(uri.query().and_then(|query| {
         let scrubbed = scrub_query_api_key(query);
         (!scrubbed.is_empty()).then_some(scrubbed.into_owned())
@@ -3582,8 +3588,10 @@ async fn lifecycle_handler(
         Ok(auth) => auth,
         Err(error) => {
             let provider = parts.extensions.get::<ProviderScope>().map(|scope| scope.0);
-            return cc_lb_engine::reject_unauthenticated_for_provider(
+            return cc_lb_engine::reject_unauthenticated_for_route(
                 &error,
+                &parts.method,
+                parts.uri.path(),
                 provider,
                 observer.as_ref(),
             );

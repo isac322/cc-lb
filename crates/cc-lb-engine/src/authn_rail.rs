@@ -28,10 +28,11 @@ use axum::response::Response;
 use cc_lb_control::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_domain::Provider;
-use http::StatusCode;
+use http::header::{CONTENT_TYPE, RETRY_AFTER};
+use http::{Method, HeaderValue, StatusCode};
 
 use crate::error_format::{provider_error_response, provider_error_response_with_retry_after};
-use crate::provider_capability::ProviderCapability;
+use crate::provider_capability::{ProviderCapability, classify};
 use crate::terminal_observer::{LifecycleContext, error_codes};
 
 fn auth_capability(provider: Option<Provider>) -> ProviderCapability {
@@ -42,28 +43,77 @@ fn auth_capability(provider: Option<Provider>) -> ProviderCapability {
     }
 }
 
-pub fn reject_unauthenticated_for_provider(
-    error: &BuiltinAuthError,
+fn auth_capability_for_route(
+    method: &Method,
+    path: &str,
     provider: Option<Provider>,
+) -> Option<ProviderCapability> {
+    provider.map(|provider| auth_capability(Some(provider))).or_else(|| {
+        // The shared Responses WebSocket route is GET-only and therefore
+        // does not appear in the POST capability classifier.
+        (method == Method::GET && path == "/v1/responses")
+            .then_some(ProviderCapability::OpenaiResponses)
+            .or_else(|| classify(method, path, None))
+    })
+}
+
+fn generic_error_response(
+    status: StatusCode,
+    error_type: &str,
+    message: &str,
+    retry_after_secs: Option<u64>,
+) -> Response<Body> {
+    let mut response = Response::new(Body::from(
+        serde_json::json!({
+            "error": error_type,
+            "message": message,
+        })
+        .to_string(),
+    ));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
+    if let Some(retry_after_secs) = retry_after_secs {
+        if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+            response.headers_mut().insert(RETRY_AFTER, value);
+        }
+    }
+    response
+}
+
+fn reject_unauthenticated_with_capability(
+    error: &BuiltinAuthError,
+    capability: Option<ProviderCapability>,
     observer: Option<&LifecycleContext>,
 ) -> Response<Body> {
     let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-    let capability = auth_capability(provider);
-    let response = match error {
-        BuiltinAuthError::Unavailable => provider_error_response_with_retry_after(
+    let retry_after_secs = matches!(error, BuiltinAuthError::Unavailable).then_some(1);
+    let response = match (capability, retry_after_secs) {
+        (Some(capability), Some(retry_after_secs)) => provider_error_response_with_retry_after(
             capability,
             StatusCode::SERVICE_UNAVAILABLE,
             "authentication_error",
             &error.to_string(),
             None,
-            1,
+            retry_after_secs,
         ),
-        _ => provider_error_response(
+        (Some(capability), None) => provider_error_response(
             capability,
             status,
             "authentication_error",
             &error.to_string(),
             None,
+        ),
+        (None, retry_after_secs) => generic_error_response(
+            if retry_after_secs.is_some() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                status
+            },
+            "authentication_error",
+            &error.to_string(),
+            retry_after_secs,
         ),
     };
     if let Some(o) = observer {
@@ -90,6 +140,34 @@ pub fn reject_unauthenticated_for_provider(
         });
     }
     response
+}
+
+pub fn reject_unauthenticated_for_provider(
+    error: &BuiltinAuthError,
+    provider: Option<Provider>,
+    observer: Option<&LifecycleContext>,
+) -> Response<Body> {
+    reject_unauthenticated_with_capability(
+        error,
+        Some(auth_capability(provider)),
+        observer,
+    )
+}
+
+/// Build a provider-native rejection from route metadata available before the
+/// request body is read. Ambiguous paths use a provider-neutral JSON fallback.
+pub fn reject_unauthenticated_for_route(
+    error: &BuiltinAuthError,
+    method: &Method,
+    path: &str,
+    provider: Option<Provider>,
+    observer: Option<&LifecycleContext>,
+) -> Response<Body> {
+    reject_unauthenticated_with_capability(
+        error,
+        auth_capability_for_route(method, path, provider),
+        observer,
+    )
 }
 
 /// Build an Anthropic-shaped rejection for unscoped legacy callers.
@@ -332,5 +410,79 @@ mod tests {
                 "{provider:?} rejection must not dispatch or route: {events:?}",
             );
         }
+    }
+    #[tokio::test]
+    async fn route_auth_rejections_classify_generation_paths_before_body_reads() {
+        let cases: [(Method, &str, Option<Provider>, fn(&Value) -> bool); 3] = [
+            (
+                Method::POST,
+                "/v1/responses",
+                None,
+                |value: &Value| {
+                    value.get("error").and_then(Value::as_object).is_some()
+                        && value.get("type").is_none()
+                },
+            ),
+            (
+                Method::POST,
+                "/v1beta/models/gemini-2.5-pro:generateContent",
+                None,
+                |value: &Value| {
+                    value
+                        .get("error")
+                        .and_then(Value::as_object)
+                        .is_some_and(|error| {
+                            error.get("code").and_then(Value::as_u64).is_some()
+                                && error.get("status").and_then(Value::as_str).is_some()
+                        })
+                },
+            ),
+            (
+                Method::POST,
+                "/v1/unknown",
+                None,
+                |value: &Value| {
+                    value.get("error").and_then(Value::as_str)
+                        == Some("authentication_error")
+                        && value.get("type").is_none()
+                },
+            ),
+        ];
+
+        for (method, path, provider, assert_shape) in cases {
+            let response = reject_unauthenticated_for_route(
+                &BuiltinAuthError::MissingHeader,
+                &method,
+                path,
+                provider,
+                None,
+            );
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("auth response body collects")
+                .to_bytes();
+            let value: Value = serde_json::from_slice(&body).expect("auth response is JSON");
+            assert!(assert_shape(&value), "unexpected auth envelope: {value}");
+        }
+
+        let response = reject_unauthenticated_for_route(
+            &BuiltinAuthError::MissingHeader,
+            &Method::POST,
+            "/v1/messages",
+            Some(Provider::Openai),
+            None,
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("scoped auth response body collects")
+            .to_bytes();
+        let value: Value = serde_json::from_slice(&body).expect("scoped auth response is JSON");
+        assert!(value.get("error").and_then(Value::as_object).is_some());
+        assert!(value.get("type").is_none());
     }
 }
