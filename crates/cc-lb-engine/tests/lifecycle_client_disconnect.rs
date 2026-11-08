@@ -381,7 +381,9 @@ async fn native_provider_transform_failure_is_terminal_once() {
             "{provider:?} transform failure must not use the Anthropic outer error wrapper: {text:?}",
         );
         assert!(
-            text.contains("\"error\":{") && (text.contains("\"api_error\"") || text.contains("\"response_transform_error\"")),
+            text.contains("\"error\":{")
+                && (text.contains("\"api_error\"")
+                    || text.contains("\"response_transform_error\"")),
             "{provider:?} transform failure must use a provider-shaped error object: {text:?}",
         );
         assert!(
