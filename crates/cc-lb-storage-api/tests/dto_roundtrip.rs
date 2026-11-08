@@ -416,6 +416,7 @@ fn batch_b_wire_snapshots_are_stable() {
             }],
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         }],
+        native_cache: None,
         token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         cost_usd_micros: Some(987_654),
         cost_input_micros: Some(111_000),

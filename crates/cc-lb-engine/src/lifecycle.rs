@@ -33,8 +33,8 @@ use cc_lb_request_log::{
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision};
 use cc_lb_storage_api::{
     PrincipalKind as DbPrincipalKind, PrincipalKindLite, PromptCacheObservationRecord,
-    StoredApiKeyRecord, UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityStore,
-    UpstreamRateLimitObservationRecord, UpstreamRecord,
+    ProviderPromptCacheObservationRecord, StoredApiKeyRecord, UpstreamAffinityBinding,
+    UpstreamAffinityKey, UpstreamAffinityStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
 };
 #[cfg(test)]
@@ -84,6 +84,7 @@ use crate::prompt_cache_simulator::{
     PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
     analyze_v3_prompt_cache,
 };
+use crate::provider_cache;
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
@@ -134,7 +135,7 @@ pub type Body = AxumBody;
 /// Version 6 excludes the official Anthropic billing-header system block from
 /// effective cache identity while preserving literal custom-upstream identity.
 /// The version filter cold-starts older persisted observations.
-pub const HASH_SCHEMA_VERSION: u8 = 6;
+pub use cc_lb_domain::HASH_SCHEMA_VERSION;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
@@ -1897,6 +1898,7 @@ pub struct PromptCacheObservationContext {
     pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
     pub(crate) cacheable_breakpoint_prefix_keys: HashSet<String>,
     pub(crate) selected_match: Option<SelectedCacheMatch>,
+    pub(crate) native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
     /// Direct non-blocking publication port for decoded observations.
     /// Replaces the old lifecycle-bus hop: enqueue failures are reported
     /// and never fail the request.
@@ -1910,6 +1912,8 @@ pub struct PromptCacheObservationContext {
 pub(crate) struct PromptCacheUsage {
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_read_input_tokens: u64,
+    pub(crate) cache_creation_evidence: cc_lb_request_log::RequestCacheEvidence,
+    pub(crate) cache_read_evidence: cc_lb_request_log::RequestCacheEvidence,
     /// True only for present valid positive reads and complete numeric zero
     /// creation evidence, never from accounting counters' zero defaults.
     pub(crate) read_only_evidence: bool,
@@ -1920,8 +1924,39 @@ impl From<&UsageCounts> for PromptCacheUsage {
         Self {
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_evidence: request_cache_evidence(usage.cache_creation_evidence),
+            cache_read_evidence: request_cache_evidence(usage.cache_read_evidence),
             read_only_evidence: usage.has_affirmative_read_only_cache_usage(),
         }
+    }
+}
+
+fn request_cache_evidence(
+    evidence: usage_parser::CacheTokenEvidence,
+) -> cc_lb_request_log::RequestCacheEvidence {
+    match evidence {
+        usage_parser::CacheTokenEvidence::Unreported => {
+            cc_lb_request_log::RequestCacheEvidence::Unreported
+        }
+        usage_parser::CacheTokenEvidence::Zero => cc_lb_request_log::RequestCacheEvidence::Zero,
+        usage_parser::CacheTokenEvidence::Positive => {
+            cc_lb_request_log::RequestCacheEvidence::Positive
+        }
+        usage_parser::CacheTokenEvidence::Invalid => {
+            cc_lb_request_log::RequestCacheEvidence::Invalid
+        }
+    }
+}
+
+fn native_tokens_for_evidence(
+    evidence: cc_lb_request_log::RequestCacheEvidence,
+    tokens: u64,
+) -> Option<u64> {
+    match evidence {
+        cc_lb_request_log::RequestCacheEvidence::Zero
+        | cc_lb_request_log::RequestCacheEvidence::Positive => Some(tokens),
+        cc_lb_request_log::RequestCacheEvidence::Unreported
+        | cc_lb_request_log::RequestCacheEvidence::Invalid => None,
     }
 }
 
@@ -1954,8 +1989,9 @@ pub(crate) fn prompt_cache_observation_context(
     cache_breakpoints: &[CacheBreakpoint],
     cacheable_breakpoint_prefix_keys: &HashSet<String>,
     selected_match: Option<SelectedCacheMatch>,
+    native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
 ) -> Option<PromptCacheObservationContext> {
-    if canonical_model_id.is_empty() || cache_breakpoints.is_empty() {
+    if canonical_model_id.is_empty() || (cache_breakpoints.is_empty() && native_cache.is_none()) {
         return None;
     }
     let sink = Arc::clone(&view.prompt_cache_observation_sink);
@@ -1965,6 +2001,7 @@ pub(crate) fn prompt_cache_observation_context(
         cache_breakpoints: cache_breakpoints.to_vec(),
         cacheable_breakpoint_prefix_keys: cacheable_breakpoint_prefix_keys.clone(),
         selected_match,
+        native_cache,
         sink,
         grace_margin_secs: view.prompt_cache_grace_margin_secs,
     })
@@ -2098,6 +2135,59 @@ pub(crate) fn publish_prompt_cache_observations(
                 PromptCacheObservationEnqueueError::ChannelClosed => {
                     tracing::warn!("prompt cache observation sink is closed");
                 }
+            }
+        }
+    }
+}
+
+pub(crate) fn publish_prompt_cache_observations_with_usage(
+    context: &PromptCacheObservationContext,
+    decode: &PromptCacheObservationDecodeResult,
+    usage: PromptCacheUsage,
+    now_unix_secs: u64,
+) {
+    publish_prompt_cache_observations(context, decode, now_unix_secs);
+    publish_provider_cache_observation(context, usage, now_unix_secs);
+}
+
+fn publish_provider_cache_observation(
+    context: &PromptCacheObservationContext,
+    usage: PromptCacheUsage,
+    now_unix_secs: u64,
+) {
+    let Some(native) = context.native_cache.as_ref() else {
+        return;
+    };
+    let record = ProviderPromptCacheObservationRecord {
+        upstream_id: context.upstream_id,
+        provider: native.provider.clone(),
+        canonical_model_id: context.canonical_model_id.clone(),
+        mode: native.mode.clone(),
+        isolation_scope: native.scope.clone().unwrap_or_default(),
+        identity_hash: native.identity_hash.clone().unwrap_or_default(),
+        boundary: native.boundary.clone().unwrap_or_default(),
+        evidence_source: native.evidence_source.clone().unwrap_or_default(),
+        observed_cached_tokens: native_tokens_for_evidence(
+            usage.cache_read_evidence,
+            usage.cache_read_input_tokens,
+        ),
+        observed_write_tokens: native_tokens_for_evidence(
+            usage.cache_creation_evidence,
+            usage.cache_creation_input_tokens,
+        ),
+        retention_secs: native.retention_secs,
+        expires_at_unix_secs: native.expires_at_unix_secs.or_else(|| {
+            native
+                .retention_secs
+                .map(|ttl| now_unix_secs.saturating_add(ttl))
+        }),
+        last_observed_at_unix_secs: now_unix_secs,
+    };
+    if let Err(error) = context.sink.enqueue_provider(record) {
+        match error {
+            PromptCacheObservationEnqueueError::ChannelFull => {}
+            PromptCacheObservationEnqueueError::ChannelClosed => {
+                tracing::warn!("provider prompt cache observation sink is closed");
             }
         }
     }
@@ -3297,6 +3387,14 @@ impl Lifecycle {
                         message_index: None,
                         message_count: None,
                         cache_control_message_indices: Vec::new(),
+                        native_cache: provider_cache::analyze(
+                            ProviderCapability::OpenaiResponses,
+                            body.as_ref(),
+                            body.get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            ingress.headers,
+                        ),
                     }),
                 });
             }
@@ -4228,6 +4326,7 @@ impl Lifecycle {
                     cache_control_message_indices: cache_metadata
                         .cache_control_message_indices
                         .clone(),
+                    native_cache: cache_metadata.native_cache.clone(),
                 }),
             });
         }
@@ -4909,6 +5008,7 @@ impl Lifecycle {
             &routed.cache_bundle.cache_breakpoints,
             &routed.cache_bundle.cacheable_breakpoint_prefix_keys,
             routed.selected_cache_match.take(),
+            cache_metadata.native_cache.clone(),
         );
         cache_metadata.cache_control_message_indices = routed
             .cache_bundle
@@ -5492,17 +5592,26 @@ impl Lifecycle {
                     .saturating_add(usage.cache_creation_input_tokens),
             );
         }
-        if usage.has_billable_usage()
-            && status == StatusCode::OK
+        if status.is_success()
             && let Some(context) = prompt_cache_observation_context.as_ref()
         {
             let now_unix_secs = unix_secs(self.clock.now());
-            let decode = decode_prompt_cache_observations_pure(
-                context,
-                PromptCacheUsage::from(&usage),
-                dispatch_unix_secs,
-            );
-            publish_prompt_cache_observations(context, &decode, now_unix_secs);
+            let prompt_cache_usage = PromptCacheUsage::from(&usage);
+            if usage.has_billable_usage() {
+                let decode = decode_prompt_cache_observations_pure(
+                    context,
+                    prompt_cache_usage,
+                    dispatch_unix_secs,
+                );
+                publish_prompt_cache_observations_with_usage(
+                    context,
+                    &decode,
+                    prompt_cache_usage,
+                    now_unix_secs,
+                );
+            } else {
+                publish_provider_cache_observation(context, prompt_cache_usage, now_unix_secs);
+            }
         }
         // Hand the reservation to the reconcile subscriber for every buffered outcome:
         // it reconciles a measured success and refunds errors on `RequestTerminated`.
@@ -7968,6 +8077,20 @@ impl Lifecycle {
             } else if stream_transform_error.is_some() {
                 downstream_drop_guard.mark_proxy_error(StreamTerminationCause::TransformError);
             }
+            if status.is_success()
+                && stream_affinity_error.is_none()
+                && stream_upstream_error.is_none()
+                && stream_transform_error.is_none()
+                && !stream_provider_error_seen
+                && let Some(context) = prompt_cache_observation_context.as_ref()
+            {
+                publish_provider_cache_observation(
+                    context,
+                    PromptCacheUsage::from(&usage),
+                    unix_secs(affinity_clock.now()),
+                );
+            }
+
             let finalize_ms = if let Some(o) = observer.as_ref() {
                 if usage.has_billable_usage() {
                     o.set_usage_counts(&usage, message_stop_at.is_some());
@@ -9537,6 +9660,7 @@ mod prompt_cache_policy_tests {
             cache_breakpoints: literal.cache_breakpoints.clone(),
             cacheable_breakpoint_prefix_keys: literal.cacheable_breakpoint_prefix_keys.clone(),
             selected_match: None,
+            native_cache: None,
             sink: Arc::new(NoopPromptCacheObservationSink),
             grace_margin_secs: 0,
         };
@@ -9546,6 +9670,7 @@ mod prompt_cache_policy_tests {
                 cache_creation_input_tokens: 8_192,
                 cache_read_input_tokens: 0,
                 read_only_evidence: false,
+                ..PromptCacheUsage::default()
             },
             1_800_000_000,
         );
@@ -9666,6 +9791,7 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub(crate) cache_prefix_hash: Option<String>,
     pub(crate) bundles: PromptCacheBundles,
+    pub(crate) native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
     canonical_model_id: String,
 }
 
@@ -10134,6 +10260,9 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         .map(canonical_model_id)
         .unwrap_or_default()
         .to_owned();
+    let native_cache = capability.and_then(|capability| {
+        provider_cache::analyze(capability, value, &canonical_model_id, headers)
+    });
     let requested_service_tier = value
         .get("service_tier")
         .and_then(Value::as_str)
@@ -10264,6 +10393,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             official: official_bundle,
             literal: literal_bundle,
         },
+        native_cache,
         canonical_model_id,
     }
 }
@@ -11186,6 +11316,30 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_creation_input_tokens_5m: u.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: u.cache_creation_input_tokens_1h,
+        cache_read_evidence: match u.cache_read_evidence {
+            usage_parser::CacheTokenEvidence::Unreported => None,
+            usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
+        cache_creation_evidence: match u.cache_creation_evidence {
+            usage_parser::CacheTokenEvidence::Unreported => None,
+            usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
         cache_read_input_tokens: u.cache_read_input_tokens,
         thinking_tokens: u.thinking_tokens,
         web_search_requests: u.web_search_requests,
@@ -11448,6 +11602,25 @@ mod tests {
                 Some(cc_lb_storage_api::CacheTtl::Ttl30m),
                 Some("prefix-a"),
             )
+        );
+    }
+
+    #[test]
+    fn native_observation_tokens_keep_zero_distinct_from_absent() {
+        assert_eq!(
+            super::native_tokens_for_evidence(cc_lb_request_log::RequestCacheEvidence::Zero, 0,),
+            Some(0)
+        );
+        assert_eq!(
+            super::native_tokens_for_evidence(
+                cc_lb_request_log::RequestCacheEvidence::Unreported,
+                0,
+            ),
+            None
+        );
+        assert_eq!(
+            super::native_tokens_for_evidence(cc_lb_request_log::RequestCacheEvidence::Invalid, 10,),
+            None
         );
     }
 
@@ -11981,6 +12154,7 @@ mod tests {
                         cache_breakpoints: vec![cache_breakpoint(3, "cached", 2_400, ttl)],
                         cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["cached"]),
                         selected_match: is_hit.then(|| selected_match_hit("cached", 3, ttl, 2_400)),
+                        native_cache: None,
                         sink: Arc::new(RecordingPromptCacheObservationSink::new(Vec::new())),
                         grace_margin_secs: config.grace_margin_secs,
                     };
@@ -11990,6 +12164,7 @@ mod tests {
                             cache_creation_input_tokens: if is_hit { 0 } else { 2_400 },
                             cache_read_input_tokens: if is_hit { 2_400 } else { 0 },
                             read_only_evidence: false,
+                            ..PromptCacheUsage::default()
                         },
                         dispatch,
                     );
@@ -12054,6 +12229,7 @@ mod tests {
             ],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["write"]),
             selected_match: Some(selected_match_hit("hit", 1, TtlClass::Ephemeral1h, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12080,6 +12256,36 @@ mod tests {
     }
 
     #[test]
+    fn provider_observation_without_lifetime_keeps_expiry_unknown() {
+        let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1_126),
+            canonical_model_id: "gpt-5.6".to_owned(),
+            cache_breakpoints: Vec::new(),
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: None,
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                evidence: cc_lb_request_log::RequestCacheEvidence::Positive,
+                cached_tokens: Some(128),
+                ..Default::default()
+            }),
+            sink: sink.clone(),
+            grace_margin_secs: 0,
+        };
+
+        publish_provider_cache_observation(&context, PromptCacheUsage::default(), 1_800_000_000);
+
+        let records = sink.provider_upserts();
+        let [record] = records.as_slice() else {
+            panic!("expected one provider observation");
+        };
+        assert_eq!(record.retention_secs, None);
+        assert_eq!(record.expires_at_unix_secs, None);
+    }
+
+    #[test]
     fn hit_observation_uses_sliding_ttl_from_now() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000224").unwrap();
         let now = 1_800_000_000;
@@ -12099,6 +12305,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12155,6 +12362,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12198,6 +12406,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 1_200, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12227,6 +12436,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "tiny", 1_023, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12268,6 +12478,7 @@ mod tests {
             ],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 1, TtlClass::Ephemeral1h, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12302,6 +12513,7 @@ mod tests {
             ],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["write"]),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral1h, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12338,6 +12550,7 @@ mod tests {
                 ttl_class: TtlClass::Ephemeral5m,
                 estimated_prefix_bytes: PrefixBytes::new(2_000),
             }),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12375,6 +12588,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(2, "owner", 5_000, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("nk", 0, TtlClass::Ephemeral5m, 2_000)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12418,6 +12632,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["hit"]),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12459,6 +12674,7 @@ mod tests {
             )],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12497,6 +12713,7 @@ mod tests {
             ],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["b0", "b1", "b2", "b3"]),
             selected_match: Some(selected_match_hit("b1", 1, TtlClass::Ephemeral5m, 2_500)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12552,6 +12769,7 @@ mod tests {
                 ttl_class: TtlClass::Ephemeral5m,
                 estimated_prefix_bytes: PrefixBytes::new(2_400),
             }),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12599,6 +12817,7 @@ mod tests {
                 "shallow-eligible",
             ]),
             selected_match: None,
+            native_cache: None,
             grace_margin_secs: 30,
             sink: cache,
         }
@@ -12896,6 +13115,7 @@ mod tests {
                     .official
                     .cacheable_breakpoint_prefix_keys,
                 selected_match: None,
+                native_cache: None,
                 sink: cache.clone(),
                 grace_margin_secs: 30,
             };
@@ -12961,6 +13181,7 @@ mod tests {
                     .official
                     .cacheable_breakpoint_prefix_keys,
                 selected_match: None,
+                native_cache: None,
                 sink: cache.clone(),
                 grace_margin_secs: 30,
             };
@@ -13228,6 +13449,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(3, "cached", 2_400, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["cached"]),
             selected_match: None,
+            native_cache: None,
             sink: sink.clone(),
             grace_margin_secs: 0,
         };
@@ -14751,6 +14973,7 @@ mod tests {
 
     struct RecordingPromptCacheObservationSink {
         records: Mutex<Vec<PromptCacheObservationRecord>>,
+        provider_records: Mutex<Vec<ProviderPromptCacheObservationRecord>>,
         clock_now: u64,
         grace_secs: u64,
     }
@@ -14758,6 +14981,7 @@ mod tests {
         fn new(_entries: Vec<WarmCacheEntry>) -> Self {
             Self {
                 records: Mutex::new(Vec::new()),
+                provider_records: Mutex::new(Vec::new()),
                 clock_now: 0,
                 grace_secs: 30,
             }
@@ -14773,6 +14997,12 @@ mod tests {
         fn upserts(&self) -> Vec<PromptCacheObservationRecord> {
             self.records.lock().expect("records lock").clone()
         }
+        fn provider_upserts(&self) -> Vec<ProviderPromptCacheObservationRecord> {
+            self.provider_records
+                .lock()
+                .expect("provider records lock")
+                .clone()
+        }
         fn clock_now_unix_secs(&self) -> u64 {
             self.clock_now
         }
@@ -14786,6 +15016,16 @@ mod tests {
             record: PromptCacheObservationRecord,
         ) -> Result<(), PromptCacheObservationEnqueueError> {
             self.records.lock().expect("records lock").push(record);
+            Ok(())
+        }
+        fn enqueue_provider(
+            &self,
+            record: ProviderPromptCacheObservationRecord,
+        ) -> Result<(), PromptCacheObservationEnqueueError> {
+            self.provider_records
+                .lock()
+                .expect("provider records lock")
+                .push(record);
             Ok(())
         }
     }

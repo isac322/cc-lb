@@ -599,6 +599,70 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
+        sqlx::query(
+            "DELETE FROM cache_keepalive_evidence AS f
+             WHERE f.evidence_kind = 'follow_up'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM cache_keepalive_sessions AS s
+                   WHERE s.principal_id = f.principal_id
+                     AND s.upstream_id = f.upstream_id
+                     AND s.status = 'active'
+                     AND s.enqueue_state = 'running'
+               )
+               AND (
+                   f.cache_read_input_tokens IS NULL
+                   OR f.cache_read_input_tokens <= 0
+                   OR f.prefix_hash IS NULL
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM cache_keepalive_evidence AS r
+                       WHERE r.evidence_kind = 'renewal'
+                         AND r.cycle_id IS NOT NULL
+                         AND r.prefix_policy_version IS NOT NULL
+                         AND r.prefix_schema_version IS NOT NULL
+                         AND r.principal_id = f.principal_id
+                         AND r.upstream_id = f.upstream_id
+                         AND r.model = f.model
+                         AND r.prefix_hash = f.prefix_hash
+                         AND f.request_start_ms > r.request_start_ms
+                         AND f.request_start_ms <= r.request_start_ms +
+                             CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM cache_keepalive_evidence AS e
+                             WHERE e.evidence_kind = 'follow_up'
+                               AND e.cache_read_input_tokens > 0
+                               AND e.prefix_hash IS NOT NULL
+                               AND e.principal_id = r.principal_id
+                               AND e.upstream_id = r.upstream_id
+                               AND e.model = r.model
+                               AND (e.request_start_ms < f.request_start_ms OR
+                                    (e.request_start_ms = f.request_start_ms AND e.evidence_id < f.evidence_id))
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM cache_keepalive_evidence AS r2
+                                   WHERE r2.evidence_kind = 'renewal'
+                                     AND r2.cycle_id = r.cycle_id
+                                     AND r2.cycle_id IS NOT NULL
+                                     AND r2.prefix_policy_version IS NOT NULL
+                                     AND r2.prefix_schema_version IS NOT NULL
+                                     AND r2.principal_id = r.principal_id
+                                     AND r2.upstream_id = r.upstream_id
+                                     AND r2.model = r.model
+                                     AND r2.prefix_hash = e.prefix_hash
+                                     AND e.request_start_ms > r2.request_start_ms
+                                     AND e.request_start_ms <= r2.request_start_ms +
+                                         CASE r2.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                               )
+                         )
+                   )
+             )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
         Ok(result.rows_affected())
     }
 
