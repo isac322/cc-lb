@@ -393,6 +393,7 @@ async function runProviderRegression(spec, workDir, offset, selectedUpstream) {
         },
         (upstreamResponse) => {
           let sent = false;
+          upstreamResponse.on('data', (chunk) => {
             if (mode === 'fault' && !sent) {
               sent = true;
               res.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
