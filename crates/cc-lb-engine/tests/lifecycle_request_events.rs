@@ -315,7 +315,7 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
         let dispatch = gateway
             .client_message(
                 auth,
-                Bytes::from_static(br#"{"type":"response.create","model":"gpt-test"}"#),
+                Bytes::from_static(br#"{"type":"response.create","stream_id":"main","model":"gpt-test"}"#),
             )
             .await
             .expect("response.create is admitted")
