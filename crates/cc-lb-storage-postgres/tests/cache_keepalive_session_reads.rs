@@ -2,11 +2,11 @@ use std::{collections::BTreeSet, future::Future, str::FromStr, sync::Arc};
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
-    CacheKeepaliveSessionCursor, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter,
-    CacheKeepaliveSessionListItem, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl,
-    MetaStore, RequestEvent, RequestEventProjections, RequestEventStore, StorageError,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveSessionCursor,
+    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListItem,
+    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore,
+    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl, MetaStore, RequestEvent,
+    RequestEventProjections, RequestEventStore, StorageError,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -246,24 +246,21 @@ async fn append_filtered_evidence_uses_bounded_cycle_window_case(url: &str) -> R
     )
     .fetch_one(storage.pool())
     .await?;
-    assert_eq!(no_recent_count, 0, "unrelated historical rows are fast-rejected");
+    assert_eq!(
+        no_recent_count, 0,
+        "unrelated historical rows are fast-rejected"
+    );
 
     let cycle_id = Uuid::from_u128(0x1149_01);
     let mut old_renewal = economics_projection("postgres-old-renewal", Some(cycle_id), 0, "hit", 1);
     old_renewal.evidence[0].prefix_hash = Some("retained-prefix-hash".to_owned());
     storage
-        .append_request_event_with_projections(
-            &event("postgres-old-renewal", 0),
-            &old_renewal,
-        )
+        .append_request_event_with_projections(&event("postgres-old-renewal", 0), &old_renewal)
         .await?;
     let mut first_follow_up = follow_up_evidence("postgres-old-follow-up", 0, "claude-sonnet-4-5");
     first_follow_up.request_start_ms = 1_000;
     storage
-        .append_request_event_with_evidence(
-            &event("postgres-old-follow-up", 0),
-            &[first_follow_up],
-        )
+        .append_request_event_with_evidence(&event("postgres-old-follow-up", 0), &[first_follow_up])
         .await?;
     let mut recent_renewal =
         economics_projection("postgres-recent-renewal", Some(cycle_id), 4_000, "hit", 1);
@@ -294,8 +291,13 @@ async fn append_filtered_evidence_uses_bounded_cycle_window_case(url: &str) -> R
     );
 
     let boundary_cycle = Uuid::from_u128(0x1149_02);
-    let mut boundary_renewal =
-        economics_projection("postgres-boundary-renewal", Some(boundary_cycle), 10_000, "hit", 1);
+    let mut boundary_renewal = economics_projection(
+        "postgres-boundary-renewal",
+        Some(boundary_cycle),
+        10_000,
+        "hit",
+        1,
+    );
     boundary_renewal.evidence[0].ttl = CacheTtl::Ttl1h;
     storage
         .append_request_event_with_projections(
@@ -317,7 +319,10 @@ async fn append_filtered_evidence_uses_bounded_cycle_window_case(url: &str) -> R
     )
     .fetch_one(storage.pool())
     .await?;
-    assert_eq!(boundary_count, 1, "the one-hour TTL boundary remains inclusive");
+    assert_eq!(
+        boundary_count, 1,
+        "the one-hour TTL boundary remains inclusive"
+    );
 
     storage
         .replace_from_real_request(&request("postgres-running", 20_000, "running"))

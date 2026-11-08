@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
-    CacheKeepaliveSessionCursor, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter,
-    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore,
-    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
-    RequestEventProjections, RequestEventStore, StorageError,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveSessionCursor,
+    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
+    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent, RequestEventProjections,
+    RequestEventStore, StorageError,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -199,7 +199,10 @@ async fn append_filtered_evidence_uses_bounded_cycle_window() {
     .fetch_one(storage.pool())
     .await
     .expect("count no-recent evidence");
-    assert_eq!(no_recent_count, 0, "unrelated historical rows are fast-rejected");
+    assert_eq!(
+        no_recent_count, 0,
+        "unrelated historical rows are fast-rejected"
+    );
 
     let cycle_id = Uuid::from_u128(0x1149_01);
     let mut old_renewal = economics_projection("sqlite-old-renewal", Some(cycle_id), 0, "hit", 1);
@@ -211,10 +214,7 @@ async fn append_filtered_evidence_uses_bounded_cycle_window() {
     let mut first_follow_up = follow_up_evidence("sqlite-old-follow-up", 0, "claude-sonnet-4-5");
     first_follow_up.request_start_ms = 1_000;
     storage
-        .append_request_event_with_evidence(
-            &event("sqlite-old-follow-up", 0),
-            &[first_follow_up],
-        )
+        .append_request_event_with_evidence(&event("sqlite-old-follow-up", 0), &[first_follow_up])
         .await
         .expect("append old follow-up");
     let mut recent_renewal =
@@ -249,8 +249,13 @@ async fn append_filtered_evidence_uses_bounded_cycle_window() {
     );
 
     let boundary_cycle = Uuid::from_u128(0x1149_02);
-    let mut boundary_renewal =
-        economics_projection("sqlite-boundary-renewal", Some(boundary_cycle), 10_000, "hit", 1);
+    let mut boundary_renewal = economics_projection(
+        "sqlite-boundary-renewal",
+        Some(boundary_cycle),
+        10_000,
+        "hit",
+        1,
+    );
     boundary_renewal.evidence[0].ttl = CacheTtl::Ttl1h;
     storage
         .append_request_event_with_projections(
@@ -275,7 +280,10 @@ async fn append_filtered_evidence_uses_bounded_cycle_window() {
     .fetch_one(storage.pool())
     .await
     .expect("count boundary evidence");
-    assert_eq!(boundary_count, 1, "the one-hour TTL boundary remains inclusive");
+    assert_eq!(
+        boundary_count, 1,
+        "the one-hour TTL boundary remains inclusive"
+    );
 
     storage
         .replace_from_real_request(&request("sqlite-running", 20_000, "running"))

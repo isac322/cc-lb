@@ -5543,7 +5543,11 @@ mod tests {
             "trailing message breakpoint lookbacks must be prioritized: {hashes:?}"
         );
         assert_eq!(evidence.len(), 32);
-        assert!(evidence.iter().all(|item| item.ttl == cc_lb_storage_api::CacheTtl::Ttl5m));
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.ttl == cc_lb_storage_api::CacheTtl::Ttl5m)
+        );
         assert!(
             evidence
                 .iter()
