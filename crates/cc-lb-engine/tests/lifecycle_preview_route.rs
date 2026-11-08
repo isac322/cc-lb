@@ -119,7 +119,7 @@ async fn preview_route_preserves_provider_metadata_trace_and_has_no_side_effects
             cc_lb_domain::Provider::Anthropic,
             StorageUpstreamKind::AnthropicApiKey,
             "/v1/messages",
-            br#"{"model":"claude-test","messages":[],"metadata":{"user_id":"session-preview"}}"#
+            br#"{"model":"claude-test","messages":[],"metadata":{"user_id":"550e8400-e29b-41d4-a716-446655440000"}}"#
                 as &'static [u8],
             "claude-test",
         ),
@@ -186,7 +186,8 @@ async fn preview_route_preserves_provider_metadata_trace_and_has_no_side_effects
         assert_eq!(calls[0].3.as_ref(), Some(&Bytes::from_static(body)));
         assert_eq!(
             calls[0].4.as_deref(),
-            (provider == cc_lb_domain::Provider::Anthropic).then_some("session-preview"),
+            (provider == cc_lb_domain::Provider::Anthropic)
+                .then_some("550e8400-e29b-41d4-a716-446655440000"),
             "{provider:?} cache session metadata",
         );
         assert_eq!(
