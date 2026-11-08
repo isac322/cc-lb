@@ -12,9 +12,10 @@ pub enum RequestCacheState {
 }
 /// Provider-native cache evidence. `unreported` is distinct from a provider
 /// reporting zero cached tokens; callers must not infer a miss from absence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestCacheEvidence {
+    #[default]
     Unreported,
     Zero,
     Positive,
@@ -29,11 +30,6 @@ impl RequestCacheEvidence {
             Self::Positive => "positive",
             Self::Invalid => "invalid",
         }
-    }
-}
-impl Default for RequestCacheEvidence {
-    fn default() -> Self {
-        Self::Unreported
     }
 }
 
