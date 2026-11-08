@@ -315,6 +315,7 @@ mod tests {
             prefix_hash: None,
             prefix_policy_version: None,
             prefix_schema_version: None,
+            surface: None,
         }
     }
 
