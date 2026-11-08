@@ -133,6 +133,8 @@ impl RollupDelta {
             || event.cost_cache_creation_5m_micros.is_some()
             || event.cost_cache_creation_1h_micros.is_some()
             || event.cost_cache_read_micros.is_some()
+            || event.cost_cache_write_30m_micros.is_some()
+            || event.cost_cache_write_12h_micros.is_some()
         {
             self.cost_components_event_count = self.cost_components_event_count.saturating_add(1);
             self.cost_input_micros = self
@@ -150,6 +152,12 @@ impl RollupDelta {
             self.cost_cache_read_micros = self
                 .cost_cache_read_micros
                 .saturating_add(event.cost_cache_read_micros.unwrap_or(0).max(0) as u64);
+            self.cost_cache_write_30m_micros = self
+                .cost_cache_write_30m_micros
+                .saturating_add(event.cost_cache_write_30m_micros.unwrap_or(0).max(0) as u64);
+            self.cost_cache_write_12h_micros = self
+                .cost_cache_write_12h_micros
+                .saturating_add(event.cost_cache_write_12h_micros.unwrap_or(0).max(0) as u64);
         }
     }
 }
@@ -546,7 +554,8 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
              list_ts_ms, principal_id, upstream_id, upstream_name, model, \
              list_cost_input_micros, list_cost_output_micros, \
              list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-             list_cost_cache_read_micros \
+             list_cost_cache_read_micros, list_cost_cache_write_30m_micros, \
+             list_cost_cache_write_12h_micros \
              FROM request_events_v1 \
              WHERE (tx_id, seq) > ($1::xid8, $2) \
                AND (tx_id, seq) <= ($3::xid8, $4) \
@@ -593,6 +602,12 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             cost_cache_read_micros: row
                 .try_get("list_cost_cache_read_micros")
                 .map_err(map_sqlx_error)?,
+            cost_cache_write_30m_micros: row
+                .try_get("list_cost_cache_write_30m_micros")
+                .map_err(map_sqlx_error)?,
+            cost_cache_write_12h_micros: row
+                .try_get("list_cost_cache_write_12h_micros")
+                .map_err(map_sqlx_error)?,
             ..RequestEvent::default()
         };
         let upstream = resolve_upstream_identity(&event, event.upstream_id, &upstreams);
@@ -634,11 +649,12 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
                upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
                cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, cost_cache_read_micros, \
+               cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
                cost_components_event_count, cache_write_input_tokens, cache_write_input_tokens_30m, \
                cache_write_input_tokens_12h, updated_at) \
               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
                       $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, \
-                      $28, $29, $30, $31, $32, $33, $34, $35, $36, NOW()) \
+                      $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, NOW()) \
               ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) DO UPDATE \
               SET upstream_name = EXCLUDED.upstream_name, \
                   request_count = usage_rollups_v2.request_count + EXCLUDED.request_count, \
@@ -678,6 +694,8 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                   cost_cache_creation_5m_micros = usage_rollups_v2.cost_cache_creation_5m_micros + EXCLUDED.cost_cache_creation_5m_micros, \
                   cost_cache_creation_1h_micros = usage_rollups_v2.cost_cache_creation_1h_micros + EXCLUDED.cost_cache_creation_1h_micros, \
                   cost_cache_read_micros = usage_rollups_v2.cost_cache_read_micros + EXCLUDED.cost_cache_read_micros, \
+                  cost_cache_write_30m_micros = usage_rollups_v2.cost_cache_write_30m_micros + EXCLUDED.cost_cache_write_30m_micros, \
+                  cost_cache_write_12h_micros = usage_rollups_v2.cost_cache_write_12h_micros + EXCLUDED.cost_cache_write_12h_micros, \
                   cost_components_event_count = usage_rollups_v2.cost_components_event_count + EXCLUDED.cost_components_event_count, \
                   updated_at = NOW()",
         )
@@ -720,6 +738,14 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         )?)
         .bind(u64_to_i64(delta.cost_cache_read_micros, "rollup cost_cache_read_micros")?)
         .bind(u64_to_i64(
+            delta.cost_cache_write_30m_micros,
+            "rollup cost_cache_write_30m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_write_12h_micros,
+            "rollup cost_cache_write_12h_micros",
+        )?)
+        .bind(u64_to_i64(
             delta.cost_components_event_count,
             "rollup cost_components_event_count",
         )?)
@@ -750,10 +776,12 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                  cost_cache_creation_5m_micros = cost_cache_creation_5m_micros + $3, \
                  cost_cache_creation_1h_micros = cost_cache_creation_1h_micros + $4, \
                  cost_cache_read_micros = cost_cache_read_micros + $5, \
-                 cost_components_event_count = cost_components_event_count + $6, \
+                 cost_cache_write_30m_micros = cost_cache_write_30m_micros + $6, \
+                 cost_cache_write_12h_micros = cost_cache_write_12h_micros + $7, \
+                 cost_components_event_count = cost_components_event_count + $8, \
                  updated_at = NOW() \
-             WHERE resolution = $7 AND bucket_start_unix_secs = $8 AND principal_id = $9 \
-               AND upstream_id = $10 AND model = $11",
+             WHERE resolution = $9 AND bucket_start_unix_secs = $10 AND principal_id = $11 \
+               AND upstream_id = $12 AND model = $13",
         )
         .bind(u64_to_i64(
             delta.cost_input_micros,
@@ -774,6 +802,14 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .bind(u64_to_i64(
             delta.cost_cache_read_micros,
             "backfill cost_cache_read_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_write_30m_micros,
+            "backfill cost_cache_write_30m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_write_12h_micros,
+            "backfill cost_cache_write_12h_micros",
         )?)
         .bind(u64_to_i64(
             delta.cost_components_event_count,
