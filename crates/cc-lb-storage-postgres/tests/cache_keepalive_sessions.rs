@@ -566,7 +566,7 @@ async fn purge_expired_preserves_follow_up_earliest_for_one_matching_cycle(
         .await?;
     }
 
-    assert_eq!(storage.purge_cache_keepalive_expired(100).await?, 1);
+    assert_eq!(storage.purge_cache_keepalive_expired(400).await?, 1);
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT evidence_id
          FROM cache_keepalive_evidence
