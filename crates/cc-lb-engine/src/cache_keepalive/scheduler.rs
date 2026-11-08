@@ -94,6 +94,9 @@ pub struct RenewalUsage {
     pub cache_creation_input_tokens_1h: u64,
     pub cache_read_input_tokens: u64,
     pub reasoning_tokens: u64,
+    /// OpenAI Responses write fields do not map to Anthropic cache buckets;
+    /// keep finalization cost unknown rather than mispricing them.
+    pub provider_cost_unknown: bool,
 }
 
 #[cfg(test)]

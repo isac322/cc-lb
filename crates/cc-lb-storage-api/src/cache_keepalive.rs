@@ -65,6 +65,11 @@ pub struct CacheKeepaliveConfig {
 /// AgentInTurn / UserTurn / Ambiguous.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ClassifierConfig {
+    /// Enables the separate OpenAI Responses GPT-5.6+ keepalive policy.
+    /// Defaults to false so existing Anthropic-enabled principals do not
+    /// authorize OpenAI replay.
+    #[serde(default)]
+    pub openai_responses_enabled: bool,
     /// Extra tool names to treat as "wait-for-user" on top of the built-in
     /// list. When a `stop_reason: "tool_use"` response's only client tools
     /// are wait-for-user tools, the session is classified as UserTurn and

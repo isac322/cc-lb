@@ -523,7 +523,7 @@ fn classify_success_body_with_surface(
             .and_then(|details| details.get("cached_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let cache_write = details
+        let _cache_write = details
             .and_then(|details| details.get("cache_write_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
@@ -531,19 +531,15 @@ fn classify_success_body_with_surface(
             usage: RenewalUsage {
                 input_tokens,
                 output_tokens,
-                cache_creation_input_tokens: cache_write,
-                cache_creation_input_tokens_5m: details
-                    .and_then(|details| details.get("cache_write_tokens_details"))
-                    .and_then(|details| details.get("ttl_30m_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                cache_creation_input_tokens_1h: details
-                    .and_then(|details| details.get("cache_write_tokens_details"))
-                    .and_then(|details| details.get("ttl_12h_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
+                // OpenAI lifetime-specific writes are not Anthropic cache
+                // buckets. Keep the raw response out of those projections and
+                // mark cost unknown until provider pricing is modeled.
+                cache_creation_input_tokens: 0,
+                cache_creation_input_tokens_5m: 0,
+                cache_creation_input_tokens_1h: 0,
                 cache_read_input_tokens: cache_read,
                 reasoning_tokens,
+                provider_cost_unknown: true,
             },
             status: StatusCode::OK.as_u16(),
             duration,
@@ -575,6 +571,7 @@ fn classify_success_body_with_surface(
                     cache_creation_input_tokens_1h: cache_creation_1h,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     reasoning_tokens: 0,
+                    provider_cost_unknown: false,
                 },
                 status: StatusCode::OK.as_u16(),
                 duration,

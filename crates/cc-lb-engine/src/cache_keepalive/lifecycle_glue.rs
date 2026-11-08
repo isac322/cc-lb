@@ -236,11 +236,16 @@ impl LifecycleKeepalive {
             return;
         }
         let view = self.dynamic_view.load();
-        if !view
+        let Some(config) = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
-            .is_some_and(|config| config.enabled)
+            .filter(|config| config.enabled)
+        else {
+            return;
+        };
+        if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+            && !config.classifier.openai_responses_enabled
         {
             return;
         }
@@ -305,7 +310,7 @@ impl LifecycleKeepalive {
             return;
         }
         let view = self.dynamic_view.load();
-        let Some(_config) = view
+        let Some(config) = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
@@ -313,6 +318,11 @@ impl LifecycleKeepalive {
         else {
             return;
         };
+        if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+            && !config.classifier.openai_responses_enabled
+        {
+            return;
+        }
         let compaction_boundary =
             super::classifier::HeuristicClassifier::is_compaction_boundary(response_body_json);
         if cache_metadata.cache_breakpoints.is_empty()
@@ -564,10 +574,15 @@ impl LifecycleKeepalive {
         };
         match decision {
             super::TurnDecision::AgentInTurn => {
-                if cached_tokens < config.min_cache_tokens {
+                let min_cache_tokens = if cache_metadata.cache_keepalive_surface.is_some() {
+                    super::openai::MIN_PREFIX_TOKENS
+                } else {
+                    config.min_cache_tokens
+                };
+                if cached_tokens < min_cache_tokens {
                     let reason = CacheKeepaliveDisplayReason::CachedPrefixTooSmall {
                         cached_tokens,
-                        min_cache_tokens: config.min_cache_tokens,
+                        min_cache_tokens,
                     }
                     .to_string();
                     self.record_not_tracked(
@@ -759,6 +774,7 @@ impl LifecycleKeepalive {
 #[derive(Default)]
 pub(crate) struct StreamingKeepaliveResponse {
     message: Option<Value>,
+    openai_response: Option<Value>,
     content_blocks: Vec<Value>,
     stop_reason: Option<String>,
     pending_sse_bytes: Vec<u8>,
@@ -813,6 +829,9 @@ impl StreamingKeepaliveResponse {
             return;
         };
         match event.event_name() {
+            Some(b"response.completed") => {
+                self.openai_response = value.get("response").cloned();
+            }
             Some(b"message_start") => {
                 if let Some(message) = value.get("message") {
                     self.message = Some(message.clone());
@@ -852,6 +871,9 @@ impl StreamingKeepaliveResponse {
     }
 
     pub(crate) fn into_value(self) -> Option<Value> {
+        if self.openai_response.is_some() {
+            return self.openai_response;
+        }
         let mut value = self.message?;
         let map = value.as_object_mut()?;
         if !self.content_blocks.is_empty() {
@@ -1399,6 +1421,20 @@ mod tests {
                 .and_then(|usage| usage.get("cache_creation_input_tokens"))
                 .and_then(Value::as_i64),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn streaming_openai_response_completed_becomes_response_body_for_keepalive() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe(&crate::usage_parser::parse_sse_event(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":16,\"input_tokens_details\":{\"cached_tokens\":1100}}}}\n\n",
+        ));
+        let value = response.into_value().expect("response.completed captured");
+        assert_eq!(value["model"], "gpt-5.6");
+        assert_eq!(
+            value["usage"]["input_tokens_details"]["cached_tokens"],
+            1100
         );
     }
     #[test]
