@@ -7,7 +7,7 @@ use cc_lb_control::api_keys::limit_engine::{LimitEngine, Reservation};
 use cc_lb_domain::Provider;
 use cc_lb_lifecycle::{LifecycleEvent, UsageSnapshot, UsageSource};
 use cc_lb_upstream::{
-    RealtimeFrameDirection, RealtimeFrameKind, RealtimeFrameTransformHook,
+    RealtimeFrameDirection, RealtimeFrameKind,
     TransformRealtimeFrameRequest, TransformRealtimeFrameResult,
 };
 use http::{HeaderMap, StatusCode};
@@ -74,7 +74,8 @@ pub struct RealtimeWebSocketSession {
 }
 
 impl RealtimeWebSocketSession {
-    pub(crate) fn transform_frame(
+    /// Transforms a provider WebSocket frame using the configured upstream hook.
+    pub fn transform_frame(
         &self,
         direction: RealtimeFrameDirection,
         kind: RealtimeFrameKind,
