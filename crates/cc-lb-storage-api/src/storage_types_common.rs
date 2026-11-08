@@ -346,6 +346,12 @@ pub struct UsageRollup {
     pub cache_creation_input_tokens: u64,
     #[serde(default)]
     pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default)]
+    pub cache_write_input_tokens_12h: Option<u64>,
     pub error_count: u64,
     pub latency_count: u64,
     pub latency_ms_sum: u64,
@@ -383,6 +389,9 @@ pub struct UsageRollup {
     #[serde(default)]
     pub cost_cache_read_micros: u64,
     #[serde(default)]
+    pub cost_cache_write_30m_micros: u64,
+    #[serde(default)]
+    pub cost_cache_write_12h_micros: u64,
     pub cost_components_event_count: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

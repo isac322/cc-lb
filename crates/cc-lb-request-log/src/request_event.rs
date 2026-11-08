@@ -45,6 +45,11 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_session_id: Option<String>,
@@ -83,6 +88,11 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_cache_read_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_30m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_12h_micros: Option<i64>,
     pub auth_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_ms: Option<u64>,

@@ -42,12 +42,12 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_creation_input_tokens_5m: u64,
     pub(crate) cache_creation_input_tokens_1h: u64,
     pub(crate) cache_read_input_tokens: u64,
-    /// Numeric OpenAI image-token details, when reported by an eligible usage shape.
-    pub(crate) input_image_tokens: Option<u64>,
-    pub(crate) output_image_tokens: Option<u64>,
-    /// Attribution evidence is separate from numeric accounting, which defaults
-    /// absent or malformed cache counters to zero in some provider shapes.
-    pub(crate) cache_creation_evidence: CacheTokenEvidence,
+    /// Provider-native OpenAI cache writes, retained separately from
+    /// Anthropic cache-creation buckets. `None` means the provider did not
+    /// report the component; `Some(0)` is an explicit reported zero.
+    pub(crate) cache_write_input_tokens: Option<u64>,
+    pub(crate) cache_write_input_tokens_30m: Option<u64>,
+    pub(crate) cache_write_input_tokens_12h: Option<u64>,
     pub(crate) cache_read_evidence: CacheTokenEvidence,
     pub(crate) thinking_tokens: u64,
     /// Gemini's cumulative prompt tokens attributed to tool use, when reported.
@@ -624,11 +624,12 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
 fn service_tier_from_envelope(value: &Value) -> Option<&str> {
     value
         .get("service_tier")
+        .or_else(|| value.get("serviceTier"))
         .and_then(Value::as_str)
         .or_else(|| {
             value
                 .get("response")
-                .and_then(|response| response.get("service_tier"))
+                .and_then(|response| response.get("service_tier").or_else(|| response.get("serviceTier")))
                 .and_then(Value::as_str)
         })
 }
@@ -746,6 +747,37 @@ pub(crate) fn merge_usage_value_for_shape(
         usage.cache_creation_input_tokens = cc_total;
         usage.cache_creation_input_tokens_5m = cc_5m;
         usage.cache_creation_input_tokens_1h = cc_1h;
+    } else if matches!(
+        shape,
+        Some(UsageShape::OpenaiResponses | UsageShape::OpenaiChatCompletions)
+    ) {
+        let details = reported
+            .get("input_tokens_details")
+            .or_else(|| reported.get("input_token_details"))
+            .or_else(|| reported.get("prompt_tokens_details"));
+        if let Some(details) = details {
+            if let Some(value) = details.get("cache_write_tokens").and_then(Value::as_u64) {
+                usage.cache_write_input_tokens = Some(value);
+                usage.input_includes_cached = true;
+                usage.present = true;
+            }
+            if matches!(shape, Some(UsageShape::OpenaiResponses)) {
+                if let Some(value) = details
+                    .get("cache_write_tokens_details")
+                    .and_then(|v| v.get("ttl_30m_tokens"))
+                    .and_then(Value::as_u64)
+                {
+                    usage.cache_write_input_tokens_30m = Some(value);
+                }
+                if let Some(value) = details
+                    .get("cache_write_tokens_details")
+                    .and_then(|v| v.get("ttl_12h_tokens"))
+                    .and_then(Value::as_u64)
+                {
+                    usage.cache_write_input_tokens_12h = Some(value);
+                }
+            }
+        }
     } else if let Some(cache_write_tokens) = reported
         .get("input_tokens_details")
         .and_then(|details| details.get("cache_write_tokens"))
@@ -776,7 +808,8 @@ pub(crate) fn merge_usage_value_for_shape(
     {
         usage.input_tokens = gross
             .saturating_sub(usage.cache_read_input_tokens)
-            .saturating_sub(usage.cache_creation_input_tokens);
+            .saturating_sub(usage.cache_creation_input_tokens)
+            .saturating_sub(usage.cache_write_input_tokens.unwrap_or_default());
     }
     if let Some(reasoning_tokens) = reported
         .get("output_tokens_details")
@@ -836,7 +869,11 @@ pub(crate) fn merge_usage_value_for_shape(
             usage.web_fetch_requests = wf;
         }
     }
-    if let Some(tier) = reported.get("service_tier").and_then(Value::as_str) {
+    if let Some(tier) = reported
+        .get("service_tier")
+        .or_else(|| reported.get("serviceTier"))
+        .and_then(Value::as_str)
+    {
         usage.service_tier = Some(tier.to_owned());
     }
     if let Some(geo) = reported.get("inference_geo").and_then(Value::as_str) {
@@ -1651,6 +1688,52 @@ mod tests {
         );
         assert_eq!(usage.cache_creation_input_tokens, 30);
         assert_eq!(usage.input_tokens, 50);
+    }
+    #[test]
+    fn openai_responses_preserve_provider_write_lifetimes_and_zeroes() {
+        let mut usage = UsageCounts::default();
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens": 100,
+                "input_tokens_details": {
+                    "cached_tokens": 20,
+                    "cache_write_tokens": 30,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": 0,
+                        "ttl_12h_tokens": 30
+                    }
+                },
+                "service_tier": "priority"
+            }),
+            Some(UsageShape::OpenaiResponses),
+        );
+        assert_eq!(usage.cache_read_input_tokens, 20);
+        assert_eq!(usage.cache_write_input_tokens, Some(30));
+        assert_eq!(usage.cache_write_input_tokens_30m, Some(0));
+        assert_eq!(usage.cache_write_input_tokens_12h, Some(30));
+        assert_eq!(usage.input_tokens, 50);
+        assert_eq!(usage.service_tier.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn gemini_service_tier_uses_camel_case_without_write_evidence() {
+        let mut usage = UsageCounts::default();
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "promptTokenCount": 100,
+                "cachedContentTokenCount": 20,
+                "thoughtsTokenCount": 4,
+                "candidatesTokenCount": 6,
+                "toolUsePromptTokenCount": 3,
+                "serviceTier": "flex"
+            }),
+            Some(UsageShape::GeminiGenerateContent),
+        );
+        assert_eq!(usage.cache_read_input_tokens, 20);
+        assert_eq!(usage.cache_write_input_tokens, None);
+        assert_eq!(usage.service_tier.as_deref(), Some("flex"));
     }
 
     #[test]

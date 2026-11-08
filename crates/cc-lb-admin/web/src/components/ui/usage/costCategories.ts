@@ -28,15 +28,15 @@ export interface CostSegment {
   value: number;
 }
 
-/** Field carrying each category on a `/admin/v1/dashboard/usage` bucket. */
 const USAGE_COST_FIELD = {
   input: 'cost_input_micros',
   output: 'cost_output_micros',
   cache_create_5m: 'cost_cache_creation_5m_micros',
   cache_create_1h: 'cost_cache_creation_1h_micros',
   cache_read: 'cost_cache_read_micros',
+  cache_write_30m: 'cost_cache_write_30m_micros',
+  cache_write_12h: 'cost_cache_write_12h_micros',
 } as const satisfies Record<UsageCategoryKey, keyof UsageBucket>;
-
 export function emptyCostComponents(): CostComponentMicros {
   return {
     input: 0,
@@ -44,6 +44,8 @@ export function emptyCostComponents(): CostComponentMicros {
     cache_create_5m: 0,
     cache_create_1h: 0,
     cache_read: 0,
+    cache_write_30m: 0,
+    cache_write_12h: 0,
   };
 }
 

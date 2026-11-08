@@ -23,13 +23,17 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
     cache_create_5m: e.cost_cache_creation_5m_micros ?? 0,
     cache_create_1h: e.cost_cache_creation_1h_micros ?? 0,
     cache_read: e.cost_cache_read_micros ?? 0,
+    cache_write_30m: e.cost_cache_write_30m_micros ?? 0,
+    cache_write_12h: e.cost_cache_write_12h_micros ?? 0,
   };
   const hasComponents =
     e.cost_input_micros != null ||
     e.cost_output_micros != null ||
     e.cost_cache_creation_5m_micros != null ||
     e.cost_cache_creation_1h_micros != null ||
-    e.cost_cache_read_micros != null;
+    e.cost_cache_read_micros != null ||
+    e.cost_cache_write_30m_micros != null ||
+    e.cost_cache_write_12h_micros != null;
   const total = e.cost_usd_micros ?? sumCostMicros(components);
   return { components, total, hasComponents };
 }

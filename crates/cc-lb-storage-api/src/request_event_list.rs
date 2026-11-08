@@ -90,12 +90,24 @@ pub struct RequestEventListItem {
     pub cache_creation_input_tokens_5m: Option<u64>,
     pub cache_creation_input_tokens_1h: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
     pub cost_usd_micros: Option<i64>,
     pub cost_input_micros: Option<i64>,
     pub cost_output_micros: Option<i64>,
     pub cost_cache_creation_5m_micros: Option<i64>,
     pub cost_cache_creation_1h_micros: Option<i64>,
     pub cost_cache_read_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_30m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_12h_micros: Option<i64>,
 }
 
 /// Cursor + limit + filter parameters for a request-event list page,

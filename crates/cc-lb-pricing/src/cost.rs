@@ -56,7 +56,7 @@ pub fn virtual_cost_micros_full_with_context(
     cache_read_input: u64,
     service_tier: Option<&str>,
 ) -> Option<ComputedCostBreakdown> {
-    virtual_cost_micros_full_with_context_and_images(
+    virtual_cost_micros_full_with_context_and_provider_writes(
         model,
         input,
         output,
@@ -66,6 +66,9 @@ pub fn virtual_cost_micros_full_with_context(
         cache_creation_5m_input,
         cache_creation_1h_input,
         cache_read_input,
+        None,
+        None,
+        None,
         service_tier,
     )
 }
@@ -81,6 +84,39 @@ pub fn virtual_cost_micros_full_with_context_and_images(
     cache_creation_5m_input: u64,
     cache_creation_1h_input: u64,
     cache_read_input: u64,
+    service_tier: Option<&str>,
+) -> Option<ComputedCostBreakdown> {
+    virtual_cost_micros_full_with_context_and_provider_writes(
+        model,
+        input,
+        output,
+        input_image_tokens,
+        output_image_tokens,
+        cache_creation_input_tokens,
+        cache_creation_5m_input,
+        cache_creation_1h_input,
+        cache_read_input,
+        None,
+        None,
+        None,
+        service_tier,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn virtual_cost_micros_full_with_context_and_provider_writes(
+    model: &str,
+    input: u64,
+    output: u64,
+    input_image_tokens: u64,
+    output_image_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_creation_5m_input: u64,
+    cache_creation_1h_input: u64,
+    cache_read_input: u64,
+    cache_write_input: Option<u64>,
+    cache_write_30m_input: Option<u64>,
+    cache_write_12h_input: Option<u64>,
     service_tier: Option<&str>,
 ) -> Option<ComputedCostBreakdown> {
     let normalized = normalize_model_id(model);
@@ -114,9 +150,21 @@ pub fn virtual_cost_micros_full_with_context_and_images(
         tier.as_deref(),
     );
 
+    let write_total = cache_write_input.unwrap_or_default();
+    let write_detail_total = cache_write_30m_input
+        .unwrap_or_default()
+        .saturating_add(cache_write_12h_input.unwrap_or_default());
+    if write_total > 0
+        && (cache_write_30m_input.is_none() || cache_write_12h_input.is_none()
+            || write_detail_total != write_total)
+    {
+        record_missing_price_field(&normalized, "cache_write_tokens_details");
+        return None;
+    }
     let gross_input_tokens = input
         .saturating_add(cache_read_input)
-        .saturating_add(cache_creation_input_tokens);
+        .saturating_add(cache_creation_input_tokens)
+        .saturating_add(write_total);
     apply_threshold_bands(
         snapshot.above_tokens_rates.get(model_key),
         gross_input_tokens,
@@ -164,17 +212,34 @@ pub fn virtual_cost_micros_full_with_context_and_images(
             0
         });
 
+    let write_30m_micros = cache_write_30m_input
+        .map(|tokens| component_cost(tokens, UsdPerMillion::from_micros_usd(
+            input_price.as_micros_usd().saturating_mul(5) / 4,
+        )));
+    let write_12h_micros = cache_write_12h_input
+        .map(|tokens| component_cost(tokens, UsdPerMillion::from_micros_usd(
+            input_price.as_micros_usd().saturating_mul(5) / 2,
+        )));
+    let write_micros = cache_write_input.map(|_| {
+        write_30m_micros
+            .unwrap_or_default()
+            .saturating_add(write_12h_micros.unwrap_or_default())
+    });
     let to_i64 = |v: u128| -> i64 { v.try_into().unwrap_or(i64::MAX) };
     let input_i = to_i64(input_micros);
     let output_i = to_i64(output_micros);
     let cc5_i = to_i64(cc_5m_micros);
     let cc1_i = to_i64(cc_1h_micros);
     let cr_i = to_i64(cr_micros);
+    let write_i = write_micros.map(to_i64);
+    let write_30m_i = write_30m_micros.map(to_i64);
+    let write_12h_i = write_12h_micros.map(to_i64);
     let total = input_i
         .saturating_add(output_i)
         .saturating_add(cc5_i)
         .saturating_add(cc1_i)
-        .saturating_add(cr_i);
+        .saturating_add(cr_i)
+        .saturating_add(write_i.unwrap_or_default());
 
     Some(ComputedCostBreakdown {
         input_micros: input_i,
@@ -182,6 +247,9 @@ pub fn virtual_cost_micros_full_with_context_and_images(
         cache_creation_5m_micros: cc5_i,
         cache_creation_1h_micros: cc1_i,
         cache_read_micros: cr_i,
+        cache_write_micros: write_i,
+        cache_write_30m_micros: write_30m_i,
+        cache_write_12h_micros: write_12h_i,
         total_micros: total,
         pricing_status: PricingStatus::Known,
     })

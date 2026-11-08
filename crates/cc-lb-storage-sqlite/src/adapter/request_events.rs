@@ -617,7 +617,7 @@ async fn insert_request_event_in_tx(
         "request_id, ts, source_kind, source_ref_id, upstream_id, principal_id, ",
         "created_at, key_id, model, upstream_name, thread_id, input_tokens, ",
         "output_tokens, cache_creation_input_tokens, cache_read_input_tokens, ",
-        "event_id, error_code, upstream_error_type, upstream_error_message, ",
+        "cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h, ",
         "thinking_tokens, tool_use_prompt_tokens, service_tier, cache_creation_input_tokens_5m, ",
         "cache_creation_input_tokens_1h, token_estimate_source, ",
         "thinking_budget_tokens, reasoning_effort, list_ts_ms, ",
@@ -631,10 +631,9 @@ async fn insert_request_event_in_tx(
         "list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, ",
         "list_upstream_body_ms, list_stream_first_content_delta_ms, ",
         "list_stream_last_content_delta_ms, list_inter_token_avg_ms, ",
-        "list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, ",
         "list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, ",
-        "list_cost_cache_read_micros, observed_session_id, request_kind, ",
-        "claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, ",
+        "list_cost_cache_read_micros, list_cost_cache_write_micros, ",
+        "list_cost_cache_write_30m_micros, list_cost_cache_write_12h_micros, observed_session_id, request_kind, ",
         "session_id_source, list_request_body_read_ms, list_request_body_bytes, ",
         "list_finalize_ms, list_request_body_first_chunk_ms, ",
         "list_request_body_receive_ms, list_request_body_wait_ms, ",
@@ -650,7 +649,7 @@ async fn insert_request_event_in_tx(
         "upstream_body_error_io_kind, upstream_body_error_h2_reason, ",
         "upstream_stream_warning_type, upstream_stream_warning_message",
         ") VALUES (",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -688,6 +687,18 @@ async fn insert_request_event_in_tx(
     .bind(option_u64_to_i64(
         event.cache_read_input_tokens,
         "request event cache_read_input_tokens",
+    )?)
+    .bind(option_u64_to_i64(
+        event.cache_write_input_tokens,
+        "request event cache_write_input_tokens",
+    )?)
+    .bind(option_u64_to_i64(
+        event.cache_write_input_tokens_30m,
+        "request event cache_write_input_tokens_30m",
+    )?)
+    .bind(option_u64_to_i64(
+        event.cache_write_input_tokens_12h,
+        "request event cache_write_input_tokens_12h",
     )?)
     .bind(event_id)
     .bind(event.error_code.as_deref())
@@ -794,6 +805,9 @@ async fn insert_request_event_in_tx(
     .bind(event.cost_cache_creation_5m_micros)
     .bind(event.cost_cache_creation_1h_micros)
     .bind(event.cost_cache_read_micros)
+    .bind(event.cost_cache_write_micros)
+    .bind(event.cost_cache_write_30m_micros)
+    .bind(event.cost_cache_write_12h_micros)
     .bind(event.observed_session_id.as_deref())
     .bind(event.request_kind.as_deref())
     .bind(event.claude_agent_id.as_deref())

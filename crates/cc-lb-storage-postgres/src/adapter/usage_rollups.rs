@@ -878,6 +878,9 @@ fn row_to_usage_rollup(row: PgRow) -> StorageResult<UsageRollup> {
                 .map_err(map_sqlx_error)?,
             "rollup cache_read_input_tokens",
         )?,
+        cache_write_input_tokens: None,
+        cache_write_input_tokens_30m: None,
+        cache_write_input_tokens_12h: None,
         error_count: i64_to_u64(
             row.try_get("error_count").map_err(map_sqlx_error)?,
             "rollup error_count",
