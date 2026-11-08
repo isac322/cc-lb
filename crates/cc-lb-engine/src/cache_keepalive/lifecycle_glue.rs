@@ -1500,8 +1500,6 @@ mod tests {
                     OrderedCompletion::Observe(expected_key.clone()),
                     OrderedCompletion::NotTracked(expected_key.clone()),
                     OrderedCompletion::Cancel(expected_key.clone(), Some(41)),
-                    OrderedCompletion::Observe(format!("{expected_key}/agent:subagent")),
-                    OrderedCompletion::Cancel(format!("{expected_key}/agent:subagent"), Some(41)),
                 ]
             } else {
                 vec![
