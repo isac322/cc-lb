@@ -454,16 +454,16 @@ pub mod __private {
         ) -> cc_lb_plugin_wire::v2::TransformRealtimeFrameResult,
     {
         let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived =
-            rkyv::access::<cc_lb_plugin_wire::v2::ArchivedTransformRealtimeFrameRequest, Error>(
-                in_bytes,
-            )
-            .expect("rkyv::access(v2::TransformRealtimeFrameRequest) failed");
-        let owned = rkyv::deserialize::<
-            cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest,
+        let archived = rkyv::access::<
+            cc_lb_plugin_wire::v2::ArchivedTransformRealtimeFrameRequest,
             Error,
-        >(archived)
-        .expect("rkyv::deserialize(v2::TransformRealtimeFrameRequest) failed");
+        >(in_bytes)
+        .expect("rkyv::access(v2::TransformRealtimeFrameRequest) failed");
+        let owned =
+            rkyv::deserialize::<cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest, Error>(
+                archived,
+            )
+            .expect("rkyv::deserialize(v2::TransformRealtimeFrameRequest) failed");
         free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
         let response = handler(owned);
         encode_and_pack::<cc_lb_plugin_wire::v2::TransformRealtimeFrameResult>(
@@ -473,22 +473,18 @@ pub mod __private {
     }
 
     #[allow(unsafe_code)]
-    pub fn run_transform_realtime_frame_v2_view<F>(
-        in_ptr: u32,
-        in_len: u32,
-        handler: F,
-    ) -> u64
+    pub fn run_transform_realtime_frame_v2_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
     where
         F: FnOnce(
             &cc_lb_plugin_wire::v2::ArchivedTransformRealtimeFrameRequest,
         ) -> cc_lb_plugin_wire::v2::TransformRealtimeFrameResult,
     {
         let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived =
-            rkyv::access::<cc_lb_plugin_wire::v2::ArchivedTransformRealtimeFrameRequest, Error>(
-                in_bytes,
-            )
-            .expect("rkyv::access(v2::TransformRealtimeFrameRequest) failed");
+        let archived = rkyv::access::<
+            cc_lb_plugin_wire::v2::ArchivedTransformRealtimeFrameRequest,
+            Error,
+        >(in_bytes)
+        .expect("rkyv::access(v2::TransformRealtimeFrameRequest) failed");
         let response = handler(archived);
         free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
         encode_and_pack::<cc_lb_plugin_wire::v2::TransformRealtimeFrameResult>(

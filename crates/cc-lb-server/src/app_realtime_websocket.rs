@@ -39,10 +39,7 @@ fn transform_realtime_message(
             realtime_payload_kind(frame.as_bytes(), false),
             Bytes::from(frame.clone()),
         ),
-        UpstreamMessage::Binary(frame) => (
-            realtime_payload_kind(frame, true),
-            frame.clone(),
-        ),
+        UpstreamMessage::Binary(frame) => (realtime_payload_kind(frame, true), frame.clone()),
         _ => return Ok(Some(message)),
     };
     match session
@@ -56,9 +53,7 @@ fn transform_realtime_message(
                 cc_lb_upstream::RealtimeFrameKind::Binary => UpstreamMessage::Binary(payload),
                 cc_lb_upstream::RealtimeFrameKind::Json
                 | cc_lb_upstream::RealtimeFrameKind::Text => UpstreamMessage::Text(
-                    String::from_utf8(payload.to_vec())
-                        .map_err(|_| ())?
-                        .into(),
+                    String::from_utf8(payload.to_vec()).map_err(|_| ())?.into(),
                 ),
             }))
         }

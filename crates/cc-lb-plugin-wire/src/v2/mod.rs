@@ -436,13 +436,9 @@ pub struct TransformRealtimeFrameRequestRef<'a> {
 #[rkyv(derive(Debug))]
 pub enum TransformRealtimeFrameResult {
     Unchanged,
-    Replace {
-        kind: Box<str>,
-        payload: Box<[u8]>,
-    },
+    Replace { kind: Box<str>, payload: Box<[u8]> },
     Drop,
 }
-
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]

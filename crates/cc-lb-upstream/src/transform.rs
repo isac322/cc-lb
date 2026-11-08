@@ -156,7 +156,6 @@ pub trait RealtimeFrameTransformHook: Send + Sync {
     ) -> Result<TransformRealtimeFrameResult, ResponseTransformError>;
 }
 
-
 /// Final Code Assist envelope, before the signer applies stored credentials.
 #[derive(Clone, Copy, Debug)]
 pub struct GeminiEnvelopeRequest<'a> {

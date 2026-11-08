@@ -356,9 +356,7 @@ fn reject_non_response_noop_modes(metadata: &PluginMetadata) -> Result<(), Wasmt
         if HookKind::parse_entrypoint(name).is_some_and(|(hook, _)| {
             matches!(
                 hook,
-                HookKind::Filter
-                    | HookKind::Shape
-                    | HookKind::ShapeEnvelopeGemini
+                HookKind::Filter | HookKind::Shape | HookKind::ShapeEnvelopeGemini
             )
         }) && hook_metadata.mode.is_noop()
         {
@@ -476,9 +474,7 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
             Some(<cc_lb_plugin_wire::v2::TransformSseEventRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::TransformRealtimeFrame, WireVersion::V2) => {
-            Some(
-                <cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT,
-            )
+            Some(<cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::ShapeEnvelopeGemini, WireVersion::V2) => {
             Some(<cc_lb_plugin_wire::v2::ShapeEnvelopeGeminiRequest as WireSchema>::FINGERPRINT)

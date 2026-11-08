@@ -266,10 +266,7 @@ impl HandlerKind {
             Self::ShapeEnvelopeGemini => {
                 wire_version == 2 && matches!(provider, Some(ProviderFamily::Gemini))
             }
-            Self::Filter
-            | Self::Shape
-            | Self::TransformResponse
-            | Self::TransformSseEvent => {
+            Self::Filter | Self::Shape | Self::TransformResponse | Self::TransformSseEvent => {
                 wire_version == 1 || (wire_version == 2 && provider.is_some())
             }
             Self::TransformRealtimeFrame => wire_version == 2 && provider.is_some(),

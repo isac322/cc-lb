@@ -102,12 +102,8 @@ impl HookKind {
             (Self::TransformSseEvent, ProviderFamily::Anthropic) => {
                 "cc_lb_transform_sse_event_anthropic"
             }
-            (Self::TransformSseEvent, ProviderFamily::Openai) => {
-                "cc_lb_transform_sse_event_openai"
-            }
-            (Self::TransformSseEvent, ProviderFamily::Gemini) => {
-                "cc_lb_transform_sse_event_gemini"
-            }
+            (Self::TransformSseEvent, ProviderFamily::Openai) => "cc_lb_transform_sse_event_openai",
+            (Self::TransformSseEvent, ProviderFamily::Gemini) => "cc_lb_transform_sse_event_gemini",
             (Self::TransformRealtimeFrame, ProviderFamily::Anthropic) => {
                 "cc_lb_transform_realtime_frame_anthropic"
             }

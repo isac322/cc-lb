@@ -11,11 +11,11 @@ use cc_lb_plugin_wire::{
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntimeError};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, GeminiEnvelopeHook, GeminiEnvelopeRequest,
-    GeminiEnvelopeResult, RealtimeFrameDirection, RealtimeFrameKind,
-    RealtimeFrameTransformHook, ResponseTransformError, ResponseTransformHook, ShapedRequest,
-    ShapedRequestBuilder, SseEventTransformHook, TransformRealtimeFrameRequest,
-    TransformRealtimeFrameResult, TransformResponseRequest, TransformResponseResult,
-    TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
+    GeminiEnvelopeResult, RealtimeFrameDirection, RealtimeFrameKind, RealtimeFrameTransformHook,
+    ResponseTransformError, ResponseTransformHook, ShapedRequest, ShapedRequestBuilder,
+    SseEventTransformHook, TransformRealtimeFrameRequest, TransformRealtimeFrameResult,
+    TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+    TransformSseEventResult, UpstreamDialect,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -200,9 +200,7 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
             .as_ref()
             .map(|h| h as &dyn SseEventTransformHook)
     }
-    fn realtime_frame_transform_hook(
-        &self,
-    ) -> Option<&dyn RealtimeFrameTransformHook> {
+    fn realtime_frame_transform_hook(&self) -> Option<&dyn RealtimeFrameTransformHook> {
         self.realtime_frame_transform
             .as_ref()
             .map(|h| h as &dyn RealtimeFrameTransformHook)
@@ -418,7 +416,9 @@ impl RealtimeFrameTransformHook for WasmtimeRealtimeFrameTransformHook {
         request: TransformRealtimeFrameRequest,
     ) -> Result<TransformRealtimeFrameResult, ResponseTransformError> {
         let identity = self.identity.as_ref().ok_or_else(|| {
-            response_runtime_error("V2 realtime frame transform missing upstream identity".to_owned())
+            response_runtime_error(
+                "V2 realtime frame transform missing upstream identity".to_owned(),
+            )
         })?;
         if self.wire_version != Some(WireVersion::V2) {
             return Err(response_runtime_error(
@@ -916,22 +916,17 @@ fn host_to_wire_transform_realtime_frame_v2(
     rkyv::to_bytes::<RkyvError>(&wire)
 }
 
-
 fn wire_to_host_transform_realtime_frame(
     bytes: &AlignedVec<16>,
 ) -> Result<TransformRealtimeFrameResult, ResponseTransformError> {
-    let archived =
-        rkyv::access::<v2::ArchivedTransformRealtimeFrameResult, RkyvError>(bytes).map_err(
-            |e| response_runtime_error(format!("rkyv access realtime frame result: {e}")),
-        )?;
+    let archived = rkyv::access::<v2::ArchivedTransformRealtimeFrameResult, RkyvError>(bytes)
+        .map_err(|e| response_runtime_error(format!("rkyv access realtime frame result: {e}")))?;
     let result: v2::TransformRealtimeFrameResult =
         rkyv::deserialize::<v2::TransformRealtimeFrameResult, RkyvError>(archived).map_err(
             |e| response_runtime_error(format!("rkyv deserialize realtime frame result: {e}")),
         )?;
     match result {
-        v2::TransformRealtimeFrameResult::Unchanged => {
-            Ok(TransformRealtimeFrameResult::Unchanged)
-        }
+        v2::TransformRealtimeFrameResult::Unchanged => Ok(TransformRealtimeFrameResult::Unchanged),
         v2::TransformRealtimeFrameResult::Drop => Ok(TransformRealtimeFrameResult::Drop),
         v2::TransformRealtimeFrameResult::Replace { kind, payload } => {
             let kind = match kind.as_ref() {
