@@ -380,9 +380,20 @@ jobs:
       - name: Install and run promtool
         run: |
           set -euo pipefail
-          go install github.com/prometheus/prometheus/v3/cmd/promtool@v3.15.0
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          export PATH="$(go env GOPATH)/bin:$PATH"
+          image=prom/prometheus:v3.15.0
+          docker pull "$image"
+          cat > "$RUNNER_TEMP/promtool" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -v "$RUNNER_TEMP:$RUNNER_TEMP" \
+            -w "$GITHUB_WORKSPACE" \
+            prom/prometheus:v3.15.0 promtool "$@"
+          EOF
+          chmod 0755 "$RUNNER_TEMP/promtool"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP:$PATH"
           promtool --version
       - name: Check alert rule syntax
         run: promtool check rules deploy/alerts/*.yml
