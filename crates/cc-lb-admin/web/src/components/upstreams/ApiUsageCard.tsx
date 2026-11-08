@@ -12,6 +12,7 @@ import type {
   DashboardUsageResponse,
   KeyUsageMonth,
   KeyUsageProvenance,
+  ProviderReportState,
 } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import { fmtUsd, splitNum, sumTokens } from '../../lib/format';
@@ -63,6 +64,17 @@ const METRIC_OPTIONS = [
   { value: 'cost', label: 'Cost' },
 ] as const;
 
+const REPORT_STATE_LABEL: Record<ProviderReportState, string> = {
+  reported: 'Reported',
+  estimated: 'Estimated',
+  not_configured: 'Not configured',
+  unavailable: 'Unavailable',
+  denied: 'Denied',
+  not_applicable: 'Not applicable',
+  stale: 'Stale',
+  failed: 'Failed',
+};
+
 type Props = {
   data: DashboardUsageResponse | undefined;
   isLoading: boolean;
@@ -71,8 +83,8 @@ type Props = {
   metric: 'tokens' | 'cost';
   onMetricChange: (m: 'tokens' | 'cost') => void;
   /**
-   * Where the figures come from and whose they are. Reported = token counts
-   * from Anthropic's usage report; anything else is cc-lb's own estimate.
+   * Where the figures come from and whose they are. Legacy Anthropic
+   * provenance and additive provider reporting states share this surface.
    * Omitted when the backend does not report provenance.
    */
   provenance?: KeyUsageProvenance;
@@ -160,17 +172,34 @@ export function ApiUsageCard({
     return val.toLocaleString();
   };
 
-  // The label follows the data's source: a stale Anthropic snapshot is
-  // still reported data (labeled stale), never relabeled as an estimate.
-  const reported = provenance?.source === 'reported';
-  const stale = reported && provenance?.stale === true;
+  const nativeProvider =
+    provenance?.provider === 'openai' || provenance?.provider === 'gemini';
+  const providerLabel =
+    provenance?.provider === 'openai'
+      ? 'OpenAI'
+      : provenance?.provider === 'gemini'
+        ? 'Gemini'
+        : provenance?.provider === 'anthropic' ||
+            provenance?.provider_report_state === undefined
+          ? 'Anthropic'
+          : 'the provider';
+  const reportState =
+    provenance?.provider_report_state ??
+    (provenance?.source !== 'reported' && provenance?.source !== 'estimated'
+      ? provenance?.source
+      : undefined);
+  // A stale provider snapshot is still reported data, never an estimate.
+  const reported =
+    provenance?.source === 'reported' || provenance?.source === 'stale';
+  const stale =
+    reported && (provenance?.stale === true || reportState === 'stale');
   // Stopped (Anthropic refuses reports) is a fix-code state; a stale
   // snapshot without it is a transient outage with no fix to offer.
   const stopped = stale && provenance?.stopped === true;
   const estimated = provenance !== undefined && !reported;
   // Access already says Reported; the first poll is queued (plan R2-4).
   const pendingFirstReport =
-    estimated && provenance?.pending_first_report === true;
+    estimated && !nativeProvider && provenance?.pending_first_report === true;
   const lastReported = provenance?.last_reported_unix_secs ?? null;
   // A background refetch failed while the previous answer stays on screen.
   const notRefreshed = month !== undefined && monthError !== null;
@@ -180,10 +209,19 @@ export function ApiUsageCard({
   // description says so instead of an Estimated badge contradicting Access.
   const showEstimatedBadge = estimated && !pendingFirstReport;
   const action =
-    showEstimatedBadge || stale || notRefreshed ? (
+    showEstimatedBadge ||
+    stale ||
+    notRefreshed ||
+    reportState ||
+    nativeProvider ? (
       <div className="flex flex-wrap items-center gap-2">
         {showEstimatedBadge ? <Badge>Estimated</Badge> : null}
         {stale ? <Badge>Last report</Badge> : null}
+        {reportState && reportState !== 'estimated' ? (
+          <Badge>{REPORT_STATE_LABEL[reportState]}</Badge>
+        ) : nativeProvider && reported && !stale ? (
+          <Badge>Reported</Badge>
+        ) : null}
         {notRefreshed ? <Badge>Not refreshed</Badge> : null}
       </div>
     ) : undefined;
@@ -191,15 +229,19 @@ export function ApiUsageCard({
   // What the figures are and whose they are. Key status and the fix that
   // makes usage reported belong to the pane notice and Access.
   const costNote = metric === 'cost' ? ' Cost computed at list price.' : '';
-  const caption = reported
-    ? stale
-      ? `Showing the last reported figures — ${provenance?.attribution === 'workspace' ? `all usage in ${provenance.workspace ?? 'the workspace'}` : "all of this key's usage"}.${costNote}`
-      : provenance?.attribution === 'workspace'
-        ? `All usage in ${provenance.workspace ?? 'the workspace'} — Anthropic can't attribute it to this key.${costNote}`
-        : `All of this key's usage, including traffic outside cc-lb.${costNote}`
-    : provenance?.fix === 'non_anthropic_base_url'
-      ? `Real usage needs api.anthropic.com Admin API access. This upstream points elsewhere → showing estimates only.${costNote}`
-      : costNote.trim() || null;
+  const caption = nativeProvider
+    ? reported
+      ? `${stale ? 'Last reported' : 'Reported'} figures for ${provenance?.project_id ? `project ${provenance.project_id}` : 'the provider reporting scope'}.${costNote}`
+      : `Proxy estimates cover cc-lb traffic only, not organization totals.${costNote}`
+    : reported
+      ? stale
+        ? `Showing the last reported figures — ${provenance?.attribution === 'workspace' ? `all usage in ${provenance.workspace ?? 'the workspace'}` : "all of this key's usage"}.${costNote}`
+        : provenance?.attribution === 'workspace'
+          ? `All usage in ${provenance.workspace ?? 'the workspace'} — Anthropic can't attribute it to this key.${costNote}`
+          : `All of this key's usage, including traffic outside cc-lb.${costNote}`
+      : provenance?.fix === 'non_anthropic_base_url'
+        ? `Real usage needs api.anthropic.com Admin API access. This upstream points elsewhere → showing estimates only.${costNote}`
+        : costNote.trim() || null;
 
   const goToUsageMode = () => {
     const row = document.querySelector<HTMLElement>(
@@ -215,7 +257,13 @@ export function ApiUsageCard({
       data-testid="api-usage-card"
       title="API usage"
       description={
-        reported ? (
+        nativeProvider || reportState ? (
+          reported ? (
+            `${stale ? 'Last figures' : 'Figures'} reported by ${providerLabel}${notRefreshed ? ' · not refreshed' : ''}`
+          ) : (
+            `Estimated from cc-lb traffic · provider reporting ${REPORT_STATE_LABEL[reportState ?? 'estimated'].toLowerCase()}`
+          )
+        ) : reported ? (
           stopped ? (
             'Last tokens reported by Anthropic · reports stopped'
           ) : stale ? (
@@ -260,12 +308,53 @@ export function ApiUsageCard({
       action={action}
     >
       <div className="flex flex-col gap-4">
-        <CreditStrip
-          month={month}
-          provenance={provenance}
-          isLoading={monthLoading}
-          loadError={monthError}
-        />
+        {nativeProvider ? (
+          <div className="flex flex-col gap-2">
+            <p className="text-caption text-text-faint">This month (UTC)</p>
+            {monthLoading && !month ? (
+              <Skeleton className="h-5 w-40" />
+            ) : (
+              <dl className="grid grid-cols-2 gap-4">
+                <div>
+                  <dt className="text-caption text-text-faint">Tokens used</dt>
+                  <dd className="text-body font-medium tabular-nums">
+                    {month ? month.tokens.toLocaleString() : 'No reading'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-caption text-text-faint">
+                    Cost at list price
+                  </dt>
+                  <dd className="text-body font-medium tabular-nums">
+                    {month ? fmtUsd(month.cost_usd_micros) : 'No reading'}
+                  </dd>
+                </div>
+              </dl>
+            )}
+            {monthError ? (
+              <p role="alert" className="text-caption text-warn-text">
+                {month ? 'Usage not refreshed' : 'Usage unavailable'}
+              </p>
+            ) : null}
+            {provenance?.provider === 'gemini' ? (
+              <a
+                className={QUIET_LINK_CLASS}
+                href="https://aistudio.google.com/docs/billing#monitor-usage"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Gemini usage and billing in AI Studio
+              </a>
+            ) : null}
+          </div>
+        ) : (
+          <CreditStrip
+            month={month}
+            provenance={provenance}
+            isLoading={monthLoading}
+            loadError={monthError}
+          />
+        )}
         <div className="flex flex-col gap-3 border-t border-border-row pt-4">
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <div className="flex flex-wrap items-center gap-2">

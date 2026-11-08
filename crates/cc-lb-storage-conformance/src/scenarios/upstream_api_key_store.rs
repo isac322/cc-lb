@@ -9,7 +9,9 @@ use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability,
     ApiKeyResolution, ApiKeyType, ApiKeyUsagePollOutcome, ApiKeyWorkspace, ApiKeyWorkspaceMode,
-    ApiUsageAttribution, RemediationCode, StorageError, UpstreamApiKeyDetailsRecord,
+    ApiUsageAttribution, OpenAiOrganizationReportingCredentialStatus,
+    OpenAiOrganizationReportingCredentialWrite, Provider, ProviderProjectSource,
+    ProviderReportState, RemediationCode, StorageError, UpstreamApiKeyDetailsRecord,
     UpstreamApiKeyStore, UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord,
     UpstreamApiUsageBucketWrite, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore,
     UpstreamUpdate,
@@ -30,6 +32,7 @@ where
 {
     sto05_upd08_workspace_id_tri_state_bumps_revision(Arc::clone(&backend)).await?;
     sto04_details_create_get_list_update_conflict(Arc::clone(&backend)).await?;
+    provider_fields_and_reporting_credential_roundtrip(Arc::clone(&backend)).await?;
     acc08_capabilities_json_roundtrip_all_values(Arc::clone(&backend)).await?;
     conc07_access_and_poll_writes_are_column_scoped(Arc::clone(&backend)).await?;
     conc07_concurrent_access_and_poll_writes_both_survive(Arc::clone(&backend)).await?;
@@ -60,6 +63,127 @@ macro_rules! scenario {
         }
     };
 }
+scenario!(
+    provider_fields_and_reporting_credential_roundtrip,
+    |storage| async move {
+        let store = storage.as_ref();
+        let upstream = create_api_key_upstream(store, "provider-reporting").await?;
+
+        let mut openai = access(Some(1_800_010_000));
+        openai.provider = Some(Provider::Openai);
+        openai.project_id = Some("proj_openai_initial".to_owned());
+        openai.project_source = Some(ProviderProjectSource::Configured);
+        openai.provider_report_state = Some(ProviderReportState::Reported);
+        openai.provider_report_status_metadata =
+            Some(r#"{"source":"organization_usage","window":"daily"}"#.to_owned());
+        UpstreamApiKeyStore::write_api_key_access(store, upstream.id, upstream.revision, &openai)
+            .await?;
+        let openai_details = require_details(store, upstream.id).await?;
+        ensure_access_matches(&openai_details, &openai)?;
+        ensure!(
+            openai_details.provider == Some(Provider::Openai)
+                && openai_details.project_id.as_deref() == Some("proj_openai_initial")
+                && openai_details.project_source == Some(ProviderProjectSource::Configured)
+                && openai_details.provider_report_state == Some(ProviderReportState::Reported)
+                && openai_details.provider_report_status_metadata.as_deref()
+                    == openai.provider_report_status_metadata.as_deref(),
+            "OpenAI provider project provenance and report metadata round-trip"
+        );
+
+        let mut gemini = openai.clone();
+        gemini.provider = Some(Provider::Gemini);
+        gemini.project_id = Some("code-assist-project".to_owned());
+        gemini.project_source = Some(ProviderProjectSource::AdminResolved);
+        gemini.provider_report_state = Some(ProviderReportState::Estimated);
+        gemini.provider_report_status_metadata = Some(r#"{"source":"code_assist"}"#.to_owned());
+        UpstreamApiKeyStore::write_api_key_access(store, upstream.id, upstream.revision, &gemini)
+            .await?;
+        let gemini_details = require_details(store, upstream.id).await?;
+        ensure_access_matches(&gemini_details, &gemini)?;
+        ensure!(
+            gemini_details.provider == Some(Provider::Gemini)
+                && gemini_details.project_id.as_deref() == Some("code-assist-project")
+                && gemini_details.project_source == Some(ProviderProjectSource::AdminResolved)
+                && gemini_details.provider_report_state == Some(ProviderReportState::Estimated),
+            "Gemini project id and report state round-trip"
+        );
+
+        ensure!(
+            UpstreamApiKeyStore::get_openai_org_reporting_credential(store)
+                .await?
+                .is_none(),
+            "credential snapshot is absent before configuration"
+        );
+        let ciphertext = b"synthetic-encrypted-credential".to_vec();
+        let first_write = OpenAiOrganizationReportingCredentialWrite {
+            encrypted_secret_ciphertext: ciphertext.clone(),
+            redacted_hint: "org-admin-...7890".to_owned(),
+            status: OpenAiOrganizationReportingCredentialStatus::Configured,
+            expected_revision: None,
+            updated_at_unix_secs: 1_800_010_100,
+        };
+        let first =
+            UpstreamApiKeyStore::replace_openai_org_reporting_credential(store, &first_write)
+                .await?;
+        ensure!(
+            first.scope == "deployment"
+                && first.revision == 1
+                && first.redacted_hint == first_write.redacted_hint
+                && first.status == OpenAiOrganizationReportingCredentialStatus::Configured,
+            "credential replacement creates deployment singleton metadata"
+        );
+        let debug = format!("{first_write:?}");
+        let serialized = serde_json::to_string(&first)?;
+        let ciphertext_text = String::from_utf8(ciphertext)?;
+        ensure!(
+            !debug.contains(&ciphertext_text) && !serialized.contains(&ciphertext_text),
+            "credential ciphertext is excluded from Debug and serialized public records"
+        );
+        ensure!(
+            UpstreamApiKeyStore::get_openai_org_reporting_credential(store).await?
+                == Some(first.clone()),
+            "credential metadata reads back without ciphertext"
+        );
+
+        let duplicate =
+            UpstreamApiKeyStore::replace_openai_org_reporting_credential(store, &first_write).await;
+        ensure!(
+            matches!(duplicate, Err(StorageError::Conflict { .. })),
+            "create-only credential replacement conflicts once singleton exists"
+        );
+        let stale = OpenAiOrganizationReportingCredentialWrite {
+            encrypted_secret_ciphertext: b"synthetic-stale".to_vec(),
+            redacted_hint: "stale".to_owned(),
+            status: OpenAiOrganizationReportingCredentialStatus::Failed,
+            expected_revision: Some(first.revision - 1),
+            updated_at_unix_secs: 1_800_010_200,
+        };
+        ensure!(
+            matches!(
+                UpstreamApiKeyStore::replace_openai_org_reporting_credential(store, &stale).await,
+                Err(StorageError::Conflict { .. })
+            ),
+            "stale credential revision is rejected"
+        );
+        let replacement = OpenAiOrganizationReportingCredentialWrite {
+            encrypted_secret_ciphertext: b"synthetic-encrypted-credential-v2".to_vec(),
+            redacted_hint: "org-admin-...4321".to_owned(),
+            status: OpenAiOrganizationReportingCredentialStatus::Configured,
+            expected_revision: Some(first.revision),
+            updated_at_unix_secs: 1_800_010_300,
+        };
+        let second =
+            UpstreamApiKeyStore::replace_openai_org_reporting_credential(store, &replacement)
+                .await?;
+        ensure!(
+            second.revision == first.revision + 1
+                && second.redacted_hint == replacement.redacted_hint
+                && second.updated_at_unix_secs == replacement.updated_at_unix_secs,
+            "credential replacement advances revision conditionally"
+        );
+        Ok(())
+    }
+);
 
 scenario!(
     sto05_upd08_workspace_id_tri_state_bumps_revision,
@@ -379,6 +503,11 @@ scenario!(
                     Vec::new()
                 },
                 usage_report_state: report_states[index % report_states.len()],
+                provider: None,
+                project_id: None,
+                project_source: None,
+                provider_report_state: None,
+                provider_report_status_metadata: None,
                 last_error: Some(format!(
                     "키 오류 {index} — ✓ \u{1F511} \"quoted\"\n\ttab \\ backslash"
                 )),
@@ -2185,6 +2314,11 @@ fn ensure_access_matches(
             && details.capabilities == access.capabilities
             && details.remediation == access.remediation
             && details.usage_report_state == access.usage_report_state
+            && details.provider == access.provider
+            && details.project_id == access.project_id
+            && details.project_source == access.project_source
+            && details.provider_report_state == access.provider_report_state
+            && details.provider_report_status_metadata == access.provider_report_status_metadata
             && details.last_error == access.last_error
             && details.checked_at_unix_secs == access.checked_at_unix_secs
             && details.last_attempt_at_unix_secs == Some(access.last_attempt_at_unix_secs),
@@ -2213,6 +2347,11 @@ fn access(checked_at_unix_secs: Option<u64>) -> ApiKeyAccessWrite {
         },
         remediation: Vec::new(),
         usage_report_state: Some(ApiKeyOrgCapability::Ok),
+        provider: None,
+        project_id: None,
+        project_source: None,
+        provider_report_state: None,
+        provider_report_status_metadata: None,
         last_error: None,
         checked_at_unix_secs,
         last_attempt_at_unix_secs: checked_at_unix_secs.unwrap_or(1_800_000_000),
@@ -2223,6 +2362,9 @@ fn poll_outcome(attempted_at_unix_secs: u64) -> ApiKeyUsagePollOutcome {
     ApiKeyUsagePollOutcome {
         attempted_at_unix_secs,
         usage_report_state: None,
+        provider: None,
+        provider_report_state: None,
+        provider_report_status_metadata: None,
         access_revision_seen: 0,
         consecutive_failures: 0,
         next_poll_after_unix_secs: None,

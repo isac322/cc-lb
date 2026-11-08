@@ -20,6 +20,7 @@ use cc_lb_control::RequestEventBus;
 use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
 use cc_lb_control::api_keys::key_store::KeyStore;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::openai_org_api::OpenAiOrgApi;
 use cc_lb_engine::cache_keepalive::KeepaliveDispatcher;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::Result as SchedulerResult;
@@ -89,6 +90,7 @@ pub(super) struct SchedulerDispatch {
     pub(super) event_bus: Arc<dyn RequestEventBus>,
     pub(super) clock: ClockHandle,
     pub(super) anthropic_org_api: AnthropicOrgApi,
+    pub(super) openai_org_api: OpenAiOrgApi,
 }
 
 pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
@@ -127,6 +129,8 @@ impl SchedulerDispatch {
             event_bus: deps.event_bus,
             clock: deps.clock,
             anthropic_org_api: deps.anthropic_org_api,
+            openai_org_api: OpenAiOrgApi::production()
+                .expect("OpenAI production organization origin parses"),
         }
     }
 

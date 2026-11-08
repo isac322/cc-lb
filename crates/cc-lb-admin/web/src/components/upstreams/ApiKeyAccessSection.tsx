@@ -1,20 +1,15 @@
-// What an `anthropic_api_key` upstream's key can do at Anthropic, as of the
-// last probe. The description is the credential summary (key kind · when it
-// was checked); the header carries one status badge plus Re-check and
-// Replace key. Blocking key states (rejected, never checked, last check
-// failed) are owned by the pane's key notice, so Access hands it the matching
-// action and keeps only the badge. The body is label / value rows: the
-// effective Endpoint always, then — only for a usable key — Workspace and
-// Usage data, whose one nudge line is the single owner of the
-// "get reported usage" fix. Only org-scoped keys get a workspace Change.
+// Provider-native key verification, project provenance and reporting access.
+// Anthropic keeps its workspace controls; other providers show serving-key
+// access separately from administrator reporting capability.
 
 import { KeyRound } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import {
-  API_KEY_ACCESS_NOT_CHECKED,
   ApiError,
   type ApiKeyAccess,
+  apiKeyAccessOf,
+  type ProviderReportState,
   type Upstream,
 } from '../../lib/api';
 import {
@@ -58,8 +53,13 @@ function keyKindLabel(access: ApiKeyAccess): string | null {
 }
 
 /** Credential summary: `Service account key · checked 3 hours ago`. */
-function accessSummary(access: ApiKeyAccess): ReactNode {
-  const kind = keyKindLabel(access);
+function accessSummary(
+  access: ApiKeyAccess,
+  providerLabel?: string,
+): ReactNode {
+  const kind = providerLabel
+    ? `${providerLabel} serving key`
+    : keyKindLabel(access);
   const at = access.checked_at_unix_secs;
   const verb = access.verified ? 'checked' : 'last attempt';
   const check =
@@ -106,7 +106,10 @@ export function ApiKeyAccessSection({
   /** Whose figures Anthropic reports: this key's, or the whole workspace's. */
   usageAttribution?: 'api_key' | 'workspace';
 }) {
-  const access = upstream.api_key_access ?? API_KEY_ACCESS_NOT_CHECKED;
+  const access = apiKeyAccessOf(upstream);
+  const anthropic = upstream.kind === 'anthropic_api_key';
+  const providerLabel =
+    upstream.kind === 'openai_api_key' ? 'OpenAI' : 'Gemini';
   const recheck = useRecheckApiKey();
   const [ownEditing, setOwnEditing] = useState(false);
   const editing = workspaceEditing ?? ownEditing;
@@ -120,6 +123,7 @@ export function ApiKeyAccessSection({
     setOwnEndpointEditing(next);
     onEndpointEditingChange?.(next);
   };
+  if (access === null) return null;
   const ws = access.workspace;
   const orgScoped = access.key_class === 'org_scoped';
   const foreignBase = !isAnthropicBaseUrl(upstream.base_url ?? '');
@@ -128,7 +132,7 @@ export function ApiKeyAccessSection({
   // The pane key notice owns the action that fixes its state.
   const notice = apiKeyNoticeOf(access);
   const noticeOwnsRecheck =
-    notice === 'never_checked' || notice === 'check_failed';
+    anthropic && (notice === 'never_checked' || notice === 'check_failed');
   const recheckNow = () => recheck.mutate(upstream.id);
 
   const status =
@@ -152,7 +156,7 @@ export function ApiKeyAccessSection({
           {recheck.isPending ? 'Checking…' : 'Re-check'}
         </Button>
       )}
-      {notice === 'rejected' ? null : (
+      {anthropic && notice === 'rejected' ? null : (
         <Button size="sm" iconLeft={<KeyRound />} onClick={onReplace}>
           Replace key
         </Button>
@@ -247,13 +251,13 @@ export function ApiKeyAccessSection({
         ];
 
   const workspaceNotice =
-    keyUsable && orgScoped && ws.mode === 'required' && !editing;
+    anthropic && keyUsable && orgScoped && ws.mode === 'required' && !editing;
 
   return (
     <DetailSection
       span="full"
       title="Access"
-      description={accessSummary(access)}
+      description={accessSummary(access, anthropic ? undefined : providerLabel)}
       data-testid="api-key-access"
       action={headerActions}
     >
@@ -283,7 +287,14 @@ export function ApiKeyAccessSection({
             editing={editingEndpoint}
             onEditingChange={setEndpointEditing}
           />
-          {keyUsable ? (
+          {!anthropic ? (
+            <ProviderAccessRows
+              access={access}
+              provider={
+                upstream.kind === 'openai_api_key' ? 'openai' : 'gemini'
+              }
+            />
+          ) : keyUsable ? (
             <>
               {editing && orgScoped ? (
                 <WorkspaceEditor
@@ -310,13 +321,130 @@ export function ApiKeyAccessSection({
             </>
           ) : null}
         </DetailRows>
-        {keyUsable ? null : (
+        {!anthropic || keyUsable ? null : (
           <p className="text-body-sm text-text-muted">
             Workspace and usage reports appear after a successful check.
           </p>
         )}
       </div>
     </DetailSection>
+  );
+}
+
+const REPORT_LABEL: Record<ProviderReportState, string> = {
+  reported: 'Reported',
+  estimated: 'Estimated',
+  not_configured: 'Not configured',
+  unavailable: 'Unavailable',
+  denied: 'Denied',
+  not_applicable: 'Not applicable',
+  stale: 'Stale',
+  failed: 'Failed',
+};
+
+function ProviderAccessRows({
+  access,
+  provider,
+}: {
+  access: ApiKeyAccess;
+  provider: 'openai' | 'gemini';
+}) {
+  const state = access.provider_report_state;
+  const projectSource =
+    access.project_source === 'configured'
+      ? 'Configured project ID · not verified by the serving-key check'
+      : access.project_source === 'admin_resolved'
+        ? 'Resolved by the administrator API'
+        : access.project_source === 'unverified'
+          ? 'Project provenance unverified'
+          : 'Project provenance unknown';
+  const reportHint =
+    provider === 'gemini'
+      ? 'Provider reporting is not applicable to this Gemini API-key integration. Proxy estimates cover cc-lb traffic only, not organization totals.'
+      : state === 'reported'
+        ? 'Text-generation usage and costs from the organization administrator API, scoped to this project.'
+        : state === 'not_configured'
+          ? 'Configure the deployment’s OpenAI organization-admin credential → get reported text-generation usage and costs. The serving key alone cannot authorize reports.'
+          : state === 'denied'
+            ? 'Authorize the deployment’s OpenAI organization-admin credential for usage and costs → get reported figures.'
+            : state === 'stale'
+              ? 'The last administrator report is retained; the latest refresh did not succeed.'
+              : state === 'not_applicable'
+                ? 'Administrator reporting does not apply to this upstream. Proxy estimates cover cc-lb traffic only.'
+                : state == null
+                  ? 'Reporting status is unknown. The serving-key check does not verify administrator reporting access.'
+                  : 'Administrator reports are not available. Showing proxy estimates from cc-lb traffic.';
+  return (
+    <>
+      <DetailRow label="Provider">
+        {access.provider === 'openai'
+          ? 'OpenAI'
+          : access.provider === 'gemini'
+            ? 'Gemini'
+            : access.provider === 'anthropic'
+              ? 'Anthropic'
+              : 'Unknown'}
+      </DetailRow>
+      <DetailRow label="Project">
+        <div className="flex min-w-0 flex-col gap-1">
+          <span className="break-all font-mono text-data">
+            {access.project_id ?? 'Unknown'}
+          </span>
+          <span className="text-caption text-text-muted">{projectSource}</span>
+        </div>
+      </DetailRow>
+      <DetailRow label="Administrator reporting">
+        <div className="flex flex-col items-start gap-1">
+          <StatusBadge
+            tone={
+              state === 'reported'
+                ? 'ok'
+                : state === 'denied' || state === 'failed'
+                  ? 'warn'
+                  : 'neutral'
+            }
+            label={state == null ? 'Unknown' : REPORT_LABEL[state]}
+          />
+          <span className="text-caption text-text-muted">{reportHint}</span>
+          {provider === 'gemini' ? (
+            <a
+              className={ANCHOR_CLASS}
+              href="https://aistudio.google.com/docs/billing#monitor-usage"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Gemini usage and billing in AI Studio
+            </a>
+          ) : null}
+        </div>
+      </DetailRow>
+      <DetailRow
+        label="Usage data"
+        data-testid="api-key-usage-mode"
+        tabIndex={-1}
+        className="outline-none"
+      >
+        <StatusBadge
+          tone={state === 'reported' ? 'ok' : 'neutral'}
+          label={
+            state === 'reported'
+              ? 'Reported'
+              : state === 'stale'
+                ? 'Last report'
+                : state == null && provider !== 'gemini'
+                  ? 'Unknown'
+                  : 'Estimated'
+          }
+        />
+        <span className="mt-1 block text-caption text-text-muted">
+          {state === 'reported' || state === 'stale'
+            ? 'Provider report; serving-key verification is separate from administrator access.'
+            : state == null && provider !== 'gemini'
+              ? 'Reporting status unknown · cc-lb traffic estimates remain available'
+              : 'Proxy estimates · cc-lb traffic only'}
+        </span>
+      </DetailRow>
+    </>
   );
 }
 

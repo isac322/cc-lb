@@ -825,7 +825,7 @@ export interface ConfigHistoryResponse {
   entries: ConfigHistoryItem[];
 }
 
-// ─── Anthropic API-key access ────────────────────────────────────────────────
+// ─── Provider API-key access ────────────────────────────────────────────────
 // One contract for every API-key surface: the connect dialog's preflight,
 // the upstream pane's Access section and the usage card's provenance. The
 // backend implements these under `crates/cc-lb-admin/src/v1/upstreams.rs`.
@@ -869,7 +869,21 @@ export const ApiKeyWorkspaceSchema = z.object({
 });
 export type ApiKeyWorkspace = z.infer<typeof ApiKeyWorkspaceSchema>;
 
-/** Stored capability snapshot of an `anthropic_api_key` upstream. */
+export const ApiKeyProviderSchema = z.enum(['anthropic', 'openai', 'gemini']);
+export type ApiKeyProvider = z.infer<typeof ApiKeyProviderSchema>;
+export const ProviderReportStateSchema = z.enum([
+  'reported',
+  'estimated',
+  'not_configured',
+  'unavailable',
+  'denied',
+  'not_applicable',
+  'stale',
+  'failed',
+]);
+export type ProviderReportState = z.infer<typeof ProviderReportStateSchema>;
+
+/** Stored capability snapshot; Anthropic fields remain backward-compatible. */
 export const ApiKeyAccessSchema = z.object({
   /** False until a probe succeeds: migrated keys and "Save without checking". */
   verified: z.boolean(),
@@ -889,6 +903,15 @@ export const ApiKeyAccessSchema = z.object({
   key_type: z.enum(['personal', 'service_account', 'workspace']).nullable(),
   /** Last probe failure, already phrased for operators. */
   last_error: z.string().nullable(),
+  provider: ApiKeyProviderSchema.nullable().optional(),
+  project_id: z.string().nullable().optional(),
+  project_source: z
+    .enum(['configured', 'admin_resolved', 'unverified'])
+    .nullable()
+    .optional(),
+  provider_report_state: ProviderReportStateSchema.nullable().optional(),
+  /** Redacted backend metadata; never rendered as raw provider output. */
+  provider_report_status_metadata: z.string().nullable().optional(),
 });
 export type ApiKeyAccess = z.infer<typeof ApiKeyAccessSchema>;
 
@@ -1060,8 +1083,12 @@ export interface UpstreamWorkspacesResponse {
  * card's series for one API-key upstream.
  */
 export interface UpstreamKeyUsageResponse extends DashboardUsageResponse {
-  /** `real`: token counts from Anthropic's usage report; `estimated`: cc-lb's request log. */
-  source: 'real' | 'estimated';
+  /** `real` is the legacy spelling of provider-reported token counts. */
+  source: 'real' | ProviderReportState;
+  /** Absent/null on legacy responses; access snapshots may supply context. */
+  provider?: ApiKeyProvider | null;
+  provider_report_state?: ProviderReportState | null;
+  project_id?: string | null;
   /**
    * `api_key`: everything the key did, including traffic outside cc-lb.
    * `workspace`: the key could not be matched (`key_id_unresolved`), so the
@@ -1117,7 +1144,10 @@ export interface KeyUsageMonth {
 
 /** What the usage card needs to label its figures; see `keyUsageProvenance`. */
 export interface KeyUsageProvenance {
-  source: 'reported' | 'estimated';
+  source: ProviderReportState;
+  provider?: ApiKeyProvider;
+  provider_report_state?: ProviderReportState;
+  project_id?: string;
   /**
    * Reported figures are Anthropic's last snapshot, kept while reports
    * fail: still reported data, just not current.
@@ -1163,16 +1193,34 @@ export function keyUsageProvenance(
   usage: UpstreamKeyUsageResponse,
   access: ApiKeyAccess,
 ): KeyUsageProvenance {
-  const reported = usage.source === 'real';
+  const source: ProviderReportState =
+    usage.source === 'real' ? 'reported' : usage.source;
+  const reported = source === 'reported' || source === 'stale';
+  const provider = usage.provider ?? access.provider ?? undefined;
+  const reportState =
+    usage.provider_report_state ??
+    (usage.source !== 'real' &&
+    usage.source !== 'reported' &&
+    usage.source !== 'estimated'
+      ? usage.source
+      : (access.provider_report_state ?? undefined));
   const fix = usage.fix?.code ?? null;
   return {
-    source: reported ? 'reported' : 'estimated',
-    stale: reported && usage.stale,
+    source,
+    ...(provider ? { provider } : {}),
+    ...(reportState ? { provider_report_state: reportState } : {}),
+    ...((usage.project_id ?? access.project_id)
+      ? { project_id: usage.project_id ?? access.project_id ?? undefined }
+      : {}),
+    stale: reported && (usage.stale || reportState === 'stale'),
     // R2-2: only Anthropic's refusal stops reports; a 5xx streak is stale.
     stopped: fix === 'usage_poll_failed',
     last_reported_unix_secs: reported ? usage.last_reported_unix_secs : null,
     pending_first_report:
-      !reported && fix === null && access.usage_report === 'ok',
+      !reported &&
+      fix === null &&
+      access.usage_report === 'ok' &&
+      (provider === undefined || provider === 'anthropic'),
     attribution: usage.attribution,
     workspace: attributedWorkspace(usage, access),
     verified: access.verified,
@@ -1184,11 +1232,18 @@ export function keyUsageProvenance(
 export const UpstreamSchema = z.object({
   id: z.string(),
   name: z.string(),
-  kind: z.enum(['anthropic_api_key', 'anthropic_oauth']),
+  kind: z.enum([
+    'anthropic_api_key',
+    'anthropic_oauth',
+    'openai_api_key',
+    'openai_oauth',
+    'gemini_api_key',
+    'gemini_oauth',
+  ]),
   enabled: z.boolean(),
   base_url: z.string().nullable(),
 
-  /** `anthropic_api_key` upstreams only; absent on rows never checked. */
+  /** All API-key upstream kinds; absent on rows never checked. */
   api_key_access: ApiKeyAccessSchema.nullable().optional(),
   warmup_enabled: z.boolean(),
   warmup_dialect_plugin: z
@@ -1226,8 +1281,14 @@ export const API_KEY_ACCESS_NOT_CHECKED: ApiKeyAccess = {
  * checked (unverified). `null` for OAuth upstreams.
  */
 export function apiKeyAccessOf(upstream: Upstream): ApiKeyAccess | null {
-  if (upstream.kind !== 'anthropic_api_key') return null;
-  return upstream.api_key_access ?? API_KEY_ACCESS_NOT_CHECKED;
+  switch (upstream.kind) {
+    case 'anthropic_api_key':
+    case 'openai_api_key':
+    case 'gemini_api_key':
+      return upstream.api_key_access ?? API_KEY_ACCESS_NOT_CHECKED;
+    default:
+      return null;
+  }
 }
 
 export type OAuthTokenMode = 'long_lived_365d' | 'refreshing';

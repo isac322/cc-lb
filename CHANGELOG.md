@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- API-key access now includes bounded OpenAI and Gemini native checks with strict create/update validation, while preserving Anthropic behavior. A separate encrypted OpenAI organization-admin credential enables project listing and project-scoped text-generation usage and cost reporting. Gemini shows project-scoped estimates from cc-lb traffic and explicitly marks organization reporting as not applicable. ([#1129](https://github.com/isac322/cc-lb/issues/1129))
 - Added API-key-only OpenAI Realtime (`/openai/v1/realtime`) and Gemini Live (`/gemini/ws/...`) WebSocket tunnels. Each connection authenticates before upgrade, selects and pins one provider upstream, relays frames without rewriting them, scrubs downstream API-key query parameters, and records reported frame usage with connection status and duration.
 - Admin request-event filters now accept `event_kind=messages,openai_responses` or repeated `event_kind=messages&event_kind=openai_responses` query keys across recent, histogram, delta, and SSE endpoints. Unknown or empty entries return `400 {"error":"invalid_event_kind"}`.
 

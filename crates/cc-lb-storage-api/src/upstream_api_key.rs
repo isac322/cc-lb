@@ -1,16 +1,24 @@
-//! Storage vocabulary for Anthropic API-key upstreams: the capability/access
-//! snapshot (`upstream_api_key_details_v1`) and provider-reported usage
-//! buckets (`upstream_api_usage_v1`).
+//! Storage vocabulary for API-key upstreams: the capability/access snapshot
+//! (`upstream_api_key_details_v1`) and provider-reported usage buckets
+//! (`upstream_api_usage_v1`). Anthropic-specific fields remain for backwards
+//! compatibility; provider-neutral project/reporting fields are additive.
 //!
 //! These types are unrelated to the managed-key (`sk-cclb-*`) usage store in
 //! [`crate::api_key_usage`]; every name here is prefixed `ApiKey*` on the
 //! upstream side or `UpstreamApiUsage*`.
 
 use async_trait::async_trait;
+use cc_lb_domain::Provider;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{StorageResult, UpstreamRecord};
+use crate::{
+    StorageError, StorageResult, UpstreamRecord,
+    openai_reporting::{
+        OpenAiOrganizationReportingCredentialRecord, OpenAiOrganizationReportingCredentialStatus,
+        OpenAiOrganizationReportingCredentialWrite,
+    },
+};
 
 macro_rules! snake_case_vocabulary {
     (
@@ -89,6 +97,29 @@ snake_case_vocabulary! {
         Resolved => "resolved",
         Unresolved => "unresolved",
         NotApplicable => "not_applicable",
+    }
+}
+
+snake_case_vocabulary! {
+    /// Provenance of a provider project id on an API-key access snapshot.
+    pub enum ProviderProjectSource {
+        Configured => "configured",
+        AdminResolved => "admin_resolved",
+        Unverified => "unverified",
+    }
+}
+
+snake_case_vocabulary! {
+    /// Provider-neutral state of the API-key usage/reporting surface.
+    pub enum ProviderReportState {
+        Reported => "reported",
+        Estimated => "estimated",
+        NotConfigured => "not_configured",
+        Unavailable => "unavailable",
+        Denied => "denied",
+        NotApplicable => "not_applicable",
+        Stale => "stale",
+        Failed => "failed",
     }
 }
 
@@ -202,6 +233,15 @@ pub struct ApiKeyAccessWrite {
     pub capabilities: ApiKeyCapabilities,
     pub remediation: Vec<RemediationCode>,
     pub usage_report_state: Option<ApiKeyOrgCapability>,
+    /// Provider kind for this API-key access snapshot. `None` preserves
+    /// legacy callers that only populate the Anthropic vocabulary.
+    pub provider: Option<Provider>,
+    pub project_id: Option<String>,
+    pub project_source: Option<ProviderProjectSource>,
+    pub provider_report_state: Option<ProviderReportState>,
+    /// Redacted, bounded metadata encoded by the provider/reporting adapter.
+    /// This field MUST never contain credentials or authorization headers.
+    pub provider_report_status_metadata: Option<String>,
     /// Scrubbed of key material, at most 200 characters.
     pub last_error: Option<String>,
     /// `None` when no probe succeeded (create/PUT with skip).
@@ -217,6 +257,19 @@ pub struct ApiKeyUsagePollOutcome {
     /// `access_revision` still equals `access_revision_seen`; otherwise this
     /// one column is skipped and the rest are written.
     pub usage_report_state: Option<ApiKeyOrgCapability>,
+    /// Provider kind associated with this poll's provider-neutral result.
+    /// `Some` is applied only when `access_revision` still equals
+    /// `access_revision_seen`; `None` leaves the stored value unchanged.
+    pub provider: Option<Provider>,
+    /// Provider-neutral result of this usage/reporting poll. `Some` is
+    /// applied only when `access_revision` still equals `access_revision_seen`;
+    /// `None` leaves the stored value unchanged.
+    pub provider_report_state: Option<ProviderReportState>,
+    /// Redacted, bounded provider status metadata. It MUST never contain
+    /// credentials or authorization headers. `Some` is applied only when
+    /// `access_revision` still equals `access_revision_seen`; `None` leaves
+    /// the stored value unchanged.
+    pub provider_report_status_metadata: Option<String>,
     /// `details.access_revision` as read with the poll candidate; `0` when
     /// the candidate had no details row (an inserted row starts at `0`).
     pub access_revision_seen: u64,
@@ -284,6 +337,12 @@ pub struct UpstreamApiKeyDetailsRecord {
     pub capabilities: ApiKeyCapabilities,
     pub remediation: Vec<RemediationCode>,
     pub usage_report_state: Option<ApiKeyOrgCapability>,
+    pub provider: Option<Provider>,
+    pub project_id: Option<String>,
+    pub project_source: Option<ProviderProjectSource>,
+    pub provider_report_state: Option<ProviderReportState>,
+    /// Redacted, bounded metadata; never provider credentials or auth headers.
+    pub provider_report_status_metadata: Option<String>,
     pub last_error: Option<String>,
     pub checked_at_unix_secs: Option<u64>,
     pub last_attempt_at_unix_secs: Option<u64>,
@@ -328,6 +387,33 @@ pub struct UpstreamRequestOutcome {
     pub observed_at_unix_ms: u64,
 }
 
+/// Internal storage seam for the deployment-scoped OpenAI organization
+/// reporting credential. This type is intentionally not serializable and its
+/// `Debug` implementation redacts the ciphertext.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OpenAiOrganizationReportingCredentialCiphertextRecord {
+    pub encrypted_secret_ciphertext: Vec<u8>,
+    pub status: OpenAiOrganizationReportingCredentialStatus,
+    pub revision: u64,
+}
+
+impl std::fmt::Debug for OpenAiOrganizationReportingCredentialCiphertextRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenAiOrganizationReportingCredentialCiphertextRecord")
+            .field(
+                "encrypted_secret_ciphertext",
+                &format_args!(
+                    "<{} bytes redacted>",
+                    self.encrypted_secret_ciphertext.len()
+                ),
+            )
+            .field("status", &self.status)
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
+
 #[async_trait]
 pub trait UpstreamApiKeyStore: Send + Sync {
     async fn get_api_key_details(
@@ -339,6 +425,79 @@ pub trait UpstreamApiKeyStore: Send + Sync {
         &self,
         upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<UpstreamApiKeyDetailsRecord>>;
+
+    /// Atomically leases the deployment-scoped OpenAI organization credential
+    /// for one bounded poll. The lease is revision-fenced and expires at
+    /// `lease_until_unix_secs`; `Ok(false)` means another poll owns it.
+    async fn claim_openai_org_reporting_poll(
+        &self,
+        credential_revision: u64,
+        now_unix_secs: u64,
+        lease_until_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        let _ = (credential_revision, now_unix_secs, lease_until_unix_secs);
+        Ok(true)
+    }
+
+    /// Marks the deployment credential denied after an OpenAI 401/403. The
+    /// revision fence prevents an older poll from overwriting a replacement.
+    async fn mark_openai_org_reporting_credential_denied(
+        &self,
+        expected_revision: u64,
+        updated_at_unix_secs: u64,
+    ) -> StorageResult<()> {
+        let _ = (expected_revision, updated_at_unix_secs);
+        Err(StorageError::Fatal {
+            message:
+                "mark_openai_org_reporting_credential_denied is not implemented for this storage backend"
+                    .to_owned(),
+        })
+    }
+
+    /// Returns the encrypted deployment-scoped OpenAI organization reporting
+    /// credential for internal consumers that already hold the deployment AEAD.
+    /// Backends that do not yet implement the credential table return
+    /// `StorageError::Fatal`; this default keeps the existing adapter contract
+    /// source-compatible while the adapter slice is staged.
+    async fn get_openai_org_reporting_credential_ciphertext(
+        &self,
+    ) -> StorageResult<Option<OpenAiOrganizationReportingCredentialCiphertextRecord>> {
+        Err(StorageError::Fatal {
+            message:
+                "get_openai_org_reporting_credential_ciphertext is not implemented for this storage backend"
+                    .to_owned(),
+        })
+    }
+
+    /// Returns only the redacted deployment-scoped OpenAI organization
+    /// reporting snapshot. The encrypted credential bytes are never included.
+    /// Backends that do not yet implement the credential table return
+    /// `StorageError::Fatal`; this default keeps the existing adapter contract
+    /// source-compatible while the adapter slice is staged.
+    async fn get_openai_org_reporting_credential(
+        &self,
+    ) -> StorageResult<Option<OpenAiOrganizationReportingCredentialRecord>> {
+        Err(StorageError::Fatal {
+            message:
+                "get_openai_org_reporting_credential is not implemented for this storage backend"
+                    .to_owned(),
+        })
+    }
+
+    /// Conditionally replaces the deployment-scoped OpenAI organization
+    /// reporting credential. The write carries already-encrypted ciphertext;
+    /// adapters persist it without exposing it through public snapshots.
+    async fn replace_openai_org_reporting_credential(
+        &self,
+        write: &OpenAiOrganizationReportingCredentialWrite,
+    ) -> StorageResult<OpenAiOrganizationReportingCredentialRecord> {
+        let _ = write;
+        Err(StorageError::Fatal {
+            message:
+                "replace_openai_org_reporting_credential is not implemented for this storage backend"
+                    .to_owned(),
+        })
+    }
 
     /// Re-check write: capability/access columns only, insert-if-missing.
     /// `StorageError::Conflict` when the spec is deleted or its
@@ -361,13 +520,16 @@ pub trait UpstreamApiKeyStore: Send + Sync {
         attempted_at_unix_secs: u64,
     ) -> StorageResult<()>;
 
-    /// Live, enabled `anthropic_api_key` specs LEFT JOIN details where
-    /// (no details row OR `usage_report_state IS NULL` OR
-    /// (`state = 'ok'` AND `key_class = 'org_scoped'`)) AND
-    /// (`usage_next_poll_after_unix_secs IS NULL OR <= now`) AND no live poll
-    /// claim (`usage_poll_claim_token IS NULL OR lease <= now`). Ordered by
-    /// oldest usage-poll attempt first (never-attempted first), then spec id,
-    /// so a `limit` below the eligible count still rotates through all of them.
+    /// Live, enabled API-key specs (`anthropic_api_key`, `openai_api_key`, or
+    /// `gemini_api_key`) LEFT JOIN details. Anthropic candidates use the
+    /// legacy eligibility rule (no details row OR `usage_report_state IS
+    /// NULL` OR (`state = 'ok'` AND `key_class = 'org_scoped'`)); OpenAI and
+    /// Gemini candidates remain eligible until `provider_report_state` is
+    /// `denied`, `not_configured`, or `not_applicable` (transient unavailable,
+    /// failed, and stale states retry). All candidates must be due and have no
+    /// live poll claim. Ordered by oldest usage-poll attempt first
+    /// (never-attempted first), then spec id, so a `limit` below the eligible
+    /// count still rotates through all of them.
     async fn list_api_key_usage_poll_candidates(
         &self,
         now_unix_secs: u64,

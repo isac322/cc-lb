@@ -15,21 +15,29 @@ use cc_lb_control::anthropic_api_key::{
     OrgApiError, UsageBucketWidth, UsageFilter, UsageReportPage, UsageReportQuery, key_hint,
     resolve_api_key,
 };
+use cc_lb_control::openai_org_api::{
+    OpenAiBucketWidth, OpenAiCostsPage, OpenAiCostsQuery, OpenAiOrgApiError, OpenAiTextUsagePage,
+    OpenAiUsageQuery,
+};
+use cc_lb_domain::Provider;
 use cc_lb_pricing::{PriceCatalog, normalize_model_id};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::api_key_usage_poll::{API_KEY_USAGE_POLL_JOB, ApiKeyUsagePollCronJob};
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::scheduler_metrics::record_api_key_usage_poll_outcome;
+use cc_lb_scheduler::scheduler_metrics::record_api_key_usage_poll_outcome_with_labels;
 use cc_lb_storage_api::usage_pruner::utc_month_start_unix_secs;
 use cc_lb_storage_api::{
     ApiKeyOrgCapability, ApiKeyUsagePollCandidate, ApiKeyUsagePollOutcome, ApiUsageAttribution,
+    OpenAiOrganizationReportingCredentialStatus, ProviderProjectSource, ProviderReportState,
     StorageError, UpstreamApiKeyDetailsRecord, UpstreamApiUsageBucketWrite, UpstreamRecord,
     UpstreamStore,
 };
 use futures_util::StreamExt as _;
+use std::collections::BTreeSet;
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use super::SchedulerDispatch;
 use super::storage::storage_scheduler_error;
@@ -69,6 +77,8 @@ pub(super) enum PollLabel {
     RateLimited,
     Failed,
     DecryptFailed,
+    NotConfigured,
+    Unavailable,
     NotApplicable,
     NoSubject,
     Conflict,
@@ -89,6 +99,25 @@ impl PollLabel {
             Self::RateLimited => "rate_limited",
             Self::Failed => "failed",
             Self::DecryptFailed => "decrypt_failed",
+            Self::NotConfigured => "not_configured",
+            Self::Unavailable => "unavailable",
+            Self::NotApplicable => "not_applicable",
+            Self::NoSubject => "no_subject",
+            Self::Conflict => "conflict",
+            Self::ClaimLost => "claim_lost",
+            Self::LeaseSpent => "lease_spent",
+            Self::StorageError => "storage_error",
+        }
+    }
+    const fn status_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Probed => "probed",
+            Self::Denied => "denied",
+            Self::RateLimited => "rate_limited",
+            Self::Failed => "failed",
+            Self::DecryptFailed | Self::Unavailable => "unavailable",
+            Self::NotConfigured => "not_configured",
             Self::NotApplicable => "not_applicable",
             Self::NoSubject => "no_subject",
             Self::Conflict => "conflict",
@@ -219,7 +248,6 @@ impl SchedulerDispatch {
             .await;
         let mut failed = 0_usize;
         for label in labels {
-            record_api_key_usage_poll_outcome(label.as_str(), 1);
             failed += usize::from(label.is_failure());
         }
         tracing::info!(
@@ -245,16 +273,37 @@ impl SchedulerDispatch {
         candidate: ApiKeyUsagePollCandidate,
         times: PollTimes,
     ) -> PollLabel {
+        let provider = provider_label(candidate.upstream.kind.provider());
+        let kind = candidate.upstream.kind.as_str();
+        let label = self.poll_api_key_candidate_inner(candidate, times).await;
+        record_api_key_usage_poll_outcome_with_labels(
+            label.as_str(),
+            provider,
+            kind,
+            label.status_str(),
+            1,
+        );
+        label
+    }
+
+    async fn poll_api_key_candidate_inner(
+        &self,
+        candidate: ApiKeyUsagePollCandidate,
+        times: PollTimes,
+    ) -> PollLabel {
         let ApiKeyUsagePollCandidate {
             mut upstream,
             details,
         } = candidate;
+        let provider = upstream.kind.provider();
         let failures = details.as_ref().map_or(0, |row| row.usage_poll_failures);
-        let key = resolve_api_key(&self.aead, &upstream);
+        // Organization reporting never uses the serving credential for
+        // OpenAI/Gemini. Resolve it only on the legacy Anthropic path.
+        let key = (provider == Provider::Anthropic).then(|| resolve_api_key(&self.aead, &upstream));
         // Claim before any outbound call and before any outcome write: only
         // the claim owner polls this upstream and completes it.
-        let legacy_key_hint = match (&details, &key) {
-            (None, Ok(key)) => key_hint(key),
+        let legacy_key_hint = match (&details, key.as_ref()) {
+            (None, Some(Ok(key))) => key_hint(key),
             _ => None,
         };
         let claim_token = Uuid::new_v4();
@@ -317,6 +366,9 @@ impl SchedulerDispatch {
         let mut outcome = ApiKeyUsagePollOutcome {
             attempted_at_unix_secs: times.now,
             usage_report_state: None,
+            provider: Some(provider),
+            provider_report_state: None,
+            provider_report_status_metadata: None,
             access_revision_seen: details.as_ref().map_or(0, |row| row.access_revision),
             consecutive_failures: failures,
             next_poll_after_unix_secs: Some(times.next_regular_poll()),
@@ -325,16 +377,25 @@ impl SchedulerDispatch {
             claim_token: Some(claim_token),
             buckets: Vec::new(),
         };
-        let key = match key {
+        if provider == Provider::Gemini {
+            outcome.provider_report_state = Some(ProviderReportState::NotApplicable);
+            outcome.provider_report_status_metadata =
+                Some("provider=gemini;organization_reporting=not_applicable".to_owned());
+            outcome.consecutive_failures = 0;
+            outcome.next_poll_after_unix_secs = None;
+            return self
+                .write_api_key_poll_outcome(&upstream, outcome, times, PollLabel::NotApplicable)
+                .await;
+        }
+        if provider == Provider::Openai {
+            return self
+                .poll_openai_usage(&upstream, details.as_ref(), times, window, outcome)
+                .await;
+        }
+        let key = match key.expect("Anthropic provider resolves a serving credential") {
             Ok(key) => key,
             Err(reason) => {
-                // Zero outbound calls; the log names the upstream only.
-                tracing::warn!(
-                    upstream_id = %upstream.id,
-                    upstream_name = %upstream.name,
-                    ?reason,
-                    "api-key usage poll skipped: stored credential cannot be decrypted"
-                );
+                tracing::warn!(upstream_id = %upstream.id, upstream_name = %upstream.name, ?reason, "api-key usage poll skipped: stored credential cannot be decrypted");
                 outcome.usage_report_state = Some(ApiKeyOrgCapability::Error);
                 outcome.consecutive_failures = failures.saturating_add(1);
                 return self
@@ -478,6 +539,308 @@ impl SchedulerDispatch {
         outcome.last_success_at_unix_secs = Some(times.now);
         PollLabel::Success
     }
+    /// OpenAI organization reporting is deployment-scoped.  It deliberately
+    /// never resolves or falls back to the serving key stored on `upstream`.
+    async fn poll_openai_usage(
+        &self,
+        upstream: &UpstreamRecord,
+        details: Option<&UpstreamApiKeyDetailsRecord>,
+        times: PollTimes,
+        window: ClaimWindow,
+        mut outcome: ApiKeyUsagePollOutcome,
+    ) -> PollLabel {
+        let (credential, credential_revision) = match self
+            .storage
+            .get_openai_org_reporting_credential_ciphertext()
+            .await
+        {
+            Ok(Some(record)) => match record.status {
+                OpenAiOrganizationReportingCredentialStatus::Configured => {
+                    let revision = record.revision;
+                    match self.aead.decrypt(
+                        &record.encrypted_secret_ciphertext,
+                        cc_lb_storage_api::OPENAI_ORG_REPORTING_CREDENTIAL_AAD,
+                    ) {
+                        Ok(bytes) => match String::from_utf8(bytes) {
+                            Ok(secret) if !secret.is_empty() => (Zeroizing::new(secret), revision),
+                            _ => {
+                                outcome.provider_report_state = Some(ProviderReportState::Failed);
+                                outcome.provider_report_status_metadata =
+                                    Some("provider=openai;credential=decrypt_failed".to_owned());
+                                outcome.consecutive_failures =
+                                    outcome.consecutive_failures.saturating_add(1);
+                                return self
+                                    .write_api_key_poll_outcome(
+                                        upstream,
+                                        outcome,
+                                        times,
+                                        PollLabel::DecryptFailed,
+                                    )
+                                    .await;
+                            }
+                        },
+                        Err(_) => {
+                            outcome.provider_report_state = Some(ProviderReportState::Failed);
+                            outcome.provider_report_status_metadata =
+                                Some("provider=openai;credential=decrypt_failed".to_owned());
+                            outcome.consecutive_failures =
+                                outcome.consecutive_failures.saturating_add(1);
+                            return self
+                                .write_api_key_poll_outcome(
+                                    upstream,
+                                    outcome,
+                                    times,
+                                    PollLabel::DecryptFailed,
+                                )
+                                .await;
+                        }
+                    }
+                }
+                OpenAiOrganizationReportingCredentialStatus::Denied => {
+                    outcome.provider_report_state = Some(ProviderReportState::Denied);
+                    outcome.provider_report_status_metadata =
+                        Some("provider=openai;credential=denied".to_owned());
+                    outcome.next_poll_after_unix_secs = None;
+                    return self
+                        .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::Denied)
+                        .await;
+                }
+                OpenAiOrganizationReportingCredentialStatus::Unavailable => {
+                    outcome.provider_report_state = Some(ProviderReportState::Unavailable);
+                    outcome.provider_report_status_metadata =
+                        Some("provider=openai;credential=unavailable".to_owned());
+                    return self
+                        .write_api_key_poll_outcome(
+                            upstream,
+                            outcome,
+                            times,
+                            PollLabel::Unavailable,
+                        )
+                        .await;
+                }
+                OpenAiOrganizationReportingCredentialStatus::Failed => {
+                    outcome.provider_report_state = Some(ProviderReportState::Failed);
+                    outcome.provider_report_status_metadata =
+                        Some("provider=openai;credential=failed".to_owned());
+                    outcome.consecutive_failures = outcome.consecutive_failures.saturating_add(1);
+                    return self
+                        .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::Failed)
+                        .await;
+                }
+            },
+            Ok(None) => {
+                outcome.provider_report_state = Some(ProviderReportState::NotConfigured);
+                outcome.provider_report_status_metadata =
+                    Some("provider=openai;credential=not_configured".to_owned());
+                outcome.next_poll_after_unix_secs = None;
+                return self
+                    .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::NotConfigured)
+                    .await;
+            }
+            Err(_) => {
+                outcome.provider_report_state = Some(ProviderReportState::Unavailable);
+                outcome.provider_report_status_metadata =
+                    Some("provider=openai;credential=unavailable".to_owned());
+                outcome.consecutive_failures = outcome.consecutive_failures.saturating_add(1);
+                return self
+                    .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::StorageError)
+                    .await;
+            }
+        };
+
+        if !self
+            .storage
+            .claim_openai_org_reporting_poll(
+                credential_revision,
+                times.now,
+                times.now.saturating_add(CLAIM_LEASE_SECS),
+            )
+            .await
+            .unwrap_or(false)
+        {
+            return self
+                .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::ClaimLost)
+                .await;
+        }
+
+        if openai_project_scope(details).is_none() {
+            outcome.provider_report_state = Some(ProviderReportState::NotConfigured);
+            outcome.provider_report_status_metadata =
+                Some("provider=openai;project=not_configured".to_owned());
+            outcome.next_poll_after_unix_secs = None;
+            return self
+                .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::NotConfigured)
+                .await;
+        }
+        let hour_start = times.now - times.now % HOUR_SECS;
+        let windows = [
+            (
+                OpenAiBucketWidth::Hour,
+                hour_start.saturating_sub(u64::from(HOURLY_BUCKETS - 1) * HOUR_SECS),
+                HOURLY_BUCKETS,
+            ),
+            (
+                OpenAiBucketWidth::Day,
+                utc_month_start_unix_secs(times.now),
+                DAILY_BUCKETS,
+            ),
+        ];
+        let mut incomplete_usage = false;
+        let mut projects = BTreeSet::new();
+        for (bucket_width, start_time, limit) in windows {
+            if !self.claim_admits_call_for(
+                upstream,
+                window,
+                self.openai_org_api.limits().per_request,
+            ) {
+                return self
+                    .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::LeaseSpent)
+                    .await;
+            }
+            let query = OpenAiUsageQuery {
+                start_time,
+                end_time: Some(times.now),
+                bucket_width,
+                limit,
+                page: None,
+            };
+            let page = self.openai_org_api.text_usage(&credential, &query);
+            match tokio::time::timeout_at(window.exchange_deadline, page)
+                .await
+                .unwrap_or(Err(OpenAiOrgApiError::Timeout))
+            {
+                Ok(page) => {
+                    incomplete_usage |= page.next_page.is_some();
+                    append_openai_usage_buckets(
+                        details,
+                        upstream,
+                        bucket_width,
+                        page,
+                        &mut projects,
+                        &mut outcome.buckets,
+                    );
+                }
+                Err(error) => {
+                    if matches!(error, OpenAiOrgApiError::Denied { .. }) {
+                        let _ = self
+                            .storage
+                            .mark_openai_org_reporting_credential_denied(
+                                credential_revision,
+                                unix_secs(self.clock.now()),
+                            )
+                            .await;
+                    }
+                    apply_openai_error(error, times, unix_secs(self.clock.now()), &mut outcome);
+                    return self
+                        .write_api_key_poll_outcome(
+                            upstream,
+                            outcome,
+                            times,
+                            openai_error_label(error),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        let (incomplete_costs, unsupported_cost_currency) = if self.claim_admits_call_for(
+            upstream,
+            window,
+            self.openai_org_api.limits().per_request,
+        ) {
+            let query = OpenAiCostsQuery {
+                start_time: utc_month_start_unix_secs(times.now),
+                end_time: Some(times.now),
+                bucket_width: OpenAiBucketWidth::Day,
+                limit: DAILY_BUCKETS,
+                page: None,
+            };
+            let page = self.openai_org_api.costs(&credential, &query);
+            match tokio::time::timeout_at(window.exchange_deadline, page)
+                .await
+                .unwrap_or(Err(OpenAiOrgApiError::Timeout))
+            {
+                Ok(page) => {
+                    let incomplete_costs = page.next_page.is_some();
+                    let unsupported_cost_currency =
+                        append_openai_cost_buckets(upstream, details, page, &mut outcome.buckets);
+                    (incomplete_costs, unsupported_cost_currency)
+                }
+                Err(error) => {
+                    if matches!(error, OpenAiOrgApiError::Denied { .. }) {
+                        let _ = self
+                            .storage
+                            .mark_openai_org_reporting_credential_denied(
+                                credential_revision,
+                                unix_secs(self.clock.now()),
+                            )
+                            .await;
+                    }
+                    apply_openai_error(error, times, unix_secs(self.clock.now()), &mut outcome);
+                    return self
+                        .write_api_key_poll_outcome(
+                            upstream,
+                            outcome,
+                            times,
+                            openai_error_label(error),
+                        )
+                        .await;
+                }
+            }
+        } else {
+            return self
+                .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::LeaseSpent)
+                .await;
+        };
+
+        let incomplete = incomplete_usage || incomplete_costs;
+        let report_failed = unsupported_cost_currency;
+        outcome.provider_report_state = Some(if report_failed {
+            ProviderReportState::Failed
+        } else if incomplete {
+            ProviderReportState::Stale
+        } else {
+            ProviderReportState::Reported
+        });
+        outcome.provider_report_status_metadata = Some(openai_report_metadata(
+            incomplete_usage,
+            incomplete_costs,
+            unsupported_cost_currency,
+            &projects,
+        ));
+        outcome.consecutive_failures = 0;
+        if !incomplete && !report_failed {
+            outcome.last_success_at_unix_secs = Some(times.now);
+        }
+        self.write_api_key_poll_outcome(
+            upstream,
+            outcome,
+            times,
+            if incomplete || report_failed {
+                PollLabel::Failed
+            } else {
+                PollLabel::Success
+            },
+        )
+        .await
+    }
+
+    fn claim_admits_call_for(
+        &self,
+        upstream: &UpstreamRecord,
+        window: ClaimWindow,
+        call: Duration,
+    ) -> bool {
+        let admitted = window.admits(call, Instant::now(), unix_secs(self.clock.now()));
+        if !admitted {
+            tracing::warn!(
+                upstream_id = %upstream.id,
+                upstream_name = %upstream.name,
+                "api-key usage poll skipped a provider call: too little of the claim's lease is left"
+            );
+        }
+        admitted
+    }
 
     /// Whether the claim still covers one more provider call, by fresh reads
     /// of both clocks. A call that would not end, at its per-probe bound,
@@ -579,6 +942,206 @@ impl SchedulerDispatch {
             && current.base_url == polled.base_url
             && current.workspace_id == polled.workspace_id)
             .then_some(current)
+    }
+}
+
+fn append_openai_usage_buckets(
+    details: Option<&UpstreamApiKeyDetailsRecord>,
+    _upstream: &UpstreamRecord,
+    bucket_width: OpenAiBucketWidth,
+    page: OpenAiTextUsagePage,
+    projects: &mut BTreeSet<String>,
+    out: &mut Vec<UpstreamApiUsageBucketWrite>,
+) {
+    let Some(project_id) = openai_project_scope(details) else {
+        return;
+    };
+    let expected_api_key_id = details.and_then(|row| row.api_key_id.as_deref());
+    for bucket in page.buckets {
+        for result in bucket.results {
+            if result.project_id.as_deref() != Some(project_id)
+                || !openai_api_key_group_matches(expected_api_key_id, result.api_key_id.as_deref())
+            {
+                continue;
+            }
+            projects.insert(project_id.to_owned());
+            let (attribution, subject_id) = if let Some(api_key_id) = result.api_key_id.as_ref() {
+                (ApiUsageAttribution::ApiKey, api_key_id.clone())
+            } else {
+                // A null provider key id is an aggregate row. It is only
+                // accepted when this serving snapshot has no key id and must
+                // remain attributed to the project workspace.
+                (ApiUsageAttribution::Workspace, project_id.to_owned())
+            };
+            out.push(UpstreamApiUsageBucketWrite {
+                attribution,
+                subject_id,
+                bucket_width_secs: match bucket_width {
+                    OpenAiBucketWidth::Hour => 3_600,
+                    OpenAiBucketWidth::Day => 86_400,
+                },
+                bucket_start_unix_secs: bucket.start_time,
+                model: result.model.unwrap_or_default(),
+                uncached_input_tokens: result.input_tokens,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
+                cache_read_input_tokens: result.input_cached_tokens,
+                output_tokens: result.output_tokens,
+                list_cost_micros: 0,
+            });
+        }
+    }
+}
+
+fn append_openai_cost_buckets(
+    _upstream: &UpstreamRecord,
+    details: Option<&UpstreamApiKeyDetailsRecord>,
+    page: OpenAiCostsPage,
+    out: &mut Vec<UpstreamApiUsageBucketWrite>,
+) -> bool {
+    let Some(project_id) = openai_project_scope(details) else {
+        return false;
+    };
+    let mut unsupported_currency = false;
+    for bucket in page.buckets {
+        for result in bucket.results {
+            if result.project_id.as_deref() != Some(project_id) {
+                continue;
+            }
+            let Some(cost_micros) = usd_cost_micros(&result.amount.value, &result.amount.currency)
+            else {
+                unsupported_currency = true;
+                continue;
+            };
+            let (attribution, subject_id) = openai_cost_subject(project_id);
+            let model = result.line_item.unwrap_or_else(|| "openai_cost".to_owned());
+            out.push(UpstreamApiUsageBucketWrite {
+                attribution,
+                subject_id,
+                bucket_width_secs: 86_400,
+                bucket_start_unix_secs: bucket.start_time,
+                model,
+                uncached_input_tokens: 0,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 0,
+                list_cost_micros: cost_micros,
+            });
+        }
+    }
+    unsupported_currency
+}
+
+fn openai_cost_subject(project_id: &str) -> (ApiUsageAttribution, String) {
+    // OpenAI's costs endpoint reports project-level totals, never per-key
+    // totals. Keep them out of the per-key series even when this poll was
+    // initiated for an API-key upstream.
+    (ApiUsageAttribution::Workspace, project_id.to_owned())
+}
+
+fn openai_project_scope(details: Option<&UpstreamApiKeyDetailsRecord>) -> Option<&str> {
+    let row = details?;
+    matches!(
+        row.project_source,
+        Some(ProviderProjectSource::Configured | ProviderProjectSource::AdminResolved)
+    )
+    .then_some(row.project_id.as_deref())
+    .flatten()
+}
+
+fn openai_api_key_group_matches(expected: Option<&str>, actual: Option<&str>) -> bool {
+    match (expected, actual) {
+        (Some(expected), Some(actual)) => expected == actual,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+fn usd_cost_micros(value: &str, currency: &str) -> Option<u64> {
+    if !currency.eq_ignore_ascii_case("usd") {
+        return None;
+    }
+    let mut parts = value.trim().splitn(2, '.');
+    let whole = parts.next().unwrap_or_default();
+    if whole.is_empty() || whole.starts_with('-') {
+        return Some(0);
+    }
+    let whole = whole.parse::<u64>().ok()?;
+    let fraction = parts.next().unwrap_or_default();
+    let mut micros = 0_u64;
+    for (index, byte) in fraction.bytes().take(6).enumerate() {
+        if !byte.is_ascii_digit() {
+            return Some(0);
+        }
+        micros = micros.saturating_add(u64::from(byte - b'0') * 10_u64.pow(5 - index as u32));
+    }
+    Some(whole.saturating_mul(1_000_000).saturating_add(micros))
+}
+
+fn openai_report_metadata(
+    incomplete_usage: bool,
+    incomplete_costs: bool,
+    unsupported_cost_currency: bool,
+    projects: &BTreeSet<String>,
+) -> String {
+    let mut metadata = format!(
+        "provider=openai;usage={};costs={}",
+        if incomplete_usage {
+            "incomplete"
+        } else {
+            "complete"
+        },
+        if unsupported_cost_currency {
+            "unsupported_currency"
+        } else if incomplete_costs {
+            "incomplete"
+        } else {
+            "complete"
+        },
+    );
+    for project in projects.iter().take(3) {
+        metadata.push_str(";project=");
+        metadata.push_str(project);
+    }
+    metadata.chars().take(200).collect()
+}
+
+fn apply_openai_error(
+    error: OpenAiOrgApiError,
+    times: PollTimes,
+    responded_at: u64,
+    outcome: &mut ApiKeyUsagePollOutcome,
+) {
+    let (state, reason) = match error {
+        OpenAiOrgApiError::Denied { .. } => (ProviderReportState::Denied, "denied"),
+        OpenAiOrgApiError::RateLimited { .. }
+        | OpenAiOrgApiError::Timeout
+        | OpenAiOrgApiError::Unreachable => (ProviderReportState::Unavailable, "unavailable"),
+        OpenAiOrgApiError::Upstream { .. }
+        | OpenAiOrgApiError::BodyTooLarge
+        | OpenAiOrgApiError::MalformedJson => (ProviderReportState::Failed, "failed"),
+    };
+    outcome.provider_report_state = Some(state);
+    outcome.provider_report_status_metadata = Some(format!("provider=openai;error={reason}"));
+    match error {
+        OpenAiOrgApiError::Denied { .. } => outcome.next_poll_after_unix_secs = None,
+        OpenAiOrgApiError::RateLimited { retry_after_secs } => {
+            outcome.next_poll_after_unix_secs =
+                Some(times.after_rate_limit(responded_at, retry_after_secs));
+        }
+        _ => outcome.consecutive_failures = outcome.consecutive_failures.saturating_add(1),
+    }
+}
+
+const fn openai_error_label(error: OpenAiOrgApiError) -> PollLabel {
+    match error {
+        OpenAiOrgApiError::Denied { .. } => PollLabel::Denied,
+        OpenAiOrgApiError::RateLimited { .. } => PollLabel::RateLimited,
+        OpenAiOrgApiError::Timeout | OpenAiOrgApiError::Unreachable => PollLabel::Unavailable,
+        OpenAiOrgApiError::Upstream { .. }
+        | OpenAiOrgApiError::BodyTooLarge
+        | OpenAiOrgApiError::MalformedJson => PollLabel::Failed,
     }
 }
 
@@ -729,6 +1292,45 @@ fn list_cost_micros(
     u64::try_from(total).unwrap_or(u64::MAX)
 }
 
+fn provider_label(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "anthropic",
+        Provider::Openai => "openai",
+        Provider::Gemini => "gemini",
+    }
+}
+
 #[cfg(all(test, feature = "sqlite"))]
 #[path = "api_key_usage/tests.rs"]
 mod tests;
+#[cfg(test)]
+mod openai_helper_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_currency_is_not_a_zero_usd_cost() {
+        assert_eq!(usd_cost_micros("1.25", "USD"), Some(1_250_000));
+        assert_eq!(usd_cost_micros("1.25", "EUR"), None);
+    }
+
+    #[test]
+    fn api_key_group_filter_rejects_null_aggregate_for_known_key() {
+        assert!(!openai_api_key_group_matches(Some("key"), None));
+        assert!(!openai_api_key_group_matches(Some("key-a"), Some("key-b")));
+        assert!(openai_api_key_group_matches(Some("key"), Some("key")));
+    }
+
+    #[test]
+    fn api_key_group_filter_accepts_workspace_aggregates_without_key() {
+        assert!(openai_api_key_group_matches(None, None));
+        assert!(openai_api_key_group_matches(None, Some("key")));
+    }
+
+    #[test]
+    fn project_costs_use_project_workspace_subject() {
+        assert_eq!(
+            openai_cost_subject("proj_test"),
+            (ApiUsageAttribution::Workspace, "proj_test".to_owned())
+        );
+    }
+}
