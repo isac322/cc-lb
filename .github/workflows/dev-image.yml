@@ -62,6 +62,8 @@ jobs:
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
             CARGO_BUILD_JOBS=4
+            CARGO_PROFILE_RELEASE_LTO=thin
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
             SCCACHE_LOCAL_MOUNT=0
             REQUIRE_SCCACHE=0
           # Avoid an unknown/unknown attestation entry in the mutable tag. The

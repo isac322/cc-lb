@@ -1,7 +1,7 @@
 use cc_lb_quota::rate_limit_headers::parse_anthropic_unified_headers;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
-use crate::headers;
+use super::headers;
 
 #[test]
 fn unified_top_level_fields_are_normalized_and_clamped() {
