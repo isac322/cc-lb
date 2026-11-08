@@ -31,6 +31,11 @@ impl RequestCacheEvidence {
         }
     }
 }
+impl Default for RequestCacheEvidence {
+    fn default() -> Self {
+        Self::Unreported
+    }
+}
 
 /// Bounded provider-native cache facts. Raw prompts, credentials, and raw
 /// provider cache keys are intentionally not represented.
