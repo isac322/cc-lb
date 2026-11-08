@@ -9,6 +9,7 @@ description = "Cache-affinity router plugin authored against the wasmtime PDK (R
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+test = false
 
 [dependencies]
 cc-lb-pdk-wasmtime.workspace = true

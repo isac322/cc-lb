@@ -13,6 +13,7 @@ path = "tests/all.rs"
 
 [lib]
 name = "cc_lb_loom_tests"
+test = false
 
 [dependencies]
 
