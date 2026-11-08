@@ -17,9 +17,9 @@ use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheBreakpoint, CacheBreakpointSource,
     CacheLookbackPrefix, CachePricingSummary, CacheScore, CredentialKind, InternalError,
-    InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace,
-    StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
-    UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
+    InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind, Provider,
+    RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream,
+    UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_quota::build_subscription_quota_samples;
 use cc_lb_quota::rate_limit_headers::{
@@ -117,7 +117,7 @@ use cc_lb_control::api_keys::limit_engine::{
 use cc_lb_control::api_keys::principal_view::{
     PrincipalSpecCached, PrincipalView, RouterPipelineCache,
 };
-use cc_lb_control::api_keys::types::LimitKind;
+use cc_lb_control::api_keys::types::{Limit, LimitKind};
 use cc_lb_control::dynamic_view::{DynamicView, DynamicViewHolder};
 use cc_lb_control::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use cc_lb_control::{
@@ -4714,7 +4714,11 @@ impl Lifecycle {
                         "failed to prepare upstream credentials",
                         None,
                     );
-                    self.attach_limit_headers(&mut response, active_limit.as_ref());
+                    self.attach_limit_headers(
+                        &mut response,
+                        active_limit.as_ref(),
+                        request_capability.provider(),
+                    );
                     if let Some(o) = observer.as_ref() {
                         o.terminate_failure(InternalFailure {
                             status: StatusCode::BAD_GATEWAY,
@@ -4773,6 +4777,7 @@ impl Lifecycle {
                         active_limit.as_ref(),
                         observer.as_ref(),
                         &attempt_timings,
+                        request_capability.provider(),
                     ));
                 }
             };
@@ -4802,7 +4807,11 @@ impl Lifecycle {
                         // A proxy-generated body is not an upstream response:
                         // do not pass it through the custom response hook.
                         let mut response = response_from_collected(unauthorized);
-                        self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        self.attach_limit_headers(
+                            &mut response,
+                            active_limit.as_ref(),
+                            request_capability.provider(),
+                        );
                         if let Some(o) = observer.as_ref() {
                             o.set_upstream_error(response.status(), UpstreamErrorCode::Upstream5xx);
                             o.finish();
@@ -4853,6 +4862,7 @@ impl Lifecycle {
                             active_limit.as_ref(),
                             observer.as_ref(),
                             &attempt_timings,
+                            request_capability.provider(),
                         ));
                     }
                 };
@@ -4875,7 +4885,11 @@ impl Lifecycle {
                     let unauthorized = collect_error_response(response).await;
                     if unauthorized.body.is_none() {
                         let mut response = response_from_collected(unauthorized);
-                        self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        self.attach_limit_headers(
+                            &mut response,
+                            active_limit.as_ref(),
+                            request_capability.provider(),
+                        );
                         if let Some(o) = observer.as_ref() {
                             o.set_upstream_error(response.status(), UpstreamErrorCode::Upstream5xx);
                             o.finish();
@@ -5077,23 +5091,26 @@ impl Lifecycle {
                 }
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
                 let reason_label = "limit_rejected".to_owned();
+                let capability = crate::provider_capability::classify(
+                    &ctx.method,
+                    &ctx.path,
+                    ctx.provider_scope,
+                )
+                .unwrap_or(ProviderCapability::AnthropicMessages);
                 let mut response = limit_rejection_response(
-                    crate::provider_capability::classify(
-                        &ctx.method,
-                        &ctx.path,
-                        ctx.provider_scope,
-                    )
-                    .unwrap_or(ProviderCapability::AnthropicMessages),
+                    capability,
                     reason,
                     &limit_request.model,
                     &subject.principal_id,
                     retry_after_seconds,
                 );
-                attach_limit_headers_from_engine(
+                attach_limit_headers_from_record(
                     response.headers_mut(),
                     limit_engine.as_ref(),
+                    capability.provider(),
                     &subject.key_id,
-                    &subject.principal_id,
+                    &subject.record,
+                    view.default_limits(&subject.principal_id),
                 );
                 let info = LimitRejectionInfo {
                     subject: cc_lb_lifecycle::LimitSubject {
@@ -5169,6 +5186,7 @@ impl Lifecycle {
             response_affinity_context.capability,
         ) || (stream_response && !buffered_transform_required)
         {
+            let provider = response_affinity_context.capability.provider();
             let response_status = response.status();
             let mut response = self.relay_response(
                 response,
@@ -5185,7 +5203,7 @@ impl Lifecycle {
                 dispatch_started,
                 dispatch_unix_secs,
             );
-            self.attach_limit_headers(&mut response, None);
+            self.attach_limit_headers(&mut response, None, provider);
             return response;
         }
 
@@ -5504,15 +5522,16 @@ impl Lifecycle {
         }
         // Hand the reservation to the reconcile subscriber for every buffered outcome:
         // it reconciles a measured success and refunds errors on `RequestTerminated`.
-        if let (Some(limit_engine), Some(active_limit), Some(response_accounting_guard)) = (
-            self.limit_engine.as_ref(),
-            active_limit.as_ref(),
-            response_accounting_guard,
-        ) {
+        if let Some(response_accounting_guard) = response_accounting_guard {
             response_accounting_guard.forget();
+        }
+        if let (Some(limit_engine), Some(active_limit)) =
+            (self.limit_engine.as_ref(), active_limit.as_ref())
+        {
             attach_limit_headers_from_engine(
                 &mut parts.headers,
                 limit_engine.as_ref(),
+                response_affinity_context.capability.provider(),
                 &active_limit.subject.key_id,
                 &active_limit.subject.principal_id,
             );
@@ -5720,9 +5739,10 @@ impl Lifecycle {
         active_limit: Option<&ActiveLimit>,
         observer: Option<&LifecycleContext>,
         attempt_timings: &AttemptTimings,
+        provider: Provider,
     ) -> Response<Body> {
         let (mut response, failure) = failure.into_response_and_failure(capability);
-        self.attach_limit_headers(&mut response, active_limit);
+        self.attach_limit_headers(&mut response, active_limit, provider);
         if let Some(o) = observer {
             o.set_attempt_timings(
                 attempt_timings.shape_ms,
@@ -5768,6 +5788,7 @@ impl Lifecycle {
         &self,
         response: &mut Response<Body>,
         active_limit: Option<&ActiveLimit>,
+        provider: Provider,
     ) {
         let (Some(limit_engine), Some(active_limit)) = (self.limit_engine.as_ref(), active_limit)
         else {
@@ -5776,6 +5797,7 @@ impl Lifecycle {
         attach_limit_headers_from_engine(
             response.headers_mut(),
             limit_engine.as_ref(),
+            provider,
             &active_limit.subject.key_id,
             &active_limit.subject.principal_id,
         );
@@ -10397,10 +10419,31 @@ fn duration_to_us(duration: Duration) -> u64 {
 fn attach_limit_headers_from_engine(
     headers: &mut HeaderMap,
     limit_engine: &LimitEngine,
+    provider: Provider,
     key_id: &str,
     principal_id: &str,
 ) {
-    for (name, value) in limit_engine.headers_for(key_id, principal_id) {
+    for (name, value) in limit_engine.headers_for_provider(provider, key_id, principal_id) {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+}
+
+fn attach_limit_headers_from_record(
+    headers: &mut HeaderMap,
+    limit_engine: &LimitEngine,
+    provider: Provider,
+    key_id: &str,
+    record: &StoredApiKeyRecord,
+    default_limits: &[Limit],
+) {
+    for (name, value) in
+        limit_engine.headers_for_provider_record(provider, key_id, record, default_limits)
+    {
         if let (Ok(name), Ok(value)) = (
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(&value),

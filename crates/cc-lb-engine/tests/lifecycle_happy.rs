@@ -1067,6 +1067,219 @@ async fn provider_output_cap_accepts_exact_native_caps_and_rejects_larger_caps()
         }
     }
 }
+fn assert_provider_local_limit_headers(
+    headers: &http::HeaderMap,
+    case: ProviderOutputCase,
+    name: &str,
+) {
+    let expected: [&str; 6] = match case {
+        ProviderOutputCase::AnthropicMessages => [
+            "anthropic-ratelimit-requests-remaining",
+            "anthropic-ratelimit-requests-limit",
+            "anthropic-ratelimit-requests-reset",
+            "anthropic-ratelimit-tokens-remaining",
+            "anthropic-ratelimit-tokens-limit",
+            "anthropic-ratelimit-tokens-reset",
+        ],
+        ProviderOutputCase::Responses => [
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-remaining-tokens",
+            "x-ratelimit-limit-tokens",
+            "x-ratelimit-reset-tokens",
+        ],
+        ProviderOutputCase::Gemini => [
+            "x-cc-lb-ratelimit-remaining-requests",
+            "x-cc-lb-ratelimit-limit-requests",
+            "x-cc-lb-ratelimit-reset-requests",
+            "x-cc-lb-ratelimit-remaining-tokens",
+            "x-cc-lb-ratelimit-limit-tokens",
+            "x-cc-lb-ratelimit-reset-tokens",
+        ],
+    };
+    for header in expected {
+        assert!(
+            headers.contains_key(header),
+            "{name}: missing provider-local header {header}"
+        );
+    }
+
+    let reset_names = match case {
+        ProviderOutputCase::AnthropicMessages => [
+            "anthropic-ratelimit-requests-reset",
+            "anthropic-ratelimit-tokens-reset",
+        ],
+        ProviderOutputCase::Responses => ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
+        ProviderOutputCase::Gemini => [
+            "x-cc-lb-ratelimit-reset-requests",
+            "x-cc-lb-ratelimit-reset-tokens",
+        ],
+    };
+    for reset_name in reset_names {
+        let value = headers
+            .get(reset_name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| panic!("{name}: invalid reset header {reset_name}"));
+        match case {
+            ProviderOutputCase::AnthropicMessages => {
+                let bytes = value.as_bytes();
+                assert!(
+                    bytes.len() == 20
+                        && bytes[4] == b'-'
+                        && bytes[7] == b'-'
+                        && bytes[10] == b'T'
+                        && bytes[13] == b':'
+                        && bytes[16] == b':'
+                        && bytes[19] == b'Z'
+                        && value[..4].chars().all(|c| c.is_ascii_digit())
+                        && value[5..7].chars().all(|c| c.is_ascii_digit())
+                        && value[8..10].chars().all(|c| c.is_ascii_digit())
+                        && value[11..13].chars().all(|c| c.is_ascii_digit())
+                        && value[14..16].chars().all(|c| c.is_ascii_digit())
+                        && value[17..19].chars().all(|c| c.is_ascii_digit()),
+                    "{name}: Anthropic reset is not an ISO-8601 UTC timestamp: {value}"
+                );
+            }
+            ProviderOutputCase::Responses | ProviderOutputCase::Gemini => {
+                let seconds = value
+                    .strip_suffix('s')
+                    .and_then(|value| value.parse::<u64>().ok());
+                assert!(
+                    seconds.is_some(),
+                    "{name}: provider reset is not a duration in seconds: {value}"
+                );
+            }
+        }
+    }
+
+    let forbidden_prefixes: &[&str] = match case {
+        ProviderOutputCase::AnthropicMessages => &["x-ratelimit-", "x-cc-lb-ratelimit-"],
+        ProviderOutputCase::Responses => &["anthropic-ratelimit-", "x-cc-lb-ratelimit-"],
+        ProviderOutputCase::Gemini => &["anthropic-ratelimit-", "x-ratelimit-"],
+    };
+    for prefix in forbidden_prefixes {
+        assert!(
+            !headers
+                .keys()
+                .any(|header| header.as_str().starts_with(prefix)),
+            "{name}: response contains stray provider-local headers with prefix {prefix}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn buffered_responses_and_local_rejections_emit_provider_correct_limit_headers() {
+    for (case, name) in [
+        (ProviderOutputCase::AnthropicMessages, "anthropic"),
+        (ProviderOutputCase::Responses, "openai"),
+        (ProviderOutputCase::Gemini, "gemini"),
+    ] {
+        let state = TestState::default();
+        let (kind, request) = provider_output_request(case, 1);
+        let lifecycle = limited_lifecycle(
+            kind,
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 1,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 10_000,
+                },
+            ],
+            &state,
+            None,
+        );
+        let response = handle(&lifecycle, request).await;
+        let (status, headers, body) = collect_body(response).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body:?}");
+        assert!(!body.is_empty(), "{name}: buffered response body is empty");
+        assert_provider_local_limit_headers(&headers, case, name);
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            1,
+            "{name}: allowed request did not dispatch once"
+        );
+
+        let state = TestState::default();
+        let (kind, request) = provider_output_request(case, 1);
+        let lifecycle = limited_lifecycle(
+            kind,
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 0,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 10_000,
+                },
+            ],
+            &state,
+            None,
+        );
+        let response = handle(&lifecycle, request).await;
+        let (status, headers, body) = collect_body(response).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{name}: {body:?}");
+        assert_provider_local_limit_headers(&headers, case, name);
+        assert_eq!(
+            headers
+                .get("x-should-retry")
+                .and_then(|value| value.to_str().ok()),
+            Some("false"),
+            "{name}: unsatisfiable local rejection must not be retried"
+        );
+        assert!(
+            !headers.contains_key(http::header::RETRY_AFTER),
+            "{name}: unsatisfiable local rejection must not advertise retry-after"
+        );
+        let actual_error: serde_json::Value =
+            serde_json::from_slice(&body).expect("local rejection is JSON");
+        let expected_error = match case {
+            ProviderOutputCase::AnthropicMessages => serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": "requested requests reservation 1 cannot fit configured cap 0",
+                    "limit_kind": "requests"
+                }
+            }),
+            ProviderOutputCase::Responses => serde_json::json!({
+                "error": {
+                    "message": "requested requests reservation 1 cannot fit configured cap 0",
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_error",
+                    "param": null,
+                    "limit_kind": "requests"
+                }
+            }),
+            ProviderOutputCase::Gemini => serde_json::json!({
+                "error": {
+                    "code": 429,
+                    "message": "requested requests reservation 1 cannot fit configured cap 0",
+                    "status": "RESOURCE_EXHAUSTED",
+                    "type": "rate_limit_error",
+                    "limit_kind": "requests"
+                }
+            }),
+        };
+        assert_eq!(
+            actual_error, expected_error,
+            "{name}: provider error changed"
+        );
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            0,
+            "{name}: locally rejected request dispatched upstream"
+        );
+    }
+}
 
 #[tokio::test]
 async fn uncapped_output_total_token_admission_remains_input_only() {
