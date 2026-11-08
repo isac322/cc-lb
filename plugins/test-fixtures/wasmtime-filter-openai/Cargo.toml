@@ -9,6 +9,7 @@ description = "Provider-qualified OpenAI filter test fixture for cc-lb."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+test = false
 
 [dependencies]
 cc-lb-pdk-wasmtime.workspace = true

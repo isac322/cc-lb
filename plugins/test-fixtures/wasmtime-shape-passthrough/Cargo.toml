@@ -9,6 +9,7 @@ description = "Minimal Shape test fixture for cc-lb-runtime-wasmtime integration
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+test = false
 
 [dependencies]
 cc-lb-pdk-wasmtime.workspace = true
