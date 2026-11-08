@@ -388,7 +388,7 @@ jobs:
           exec docker run --rm \
             --entrypoint /bin/promtool \
             --volume "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" \
-            --workdir "$GITHUB_WORKSPACE" \
+            --volume /tmp:/tmp \
             prom/prometheus:v3.15.0 "$@"
           EOF
           chmod 0755 "$RUNNER_TEMP/bin/promtool"
