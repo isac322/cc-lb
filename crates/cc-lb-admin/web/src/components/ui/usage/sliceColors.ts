@@ -28,6 +28,16 @@ export const USAGE_CATEGORIES = [
     label: 'Cache create 1h',
     color: 'var(--color-series-cache-create-1h)',
   },
+  {
+    key: 'cache_write_30m',
+    label: 'Cache write 30m',
+    color: 'var(--color-series-cache-create-5m)',
+  },
+  {
+    key: 'cache_write_12h',
+    label: 'Cache write 12h',
+    color: 'var(--color-series-cache-create-1h)',
+  },
   { key: 'input', label: 'Input', color: 'var(--color-series-input)' },
   { key: 'output', label: 'Output', color: 'var(--color-series-output)' },
 ] as const;

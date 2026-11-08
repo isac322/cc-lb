@@ -38,11 +38,17 @@ export function budgetToTier(budget: number | null | undefined): ReasoningTier {
   return 'max';
 }
 
-/** Service-tier badge text: the raw tier verbatim, or null when it should be hidden (standard / absent). */
+/** Service-tier badge text: the raw tier verbatim, or null when it should be hidden (standard / unspecified / absent). */
 export function serviceTierBadgeText(
   tier: string | null | undefined,
 ): string | null {
-  if (tier == null || tier === '' || tier === 'standard') return null;
+  if (
+    tier == null ||
+    tier === '' ||
+    tier === 'standard' ||
+    tier === 'unspecified'
+  )
+    return null;
   return tier;
 }
 

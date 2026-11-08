@@ -2174,6 +2174,9 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
         cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        cache_write_input_tokens_30m: usage.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: usage.cache_write_input_tokens_12h,
         cache_read_evidence: match usage.cache_read_evidence {
             crate::usage_parser::CacheTokenEvidence::Unreported => None,
             crate::usage_parser::CacheTokenEvidence::Zero => {

@@ -215,6 +215,9 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         output_tokens: 240,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
+        cache_write_input_tokens: Some(0),
+        cache_write_input_tokens_30m: None,
+        cache_write_input_tokens_12h: None,
         error_count: 1,
         latency_count: 4,
         latency_ms_sum: 1_000,
@@ -236,6 +239,8 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         cost_cache_creation_5m_micros: 10_000,
         cost_cache_creation_1h_micros: 10_000,
         cost_cache_read_micros: 3_456,
+        cost_cache_write_30m_micros: 0,
+        cost_cache_write_12h_micros: 0,
         cost_components_event_count: 4,
     });
     assert_json_roundtrip(UsageRollupRun {
@@ -392,6 +397,9 @@ fn batch_b_wire_snapshots_are_stable() {
         cache_creation_input_tokens_5m: Some(123),
         cache_creation_input_tokens_1h: Some(210),
         cache_read_input_tokens: Some(444),
+        cache_write_input_tokens: None,
+        cache_write_input_tokens_30m: None,
+        cache_write_input_tokens_12h: None,
         thread_id: Some("thread_batch_b".to_owned()),
         observed_session_id: Some("session_batch_b".to_owned()),
         request_kind: Some("subagent".to_owned()),
@@ -424,6 +432,9 @@ fn batch_b_wire_snapshots_are_stable() {
         cost_cache_creation_5m_micros: Some(333_000),
         cost_cache_creation_1h_micros: Some(444_000),
         cost_cache_read_micros: Some(55_000),
+        cost_cache_write_micros: None,
+        cost_cache_write_30m_micros: None,
+        cost_cache_write_12h_micros: None,
         auth_ms: Some(5),
         route_ms: Some(6),
         limit_reserve_ms: Some(7),
@@ -750,6 +761,7 @@ fn batch_b_wire_snapshots_are_stable() {
             cache_creation_5m_micros: Some(333),
             cache_creation_1h_micros: Some(444),
             cache_read_micros: Some(55),
+            ..Default::default()
         },
         json!({
             "total_micros": 999,

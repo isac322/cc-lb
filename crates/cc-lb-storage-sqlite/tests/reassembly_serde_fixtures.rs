@@ -48,6 +48,12 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
         serde_json::to_vec(&request).expect("re-serialize request event fixture"),
         request_bytes
     );
+    assert!(request.cache_write_input_tokens.is_none());
+    assert!(request.cache_write_input_tokens_30m.is_none());
+    assert!(request.cache_write_input_tokens_12h.is_none());
+    assert!(request.cost_cache_write_micros.is_none());
+    assert!(request.cost_cache_write_30m_micros.is_none());
+    assert!(request.cost_cache_write_12h_micros.is_none());
     let trace = request
         .routing_trace
         .as_ref()

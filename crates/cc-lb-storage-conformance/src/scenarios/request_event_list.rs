@@ -1038,12 +1038,18 @@ fn request_event(
         cache_creation_input_tokens_5m: Some(24),
         cache_creation_input_tokens_1h: Some(25),
         cache_read_input_tokens: Some(26),
+        cache_write_input_tokens: Some(33),
+        cache_write_input_tokens_30m: Some(34),
+        cache_write_input_tokens_12h: Some(35),
         cost_usd_micros: Some(27),
         cost_input_micros: Some(28),
         cost_output_micros: Some(29),
         cost_cache_creation_5m_micros: Some(30),
         cost_cache_creation_1h_micros: Some(31),
         cost_cache_read_micros: Some(32),
+        cost_cache_write_micros: Some(36),
+        cost_cache_write_30m_micros: Some(37),
+        cost_cache_write_12h_micros: Some(38),
         ..Default::default()
     }
 }
@@ -1187,12 +1193,18 @@ fn list_projection(event: &RequestEvent) -> RequestEventListItem {
         cache_creation_input_tokens_5m: event.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: event.cache_creation_input_tokens_1h,
         cache_read_input_tokens: event.cache_read_input_tokens,
+        cache_write_input_tokens: event.cache_write_input_tokens,
+        cache_write_input_tokens_30m: event.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: event.cache_write_input_tokens_12h,
         cost_usd_micros: event.cost_usd_micros,
         cost_input_micros: event.cost_input_micros,
         cost_output_micros: event.cost_output_micros,
         cost_cache_creation_5m_micros: event.cost_cache_creation_5m_micros,
         cost_cache_creation_1h_micros: event.cost_cache_creation_1h_micros,
         cost_cache_read_micros: event.cost_cache_read_micros,
+        cost_cache_write_micros: event.cost_cache_write_micros,
+        cost_cache_write_30m_micros: event.cost_cache_write_30m_micros,
+        cost_cache_write_12h_micros: event.cost_cache_write_12h_micros,
     }
 }
 
