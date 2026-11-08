@@ -380,7 +380,7 @@ jobs:
       - name: Install and run promtool
         run: |
           set -euo pipefail
-          go install github.com/prometheus/prometheus/cmd/promtool@v3.15.0
+          go install github.com/prometheus/prometheus/v3/cmd/promtool@v3.15.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           export PATH="$(go env GOPATH)/bin:$PATH"
           promtool --version
