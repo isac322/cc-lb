@@ -350,29 +350,31 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
     settle().await;
 
     assert_eq!(enqueuer.enqueued.lock().expect("enqueued lock").len(), 1);
-    let cancelled = enqueuer.cancelled.lock().expect("cancelled lock");
-    let completion_cancellations = cancelled
-        .iter()
-        .filter(|request| request.reason == CancelReason::UserTurnDetected)
-        .collect::<Vec<_>>();
-    assert_eq!(completion_cancellations.len(), 2);
-    assert!(
-        completion_cancellations
+    {
+        let cancelled = enqueuer.cancelled.lock().expect("cancelled lock");
+        let completion_cancellations = cancelled
             .iter()
-            .any(|request| request.session_key_hash.ends_with("/thread:compaction-fence"))
-    );
-    assert!(
-        completion_cancellations.iter().any(|request| {
-            request
-                .session_key_hash
-                .ends_with("/thread:compaction-fence/agent:subagent")
-        })
-    );
-    assert!(
-        completion_cancellations
-            .iter()
-            .all(|request| request.expected_generation == Some(42))
-    );
+            .filter(|request| request.reason == CancelReason::UserTurnDetected)
+            .collect::<Vec<_>>();
+        assert_eq!(completion_cancellations.len(), 2);
+        assert!(
+            completion_cancellations
+                .iter()
+                .any(|request| request.session_key_hash.ends_with("/thread:compaction-fence"))
+        );
+        assert!(
+            completion_cancellations.iter().any(|request| {
+                request
+                    .session_key_hash
+                    .ends_with("/thread:compaction-fence/agent:subagent")
+            })
+        );
+        assert!(
+            completion_cancellations
+                .iter()
+                .all(|request| request.expected_generation == Some(42))
+        );
+    }
 
     let after = handle_keepalive_response_with(
         agent_turn_body("msg_after_compaction", "Bash", 12_000),

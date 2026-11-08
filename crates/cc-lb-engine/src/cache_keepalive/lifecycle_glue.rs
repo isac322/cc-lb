@@ -1408,10 +1408,8 @@ mod tests {
             .expect("generation state")
             .insert(sibling.to_string(), Some(7));
         let keepalive = backstop_keepalive(Arc::clone(&state));
-        let metadata = RequestCacheMetadata {
-            claude_agent_id: Some("main".to_owned()),
-            ..RequestCacheMetadata::default()
-        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.claude_agent_id = Some("main".to_owned());
         keepalive
             .cancel_session(
                 &primary,
