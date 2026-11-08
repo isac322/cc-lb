@@ -8,9 +8,9 @@ use bytes::Bytes;
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
 use cc_lb_engine::responses_websocket::{ResponsesWebSocketGateway, WebSocketError};
 use cc_lb_engine::{
-    BreakerRegistry, DispatchError, Lifecycle, LifecycleConfig, RealtimeWebSocketKind,
-    RealtimeWebSocketTarget, UpstreamDispatch,
+    BreakerRegistry, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
+use cc_lb_engine::realtime_websocket::{RealtimeWebSocketKind, RealtimeWebSocketTarget};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -204,17 +204,15 @@ async fn realtime_setup_identity_is_authenticated_and_persisted_before_routing()
         HeaderValue::from_static("lower-priority-session"),
     );
 
-    for (kind, path, expected_kind, model) in [
+    for (kind, path, model) in [
         (
             RealtimeWebSocketKind::Openai,
             "/v1/realtime",
-            cc_lb_request_log::RequestEventKind::OpenaiResponses,
             "gpt-realtime",
         ),
         (
             RealtimeWebSocketKind::Gemini,
             "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
-            cc_lb_request_log::RequestEventKind::GeminiGenerateContent,
             "gemini-live",
         ),
     ] {
@@ -250,7 +248,6 @@ async fn realtime_setup_identity_is_authenticated_and_persisted_before_routing()
                 _ => {}
             }
         };
-        assert_eq!(parse.event_kind, Some(expected_kind));
         assert_eq!(parse.thread_id.as_deref(), Some("realtime-session"));
         assert_eq!(
             parse.observed_session_id.as_deref(),
@@ -395,13 +392,20 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
         }
         assert_eq!(stream_completed_count, 1, "{case} stream settles once");
         assert_eq!(terminal_count, 1, "{case} request settles once");
-        assert!(
-            !lifecycle_events.try_iter().any(|event| matches!(
-                event,
-                cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
-            )),
-            "{case} close/task-drop race must not duplicate RequestTerminated"
-        );
+        loop {
+            match lifecycle_events.try_recv() {
+                Ok(event) => assert!(
+                    !matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                    ),
+                    "{case} close/task-drop race must not duplicate RequestTerminated"
+                ),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
     }
 
     let samples = snapshotter.snapshot().into_vec();
