@@ -100,44 +100,26 @@ async fn get_or_build_fast_init_sql() -> Result<&'static String, StorageError> {
 impl MetaStore for SqliteStorage {
     async fn initialize(&self) -> StorageResult<()> {
         let fast_sql = get_or_build_fast_init_sql().await?;
-        let mut conn = self.pool().acquire().await.map_err(map_sqlx_error)?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *conn)
-            .await
-            .map_err(map_sqlx_error)?;
+        let mut tx = crate::begin_immediate(self.pool()).await?;
 
-        let existing_objects: Result<(i64,), _> = sqlx::query_as(
+        let (existing_objects,): (i64,) = sqlx::query_as(
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
         )
-        .fetch_one(&mut *conn)
-        .await;
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
 
-        match existing_objects {
-            Ok((0,)) => {
-                if let Err(error) = sqlx::raw_sql(sqlx::AssertSqlSafe(fast_sql.as_str()))
-                    .execute(&mut *conn)
-                    .await
-                {
-                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                    return Err(StorageError::Fatal {
-                        message: error.to_string(),
-                    });
-                }
-                sqlx::query("COMMIT")
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(map_sqlx_error)?;
-                return Ok(());
-            }
-            Ok(_) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            }
-            Err(error) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                return Err(map_sqlx_error(error));
-            }
+        if existing_objects == 0 {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(fast_sql.as_str()))
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| StorageError::Fatal {
+                    message: error.to_string(),
+                })?;
+            tx.commit().await.map_err(map_sqlx_error)?;
+            return Ok(());
         }
-        drop(conn);
+        tx.rollback().await.map_err(map_sqlx_error)?;
 
         MIGRATOR
             .run(self.pool())
