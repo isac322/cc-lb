@@ -97,6 +97,12 @@ async fn append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles(
         ids,
         vec!["first-follow-up", "overlapping-renewal", "renewal",]
     );
+    sqlx::query(
+        "DELETE FROM cache_keepalive_evidence
+         WHERE evidence_id IN ('first-follow-up', 'overlapping-renewal', 'renewal')",
+    )
+    .execute(storage.pool())
+    .await?;
     Ok(())
 }
 async fn append_evidence_deduplicates_follow_ups_across_sibling_renewals(
