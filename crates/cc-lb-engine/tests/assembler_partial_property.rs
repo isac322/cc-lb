@@ -197,6 +197,8 @@ fn usage(profile: Profile) -> UsageSnapshot {
         cache_write_input_tokens: None,
         cache_write_input_tokens_30m: None,
         cache_write_input_tokens_12h: None,
+        cache_read_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Unreported),
+        cache_creation_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Unreported),
         thinking_tokens: base + 60,
         tool_use_prompt_tokens: None,
         web_search_requests: base + 70,

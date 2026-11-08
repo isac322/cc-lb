@@ -372,6 +372,7 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .try_get("upstream_stream_warning_message")
             .map_err(map_sqlx_error)?,
         cache_breakpoints: Vec::new(),
+        native_cache: None,
         cache_control_message_indices: Vec::new(),
         routing_trace: None,
         iterations: None,

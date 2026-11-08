@@ -110,6 +110,7 @@ pub struct UpstreamStreamDiagnostics {
 /// Fixed vocabulary of events emitted during a single request's lifecycle.
 ///
 /// See the crate-level documentation for the expected sequences.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LifecycleEvent {

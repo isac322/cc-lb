@@ -1898,6 +1898,30 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         cache_write_input_tokens: usage.cache_write_input_tokens,
         cache_write_input_tokens_30m: usage.cache_write_input_tokens_30m,
         cache_write_input_tokens_12h: usage.cache_write_input_tokens_12h,
+        cache_read_evidence: match usage.cache_read_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
+        cache_creation_evidence: match usage.cache_creation_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
         thinking_tokens: usage.thinking_tokens,
         tool_use_prompt_tokens: usage.tool_use_prompt_tokens,
         web_search_requests: usage.web_search_requests,

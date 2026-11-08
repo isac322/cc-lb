@@ -74,6 +74,10 @@ pub struct RequestEvent {
     pub cache_control_message_indices: Vec<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
+    /// Provider-native cache facts. Anthropic breakpoint fields remain
+    /// unchanged and are intentionally kept separate from this extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_cache: Option<crate::RequestNativeCacheObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_estimate_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,5 +398,30 @@ mod tests {
         let legacy: RequestEvent =
             serde_json::from_value(legacy).expect("deserialize legacy event");
         assert_eq!(legacy.tool_use_prompt_tokens, None);
+    }
+    #[test]
+    fn native_cache_observation_serializes_without_raw_identity() {
+        let event = RequestEvent {
+            native_cache: Some(crate::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                scope: Some("org=o1;region=us".to_owned()),
+                identity_hash: Some("sha256:abc".to_owned()),
+                boundary: Some("latest_message=3".to_owned()),
+                evidence_source: Some("provider_usage_metadata".to_owned()),
+                cached_tokens: Some(256),
+                write_tokens: None,
+                evidence: crate::RequestCacheEvidence::Positive,
+                retention_secs: Some(1_800),
+                expires_at_unix_secs: None,
+                analysis_ms: Some(0.5),
+            }),
+            ..RequestEvent::default()
+        };
+        let json = serde_json::to_value(&event).expect("serialize native cache");
+        assert_eq!(json["native_cache"]["provider"], "openai");
+        assert_eq!(json["native_cache"]["cached_tokens"], 256);
+        assert!(json.to_string().contains("sha256:abc"));
+        assert!(!json.to_string().contains("raw prompt"));
     }
 }

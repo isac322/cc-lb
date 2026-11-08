@@ -424,6 +424,7 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+          --tmpfs /var/lib/postgresql:rw,size=2g
 
     env:
       # Keep coverage build and test concurrency aligned with the hosted runner.

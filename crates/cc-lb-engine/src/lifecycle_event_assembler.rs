@@ -1428,6 +1428,57 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
     }
 }
 
+fn native_cache_with_usage(
+    partial: &Partial,
+) -> Option<cc_lb_request_log::RequestNativeCacheObservation> {
+    let mut native = partial
+        .parse
+        .as_ref()
+        .and_then(|parse| parse.native_cache.clone())?;
+    let evidence = partial
+        .usage
+        .cache_read_evidence
+        .unwrap_or(cc_lb_request_log::RequestCacheEvidence::Unreported);
+    native.evidence = evidence;
+    native.cached_tokens = match evidence {
+        cc_lb_request_log::RequestCacheEvidence::Zero
+        | cc_lb_request_log::RequestCacheEvidence::Positive => {
+            let model = partial
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.model.as_deref());
+            partial.usage_seen.then_some({
+                let tokens = crate::provider_cache::normalize_cached_tokens(
+                    model,
+                    partial.usage.cache_read_input_tokens,
+                );
+                // Older OpenAI cache contracts round token counts down to 128-token
+                // boundaries, but a reported positive observation must remain
+                // positive in durable request evidence.
+                if evidence == cc_lb_request_log::RequestCacheEvidence::Positive
+                    && partial.usage.cache_read_input_tokens > 0
+                {
+                    tokens.max(1)
+                } else {
+                    tokens
+                }
+            })
+        }
+        cc_lb_request_log::RequestCacheEvidence::Unreported
+        | cc_lb_request_log::RequestCacheEvidence::Invalid => None,
+    };
+    native.write_tokens = match partial.usage.cache_creation_evidence {
+        Some(
+            cc_lb_request_log::RequestCacheEvidence::Zero
+            | cc_lb_request_log::RequestCacheEvidence::Positive,
+        ) => partial
+            .usage_seen
+            .then_some(partial.usage.cache_creation_input_tokens),
+        _ => None,
+    };
+    Some(native)
+}
+
 fn finalize_base(
     partial: &Partial,
     reason: &TerminationReason,
@@ -1556,6 +1607,7 @@ fn finalize_base(
         thinking_budget_tokens: partial.thinking_budget_tokens,
         reasoning_effort: partial.reasoning_effort.clone(),
         cache_breakpoints: partial.cache_breakpoints.clone(),
+        native_cache: native_cache_with_usage(partial),
         token_estimate_source,
         cost_usd_micros: cost.total,
         cost_input_micros: cost.input,
@@ -5423,6 +5475,31 @@ mod tests {
             *sink.shutdowns.lock().expect("shutdowns lock"),
             [2],
             "sink shutdown runs once, after every offer"
+        );
+    }
+    #[test]
+    fn positive_older_openai_cached_tokens_never_serialize_zero() {
+        let mut partial = Partial {
+            parse: Some(ParseInfo {
+                model: Some("gpt-5".to_owned()),
+                native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                    provider: "openai".to_owned(),
+                    mode: "implicit".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            usage_seen: true,
+            ..Default::default()
+        };
+        partial.usage.cache_read_input_tokens = 64;
+        partial.usage.cache_read_evidence = Some(cc_lb_request_log::RequestCacheEvidence::Positive);
+
+        let native = native_cache_with_usage(&partial).expect("native cache observation");
+        assert_eq!(native.cached_tokens, Some(1));
+        assert_eq!(
+            native.evidence,
+            cc_lb_request_log::RequestCacheEvidence::Positive
         );
     }
 }

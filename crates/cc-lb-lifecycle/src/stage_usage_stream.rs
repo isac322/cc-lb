@@ -26,6 +26,12 @@ pub struct UsageSnapshot {
     pub cache_creation_input_tokens_5m: u64,
     pub cache_creation_input_tokens_1h: u64,
     pub cache_read_input_tokens: u64,
+    /// Provider-reported cache evidence. `None` means the provider omitted
+    /// the counter; zero is represented explicitly by `Some(Zero)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
     pub thinking_tokens: u64,
     /// Provider-native cache writes. `None` means unavailable; `Some(0)` is
     /// an explicitly reported zero.
