@@ -437,6 +437,9 @@ impl Partial {
                 cache_creation_5m: cost.cache_creation_5m_micros,
                 cache_creation_1h: cost.cache_creation_1h_micros,
                 cache_read: cost.cache_read_micros,
+                cache_write: cost.cache_write_micros,
+                cache_write_30m: cost.cache_write_30m_micros,
+                cache_write_12h: cost.cache_write_12h_micros,
             };
         }
         self.estimated_cost_options().unwrap_or_default()
@@ -1547,6 +1550,9 @@ fn finalize_base(
         cache_read_input_tokens: partial
             .usage_seen
             .then_some(partial.usage.cache_read_input_tokens),
+        cache_write_input_tokens: partial.usage.cache_write_input_tokens,
+        cache_write_input_tokens_30m: partial.usage.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: partial.usage.cache_write_input_tokens_12h,
         thinking_budget_tokens: partial.thinking_budget_tokens,
         reasoning_effort: partial.reasoning_effort.clone(),
         cache_breakpoints: partial.cache_breakpoints.clone(),
@@ -1557,6 +1563,9 @@ fn finalize_base(
         cost_cache_creation_5m_micros: cost.cache_creation_5m,
         cost_cache_creation_1h_micros: cost.cache_creation_1h,
         cost_cache_read_micros: cost.cache_read,
+        cost_cache_write_micros: cost.cache_write,
+        cost_cache_write_30m_micros: cost.cache_write_30m,
+        cost_cache_write_12h_micros: cost.cache_write_12h,
         thinking_tokens: (partial.usage.thinking_tokens > 0)
             .then_some(partial.usage.thinking_tokens),
         service_tier: partial.usage.service_tier.clone(),

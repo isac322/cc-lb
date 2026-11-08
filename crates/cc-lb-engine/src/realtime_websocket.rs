@@ -95,6 +95,7 @@ impl RealtimeWebSocketSession {
                         cache_write_input_tokens: counts.cache_write_input_tokens,
                         cache_write_input_tokens_30m: counts.cache_write_input_tokens_30m,
                         cache_write_input_tokens_12h: counts.cache_write_input_tokens_12h,
+                        thinking_tokens: counts.thinking_tokens,
                         ..Default::default()
                     },
                     source: UsageSource::NonStreamBody,

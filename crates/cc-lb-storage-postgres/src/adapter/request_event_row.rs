@@ -96,6 +96,7 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "request event cache_write_input_tokens_12h"))
             .transpose()?,
+        thread_id: row.try_get("thread_id").map_err(map_sqlx_error)?,
         observed_session_id: row.try_get("observed_session_id").map_err(map_sqlx_error)?,
         request_kind: row.try_get("request_kind").map_err(map_sqlx_error)?,
         claude_agent_id: row.try_get("claude_agent_id").map_err(map_sqlx_error)?,

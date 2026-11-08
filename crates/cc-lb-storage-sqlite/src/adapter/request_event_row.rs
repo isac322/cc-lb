@@ -55,6 +55,7 @@ pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEven
         cache_write_input_tokens: optional_u64(row, "cache_write_input_tokens")?,
         cache_write_input_tokens_30m: optional_u64(row, "cache_write_input_tokens_30m")?,
         cache_write_input_tokens_12h: optional_u64(row, "cache_write_input_tokens_12h")?,
+        thread_id: row.try_get("thread_id").map_err(map_sqlx_error)?,
         observed_session_id: row.try_get("observed_session_id").map_err(map_sqlx_error)?,
         request_kind: row.try_get("request_kind").map_err(map_sqlx_error)?,
         claude_agent_id: row.try_get("claude_agent_id").map_err(map_sqlx_error)?,
@@ -96,6 +97,7 @@ pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEven
         cost_cache_write_12h_micros: row
             .try_get("list_cost_cache_write_12h_micros")
             .map_err(map_sqlx_error)?,
+        auth_ms: optional_u64(row, "list_auth_ms")?,
         route_ms: optional_u64(row, "list_route_ms")?,
         limit_reserve_ms: optional_u64(row, "list_limit_reserve_ms")?,
         json_parse_ms: row.try_get("list_json_parse_ms").map_err(map_sqlx_error)?,
