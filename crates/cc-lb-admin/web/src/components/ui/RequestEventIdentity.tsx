@@ -10,7 +10,10 @@ import {
 } from '../../lib/format';
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
-import { reasoningBadgeText, serviceTierBadgeText } from '../../lib/reasoningTier';
+import {
+  reasoningBadgeText,
+  serviceTierBadgeText,
+} from '../../lib/reasoningTier';
 import {
   type ErrorCodeTarget,
   explainErrorCode,
