@@ -227,10 +227,10 @@ defaults; every field is optional except `enabled`.
 
 The built-in wait-for-user tool allow-list matches Claude Code, Oh My Pi,
 Cline, Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
-`AskUserQuestion`, `ExitPlanMode`, `ask`, `ask_followup_question`,
-`ask_question`, `cursor_ask_question`, `question`, `attempt_completion`,
-`submit_and_exit`, `finish`, `plan_mode_respond`, `act_mode_respond`,
-`report_bug`.
+`AskUserQuestion`, `ExitPlanMode`, `StructuredOutput`, `ask`,
+`ask_followup_question`, `ask_question`, `cursor_ask_question`,
+`question`, `attempt_completion`, `submit_and_exit`, `finish`,
+`plan_mode_respond`, `act_mode_respond`, `report_bug`.
 
 Tool-name matching is case-sensitive and uses the client-facing response after
 any public response transform, in both SSE and buffered JSON paths. Provider

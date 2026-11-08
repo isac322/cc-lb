@@ -37,6 +37,7 @@ const BUILTIN_WAIT_FOR_USER_TOOLS: &[&str] = &[
     "plan_mode_respond",
     "act_mode_respond",
     "report_bug",
+    "StructuredOutput",
 ];
 
 const BUILTIN_COMPLETION_TOOLS: &[&str] = &[
@@ -44,6 +45,7 @@ const BUILTIN_COMPLETION_TOOLS: &[&str] = &[
     "submit_and_exit",
     "ExitPlanMode",
     "finish",
+    "StructuredOutput",
 ];
 
 pub struct HeuristicClassifier<'a> {
@@ -389,6 +391,50 @@ mod tests {
             }),
         );
         assert_eq!(d, TurnDecision::AgentInTurn);
+    }
+
+    #[test]
+    fn tool_use_with_only_structured_output_is_user_turn() {
+        let d = classify(
+            &default_config(),
+            json!({"tools": [{"name": "StructuredOutput"}]}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "name": "StructuredOutput", "id": "t1", "input": {}}
+                ],
+            }),
+        );
+        assert_eq!(d, TurnDecision::UserTurn);
+    }
+
+    #[test]
+    fn tool_use_with_structured_output_and_regular_tool_is_agent_in_turn() {
+        let d = classify(
+            &default_config(),
+            json!({"tools": [{"name": "StructuredOutput"}, {"name": "Bash"}]}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "name": "StructuredOutput", "id": "a", "input": {}},
+                    {"type": "tool_use", "name": "Bash", "id": "b", "input": {}}
+                ],
+            }),
+        );
+        assert_eq!(d, TurnDecision::AgentInTurn);
+    }
+
+    #[test]
+    fn end_turn_without_invoking_structured_output_is_agent_in_turn() {
+        let req = json!({"tools": [{"name": "StructuredOutput"}]});
+        let resp = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "thinking"}],
+        });
+        assert_eq!(
+            classify(&default_config(), req, resp),
+            TurnDecision::AgentInTurn
+        );
     }
 
     #[test]
