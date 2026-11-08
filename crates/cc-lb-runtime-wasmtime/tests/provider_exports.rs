@@ -80,6 +80,7 @@ fn shape_module(hooks: &[&str], metadata_version: u8) -> Vec<u8> {
             HookKind::TransformSseEvent => {
                 <cc_lb_plugin_wire::TransformSseEventRequest as WireSchema>::FINGERPRINT
             }
+            HookKind::Filter => <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT,
             HookKind::TransformRealtimeFrame | HookKind::ShapeEnvelopeGemini => {
                 unreachable!("fixture uses wire v1 hooks")
             }
