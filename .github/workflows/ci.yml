@@ -466,6 +466,7 @@ jobs:
 
   nextest-cov-shard:
     needs: nextest-cov-build
+    if: ${{ !cancelled() && needs.nextest-cov-build.result == 'success' }}
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
