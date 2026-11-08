@@ -116,3 +116,81 @@ fn v2_encoding_includes_provider_kind_and_quota_sample() {
     })
     .expect("encode V2");
 }
+
+#[test]
+fn v3_encoding_carries_provider_native_pricing_and_explicit_unknown_fallback() {
+    let principal = principal();
+    let mut native_ctx = context();
+    native_ctx.cache_pricing.native = Some(cc_lb_domain::NativeCachePricing {
+        version: 1,
+        provider: cc_lb_domain::NativeCachePricingProvider::OpenAi,
+        rates: vec![
+            cc_lb_domain::NativeCachePricingRate {
+                component: cc_lb_domain::NativeCachePricingComponent::OrdinaryInput,
+                lifetime: None,
+                status: cc_lb_domain::NativeCachePricingStatus::Known,
+                micros_per_million: Some(2_000_000),
+            },
+            cc_lb_domain::NativeCachePricingRate {
+                component: cc_lb_domain::NativeCachePricingComponent::TotalWrite,
+                lifetime: Some(cc_lb_domain::NativeCachePricingLifetime::ThirtyMinutes),
+                status: cc_lb_domain::NativeCachePricingStatus::Unknown,
+                micros_per_million: None,
+            },
+        ],
+    });
+    FilterWireRequest {
+        wire_version: WireVersion::V3,
+        ctx: &native_ctx,
+        principal: &principal,
+        candidates: &[],
+        cookie_redaction: false,
+    }
+    .encode(|bytes| {
+        let archived =
+            rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, RkyvError>(bytes)
+                .expect("archived V3");
+        let owned: cc_lb_plugin_wire::v3::FilterRequest =
+            rkyv::deserialize::<cc_lb_plugin_wire::v3::FilterRequest, RkyvError>(archived)
+                .expect("deserialize V3");
+        assert_eq!(
+            owned.native_pricing.provider,
+            cc_lb_plugin_wire::v3::NativeCachePricingProvider::OpenAi
+        );
+        assert_eq!(owned.native_pricing.rates.len(), 2);
+        assert_eq!(
+            owned.native_pricing.rates[0].micros_per_million,
+            Some(2_000_000)
+        );
+        assert_eq!(
+            owned.native_pricing.rates[1].lifetime,
+            Some(cc_lb_plugin_wire::v3::NativeCachePricingLifetime::ThirtyMinutes)
+        );
+    })
+    .expect("encode V3");
+
+    let mut fallback_ctx = context();
+    fallback_ctx.cache_pricing.native = None;
+    FilterWireRequest {
+        wire_version: WireVersion::V3,
+        ctx: &fallback_ctx,
+        principal: &principal,
+        candidates: &[],
+        cookie_redaction: false,
+    }
+    .encode(|bytes| {
+        let archived =
+            rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, RkyvError>(bytes)
+                .expect("archived V3 fallback");
+        let owned: cc_lb_plugin_wire::v3::FilterRequest =
+            rkyv::deserialize::<cc_lb_plugin_wire::v3::FilterRequest, RkyvError>(archived)
+                .expect("deserialize V3 fallback");
+        assert_eq!(
+            owned.native_pricing.provider,
+            cc_lb_plugin_wire::v3::NativeCachePricingProvider::Unknown
+        );
+        assert_eq!(owned.native_pricing.version, 1);
+        assert!(owned.native_pricing.rates.is_empty());
+    })
+    .expect("encode V3 fallback");
+}

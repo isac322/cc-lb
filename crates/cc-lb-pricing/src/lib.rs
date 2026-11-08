@@ -14,8 +14,9 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
 pub use cost::{
-    cache_creation_1h_micros_from_input, virtual_cost_micros_full,
-    virtual_cost_micros_full_with_context, virtual_cost_micros_full_with_context_and_images,
+    NativeCostBreakdown, cache_creation_1h_micros_from_input, native_cost_micros,
+    virtual_cost_micros_full, virtual_cost_micros_full_with_context,
+    virtual_cost_micros_full_with_context_and_images,
 };
 use cost::{record_missing_price_field, resolved_cache_creation_1h_price};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
@@ -49,6 +50,112 @@ pub struct ThresholdBand {
     pub by_tier: BTreeMap<String, ThresholdRate>,
 }
 
+/// Provider-owned cache pricing status. `Unknown` is intentionally distinct
+/// from `NotApplicable`: the former means the catalog could not establish a
+/// rate, while the latter means that the provider does not charge that
+/// component for the selected cache mode.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePricingStatus {
+    Known,
+    #[default]
+    Unknown,
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePricingLifetime {
+    #[default]
+    ModelRetention,
+    ThirtyMinutes,
+    OneHour,
+    TwelveHours,
+    ExplicitResourceTtl,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePricingProvider {
+    #[default]
+    Unknown,
+    Anthropic,
+    OpenAi,
+    Gemini,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativePricingRate {
+    pub status: NativePricingStatus,
+    #[serde(default)]
+    pub price_per_million_usd: Option<UsdPerMillion>,
+}
+
+impl NativePricingRate {
+    pub const fn known(price: UsdPerMillion) -> Self {
+        Self {
+            status: NativePricingStatus::Known,
+            price_per_million_usd: Some(price),
+        }
+    }
+
+    pub const fn unknown() -> Self {
+        Self {
+            status: NativePricingStatus::Unknown,
+            price_per_million_usd: None,
+        }
+    }
+
+    pub const fn not_applicable() -> Self {
+        Self {
+            status: NativePricingStatus::NotApplicable,
+            price_per_million_usd: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativeResourcePricing {
+    pub token: NativePricingRate,
+    pub storage: NativePricingRate,
+    pub ttl: NativePricingRate,
+}
+
+impl Default for NativeResourcePricing {
+    fn default() -> Self {
+        Self {
+            token: NativePricingRate::unknown(),
+            storage: NativePricingRate::unknown(),
+            ttl: NativePricingRate::unknown(),
+        }
+    }
+}
+
+/// Provider-native cache economics. Write rates are total rates for the
+/// indicated lifetime; they are not surcharges on ordinary input.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderNativePricing {
+    pub provider: NativePricingProvider,
+    pub ordinary_input: NativePricingRate,
+    pub cached_input_read: NativePricingRate,
+    #[serde(default)]
+    pub total_write: BTreeMap<NativePricingLifetime, NativePricingRate>,
+    #[serde(default)]
+    pub explicit_resource: NativeResourcePricing,
+}
+
+impl ProviderNativePricing {
+    pub fn unknown(provider: NativePricingProvider) -> Self {
+        Self {
+            provider,
+            ordinary_input: NativePricingRate::unknown(),
+            cached_input_read: NativePricingRate::unknown(),
+            total_write: BTreeMap::new(),
+            explicit_resource: NativeResourcePricing::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Pricing {
     pub model: String,
@@ -60,6 +167,10 @@ pub struct Pricing {
     pub output_image_per_million_usd: Option<UsdPerMillion>,
     #[serde(default)]
     pub by_tier: BTreeMap<String, TierRate>,
+    /// Provider-native prompt-cache rates. `None` preserves legacy catalog
+    /// entries and means that no provider-native contract was supplied.
+    #[serde(default)]
+    pub native: Option<ProviderNativePricing>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,6 +335,17 @@ impl PriceCatalog {
         pricing.input_per_million_usd = resolved.input_per_million_usd;
         pricing.output_per_million_usd = resolved.output_per_million_usd;
         Some(pricing)
+    }
+    /// Returns provider-native pricing for the model after model and service-tier
+    /// resolution. Native rates are provider-owned and are never synthesized from
+    /// the legacy Anthropic cache multipliers.
+    pub fn native_pricing(
+        &self,
+        model: &str,
+        service_tier: Option<&str>,
+    ) -> Option<ProviderNativePricing> {
+        self.lookup(model, service_tier)
+            .and_then(|pricing| pricing.native)
     }
 
     pub fn routing_cache_pricing(
@@ -553,6 +675,7 @@ mod tests {
             input_image_per_million_usd: None,
             output_image_per_million_usd: None,
             by_tier: BTreeMap::new(),
+            native: None,
         }
     }
     fn pricing_with_images(
@@ -818,6 +941,7 @@ mod tests {
                         output_per_million_usd: UsdPerMillion::from_whole_usd(12),
                     },
                 )]),
+                native: None,
             },
         );
         snap.above_tokens_rates.insert(

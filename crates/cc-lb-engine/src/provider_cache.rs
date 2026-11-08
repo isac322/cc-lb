@@ -292,7 +292,7 @@ fn parse_ttl_secs(value: &Value) -> Option<u64> {
     .filter(|seconds| (1..=OPENAI_LONG_RETENTION_SECS).contains(seconds))
 }
 
-fn supports_modern_openai_cache(model: &str) -> bool {
+pub(crate) fn supports_modern_openai_cache(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     let Some(version) = lower.strip_prefix("gpt-").and_then(|value| {
         let version = value

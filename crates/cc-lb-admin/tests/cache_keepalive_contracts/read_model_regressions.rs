@@ -28,6 +28,7 @@ fn install_regression_catalog() {
     models.insert(
         MODEL.to_owned(),
         Pricing {
+            native: None,
             model: MODEL.to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(3),
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),

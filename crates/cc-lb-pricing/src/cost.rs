@@ -1,8 +1,83 @@
-use crate::tier_resolver::{apply_threshold_bands, resolve_optional_price, resolve_tier_rate};
+use crate::tier_resolver::{
+    apply_threshold_bands, resolve_native_rate, resolve_optional_price, resolve_tier_rate,
+};
 use crate::{
-    ComputedCostBreakdown, PricingStatus, UsdPerMillion, canonical_service_tier, global_catalog,
+    ComputedCostBreakdown, NativePricingLifetime, NativePricingStatus, PricingStatus,
+    ProviderNativePricing, UsdPerMillion, canonical_service_tier, global_catalog,
     normalize_model_id,
 };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeCostBreakdown {
+    pub ordinary_input_micros: u64,
+    pub cached_input_read_micros: u64,
+    pub total_write_micros: u64,
+    pub total_micros: u64,
+    pub pricing_status: PricingStatus,
+}
+
+impl NativeCostBreakdown {
+    pub const fn unknown() -> Self {
+        Self {
+            ordinary_input_micros: 0,
+            cached_input_read_micros: 0,
+            total_write_micros: 0,
+            total_micros: 0,
+            pricing_status: PricingStatus::Unknown,
+        }
+    }
+}
+
+/// Computes provider-native cache economics. `write_tokens` contains complete
+/// native write regions; those tokens are deliberately not included in
+/// `ordinary_input_tokens`.
+pub fn native_cost_micros(
+    pricing: &ProviderNativePricing,
+    ordinary_input_tokens: u64,
+    cached_input_read_tokens: u64,
+    write_tokens: &[(NativePricingLifetime, u64)],
+) -> NativeCostBreakdown {
+    let ordinary = match (
+        pricing.ordinary_input.status,
+        pricing.ordinary_input.price_per_million_usd,
+    ) {
+        (NativePricingStatus::Known, Some(price)) => component_cost(ordinary_input_tokens, price),
+        _ => return NativeCostBreakdown::unknown(),
+    };
+    let read = match (
+        pricing.cached_input_read.status,
+        pricing.cached_input_read.price_per_million_usd,
+    ) {
+        (NativePricingStatus::Known, Some(price)) => {
+            component_cost(cached_input_read_tokens, price)
+        }
+        _ => return NativeCostBreakdown::unknown(),
+    };
+    let mut writes = 0_u128;
+    for (lifetime, tokens) in write_tokens {
+        let rate = resolve_native_rate(pricing, *lifetime);
+        let Some(price) = (rate.status == NativePricingStatus::Known)
+            .then_some(rate.price_per_million_usd)
+            .flatten()
+        else {
+            if *tokens == 0 {
+                continue;
+            }
+            return NativeCostBreakdown::unknown();
+        };
+        writes = writes.saturating_add(component_cost(*tokens, price));
+    }
+    let to_u64 = |cost: u128| cost.try_into().unwrap_or(u64::MAX);
+    let ordinary = to_u64(ordinary);
+    let read = to_u64(read);
+    let writes = to_u64(writes);
+    NativeCostBreakdown {
+        ordinary_input_micros: ordinary,
+        cached_input_read_micros: read,
+        total_write_micros: writes,
+        total_micros: ordinary.saturating_add(read).saturating_add(writes),
+        pricing_status: PricingStatus::Known,
+    }
+}
 
 /// Multiplier the provider applies to base input pricing for a 1-hour cache write.
 const CACHE_CREATION_1H_BASE_INPUT_MULTIPLIER: u64 = 2;
@@ -210,8 +285,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, LocalCacheInputEstimate, Pricing,
-        ThresholdBand, ThresholdRate, TierRate,
+        CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, LocalCacheInputEstimate,
+        NativePricingProvider, NativePricingRate, NativeResourcePricing, Pricing, ThresholdBand,
+        ThresholdRate, TierRate,
     };
 
     #[test]
@@ -234,6 +310,7 @@ mod tests {
                     input_image_per_million_usd: None,
                     output_image_per_million_usd: None,
                     by_tier: BTreeMap::new(),
+                    native: None,
                 },
             )]),
             raw_json: b"{}".to_vec(),
@@ -276,6 +353,7 @@ mod tests {
                             output_per_million_usd: UsdPerMillion::from_whole_usd(10),
                         },
                     )]),
+                    native: None,
                 },
             )]),
             raw_json: b"{}".to_vec(),
@@ -352,6 +430,7 @@ mod tests {
                     input_image_per_million_usd: Some(UsdPerMillion::from_whole_usd(99)),
                     output_image_per_million_usd: Some(UsdPerMillion::from_whole_usd(99)),
                     by_tier: BTreeMap::new(),
+                    native: None,
                 },
             )]),
             raw_json: b"{}".to_vec(),
@@ -402,6 +481,7 @@ mod tests {
                     input_image_per_million_usd: None,
                     output_image_per_million_usd: None,
                     by_tier: BTreeMap::new(),
+                    native: None,
                 },
             )]),
             raw_json: b"{}".to_vec(),
@@ -471,6 +551,7 @@ mod tests {
             models: HashMap::from([(
                 model.to_owned(),
                 Pricing {
+                    native: None,
                     model: model.to_owned(),
                     input_per_million_usd: UsdPerMillion::from_whole_usd(2),
                     output_per_million_usd: UsdPerMillion::from_whole_usd(8),
@@ -551,6 +632,7 @@ mod tests {
                     input_image_per_million_usd: None,
                     output_image_per_million_usd: None,
                     by_tier: BTreeMap::new(),
+                    native: None,
                 },
             )]),
             raw_json: b"{}".to_vec(),
@@ -580,6 +662,7 @@ mod tests {
             models: HashMap::from([(
                 model.to_owned(),
                 Pricing {
+                    native: None,
                     model: model.to_owned(),
                     input_per_million_usd: UsdPerMillion::from_micros_usd(3_000_000),
                     output_per_million_usd: UsdPerMillion::from_micros_usd(15_000_000),
@@ -678,6 +761,7 @@ mod tests {
                 input_image_per_million_usd: None,
                 output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
+                native: None,
             },
             Some(UsdPerMillion::from_micros_usd(3_750_000)),
             None,
@@ -715,6 +799,7 @@ mod tests {
                 input_image_per_million_usd: None,
                 output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
+                native: None,
             },
             None,
             None,
@@ -752,6 +837,7 @@ mod tests {
                 input_image_per_million_usd: None,
                 output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
+                native: None,
             },
             Some(UsdPerMillion::from_micros_usd(4_250_000)),
             Some(UsdPerMillion::from_micros_usd(5_000_000)),
@@ -815,6 +901,7 @@ mod tests {
                         output_per_million_usd: UsdPerMillion::from_whole_usd(12),
                     },
                 )]),
+                native: None,
             },
             Some(UsdPerMillion::from_whole_usd(4)),
             Some(UsdPerMillion::from_whole_usd(1)),
@@ -889,6 +976,7 @@ mod tests {
                 input_image_per_million_usd: None,
                 output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
+                native: None,
             },
             None,
             None,
@@ -907,5 +995,39 @@ mod tests {
         );
 
         assert_eq!(estimate, Some(u64::MAX));
+    }
+
+    #[test]
+    fn native_cost_keeps_total_writes_separate_from_ordinary_input() {
+        let pricing = ProviderNativePricing {
+            provider: NativePricingProvider::OpenAi,
+            ordinary_input: NativePricingRate::known(UsdPerMillion::from_micros_usd(2_000_000)),
+            cached_input_read: NativePricingRate::known(UsdPerMillion::from_micros_usd(100_000)),
+            total_write: BTreeMap::from([
+                (
+                    NativePricingLifetime::ThirtyMinutes,
+                    NativePricingRate::known(UsdPerMillion::from_micros_usd(2_500_000)),
+                ),
+                (
+                    NativePricingLifetime::TwelveHours,
+                    NativePricingRate::known(UsdPerMillion::from_micros_usd(5_000_000)),
+                ),
+            ]),
+            explicit_resource: NativeResourcePricing::default(),
+        };
+        let breakdown = native_cost_micros(
+            &pricing,
+            100,
+            20,
+            &[
+                (NativePricingLifetime::ThirtyMinutes, 10),
+                (NativePricingLifetime::TwelveHours, 5),
+            ],
+        );
+        assert_eq!(breakdown.pricing_status, PricingStatus::Known);
+        assert_eq!(breakdown.ordinary_input_micros, 200);
+        assert_eq!(breakdown.cached_input_read_micros, 2);
+        assert_eq!(breakdown.total_write_micros, 50);
+        assert_eq!(breakdown.total_micros, 252);
     }
 }

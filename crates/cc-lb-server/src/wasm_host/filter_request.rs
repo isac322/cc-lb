@@ -7,7 +7,7 @@ use cc_lb_plugin_wire::{
         CachePricingSummaryRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
         UpstreamCandidateRef,
     },
-    v2,
+    v2, v3,
 };
 use cc_lb_routing::RoutingContext;
 use rkyv::rancor::Error as RkyvError;
@@ -257,8 +257,227 @@ impl FilterWireRequest<'_> {
                     with_bytes,
                 )
             }
+            WireVersion::V3 => {
+                let thread_id = self
+                    .ctx
+                    .thread_id
+                    .as_deref()
+                    .map(|value| v3::OptionalStrRef { value });
+                let service_tier = self
+                    .ctx
+                    .requested_service_tier
+                    .as_deref()
+                    .map(|value| v3::OptionalStrRef { value });
+                let query = self
+                    .ctx
+                    .query
+                    .as_deref()
+                    .map(|value| v3::OptionalStrRef { value });
+                let principal = v3::PrincipalRef {
+                    id: self.principal.id.as_str(),
+                    kind: principal_kind,
+                    claims: &[],
+                };
+                let quota_refs: Vec<Vec<v2::SubscriptionQuotaSampleRef<'_>>> = self
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        candidate
+                            .subscription_quotas
+                            .iter()
+                            .map(|quota| v2::SubscriptionQuotaSampleRef {
+                                window: quota.window.as_str(),
+                                utilization: quota.utilization,
+                                resets_at_unix_secs: quota.resets_at_unix_secs,
+                                status: quota
+                                    .status
+                                    .as_deref()
+                                    .map(|value| v3::OptionalStrRef { value }),
+                                sample_kind: match quota.state {
+                                    cc_lb_domain::SubscriptionQuotaDataState::Fresh
+                                    | cc_lb_domain::SubscriptionQuotaDataState::Stale => "sample",
+                                    cc_lb_domain::SubscriptionQuotaDataState::Absent => "absent",
+                                    cc_lb_domain::SubscriptionQuotaDataState::Unobserved => {
+                                        "unobserved"
+                                    }
+                                },
+                                observed_at_unix_millis: quota.observed_at_unix_millis,
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let candidates: Vec<v3::UpstreamCandidateRef<'_>> = self
+                    .candidates
+                    .iter()
+                    .zip(candidate_ids.iter())
+                    .zip(quota_refs.iter())
+                    .map(|((candidate, upstream_id), quotas)| {
+                        let cache_score = candidate.cache_score.as_ref();
+                        v3::UpstreamCandidateRef {
+                            upstream_id,
+                            name: candidate.name.as_str(),
+                            kind: candidate.kind.as_str(),
+                            base_url: candidate
+                                .base_url
+                                .as_deref()
+                                .map(|value| v3::OptionalStrRef { value }),
+                            observed_at_unix_secs: candidate.observed_at_unix_secs,
+                            predicted_cache_read_tokens: cache_score
+                                .map(|score| score.predicted_cache_read_tokens)
+                                .unwrap_or(0),
+                            predicted_cache_creation_tokens_5m: cache_score
+                                .map(|score| score.predicted_cache_creation_tokens_5m)
+                                .unwrap_or(0),
+                            predicted_cache_creation_tokens_1h: cache_score
+                                .map(|score| score.predicted_cache_creation_tokens_1h)
+                                .unwrap_or(0),
+                            predicted_uncached_input_tokens: cache_score
+                                .map(|score| score.predicted_uncached_input_tokens)
+                                .unwrap_or(0),
+                            plan_capacity_ratio: candidate.plan_capacity_ratio.unwrap_or(1.0),
+                            organization_type: candidate.organization_type.as_deref().unwrap_or(""),
+                            rate_limit_tier: candidate.rate_limit_tier.as_deref().unwrap_or(""),
+                            seat_tier: candidate.seat_tier.as_deref().unwrap_or(""),
+                            subscription_quotas: quotas,
+                        }
+                    })
+                    .collect();
+                let headers: Vec<v3::HeaderRef<'_>> = self
+                    .ctx
+                    .downstream_headers
+                    .iter()
+                    .filter(|(name, _)| {
+                        !is_stripped_downstream_header(name.as_str(), self.cookie_redaction)
+                    })
+                    .map(|(name, value)| v3::HeaderRef {
+                        name: name.as_str(),
+                        value: value.as_bytes(),
+                    })
+                    .collect();
+                let native_pricing = self.ctx.cache_pricing.native.as_ref();
+                let (native_version, native_provider, native_rate_refs) =
+                    native_pricing_refs(native_pricing);
+                serialize_with_input_scratch(
+                    &v3::FilterRequestRef {
+                        request_id: self.ctx.request_id.as_str(),
+                        thread_id,
+                        service_tier,
+                        canonical_model_id: self.ctx.canonical_model_id.as_str(),
+                        cache_pricing: v2::CachePricingSummaryRef {
+                            status: self.ctx.cache_pricing.status.as_str(),
+                            input_micros_per_million: self
+                                .ctx
+                                .cache_pricing
+                                .input_micros_per_million,
+                            cache_creation_5m_micros_per_million: self
+                                .ctx
+                                .cache_pricing
+                                .cache_creation_5m_micros_per_million,
+                            cache_creation_1h_micros_per_million: self
+                                .ctx
+                                .cache_pricing
+                                .cache_creation_1h_micros_per_million,
+                            cache_read_micros_per_million: self
+                                .ctx
+                                .cache_pricing
+                                .cache_read_micros_per_million,
+                        },
+                        native_pricing: v3::NativeCachePricingRef {
+                            version: native_version,
+                            provider: native_provider,
+                            rates: &native_rate_refs,
+                        },
+                        method: self.ctx.method.as_str(),
+                        path: self.ctx.path.as_str(),
+                        query,
+                        headers: &headers,
+                        body: self.ctx.body_bytes.as_ref(),
+                        principal,
+                        candidates: &candidates,
+                    },
+                    with_bytes,
+                )
+            }
         }
     }
+}
+
+fn native_pricing_refs(
+    native: Option<&cc_lb_domain::NativeCachePricing>,
+) -> (
+    u8,
+    v3::NativeCachePricingProvider,
+    Vec<v3::NativeCachePricingRateRef>,
+) {
+    let Some(native) = native else {
+        return (1, v3::NativeCachePricingProvider::Unknown, Vec::new());
+    };
+    let provider = match native.provider {
+        cc_lb_domain::NativeCachePricingProvider::Unknown => {
+            v3::NativeCachePricingProvider::Unknown
+        }
+        cc_lb_domain::NativeCachePricingProvider::Anthropic => {
+            v3::NativeCachePricingProvider::Anthropic
+        }
+        cc_lb_domain::NativeCachePricingProvider::OpenAi => v3::NativeCachePricingProvider::OpenAi,
+        cc_lb_domain::NativeCachePricingProvider::Gemini => v3::NativeCachePricingProvider::Gemini,
+    };
+    let rates = native
+        .rates
+        .iter()
+        .map(|rate| v3::NativeCachePricingRateRef {
+            component: match rate.component {
+                cc_lb_domain::NativeCachePricingComponent::OrdinaryInput => {
+                    v3::NativeCachePricingComponent::OrdinaryInput
+                }
+                cc_lb_domain::NativeCachePricingComponent::CachedInputRead => {
+                    v3::NativeCachePricingComponent::CachedInputRead
+                }
+                cc_lb_domain::NativeCachePricingComponent::TotalWrite => {
+                    v3::NativeCachePricingComponent::TotalWrite
+                }
+                cc_lb_domain::NativeCachePricingComponent::ExplicitResourceToken => {
+                    v3::NativeCachePricingComponent::ExplicitResourceToken
+                }
+                cc_lb_domain::NativeCachePricingComponent::ExplicitResourceStorage => {
+                    v3::NativeCachePricingComponent::ExplicitResourceStorage
+                }
+                cc_lb_domain::NativeCachePricingComponent::ExplicitResourceTtl => {
+                    v3::NativeCachePricingComponent::ExplicitResourceTtl
+                }
+            },
+            lifetime: rate.lifetime.map(|lifetime| match lifetime {
+                cc_lb_domain::NativeCachePricingLifetime::ModelRetention => {
+                    v3::NativeCachePricingLifetime::ModelRetention
+                }
+                cc_lb_domain::NativeCachePricingLifetime::ThirtyMinutes => {
+                    v3::NativeCachePricingLifetime::ThirtyMinutes
+                }
+                cc_lb_domain::NativeCachePricingLifetime::OneHour => {
+                    v3::NativeCachePricingLifetime::OneHour
+                }
+                cc_lb_domain::NativeCachePricingLifetime::TwelveHours => {
+                    v3::NativeCachePricingLifetime::TwelveHours
+                }
+                cc_lb_domain::NativeCachePricingLifetime::ExplicitResourceTtl => {
+                    v3::NativeCachePricingLifetime::ExplicitResourceTtl
+                }
+            }),
+            status: match rate.status {
+                cc_lb_domain::NativeCachePricingStatus::Known => {
+                    v3::NativeCachePricingStatus::Known
+                }
+                cc_lb_domain::NativeCachePricingStatus::Unknown => {
+                    v3::NativeCachePricingStatus::Unknown
+                }
+                cc_lb_domain::NativeCachePricingStatus::NotApplicable => {
+                    v3::NativeCachePricingStatus::NotApplicable
+                }
+            },
+            micros_per_million: rate.micros_per_million,
+        })
+        .collect();
+    (native.version, provider, rates)
 }
 
 pub(super) fn principal_kind_to_wire(principal: &Principal) -> &'static str {

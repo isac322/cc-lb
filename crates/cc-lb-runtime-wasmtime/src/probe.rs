@@ -66,24 +66,40 @@ pub(crate) fn probe_hook_dispatch(
         (HookKind::Filter, version) => probe_filter(&cell, provider, export, version),
         (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell, provider, export),
         (HookKind::Shape, WireVersion::V2) => probe_shape_v2(&cell, provider, export),
+        (HookKind::Shape, WireVersion::V3) => Err(probe_failed(
+            HookKind::Shape,
+            "wire v3 is unsupported for shape hooks".into(),
+        )),
         (HookKind::TransformResponse, WireVersion::V1) => {
             probe_transform_response_v1(&cell, provider, export)
         }
         (HookKind::TransformResponse, WireVersion::V2) => {
             probe_transform_response_v2(&cell, provider, export)
         }
+        (HookKind::TransformResponse, WireVersion::V3) => Err(probe_failed(
+            HookKind::TransformResponse,
+            "wire v3 is unsupported for response transforms".into(),
+        )),
         (HookKind::TransformSseEvent, WireVersion::V1) => {
             probe_transform_sse_event_v1(&cell, provider, export)
         }
         (HookKind::TransformSseEvent, WireVersion::V2) => {
             probe_transform_sse_event_v2(&cell, provider, export)
         }
+        (HookKind::TransformSseEvent, WireVersion::V3) => Err(probe_failed(
+            HookKind::TransformSseEvent,
+            "wire v3 is unsupported for SSE transforms".into(),
+        )),
         (HookKind::ShapeEnvelopeGemini, WireVersion::V2) => {
             probe_shape_envelope_gemini_v2(&cell, provider, export)
         }
         (HookKind::ShapeEnvelopeGemini, WireVersion::V1) => Err(probe_failed(
             HookKind::ShapeEnvelopeGemini,
             "wire v1 is unsupported for Gemini shape envelope".into(),
+        )),
+        (HookKind::ShapeEnvelopeGemini, WireVersion::V3) => Err(probe_failed(
+            HookKind::ShapeEnvelopeGemini,
+            "wire v3 is unsupported for Gemini shape envelope".into(),
         )),
     }
 }

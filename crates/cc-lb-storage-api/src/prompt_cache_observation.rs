@@ -1,12 +1,12 @@
 //! Storage API records observed prompt-cache prefixes per upstream/model.
 
+use crate::{StorageError, StorageResult};
 use async_trait::async_trait;
 use cc_lb_domain::TtlClass;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{StorageError, StorageResult};
-
+pub const MAX_PROVIDER_NATIVE_CANDIDATES: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptCacheObservationRecord {
     pub upstream_id: Uuid,
@@ -112,6 +112,37 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
                     .to_owned(),
         })
     }
+    /// Batch lookup of active provider-native observations for one request's
+    /// bounded routing candidates (`upstream_ids` is bounded by
+    /// [`MAX_PROVIDER_NATIVE_CANDIDATES`]). Every candidate must match the exact
+    /// provider, canonical model, mode, isolation scope, identity hash, and
+    /// required retention. Rows are active only when `expires_at` is strictly
+    /// after `not_expired_at_unix_secs`.
+    ///
+    /// `None` is an exact retention value: it matches only rows whose
+    /// `retention_secs` is also `NULL`. Results are deterministically ordered
+    /// by `(upstream_id, boundary)`. Empty `upstream_ids` or `identity_hash`
+    /// MUST return `Ok(vec![])` without issuing a query.
+    #[allow(clippy::too_many_arguments)]
+    async fn list_active_provider_observations_for_candidates(
+        &self,
+        _upstream_ids: &[Uuid],
+        _provider: &str,
+        _canonical_model_id: &str,
+        _mode: &str,
+        _isolation_scope: &str,
+        _identity_hash: &str,
+        _required_retention_secs: Option<u64>,
+        _not_expired_at_unix_secs: u64,
+    ) -> StorageResult<Vec<ProviderPromptCacheObservationRecord>> {
+        Err(StorageError::Unavailable {
+            message:
+                "PromptCacheObservationStore::list_active_provider_observations_for_candidates \
+                 is not implemented"
+                    .to_owned(),
+        })
+    }
+
     async fn purge_expired_before(&self, _ts_unix_secs: u64) -> StorageResult<u64> {
         Ok(0)
     }

@@ -92,6 +92,39 @@ fn v2_filter_fixture_has_no_upstream_identity() {
 }
 
 #[test]
+fn v3_filter_fixture_round_trips_native_pricing_values() {
+    let request = fixtures::sample_filter_request_v3(ProviderFamily::Openai);
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request).expect("encode V3 fixture");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::v3::ArchivedFilterRequest, rkyv::rancor::Error>(&bytes)
+            .expect("access V3 fixture");
+    let owned: cc_lb_plugin_wire::v3::FilterRequest =
+        rkyv::deserialize::<cc_lb_plugin_wire::v3::FilterRequest, rkyv::rancor::Error>(archived)
+            .expect("deserialize V3 fixture");
+    assert_eq!(
+        owned.native_pricing.provider,
+        cc_lb_plugin_wire::v3::NativeCachePricingProvider::OpenAi
+    );
+    assert_eq!(owned.native_pricing.rates.len(), 4);
+    assert_eq!(
+        owned.native_pricing.rates[2].component,
+        cc_lb_plugin_wire::v3::NativeCachePricingComponent::TotalWrite
+    );
+    assert_eq!(
+        owned.native_pricing.rates[2].lifetime,
+        Some(cc_lb_plugin_wire::v3::NativeCachePricingLifetime::ThirtyMinutes)
+    );
+    assert_eq!(
+        owned.native_pricing.rates[2].status,
+        cc_lb_plugin_wire::v3::NativeCachePricingStatus::Unknown
+    );
+    assert_eq!(
+        owned.native_pricing.rates[0].micros_per_million,
+        Some(2_000_000)
+    );
+}
+
+#[test]
 fn prelude_exports_provider_conformance_surface() {
     use crate::prelude::*;
     let provider = ProviderFamily::Openai;

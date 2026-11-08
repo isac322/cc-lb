@@ -1,4 +1,7 @@
-use cc_lb_domain::CacheScore;
+use cc_lb_domain::{
+    CachePricingSummary, CacheScore, NativeCachePricing, NativeCachePricingComponent,
+    NativeCachePricingProvider, NativeCachePricingRate, NativeCachePricingStatus,
+};
 
 use super::*;
 
@@ -64,6 +67,64 @@ fn winner(candidates: &[UpstreamCandidate], request_id: &str) -> Uuid {
         )
         .expect("builtin filter cannot fail")
         .kept_upstream_ids[0]
+}
+fn winner_with_pricing(
+    candidates: &[UpstreamCandidate],
+    request_id: &str,
+    cache_pricing: CachePricingSummary,
+) -> Uuid {
+    let mut ctx = ctx_with_request_id(MODEL_AGNOSTIC, request_id);
+    ctx.cache_pricing = cache_pricing;
+    SubscriptionPreferenceFilter::new()
+        .filter(&ctx, &principal(), candidates)
+        .expect("builtin filter cannot fail")
+        .kept_upstream_ids[0]
+}
+
+fn native_pricing(input: Option<u64>, read: Option<u64>) -> CachePricingSummary {
+    let rates = vec![
+        NativeCachePricingRate {
+            component: NativeCachePricingComponent::OrdinaryInput,
+            lifetime: None,
+            status: input
+                .map(|_| NativeCachePricingStatus::Known)
+                .unwrap_or(NativeCachePricingStatus::Unknown),
+            micros_per_million: input,
+        },
+        NativeCachePricingRate {
+            component: NativeCachePricingComponent::CachedInputRead,
+            lifetime: None,
+            status: read
+                .map(|_| NativeCachePricingStatus::Known)
+                .unwrap_or(NativeCachePricingStatus::Unknown),
+            micros_per_million: read,
+        },
+    ];
+    CachePricingSummary {
+        status: "unknown".to_owned(),
+        input_micros_per_million: None,
+        cache_creation_5m_micros_per_million: None,
+        cache_creation_1h_micros_per_million: None,
+        cache_read_micros_per_million: None,
+        native: Some(NativeCachePricing {
+            version: 1,
+            provider: NativeCachePricingProvider::OpenAi,
+            rates,
+        }),
+    }
+}
+
+fn native_observation(
+    candidate: UpstreamCandidate,
+    estimate: CacheTokenEstimate,
+) -> UpstreamCandidate {
+    let mut candidate = with_cache_tokens(candidate, estimate);
+    candidate
+        .cache_score
+        .as_mut()
+        .expect("cache score")
+        .ambiguity_reason = Some("provider_native_observation".to_owned());
+    candidate
 }
 
 #[test]
@@ -176,6 +237,111 @@ fn costs_more_than_five_percent_choose_cheaper_candidate() {
 
     // Then: cost excludes the urgent but too-expensive candidate.
     assert_eq!(selected, cheap.upstream_id);
+}
+
+#[test]
+fn native_observation_respects_the_five_percent_cost_gate() {
+    // Given: a native warm candidate and an urgent candidate with no observed
+    // warmth, the shared native baseline makes the urgent candidate costlier.
+    let warm = native_observation(
+        on_pace_candidate("warm", 1),
+        CacheTokenEstimate {
+            uncached_input: 0,
+            create_5m: 0,
+            create_1h: 0,
+            read: 212,
+        },
+    );
+    let cold = native_observation(urgent_candidate("cold", 2), CacheTokenEstimate::zero());
+
+    // Then: urgency cannot override a cost gap above five percent.
+    assert_eq!(
+        winner_with_pricing(
+            &[warm.clone(), cold],
+            "native-cost-gap",
+            native_pricing(Some(5_000_000), Some(500_000)),
+        ),
+        warm.upstream_id
+    );
+}
+
+#[test]
+fn native_warmth_uses_shared_baseline_and_lowers_cost() {
+    // Given: native observations with 100k versus 1k cached tokens and the
+    // same native rates.
+    let warm = native_observation(
+        on_pace_candidate("warm", 1),
+        CacheTokenEstimate {
+            uncached_input: 0,
+            create_5m: 0,
+            create_1h: 0,
+            read: 100_000,
+        },
+    );
+    let shallow = native_observation(
+        urgent_candidate("shallow", 2),
+        CacheTokenEstimate {
+            uncached_input: 0,
+            create_5m: 0,
+            create_1h: 0,
+            read: 1_000,
+        },
+    );
+    let pricing = native_pricing(Some(5_000_000), Some(500_000));
+    let baseline_tokens = 100_000;
+    let warm_cost = estimate_candidate_input_cost_micros(&warm, &pricing, baseline_tokens)
+        .expect("known native rates");
+    let shallow_cost = estimate_candidate_input_cost_micros(&shallow, &pricing, baseline_tokens)
+        .expect("known native rates");
+
+    // Then: the larger warm observation is cheaper and wins outside the gate.
+    assert!(warm_cost < shallow_cost);
+    assert!(u128::from(shallow_cost) * 100 > u128::from(warm_cost) * 105);
+    assert_eq!(
+        winner_with_pricing(&[warm.clone(), shallow], "native-warmth-direction", pricing),
+        warm.upstream_id
+    );
+}
+
+#[test]
+fn known_native_read_cost_uses_native_input_and_read_rates() {
+    let candidate = native_observation(
+        on_pace_candidate("native", 1),
+        CacheTokenEstimate {
+            uncached_input: 0,
+            create_5m: 0,
+            create_1h: 0,
+            read: 1_000_000,
+        },
+    );
+    assert_eq!(
+        estimate_candidate_input_cost_micros(
+            &candidate,
+            &native_pricing(Some(2_000_000), Some(100_000)),
+            1_000_000,
+        ),
+        Some(100_000)
+    );
+}
+
+#[test]
+fn missing_native_rate_keeps_cost_neutral() {
+    let candidate = native_observation(
+        on_pace_candidate("native", 1),
+        CacheTokenEstimate {
+            uncached_input: 0,
+            create_5m: 10_000,
+            create_1h: 10_000,
+            read: 1_000_000,
+        },
+    );
+    let pricing = native_pricing(Some(2_000_000), None);
+    assert_eq!(
+        estimate_candidate_input_cost_micros(&candidate, &pricing, 1_000_000),
+        None
+    );
+    assert_eq!(cache_read_savings_ratio(&candidate, &pricing), 0.0);
+    assert_eq!(candidate_cache_value_micros(&candidate, &pricing), None);
 }
 
 #[test]

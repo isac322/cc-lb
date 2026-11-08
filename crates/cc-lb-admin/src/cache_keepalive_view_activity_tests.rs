@@ -94,6 +94,7 @@ fn priced_catalog() -> std::sync::Arc<PriceCatalog> {
     models.insert(
         "claude-sonnet-4-5".to_owned(),
         Pricing {
+            native: None,
             model: "claude-sonnet-4-5".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(3),
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),

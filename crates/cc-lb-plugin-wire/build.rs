@@ -315,6 +315,39 @@ fn main() {
         },
     ];
 
+    let v3_entries = [
+        SchemaEntry {
+            impl_generics: "",
+            ty: "v3::NativeCachePricingRate",
+            descriptor: "NativeCachePricingRate{component:NativeCachePricingComponent,lifetime:Option<NativeCachePricingLifetime>,micros_per_million:Option<u64>,status:NativeCachePricingStatus}",
+        },
+        SchemaEntry {
+            impl_generics: "",
+            ty: "v3::NativeCachePricingRateRef",
+            descriptor: "NativeCachePricingRateRef{component:NativeCachePricingComponent,lifetime:Option<NativeCachePricingLifetime>,micros_per_million:Option<u64>,status:NativeCachePricingStatus}",
+        },
+        SchemaEntry {
+            impl_generics: "",
+            ty: "v3::NativeCachePricing",
+            descriptor: "NativeCachePricing{provider:NativeCachePricingProvider,rates:Box<[NativeCachePricingRate]>,version:u8}",
+        },
+        SchemaEntry {
+            impl_generics: "<'a>",
+            ty: "v3::NativeCachePricingRef<'a>",
+            descriptor: "NativeCachePricingRef{provider:NativeCachePricingProvider,rates:&[NativeCachePricingRateRef],version:u8}",
+        },
+        SchemaEntry {
+            impl_generics: "",
+            ty: "v3::FilterRequest",
+            descriptor: "FilterRequest{body:Box<[u8]>,cache_pricing:CachePricingSummary,candidates:Box<[UpstreamCandidate]>,canonical_model_id:Box<str>,headers:Box<[Header]>,method:Box<str>,native_pricing:NativeCachePricing,path:Box<str>,principal:Principal,query:Option<Box<str>>,request_id:Box<str>,service_tier:Option<Box<str>>,thread_id:Option<Box<str>}",
+        },
+        SchemaEntry {
+            impl_generics: "<'a>",
+            ty: "v3::FilterRequestRef<'a>",
+            descriptor: "FilterRequestRef{body:&[u8],cache_pricing:CachePricingSummaryRef,candidates:&[UpstreamCandidateRef],canonical_model_id:&str,headers:&[HeaderRef],method:&str,native_pricing:NativeCachePricingRef,path:&str,principal:PrincipalRef,query:Option<OptionalStrRef>,request_id:&str,service_tier:Option<OptionalStrRef>,thread_id:Option<OptionalStrRef>}",
+        },
+    ];
+
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by Cargo"));
     fs::write(
         out_dir.join("wire_schema_impls.rs"),
@@ -326,6 +359,11 @@ fn main() {
         render_schema_impls(&v2_entries),
     )
     .expect("write generated V2 WireSchema impls");
+    fs::write(
+        out_dir.join("wire_schema_v3_impls.rs"),
+        render_schema_impls(&v3_entries),
+    )
+    .expect("write generated V3 WireSchema impls");
 }
 
 fn render_schema_impls(entries: &[SchemaEntry]) -> String {
@@ -338,7 +376,7 @@ fn render_schema_impls(entries: &[SchemaEntry]) -> String {
             .map(u8::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let ty = if entry.ty.starts_with("v2::") {
+        let ty = if entry.ty.starts_with("v2::") || entry.ty.starts_with("v3::") {
             format!("crate::{}", entry.ty)
         } else {
             entry.ty.to_owned()
