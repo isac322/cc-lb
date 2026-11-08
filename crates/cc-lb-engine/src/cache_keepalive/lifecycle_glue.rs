@@ -625,6 +625,28 @@ impl LifecycleKeepalive {
                     .await;
                     return;
                 }
+                if cache_metadata.cache_keepalive_surface.is_some()
+                    && !super::openai::should_schedule_refresh(
+                        snapshot.keepalive_model(),
+                        match ttl {
+                            CacheTtl::Ttl30m => super::openai::Lifetime::ThirtyMinutes,
+                            CacheTtl::Ttl12h => super::openai::Lifetime::TwelveHours,
+                            _ => super::openai::Lifetime::ThirtyMinutes,
+                        },
+                        config.max_refreshes_per_session,
+                    )
+                {
+                    self.record_not_tracked(
+                        &session_key,
+                        principal,
+                        upstream_id,
+                        ttl,
+                        config,
+                        "refresh expected value is unknown or non-positive",
+                    )
+                    .await;
+                    return;
+                }
                 let params =
                     super::ScheduleParams::from_cache_anchor_age(config, ttl, cache_anchor_age);
                 let display_reason =

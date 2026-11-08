@@ -35,8 +35,9 @@ impl Lifetime {
 /// fail closed instead of guessing which provider lifetime was requested.
 pub fn parse_lifetime(value: &Value) -> Option<Lifetime> {
     let mut declared = Vec::new();
-    collect_lifetimes(value, false, &mut declared);
-    declared.into_iter().next()
+    let mut unknown = false;
+    collect_lifetimes(value, false, &mut declared, &mut unknown);
+    (!unknown).then(|| declared.into_iter().next()).flatten()
 }
 
 fn parse_lifetime_value(raw: &str) -> Option<Lifetime> {
@@ -47,7 +48,12 @@ fn parse_lifetime_value(raw: &str) -> Option<Lifetime> {
     }
 }
 
-fn collect_lifetimes(value: &Value, in_options: bool, declared: &mut Vec<Lifetime>) {
+fn collect_lifetimes(
+    value: &Value,
+    in_options: bool,
+    declared: &mut Vec<Lifetime>,
+    unknown: &mut bool,
+) {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
@@ -55,15 +61,19 @@ fn collect_lifetimes(value: &Value, in_options: bool, declared: &mut Vec<Lifetim
                     if let Some(raw) = child.as_str() {
                         if let Some(lifetime) = parse_lifetime_value(raw) {
                             declared.push(lifetime);
+                        } else {
+                            *unknown = true;
                         }
+                    } else {
+                        *unknown = true;
                     }
                 }
-                collect_lifetimes(child, key == "prompt_cache_options", declared);
+                collect_lifetimes(child, key == "prompt_cache_options", declared, unknown);
             }
         }
         Value::Array(values) => {
             for child in values {
-                collect_lifetimes(child, in_options, declared);
+                collect_lifetimes(child, in_options, declared, unknown);
             }
         }
         _ => {}
@@ -73,7 +83,11 @@ fn collect_lifetimes(value: &Value, in_options: bool, declared: &mut Vec<Lifetim
 /// Returns the lifetime only when all configured retention declarations agree.
 pub fn parse_lifetime_conservative(value: &Value) -> Option<Lifetime> {
     let mut declared = Vec::new();
-    collect_lifetimes(value, false, &mut declared);
+    let mut unknown = false;
+    collect_lifetimes(value, false, &mut declared, &mut unknown);
+    if unknown {
+        return None;
+    }
     let first = declared.first().copied()?;
     declared
         .iter()
@@ -125,6 +139,9 @@ pub const fn write_multiplier(lifetime: Lifetime) -> f64 {
 }
 
 pub fn read_break_even_reads(model: &str, lifetime: Lifetime) -> Option<u64> {
+    if !is_gpt56_or_newer(model) {
+        return None;
+    }
     let ratio = write_multiplier(lifetime) / read_multiplier(model);
     if !ratio.is_finite() || ratio <= 0.0 {
         return None;
@@ -132,6 +149,14 @@ pub fn read_break_even_reads(model: &str, lifetime: Lifetime) -> Option<u64> {
     Some(ratio.ceil() as u64)
 }
 
+/// Suppresses refresh traffic unless the configured session budget can reach
+/// the conservative read/write break-even boundary. A zero budget or unknown
+/// model has undefined expected value and therefore fails closed.
+pub fn should_schedule_refresh(model: &str, lifetime: Lifetime, max_refreshes: u32) -> bool {
+    max_refreshes > 0
+        && read_break_even_reads(model, lifetime)
+            .is_some_and(|break_even| u64::from(max_refreshes) >= break_even)
+}
 pub fn cached_tokens(value: &Value) -> Option<u64> {
     value
         .get("usage")
@@ -195,6 +220,13 @@ mod tests {
             })),
             None
         );
+        assert_eq!(
+            parse_lifetime_conservative(&json!({
+                "prompt_cache_retention":"24h",
+                "prompt_cache_options":{"retention":"30m"}
+            })),
+            None
+        );
     }
 
     #[test]
@@ -226,6 +258,40 @@ mod tests {
             read_break_even_reads("gpt-6.1-sol", Lifetime::TwelveHours),
             Some(50)
         );
+    }
+
+    #[test]
+    fn openai_refresh_suppresses_unknown_or_negative_value() {
+        assert!(!should_schedule_refresh(
+            "gpt-5.6",
+            Lifetime::TwelveHours,
+            0
+        ));
+        assert!(!should_schedule_refresh(
+            "gpt-5.5",
+            Lifetime::TwelveHours,
+            50
+        ));
+        assert!(!should_schedule_refresh(
+            "gpt-5.6",
+            Lifetime::TwelveHours,
+            24
+        ));
+        assert!(should_schedule_refresh(
+            "gpt-5.6",
+            Lifetime::TwelveHours,
+            25
+        ));
+        assert!(!should_schedule_refresh(
+            "gpt-6.1-sol",
+            Lifetime::TwelveHours,
+            49
+        ));
+        assert!(should_schedule_refresh(
+            "gpt-6.1-sol",
+            Lifetime::TwelveHours,
+            50
+        ));
     }
 
     #[test]

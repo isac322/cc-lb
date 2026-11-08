@@ -217,7 +217,14 @@ impl SchedulerDispatch {
         let Some(principal) = view.principal_view.get(&record.principal_id) else {
             return false;
         };
-        if principal.cache_keepalive().is_none() {
+        let Some(config) = principal.cache_keepalive() else {
+            return false;
+        };
+        if matches!(
+            record.ttl,
+            cc_lb_storage_api::CacheTtl::Ttl30m | cc_lb_storage_api::CacheTtl::Ttl12h
+        ) && !config.classifier.openai_responses_enabled
+        {
             return false;
         }
         let allowed = principal.allowed_upstreams();
