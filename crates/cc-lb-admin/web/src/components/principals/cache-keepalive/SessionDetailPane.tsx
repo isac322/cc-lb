@@ -265,7 +265,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   > = {
     renewed: 'ok',
     scheduled: 'accent',
-    capped: 'neutral',
+    capped: 'warn',
     expired: 'warn',
     not_tracked: 'neutral',
   };
@@ -322,41 +322,49 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
 
         <div className="h-px bg-row w-full my-1"></div>
 
-        <dl className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-body-sm">
-          <dt className="text-text-muted">Session ID</dt>
-          <dd className="text-text font-mono text-data break-all">
-            {session.id}
-          </dd>
-
-          <dt className="text-text-muted">Upstream</dt>
-          <dd className="text-text break-all">{session.upstream ?? '—'}</dd>
-
-          <dt className="text-text-muted">TTL</dt>
-          <dd className="text-text">{session.ttl ?? '—'}</dd>
-
-          <dt className="text-text-muted">Generation</dt>
-          <dd className="text-text tabular-nums">{session.generation}</dd>
-
-          <dt className="text-text-muted">First seen</dt>
-          <dd className="text-text">
-            {session.turns.length > 0 ? (
-              <RelativeTime
-                ts={session.turns[session.turns.length - 1].time_ms}
-              />
-            ) : (
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-body-sm sm:grid-cols-2">
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+            <dt className="text-text-muted">Session ID</dt>
+            <dd className="text-text font-mono text-data break-all">
+              {session.id}
+            </dd>
+          </div>
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+            <dt className="text-text-muted">Upstream</dt>
+            <dd className="text-text break-all">{session.upstream ?? '—'}</dd>
+          </div>
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+            <dt className="text-text-muted">TTL</dt>
+            <dd className="text-text">{session.ttl ?? '—'}</dd>
+          </div>
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+            <dt className="text-text-muted">Generation</dt>
+            <dd className="text-text tabular-nums">{session.generation}</dd>
+          </div>
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+            <dt className="text-text-muted">First seen</dt>
+            <dd className="text-text">
+              {session.turns.length > 0 ? (
+                <RelativeTime
+                  ts={session.turns[session.turns.length - 1].time_ms}
+                />
+              ) : (
+                <RelativeTime ts={session.last_message_at_ms} />
+              )}
+            </dd>
+          </div>
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+            <dt className="text-text-muted">Last message</dt>
+            <dd className="text-text">
               <RelativeTime ts={session.last_message_at_ms} />
-            )}
-          </dd>
-
-          <dt className="text-text-muted">Last message</dt>
-          <dd className="text-text">
-            <RelativeTime ts={session.last_message_at_ms} />
-          </dd>
-
-          <dt className="text-text-muted">Current-cycle renewals</dt>
-          <dd className="text-text tabular-nums">
-            {session.total_renewals_current_cycle}
-          </dd>
+            </dd>
+          </div>
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+            <dt className="text-text-muted">Current-cycle renewals</dt>
+            <dd className="text-text tabular-nums">
+              {session.total_renewals_current_cycle}
+            </dd>
+          </div>
         </dl>
       </div>
 

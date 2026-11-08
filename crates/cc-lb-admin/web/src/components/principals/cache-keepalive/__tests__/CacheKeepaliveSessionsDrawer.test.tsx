@@ -317,7 +317,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(screen.getByText('Session detail')).toBeDefined();
   });
 
-  it('status filter is a select that narrows the sessions query', async () => {
+  it('status filter chips narrow the sessions query and hide not-tracked rows by default', async () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -326,27 +326,96 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    expect(screen.queryByRole('radiogroup', { name: 'Session status' })).toBe(
-      null,
-    );
-    const trigger = screen.getByRole('combobox', { name: 'Session status' });
-    expect(trigger.textContent).toContain('All statuses');
+    const statusGroup = screen.getByRole('group', { name: 'Session status' });
+    expect(
+      within(statusGroup)
+        .getByTestId('status-chip-renewed')
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(screen.queryByText('decision-2d8077e9a1c4')).toBeNull();
 
     const user = userEvent.setup();
-    await user.click(trigger);
-    await user.click(await screen.findByRole('option', { name: 'Renewed' }));
+    const showNotTracked = screen.getByTestId('toggle-not-tracked');
+    expect(showNotTracked.textContent).toContain('+ Show not tracked (1)');
+    await user.click(showNotTracked);
+    expect(screen.getByText('decision-2d8077e9a1c4')).toBeDefined();
 
-    expect(trigger.textContent).toContain('Renewed');
-    expect(
-      vi.mocked(queries.useCacheKeepaliveSessions),
-    ).toHaveBeenLastCalledWith(
+    await user.click(within(statusGroup).getByTestId('status-chip-renewed'));
+    expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenCalledWith(
       'p-123',
       { horizon: '24h', status: 'renewed', error: undefined },
       true,
     );
+    expect(screen.getByText('a1f39c2b7e04')).toBeDefined();
+    expect(screen.queryByText('f4b71a0c9d52')).toBeNull();
+    expect(screen.queryByText('decision-2d8077e9a1c4')).toBeNull();
+    expect(
+      within(statusGroup)
+        .getByTestId('status-chip-renewed')
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(
+      within(statusGroup)
+        .getByTestId('status-chip-capped')
+        .getAttribute('aria-pressed'),
+    ).toBe('false');
+    expect(
+      within(statusGroup).getByTestId('status-chip-capped').textContent,
+    ).toContain('2');
+
+    await user.click(within(statusGroup).getByTestId('status-chip-capped'));
+    expect(screen.getByText('f4b71a0c9d52')).toBeDefined();
+    expect(
+      within(statusGroup)
+        .getByTestId('status-chip-capped')
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(
+      within(statusGroup)
+        .getByTestId('status-chip-renewed')
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(screen.getByTestId('status-filter-reset')).toBeDefined();
   });
 
-  it('applies responsive layout classes when a row is selected', () => {
+  it('keeps pagination user-driven without auto-draining older pages on open', () => {
+    const fetchNextPage = vi.fn();
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+      data: {
+        pages: [
+          {
+            summary: summaryBase,
+            rows: [
+              {
+                ...cacheKeepaliveApiRows[5]!,
+                id: 'not-tracked-page-1',
+                state: 'not_tracked',
+              },
+            ],
+            next_cursor: 'cursor-page-2',
+          },
+          {
+            summary: summaryBase,
+            rows: [
+              {
+                ...cacheKeepaliveApiRows[0]!,
+                id: 'older-renewed-page-2',
+                state: 'renewed',
+                error: null,
+              },
+            ],
+            next_cursor: 'cursor-page-3',
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      isFetchNextPageError: false,
+      hasNextPage: true,
+      isFetchingNextPage: false,
+      fetchNextPage,
+    } as never);
+
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -355,15 +424,50 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    const row = screen.getByText('a1f39c2b7e04');
-    fireEvent.click(row);
-
-    const listContainer = row.closest('.overflow-y-auto');
-    expect(listContainer?.className).toContain('max-[960px]:hidden');
-    expect(listContainer?.className).toContain('w-[440px]');
+    expect(screen.getByText('older-renewed-page-2')).toBeDefined();
+    expect(screen.queryByText('not-tracked-page-1')).toBeNull();
+    expect(screen.getByTestId('status-chip-renewed').textContent).toContain(
+      '1',
+    );
+    expect(screen.getByTestId('toggle-not-tracked').textContent).toContain(
+      '+ Show not tracked (1)',
+    );
+    expect(fetchNextPage).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Loading older sessions...' }),
+    );
+    expect(fetchNextPage).toHaveBeenCalledTimes(1);
   });
 
-  it('returns from a detail query error through the responsive Back action', () => {
+  it('expands and collapses selected row details inline at full width', () => {
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const rowButton = screen.getByText('a1f39c2b7e04').closest('button')!;
+    const row = rowButton.closest('li[data-key="a1f39c2b7e04"]') as HTMLElement;
+    fireEvent.click(rowButton);
+
+    expect(
+      within(row).getByRole('region', { name: 'Session detail' }),
+    ).toBeDefined();
+    const listRegion = screen.getByTestId(
+      'cache-keepalive-session-list-region',
+    );
+    expect(listRegion.className).not.toContain('max-[960px]:hidden');
+    expect(listRegion.className).not.toContain('w-[440px]');
+
+    fireEvent.click(rowButton);
+    expect(
+      within(row).queryByRole('region', { name: 'Session detail' }),
+    ).toBeNull();
+  });
+
+  it('returns from a detail query error through the inline Back action', () => {
     vi.mocked(queries.useCacheKeepaliveSessionDetail).mockReturnValue({
       data: undefined,
       isLoading: false,
@@ -377,21 +481,20 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    const row = screen.getByText('a1f39c2b7e04');
-    fireEvent.click(row);
+    const row = screen.getByText('a1f39c2b7e04').closest('li') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button'));
 
-    const listContainer = row.closest('.overflow-y-auto');
-    expect(listContainer?.className).toContain('max-[960px]:hidden');
-    expect(screen.getByTestId('session-detail-error')).toBeDefined();
+    expect(within(row).getByTestId('session-detail-error')).toBeDefined();
+    const listRegion = screen.getByTestId(
+      'cache-keepalive-session-list-region',
+    );
+    expect(listRegion.className).not.toContain('max-[960px]:hidden');
 
-    const backActions = screen.getAllByRole('button', {
-      name: 'Back to sessions',
-    });
-    fireEvent.click(backActions[backActions.length - 1]!);
+    fireEvent.click(
+      within(row).getAllByRole('button', { name: 'Back to sessions' })[0]!,
+    );
 
-    expect(screen.queryByTestId('session-detail-error')).toBeNull();
-    expect(listContainer?.className).toContain('flex-1');
-    expect(listContainer?.className).not.toContain('max-[960px]:hidden');
+    expect(within(row).queryByTestId('session-detail-error')).toBeNull();
   });
 
   it('renders drawer title, principal name, and time range with 24h default', () => {
@@ -457,7 +560,47 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(screen.getByText('1 renewal fired')).toBeDefined();
   });
 
-  it('lists every status in the status filter', async () => {
+  it('lists every tracked status chip and the not-tracked toggle', () => {
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const statusGroup = screen.getByRole('group', { name: 'Session status' });
+    for (const status of [
+      'renewed',
+      'scheduled',
+      'capped',
+      'expired',
+      'error',
+    ]) {
+      expect(
+        within(statusGroup).getByTestId(`status-chip-${status}`),
+      ).toBeDefined();
+    }
+    expect(
+      within(statusGroup).getByTestId('status-chip-renewed').textContent,
+    ).toContain('Renewed');
+    expect(
+      within(statusGroup).getByTestId('status-chip-scheduled').textContent,
+    ).toContain('Scheduled');
+    expect(
+      within(statusGroup).getByTestId('status-chip-capped').textContent,
+    ).toContain('Capped');
+    expect(
+      within(statusGroup).getByTestId('status-chip-expired').textContent,
+    ).toContain('Expired');
+    expect(
+      within(statusGroup).getByTestId('status-chip-error').textContent,
+    ).toContain('Error');
+    expect(screen.getByTestId('toggle-not-tracked').textContent).toContain(
+      '+ Show not tracked (1)',
+    );
+  });
+  it('groups visible sessions by trigger with counts and net P&L', async () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -467,17 +610,84 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('combobox', { name: 'Session status' }));
-    const options = await screen.findAllByRole('option');
-    expect(options.map((option) => option.textContent)).toEqual([
-      'All statuses',
-      'Renewed',
-      'Scheduled',
-      'Capped',
-      'Expired',
-      'Not tracked',
-      'Error',
-    ]);
+    const grouping = screen.getByRole('radiogroup', { name: 'List grouping' });
+    await user.click(
+      within(grouping).getByRole('radio', { name: 'Group by trigger' }),
+    );
+
+    const groupHeaders = Array.from(
+      screen
+        .getByTestId('cache-keepalive-session-list-region')
+        .querySelectorAll('li:not([data-key])'),
+    );
+    expect(groupHeaders.length).toBeGreaterThan(0);
+    expect(
+      groupHeaders.some((header) => header.textContent?.includes('bash')),
+    ).toBe(true);
+    expect(
+      groupHeaders.some((header) =>
+        /\b1 session\b/.test(header.textContent ?? ''),
+      ),
+    ).toBe(true);
+    expect(
+      groupHeaders.some((header) =>
+        /\$\d+\.\d+/.test(header.textContent ?? ''),
+      ),
+    ).toBe(true);
+  });
+
+  it('renders Saving and Losing verdicts in the P&L equation well', () => {
+    const { rerender } = renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    let equation = screen.getByTestId('cache-keepalive-pnl-equation');
+    expect(within(equation).getByText('Saving')).toBeDefined();
+    expect(equation.textContent).toMatch(
+      /Avoided \$16\.65.*Spent \$4\.18.*Net \+\$4\.56/,
+    );
+
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+      data: {
+        pages: [
+          {
+            summary: {
+              ...summaryBase,
+              cost_saved: -2.34,
+            },
+            rows: cacheKeepaliveApiRows,
+            next_cursor: null,
+          },
+        ],
+      },
+      isLoading: false,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+    } as never);
+    rerender(
+      <QueryClientProvider
+        client={
+          new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        }
+      >
+        <CacheKeepaliveSessionsDrawer
+          open={true}
+          onOpenChange={() => {}}
+          principal={mockPrincipal}
+        />
+      </QueryClientProvider>,
+    );
+
+    equation = screen.getByTestId('cache-keepalive-pnl-equation');
+    expect(within(equation).getByText('Losing')).toBeDefined();
+    expect(equation.textContent).toMatch(
+      /Avoided \$16\.65.*Spent \$4\.18.*Net −\$2\.34/,
+    );
   });
 
   it('renders row full session id first, not truncated, with status badge, optional Error chip, Net P&L, reason-only second line', () => {
@@ -654,9 +864,8 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     );
 
     expect(screen.getByTestId('cache-keepalive-sessions-off')).toBeDefined();
-    expect(screen.queryByRole('combobox', { name: 'Session status' })).toBe(
-      null,
-    );
+    expect(screen.queryByRole('group', { name: 'Session status' })).toBeNull();
+    expect(screen.queryByTestId('toggle-not-tracked')).toBeNull();
     expect(screen.queryByRole('radiogroup', { name: 'Time range' })).toBe(null);
     expect(screen.getByText('No sessions recorded')).toBeDefined();
   });
@@ -730,8 +939,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('combobox', { name: 'Session status' }));
-    await user.click(await screen.findByRole('option', { name: 'Renewed' }));
+    await user.click(screen.getByTestId('status-chip-renewed'));
 
     expect(screen.getByText('No matching sessions')).toBeDefined();
   });
