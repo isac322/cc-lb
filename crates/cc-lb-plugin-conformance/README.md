@@ -93,7 +93,67 @@ fn plugin_passes_boundary_smoke() {
 }
 ```
 
+## Provider-qualified workflow
+
+The harness supports provider-qualified hooks without changing the legacy
+Anthropic path. Select `ProviderFamily::Anthropic`, `ProviderFamily::Openai`,
+or `ProviderFamily::Gemini` on the suite builder before running the admission
+check and boundary smoke. The selected provider resolves only its qualified
+exports; Anthropic also falls back to the bare legacy exports.
+
+For a shape slot, the explicit constructor is:
+
+```rust
+use cc_lb_plugin_conformance::prelude::*;
+
+let suite = ConformanceSuite::for_shape_provider(&wasm, ProviderFamily::Openai);
+suite.run();
+```
+
+Use `for_filter_provider` for a filter slot, or call `with_provider` on
+`for_filter` / `for_shape`. The provider-specific fixture builders are
+available for semantic tests, including
+`sample_openai_responses_shape_request`,
+`sample_openai_chat_completions_shape_request`,
+`sample_gemini_generate_content_shape_request`, and
+`sample_gemini_stream_generate_content_shape_request`. The corresponding
+response and SSE builders use the same provider-qualified names.
+
+Provider selection and wire version are independent. For every selected hook,
+the harness reads the declared wire version and encodes and decodes the
+matching contract:
+
+- V1 keeps the existing request and response layout.
+- V2 shape, buffered-response, and SSE requests include a synthetic principal,
+  `Upstream`, and matching `UpstreamIdentity`.
+- V2 filter requests use provider-appropriate candidates and do not include
+  upstream identity, because the V2 filter schema has no such field.
+
+Provider fixtures are network-free and use synthetic identities:
+
+- OpenAI covers Responses and Chat Completions HTTP request/response/SSE
+  shapes, including a representative `response.created` event.
+- Gemini covers native `generateContent` and `streamGenerateContent` request,
+  response, and streaming shapes.
+
+For a Gemini OAuth Code Assist shape plugin, the optional
+`shape_envelope_gemini` export is exercised with a `ShapeEnvelopeGeminiRequest`
+fixture only when present. An absent envelope export is skipped; the required
+Gemini shape boundary is still exercised. Unsupported hooks should be omitted,
+not implemented as placeholder handlers.
+
+Keep `ConformanceSuite::for_filter` and `ConformanceSuite::for_shape` for
+source-compatible legacy Anthropic V1 coverage. Use the provider-selected
+workflow for each OpenAI or Gemini hook you implement. Conformance proves
+admission, registration, wire round-trips, and trap-free boundary calls; it
+does not make provider API calls or assert plugin business semantics.
+
+The fixture builders and provider selectors are re-exported from
+`cc_lb_plugin_conformance::prelude` together with the V1/V2 request and result
+types used by semantic tests.
+
 ## Links
+
 
 - Main repository: <https://github.com/isac322/cc-lb>
 - Plugin author guide: <https://github.com/isac322/cc-lb/blob/master/docs/plugin-author-guide.md>

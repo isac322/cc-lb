@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use super::ConformanceSuite;
+use super::{ConformanceSuite, fixtures};
+use cc_lb_plugin_wire::{ProviderFamily, Upstream};
 
 fn wasm_fixture_path(file_name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -32,4 +33,60 @@ fn run_exercises_cache_aware_filter() {
 
     // When / Then
     suite.run();
+}
+
+#[test]
+fn provider_fixtures_use_native_upstreams_and_no_credentials() {
+    let openai = fixtures::sample_openai_responses_shape_request();
+    assert_eq!(openai.path.as_ref(), "/v1/responses");
+    assert_eq!(
+        openai.body.as_ref(),
+        br#"{"model":"gpt-4.1","input":"probe"}"#
+    );
+    assert!(matches!(openai.upstream, Upstream::OpenaiDirect { .. }));
+    let chat = fixtures::sample_openai_chat_completions_shape_request();
+    assert_eq!(chat.path.as_ref(), "/v1/chat/completions");
+    assert!(matches!(chat.upstream, Upstream::OpenaiDirect { .. }));
+
+    let gemini = fixtures::sample_gemini_generate_content_shape_request();
+    assert_eq!(
+        gemini.path.as_ref(),
+        "/v1beta/models/gemini-2.5-flash:generateContent"
+    );
+    assert!(matches!(gemini.upstream, Upstream::GeminiDirect { .. }));
+    let stream = fixtures::sample_gemini_stream_generate_content_shape_request();
+    assert_eq!(
+        stream.path.as_ref(),
+        "/v1beta/models/gemini-2.5-flash:streamGenerateContent"
+    );
+    let envelope = fixtures::sample_gemini_shape_envelope_request();
+    assert_eq!(envelope.upstream.credential_kind.as_ref(), "oauth");
+    assert_eq!(
+        envelope.upstream.gemini_oauth_profile.as_deref(),
+        Some("gemini_cli")
+    );
+    assert!(!String::from_utf8_lossy(&envelope.envelope_body).contains("token"));
+}
+
+#[test]
+fn v2_filter_fixture_has_no_upstream_identity() {
+    let request = fixtures::sample_filter_request_v2(ProviderFamily::Openai);
+    assert_eq!(request.canonical_model_id.as_ref(), "gpt-4.1");
+    assert!(matches!(
+        request.candidates[0].base_url.as_deref(),
+        Some("https://example.test")
+    ));
+}
+
+#[test]
+fn prelude_exports_provider_conformance_surface() {
+    use crate::prelude::*;
+    let provider = ProviderFamily::Openai;
+    let _ = ConformanceSuite::for_shape_provider(&[], provider);
+    let _ = sample_openai_responses_shape_request();
+    let _ = sample_openai_chat_completions_transform_response_request();
+    let _ = sample_gemini_generate_content_transform_sse_event_request();
+    let _: ShapeRequestV2 = sample_shape_request_v2(ProviderFamily::Gemini);
+    let _: TransformResponseResultV2 = TransformResponseResultV2::Unchanged;
+    let _: TransformSseEventResultV2 = TransformSseEventResultV2::Unchanged;
 }

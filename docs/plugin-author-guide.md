@@ -200,10 +200,14 @@ mod provider_request_shaper {
 ```
 
 The generated exports are `cc_lb_shape_anthropic` and `cc_lb_shape_openai`;
-the V2 metadata keys are `shape_anthropic` and `shape_openai`. Qualified
-handlers use the V2 request types, including upstream identity; legacy
-unqualified handlers retain the V1 wire layout. Filter, buffered-response,
-and SSE handlers use the same provider suffix convention.
+metadata keys use the matching hook/provider form, such as `shape_anthropic`
+and `shape_openai`. Provider selection and wire version are independent:
+provider-qualified handlers may declare V1 or V2. A selected V1 handler uses
+the unchanged V1 request and response layout; a selected V2 shape,
+buffered-response, or SSE handler receives the V2 upstream and upstream
+identity fields. V2 filter requests use the V2 filter schema and do not carry
+an upstream-identity field. Filter, buffered-response, and SSE handlers use
+the same provider suffix convention.
 For Gemini OAuth Code Assist requests, a provider-qualified shape plugin may
 also declare `shape_envelope_gemini` with `wire = 2`. The host invokes this
 optional export after native Code Assist wrapping and before credentials are
@@ -616,6 +620,66 @@ canonical payload for each hook's declared wire version. A filter plugin
 receives the V1 request with `service_tier = Some("priority")`. It proves the
 boundary works; it does not replace semantic tests for your plugin's routing
 or shaping behavior.
+
+### Provider-qualified conformance workflow
+
+Use the same conformance harness for each provider you support. Select
+`ProviderFamily::Anthropic`, `ProviderFamily::Openai`, or
+`ProviderFamily::Gemini` on the suite builder, then run the admission check
+and boundary smoke. The selected provider resolves only that provider's
+qualified exports. For Anthropic, the harness also falls back to the bare
+legacy export names.
+
+For example, a shape-slot test can select OpenAI explicitly:
+
+```rust
+use cc_lb_plugin_conformance::prelude::*;
+
+let suite = ConformanceSuite::for_shape_provider(&wasm, ProviderFamily::Openai);
+suite.run();
+```
+
+Use `for_filter_provider` for a filter slot, or use `with_provider` after
+`for_filter` or `for_shape`. The prelude exports provider fixture builders for
+OpenAI Responses and Chat Completions, Gemini `generateContent` and
+`streamGenerateContent`, and the V2 request/result types. The generic
+`sample_*_for` builders select the provider-specific V1 request, response, or
+SSE payload when a test needs to exercise a declared V1 hook directly.
+
+Provider selection does not choose the wire layout. The harness reads each
+selected hook's declared wire version and encodes and decodes the matching
+V1 or V2 contract:
+
+- A V1 hook uses the unchanged V1 request and response types.
+- V2 shape, buffered-response, and SSE fixtures include a synthetic principal
+  and matching `Upstream` and `UpstreamIdentity` values.
+- V2 filter fixtures use the V2 filter schema and provider-appropriate
+  candidates; that schema has no upstream-identity field.
+
+The provider fixture set exercises the request, response, and streaming
+boundaries without contacting a provider:
+
+- **OpenAI** covers Responses and Chat Completions request/response/SSE
+  payloads, including the Responses path and representative
+  `response.created` event.
+- **Gemini** covers native `generateContent` and
+  `streamGenerateContent` payloads, response bodies, and streaming events.
+  Fixtures use synthetic upstream identities and contain no credential
+  material.
+
+For Gemini OAuth Code Assist, a shape plugin may additionally export the
+optional `shape_envelope_gemini` hook. The Gemini-selected session calls it
+with a `ShapeEnvelopeGeminiRequest` fixture only when the export is present.
+When it is absent, the harness skips that call and still requires the
+provider's required shape boundary to pass.
+
+Keep the existing `ConformanceSuite::for_filter` and
+`ConformanceSuite::for_shape` calls for legacy Anthropic V1 coverage; they
+remain source-compatible and default to the Anthropic V1 behavior. Add
+provider-selected coverage for every qualified hook you implement, and omit
+unsupported hooks instead of adding placeholder handlers. Conformance checks
+boundary encoding, decoding, registration, and traps; provider semantics,
+network behavior, credentials, and billing belong in separate tests.
 
 ## Wire Version Bump Policy
 
