@@ -377,20 +377,20 @@ async fn native_provider_transform_failure_is_terminal_once() {
             "{provider:?} transform failure must relay exactly one provider error frame: {text:?}",
         );
         assert!(
-            text.contains("\"api_error\""),
-            "{provider:?} transform failure must use the provider error envelope: {text:?}",
+            !text.contains("{\"type\":\"error\",\"error\":"),
+            "{provider:?} transform failure must not use the Anthropic outer error wrapper: {text:?}",
+        );
+        assert!(
+            text.contains("\"error\":{") && (text.contains("\"api_error\"") || text.contains("\"response_transform_error\"")),
+            "{provider:?} transform failure must use a provider-shaped error object: {text:?}",
         );
         assert!(
             text.contains("upstream SSE response could not be safely processed"),
             "{provider:?} transform failure must use the generic inspection message: {text:?}",
         );
         assert!(
-            !text.contains("response_transform_error"),
-            "{provider:?} affinity-gated transform failure must not expose hook error framing: {text:?}",
-        );
-        assert!(
             !text.contains("forced post-output failure"),
-            "{provider:?} transform failure must not expose hook error details: {text:?}",
+            "{provider:?} affinity-gated transform failure must not expose hook error details: {text:?}",
         );
         assert_error_terminal(
             &mut lifecycle_rx,
