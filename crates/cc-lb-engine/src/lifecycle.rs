@@ -55,6 +55,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::Instrument as _;
 use url::Url;
@@ -9653,6 +9654,7 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) session_id_source: Option<String>,
     pub(crate) cache_keepalive_surface: Option<String>,
     pub(crate) cache_keepalive_ttl: Option<cc_lb_storage_api::CacheTtl>,
+    pub(crate) openai_replay_identity: Option<String>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
@@ -10007,6 +10009,29 @@ fn request_reasoning_metadata(
         _ => (None, None),
     }
 }
+fn openai_replay_identity(value: &Value) -> Option<String> {
+    if let Some(key) = value.get("prompt_cache_key").and_then(Value::as_str) {
+        if !key.is_empty() {
+            return Some(format!("prompt-cache-key:{key}"));
+        }
+    }
+    if let Some(conversation_id) = value
+        .get("conversation")
+        .and_then(|conversation| conversation.get("id"))
+        .and_then(Value::as_str)
+        && !conversation_id.is_empty()
+    {
+        return Some(format!("conversation:{conversation_id}"));
+    }
+    let input = value.get("input")?;
+    let bytes = sonic_rs::to_vec(input).ok()?;
+    let digest = Sha256::digest(&bytes);
+    let digest_hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(format!("input-sha256:{digest_hex}"))
+}
 
 fn request_cache_metadata_from_value_with_analysis_for_capability(
     headers: &HeaderMap,
@@ -10136,7 +10161,9 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         } else {
             (None, None)
         };
-
+    let replay_identity = (capability == Some(ProviderCapability::OpenaiResponses))
+        .then(|| openai_replay_identity(value))
+        .flatten();
     RequestCacheMetadata {
         request_json: None,
         thread_id,
@@ -10150,6 +10177,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         session_id_source,
         cache_keepalive_surface,
         cache_keepalive_ttl,
+        openai_replay_identity: replay_identity,
         requested_service_tier,
         message_id,
         message_index,

@@ -1036,6 +1036,14 @@ fn cache_keepalive_session_key(
         None => (cache_metadata.request_kind.as_deref() == Some("subagent"))
             .then(|| "subagent".to_owned()),
     };
+    if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+        && let Some(identity) = cache_metadata.openai_replay_identity.clone()
+    {
+        return Some(
+            SessionKey::from_cache_prefix_hash(principal_id, format!("openai-replay:{identity}"))
+                .with_agent_scope(agent_scope.clone()),
+        );
+    }
     if let Some(thread_id) = cache_metadata.thread_id.clone() {
         return Some(
             SessionKey::from_thread_id(principal_id, thread_id).with_agent_scope(agent_scope),
@@ -1586,6 +1594,28 @@ mod tests {
                 "{}/thread:thread-1",
                 cache_keepalive_principal_uuid("principal-test")
             )
+        );
+    }
+
+    #[test]
+    fn openai_responses_without_headers_use_replay_identity() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.cache_keepalive_surface = Some("responses".to_owned());
+        metadata.openai_replay_identity = Some("prompt-cache-key:stable".to_owned());
+        let key = cache_keepalive_session_key(&principal, &metadata)
+            .expect("OpenAI replay identity should create a session key")
+            .to_string();
+        assert!(key.contains("openai-replay:prompt-cache-key:stable"));
+        metadata.openai_replay_identity = Some("conversation:conv-1".to_owned());
+        assert_ne!(
+            key,
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string()
         );
     }
 

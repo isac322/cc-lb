@@ -480,9 +480,11 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       expect.objectContaining({
         expected_revision: 43,
         cache_keepalive: expect.objectContaining({
-          openai_responses_enabled: true,
           refresh_lead_time_5m_secs: 77,
           refresh_lead_time_1h_secs: 301,
+          classifier: expect.objectContaining({
+            openai_responses_enabled: true,
+          }),
         }),
       }),
       expect.any(Object),
