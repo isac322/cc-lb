@@ -38,6 +38,7 @@ pub struct RoutePreviewOutcome {
 pub enum RoutePreviewError {
     PrincipalNotFound(String),
     PipelineInstantiationError(String),
+    UnsupportedOperation { method: String, path: String },
 }
 
 #[async_trait]

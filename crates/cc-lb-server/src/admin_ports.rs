@@ -63,6 +63,9 @@ fn map_preview_error(error: PreviewRouteError) -> RoutePreviewError {
         PreviewRouteError::PipelineInstantiationError(detail) => {
             RoutePreviewError::PipelineInstantiationError(detail)
         }
+        PreviewRouteError::UnsupportedOperation { method, path } => {
+            RoutePreviewError::UnsupportedOperation { method, path }
+        }
     }
 }
 
