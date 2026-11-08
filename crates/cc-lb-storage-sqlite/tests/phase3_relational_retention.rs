@@ -249,6 +249,7 @@ async fn usage_rollup_conflict_accumulates_nullable_provider_cache_writes() {
             };
         let event = RequestEvent {
             ts: 1_800_000_000,
+            ts_ms: Some(1_800_000_000_000),
             request_id: request_id.to_owned(),
             event_id: Some(format!("rollup-cache-write-{request_id}")),
             upstream_id: Some(upstream_id),
