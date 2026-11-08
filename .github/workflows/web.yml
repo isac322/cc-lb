@@ -84,6 +84,56 @@ jobs:
           # generated input before lint, typecheck, and test readers start.
           bun run --shell=bun build
           git diff --exit-code -- src/routeTree.gen.ts
+          # BUNDLE-01: the packaged SPA keeps the strict-CSP bootstrap and
+          # font files external instead of inlining either into the bundle.
+          if [[ ! -s dist/theme-init.js ]]; then
+            echo '::error::dist/theme-init.js is missing or empty (BUNDLE-01)'
+            exit 1
+          fi
+          font_file="$(find dist -type f \( -iname '*.woff' -o -iname '*.woff2' -o -iname '*.ttf' -o -iname '*.otf' \) -print -quit)"
+          if [[ -z "$font_file" ]]; then
+            echo '::error::no packaged font files found in dist/ (BUNDLE-01)'
+            exit 1
+          fi
+          if grep -RniE --include='*.css' 'url\([[:space:]]*["'"'"']?data:(font/|application/(font-|x-font|vnd\.ms-fontobject)|application/octet-stream)' dist/; then
+            echo '::error::font data URL found in generated CSS (BUNDLE-01)'
+            exit 1
+          fi
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+
+          class InlineScriptChecker(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.inline_executable = False
+
+              def handle_starttag(self, tag, attrs):
+                  if tag != "script":
+                      return
+                  attributes = dict(attrs)
+                  script_type = (attributes.get("type") or "").lower()
+                  executable_type = not script_type or script_type in {
+                      "text/javascript",
+                      "application/javascript",
+                      "text/ecmascript",
+                      "application/ecmascript",
+                      "module",
+                  }
+                  self.inline_executable = "src" not in attributes and executable_type
+
+              def handle_data(self, data):
+                  if self.inline_executable and data.strip():
+                      raise SystemExit(
+                          "inline executable script body found in dist/index.html (BUNDLE-01)"
+                      )
+
+              def handle_endtag(self, tag):
+                  if tag == "script":
+                      self.inline_executable = False
+
+          InlineScriptChecker().feed(Path("dist/index.html").read_text())
+          PY
 
           # PRE-01: the production bundle carries no preview transport or
           # scenario fixtures (src/preview/ was removed; nothing may return).

@@ -264,7 +264,7 @@ impl SchedulerDispatch {
                 &key_record,
                 &record.principal_id,
                 model,
-                max_tokens,
+                Some(max_tokens),
                 4_000,
                 cost_estimate_micros,
             )

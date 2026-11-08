@@ -83,6 +83,20 @@ fn assert_strong_lowercase_sha256_etag(etag: &str) {
     );
 }
 
+fn is_spa_skip_placeholder(index_html: &str) -> bool {
+    index_html
+        .split(['"', '\''])
+        .any(|part| part == "/assets/index-skip.js")
+}
+
+fn discover_bootstrap_asset(index_html: &str) -> String {
+    index_html
+        .split(['"', '\''])
+        .find(|part| *part == "/theme-init.js")
+        .unwrap_or_else(|| panic!("missing external theme bootstrap"))
+        .to_owned()
+}
+
 fn discover_index_asset(index_html: &str) -> String {
     index_html
         .split(['"', '\''])
@@ -96,7 +110,35 @@ async fn asset_responses_are_immutable_and_support_conditional_get() {
     let app = router(test_state());
 
     let index = get(&app, "/").await;
-    let asset_path = discover_index_asset(&body_text(index).await);
+    let index_html = body_text(index).await;
+    let asset_path = discover_index_asset(&index_html);
+    if !is_spa_skip_placeholder(&index_html) {
+        let bootstrap_path = discover_bootstrap_asset(&index_html);
+        let response = get(&app, &bootstrap_path).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_value(&response, header::CONTENT_TYPE),
+            "text/javascript"
+        );
+        assert_eq!(
+            header_value(&response, header::CACHE_CONTROL),
+            "no-cache, must-revalidate"
+        );
+        let etag = header_value(&response, header::ETAG);
+        assert_strong_lowercase_sha256_etag(&etag);
+        let response = get_with_if_none_match(&app, &bootstrap_path, &etag).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(header_value(&response, header::ETAG), etag);
+        assert_eq!(
+            header_value(&response, header::CONTENT_TYPE),
+            "text/javascript"
+        );
+        assert_eq!(
+            header_value(&response, header::CACHE_CONTROL),
+            "no-cache, must-revalidate"
+        );
+        assert!(body_text(response).await.is_empty());
+    }
 
     let response = get(&app, &asset_path).await;
     assert_eq!(response.status(), StatusCode::OK);

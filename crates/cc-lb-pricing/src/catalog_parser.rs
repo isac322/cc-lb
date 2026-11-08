@@ -28,23 +28,58 @@ pub(crate) fn parse_litellm_json(
         if model == "sample_spec" {
             continue;
         }
-
         let Some(object) = value.as_object() else {
             continue;
         };
-        let Some(input_cost) = object.get("input_cost_per_token").and_then(Value::as_f64) else {
-            record_missing_catalog_field(&model, "input_cost_per_token");
+
+        let image_generation =
+            object.get("mode").and_then(Value::as_str) == Some("image_generation");
+        let Some((input_field, input_cost)) = preferred_cost(
+            object,
+            "input_cost_per_token",
+            "input_cost_per_image_token",
+            image_generation,
+        ) else {
+            record_missing_catalog_field(
+                &model,
+                if image_generation {
+                    "input_cost_per_image_token"
+                } else {
+                    "input_cost_per_token"
+                },
+            );
             continue;
         };
-        let Some(output_cost) = object.get("output_cost_per_token").and_then(Value::as_f64) else {
-            record_missing_catalog_field(&model, "output_cost_per_token");
+        let Some((output_field, output_cost)) = preferred_cost(
+            object,
+            "output_cost_per_token",
+            "output_cost_per_image_token",
+            image_generation,
+        ) else {
+            record_missing_catalog_field(
+                &model,
+                if image_generation {
+                    "output_cost_per_image_token"
+                } else {
+                    "output_cost_per_token"
+                },
+            );
             continue;
         };
 
-        let input_per_million_usd =
-            usd_per_token_to_per_million(&model, "input_cost_per_token", input_cost)?;
+        let input_per_million_usd = usd_per_token_to_per_million(&model, input_field, input_cost)?;
         let output_per_million_usd =
-            usd_per_token_to_per_million(&model, "output_cost_per_token", output_cost)?;
+            usd_per_token_to_per_million(&model, output_field, output_cost)?;
+        let input_image_per_million_usd = if image_generation {
+            parse_optional_cost(&model, object, "input_cost_per_image_token")?
+        } else {
+            None
+        };
+        let output_image_per_million_usd = if image_generation {
+            parse_optional_cost(&model, object, "output_cost_per_image_token")?
+        } else {
+            None
+        };
 
         if let Some(cache_creation_cost) = object
             .get("cache_creation_input_token_cost")
@@ -152,6 +187,8 @@ pub(crate) fn parse_litellm_json(
                 model,
                 input_per_million_usd,
                 output_per_million_usd,
+                input_image_per_million_usd,
+                output_image_per_million_usd,
                 by_tier,
             },
         );
@@ -159,8 +196,7 @@ pub(crate) fn parse_litellm_json(
 
     if models.is_empty() {
         return Err(LoaderError::Validation(
-            "litellm catalog contains no models with input_cost_per_token and output_cost_per_token"
-                .to_owned(),
+            "litellm catalog contains no models with usable input/output token pricing".to_owned(),
         ));
     }
 
@@ -178,6 +214,35 @@ pub(crate) fn parse_litellm_json(
         above_tokens_rates,
         status: CatalogStatus::Ok,
     })
+}
+
+fn preferred_cost(
+    object: &Map<String, Value>,
+    generic_field: &'static str,
+    image_field: &'static str,
+    image_generation: bool,
+) -> Option<(&'static str, f64)> {
+    object
+        .get(generic_field)
+        .and_then(Value::as_f64)
+        .map(|cost| (generic_field, cost))
+        .or_else(|| {
+            image_generation
+                .then(|| object.get(image_field).and_then(Value::as_f64))
+                .flatten()
+                .map(|cost| (image_field, cost))
+        })
+}
+fn parse_optional_cost(
+    model: &str,
+    object: &Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<UsdPerMillion>, LoaderError> {
+    object
+        .get(field)
+        .and_then(Value::as_f64)
+        .map(|cost| usd_per_token_to_per_million(model, field, cost).map(Some))
+        .unwrap_or(Ok(None))
 }
 
 fn discover_tier_costs<'a>(object: &'a Map<String, Value>, base: &str) -> RawTierCosts<'a> {
@@ -334,4 +399,91 @@ fn record_missing_catalog_field(model: &str, field: &'static str) {
         "field" => field
     )
     .increment(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_generation_falls_back_to_image_output_price() {
+        let snapshot = parse_litellm_json(
+            br#"{
+                "gpt-image-1-mini": {
+                    "mode": "image_generation",
+                    "input_cost_per_token": 0.000002,
+                    "input_cost_per_image_token": 0.0000025,
+                    "output_cost_per_image_token": 0.000008
+                },
+                "image-only": {
+                    "mode": "image_generation",
+                    "input_cost_per_image_token": 0.000004,
+                    "output_cost_per_image_token": 0.000009
+                },
+                "regular-model": {
+                    "input_cost_per_token": 0.000003,
+                    "output_cost_per_token": 0.000015,
+                    "input_cost_per_image_token": 0.000099,
+                    "output_cost_per_image_token": 0.000099
+                }
+            }"#,
+            &cc_lb_clock::TestClock::new_at_secs(1_700_000_000),
+        )
+        .expect("catalog should parse");
+
+        let image_pricing = snapshot
+            .models
+            .get("gpt-image-1-mini")
+            .expect("image model should be retained");
+        assert_eq!(
+            image_pricing.input_per_million_usd,
+            UsdPerMillion::from_micros_usd(2_000_000)
+        );
+        assert_eq!(
+            image_pricing.output_per_million_usd,
+            UsdPerMillion::from_micros_usd(8_000_000)
+        );
+        assert_eq!(
+            image_pricing.input_image_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(2_500_000))
+        );
+        assert_eq!(
+            image_pricing.output_image_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(8_000_000))
+        );
+        let regular_pricing = snapshot
+            .models
+            .get("regular-model")
+            .expect("regular model should be retained");
+        assert_eq!(regular_pricing.input_image_per_million_usd, None);
+        assert_eq!(regular_pricing.output_image_per_million_usd, None);
+        let image_only = snapshot
+            .models
+            .get("image-only")
+            .expect("image-only model should be retained");
+        assert_eq!(
+            image_only.input_per_million_usd,
+            UsdPerMillion::from_micros_usd(4_000_000)
+        );
+        assert_eq!(
+            image_only.output_per_million_usd,
+            UsdPerMillion::from_micros_usd(9_000_000)
+        );
+        assert_eq!(
+            image_only.input_image_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(4_000_000))
+        );
+        assert_eq!(
+            image_only.output_image_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(9_000_000))
+        );
+
+        let catalog = crate::PriceCatalog::new_empty();
+        catalog.install_snapshot(snapshot);
+        assert_eq!(
+            catalog.estimate_max("gpt-image-1-mini", 11, 3, None),
+            Some(46)
+        );
+        assert_eq!(catalog.estimate_max("regular-model", 11, 3, None), Some(78));
+    }
 }

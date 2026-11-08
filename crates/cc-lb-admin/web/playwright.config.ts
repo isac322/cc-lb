@@ -5,7 +5,7 @@ import { defineConfig } from '@playwright/test';
 // (playwright.api-key.config.ts) and is excluded here.
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: 'api-key/**',
+  testIgnore: ['api-key/**', 'csp.spec.ts'],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

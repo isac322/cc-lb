@@ -18,6 +18,8 @@ fn install_tierless_pricing() {
                 model: MODEL.to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: BTreeMap::<String, TierRate>::new(),
             },
         )]),
@@ -91,6 +93,7 @@ fn stream_completed_batch_tier_is_used_for_actual_cost() {
                     service_tier: Some("batch".to_owned()),
                     ..UsageSnapshot::default()
                 },
+                usage_present: true,
                 ..StreamSuccess::default()
             }),
         },

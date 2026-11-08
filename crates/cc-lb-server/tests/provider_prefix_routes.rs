@@ -2,10 +2,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common;
-use axum::body::to_bytes;
+use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use cc_lb_storage_api::principal::{Limit, LimitKind};
 use reqwest::Method;
 use serde_json::{Value, json};
 use sqlx::{Row, sqlite::SqlitePoolOptions};
@@ -54,6 +56,40 @@ async fn fake_handler(State(state): State<FakeState>, request: Request) -> Respo
         .expect("fake request lock")
         .push((method, path.clone(), body.to_vec()));
 
+    let request_json = serde_json::from_slice::<Value>(&body).unwrap_or_default();
+    if (path == "/v1/responses"
+        && request_json
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+        || (path.starts_with("/v1beta/models/") && path.ends_with(":streamGenerateContent"))
+    {
+        let (content_type, body) = if path == "/v1/responses" {
+            (
+                "text/event-stream",
+                concat!(
+                    "event: response.created\n",
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_provider_prefix\",\"status\":\"in_progress\",\"usage\":null}}\n\n",
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"openai-ok\"}\n\n",
+                    "event: response.completed\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_provider_prefix\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+                ),
+            )
+        } else {
+            (
+                "text/event-stream",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini-ok\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n",
+            )
+        };
+        return (
+            axum::http::StatusCode::OK,
+            [(header::CONTENT_TYPE, content_type)],
+            Body::from(body),
+        )
+            .into_response();
+    }
+
     let (status, response) = match path.as_str() {
         "/v1/messages" => (
             200,
@@ -87,6 +123,23 @@ async fn fake_handler(State(state): State<FakeState>, request: Request) -> Respo
                 }
             }),
         ),
+        "/v1/responses" => (
+            200,
+            json!({
+                "id": "resp_provider_prefix",
+                "object": "response",
+                "status": "completed",
+                "model": "gpt-5",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_provider_prefix",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "openai-ok", "annotations": []}]
+                }],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            }),
+        ),
         path if path.starts_with("/v1beta/models/") && path.ends_with(":generateContent") => (
             200,
             json!({
@@ -95,9 +148,9 @@ async fn fake_handler(State(state): State<FakeState>, request: Request) -> Respo
                     "finishReason": "STOP"
                 }],
                 "usageMetadata": {
-                    "promptTokenCount": 2,
-                    "candidatesTokenCount": 3,
-                    "totalTokenCount": 5
+                    "promptTokenCount": 1,
+                    "candidatesTokenCount": 1,
+                    "totalTokenCount": 2
                 },
                 "modelVersion": "gemini-2.5-flash"
             }),
@@ -523,4 +576,140 @@ async fn provider_prefixed_routes_dispatch_and_filter_by_provider() {
         "route_no_upstream_after_filter"
     );
     assert_eq!(fake.state.snapshot().len(), embeddings_before);
+}
+
+#[tokio::test]
+async fn output_token_cap_rejects_uncapped_responses_and_gemini_generation() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let server = common::spawn_test_server_with_principal_limits(
+        "",
+        vec![Limit {
+            kind: LimitKind::OutputTokens,
+            window_secs: 60,
+            cap_micros: 1000,
+        }],
+        fake_anthropic::AppConfig::default(),
+    )
+    .await;
+    let fake = spawn_fake_upstream().await;
+    let admin = reqwest::Client::new();
+
+    disable_seeded_anthropic(&admin, &server).await;
+    create_upstream(
+        &admin,
+        &server,
+        json!({
+            "name": "provider-openai-output-cap",
+            "kind": "openai_api_key",
+            "base_url": fake.base_url.clone(),
+            "api_key_value": "sk-openai-output-cap-test",
+            "skip_preflight": true
+        }),
+    )
+    .await;
+    create_upstream(
+        &admin,
+        &server,
+        json!({
+            "name": "provider-gemini-output-cap",
+            "kind": "gemini_api_key",
+            "base_url": fake.base_url.clone(),
+            "api_key_value": "AIza-output-cap-test",
+            "skip_preflight": true
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    let before = fake.state.snapshot().len();
+    let responses_uncapped = common::http_post(
+        server.proxy_addr,
+        "/openai/v1/responses",
+        &server.managed_key.plaintext,
+        r#"{"model":"gpt-5","input":"hello"}"#,
+        &[],
+    )
+    .await
+    .expect("uncapped Responses request");
+    assert_eq!(
+        responses_uncapped.status, 400,
+        "{}",
+        responses_uncapped.body
+    );
+    assert_eq!(fake.state.snapshot().len(), before);
+
+    let responses_capped = common::http_post(
+        server.proxy_addr,
+        "/openai/v1/responses",
+        &server.managed_key.plaintext,
+        r#"{"model":"gpt-5","input":"hello","max_output_tokens":1}"#,
+        &[],
+    )
+    .await
+    .expect("capped Responses request");
+    assert_eq!(responses_capped.status, 200, "{}", responses_capped.body);
+    assert_eq!(fake.state.count_path("/v1/responses"), 1);
+
+    let before = fake.state.snapshot().len();
+    let responses_stream_uncapped = common::http_post(
+        server.proxy_addr,
+        "/openai/v1/responses",
+        &server.managed_key.plaintext,
+        r#"{"model":"gpt-5","input":"hello","stream":true}"#,
+        &[],
+    )
+    .await
+    .expect("uncapped Responses stream request");
+    assert_eq!(
+        responses_stream_uncapped.status, 400,
+        "{}",
+        responses_stream_uncapped.body
+    );
+    assert_eq!(fake.state.snapshot().len(), before);
+
+    let before = fake.state.snapshot().len();
+    let gemini_uncapped = common::http_post(
+        server.proxy_addr,
+        "/gemini/v1beta/models/gemini-2.5-flash:generateContent",
+        &server.managed_key.plaintext,
+        r#"{"contents":[{"parts":[{"text":"hello"}]}]}"#,
+        &[],
+    )
+    .await
+    .expect("uncapped Gemini request");
+    assert_eq!(gemini_uncapped.status, 400, "{}", gemini_uncapped.body);
+    assert_eq!(fake.state.snapshot().len(), before);
+
+    let gemini_capped = common::http_post(
+        server.proxy_addr,
+        "/gemini/v1beta/models/gemini-2.5-flash:generateContent",
+        &server.managed_key.plaintext,
+        r#"{"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"maxOutputTokens":1}}"#,
+        &[],
+    )
+    .await
+    .expect("capped Gemini request");
+    assert_eq!(gemini_capped.status, 200, "{}", gemini_capped.body);
+    assert_eq!(
+        fake.state
+            .count_path("/v1beta/models/gemini-2.5-flash:generateContent"),
+        1
+    );
+
+    let before = fake.state.snapshot().len();
+    let gemini_stream_uncapped = common::http_post(
+        server.proxy_addr,
+        "/gemini/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+        &server.managed_key.plaintext,
+        r#"{"contents":[{"parts":[{"text":"hello"}]}]}"#,
+        &[],
+    )
+    .await
+    .expect("uncapped Gemini stream request");
+    assert_eq!(
+        gemini_stream_uncapped.status, 400,
+        "{}",
+        gemini_stream_uncapped.body
+    );
+    assert_eq!(fake.state.snapshot().len(), before);
 }

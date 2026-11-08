@@ -284,6 +284,29 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
             )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+
+    fn estimate_max_with_cache_and_images(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache_and_images(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                use_image_rates,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
     fn estimate_max_with_local_cache(
         &self,
         model: &str,
@@ -293,6 +316,24 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
     ) -> Option<i64> {
         self.catalog
             .estimate_max_with_local_cache(model, input, max_output, service_tier)
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
+    fn estimate_max_with_local_cache_and_images(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache_and_images(
+                model,
+                input,
+                max_output,
+                use_image_rates,
+                service_tier,
+            )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
 }
@@ -1041,9 +1082,13 @@ async fn build_app_with_storage_inner(
         >,
     > = Arc::new(tokio::sync::Mutex::new(limit_reservation_ttl_handle));
     let builtin_authn = Arc::new(BuiltinAuthn::new(key_store.clone(), clock.clone()));
-    let (dispatcher, _breaker_registry, websocket_bulkheads, websocket_bulkhead_config) =
-        dispatcher(&config, clock.clone());
-
+    let (
+        dispatcher,
+        breaker_registry,
+        breaker_config,
+        websocket_bulkheads,
+        websocket_bulkhead_config,
+    ) = dispatcher(&config, clock.clone());
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
             Ok(id) => Some(cc_lb_domain::ReplicaIdentity { id }),
@@ -1727,6 +1772,8 @@ async fn build_app_with_storage_inner(
         dynamic_view: dynamic_view.clone(),
         builtin_authn: builtin_authn.clone(),
         clock: clock.clone(),
+        breaker_registry,
+        breaker_config,
         websocket_bulkheads,
         websocket_bulkhead_config,
     };
@@ -2226,6 +2273,8 @@ struct ProxyState {
     dynamic_view: Arc<DynamicViewHolder>,
     builtin_authn: Arc<BuiltinAuthn>,
     clock: ClockHandle,
+    breaker_registry: Arc<BreakerRegistry>,
+    breaker_config: BreakerRuntimeConfig,
     websocket_bulkheads: Arc<BulkheadRegistry>,
     websocket_bulkhead_config: BulkheadRuntimeConfig,
 }
@@ -2365,6 +2414,8 @@ fn claude_default_snapshot(clock: &dyn cc_lb_clock::Clock) -> cc_lb_pricing::Cat
                 model: (*name).to_owned(),
                 input_per_million_usd: UsdPerMillion::from_micros_usd(*input),
                 output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: Default::default(),
             },
         );
@@ -2801,7 +2852,7 @@ async fn responses_websocket_handler(
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error);
+                .reject_responses_websocket_authentication(&error, "/v1/responses");
         }
     };
     let slots: usize = state
@@ -2862,28 +2913,120 @@ enum WsProviderEvent {
     },
 }
 
+fn provider_websocket_error_from_http(response: http::Response<Option<Vec<u8>>>) -> WebSocketError {
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    WebSocketError::new(
+        status,
+        "upstream_unavailable",
+        "provider WebSocket handshake rejected",
+    )
+    .with_provider_headers(&headers)
+}
+
+fn websocket_breaker_key(upstream_id: uuid::Uuid) -> String {
+    format!("websocket:{upstream_id}")
+}
+
+async fn connect_provider_websocket(
+    state: &ProxyState,
+    upstream_id: uuid::Uuid,
+    request: http::Request<()>,
+    bulkhead_guard: cc_lb_engine::OwnedBulkheadGuard,
+) -> Result<
+    (
+        WebSocketStream<MaybeTlsStream<TcpStream>>,
+        cc_lb_engine::OwnedBulkheadGuard,
+    ),
+    WebSocketError,
+> {
+    let breaker = state.breaker_registry.breaker(
+        websocket_breaker_key(upstream_id),
+        state.breaker_config,
+        state.clock.clone(),
+    );
+    let permit = breaker.permit().map_err(|_| {
+        WebSocketError::new(
+            502,
+            "upstream_unavailable",
+            "provider WebSocket connection is unavailable",
+        )
+    })?;
+    let result = tokio::time::timeout(
+        WS_PROVIDER_CONNECT_TIMEOUT,
+        connect_async_with_config(
+            request,
+            Some(responses_websocket_config(state.body_caps.messages)),
+            false,
+        ),
+    )
+    .await;
+    match result {
+        Ok(Ok((stream, _response))) => {
+            permit.record_success();
+            Ok((stream, bulkhead_guard))
+        }
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
+            let error = provider_websocket_error_from_http(*response);
+            if (500..=599).contains(&error.status) {
+                permit.record_failure();
+            } else {
+                permit.record_success();
+            }
+            Err(error)
+        }
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Url(_))) => {
+            drop(permit);
+            Err(WebSocketError::new(
+                502,
+                "upstream_unavailable",
+                "provider WebSocket connection failed",
+            ))
+        }
+        Ok(Err(_)) => {
+            permit.record_failure();
+            Err(WebSocketError::new(
+                502,
+                "upstream_unavailable",
+                "provider WebSocket connection failed",
+            ))
+        }
+        Err(_) => {
+            permit.record_failure();
+            Err(WebSocketError::new(
+                504,
+                "upstream_unavailable",
+                "provider WebSocket connection timed out",
+            ))
+        }
+    }
+}
 const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn start_responses_provider(
+struct ResponsesProviderParams<'a> {
+    state: &'a ProxyState,
     request: http::Request<()>,
     connection_id: u64,
     upstream_id: uuid::Uuid,
     upstream_name: String,
     bulkhead_guard: cc_lb_engine::OwnedBulkheadGuard,
     events: tokio::sync::mpsc::Sender<WsProviderEvent>,
-    message_cap: usize,
-) -> Result<WsProviderConnection, String> {
-    let (upstream, _) = tokio::time::timeout(
-        WS_PROVIDER_CONNECT_TIMEOUT,
-        connect_async_with_config(
-            request,
-            Some(responses_websocket_config(message_cap)),
-            false,
-        ),
-    )
-    .await
-    .map_err(|_| "upstream WebSocket connection timed out".to_owned())?
-    .map_err(|error| format!("upstream WebSocket connection failed: {error}"))?;
+}
+
+async fn start_responses_provider(
+    params: ResponsesProviderParams<'_>,
+) -> Result<WsProviderConnection, WebSocketError> {
+    let ResponsesProviderParams {
+        state,
+        request,
+        connection_id,
+        upstream_id,
+        upstream_name,
+        bulkhead_guard,
+        events,
+    } = params;
+    let (upstream, bulkhead_guard) =
+        connect_provider_websocket(state, upstream_id, request, bulkhead_guard).await?;
     let (sink, mut stream) = upstream.split();
     let task = tokio::spawn(async move {
         let reason = loop {
@@ -3095,20 +3238,20 @@ async fn dispatch_responses_websocket(
         };
         let connection_id = *next_connection_id;
         *next_connection_id = next_id;
-        let connection = match start_responses_provider(
+        let connection = match start_responses_provider(ResponsesProviderParams {
+            state,
             request,
             connection_id,
-            candidate.upstream_id,
-            candidate.upstream_name.clone(),
+            upstream_id: candidate.upstream_id,
+            upstream_name: candidate.upstream_name.clone(),
             bulkhead_guard,
-            events.clone(),
-            state.body_caps.messages,
-        )
+            events: events.clone(),
+        })
         .await
         {
             Ok(connection) => connection,
             Err(error) => {
-                last_error = Some(WebSocketError::new(502, "upstream_unavailable", error));
+                last_error = Some(error);
                 continue;
             }
         };
@@ -3875,6 +4018,7 @@ fn dispatcher(
 ) -> (
     Arc<dyn UpstreamDispatch>,
     Arc<BreakerRegistry>,
+    BreakerRuntimeConfig,
     Arc<BulkheadRegistry>,
     BulkheadRuntimeConfig,
 ) {
@@ -3910,6 +4054,7 @@ fn dispatcher(
             dispatcher_factory,
         )),
         breaker_registry,
+        breaker_config,
         bulkhead_registry,
         bulkhead_config,
     )
@@ -3919,6 +4064,9 @@ fn dispatcher(
 mod tests {
     mod realtime_websocket_tests {
         include!("app_realtime_websocket_tests.rs");
+    }
+    mod websocket_handshake_tests {
+        include!("app_websocket_handshake_tests.rs");
     }
     use std::collections::{BTreeMap, HashMap};
     use std::convert::Infallible;
@@ -4010,6 +4158,8 @@ mod tests {
                 model: TIER_PRICING_TEST_MODEL.to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier,
             },
         );
@@ -4903,6 +5053,8 @@ mod tests {
                 model: "operator-model-a".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: Default::default(),
             },
         );
@@ -5126,8 +5278,9 @@ mod tests {
             },
             builtin_authn,
             clock,
+            breaker_registry: Arc::new(BreakerRegistry::new()),
+            breaker_config: BreakerRuntimeConfig::default(),
         };
-
         // Same middleware order as `proxy_router`: request_id → lifecycle →
         // drain → (HandleError(timeout_error) → timeout) → routes.
         let router = Router::new()
@@ -5426,6 +5579,8 @@ mod tests {
             dynamic_view,
             builtin_authn,
             clock,
+            breaker_registry: Arc::new(BreakerRegistry::new()),
+            breaker_config: BreakerRuntimeConfig::default(),
             websocket_bulkheads: Arc::new(BulkheadRegistry::new()),
             websocket_bulkhead_config: BulkheadRuntimeConfig {
                 max_conns_per_upstream: 50,
@@ -5433,6 +5588,15 @@ mod tests {
                 acquire_timeout: Duration::from_secs(1),
             },
         }
+    }
+
+    fn replace_websocket_upstreams(state: &ProxyState, records: Vec<UpstreamRecord>) {
+        let view = state.dynamic_view.load();
+        state.dynamic_view.store(
+            cc_lb_control::DynamicViewBuilder::from_view(&view)
+                .upstream_records(records)
+                .build(),
+        );
     }
 
     async fn spawn_proxy_router(router: Router) -> (SocketAddr, JoinHandle<()>) {
@@ -5611,7 +5775,7 @@ mod tests {
                         &record,
                         TEST_PRINCIPAL,
                         "gpt-4.1",
-                        0,
+                        Some(0),
                         0,
                         Some(1_000),
                     ),
@@ -5723,7 +5887,7 @@ mod tests {
                     &record,
                     TEST_PRINCIPAL,
                     "gpt-4.1",
-                    0,
+                    Some(0),
                     0,
                     Some(1_000),
                 )

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import {
   act,
   cleanup,
@@ -18,6 +20,17 @@ import { initTheme, useTheme } from '../../theme';
 import { TIME_PRESETS, useSharedTimeRange } from '../../timePresets';
 
 const SYSTEM_THEME_QUERY = '(prefers-color-scheme: light)';
+const THEME_INIT_SCRIPT = readFileSync(
+  `${import.meta.dirname}/../../../../public/theme-init.js`,
+  'utf8',
+);
+
+function runThemeInitScript() {
+  runInNewContext(THEME_INIT_SCRIPT, {
+    document,
+    localStorage: window.localStorage,
+  });
+}
 
 let prefersLight = false;
 let mediaListeners: Set<(event: MediaQueryListEvent) => void>;
@@ -222,6 +235,50 @@ describe('locale and timezone preferences', () => {
 });
 
 describe('theme preference', () => {
+  test.each(['light', 'dark', 'system'] as const)(
+    'applies a stored %s theme before React mounts',
+    (theme) => {
+      document.documentElement.setAttribute('data-theme', 'system');
+      window.localStorage.setItem('cclb.theme', theme);
+
+      runThemeInitScript();
+
+      expect(document.documentElement.getAttribute('data-theme')).toBe(theme);
+    },
+  );
+
+  test.each([
+    { storedTheme: null, description: 'missing storage' },
+    { storedTheme: 'invalid', description: 'invalid storage' },
+  ])('preserves system for $description', ({ storedTheme }) => {
+    document.documentElement.setAttribute('data-theme', 'system');
+    if (storedTheme === null) {
+      window.localStorage.removeItem('cclb.theme');
+    } else {
+      window.localStorage.setItem('cclb.theme', storedTheme);
+    }
+
+    runThemeInitScript();
+
+    expect(document.documentElement.getAttribute('data-theme')).toBe('system');
+  });
+
+  test('preserves system and swallows storage errors', () => {
+    document.documentElement.setAttribute('data-theme', 'system');
+    const storageGetItem = vi
+      .spyOn(Storage.prototype, 'getItem')
+      .mockImplementation(() => {
+        throw new Error('storage unavailable');
+      });
+    const consoleError = vi.spyOn(console, 'error');
+
+    expect(() => runThemeInitScript()).not.toThrow();
+
+    expect(storageGetItem).toHaveBeenCalled();
+    expect(document.documentElement.getAttribute('data-theme')).toBe('system');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   test('keeps initTheme applying the stored selection before React mounts', () => {
     window.localStorage.setItem('cclb.theme', 'light');
 

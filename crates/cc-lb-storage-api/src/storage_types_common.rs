@@ -372,6 +372,18 @@ pub struct UsageRollup {
     #[serde(default)]
     pub upstream_body_ms_sum: u64,
     pub virtual_cost_micros: u64,
+    #[serde(default)]
+    pub cost_input_micros: u64,
+    #[serde(default)]
+    pub cost_output_micros: u64,
+    #[serde(default)]
+    pub cost_cache_creation_5m_micros: u64,
+    #[serde(default)]
+    pub cost_cache_creation_1h_micros: u64,
+    #[serde(default)]
+    pub cost_cache_read_micros: u64,
+    #[serde(default)]
+    pub cost_components_event_count: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverviewExcludedErrorBucket {

@@ -19,16 +19,7 @@
     </style>
     <!-- Pre-paint theme: mirrors readStoredTheme() in src/lib/theme.ts so the
          first frame already uses the stored theme instead of flashing dark. -->
-    <script>
-      (function () {
-        try {
-          var t = localStorage.getItem('cclb.theme');
-          if (t === 'dark' || t === 'light' || t === 'system') {
-            document.documentElement.setAttribute('data-theme', t);
-          }
-        } catch (e) {}
-      })();
-    </script>
+    <script src="/theme-init.js"></script>
   </head>
   <body class="antialiased">
     <div id="root"></div>

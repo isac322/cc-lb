@@ -18,9 +18,9 @@ pub enum RequestEventKind {
     Messages,
     /// Anthropic token counting and OpenAI Responses input-token counting.
     CountTokens,
-    /// OpenAI Responses generation and compaction.
+    /// OpenAI Responses generation, compaction, and Realtime WebSockets.
     OpenaiResponses,
-    /// Gemini `generateContent` and `streamGenerateContent` model actions.
+    /// Gemini `generateContent`, `streamGenerateContent`, and Live WebSockets.
     GeminiGenerateContent,
     /// Gemini `countTokens` model action.
     GeminiCountTokens,
@@ -89,7 +89,10 @@ impl RequestEventKind {
         match path {
             "/v1/messages" => Self::Messages,
             "/v1/messages/count_tokens" | "/v1/responses/input_tokens" => Self::CountTokens,
-            "/v1/responses" | "/v1/responses/compact" => Self::OpenaiResponses,
+            "/v1/responses" | "/v1/responses/compact" | "/v1/realtime" => Self::OpenaiResponses,
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent" => {
+                Self::GeminiGenerateContent
+            }
             "/v1/chat/completions" | "/v1beta/openai/chat/completions" => Self::ChatCompletions,
             "/v1/complete" | "/v1/completions" => Self::Completions,
             "/v1/embeddings" | "/v1beta/openai/embeddings" => Self::Embeddings,
@@ -221,6 +224,11 @@ mod tests {
     fn from_path_matches_multi_provider_endpoints() {
         for (path, expected) in [
             ("/v1/responses", RequestEventKind::OpenaiResponses),
+            ("/v1/realtime", RequestEventKind::OpenaiResponses),
+            (
+                "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                RequestEventKind::GeminiGenerateContent,
+            ),
             (
                 "/v1beta/models/gemini-2.5-pro:generateContent",
                 RequestEventKind::GeminiGenerateContent,
@@ -241,6 +249,11 @@ mod tests {
     #[test]
     fn new_endpoint_families_have_bounded_labels_with_or_without_prefix() {
         for (path, expected) in [
+            ("/openai/v1/realtime", RequestEventKind::OpenaiResponses),
+            (
+                "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                RequestEventKind::GeminiGenerateContent,
+            ),
             (
                 "/openai/v1/responses/compact",
                 RequestEventKind::OpenaiResponses,
@@ -323,6 +336,16 @@ mod tests {
             "/v1/responses/",
             "/v1/responses/extra",
             "/v1/responsesx",
+            "/v1/realtime/",
+            "/v1/realtime/extra",
+            "/v1/realtimex",
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent/",
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent/extra",
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContents",
+            "/openai/v1/realtime?model=gpt-realtime",
+            "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?alt=json",
+            "/v1/realtime/calls",
+            "/v1/realtime/client_secrets",
             "/v1beta/models/:generateContent",
             "/v1beta/models/:streamGenerateContent",
             "/v1beta/models/:countTokens",

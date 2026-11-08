@@ -231,6 +231,12 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         upstream_body_ms_count: 0,
         upstream_body_ms_sum: 0,
         virtual_cost_micros: 123_456,
+        cost_input_micros: 40_000,
+        cost_output_micros: 60_000,
+        cost_cache_creation_5m_micros: 10_000,
+        cost_cache_creation_1h_micros: 10_000,
+        cost_cache_read_micros: 3_456,
+        cost_components_event_count: 4,
     });
     assert_json_roundtrip(UsageRollupRun {
         processed_events: 10,
@@ -380,6 +386,7 @@ fn batch_b_wire_snapshots_are_stable() {
         status: 200,
         input_tokens: Some(111),
         output_tokens: Some(222),
+        tool_use_prompt_tokens: Some(42),
         cache_creation_input_tokens: Some(333),
         cache_creation_input_tokens_5m: Some(123),
         cache_creation_input_tokens_1h: Some(210),
@@ -516,6 +523,7 @@ fn batch_b_wire_snapshots_are_stable() {
         "status": 200,
         "input_tokens": 111,
         "output_tokens": 222,
+        "tool_use_prompt_tokens": 42,
         "cache_creation_input_tokens": 333,
         "cache_creation_input_tokens_5m": 123,
         "cache_creation_input_tokens_1h": 210,

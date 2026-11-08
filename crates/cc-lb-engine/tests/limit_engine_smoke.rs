@@ -50,11 +50,11 @@ fn requests_cap_two_rejects_third() {
         vec![limit(StoredLimitKind::Requests, 60, 2)],
     );
 
-    let first = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
+    let first = engine.reserve(&view, &record, "principal-1", "claude", Some(0), 0, None);
     assert!(first.is_ok());
-    let second = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
+    let second = engine.reserve(&view, &record, "principal-1", "claude", Some(0), 0, None);
     assert!(second.is_ok());
-    let third = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
+    let third = engine.reserve(&view, &record, "principal-1", "claude", Some(0), 0, None);
     assert_eq!(third.err(), Some(RejectReason::RequestsRateLimit));
 }
 
@@ -66,7 +66,7 @@ fn output_cap_rejects_single_request_above_cap() {
         vec![limit(StoredLimitKind::OutputTokens, 60, 100)],
     );
 
-    let result = engine.reserve(&view, &record, "principal-1", "claude", 200, 0, None);
+    let result = engine.reserve(&view, &record, "principal-1", "claude", Some(200), 0, None);
 
     assert_eq!(
         result.err(),
@@ -85,7 +85,15 @@ fn cost_usd_cap_rejects_when_estimate_exceeds_cap() {
         vec![limit(StoredLimitKind::CostUsd, 60, 1_000)],
     );
 
-    let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, Some(2_000));
+    let result = engine.reserve(
+        &view,
+        &record,
+        "principal-1",
+        "claude",
+        Some(0),
+        0,
+        Some(2_000),
+    );
 
     assert_eq!(
         result.err(),
@@ -102,7 +110,7 @@ fn principal_disabled_rejects() {
     let (engine, view) = engine(false);
     let record = record(KeyStatus::Active, Vec::new());
 
-    let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
+    let result = engine.reserve(&view, &record, "principal-1", "claude", Some(0), 0, None);
 
     assert_eq!(result.err(), Some(RejectReason::PrincipalDisabled));
 }
@@ -119,7 +127,7 @@ fn reconcile_refund_leaves_actual_output_usage() {
     );
 
     let reservation = engine
-        .reserve(&view, &record, "principal-1", "claude", 100, 0, None)
+        .reserve(&view, &record, "principal-1", "claude", Some(100), 0, None)
         .expect("reservation succeeds");
     engine.reconcile(reservation, 0, 50, 0);
 
@@ -155,7 +163,7 @@ fn local_limit_retryability_impossible_reservation_has_no_partial_admission() {
                 &record,
                 "principal-1",
                 "claude",
-                max_output,
+                Some(max_output),
                 max_input,
                 cost,
             )
@@ -173,7 +181,7 @@ fn local_limit_retryability_impossible_reservation_has_no_partial_admission() {
                 &record,
                 "principal-1",
                 "claude",
-                max_output,
+                Some(max_output),
                 max_input,
                 cost,
             )

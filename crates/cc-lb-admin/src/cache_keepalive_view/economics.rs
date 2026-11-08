@@ -4,14 +4,13 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CacheKeepalivePnlRates {
-    pub cache_read_micros_per_million: u64,
     pub avoided_create_micros_per_million: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CacheKeepaliveTurnPnlInput {
     pub renewal_tokens: u64,
-    pub renewals: u32,
+    pub spent_micros: i64,
     pub followed_up: bool,
     pub pending: bool,
 }
@@ -43,7 +42,6 @@ pub fn rates_from_catalog(
     }
     .as_micros_usd();
     Some(CacheKeepalivePnlRates {
-        cache_read_micros_per_million: pricing.cache_read_per_million_usd?.as_micros_usd(),
         avoided_create_micros_per_million,
     })
 }
@@ -52,9 +50,6 @@ pub fn derive_turn_pnl(
     input: CacheKeepaliveTurnPnlInput,
     rates: CacheKeepalivePnlRates,
 ) -> CacheKeepaliveTurnPnl {
-    let read_per_renewal =
-        token_cost_micros(input.renewal_tokens, rates.cache_read_micros_per_million);
-    let spent_micros = read_per_renewal.saturating_mul(i64::from(input.renewals));
     let avoided_micros = if input.followed_up {
         token_cost_micros(
             input.renewal_tokens,
@@ -65,8 +60,8 @@ pub fn derive_turn_pnl(
     };
     CacheKeepaliveTurnPnl {
         avoided_micros,
-        spent_micros,
-        net_micros: avoided_micros.saturating_sub(spent_micros),
+        spent_micros: input.spent_micros,
+        net_micros: avoided_micros.saturating_sub(input.spent_micros),
         pending: input.pending,
     }
 }

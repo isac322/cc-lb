@@ -25,6 +25,8 @@ fn tier_snapshot(with_explicit_tiers: bool) -> CatalogSnapshot {
         model: MODEL.to_owned(),
         input_per_million_usd: UsdPerMillion::from_whole_usd(2),
         output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+        input_image_per_million_usd: None,
+        output_image_per_million_usd: None,
         by_tier,
     };
     let cache_creation_by_tier = with_explicit_tiers.then(|| {

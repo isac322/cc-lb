@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::responses_websocket::WebSocketCandidate;
 use crate::terminal_observer::{LifecycleContext, UpstreamErrorCode};
-use crate::usage_parser::{UsageCounts, merge_usage_value};
+use crate::usage_parser::{UsageCounts, merge_usage_value, merge_usage_value_for_shape};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RealtimeWebSocketKind {
@@ -89,6 +89,8 @@ impl RealtimeWebSocketSession {
                     usage: UsageSnapshot {
                         input_tokens: counts.input_tokens,
                         output_tokens: counts.output_tokens,
+                        input_image_tokens: counts.input_image_tokens,
+                        output_image_tokens: counts.output_image_tokens,
                         cache_read_input_tokens: counts.cache_read_input_tokens,
                         ..Default::default()
                     },
@@ -109,10 +111,12 @@ impl RealtimeWebSocketSession {
             self.reservation.take(),
             usage.counts.as_ref(),
         ) {
-            let cost = cc_lb_pricing::virtual_cost_micros_full_with_context(
+            let cost = cc_lb_pricing::virtual_cost_micros_full_with_context_and_images(
                 &self.model,
                 counts.input_tokens,
                 counts.output_tokens,
+                counts.input_image_tokens.unwrap_or(0),
+                counts.output_image_tokens.unwrap_or(0),
                 0,
                 0,
                 0,
@@ -126,6 +130,24 @@ impl RealtimeWebSocketSession {
                 counts.output_tokens,
                 cost.total_micros,
             );
+        }
+    }
+
+    /// Finish a failed provider handshake without treating HTTP errors as a
+    /// successful relay response.
+    pub fn finish_handshake(mut self, status: StatusCode) {
+        if let Some(observer) = &self.observer {
+            if let Some(reservation) = self.reservation.take() {
+                reservation.handoff_after_response();
+            }
+            if status.is_client_error() {
+                observer.set_upstream_error(status, UpstreamErrorCode::Upstream4xx);
+            } else if status.is_server_error() {
+                observer.set_upstream_error(status, UpstreamErrorCode::Upstream5xx);
+            } else {
+                observer.set_success_status(status);
+            }
+            observer.finish();
         }
     }
 }
@@ -156,11 +178,17 @@ impl RealtimeUsage {
                 };
                 let mut normalized = UsageCounts {
                     present: true,
+                    billable_present: true,
                     ..Default::default()
                 };
-                merge_usage_value(&mut normalized, usage);
+                merge_usage_value_for_shape(
+                    &mut normalized,
+                    usage,
+                    Some(crate::provider_capability::UsageShape::OpenaiResponses),
+                );
                 let counts = self.counts.get_or_insert_with(UsageCounts::default);
                 counts.present = true;
+                counts.billable_present = true;
                 counts.input_tokens = counts.input_tokens.saturating_add(normalized.input_tokens);
                 counts.output_tokens = counts
                     .output_tokens
@@ -168,6 +196,22 @@ impl RealtimeUsage {
                 counts.cache_read_input_tokens = counts
                     .cache_read_input_tokens
                     .saturating_add(normalized.cache_read_input_tokens);
+                if let Some(image_tokens) = normalized.input_image_tokens {
+                    counts.input_image_tokens = Some(
+                        counts
+                            .input_image_tokens
+                            .unwrap_or_default()
+                            .saturating_add(image_tokens),
+                    );
+                }
+                if let Some(image_tokens) = normalized.output_image_tokens {
+                    counts.output_image_tokens = Some(
+                        counts
+                            .output_image_tokens
+                            .unwrap_or_default()
+                            .saturating_add(image_tokens),
+                    );
+                }
             }
             RealtimeWebSocketKind::Gemini => {
                 let Some(usage) = value.get("usageMetadata").filter(|value| value.is_object())
@@ -176,12 +220,14 @@ impl RealtimeUsage {
                 };
                 let mut normalized = UsageCounts {
                     present: true,
+                    billable_present: true,
                     ..Default::default()
                 };
                 merge_usage_value(&mut normalized, usage);
                 // Live usageMetadata is cumulative for the session, unlike Realtime response.done.
                 self.counts = Some(UsageCounts {
                     present: true,
+                    billable_present: true,
                     input_tokens: normalized.input_tokens,
                     output_tokens: number(usage, "responseTokenCount")
                         .saturating_add(number(usage, "thoughtsTokenCount")),
@@ -219,6 +265,8 @@ mod tests {
             usage.observe(RealtimeWebSocketKind::Openai, &Bytes::from_static(br#"{"type":"response.done","response":{"usage":{"input_tokens":10,"output_tokens":3,"input_token_details":{"cached_tokens":4}}}}"#));
         }
         let counts = usage.counts.unwrap();
+        assert!(counts.present);
+        assert!(counts.billable_present);
         assert_eq!(
             (
                 counts.input_tokens,
@@ -227,6 +275,30 @@ mod tests {
             ),
             (12, 6, 8)
         );
+    }
+    #[test]
+    fn realtime_openai_usage_propagates_image_details_only_for_openai() {
+        let mut openai = RealtimeUsage::default();
+        openai.observe(
+            RealtimeWebSocketKind::Openai,
+            &Bytes::from_static(
+                br#"{"type":"response.done","response":{"usage":{"input_tokens":100,"output_tokens":7,"input_token_details":{"image_tokens":12},"output_tokens_details":{"image_tokens":4}}}}"#,
+            ),
+        );
+        let counts = openai.counts.unwrap();
+        assert_eq!(counts.input_image_tokens, Some(12));
+        assert_eq!(counts.output_image_tokens, Some(4));
+
+        let mut gemini = RealtimeUsage::default();
+        gemini.observe(
+            RealtimeWebSocketKind::Gemini,
+            &Bytes::from_static(
+                br#"{"usageMetadata":{"promptTokenCount":100,"responseTokenCount":7,"modalityTokenCount":[{"modality":"IMAGE","tokenCount":12}]}}"#,
+            ),
+        );
+        let counts = gemini.counts.unwrap();
+        assert_eq!(counts.input_image_tokens, None);
+        assert_eq!(counts.output_image_tokens, None);
     }
 
     #[test]

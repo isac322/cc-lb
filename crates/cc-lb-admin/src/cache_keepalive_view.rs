@@ -83,26 +83,30 @@ pub fn derive_activity_view(
     catalog: &PriceCatalog,
 ) -> CacheKeepaliveActivityView {
     let state = state_from_item(source.item);
-    let cycle_id = source.session.and_then(|session| session.cycle_id);
+    // The session row is the authoritative current-generation projection for
+    // detail views. List items normally carry the same cycle id, but older
+    // projections can omit or lag it while the session record is current.
+    // Preserve null-cycle legacy turns when they have no owned cycle evidence.
+    let cycle_id = source
+        .session
+        .and_then(|session| session.cycle_id)
+        .or(source.item.cycle_id);
     let mut records = source
         .turns
         .iter()
         .filter(|turn| {
-            cycle_id.is_none_or(|cycle_id| {
-                let has_cycle_linkage = source
-                    .evidence
-                    .iter()
-                    .any(|entry| entry.evidence_kind == "renewal" && entry.cycle_id.is_some());
-                !has_cycle_linkage
-                    || source.evidence.iter().any(|entry| {
-                        entry.evidence_kind == "renewal"
-                            && entry.cycle_id == Some(cycle_id)
-                            && entry
-                                .event_ref
-                                .as_deref()
-                                .is_some_and(|event_ref| event_ref == turn.source_ref_id)
-                    })
-            })
+            let Some(cycle_id) = cycle_id else {
+                return true;
+            };
+            if turn.cycle_id == Some(cycle_id) {
+                return true;
+            }
+            if turn.cycle_id.is_some() {
+                return false;
+            }
+            renewal_evidence_for_turn(turn, source.evidence)
+                .and_then(|renewal| renewal.cycle_id)
+                .is_none_or(|renewal_cycle_id| renewal_cycle_id == cycle_id)
         })
         .collect::<Vec<_>>();
     records.sort_by(|left, right| {
@@ -115,23 +119,57 @@ pub fn derive_activity_view(
         source.item.status,
         Some(cc_lb_storage_api::CacheKeepaliveSessionStatus::Active)
     );
+    let pending_source_ref_id = if is_active && cycle_id.is_some() {
+        records
+            .first()
+            .filter(|turn| {
+                renewal_evidence_for_turn(turn, source.evidence)
+                    .and_then(|renewal| renewal.cycle_id)
+                    == cycle_id
+            })
+            .map(|turn| turn.source_ref_id.as_str())
+    } else {
+        None
+    };
+    // A proven follow-up closes the active window for the newest turn. Keep
+    // the newest turn pending only while its current-cycle renewal is unresolved.
     let turns = records
         .iter()
         .enumerate()
         .map(|(index, record)| {
+            let pending = is_active
+                && index == 0
+                && (pending_source_ref_id.is_none()
+                    || (pending_source_ref_id == Some(record.source_ref_id.as_str())
+                        && !follow_up_proven(record, source.evidence)));
             let turn_number =
                 u32::try_from(records.len().saturating_sub(index)).unwrap_or(u32::MAX);
             activity_turn(
                 record,
                 turn_number,
-                is_active && index == 0,
+                pending,
                 catalog,
                 source.item.ttl,
                 source.evidence,
             )
         })
         .collect::<Vec<_>>();
-    let priced_turns = turns
+    let retained_turns = source
+        .turns
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            activity_turn(
+                record,
+                u32::try_from(source.turns.len().saturating_sub(index)).unwrap_or(u32::MAX),
+                false,
+                catalog,
+                source.item.ttl,
+                source.evidence,
+            )
+        })
+        .collect::<Vec<_>>();
+    let priced_turns = retained_turns
         .iter()
         .map(|turn| turn.pnl)
         .collect::<Option<Vec<_>>>();
@@ -140,11 +178,8 @@ pub fn derive_activity_view(
         (_, Some(turns)) => Some(sum_turn_pnl(&turns)),
         (_, None) => None,
     };
-    let (evidence_status, unknown_cycles) = evidence_status(
-        source.turns,
-        source.evidence,
-        is_active && turns.first().is_some_and(|turn| turn.pending),
-    );
+    let (evidence_status, unknown_cycles) =
+        evidence_status(source.turns, source.evidence, pending_source_ref_id);
     let total_spent_micros = source
         .turns
         .iter()
@@ -195,39 +230,40 @@ pub fn derive_activity_view(
 fn evidence_status(
     turns: &[CacheKeepaliveTurnRecord],
     evidence: &[CacheKeepaliveEvidenceRecord],
-    pending: bool,
+    pending_source_ref_id: Option<&str>,
 ) -> (String, u64) {
-    let renewals = evidence
-        .iter()
-        .filter(|entry| entry.evidence_kind == "renewal")
-        .collect::<Vec<_>>();
-    if turns.is_empty() && renewals.is_empty() {
+    if turns.is_empty()
+        && !evidence
+            .iter()
+            .any(|entry| entry.evidence_kind == "renewal")
+    {
         return ("none".to_owned(), 0);
     }
     let mut unknown_cycles = 0_u64;
     let mut observed = false;
+    let mut pending = false;
     for turn in turns {
-        let Some(renewal) = renewals.iter().find(|entry| {
-            entry
-                .event_ref
-                .as_deref()
-                .is_some_and(|event_ref| event_ref == turn.source_ref_id)
-        }) else {
+        let Some(renewal) = renewal_evidence_for_turn(turn, evidence) else {
             unknown_cycles = unknown_cycles.saturating_add(1);
             continue;
         };
         if !renewal_evidence_known(renewal) {
             unknown_cycles = unknown_cycles.saturating_add(1);
-        } else if follow_up_proven(turn, evidence) {
+        } else {
             observed = true;
+            if pending_source_ref_id == Some(turn.source_ref_id.as_str())
+                && !follow_up_proven(turn, evidence)
+            {
+                pending = true;
+            }
         }
     }
     if unknown_cycles > 0 {
         ("unknown".to_owned(), unknown_cycles)
-    } else if observed {
-        ("observed".to_owned(), 0)
     } else if pending {
         ("pending".to_owned(), 0)
+    } else if observed {
+        ("observed".to_owned(), 0)
     } else {
         ("none".to_owned(), 0)
     }
@@ -324,14 +360,16 @@ fn activity_turn(
     ttl: CacheTtl,
     evidence: &[CacheKeepaliveEvidenceRecord],
 ) -> CacheKeepaliveActivityTurn {
-    let evidence_known =
-        renewal_evidence_for_turn(record, evidence).is_some_and(renewal_evidence_known);
-    let followed_up = !pending && follow_up_proven(record, evidence) && evidence_known;
+    let renewal_evidence = renewal_evidence_for_turn(record, evidence);
+    let evidence_known = renewal_evidence.is_some_and(renewal_evidence_known);
+    let hit = record.hit_miss.eq_ignore_ascii_case("hit");
+    let followed_up = !pending && hit && follow_up_proven(record, evidence) && evidence_known;
+    let ttl = renewal_evidence.map_or(ttl, |renewal| renewal.ttl);
     let pnl = rates_from_catalog(catalog, &record.model, ttl).map(|rates| {
         derive_turn_pnl(
             CacheKeepaliveTurnPnlInput {
                 renewal_tokens: record.cache_read_input_tokens,
-                renewals: 1,
+                spent_micros: record.cost_micros,
                 followed_up,
                 pending,
             },
@@ -349,7 +387,7 @@ fn activity_turn(
         turn_number,
         time_ms: record.ts.saturating_mul(1_000),
         renewal_tokens: record.cache_read_input_tokens,
-        renewals: 1,
+        renewals: u32::from(hit),
         followed_up,
         pending,
         action,

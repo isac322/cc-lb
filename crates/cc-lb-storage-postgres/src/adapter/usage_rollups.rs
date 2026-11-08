@@ -14,6 +14,8 @@ use crate::{
 };
 
 const CHECKPOINT_ID: &str = "high_water";
+const COST_BACKFILL_UPPER_ID: &str = "cost_components_backfill_upper";
+const COST_BACKFILL_CURSOR_ID: &str = "cost_components_backfill_cursor";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
@@ -52,6 +54,12 @@ struct RollupDelta {
     upstream_body_ms_count: u64,
     upstream_body_ms_sum: u64,
     virtual_cost_micros: u64,
+    cost_input_micros: u64,
+    cost_output_micros: u64,
+    cost_cache_creation_5m_micros: u64,
+    cost_cache_creation_1h_micros: u64,
+    cost_cache_read_micros: u64,
+    cost_components_event_count: u64,
 }
 
 impl RollupDelta {
@@ -99,6 +107,33 @@ impl RollupDelta {
         self.virtual_cost_micros = self
             .virtual_cost_micros
             .saturating_add(event.cost_usd_micros.unwrap_or(0).max(0) as u64);
+        self.add_cost_components(event);
+    }
+
+    fn add_cost_components(&mut self, event: &RequestEvent) {
+        if event.cost_input_micros.is_some()
+            || event.cost_output_micros.is_some()
+            || event.cost_cache_creation_5m_micros.is_some()
+            || event.cost_cache_creation_1h_micros.is_some()
+            || event.cost_cache_read_micros.is_some()
+        {
+            self.cost_components_event_count = self.cost_components_event_count.saturating_add(1);
+            self.cost_input_micros = self
+                .cost_input_micros
+                .saturating_add(event.cost_input_micros.unwrap_or(0).max(0) as u64);
+            self.cost_output_micros = self
+                .cost_output_micros
+                .saturating_add(event.cost_output_micros.unwrap_or(0).max(0) as u64);
+            self.cost_cache_creation_5m_micros = self
+                .cost_cache_creation_5m_micros
+                .saturating_add(event.cost_cache_creation_5m_micros.unwrap_or(0).max(0) as u64);
+            self.cost_cache_creation_1h_micros = self
+                .cost_cache_creation_1h_micros
+                .saturating_add(event.cost_cache_creation_1h_micros.unwrap_or(0).max(0) as u64);
+            self.cost_cache_read_micros = self
+                .cost_cache_read_micros
+                .saturating_add(event.cost_cache_read_micros.unwrap_or(0).max(0) as u64);
+        }
     }
 }
 
@@ -165,7 +200,10 @@ impl UsageRollupStore for PostgresStorage {
               latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
               shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
               upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
-              upstream_body_ms_sum, virtual_cost_micros \
+              upstream_body_ms_sum, virtual_cost_micros, \
+              cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, \
+              cost_cache_creation_1h_micros, cost_cache_read_micros, \
+              cost_components_event_count \
               FROM usage_rollups_v2 \
               WHERE resolution = $1 AND bucket_start_unix_secs >= $2 AND bucket_start_unix_secs < $3 \
               ORDER BY bucket_start_unix_secs ASC",
@@ -267,13 +305,49 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     .await
     .map_err(map_sqlx_error)?
     .unwrap_or_else(|| (0, "0".to_owned()));
-
+    let upper_checkpoint = sqlx::query_as::<_, (i64, String)>(
+        "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id = $1",
+    )
+    .bind(COST_BACKFILL_UPPER_ID)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let cursor_checkpoint = sqlx::query_as::<_, (i64, String)>(
+        "SELECT value, value_xid::text FROM usage_rollup_checkpoints_v1 WHERE id = $1",
+    )
+    .bind(COST_BACKFILL_CURSOR_ID)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let (upper_seq, upper_xid, backfill_seq, backfill_xid) =
+        if let Some((upper_seq, upper_xid)) = upper_checkpoint {
+            let (backfill_seq, backfill_xid) = cursor_checkpoint.unwrap_or((0, "0".to_owned()));
+            (upper_seq, upper_xid, backfill_seq, backfill_xid)
+        } else {
+            sqlx::query(
+                "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) \
+                 VALUES ($1, $2, $3::xid8), ($4, $5, $6::xid8) \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(COST_BACKFILL_UPPER_ID)
+            .bind(previous_seq)
+            .bind(&previous_xid)
+            .bind(COST_BACKFILL_CURSOR_ID)
+            .bind(0_i64)
+            .bind("0")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            (previous_seq, previous_xid.clone(), 0, "0".to_owned())
+        };
+    let backfill_has_work = (upper_seq > 0 || upper_xid != "0")
+        && (backfill_xid.as_str(), backfill_seq) != (upper_xid.as_str(), upper_seq);
     // Page by the composite (tx_id, seq) cursor below the snapshot xmin horizon,
     // never by seq alone: a lower seq can COMMIT after a higher seq (BIGSERIAL is
     // assigned at INSERT, visible at COMMIT), so a seq high-water-mark would skip
     // it forever. xmin never advances past an in-flight txn, so tx_id order does not.
     let rows = sqlx::query(
-        "SELECT seq, tx_id::text AS tx_id_text, EXTRACT(EPOCH FROM ts)::bigint AS ts_secs, source_kind, event_kind, list_ts_ms, principal_id, upstream_id, upstream_name, model, list_status, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, list_cost_usd_micros, duration_ms, proxy_setup_ms, shape_ms, sign_ms, upstream_ttfb_ms, upstream_body_ms, error_code FROM request_events_v1 \
+        "SELECT seq, tx_id::text AS tx_id_text, EXTRACT(EPOCH FROM ts)::bigint AS ts_secs, source_kind, event_kind, list_ts_ms, principal_id, upstream_id, upstream_name, model, list_status, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, duration_ms, proxy_setup_ms, shape_ms, sign_ms, upstream_ttfb_ms, upstream_body_ms, error_code FROM request_events_v1 \
           WHERE (tx_id, seq) > ($1::xid8, $2) \
             AND tx_id < pg_snapshot_xmin(pg_current_snapshot()) \
           ORDER BY tx_id ASC, seq ASC LIMIT $3",
@@ -285,16 +359,11 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     .await
     .map_err(map_sqlx_error)?;
 
-    if rows.is_empty() {
-        tx.commit().await.map_err(map_sqlx_error)?;
-        return Ok(UsageRollupRun {
-            processed_events: 0,
-            updated_rollups: 0,
-            checkpoint: Some(i64_to_u64(previous_seq, "usage rollup checkpoint")?),
-        });
-    }
-
-    let upstreams = load_upstream_identities(&mut tx).await?;
+    let upstreams = if rows.is_empty() && !backfill_has_work {
+        HashMap::new()
+    } else {
+        load_upstream_identities(&mut tx).await?
+    };
     // Rows arrive in (tx_id, seq) order, so the final row is the new cursor.
     let mut cursor_seq = previous_seq;
     let mut cursor_xid = previous_xid;
@@ -358,6 +427,21 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             cost_usd_micros: row
                 .try_get("list_cost_usd_micros")
                 .map_err(map_sqlx_error)?,
+            cost_input_micros: row
+                .try_get("list_cost_input_micros")
+                .map_err(map_sqlx_error)?,
+            cost_output_micros: row
+                .try_get("list_cost_output_micros")
+                .map_err(map_sqlx_error)?,
+            cost_cache_creation_5m_micros: row
+                .try_get("list_cost_cache_creation_5m_micros")
+                .map_err(map_sqlx_error)?,
+            cost_cache_creation_1h_micros: row
+                .try_get("list_cost_cache_creation_1h_micros")
+                .map_err(map_sqlx_error)?,
+            cost_cache_read_micros: row
+                .try_get("list_cost_cache_read_micros")
+                .map_err(map_sqlx_error)?,
             duration_ms: i64_to_u64(
                 row.try_get("duration_ms").map_err(map_sqlx_error)?,
                 "request event duration_ms",
@@ -413,9 +497,91 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         }
     }
 
-    let updated_rollups = u64::try_from(deltas.len()).map_err(|_| StorageError::Fatal {
-        message: "usage rollup aggregate count cannot be represented as u64".to_owned(),
-    })?;
+    let mut backfill_deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
+    let mut backfill_cursor_seq = backfill_seq;
+    let mut backfill_cursor_xid = backfill_xid.clone();
+    let backfill_rows = if backfill_has_work {
+        sqlx::query(
+            "SELECT seq, tx_id::text AS tx_id_text, EXTRACT(EPOCH FROM ts)::bigint AS ts_secs, \
+             list_ts_ms, principal_id, upstream_id, upstream_name, model, \
+             list_cost_input_micros, list_cost_output_micros, \
+             list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+             list_cost_cache_read_micros \
+             FROM request_events_v1 \
+             WHERE (tx_id, seq) > ($1::xid8, $2) \
+               AND (tx_id, seq) <= ($3::xid8, $4) \
+             ORDER BY tx_id ASC, seq ASC LIMIT $5",
+        )
+        .bind(&backfill_xid)
+        .bind(backfill_seq)
+        .bind(&upper_xid)
+        .bind(upper_seq)
+        .bind(ROLLUP_BATCH_LIMIT)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+    } else {
+        Vec::new()
+    };
+    for row in &backfill_rows {
+        let event = RequestEvent {
+            ts: i64_to_u64(
+                row.try_get("ts_secs").map_err(map_sqlx_error)?,
+                "request event ts",
+            )?,
+            ts_ms: row
+                .try_get::<Option<i64>, _>("list_ts_ms")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event ts_ms"))
+                .transpose()?,
+            principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
+            upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
+            upstream_name: row.try_get("upstream_name").map_err(map_sqlx_error)?,
+            model: row.try_get("model").map_err(map_sqlx_error)?,
+            cost_input_micros: row
+                .try_get("list_cost_input_micros")
+                .map_err(map_sqlx_error)?,
+            cost_output_micros: row
+                .try_get("list_cost_output_micros")
+                .map_err(map_sqlx_error)?,
+            cost_cache_creation_5m_micros: row
+                .try_get("list_cost_cache_creation_5m_micros")
+                .map_err(map_sqlx_error)?,
+            cost_cache_creation_1h_micros: row
+                .try_get("list_cost_cache_creation_1h_micros")
+                .map_err(map_sqlx_error)?,
+            cost_cache_read_micros: row
+                .try_get("list_cost_cache_read_micros")
+                .map_err(map_sqlx_error)?,
+            ..RequestEvent::default()
+        };
+        let upstream = resolve_upstream_identity(&event, event.upstream_id, &upstreams);
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            let key = RollupKey {
+                resolution,
+                bucket_start: bucket_start(resolution, event_ts_secs(&event)),
+                principal: normalize_usage_rollup_dimension(event.principal_id.as_deref()),
+                upstream_id: upstream.id,
+                upstream_name: normalize_usage_rollup_dimension(Some(&upstream.name)),
+                model: normalize_usage_rollup_dimension(event.model.as_deref()),
+            };
+            backfill_deltas
+                .entry(key)
+                .or_default()
+                .add_cost_components(&event);
+        }
+        backfill_cursor_seq = row.try_get("seq").map_err(map_sqlx_error)?;
+        backfill_cursor_xid = row.try_get("tx_id_text").map_err(map_sqlx_error)?;
+    }
+    if backfill_has_work && backfill_rows.len() < ROLLUP_BATCH_LIMIT as usize {
+        backfill_cursor_seq = upper_seq;
+        backfill_cursor_xid = upper_xid.clone();
+    }
+
+    let updated_rollups =
+        u64::try_from(deltas.len() + backfill_deltas.len()).map_err(|_| StorageError::Fatal {
+            message: "usage rollup aggregate count cannot be represented as u64".to_owned(),
+        })?;
 
     for (key, delta) in deltas {
         sqlx::query(
@@ -426,9 +592,12 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
                shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
                upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
-               upstream_body_ms_sum, virtual_cost_micros, updated_at) \
+               upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
+               cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, cost_cache_read_micros, \
+               cost_components_event_count, updated_at) \
               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                      $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NOW()) \
+                      $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, \
+                      $28, $29, $30, $31, $32, $33, NOW()) \
               ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) DO UPDATE \
               SET upstream_name = EXCLUDED.upstream_name, \
                   request_count = usage_rollups_v2.request_count + EXCLUDED.request_count, \
@@ -460,6 +629,12 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                   upstream_body_ms_count = usage_rollups_v2.upstream_body_ms_count + EXCLUDED.upstream_body_ms_count, \
                   upstream_body_ms_sum = usage_rollups_v2.upstream_body_ms_sum + EXCLUDED.upstream_body_ms_sum, \
                   virtual_cost_micros = usage_rollups_v2.virtual_cost_micros + EXCLUDED.virtual_cost_micros, \
+                  cost_input_micros = usage_rollups_v2.cost_input_micros + EXCLUDED.cost_input_micros, \
+                  cost_output_micros = usage_rollups_v2.cost_output_micros + EXCLUDED.cost_output_micros, \
+                  cost_cache_creation_5m_micros = usage_rollups_v2.cost_cache_creation_5m_micros + EXCLUDED.cost_cache_creation_5m_micros, \
+                  cost_cache_creation_1h_micros = usage_rollups_v2.cost_cache_creation_1h_micros + EXCLUDED.cost_cache_creation_1h_micros, \
+                  cost_cache_read_micros = usage_rollups_v2.cost_cache_read_micros + EXCLUDED.cost_cache_read_micros, \
+                  cost_components_event_count = usage_rollups_v2.cost_components_event_count + EXCLUDED.cost_components_event_count, \
                   updated_at = NOW()",
         )
         .bind(key.resolution.as_str())
@@ -489,6 +664,73 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .bind(u64_to_i64(delta.upstream_body_ms_count, "rollup upstream_body_ms_count")?)
         .bind(u64_to_i64(delta.upstream_body_ms_sum, "rollup upstream_body_ms_sum")?)
         .bind(u64_to_i64(delta.virtual_cost_micros, "rollup virtual_cost_micros")?)
+        .bind(u64_to_i64(delta.cost_input_micros, "rollup cost_input_micros")?)
+        .bind(u64_to_i64(delta.cost_output_micros, "rollup cost_output_micros")?)
+        .bind(u64_to_i64(
+            delta.cost_cache_creation_5m_micros,
+            "rollup cost_cache_creation_5m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_creation_1h_micros,
+            "rollup cost_cache_creation_1h_micros",
+        )?)
+        .bind(u64_to_i64(delta.cost_cache_read_micros, "rollup cost_cache_read_micros")?)
+        .bind(u64_to_i64(
+            delta.cost_components_event_count,
+            "rollup cost_components_event_count",
+        )?)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    for (key, delta) in backfill_deltas {
+        if delta.cost_components_event_count == 0 {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE usage_rollups_v2 \
+             SET cost_input_micros = cost_input_micros + $1, \
+                 cost_output_micros = cost_output_micros + $2, \
+                 cost_cache_creation_5m_micros = cost_cache_creation_5m_micros + $3, \
+                 cost_cache_creation_1h_micros = cost_cache_creation_1h_micros + $4, \
+                 cost_cache_read_micros = cost_cache_read_micros + $5, \
+                 cost_components_event_count = cost_components_event_count + $6, \
+                 updated_at = NOW() \
+             WHERE resolution = $7 AND bucket_start_unix_secs = $8 AND principal_id = $9 \
+               AND upstream_id = $10 AND model = $11",
+        )
+        .bind(u64_to_i64(
+            delta.cost_input_micros,
+            "backfill cost_input_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_output_micros,
+            "backfill cost_output_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_creation_5m_micros,
+            "backfill cost_cache_creation_5m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_creation_1h_micros,
+            "backfill cost_cache_creation_1h_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_read_micros,
+            "backfill cost_cache_read_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_components_event_count,
+            "backfill cost_components_event_count",
+        )?)
+        .bind(key.resolution.as_str())
+        .bind(u64_to_i64(
+            key.bucket_start,
+            "backfill rollup bucket_start",
+        )?)
+        .bind(&key.principal)
+        .bind(key.upstream_id)
+        .bind(&key.model)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -516,17 +758,31 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .map_err(map_sqlx_error)?;
     }
 
-    sqlx::query(
-        "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) VALUES ($1, $2, $3::xid8) \
-          ON CONFLICT (id) DO UPDATE SET value = $2, value_xid = $3::xid8 \
-          WHERE (usage_rollup_checkpoints_v1.value_xid, usage_rollup_checkpoints_v1.value) < ($3::xid8, $2)",
-    )
-    .bind(CHECKPOINT_ID)
-    .bind(cursor_seq)
-    .bind(&cursor_xid)
-    .execute(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
+    if !rows.is_empty() {
+        sqlx::query(
+            "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) VALUES ($1, $2, $3::xid8) \
+              ON CONFLICT (id) DO UPDATE SET value = $2, value_xid = $3::xid8 \
+              WHERE (usage_rollup_checkpoints_v1.value_xid, usage_rollup_checkpoints_v1.value) < ($3::xid8, $2)",
+        )
+        .bind(CHECKPOINT_ID)
+        .bind(cursor_seq)
+        .bind(&cursor_xid)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    if backfill_has_work {
+        sqlx::query(
+            "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) VALUES ($1, $2, $3::xid8) \
+              ON CONFLICT (id) DO UPDATE SET value = $2, value_xid = $3::xid8",
+        )
+        .bind(COST_BACKFILL_CURSOR_ID)
+        .bind(backfill_cursor_seq)
+        .bind(&backfill_cursor_xid)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
 
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(UsageRollupRun {
@@ -692,6 +948,34 @@ fn row_to_usage_rollup(row: PgRow) -> StorageResult<UsageRollup> {
         virtual_cost_micros: i64_to_u64(
             row.try_get("virtual_cost_micros").map_err(map_sqlx_error)?,
             "rollup virtual_cost_micros",
+        )?,
+        cost_input_micros: i64_to_u64(
+            row.try_get("cost_input_micros").map_err(map_sqlx_error)?,
+            "rollup cost_input_micros",
+        )?,
+        cost_output_micros: i64_to_u64(
+            row.try_get("cost_output_micros").map_err(map_sqlx_error)?,
+            "rollup cost_output_micros",
+        )?,
+        cost_cache_creation_5m_micros: i64_to_u64(
+            row.try_get("cost_cache_creation_5m_micros")
+                .map_err(map_sqlx_error)?,
+            "rollup cost_cache_creation_5m_micros",
+        )?,
+        cost_cache_creation_1h_micros: i64_to_u64(
+            row.try_get("cost_cache_creation_1h_micros")
+                .map_err(map_sqlx_error)?,
+            "rollup cost_cache_creation_1h_micros",
+        )?,
+        cost_cache_read_micros: i64_to_u64(
+            row.try_get("cost_cache_read_micros")
+                .map_err(map_sqlx_error)?,
+            "rollup cost_cache_read_micros",
+        )?,
+        cost_components_event_count: i64_to_u64(
+            row.try_get("cost_components_event_count")
+                .map_err(map_sqlx_error)?,
+            "rollup cost_components_event_count",
         )?,
     })
 }

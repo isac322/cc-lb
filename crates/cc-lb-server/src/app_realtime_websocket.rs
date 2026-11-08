@@ -25,6 +25,7 @@ type RealtimeProvider = WebSocketStream<MaybeTlsStream<TcpStream>>;
 fn websocket_http_error(error: &WebSocketError) -> Response<Body> {
     let mut response = Response::new(Body::from(error.to_bytes()));
     *response.status_mut() = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    error.copy_provider_headers(response.headers_mut());
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
@@ -82,30 +83,7 @@ async fn connect_realtime_provider(
                     "could not build provider WebSocket request",
                 )
             })?;
-        let (upstream, _) = tokio::time::timeout(
-            WS_PROVIDER_CONNECT_TIMEOUT,
-            connect_async_with_config(
-                request,
-                Some(responses_websocket_config(state.body_caps.messages)),
-                false,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            WebSocketError::new(
-                504,
-                "upstream_unavailable",
-                "provider WebSocket connection timed out",
-            )
-        })?
-        .map_err(|_| {
-            WebSocketError::new(
-                502,
-                "upstream_unavailable",
-                "provider WebSocket connection failed",
-            )
-        })?;
-        Ok((upstream, guard))
+        connect_provider_websocket(state, session.candidate.upstream_id, request, guard).await
     };
     tokio::select! {
         result = operation => result,
@@ -127,7 +105,7 @@ pub(super) async fn openai_realtime_websocket_handler(
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error);
+                .reject_responses_websocket_authentication(&error, "/v1/realtime");
         }
     };
     let model = uri.query().and_then(|query| {
@@ -161,7 +139,7 @@ pub(super) async fn openai_realtime_websocket_handler(
         Ok(connection) => connection,
         Err(error) => {
             let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
-            session.finish(RealtimeUsage::default(), status);
+            session.finish_handshake(status);
             return websocket_http_error(&error);
         }
     };
@@ -192,12 +170,17 @@ pub(super) async fn gemini_live_websocket_handler(
     let Some(guard) = state.drain_controller.try_track() else {
         return websocket_http_error(&WebSocketError::new(503, "draining", "server is draining"));
     };
+    let path = uri
+        .path()
+        .strip_prefix("/gemini")
+        .unwrap_or(uri.path())
+        .to_owned();
     let auth = match state.lifecycle.authenticate(&headers).await {
         Ok(auth) => auth,
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error);
+                .reject_responses_websocket_authentication(&error, &path);
         }
     };
     if uri.path()
@@ -211,11 +194,6 @@ pub(super) async fn gemini_live_websocket_handler(
         );
     }
     // OriginalUri retains the outer provider prefix even inside axum::nest.
-    let path = uri
-        .path()
-        .strip_prefix("/gemini")
-        .unwrap_or(uri.path())
-        .to_owned();
     let observation = state.lifecycle.begin_realtime_websocket(&auth, &path);
     // The setup frame supplies the model, but cannot make a disabled, unbound,
     // or OAuth-only upstream eligible for Live. Reject that structural absence
@@ -313,7 +291,7 @@ pub(super) async fn gemini_live_websocket_handler(
                 Err(error) => {
                     let status =
                         StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
-                    session.finish(RealtimeUsage::default(), status);
+                    session.finish_handshake(status);
                     let _ = downstream.send(websocket_error_message(&error)).await;
                     let _ = downstream.send(Message::Close(None)).now_or_never();
                     return;

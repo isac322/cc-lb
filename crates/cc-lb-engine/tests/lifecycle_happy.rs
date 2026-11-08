@@ -610,18 +610,69 @@ fn oauth_upstream_record() -> UpstreamRecord {
 
 // USD limit admission boundary.
 //
-// Every priced test model costs $1/M input and $10/M output, so with the
+// Most priced test models cost $1/M input and $10/M output, so with the
 // lifecycle's fixed 4,000-token input estimate a request reserves
-// `4_000 + 10 * max_output` micros. A 2,000-token output cap therefore
-// reserves 24,000 micros; no output cap reserves 4,000 micros.
+// `4_000 + 10 * max_output` micros. The image model below costs $5/M generic
+// input and $8/M image input.
 const PRICED_GEMINI_MODEL: &str = "gemini-limit-test";
 const UNPRICED_GEMINI_MODEL: &str = "gemini-unpriced-test";
 const PRICED_OPENAI_MODEL: &str = "gpt-limit-test";
+const PRICED_OPENAI_IMAGE_MODEL: &str = "gpt-image-limit-test";
+
 /// Rolling alias whose canonical dated form is deliberately left unpriced: a
 /// limit lookup that canonicalizes the raw body model misses the price.
 const PRICED_RAW_CLAUDE_ALIAS: &str = "claude-sonnet-4-5";
 const COST_WITH_2000_OUTPUT_MICROS: i64 = 24_000;
 const COST_WITHOUT_OUTPUT_MICROS: i64 = 4_000;
+
+#[tokio::test]
+async fn openai_image_multipart_admission_uses_image_rate_floor() {
+    for path in ["/v1/images/edits", "/v1/images/variations"] {
+        for (cap_micros, expected_status, expected_calls) in [
+            (31_999, StatusCode::TOO_MANY_REQUESTS, 0),
+            (32_000, StatusCode::OK, 1),
+        ] {
+            let state = TestState::default();
+            let lifecycle =
+                usd_limited_lifecycle(StorageUpstreamKind::OpenaiApiKey, cap_micros, &state);
+            let body = Bytes::from(format!(
+                "--image-boundary\r\n\
+                 Content-Disposition: form-data; name=\"model\"\r\n\r\n\
+                 {PRICED_OPENAI_IMAGE_MODEL}\r\n\
+                 --image-boundary\r\n\
+                 Content-Disposition: form-data; name=\"file\"; filename=\"input.png\"\r\n\
+                 Content-Type: image/png\r\n\r\n\
+                 image-bytes\r\n\
+                 --image-boundary--\r\n"
+            ));
+            let mut request = http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("x-api-key", managed_api_key())
+                .header(
+                    http::header::CONTENT_TYPE,
+                    "multipart/form-data; boundary=image-boundary",
+                )
+                .body(body)
+                .expect("OpenAI Images multipart request builds");
+            request
+                .extensions_mut()
+                .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+            let response = handle(&lifecycle, request).await;
+            if expected_status == StatusCode::OK {
+                let (status, _headers, body) = collect_body(response).await;
+                assert_eq!(status, expected_status, "path {path}, body: {body:?}");
+            } else {
+                assert_cost_rate_limited(response).await;
+            }
+            assert_eq!(
+                state.upstream_calls.load(Ordering::Relaxed),
+                expected_calls,
+                "path {path}, cap {cap_micros}"
+            );
+        }
+    }
+}
 
 #[tokio::test]
 async fn gemini_url_model_with_nested_output_cap_is_admitted_under_usd_limit() {
@@ -711,8 +762,9 @@ async fn unpriced_gemini_url_model_fails_closed_naming_the_requested_model() {
 }
 
 #[tokio::test]
-async fn gemini_top_level_output_cap_takes_precedence_over_nested_cap() {
-    // Given a USD cap that only admits the 1-token top-level output cap.
+async fn gemini_native_output_cap_dominates_wrong_provider_fields_for_usd_limit() {
+    // A Gemini request's native generationConfig bound must win over a
+    // top-level OpenAI/Anthropic-shaped field.
     let state = TestState::default();
     let lifecycle = usd_limited_lifecycle(
         StorageUpstreamKind::GeminiApiKey,
@@ -720,7 +772,6 @@ async fn gemini_top_level_output_cap_takes_precedence_over_nested_cap() {
         &state,
     );
 
-    // When both a top-level and a nested output cap are present.
     let response = handle(
         &lifecycle,
         gemini_request(
@@ -730,10 +781,10 @@ async fn gemini_top_level_output_cap_takes_precedence_over_nested_cap() {
     )
     .await;
 
-    // Then the top-level cap is reserved and the request is dispatched.
-    let (status, _headers, body) = collect_body(response).await;
-    assert_eq!(status, StatusCode::OK, "body: {body:?}");
-    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+    // The native 2,000-token bound is what the provider honors, so the USD
+    // limit rejects the request before dispatch.
+    assert_cost_rate_limited(response).await;
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -846,6 +897,347 @@ async fn openai_max_output_tokens_drives_usd_limit_admission_and_rejection() {
     }
 }
 
+#[tokio::test]
+async fn provider_output_cap_requires_a_provider_honored_generation_bound() {
+    // QA-01/02: an output-limited key rejects generation requests whose
+    // provider-specific output bound is absent, null, or malformed.
+    let cases = [
+        (
+            "responses absent",
+            StorageUpstreamKind::OpenaiApiKey,
+            "/v1/responses",
+            serde_json::json!({"model":"gpt-limit-test","input":"hi"}),
+        ),
+        (
+            "responses null",
+            StorageUpstreamKind::OpenaiApiKey,
+            "/v1/responses",
+            serde_json::json!({"model":"gpt-limit-test","max_output_tokens":null,"input":"hi"}),
+        ),
+        (
+            "responses wrong type",
+            StorageUpstreamKind::OpenaiApiKey,
+            "/v1/responses",
+            serde_json::json!({"model":"gpt-limit-test","max_output_tokens":"1","input":"hi"}),
+        ),
+        (
+            "responses ignored max_tokens",
+            StorageUpstreamKind::OpenaiApiKey,
+            "/v1/responses",
+            serde_json::json!({"model":"gpt-limit-test","max_tokens":1,"input":"hi"}),
+        ),
+        (
+            "gemini absent",
+            StorageUpstreamKind::GeminiApiKey,
+            "/v1beta/models/gemini-limit-test:generateContent",
+            serde_json::json!({"contents":[]}),
+        ),
+        (
+            "gemini empty generation config",
+            StorageUpstreamKind::GeminiApiKey,
+            "/v1beta/models/gemini-limit-test:generateContent",
+            serde_json::json!({"contents":[],"generationConfig":{}}),
+        ),
+        (
+            "gemini null generation config",
+            StorageUpstreamKind::GeminiApiKey,
+            "/v1beta/models/gemini-limit-test:generateContent",
+            serde_json::json!({"contents":[],"generationConfig":null}),
+        ),
+        (
+            "gemini wrong generation config type",
+            StorageUpstreamKind::GeminiApiKey,
+            "/v1beta/models/gemini-limit-test:generateContent",
+            serde_json::json!({"contents":[],"generationConfig":[]}),
+        ),
+        (
+            "gemini stream absent",
+            StorageUpstreamKind::GeminiApiKey,
+            "/v1beta/models/gemini-limit-test:streamGenerateContent",
+            serde_json::json!({"contents":[],"stream":true}),
+        ),
+        (
+            "gemini ignored max_tokens",
+            StorageUpstreamKind::GeminiApiKey,
+            "/v1beta/models/gemini-limit-test:generateContent",
+            serde_json::json!({"contents":[],"max_tokens":1}),
+        ),
+    ];
+
+    for (name, kind, path, body) in cases {
+        let state = TestState::default();
+        let lifecycle = output_limited_lifecycle(kind, 1, &state);
+        let response = handle(
+            &lifecycle,
+            provider_post_request(path, Bytes::from(body.to_string())),
+        )
+        .await;
+        assert_output_cap_rejected(response).await;
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            0,
+            "{name} dispatched upstream"
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProviderOutputCase {
+    Responses,
+    Gemini,
+    AnthropicMessages,
+}
+
+fn provider_output_request(
+    case: ProviderOutputCase,
+    max_tokens: i64,
+) -> (StorageUpstreamKind, http::Request<Bytes>) {
+    match case {
+        ProviderOutputCase::Responses => (
+            StorageUpstreamKind::OpenaiApiKey,
+            provider_post_request(
+                "/v1/responses",
+                Bytes::from(
+                    serde_json::json!({
+                        "model": PRICED_OPENAI_MODEL,
+                        "max_output_tokens": max_tokens,
+                        "input": "hi"
+                    })
+                    .to_string(),
+                ),
+            ),
+        ),
+        ProviderOutputCase::Gemini => (
+            StorageUpstreamKind::GeminiApiKey,
+            provider_post_request(
+                "/v1beta/models/gemini-limit-test:generateContent",
+                Bytes::from(
+                    serde_json::json!({
+                        "contents": [],
+                        "generationConfig": {"maxOutputTokens": max_tokens}
+                    })
+                    .to_string(),
+                ),
+            ),
+        ),
+        ProviderOutputCase::AnthropicMessages => (
+            StorageUpstreamKind::AnthropicApiKey,
+            provider_post_request(
+                "/v1/messages",
+                Bytes::from(
+                    serde_json::json!({
+                        "model": PRICED_RAW_CLAUDE_ALIAS,
+                        "max_tokens": max_tokens,
+                        "messages": []
+                    })
+                    .to_string(),
+                ),
+            ),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn provider_output_cap_accepts_exact_native_caps_and_rejects_larger_caps() {
+    // QA-03: each operation uses the bound its provider actually honors.
+    for (case, name) in [
+        (ProviderOutputCase::Responses, "responses"),
+        (ProviderOutputCase::Gemini, "gemini"),
+        (ProviderOutputCase::AnthropicMessages, "anthropic messages"),
+    ] {
+        for (requested, expected_status, expected_calls) in [
+            (1_i64, StatusCode::OK, 1_u64),
+            (2_i64, StatusCode::BAD_REQUEST, 0_u64),
+        ] {
+            let state = TestState::default();
+            let (kind, request) = provider_output_request(case, requested);
+            let lifecycle = output_limited_lifecycle(kind, 1, &state);
+            let response = handle(&lifecycle, request).await;
+            if expected_status == StatusCode::BAD_REQUEST {
+                assert_output_cap_rejected(response).await;
+            } else {
+                let (status, _headers, body) = collect_body(response).await;
+                assert_eq!(status, expected_status, "{name}: {body:?}");
+            }
+            assert_eq!(
+                state.upstream_calls.load(Ordering::Relaxed),
+                expected_calls,
+                "{name} requested={requested}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn uncapped_output_total_token_admission_remains_input_only() {
+    // QA-04: a key with no OutputTokens limit retains the existing input-only
+    // behavior for a request that omits a provider output bound.
+    let state = TestState::default();
+    let lifecycle = limited_lifecycle(
+        StorageUpstreamKind::OpenaiApiKey,
+        vec![Limit {
+            kind: LimitKind::TotalTokens,
+            window_secs: 60,
+            cap_micros: 4_000,
+        }],
+        &state,
+        None,
+    );
+    let response = handle(
+        &lifecycle,
+        provider_post_request(
+            "/v1/responses",
+            Bytes::from_static(br#"{"model":"gpt-limit-test","input":"hi"}"#),
+        ),
+    )
+    .await;
+    let (status, _headers, body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn provider_output_cap_does_not_charge_non_generating_operations() {
+    // QA-05: token counting has no generated output and remains admissible
+    // under an output cap of zero.
+    let state = TestState::default();
+    let lifecycle = output_limited_lifecycle(StorageUpstreamKind::GeminiApiKey, 0, &state);
+    let response = handle(
+        &lifecycle,
+        provider_post_request(
+            "/v1beta/models/gemini-limit-test:countTokens",
+            Bytes::from_static(br#"{"contents":[]}"#),
+        ),
+    )
+    .await;
+    let (status, _headers, body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn anthropic_count_tokens_does_not_charge_non_generating_operations() {
+    let state = TestState::default();
+    let lifecycle = output_limited_lifecycle(StorageUpstreamKind::AnthropicApiKey, 0, &state);
+    let response = handle(
+        &lifecycle,
+        provider_post_request(
+            "/v1/messages/count_tokens",
+            Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+        ),
+    )
+    .await;
+    let (status, _headers, body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+}
+
+fn provider_post_request(path: &str, body: Bytes) -> http::Request<Bytes> {
+    http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("x-api-key", managed_api_key())
+        .body(body)
+        .expect("provider request builds")
+}
+
+#[tokio::test]
+async fn rejected_provider_output_cap_does_not_consume_request_or_concurrent_reservations() {
+    // QA-08: a missing provider cap is rejected before Requests/Concurrent
+    // reservations, allowing the following valid request through.
+    let state = TestState::default();
+    let lifecycle = limited_lifecycle(
+        StorageUpstreamKind::AnthropicApiKey,
+        vec![
+            Limit {
+                kind: LimitKind::OutputTokens,
+                window_secs: 60,
+                cap_micros: 1,
+            },
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 1,
+            },
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            },
+        ],
+        &state,
+        None,
+    );
+    let rejected = handle(
+        &lifecycle,
+        provider_post_request(
+            "/v1/messages",
+            Bytes::from_static(br#"{"model":"claude-sonnet-4-5","messages":[]}"#),
+        ),
+    )
+    .await;
+    assert_output_cap_rejected(rejected).await;
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+
+    let admitted = handle(
+        &lifecycle,
+        provider_post_request(
+            "/v1/messages",
+            Bytes::from_static(br#"{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[]}"#),
+        ),
+    )
+    .await;
+    let (status, _headers, body) = collect_body(admitted).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+}
+#[tokio::test]
+async fn openai_chat_max_completion_tokens_respects_output_token_limit_boundary() {
+    for (cap, expected_status, expected_calls) in [
+        (2_000, StatusCode::OK, 1),
+        (1_999, StatusCode::BAD_REQUEST, 0),
+    ] {
+        // Given an OpenAI Chat Completions request reserving 2,000 output
+        // tokens and a limit at, or just below, that reservation.
+        let state = TestState::default();
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::OpenaiApiKey,
+            vec![Limit {
+                kind: LimitKind::OutputTokens,
+                window_secs: 60,
+                cap_micros: cap,
+            }],
+            &state,
+            None,
+        );
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("x-api-key", managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-limit-test","max_completion_tokens":2000,"messages":[]}"#,
+            ))
+            .expect("OpenAI Chat Completions request builds");
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+        let response = handle(&lifecycle, request).await;
+        if expected_status == StatusCode::OK {
+            let (status, _headers, body) = collect_body(response).await;
+            assert_eq!(status, expected_status, "cap {cap}, body: {body:?}");
+        } else {
+            assert_local_limit_retryability(response, expected_status, None, None, None).await;
+        }
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            expected_calls,
+            "cap {cap}"
+        );
+    }
+}
+
 struct CatalogLimitCostEstimator {
     catalog: Arc<PriceCatalog>,
 }
@@ -883,6 +1275,29 @@ impl LimitCostEstimator for CatalogLimitCostEstimator {
             )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+
+    fn estimate_max_with_cache_and_images(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache_and_images(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                use_image_rates,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
     fn estimate_max_with_local_cache(
         &self,
         model: &str,
@@ -894,22 +1309,49 @@ impl LimitCostEstimator for CatalogLimitCostEstimator {
             .estimate_max_with_local_cache(model, input, max_output, service_tier)
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+    fn estimate_max_with_local_cache_and_images(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache_and_images(
+                model,
+                input,
+                max_output,
+                use_image_rates,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
 }
 
 fn priced_catalog() -> Arc<PriceCatalog> {
     let models = [
         PRICED_GEMINI_MODEL,
         PRICED_OPENAI_MODEL,
+        PRICED_OPENAI_IMAGE_MODEL,
         PRICED_RAW_CLAUDE_ALIAS,
     ]
     .into_iter()
     .map(|model| {
+        let image_rate =
+            (model == PRICED_OPENAI_IMAGE_MODEL).then(|| UsdPerMillion::from_whole_usd(8));
         (
             model.to_owned(),
             Pricing {
                 model: model.to_owned(),
-                input_per_million_usd: UsdPerMillion::from_whole_usd(1),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(if image_rate.is_some() {
+                    5
+                } else {
+                    1
+                }),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(10),
+                input_image_per_million_usd: image_rate,
+                output_image_per_million_usd: None,
                 by_tier: BTreeMap::new(),
             },
         )
@@ -969,6 +1411,34 @@ fn limited_lifecycle(
         dispatch,
         Some("http://upstream.local/".parse().expect("test URL parses")),
     )
+}
+
+fn output_limited_lifecycle(
+    kind: StorageUpstreamKind,
+    cap_tokens: i64,
+    state: &TestState,
+) -> Lifecycle {
+    limited_lifecycle(
+        kind,
+        vec![Limit {
+            kind: LimitKind::OutputTokens,
+            window_secs: 60,
+            cap_micros: cap_tokens,
+        }],
+        state,
+        None,
+    )
+}
+
+async fn assert_output_cap_rejected(response: http::Response<axum::body::Body>) {
+    let (status, headers, body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body:?}");
+    assert!(!headers.contains_key("x-should-retry"));
+    assert!(!headers.contains_key(http::header::RETRY_AFTER));
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert_eq!(body["error"]["limit_kind"], serde_json::Value::Null);
+    assert!(body["error"].get("retry_after_seconds").is_none());
 }
 
 fn limited_lifecycle_at(

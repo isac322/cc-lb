@@ -1,5 +1,6 @@
 use crate::common::{
-    TestAuthn, TestLifecycleBus, TestState, collect_body, messages_request, stored_request_events,
+    TestAuthn, TestLifecycleBus, TestState, collect_body, managed_api_key, messages_request,
+    stored_request_events,
 };
 
 use std::collections::{HashMap, VecDeque};
@@ -27,7 +28,9 @@ use cc_lb_engine::{
     spawn_lifecycle_subscription_quota_subscriber,
 };
 use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind};
-use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
+use cc_lb_signer_anthropic_key::{
+    AnthropicKeySignerFactory, ProviderKeyKind, ProviderKeySignerFactory,
+};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
@@ -68,6 +71,9 @@ enum Credential {
     ApiKey {
         key: &'static str,
         workspace: Option<&'static str>,
+    },
+    OpenaiApiKey {
+        key: &'static str,
     },
 }
 
@@ -174,8 +180,28 @@ fn oauth(id: u128, name: &str) -> TestUpstream {
     TestUpstream::new(id, name, UpstreamKind::AnthropicOauth)
 }
 
+fn openai_oauth(id: u128, name: &str) -> TestUpstream {
+    TestUpstream::new(id, name, UpstreamKind::OpenaiOauth).credential(Credential::Bearer)
+}
+
 fn api_key(id: u128, name: &str) -> TestUpstream {
     TestUpstream::new(id, name, UpstreamKind::AnthropicApiKey)
+}
+
+fn openai_api_key(id: u128, name: &str) -> TestUpstream {
+    TestUpstream::new(id, name, UpstreamKind::OpenaiApiKey).credential(Credential::OpenaiApiKey {
+        key: "sk-openai-failover-test",
+    })
+}
+const OPENAI_RESPONSES_BODY: &[u8] = br#"{"model":"gpt-5-codex","input":"failover regression"}"#;
+
+fn openai_responses_request() -> Request<Bytes> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("x-api-key", managed_api_key())
+        .body(Bytes::from_static(OPENAI_RESPONSES_BODY))
+        .expect("OpenAI Responses request builds")
 }
 
 fn host(name: &str) -> String {
@@ -424,6 +450,11 @@ impl SignerFactory for ScriptedSignerBuilder {
             }),
             Credential::ApiKey { key, workspace } => {
                 AnthropicKeySignerFactory::new(key, workspace)?
+                    .build(upstream)
+                    .await
+            }
+            Credential::OpenaiApiKey { key } => {
+                ProviderKeySignerFactory::new(ProviderKeyKind::Openai, key)?
                     .build(upstream)
                     .await
             }
@@ -1056,6 +1087,133 @@ async fn last_attempt_reserved_for_api_key() {
     assert_ne!(hosts[0], hosts[1]);
     assert_eq!(hosts[2], host("key"));
 }
+#[tokio::test]
+async fn openai_responses_last_attempt_reserved_for_api_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rate_limited = || vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)];
+    let recorded = send_recorded(
+        vec![
+            openai_oauth(10, "openai-oauth-1").replies(rate_limited()),
+            openai_oauth(11, "openai-oauth-2").replies(rate_limited()),
+            openai_oauth(12, "openai-oauth-3").replies(rate_limited()),
+            openai_api_key(13, "openai-key-1"),
+            openai_api_key(14, "openai-key-2"),
+        ],
+        openai_responses_request(),
+    )
+    .await?;
+
+    assert_eq!(recorded.status, StatusCode::OK);
+    let hosts = recorded.fixture.hosts();
+    assert_eq!(
+        hosts.len(),
+        3,
+        "the bounded cap must allow at most 3 dispatches"
+    );
+    assert!(hosts[0].starts_with("openai-oauth-"));
+    assert!(hosts[1].starts_with("openai-oauth-"));
+    assert_ne!(hosts[0], hosts[1]);
+    assert!(matches!(
+        hosts[2].as_str(),
+        "openai-key-1.invalid" | "openai-key-2.invalid"
+    ));
+    assert_eq!(recorded.events.len(), 1);
+    assert_eq!(
+        recorded.events[0].upstream_name.as_deref(),
+        Some(hosts[2].trim_end_matches(".invalid"))
+    );
+    assert_eq!(recorded.events[0].status, StatusCode::OK.as_u16());
+    Ok(())
+}
+
+#[tokio::test]
+async fn openai_healthy_oauth_does_not_touch_api_key() {
+    let fixture = Fixture::new(vec![
+        openai_oauth(20, "openai-oauth"),
+        openai_api_key(21, "openai-key"),
+    ]);
+
+    let (status, _body) = fixture.send_request(openai_responses_request()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.hosts(), vec![host("openai-oauth")]);
+}
+
+#[tokio::test]
+async fn openai_oauth_only_exhaustion_relays_last_429() {
+    let rate_limited = || vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)];
+    let fixture = Fixture::new(vec![
+        openai_oauth(30, "openai-oauth-1").replies(rate_limited()),
+        openai_oauth(31, "openai-oauth-2").replies(rate_limited()),
+        openai_oauth(32, "openai-oauth-3").replies(rate_limited()),
+    ]);
+
+    let (status, _body) = fixture.send_request(openai_responses_request()).await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        fixture.hosts(),
+        vec![
+            host("openai-oauth-1"),
+            host("openai-oauth-2"),
+            host("openai-oauth-3")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_second_oauth_is_tried_before_final_api_key() {
+    let fixture = Fixture::new(vec![
+        openai_oauth(40, "openai-oauth-1")
+            .quota(known_base_quota())
+            .replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]),
+        openai_oauth(41, "openai-oauth-2"),
+        openai_api_key(42, "openai-key"),
+    ]);
+
+    let (status, _body) = fixture.send_request(openai_responses_request()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        fixture.hosts(),
+        vec![host("openai-oauth-1"), host("openai-oauth-2")]
+    );
+}
+
+#[tokio::test]
+async fn openai_all_target_failure_relays_last_failure() {
+    let rate_limited = || vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)];
+    let fixture = Fixture::new(vec![
+        openai_oauth(50, "openai-oauth-1").replies(rate_limited()),
+        openai_oauth(51, "openai-oauth-2").replies(rate_limited()),
+        openai_api_key(52, "openai-key").replies(rate_limited()),
+    ]);
+
+    let (status, _body) = fixture.send_request(openai_responses_request()).await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        fixture.hosts(),
+        vec![
+            host("openai-oauth-1"),
+            host("openai-oauth-2"),
+            host("openai-key")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_request_does_not_select_anthropic_api_key() {
+    let fixture = Fixture::new(vec![
+        openai_oauth(60, "openai-oauth"),
+        api_key(61, "anthropic-key"),
+    ]);
+
+    let (status, _body) = fixture.send_request(openai_responses_request()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.hosts(), vec![host("openai-oauth")]);
+}
 
 #[tokio::test]
 async fn single_oauth_429_without_alternative_relays_original_429()
@@ -1255,6 +1413,25 @@ impl LimitCostEstimator for PolicyCatalogLimitCostEstimator {
             .and_then(|cost| i64::try_from(cost).ok())
     }
 
+    fn estimate_max_with_local_cache_and_images(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache_and_images(
+                model,
+                input,
+                max_output,
+                use_image_rates,
+                service_tier,
+            )
+            .and_then(|cost| i64::try_from(cost).ok())
+    }
+
     fn estimate_max_with_cache(
         &self,
         model: &str,
@@ -1275,6 +1452,28 @@ impl LimitCostEstimator for PolicyCatalogLimitCostEstimator {
             )
             .and_then(|cost| i64::try_from(cost).ok())
     }
+    fn estimate_max_with_cache_and_images(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache_and_images(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                use_image_rates,
+                service_tier,
+            )
+            .and_then(|cost| i64::try_from(cost).ok())
+    }
 }
 
 fn policy_limit_cost_estimator() -> Arc<dyn LimitCostEstimator> {
@@ -1286,6 +1485,8 @@ fn policy_limit_cost_estimator() -> Arc<dyn LimitCostEstimator> {
                 model: "claude-test".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(1),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(10),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: Default::default(),
             },
         )]),
@@ -2719,6 +2920,64 @@ async fn responses_websocket_zero_slots_and_oversize_fail_before_dispatch() {
         assert_eq!(error.code, expected);
         assert!(dispatch.hosts.lock().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn responses_websocket_output_cap_rejects_missing_max_output_tokens_before_dispatch() {
+    let engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(cc_lb_clock::SystemClock),
+    );
+    let fixture = Fixture::with_limits(
+        vec![TestUpstream::new(
+            50_003,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )],
+        vec![Limit {
+            kind: LimitKind::OutputTokens,
+            window_secs: 60,
+            cap_micros: 4,
+        }],
+    )
+    .with_lifecycle(|lifecycle| {
+        lifecycle.with_static_limit_subject(
+            engine,
+            PRINCIPAL.to_owned(),
+            "ws-output-key".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "ws-output-key".to_owned(),
+                status: KeyStatus::Active,
+                ..Default::default()
+            },
+        )
+    });
+    let (mut gateway, dispatch) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+
+    let missing_cap = Bytes::from_static(
+        br#"{"type":"response.create","stream_id":"main","model":"gpt-5-codex","store":false,"input":"gateway regression"}"#,
+    );
+    let auth = gateway.authenticate().await.unwrap();
+    let error = gateway
+        .client_message(auth, missing_cap)
+        .await
+        .expect_err("missing max_output_tokens must be rejected");
+    assert_eq!(error.status, 400);
+    assert_eq!(error.code, "limit_rejected");
+    assert_eq!(error.stream_id.as_deref(), Some("main"));
+    assert!(
+        dispatch.hosts.lock().unwrap().is_empty(),
+        "rejected response.create must not reach an upstream"
+    );
+
+    let admitted = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .expect("explicit max_output_tokens within the cap is admitted");
+    assert_eq!(admitted.frame, websocket_create("main", None));
+    assert!(
+        dispatch.hosts.lock().unwrap().is_empty(),
+        "admission alone must not dispatch before connection send"
+    );
 }
 
 #[tokio::test]

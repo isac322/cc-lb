@@ -500,7 +500,7 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
 }
 
 #[tokio::test]
-async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
+async fn usage_totals_projection_preserves_recorded_zero_components_across_rollups() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(15);
@@ -526,6 +526,7 @@ async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
     zero_tail.cost_cache_creation_1h_micros = Some(0);
     zero_tail.cost_cache_read_micros = Some(0);
     storage.append_request_event(&zero_tail).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
 
     let admin_app = app(test_state_with_clock(
         Config::default(),
@@ -541,8 +542,8 @@ async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
     assert_usage_bucket_fields(
         &totals["series"][0]["buckets"][0],
         &[
-            ("request_count", 1),
-            ("input_tokens", 1),
+            ("request_count", 2),
+            ("input_tokens", 2),
             ("virtual_cost_micros", 0),
             ("cost_input_micros", 0),
             ("cost_output_micros", 0),
@@ -865,7 +866,7 @@ async fn usage_principal_preserves_recorded_zero_component_costs() {
 }
 
 #[tokio::test]
-async fn usage_principal_omits_components_when_request_events_are_ahead() {
+async fn usage_principal_preserves_components_when_request_events_are_ahead() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(5);
@@ -911,11 +912,82 @@ async fn usage_principal_omits_components_when_request_events_are_ahead() {
         .find(|bucket| bucket["virtual_cost_micros"] == 10)
         .expect("rolled bucket");
     let bucket = bucket.as_object().unwrap();
-    assert!(!bucket.contains_key("cost_input_micros"));
-    assert!(!bucket.contains_key("cost_output_micros"));
-    assert!(!bucket.contains_key("cost_cache_creation_5m_micros"));
-    assert!(!bucket.contains_key("cost_cache_creation_1h_micros"));
-    assert!(!bucket.contains_key("cost_cache_read_micros"));
+    assert_eq!(bucket["cost_input_micros"], 10);
+    assert_eq!(bucket["cost_output_micros"], 0);
+    assert_eq!(bucket["cost_cache_creation_5m_micros"], 0);
+    assert_eq!(bucket["cost_cache_creation_1h_micros"], 0);
+    assert_eq!(bucket["cost_cache_read_micros"], 0);
+}
+
+#[tokio::test]
+async fn usage_principal_totals_returns_all_principals_with_component_costs_beyond_top_5_and_20() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let now = current_unix_secs(clock.as_ref());
+
+    let mut principal_ids = Vec::new();
+    for index in 0..25_u128 {
+        let principal = Uuid::from_u128(0x1000 + index).to_string();
+        principal_ids.push(principal.clone());
+        let mut event = usage_event(
+            now.saturating_sub(60),
+            &format!("req-principal-cost-{index}"),
+            Uuid::from_u128(0x20),
+            "principal-cost-upstream",
+            index as u64 + 1,
+        );
+        event.principal_id = Some(principal);
+        let cost = 1_000 + index as i64 * 100;
+        event.cost_usd_micros = Some(cost);
+        event.cost_input_micros = Some(cost);
+        event.cost_output_micros = Some(0);
+        event.cost_cache_creation_5m_micros = Some(0);
+        event.cost_cache_creation_1h_micros = Some(0);
+        event.cost_cache_read_micros = Some(0);
+        storage.append_request_event(&event).await.unwrap();
+    }
+    storage.rollup_usage_once().await.unwrap();
+
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+    for (projection, expected_len, expected_truncated) in [
+        ("totals", 25_usize, None::<u64>),
+        ("full", 20_usize, Some(5_u64)),
+    ] {
+        let uri = format!(
+            "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&projection={projection}"
+        );
+        let (status, _, body, _) = authed_json(admin_app.clone(), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{projection}");
+        let series = body["series"].as_array().unwrap();
+        assert_eq!(series.len(), expected_len, "{projection}");
+        assert_eq!(
+            body["truncated_series_count"].as_u64(),
+            expected_truncated,
+            "{projection}"
+        );
+        for item in series {
+            assert!(principal_ids.contains(&item["key"].as_str().unwrap().to_owned()));
+            let bucket = item["buckets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|bucket| bucket["request_count"] == 1)
+                .expect("principal request bucket");
+            for field in [
+                "cost_input_micros",
+                "cost_output_micros",
+                "cost_cache_creation_5m_micros",
+                "cost_cache_creation_1h_micros",
+                "cost_cache_read_micros",
+            ] {
+                assert!(bucket[field].as_u64().is_some(), "{projection} {field}");
+            }
+        }
+    }
 }
 
 #[tokio::test]

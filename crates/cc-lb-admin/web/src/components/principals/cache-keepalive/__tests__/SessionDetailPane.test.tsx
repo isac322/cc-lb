@@ -222,11 +222,13 @@ describe('SessionDetailPane', () => {
 
     // Net P&L formatting
     expect(screen.getByText('+$0.0936')).toBeDefined();
-    expect(
-      screen.getByText(
-        'saved $0.150 in avoided cache re-creation · spent $0.056 on 8 current-cycle renewals · current turn pending',
-      ),
-    ).toBeDefined();
+    const breakdown = screen.getByText(/saved \$0\.150/);
+    expect(breakdown.textContent).toMatch(/spent \$0\.056/);
+    expect(breakdown.textContent).toMatch(/across retained history/);
+    expect(breakdown.textContent).toContain('current turn pending');
+    expect(breakdown.textContent).not.toContain(
+      'spent $0.056 on 8 current-cycle renewals',
+    );
 
     // Turns
     expect(screen.getByText('Current turn · Live')).toBeDefined();
@@ -484,10 +486,150 @@ describe('SessionDetailPane', () => {
     expect(screen.getAllByText('-')[0]).toBeDefined();
     expect(screen.queryByText(/Turn 1/)).toBeNull();
   });
-  it('labels unknown follow-up evidence as unavailable, not as a loss', () => {
-    const detail = {
+  it('shows observed terminal hit and miss spend as numeric losses, not unavailable evidence', () => {
+    const detail: CacheKeepaliveDetail = {
       ...cacheKeepaliveRenewedDetailFixture,
+      id: 'terminal-unfollowed',
+      state: 'expired',
       is_active: false,
+      reason: 'cache miss',
+      attempts: 1,
+      net_pnl: -0.021,
+      total_spent: 0.021,
+      total_avoided: 0,
+      evidence_status: 'observed',
+      total_renewals_current_cycle: 1,
+      is_last_pending: false,
+      turns: [
+        {
+          turn_number: 2,
+          renewals: 0,
+          followed_up: false,
+          label: 'no follow-up (loss)',
+          time_ms: 1_700_000_060_000,
+          pnl: -0.015,
+          pending: false,
+          evidence_status: 'observed',
+        },
+        {
+          turn_number: 1,
+          renewals: 1,
+          followed_up: false,
+          label: 'no follow-up (loss)',
+          time_ms: 1_700_000_000_000,
+          pnl: -0.006,
+          pending: false,
+          evidence_status: 'observed',
+        },
+      ],
+      raw_record: {
+        ...cacheKeepaliveRenewedDetailFixture.raw_record,
+        renewal_count: 1,
+        status: 'expired',
+      },
+    };
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: detail,
+      isLoading: false,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId={detail.id}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByRole('region', { name: 'Session detail' }),
+    ).toBeDefined();
+    expect(screen.getByText('Net P&L').nextElementSibling?.textContent).toBe(
+      '−$0.021',
+    );
+    expect(screen.getByText('−$0.015')).toBeDefined();
+    expect(screen.getByText('−$0.006')).toBeDefined();
+    expect(screen.getAllByText('no follow-up (loss)')).toHaveLength(2);
+    expect(screen.queryByText(/follow-up unavailable/)).toBeNull();
+    expect(screen.queryByText('waiting for follow-up')).toBeNull();
+    expect(
+      screen.getAllByText(/^Renewals:/).map((label) => label.textContent),
+    ).toEqual(['Renewals: 0', 'Renewals: 1']);
+    expect(
+      screen.getByText('Current-cycle renewals').nextElementSibling
+        ?.textContent,
+    ).toBe('1');
+  });
+
+  it('keeps retained economics separate from a replacement cycle with no renewals', () => {
+    const detail: CacheKeepaliveDetail = {
+      ...cacheKeepaliveRenewedDetailFixture,
+      id: 'replacement-cycle',
+      state: 'scheduled',
+      is_active: true,
+      attempts: 0,
+      net_pnl: 0.054,
+      total_spent: 0.021,
+      total_avoided: 0.075,
+      evidence_status: 'observed',
+      total_renewals_current_cycle: 0,
+      is_last_pending: false,
+      turns: [],
+      raw_record: {
+        ...cacheKeepaliveRenewedDetailFixture.raw_record,
+        generation: 8,
+        renewal_count: 0,
+        status: 'scheduled',
+      },
+      generation: 8,
+    };
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: detail,
+      isLoading: false,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId={detail.id}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText('Net P&L').nextElementSibling?.textContent).toBe(
+      '+$0.054',
+    );
+    const breakdown = screen.getByText(/saved \$0\.075/);
+    expect(breakdown.textContent).toMatch(/spent \$0\.021/);
+    expect(breakdown.textContent).toMatch(/across retained history/);
+    expect(breakdown.textContent).not.toContain(
+      'spent $0.021 on 0 current-cycle renewals',
+    );
+    expect(
+      screen.getByText('Current-cycle renewals').nextElementSibling
+        ?.textContent,
+    ).toBe('0');
+    expect(
+      screen.getByRole('heading', { name: 'Message-by-message' }),
+    ).toBeDefined();
+    expect(screen.getByText('· no renewals')).toBeDefined();
+    expect(screen.queryByText(/^Turn \d/)).toBeNull();
+    expect(screen.queryByText(/current turn pending/)).toBeNull();
+  });
+
+  it('labels unknown follow-up evidence as unavailable, not as a loss', () => {
+    const detail: CacheKeepaliveDetail = {
+      ...cacheKeepaliveRenewedDetailFixture,
+      state: 'expired',
+      is_active: false,
+      net_pnl: null,
+      total_spent: 0.021,
+      total_avoided: null,
+      evidence_status: 'unknown',
+      total_renewals_current_cycle: 1,
+      is_last_pending: false,
       turns: [
         {
           turn_number: 1,
@@ -519,16 +661,34 @@ describe('SessionDetailPane', () => {
       screen.getByText('follow-up unavailable (evidence unknown)'),
     ).toBeDefined();
     expect(screen.queryByText('no follow-up (loss)')).toBeNull();
+    expect(screen.getByText('Net P&L').nextElementSibling?.textContent).toBe(
+      '—',
+    );
+    expect(screen.getAllByText('-')[0]).toBeDefined();
+    const breakdown = screen.getByText(/evidence unknown/, { selector: 'p' });
+    expect(breakdown.textContent).toContain('spent $0.021');
+    expect(breakdown.textContent).toMatch(/across retained history/);
+    expect(screen.queryByText(/saved \$0\.000/)).toBeNull();
+    expect(screen.queryByText('waiting for follow-up')).toBeNull();
   });
 
   it('keeps pending unknown P&L nullable instead of displaying zero', () => {
-    const detail = {
+    const detail: CacheKeepaliveDetail = {
       ...cacheKeepaliveRenewedDetailFixture,
       is_active: true,
+      net_pnl: null,
+      total_spent: 0.006,
+      total_avoided: null,
+      evidence_status: 'pending',
+      total_renewals_current_cycle: 1,
       is_last_pending: true,
       turns: [
         {
-          ...cacheKeepaliveRenewedDetailFixture.turns[0],
+          turn_number: 1,
+          renewals: 1,
+          followed_up: false,
+          label: 'agent-in-turn',
+          time_ms: 1_700_000_000_000,
           pending: true,
           pnl: null,
           evidence_status: 'pending',
@@ -551,6 +711,13 @@ describe('SessionDetailPane', () => {
 
     expect(screen.getByText('— pending')).toBeDefined();
     expect(screen.queryByText('$0.000 pending')).toBeNull();
+    expect(screen.getByText('waiting for follow-up')).toBeDefined();
+    expect(screen.getByText('Current turn · Live')).toBeDefined();
+    expect(screen.getByText('Net P&L').nextElementSibling?.textContent).toBe(
+      '—',
+    );
+    expect(screen.queryByText(/follow-up unavailable/)).toBeNull();
+    expect(screen.queryByText('no follow-up (loss)')).toBeNull();
   });
   it('uses singular wording for one current-cycle renewal', () => {
     const detail = {
@@ -578,7 +745,13 @@ describe('SessionDetailPane', () => {
       />,
     );
 
-    expect(screen.getByText(/on 1 current-cycle renewal/)).toBeDefined();
+    expect(
+      screen.getByText('Current-cycle renewals').nextElementSibling
+        ?.textContent,
+    ).toBe('1');
+    const breakdown = screen.getByText(/saved \$0\.120/);
+    expect(breakdown.textContent).toMatch(/across retained history/);
+    expect(breakdown.textContent).toMatch(/1 current-cycle renewal/);
   });
   it('replaces stale detail with a stable not-found state after a terminal 404', () => {
     const refetch = vi.fn();

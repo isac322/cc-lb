@@ -86,6 +86,12 @@ function aggregateWindowKeys(
   );
 }
 
+function clampPoolQuotaPercent(used: number | null | undefined): number | null {
+  return used != null && Number.isFinite(used)
+    ? Math.min(100, Math.max(0, used))
+    : null;
+}
+
 /**
  * Pool history as used percent: each bucket plots the pool utilization,
  * clamped to 0-100 so an over-limit reading pins to the top of the plot
@@ -107,16 +113,143 @@ export function buildPoolQuotaChartData(
         for (const key of keys) row[key] = null;
         buckets.set(point.snapshot_at_unix_secs, row);
       }
-      const used = point.utilization_percent;
-      row[window] =
-        used != null && Number.isFinite(used)
-          ? Math.min(100, Math.max(0, used))
-          : null;
+      row[window] = clampPoolQuotaPercent(point.utilization_percent);
+      buckets.set(point.snapshot_at_unix_secs, row);
     }
   }
   return Array.from(buckets.values()).sort(
     (left, right) => left.unix - right.unix,
   );
+}
+
+/**
+ * Maximum idle gap across which a pool snapshot may be step-held to the range
+ * boundary: the backend's 3,600s unchanged-utilization heartbeat plus 300s of
+ * cron/poll/bucket slack. Beyond this age, snapshot collection was interrupted
+ * and the chart must not fabricate a live flat line across the outage.
+ */
+export const POOL_QUOTA_HEARTBEAT_CARRY_SECS = 3_600 + 300;
+
+function hasPoolQuotaValue(row: PoolQuotaChartRow): boolean {
+  return Object.entries(row).some(
+    ([key, value]) =>
+      key !== 'unix' && typeof value === 'number' && Number.isFinite(value),
+  );
+}
+export function latestPoolQuotaSnapshotUnix(
+  windows: readonly PoolHistoryWindowResponse[] | undefined,
+): number | null {
+  let latestUnix: number | null = null;
+  for (const entry of windows ?? []) {
+    const ts = entry.latest?.snapshot_at_unix_secs;
+    if (typeof ts === 'number' && Number.isFinite(ts)) {
+      latestUnix = latestUnix === null ? ts : Math.max(latestUnix, ts);
+    }
+  }
+  return latestUnix;
+}
+
+function buildCarriedPoolQuotaRow(
+  baseRow: PoolQuotaChartRow,
+  targetUnix: number,
+  rangeEndUnix: number,
+  windows?: readonly PoolHistoryWindowResponse[],
+): PoolQuotaChartRow {
+  if (!windows) {
+    return { ...baseRow, unix: targetUnix };
+  }
+  const carried: PoolQuotaChartRow = { unix: targetUnix };
+  for (const window of Object.keys(baseRow).filter((key) => key !== 'unix')) {
+    if (baseRow[window] == null) {
+      carried[window] = null;
+      continue;
+    }
+    const latest = windows.find((entry) => entry.window === window)?.latest;
+    const latestUnix = latest?.snapshot_at_unix_secs;
+    const windowLatestIsFresh =
+      typeof latestUnix === 'number' &&
+      Number.isFinite(latestUnix) &&
+      latestUnix <= rangeEndUnix &&
+      rangeEndUnix - latestUnix <= POOL_QUOTA_HEARTBEAT_CARRY_SECS;
+    carried[window] = windowLatestIsFresh
+      ? clampPoolQuotaPercent(latest?.utilization_percent)
+      : null;
+  }
+  return carried;
+}
+
+export function visiblePoolQuotaChartData(
+  rows: readonly PoolQuotaChartRow[],
+  rangeStartUnix: number,
+  rangeEndUnix: number,
+  latestSnapshotUnixSecs?: number | null,
+  windows?: readonly PoolHistoryWindowResponse[],
+): PoolQuotaChartRow[] {
+  if (!rows.length || rangeStartUnix > rangeEndUnix) return [];
+
+  let leadingRow: PoolQuotaChartRow | undefined;
+  const visible: PoolQuotaChartRow[] = [];
+  for (const row of rows) {
+    if (row.unix < rangeStartUnix) {
+      leadingRow = row;
+    } else if (row.unix <= rangeEndUnix) {
+      visible.push(row);
+    }
+  }
+
+  const firstInRange = visible[0];
+  const effectiveLatestUnix =
+    latestSnapshotUnixSecs === undefined
+      ? ((visible.at(-1) ?? leadingRow)?.unix ?? null)
+      : latestSnapshotUnixSecs;
+  const latestIsFresh =
+    effectiveLatestUnix !== null &&
+    effectiveLatestUnix <= rangeEndUnix &&
+    rangeEndUnix - effectiveLatestUnix <= POOL_QUOTA_HEARTBEAT_CARRY_SECS;
+
+  if (
+    leadingRow &&
+    hasPoolQuotaValue(leadingRow) &&
+    firstInRange?.unix !== rangeStartUnix
+  ) {
+    const canClampLeading = firstInRange
+      ? firstInRange.unix - leadingRow.unix <= POOL_QUOTA_HEARTBEAT_CARRY_SECS
+      : latestIsFresh &&
+        rangeStartUnix - leadingRow.unix <= POOL_QUOTA_HEARTBEAT_CARRY_SECS;
+    if (canClampLeading) {
+      const clampedRow = firstInRange
+        ? { ...leadingRow, unix: rangeStartUnix }
+        : buildCarriedPoolQuotaRow(
+            leadingRow,
+            rangeStartUnix,
+            rangeEndUnix,
+            windows,
+          );
+      if (hasPoolQuotaValue(clampedRow)) {
+        visible.unshift(clampedRow);
+      }
+    }
+  }
+
+  const lastRow = visible.at(-1);
+  if (
+    lastRow &&
+    lastRow.unix < rangeEndUnix &&
+    hasPoolQuotaValue(lastRow) &&
+    latestIsFresh
+  ) {
+    const tailRow = buildCarriedPoolQuotaRow(
+      lastRow,
+      rangeEndUnix,
+      rangeEndUnix,
+      windows,
+    );
+    if (hasPoolQuotaValue(tailRow)) {
+      visible.push(tailRow);
+    }
+  }
+
+  return visible;
 }
 
 export function poolQuotaResponseLatest(

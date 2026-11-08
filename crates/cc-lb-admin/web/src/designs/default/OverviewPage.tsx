@@ -119,6 +119,7 @@ import {
   buildPoolQuotaChartData,
   formatAgo,
   formatResetIn,
+  latestPoolQuotaSnapshotUnix,
   missingCapacityUpstreams,
   oldestProviderObservation,
   POOL_QUOTA_WINDOWS,
@@ -129,6 +130,7 @@ import {
   poolQuotaWindowsPresent,
   poolTooltipRows,
   poolWindowResets,
+  visiblePoolQuotaChartData,
 } from '../../routes/-overviewPoolQuota';
 
 export const overviewSearchSchema = z.object({
@@ -1179,6 +1181,7 @@ function ProviderUsageAreas({
 
 type PoolQuotaChartProps = {
   data: PoolQuotaChartRow[];
+  snapshots?: PoolQuotaChartRow[];
   rangeStartUnix: number;
   rangeEndUnix: number;
   latest: PoolQuotaLatest;
@@ -1267,11 +1270,12 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   const weighting =
     aggregate && 'weighting' in aggregate ? aggregate.weighting : 'plan';
   const scopedWindows = windows ?? chart.windows ?? POOL_QUOTA_WINDOWS;
-  const first = chart.data[0];
-  const last = chart.data.at(-1);
+  const snapshots = chart.snapshots ?? chart.data;
+  const first = snapshots[0];
+  const last = snapshots.at(-1);
   const proof =
     first && last
-      ? `${formatCount(chart.data.length)} snapshots · ${formatMonthDayTime(first.unix, timeZone)} → ${formatMonthDayTime(last.unix, timeZone)}`
+      ? `${formatCount(snapshots.length)} snapshots · ${formatMonthDayTime(first.unix, timeZone)} → ${formatMonthDayTime(last.unix, timeZone)}`
       : null;
   return (
     <div aria-busy={loading} className="min-w-0" data-testid="pool-quota-card">
@@ -1822,7 +1826,7 @@ export function ProviderOverviewPage({
     () => buildPoolQuotaChartData(normalizedPoolHistoryWindows),
     [normalizedPoolHistoryWindows],
   );
-  const visibleChartData = useMemo(
+  const recordedChartData = useMemo(
     () =>
       chartData
         .filter(
@@ -1845,6 +1849,34 @@ export function ProviderOverviewPage({
       visiblePoolWindows,
     ],
   );
+  const latestPoolQuotaSnapshotUnixSecs = useMemo(
+    () => latestPoolQuotaSnapshotUnix(normalizedPoolHistoryWindows),
+    [normalizedPoolHistoryWindows],
+  );
+  const visibleChartData = useMemo(
+    () =>
+      visiblePoolQuotaChartData(
+        chartData,
+        poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+        poolHistoryNowUnixSecs,
+        latestPoolQuotaSnapshotUnixSecs,
+        normalizedPoolHistoryWindows,
+      ).map((row) => {
+        const sparseRow: PoolQuotaChartRow = { unix: row.unix };
+        for (const window of visiblePoolWindows) {
+          if (window in row) sparseRow[window] = row[window];
+        }
+        return sparseRow;
+      }),
+    [
+      chartData,
+      displayedPoolHistoryRangeSecs,
+      latestPoolQuotaSnapshotUnixSecs,
+      normalizedPoolHistoryWindows,
+      poolHistoryNowUnixSecs,
+      visiblePoolWindows,
+    ],
+  );
 
   const chartLatest = useMemo(
     () =>
@@ -1854,6 +1886,7 @@ export function ProviderOverviewPage({
   const poolQuotaChart = useMemo<PoolQuotaChartProps>(
     () => ({
       data: visibleChartData,
+      snapshots: recordedChartData,
       rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
       rangeEndUnix: poolHistoryNowUnixSecs,
       latest: chartLatest,
@@ -1862,6 +1895,7 @@ export function ProviderOverviewPage({
       chartLatest,
       displayedPoolHistoryRangeSecs,
       poolHistoryNowUnixSecs,
+      recordedChartData,
       visibleChartData,
     ],
   );

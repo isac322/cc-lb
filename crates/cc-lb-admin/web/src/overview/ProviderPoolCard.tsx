@@ -16,11 +16,13 @@ import {
 import { formatQuotaPercent } from '../lib/quotaSeverity';
 import {
   buildPoolQuotaChartData,
+  latestPoolQuotaSnapshotUnix,
   type PoolQuotaChartRow,
   type PoolQuotaWindow,
   poolQuotaResponseLatest,
   poolQuotaWindowsPresent,
   poolWindowResets,
+  visiblePoolQuotaChartData,
 } from '../routes/-overviewPoolQuota';
 
 const PROVIDER_WINDOW_KEYS: Record<ProviderFamily, readonly PoolQuotaWindow[]> =
@@ -106,16 +108,34 @@ export const ProviderPoolCard = memo(function ProviderPoolCard({
       ),
     [loading, normalizedAggregate, normalizedHistory, providerWindowKeys],
   );
+  const latestSnapshotUnixSecs = useMemo(
+    () => latestPoolQuotaSnapshotUnix(normalizedHistory),
+    [normalizedHistory],
+  );
   const visibleChartData = useMemo(
     () =>
-      chartData.map((row) => {
+      visiblePoolQuotaChartData(
+        chartData,
+        (history.data?.now_unix_secs ?? Math.floor(Date.now() / 1000)) -
+          (history.data?.range_secs ?? rangeSecs),
+        history.data?.now_unix_secs ?? Math.floor(Date.now() / 1000),
+        latestSnapshotUnixSecs,
+        normalizedHistory,
+      ).map((row) => {
         const sparseRow: PoolQuotaChartRow = { unix: row.unix };
         for (const window of visibleWindows) {
           if (window in row) sparseRow[window] = row[window];
         }
         return sparseRow;
       }),
-    [chartData, visibleWindows],
+    [
+      chartData,
+      history.data,
+      latestSnapshotUnixSecs,
+      normalizedHistory,
+      rangeSecs,
+      visibleWindows,
+    ],
   );
   const latest = useMemo(
     () => poolQuotaResponseLatest(normalizedHistory, visibleChartData),
