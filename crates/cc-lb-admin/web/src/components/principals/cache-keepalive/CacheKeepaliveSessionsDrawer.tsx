@@ -1,10 +1,9 @@
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, ChevronRight } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import type {
   CacheKeepaliveHorizon,
   CacheKeepaliveRow,
   CacheKeepaliveState,
-  CacheKeepaliveStatusFilter,
   CacheKeepaliveSummary,
 } from '../../../lib/cacheKeepaliveApi';
 import {
@@ -23,7 +22,6 @@ import {
   Spinner,
 } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
-import { Select, type SelectOption } from '../../ui/Select';
 import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { mergeLiveSessions } from './liveMergeSessions';
 
@@ -47,20 +45,55 @@ const HORIZON_OPTIONS: SegmentedOption<CacheKeepaliveHorizon>[] = [
   { value: 'all', label: 'All' },
 ];
 
-/** Status filter items; the `''` "All statuses" item comes from `allLabel`. */
-const STATUS_OPTIONS: SelectOption[] = [
-  { value: 'renewed', label: 'Renewed' },
+const TRACKED_STATUS_OPTIONS = [
   { value: 'scheduled', label: 'Scheduled' },
+  { value: 'renewed', label: 'Renewed' },
   { value: 'capped', label: 'Capped' },
   { value: 'expired', label: 'Expired' },
-  { value: 'not_tracked', label: 'Not tracked' },
   { value: 'error', label: 'Error' },
-];
+] as const;
 
-function isStatusFilter(value: string): value is CacheKeepaliveStatusFilter {
+type TrackedStatus = (typeof TRACKED_STATUS_OPTIONS)[number]['value'];
+type GroupMode = 'flat' | 'trigger';
+
+const TRACKED_STATUS_KEYS = new Set<TrackedStatus>(
+  TRACKED_STATUS_OPTIONS.map((option) => option.value),
+);
+
+function extractTriggerLabel(row: CacheKeepaliveRow): string {
+  const text = `${row.id} ${row.reason}`;
+  const toolUse = text.match(/tool_use:\s*`([^`]+)`/i);
+  if (toolUse?.[1]) return toolUse[1];
+  const stopReason = text.match(/stop_reason\s*=\s*([^\s,)]+)/i);
+  if (stopReason?.[1]) return `stop_reason=${stopReason[1]}`;
+  return 'Other';
+}
+
+function extractActorLabel(
+  row: CacheKeepaliveRow,
+): 'subagent' | 'advisor' | null {
+  const match = row.id.match(/(?:^|\/)agent:(subagent|advisor)(?:$|[/:])/i);
   return (
-    value === 'all' || STATUS_OPTIONS.some((option) => option.value === value)
+    (match?.[1]?.toLowerCase() as 'subagent' | 'advisor' | undefined) ?? null
   );
+}
+
+function formatMoney(val: number) {
+  if (val < 0) return `−$${Math.abs(val).toFixed(2)}`;
+  return `$${val.toFixed(2)}`;
+}
+
+function formatSignedMoney(val: number) {
+  if (val === 0) return '$0.00';
+  return val > 0 ? `+${formatMoney(val)}` : formatMoney(val);
+}
+
+function formatNetPnl(val: number) {
+  if (val === 0) return '$0.00';
+  const sign = val > 0 ? '+' : '−';
+  const abs = Math.abs(val);
+  const str = abs.toFixed(4);
+  return `${sign}$${str.replace(/0$/, '')}`;
 }
 
 const STATE_TONE: Record<
@@ -69,7 +102,7 @@ const STATE_TONE: Record<
 > = {
   renewed: 'ok',
   scheduled: 'accent',
-  capped: 'neutral',
+  capped: 'warn',
   expired: 'warn',
   not_tracked: 'neutral',
 };
@@ -81,19 +114,6 @@ const STATE_LABEL: Record<CacheKeepaliveState, string> = {
   expired: 'Expired',
   not_tracked: 'Not tracked',
 };
-
-function formatMoney(val: number) {
-  if (val < 0) return `−$${Math.abs(val).toFixed(2)}`;
-  return `$${val.toFixed(2)}`;
-}
-
-function formatNetPnl(val: number) {
-  if (val === 0) return '$0.00';
-  const sign = val > 0 ? '+' : '−';
-  const abs = Math.abs(val);
-  const str = abs.toFixed(4);
-  return `${sign}$${str.replace(/0$/, '')}`;
-}
 
 function OverviewStrip({
   horizon,
@@ -108,50 +128,120 @@ function OverviewStrip({
   onHorizonChange: (h: CacheKeepaliveHorizon) => void;
   showHorizon: boolean;
 }) {
+  const avoidedKnown =
+    summary?.total_avoided != null && summary?.evidence_status === 'observed';
+  const avoided = summary?.total_avoided ?? 0;
+  const spent = summary?.total_spent ?? 0;
+  const total = avoidedKnown ? avoided + spent : 0;
+  const avoidedPercent = total > 0 ? (avoided / total) * 100 : 0;
+  const spentPercent = total > 0 ? (spent / total) * 100 : 0;
+
+  let verdict: React.ReactNode = null;
+  let netReadout = '—';
+  let netClassName = 'text-text-muted';
+  if (
+    summary &&
+    summary.cost_saved !== null &&
+    summary.evidence_status === 'observed'
+  ) {
+    if (summary.cost_saved > 0) {
+      verdict = <Badge tone="ok">Saving</Badge>;
+      netReadout = formatSignedMoney(summary.cost_saved);
+      netClassName = 'text-success-text';
+    } else if (summary.cost_saved < 0) {
+      verdict = <Badge tone="danger">Losing</Badge>;
+      netReadout = formatMoney(summary.cost_saved);
+      netClassName = 'text-danger-text';
+    } else {
+      verdict = <Badge tone="neutral">Break-even</Badge>;
+      netReadout = '$0.00';
+    }
+  } else if (summary) {
+    verdict = <Badge tone="neutral">Evidence {summary.evidence_status}</Badge>;
+  }
+
   return (
-    <div className="px-4 pt-3 pb-2 shrink-0 flex items-center justify-between gap-3 flex-wrap">
-      <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap min-w-0">
-        <span className="text-caption text-text-muted">Retained history:</span>
-        {isLoading ? (
-          <>
-            <Skeleton className="h-5 w-32" />
-            <Skeleton className="h-4 w-52" />
-          </>
-        ) : summary ? (
-          <>
-            <span className="text-body font-medium text-text tabular-nums">
-              {summary.retained_successful_hits.toLocaleString('en-US')} renewal
-              {summary.retained_successful_hits === 1 ? '' : 's'} fired
-            </span>
-            <span className="text-caption text-text-faint tabular-nums max-sm:basis-full">
-              <span aria-hidden="true" className="max-sm:hidden">
-                ·{' '}
+    <div className="shrink-0 px-4 pt-3 pb-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap min-w-0">
+          <span className="text-caption text-text-muted">
+            Retained history:
+          </span>
+          {isLoading ? (
+            <>
+              <Skeleton className="h-5 w-32" />
+              <Skeleton className="h-4 w-52" />
+            </>
+          ) : summary ? (
+            <>
+              <span className="text-body font-medium text-text tabular-nums">
+                {summary.retained_successful_hits.toLocaleString('en-US')}{' '}
+                renewal
+                {summary.retained_successful_hits === 1 ? '' : 's'} fired
               </span>
-              {summary.cost_saved === null
-                ? 'net saved —'
-                : `${formatMoney(summary.cost_saved)} net saved`}{' '}
-              · spent {formatMoney(summary.total_spent)} · avoided{' '}
+              <span className="text-caption text-text-faint tabular-nums">
+                · {summary.sessions_last_5m.toLocaleString('en-US')} session
+                {summary.sessions_last_5m === 1 ? '' : 's'} (last 5m)
+              </span>
+            </>
+          ) : (
+            <span className="text-caption text-text-faint">
+              No summary available
+            </span>
+          )}
+        </div>
+        {showHorizon ? (
+          <SegmentedControl
+            ariaLabel="Time range"
+            size="sm"
+            value={horizon}
+            onChange={onHorizonChange}
+            options={HORIZON_OPTIONS}
+          />
+        ) : null}
+      </div>
+      {summary && !isLoading ? (
+        <div
+          className="well mt-3 grid gap-3 p-3 sm:grid-cols-[auto_minmax(0,1fr)]"
+          data-testid="cache-keepalive-pnl-equation"
+        >
+          <div className="flex items-center gap-2">
+            {verdict}
+            <span
+              className={cx('text-body font-medium tabular-nums', netClassName)}
+            >
+              {netReadout}
+            </span>
+          </div>
+          <div className="min-w-0">
+            <div
+              className="h-1 w-full overflow-hidden rounded-xs bg-overlay-4"
+              aria-label="Avoided versus spent"
+            >
+              <div className="flex h-full">
+                <span
+                  className="h-full bg-[var(--color-series-cache-read)]"
+                  style={{ width: `${avoidedPercent}%` }}
+                />
+                <span
+                  className="h-full bg-[var(--color-series-cache-create-5m)]"
+                  style={{ width: `${spentPercent}%` }}
+                />
+              </div>
+            </div>
+            <p className="mt-2 text-caption text-text-muted tabular-nums">
+              Avoided{' '}
               {summary.total_avoided === null
                 ? '—'
-                : formatMoney(summary.total_avoided)}{' '}
-              · {summary.sessions_last_5m.toLocaleString('en-US')} session
-              {summary.sessions_last_5m === 1 ? '' : 's'} (last 5m)
-            </span>
-          </>
-        ) : (
-          <span className="text-caption text-text-faint">
-            No summary available
-          </span>
-        )}
-      </div>
-      {showHorizon ? (
-        <SegmentedControl
-          ariaLabel="Time range"
-          size="sm"
-          value={horizon}
-          onChange={onHorizonChange}
-          options={HORIZON_OPTIONS}
-        />
+                : formatMoney(summary.total_avoided)}
+              {' − '}Spent {formatMoney(summary.total_spent)}
+              {' = '}Net{' '}
+              {summary.cost_saved === null
+                ? '—'
+                : formatSignedMoney(summary.cost_saved)}
+            </p>
+          </div>
+        </div>
       ) : null}
     </div>
   );
@@ -161,12 +251,16 @@ function SessionListRow({
   row,
   isSelected,
   onSelect,
+  detail,
 }: {
   row: CacheKeepaliveRow;
   isSelected: boolean;
   onSelect: () => void;
+  detail?: React.ReactNode;
 }) {
   const isError = row.error != null;
+  const triggerLabel = extractTriggerLabel(row);
+  const actorLabel = extractActorLabel(row);
   const showTicks =
     row.is_active && row.state !== 'scheduled' && row.state !== 'not_tracked';
   // Attempt ticks are a small meter: brand fill for a renewed session, ink
@@ -196,8 +290,6 @@ function SessionListRow({
               : 'border-subtle hover:bg-overlay-2',
         )}
       >
-        {/* Phones: ID and P&L lead the first line, state badges and time the
-            second. From sm the four sit on one line as before. */}
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 leading-tight sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
           <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-2">
             {isError && (
@@ -214,6 +306,16 @@ function SessionListRow({
             >
               {row.id}
             </span>
+            {triggerLabel !== 'Other' && (
+              <span className="shrink-0 rounded-xs bg-overlay-4 px-1.5 py-0.5 font-mono text-caption text-text-muted">
+                {triggerLabel}
+              </span>
+            )}
+            {actorLabel && (
+              <span className="shrink-0 rounded-xs bg-overlay-4 px-1.5 py-0.5 text-caption text-text-faint">
+                {actorLabel}
+              </span>
+            )}
           </div>
           <div className="col-start-1 row-start-2 flex min-w-0 items-center gap-2 sm:col-start-2 sm:row-start-1">
             <Badge tone={STATE_TONE[row.state]}>{STATE_LABEL[row.state]}</Badge>
@@ -268,6 +370,7 @@ function SessionListRow({
           )}
         </div>
       </button>
+      {detail}
     </li>
   );
 }
@@ -383,7 +486,14 @@ export function CacheKeepaliveSessionsDrawer({
   onOpenChange,
   principal,
 }: Props) {
-  const [filterChoice, setFilter] = useState<CacheKeepaliveStatusFilter>('all');
+  const [selectedStatuses, setSelectedStatuses] = useState<Set<TrackedStatus>>(
+    () => new Set(TRACKED_STATUS_KEYS),
+  );
+  const [showNotTracked, setShowNotTracked] = useState(false);
+  const [groupMode, setGroupMode] = useState<GroupMode>('flat');
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [horizon, setHorizon] = useState<CacheKeepaliveHorizon>('24h');
   const [selected, setSelected] = useState<CacheKeepaliveRow | null>(null);
   const [listElement, setListElement] = useState<HTMLUListElement | null>(null);
@@ -391,22 +501,20 @@ export function CacheKeepaliveSessionsDrawer({
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset local drawer state when the principal identity changes
   useEffect(() => {
     setSelected(null);
-    setFilter('all');
+    setSelectedStatuses(new Set(TRACKED_STATUS_KEYS));
+    setShowNotTracked(false);
+    setGroupMode('flat');
+    setCollapsedGroups(new Set());
     setHorizon('24h');
   }, [principal.id]);
 
   const enabled = principal.cache_keepalive?.enabled ?? false;
-  // The status filter is hidden while keepalive is off, so a stale choice
-  // must not keep narrowing the list the operator can no longer see filtered.
-  const filter: CacheKeepaliveStatusFilter = enabled ? filterChoice : 'all';
-
   const query = useCacheKeepaliveSessions(
     principal.id,
     {
       horizon,
-      status:
-        filter === 'all' ? undefined : filter === 'error' ? undefined : filter,
-      error: filter === 'error' ? true : undefined,
+      status: undefined,
+      error: undefined,
     },
     open,
   );
@@ -420,9 +528,93 @@ export function CacheKeepaliveSessionsDrawer({
     return mergeLiveSessions(rawRows, maxRows);
   }, [query.data]);
 
-  useFlipReorder(listElement, allRows);
+  const visibleRows = useMemo(
+    () =>
+      allRows.filter((row) => {
+        if (!enabled) return true;
+        const rowStatus = row.error != null ? 'error' : row.state;
+        if (rowStatus === 'not_tracked') return showNotTracked;
+        return selectedStatuses.has(rowStatus as TrackedStatus);
+      }),
+    [allRows, enabled, selectedStatuses, showNotTracked],
+  );
 
+  const groupedRows = useMemo(() => {
+    const groups = new Map<string, CacheKeepaliveRow[]>();
+    for (const row of visibleRows) {
+      const trigger = extractTriggerLabel(row);
+      const rows = groups.get(trigger);
+      if (rows) rows.push(row);
+      else groups.set(trigger, [row]);
+    }
+    return [...groups.entries()];
+  }, [visibleRows]);
+
+  useFlipReorder(listElement, visibleRows);
+  useEffect(() => {
+    if (
+      open &&
+      enabled &&
+      !query.isLoading &&
+      !query.isError &&
+      !query.isFetchNextPageError &&
+      !query.isFetchingNextPage &&
+      visibleRows.length === 0 &&
+      query.hasNextPage
+    ) {
+      query.fetchNextPage();
+    }
+  }, [
+    enabled,
+    open,
+    query.fetchNextPage,
+    query.hasNextPage,
+    query.isError,
+    query.isFetchNextPageError,
+    query.isFetchingNextPage,
+    query.isLoading,
+    visibleRows.length,
+  ]);
+
+  const liveCounts = useMemo(() => {
+    const computed: Record<TrackedStatus | 'not_tracked', number> = {
+      scheduled: 0,
+      renewed: 0,
+      capped: 0,
+      expired: 0,
+      error: 0,
+      not_tracked: 0,
+    };
+    for (const row of allRows) {
+      const key = row.error != null ? 'error' : row.state;
+      computed[key] = (computed[key] ?? 0) + 1;
+    }
+    return computed;
+  }, [allRows]);
   const summary = query.data?.pages[0]?.summary;
+  const notTrackedCount = liveCounts.not_tracked;
+  const handleStatusClick = (key: TrackedStatus) => {
+    if (selectedStatuses.size === TRACKED_STATUS_OPTIONS.length) {
+      setShowNotTracked(false);
+    }
+    setSelectedStatuses((current) => {
+      if (current.size === TRACKED_STATUS_OPTIONS.length) {
+        return new Set([key]);
+      }
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+        return next.size === 0 ? new Set(TRACKED_STATUS_KEYS) : next;
+      }
+      next.add(key);
+      return next;
+    });
+  };
+
+  const resetStatusFilter = () => {
+    setSelectedStatuses(new Set(TRACKED_STATUS_KEYS));
+    setShowNotTracked(false);
+  };
 
   const handleOpenChange = (o: boolean) => {
     if (!o) setSelected(null);
@@ -462,18 +654,84 @@ export function CacheKeepaliveSessionsDrawer({
           </div>
         ) : null}
         {enabled ? (
-          <div className="px-4 pt-1 pb-3 border-b border-subtle shrink-0">
-            <Select
+          <div className="flex items-center gap-2 flex-wrap px-4 pt-1 pb-3 border-b border-subtle shrink-0">
+            <div
+              role="group"
               aria-label="Session status"
+              className="flex items-center gap-1.5 flex-wrap"
+            >
+              {TRACKED_STATUS_OPTIONS.map((option) => {
+                const selectedStatus = selectedStatuses.has(option.value);
+                const dotClassName =
+                  option.value === 'renewed'
+                    ? 'bg-success-text'
+                    : option.value === 'scheduled'
+                      ? 'bg-accent'
+                      : option.value === 'error'
+                        ? 'bg-danger-text'
+                        : 'bg-warn-text';
+                const count = liveCounts[option.value];
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    data-testid={`status-chip-${option.value}`}
+                    aria-pressed={selectedStatus}
+                    onClick={() => handleStatusClick(option.value)}
+                    className={cx(
+                      'inline-flex min-h-7 max-md:min-h-10 items-center gap-1.5 rounded-sm border px-2.5 text-caption transition-colors',
+                      selectedStatus
+                        ? 'border-accent bg-accent/10 text-text'
+                        : 'border-subtle text-text-muted hover:bg-overlay-2',
+                    )}
+                  >
+                    <span
+                      className={cx('h-1.5 w-1.5 rounded-full', dotClassName)}
+                      aria-hidden="true"
+                    />
+                    <span>{option.label}</span>
+                    <span className="tabular-nums text-text-faint">
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              data-testid="toggle-not-tracked"
+              aria-pressed={showNotTracked}
+              onClick={() => setShowNotTracked((current) => !current)}
+              className={cx(
+                'inline-flex min-h-7 max-md:min-h-10 items-center rounded-sm border px-2.5 text-caption transition-colors',
+                showNotTracked
+                  ? 'border-accent bg-accent/10 text-text'
+                  : 'border-subtle text-text-muted hover:bg-overlay-2',
+              )}
+            >
+              {showNotTracked ? 'Hide not tracked' : '+ Show not tracked'} (
+              {notTrackedCount})
+            </button>
+            {selectedStatuses.size < TRACKED_STATUS_OPTIONS.length ||
+            showNotTracked ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                data-testid="status-filter-reset"
+                onClick={resetStatusFilter}
+              >
+                Reset
+              </Button>
+            ) : null}
+            <SegmentedControl
+              ariaLabel="List grouping"
               size="sm"
-              className="w-44"
-              allLabel="All statuses"
-              value={filter === 'all' ? '' : filter}
-              options={STATUS_OPTIONS}
-              onChange={(next) => {
-                const value = next === '' ? 'all' : next;
-                if (isStatusFilter(value)) setFilter(value);
-              }}
+              value={groupMode}
+              onChange={setGroupMode}
+              options={[
+                { value: 'flat', label: 'Flat list' },
+                { value: 'trigger', label: 'Group by trigger' },
+              ]}
             />
           </div>
         ) : (
@@ -486,90 +744,173 @@ export function CacheKeepaliveSessionsDrawer({
           </p>
         )}
 
-        <div className="flex-1 flex min-h-0">
+        <div className="flex-1 min-h-0 overflow-y-auto p-2">
           <div
-            className={cx(
-              'overflow-y-auto p-2',
-              selected
-                ? 'max-[960px]:hidden w-[440px] shrink-0 border-r border-subtle'
-                : 'flex-1',
-            )}
+            data-testid="cache-keepalive-session-list-region"
+            aria-busy={query.isLoading}
+            className="min-h-[340px]"
           >
-            <div
-              data-testid="cache-keepalive-session-list-region"
-              aria-busy={query.isLoading}
-              className="min-h-[340px]"
-            >
-              {query.isLoading ? (
-                <SessionListSkeleton />
-              ) : query.isError && !query.data ? (
-                <div
-                  className="flex min-h-[340px] flex-col items-center justify-center gap-3 px-4 text-center"
-                  role="alert"
-                >
-                  <p className="text-body text-danger-text">
-                    Unable to load cache keepalive sessions.
-                  </p>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => query.refetch()}
-                  >
-                    Retry sessions
-                  </Button>
-                </div>
-              ) : !enabled && allRows.length === 0 ? (
-                <EmptyState title="No sessions recorded" />
-              ) : allRows.length === 0 ? (
-                <EmptyState
-                  title={
-                    filter === 'all' ? 'No sessions' : 'No matching sessions'
-                  }
-                  description={
-                    filter === 'all'
-                      ? 'No sessions recorded yet.'
-                      : 'Try a different filter.'
-                  }
-                />
-              ) : (
-                <ul ref={setListElement} className="flex flex-col">
-                  {allRows.map((r) => (
-                    <SessionListRow
-                      key={r.id}
-                      row={r}
-                      isSelected={selected?.id === r.id}
-                      onSelect={() => setSelected(r)}
-                    />
-                  ))}
-                </ul>
-              )}
-            </div>
-            {query.hasNextPage && (
-              <div className="flex justify-center pt-3 pb-4">
+            {query.isLoading ? (
+              <SessionListSkeleton />
+            ) : query.isError && !query.data ? (
+              <div
+                className="flex min-h-[340px] flex-col items-center justify-center gap-3 px-4 text-center"
+                role="alert"
+              >
+                <p className="text-body text-danger-text">
+                  Unable to load cache keepalive sessions.
+                </p>
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => query.fetchNextPage()}
-                  disabled={query.isFetchingNextPage}
-                  iconLeft={query.isFetchingNextPage ? <Spinner /> : undefined}
+                  onClick={() => query.refetch()}
                 >
-                  Loading older sessions...
+                  Retry sessions
                 </Button>
               </div>
-            )}
-            {!query.hasNextPage && allRows.length > 0 && (
-              <div className="text-center py-4 text-caption text-text-faint">
-                · No more sessions ·
-              </div>
+            ) : !enabled && allRows.length === 0 ? (
+              <EmptyState title="No sessions recorded" />
+            ) : visibleRows.length === 0 ? (
+              allRows.length === 0 &&
+              selectedStatuses.size === TRACKED_STATUS_OPTIONS.length &&
+              !showNotTracked ? (
+                <EmptyState
+                  title="No sessions"
+                  description="No sessions recorded yet."
+                />
+              ) : (
+                <EmptyState
+                  title="No matching sessions"
+                  description="Try a different filter."
+                />
+              )
+            ) : (
+              <ul ref={setListElement} className="flex flex-col">
+                {groupMode === 'flat'
+                  ? visibleRows.map((r) => (
+                      <SessionListRow
+                        key={r.id}
+                        row={r}
+                        isSelected={selected?.id === r.id}
+                        onSelect={() =>
+                          setSelected((current) =>
+                            current?.id === r.id ? null : r,
+                          )
+                        }
+                        detail={
+                          selected?.id === r.id ? (
+                            <div className="w-full border-t border-subtle bg-panel/50">
+                              <SessionDetailPane
+                                principalId={principal.id}
+                                sessionId={r.id}
+                                onClose={() => setSelected(null)}
+                              />
+                            </div>
+                          ) : null
+                        }
+                      />
+                    ))
+                  : groupedRows.map(([trigger, rows]) => {
+                      const groupPnlValues = rows
+                        .map((row) => row.net_pnl)
+                        .filter((value): value is number => value !== null);
+                      const groupPnl =
+                        groupPnlValues.length > 0
+                          ? groupPnlValues.reduce(
+                              (sum, value) => sum + value,
+                              0,
+                            )
+                          : null;
+                      const isCollapsed = collapsedGroups.has(trigger);
+                      return (
+                        <React.Fragment key={`group:${trigger}`}>
+                          <li key={`group:${trigger}`}>
+                            <button
+                              type="button"
+                              aria-expanded={!isCollapsed}
+                              onClick={() =>
+                                setCollapsedGroups((current) => {
+                                  const next = new Set(current);
+                                  if (next.has(trigger)) next.delete(trigger);
+                                  else next.add(trigger);
+                                  return next;
+                                })
+                              }
+                              className="flex w-full min-h-9 max-md:min-h-10 items-center justify-between gap-3 border-b border-subtle bg-overlay-2 px-4 py-2 text-left"
+                            >
+                              <span className="flex min-w-0 items-center gap-2">
+                                <ChevronRight
+                                  className={cx(
+                                    'w-3 h-3 shrink-0 text-text-faint transition-transform',
+                                    !isCollapsed && 'rotate-90',
+                                  )}
+                                  strokeWidth={1.75}
+                                  aria-hidden="true"
+                                />
+                                <span className="truncate text-caption font-medium text-text">
+                                  {trigger}
+                                </span>
+                                <span className="text-caption text-text-muted tabular-nums">
+                                  {' '}
+                                  {rows.length} session
+                                  {rows.length === 1 ? '' : 's'}
+                                </span>
+                              </span>
+                              <span className="shrink-0 text-caption tabular-nums text-text-muted">
+                                {groupPnl === null
+                                  ? '—'
+                                  : formatNetPnl(groupPnl)}
+                              </span>
+                            </button>
+                          </li>
+                          {!isCollapsed
+                            ? rows.map((r) => (
+                                <SessionListRow
+                                  key={r.id}
+                                  row={r}
+                                  isSelected={selected?.id === r.id}
+                                  onSelect={() =>
+                                    setSelected((current) =>
+                                      current?.id === r.id ? null : r,
+                                    )
+                                  }
+                                  detail={
+                                    selected?.id === r.id ? (
+                                      <div className="w-full border-t border-subtle bg-panel/50">
+                                        <SessionDetailPane
+                                          principalId={principal.id}
+                                          sessionId={r.id}
+                                          onClose={() => setSelected(null)}
+                                        />
+                                      </div>
+                                    ) : null
+                                  }
+                                />
+                              ))
+                            : null}
+                        </React.Fragment>
+                      );
+                    })}
+              </ul>
             )}
           </div>
-
-          {selected && (
-            <SessionDetailPane
-              principalId={principal.id}
-              sessionId={selected.id}
-              onClose={() => setSelected(null)}
-            />
+          {query.hasNextPage && (
+            <div className="flex justify-center pt-3 pb-4">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => query.fetchNextPage()}
+                disabled={query.isFetchingNextPage}
+                iconLeft={query.isFetchingNextPage ? <Spinner /> : undefined}
+              >
+                Loading older sessions...
+              </Button>
+            </div>
+          )}
+          {!query.hasNextPage && visibleRows.length > 0 && (
+            <div className="text-center py-4 text-caption text-text-faint">
+              · No more sessions ·
+            </div>
           )}
         </div>
       </div>
