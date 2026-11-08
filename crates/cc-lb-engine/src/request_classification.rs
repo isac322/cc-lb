@@ -184,6 +184,43 @@ impl<'a> RequestView<'a> {
             .any(|content| text_block_starts_with(content, marker))
     }
 
+    pub(crate) fn any_user_starts_with(&self, marker: &str) -> bool {
+        if let Some(messages) = self.value.get("messages").and_then(Value::as_array)
+            && messages.iter().any(|message| {
+                message.get("role").and_then(Value::as_str) == Some("user")
+                    && message
+                        .get("content")
+                        .is_some_and(|content| text_block_starts_with(content, marker))
+            })
+        {
+            return true;
+        }
+        if let Some(input) = self.value.get("input") {
+            let matches = match input {
+                Value::String(_) => text_block_starts_with(input, marker),
+                Value::Array(input) => input.iter().any(|item| {
+                    item.get("role").and_then(Value::as_str) == Some("user")
+                        && item
+                            .get("content")
+                            .or(Some(item))
+                            .is_some_and(|content| text_block_starts_with(content, marker))
+                }),
+                _ => false,
+            };
+            if matches {
+                return true;
+            }
+        }
+        gemini_contents(self.value).is_some_and(|contents| {
+            contents.iter().any(|item| {
+                gemini_user_or_absent_role(item)
+                    && item
+                        .get("parts")
+                        .is_some_and(|content| text_block_starts_with(content, marker))
+            })
+        })
+    }
+
     pub(crate) fn first_user_starts_with(&self, marker: &str) -> bool {
         self.first_user
             .is_some_and(|content| text_block_starts_with(content, marker))
