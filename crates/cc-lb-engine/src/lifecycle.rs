@@ -94,7 +94,7 @@ use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
     WebSocketPluginRequest,
 };
-use crate::sse_error_frame::{make_error_frame, make_provider_error_frame};
+use crate::sse_error_frame::make_provider_error_frame;
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamErrorClassification, StreamTerminationCause,
@@ -610,6 +610,10 @@ pub struct PreviewRouteInput {
     pub request_id: Option<String>,
     pub headers: HeaderMap,
     pub body_bytes: Bytes,
+    /// Provider scope selected by the admin caller.
+    pub provider: Option<cc_lb_domain::Provider>,
+    /// Provider-native path used to classify the request capability.
+    pub path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -625,6 +629,8 @@ pub enum PreviewRouteError {
     PrincipalNotFound(String),
     #[error("router pipeline instantiation error: {0}")]
     PipelineInstantiationError(String),
+    #[error("operation not supported for preview: {method} {path}")]
+    UnsupportedOperation { method: String, path: String },
 }
 
 #[derive(Clone, Debug)]
@@ -3072,7 +3078,40 @@ impl Lifecycle {
         }
 
         let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
-        let cache_metadata = request_cache_metadata_from_value(&input.headers, body_value.as_ref());
+        let method = http::Method::POST;
+        let request_capability = classify_provider_capability(&method, &input.path, input.provider)
+            .ok_or_else(|| PreviewRouteError::UnsupportedOperation {
+                method: method.to_string(),
+                path: input.path.clone(),
+            })?;
+        let request_kind = RequestKind::from(request_capability);
+        let path_model = gemini_model_from_path(&input.path);
+        let prompt_cache_analysis = match (request_capability, body_value.as_ref()) {
+            (ProviderCapability::AnthropicMessages, Some(_))
+            | (ProviderCapability::AnthropicMessages, None) => None,
+            (_, Some(_)) => Some(PromptCacheAnalysisOutput {
+                analysis: V3PromptCacheAnalysis {
+                    blocks: Vec::new(),
+                    breakpoints: Vec::new(),
+                    literal_breakpoints: Vec::new(),
+                },
+                cacheable_breakpoint_prefix_keys: Vec::new(),
+                literal_cacheable_breakpoint_prefix_keys: Vec::new(),
+                timings: PromptCacheAnalysisTimings::default(),
+            }),
+            (_, None) => None,
+        };
+        let cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &input.headers,
+            body_value.as_ref(),
+            prompt_cache_analysis,
+            Some(request_capability),
+        );
+        let canonical_model = path_model
+            .as_deref()
+            .map(canonical_model_id)
+            .unwrap_or(&cache_metadata.canonical_model_id)
+            .to_owned();
         let cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
 
         let request_id = input
@@ -3083,16 +3122,17 @@ impl Lifecycle {
             .request_id(request_id)
             .thread_id(cache_metadata.thread_id.clone())
             .requested_service_tier(cache_metadata.requested_service_tier.clone())
+            .provider_scope(input.provider)
             .downstream_headers(input.headers)
-            .method(http::Method::POST)
-            .path("/v1/messages".to_owned())
+            .method(method)
+            .path(input.path)
             .query(None)
             .body_bytes(input.body_bytes)
             .cache_breakpoints(cache_breakpoints)
-            .canonical_model_id(cache_metadata.canonical_model_id.clone())
+            .canonical_model_id(canonical_model.clone())
             .cache_pricing(cache_pricing_summary_for_model(
                 cc_lb_pricing::global_catalog(),
-                &cache_metadata.canonical_model_id,
+                &canonical_model,
                 cache_metadata.requested_service_tier.as_deref(),
             ))
             .build();
@@ -3104,7 +3144,7 @@ impl Lifecycle {
         let warm_entries = fetch_prompt_cache_warm_entries_for_bundles(
             &view,
             &principal.id,
-            RequestKind::AnthropicMessages,
+            request_kind,
             &ctx.canonical_model_id,
             &cache_metadata.bundles,
             &*self.clock,
@@ -3113,7 +3153,7 @@ impl Lifecycle {
         let candidates = build_candidates_with_matches_for_bundles(
             &view,
             &principal.id,
-            RequestKind::AnthropicMessages,
+            request_kind,
             &ctx.cache_breakpoints,
             &warm_entries,
             Some(&cache_metadata.bundles),
@@ -3121,7 +3161,7 @@ impl Lifecycle {
         )
         .0;
         let pipeline_result = execute_filter_pipeline(
-            resolved_pipeline.filters_for(cc_lb_domain::Provider::Anthropic),
+            resolved_pipeline.filters_for(request_capability.provider()),
             &ctx,
             &principal,
             candidates,
@@ -3308,11 +3348,26 @@ impl Lifecycle {
         error: &BuiltinAuthError,
         path: &str,
     ) -> Response<Body> {
+        self.reject_responses_websocket_authentication_for_provider(error, path, None)
+    }
+
+    pub fn reject_responses_websocket_authentication_for_provider(
+        &self,
+        error: &BuiltinAuthError,
+        path: &str,
+        provider: Option<cc_lb_domain::Provider>,
+    ) -> Response<Body> {
         let (observer, _) = self.websocket_observer(path);
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
-        crate::authn_rail::reject_unauthenticated(error, observer.as_ref())
+        crate::authn_rail::reject_unauthenticated_for_route(
+            error,
+            &http::Method::GET,
+            path,
+            provider,
+            observer.as_ref(),
+        )
     }
 
     /// Route and reserve one logical create; never dispatch an HTTP request.
@@ -6440,9 +6495,11 @@ impl Lifecycle {
                                     error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
                                     error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
                                 });
-                                let frame = make_error_frame(
+                                let frame = make_stream_error_frame(
+                                    response_affinity_context.capability,
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                    false,
                                 );
                                 if let Some(o) = observer.as_ref() {
                                     o.set_upstream_error(
@@ -6546,9 +6603,11 @@ impl Lifecycle {
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
                                             });
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         if let Some(o) = observer.as_ref() {
                                             o.set_upstream_error(
@@ -6582,9 +6641,11 @@ impl Lifecycle {
                                         if transformed_output_started
                                             || !downstream_stream_is_identity
                                         {
-                                            let frame = make_error_frame(
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 &error_message,
+                                                false,
                                             );
                                             stream_upstream_error_frame_emitted = true;
                                             if let Some(o) = observer.as_ref()
@@ -6620,7 +6681,10 @@ impl Lifecycle {
                                                     },
                                                 };
                                             let frame =
-                                                make_response_transform_error_frame(&transform_error);
+                                                make_response_transform_error_frame(
+                                                    response_affinity_context.capability,
+                                                    &transform_error,
+                                                );
                                             stream_transform_error = Some(transform_error);
                                             if let Some(o) = observer.as_ref()
                                                 && !upstream_error_status
@@ -6728,9 +6792,11 @@ impl Lifecycle {
                                             parse_sse_events_active = false;
                                             buffer.clear();
                                             raw_before_transform_output.clear();
-                                            let frame = make_error_frame(
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                false,
                                             );
                                             batch_index = batch_index.saturating_add(1);
                                             if let Some(o) = observer.as_ref() {
@@ -6816,9 +6882,11 @@ impl Lifecycle {
                                         || sse_transform_active
                                         || downstream_stream_is_identity
                                     {
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             "api_error",
                                             UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                            false,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         for chunk in std::mem::take(&mut deferred_terminal_chunks) {
@@ -7029,7 +7097,10 @@ impl Lifecycle {
                                                         },
                                                     };
                                                     let frame =
-                                                        make_response_transform_error_frame(&error);
+                                                        make_response_transform_error_frame(
+                                                            response_affinity_context.capability,
+                                                            &error,
+                                                        );
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
                                                         && !upstream_error_status
@@ -7073,12 +7144,19 @@ impl Lifecycle {
                                                     || !downstream_stream_is_identity
                                                 {
                                                     let frame = if success_sse_affinity_gate {
-                                                        make_error_frame(
+                                                        // The affinity gate must not expose transform
+                                                        // hook details to the client.
+                                                        make_stream_error_frame(
+                                                            response_affinity_context.capability,
                                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                            false,
                                                         )
                                                     } else {
-                                                        make_response_transform_error_frame(&error)
+                                                        make_response_transform_error_frame(
+                                                            response_affinity_context.capability,
+                                                            &error,
+                                                        )
                                                     };
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
@@ -7121,9 +7199,11 @@ impl Lifecycle {
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
                                             });
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         yield Ok::<Bytes, Infallible>(frame);
                                         break 'upstream;
@@ -7220,9 +7300,11 @@ impl Lifecycle {
                                             error_message:
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
                                         });
-                                    let frame = make_error_frame(
+                                    let frame = make_stream_error_frame(
+                                        response_affinity_context.capability,
                                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                         UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                        false,
                                     );
                                     if let Some(o) = observer.as_ref() {
                                         o.set_upstream_error(
@@ -7255,7 +7337,10 @@ impl Lifecycle {
                                                 )
                                             },
                                         };
-                                        let frame = make_response_transform_error_frame(&error);
+                                        let frame = make_response_transform_error_frame(
+                                            response_affinity_context.capability,
+                                            &error,
+                                        );
                                         stream_transform_error = Some(error);
                                         if let Some(o) = observer.as_ref()
                                             && !upstream_error_status
@@ -7464,9 +7549,11 @@ impl Lifecycle {
                                         parse_sse_events_active = false;
                                         buffer.clear();
                                         raw_before_transform_output.clear();
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(frame);
@@ -7540,9 +7627,11 @@ impl Lifecycle {
                                     || sse_transform_active
                                     || downstream_stream_is_identity
                                 {
-                                    let frame = make_error_frame(
+                                    let frame = make_stream_error_frame(
+                                        response_affinity_context.capability,
                                         "api_error",
                                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                        false,
                                     );
                                     batch_index = batch_index.saturating_add(1);
                                     yield Ok::<Bytes, Infallible>(frame);
@@ -7639,9 +7728,11 @@ impl Lifecycle {
                                             StreamTerminationCause::FramingError,
                                             None,
                                         );
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(frame);
@@ -7677,9 +7768,11 @@ impl Lifecycle {
                                             downstream_drop_guard.mark_proxy_error(
                                                 StreamTerminationCause::TransformError,
                                             );
-                                            let frame = make_error_frame(
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                false,
                                             );
                                             batch_index = batch_index.saturating_add(1);
                                             yield Ok::<Bytes, Infallible>(frame);
@@ -7732,9 +7825,11 @@ impl Lifecycle {
                                     StreamTerminationCause::FramingError,
                                     None,
                                 );
-                                let frame = make_error_frame(
+                                let frame = make_stream_error_frame(
+                                    response_affinity_context.capability,
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                    false,
                                 );
                                 yield Ok::<Bytes, Infallible>(frame);
                             } else if sse_transform_active && stream_transform_error.is_none() {
@@ -7752,7 +7847,10 @@ impl Lifecycle {
                                             )
                                         },
                                     };
-                                    let frame = make_response_transform_error_frame(&error);
+                                    let frame = make_response_transform_error_frame(
+                                        response_affinity_context.capability,
+                                        &error,
+                                    );
                                     stream_transform_error = Some(error);
                                     downstream_drop_guard.mark_proxy_error(
                                         StreamTerminationCause::TransformError,
@@ -7845,9 +7943,11 @@ impl Lifecycle {
                             StreamTerminationCause::DecodeError,
                             None,
                         );
-                        let frame = make_error_frame(
+                        let frame = make_stream_error_frame(
+                            response_affinity_context.capability,
                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                            false,
                         );
                         yield Ok::<Bytes, Infallible>(frame);
                     } else if upstream_is_sse
@@ -7880,9 +7980,11 @@ impl Lifecycle {
                                 .expect("upstream stream error set above")
                                 .error_message
                                 .clone();
-                            let frame = make_error_frame(
+                            let frame = make_stream_error_frame(
+                                response_affinity_context.capability,
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 &error_message,
+                                false,
                             );
                             if let Some(o) = observer.as_ref()
                                 && !upstream_error_status
@@ -7908,7 +8010,10 @@ impl Lifecycle {
                                     )
                                 },
                             };
-                            let frame = make_response_transform_error_frame(&transform_error);
+                            let frame = make_response_transform_error_frame(
+                                response_affinity_context.capability,
+                                &transform_error,
+                            );
                             stream_transform_error = Some(transform_error);
                             downstream_drop_guard.mark_proxy_error(
                                 StreamTerminationCause::TransformError,
@@ -8030,9 +8135,11 @@ impl Lifecycle {
                         || sse_transform_active
                         || downstream_stream_is_identity)
                 {
-                    let frame = make_error_frame(
+                    let frame = make_stream_error_frame(
+                        response_affinity_context.capability,
                         "api_error",
                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                        false,
                     );
                     batch_index = batch_index.saturating_add(1);
                     yield Ok::<Bytes, Infallible>(frame);
@@ -16633,6 +16740,39 @@ mod tests {
             &gemini_chunk,
             false,
         ));
+    }
+
+    #[test]
+    fn proxy_generated_stream_error_frames_use_selected_provider_envelope() {
+        for (capability, forbidden, required) in [
+            (
+                ProviderCapability::AnthropicMessages,
+                "\"code\"",
+                "\"type\":\"error\"",
+            ),
+            (
+                ProviderCapability::OpenaiResponses,
+                "\"type\":\"error\"",
+                "\"error\"",
+            ),
+            (
+                ProviderCapability::GeminiGenerateContent,
+                "\"type\":\"error\"",
+                "\"error\"",
+            ),
+        ] {
+            let frame = make_stream_error_frame(
+                capability,
+                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                "synthetic relay failure",
+                false,
+            );
+            let text = std::str::from_utf8(&frame).expect("SSE frame is UTF-8");
+            assert!(text.starts_with("event: error\ndata: "));
+            assert!(text.ends_with("\n\n"));
+            assert!(text.contains(required), "{text}");
+            assert!(!text.contains(forbidden), "{text}");
+        }
     }
 
     #[test]

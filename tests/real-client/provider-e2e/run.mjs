@@ -7,6 +7,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  appendFileSync,
   chmodSync,
   cpSync,
   createWriteStream,
@@ -17,6 +18,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -42,6 +44,11 @@ const CASE_SPECS = Object.freeze({
     protocol: 'openai-responses',
     envKeys: ['OPENAI_BACKEND_API_KEY', 'OPENAI_API_KEY', 'OPENAI_MANAGED_API_KEY'],
     scenarios: ['omp-gpt.stateless_tools', 'omp-gpt.stateful_previous_response_id', 'omp-gpt.session_continue'],
+    regression: {
+      stream: 'OpenAI Responses stream through loopback tap with provider error and invalid proxy credential',
+      faultRelay: 'owned-loopback-tap',
+      invalidCredential: true,
+    },
   },
   'omp-gemini': {
     id: 'omp-gemini',
@@ -63,6 +70,11 @@ const CASE_SPECS = Object.freeze({
       'omp-gemini.session_continue',
       'omp-gemini.flash_lite_transport',
     ],
+    regression: {
+      stream: 'Gemini streamGenerateContent through loopback tap with provider error and invalid proxy credential',
+      faultRelay: 'owned-loopback-tap',
+      invalidCredential: true,
+    },
   },
   codex: {
     id: 'codex',
@@ -98,6 +110,145 @@ const CASE_SPECS = Object.freeze({
     scenarios: ['Actual Antigravity coding tools', 'thoughtSignature continuity', 'Session continue'],
   },
 });
+function adminRequest(
+  adminUrl,
+  token,
+  requestPath,
+  method = 'GET',
+  body = undefined,
+  extraHeaders = {},
+) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const request = http.request(
+      new URL(requestPath, adminUrl),
+      {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...extraHeaders,
+          ...(payload
+            ? {
+                'content-type': 'application/json',
+                'content-length': payload.length,
+              }
+            : {}),
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let json = null;
+          try {
+            json = JSON.parse(text);
+          } catch {}
+          resolve({ status: response.statusCode ?? 0, headers: response.headers, text, json });
+        });
+      },
+    );
+    request.on('error', reject);
+    if (payload) request.write(payload);
+    request.end();
+  });
+}
+
+function appendOwnedResource(ledgerPath, root, entry) {
+  const record = { created_at: new Date().toISOString(), status: 'created', ...entry };
+  if (!record.kind || !record.id || !record.delete) {
+    throw new Error('owned resource ledger entry requires kind, id, delete');
+  }
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  ledger.entries = Array.isArray(ledger.entries) ? ledger.entries : [];
+  ledger.entries.push(record);
+  writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+  appendFileSync(path.join(root, 'resources.jsonl'), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  return record;
+}
+
+function providerFaultFrame(provider) {
+  if (provider === 'openai') {
+    return Buffer.from(
+      'event: response.output_text.delta\n' +
+        'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+    );
+  }
+  return Buffer.from(
+    'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n',
+  );
+}
+
+function inspectProviderErrorFrame(provider, body) {
+  const text = body.toString('utf8');
+  const dataLine = text
+    .split(/\r?\n/)
+    .reverse()
+    .find((line) => line.startsWith('data: ') && line.includes('"error"'));
+  let data = null;
+  try {
+    data = dataLine ? JSON.parse(dataLine.slice(6)) : null;
+  } catch {}
+  const error = data?.error ?? null;
+  return {
+    event_error_count: (text.match(/event: error\n/g) ?? []).length,
+    has_event_error: text.includes('event: error\n'),
+    shape:
+      provider === 'openai'
+        ? Boolean(error && typeof error.type === 'string' && error.code === error.type)
+        : Boolean(
+            error &&
+              error.code === 502 &&
+              error.status === 'BAD_GATEWAY' &&
+              typeof error.type === 'string',
+          ),
+    error_type: typeof error?.type === 'string' ? error.type : null,
+    message: typeof error?.message === 'string' ? error.message : null,
+  };
+}
+
+function readRuntimeAdminToken(root) {
+  const env = readFileSync(path.join(root, 'runtime', 'runtime.env'), 'utf8');
+  const token = env.match(/^CC_LB_ADMIN_TOKEN=(.+)$/m)?.[1]?.trim();
+  if (!token) throw new Error('runtime admin token missing');
+  return token;
+}
+
+async function waitForTerminalEvidence(adminUrl, token, requestId, upstreamId) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const response = await adminRequest(
+      adminUrl,
+      token,
+      '/admin/v1/events/delta?since_cursor=0&limit=500',
+    );
+    const events = response.json?.events;
+    if (response.status === 200 && Array.isArray(events)) {
+      const matching = events.filter(
+        (event) =>
+          (requestId && event.request_id === requestId) ||
+          (!requestId && upstreamId && event.upstream_id === upstreamId),
+      );
+      const terminal = matching.find(
+        (event) => event.error_code === 'upstream_stream_error',
+      );
+      if (terminal) {
+        return {
+          found: true,
+          request_id: terminal.request_id ?? null,
+          event_kind: terminal.event_kind ?? null,
+          status: terminal.status ?? null,
+          error_code: terminal.error_code ?? null,
+          upstream_id: terminal.upstream_id ?? null,
+          upstream_error_type: terminal.upstream_error_type ?? null,
+        };
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return { found: false, request_id: requestId ?? null, error_code: null };
+}
+
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -285,6 +436,7 @@ async function runPreflight(opts) {
       model: spec.model,
       models: spec.models,
       scenarios: spec.scenarios,
+      regression: spec.regression,
       cli: { name: spec.cli, binary: cliBin, version, ready: Boolean(cliBin && version) },
       credential: {
         ready: cred.found,
@@ -330,6 +482,209 @@ async function startCollectorWithCorrelationIds({ port, controlPort, outputFile 
     );
   const mod = await import(`data:text/javascript;base64,${Buffer.from(moduleText).toString('base64')}`);
   return mod.startOtlpReceiver({ port, controlPort, outputFile });
+}
+
+function providerRegressionRequest(spec) {
+  if (spec.provider === 'openai') {
+    return {
+      path: '/v1/responses',
+      body: Buffer.from('{"model":"gpt-test","input":[],"stream":true}'),
+    };
+  }
+  return {
+    path: `/v1beta/models/${encodeURIComponent(spec.model)}:streamGenerateContent?alt=sse`,
+    body: Buffer.from('{"contents":[],"stream":true}'),
+  };
+}
+
+async function runProviderRegression(spec, workDir, offset, selectedUpstream) {
+  const ledgerPath =
+    process.env.CC_LB_QA_LEDGER_PATH ?? path.join(workDir, 'resource-ledger.json');
+  const root = path.join(workDir, spec.id);
+  const keyPath = path.join(root, 'client', 'key');
+  const reportPath = path.join(root, 'regression.json');
+  const report = {
+    provider: spec.provider,
+    selected_upstream: selectedUpstream ?? null,
+    relay: { kind: 'owned-loopback-upstream-fault-relay', listen: null, requests: 0 },
+    invalid_proxy_credential: null,
+    stream_fault: null,
+  };
+  if (!existsSync(keyPath)) {
+    report.status = 'BLOCKED';
+    report.reason = 'proxy_key_file_missing';
+    writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    return report;
+  }
+  if (!selectedUpstream) {
+    report.status = 'BLOCKED';
+    report.reason = 'selected_upstream_missing';
+    writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    return report;
+  }
+
+  const proxyPort = spec.basePorts[0] + offset;
+  const adminUrl = `http://127.0.0.1:${spec.basePorts[1] + offset}`;
+  const adminToken = readRuntimeAdminToken(root);
+  const validKey = readFileSync(keyPath, 'utf8').trim();
+  const requestSpec = providerRegressionRequest(spec);
+  const upstreamPath = `/admin/v1/upstreams/${encodeURIComponent(selectedUpstream)}`;
+  const currentUpstream = await adminRequest(adminUrl, adminToken, upstreamPath);
+  if (currentUpstream.status !== 200 || typeof currentUpstream.json?.base_url !== 'string') {
+    report.status = 'FAIL';
+    report.reason = 'selected_upstream_lookup_failed';
+    writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    return report;
+  }
+  const originalBaseUrl = currentUpstream.json.base_url;
+  const etag = currentUpstream.headers.etag ?? `"${currentUpstream.json.revision}"`;
+  let relayPatched = false;
+  const relay = http.createServer((req, res) => {
+    req.on('data', () => {});
+    req.on('end', () => {
+      report.relay.requests += 1;
+      res.writeHead(200, {
+        'cache-control': 'no-cache',
+        connection: 'close',
+        'content-type': 'text/event-stream',
+      });
+      res.write(providerFaultFrame(spec.provider), () => res.destroy());
+    });
+    req.on('error', () => res.destroy());
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      relay.once('error', reject);
+      relay.listen(0, '127.0.0.1', resolve);
+    });
+    const relayPort = relay.address().port;
+    const relayBaseUrl = `http://127.0.0.1:${relayPort}`;
+    report.relay.listen = `127.0.0.1:${relayPort}`;
+    appendOwnedResource(ledgerPath, root, {
+      kind: 'in-process-listener',
+      id: `provider-regression-upstream-fault-relay-127.0.0.1:${relayPort}`,
+      delete: 'Closes when runProviderRegression returns; retain the ledger entry until explicit cleanup.',
+      path: relayBaseUrl,
+    });
+
+    const callProxy = (apiKey) =>
+      new Promise((resolve) => {
+        const request = http.request(
+          {
+            host: '127.0.0.1',
+            port: proxyPort,
+            method: 'POST',
+            path: requestSpec.path,
+            headers: {
+              'content-type': 'application/json',
+              'content-length': requestSpec.body.length,
+              'x-api-key': apiKey,
+            },
+          },
+          (response) => {
+            const chunks = [];
+            response.on('data', (chunk) => chunks.push(chunk));
+            response.on('end', () => {
+              const body = Buffer.concat(chunks);
+              resolve({
+                status: response.statusCode ?? 0,
+                selected_upstream: selectedUpstream,
+                request_id:
+                  response.headers['request-id'] ?? response.headers['x-request-id'] ?? null,
+                content_type: response.headers['content-type'] ?? null,
+                body,
+                body_sha256: sha256(body),
+              });
+            });
+          },
+        );
+        request.on('error', (error) =>
+          resolve({
+            status: 0,
+            selected_upstream: selectedUpstream,
+            request_id: null,
+            content_type: null,
+            body: Buffer.alloc(0),
+            body_sha256: null,
+            client_error: error.code ?? 'unknown',
+          }),
+        );
+        request.end(requestSpec.body);
+      });
+
+    const invalidProxy = await callProxy('invalid-proxy-credential');
+    const { body: _invalidBody, ...invalidSummary } = invalidProxy;
+    report.invalid_proxy_credential = invalidSummary;
+    const patched = await adminRequest(
+      adminUrl,
+      adminToken,
+      upstreamPath,
+      'PATCH',
+      { base_url: relayBaseUrl },
+      { 'if-match': etag },
+    );
+    if (patched.status !== 200) {
+      throw new Error(`fault relay upstream patch failed: HTTP ${patched.status}`);
+    }
+    relayPatched = true;
+    const faultResponse = await callProxy(validKey);
+    const providerError = inspectProviderErrorFrame(spec.provider, faultResponse.body);
+    const terminalEvidence = await waitForTerminalEvidence(
+      adminUrl,
+      adminToken,
+      faultResponse.request_id,
+      selectedUpstream,
+    );
+    report.stream_fault = {
+      status: faultResponse.status,
+      selected_upstream: selectedUpstream,
+      request_id: faultResponse.request_id,
+      content_type: faultResponse.content_type,
+      body_sha256: faultResponse.body_sha256,
+      provider_error: providerError,
+      terminal_evidence: terminalEvidence,
+      terminal:
+        providerError.has_event_error && terminalEvidence.found
+          ? 'upstream_stream_error'
+          : 'missing_provider_error_or_terminal_evidence',
+    };
+  } catch (error) {
+    report.stream_fault = {
+      status: 0,
+      selected_upstream: selectedUpstream,
+      terminal: 'harness_error',
+      error: error.message,
+    };
+  } finally {
+    if (relayPatched) {
+      const latest = await adminRequest(adminUrl, adminToken, upstreamPath);
+      const restoreEtag =
+        latest.headers.etag ?? `"${latest.json?.revision ?? currentUpstream.json.revision}"`;
+      const restored = await adminRequest(
+        adminUrl,
+        adminToken,
+        upstreamPath,
+        'PATCH',
+        { base_url: originalBaseUrl },
+        { 'if-match': restoreEtag },
+      );
+      if (restored.status !== 200) {
+        report.restore_error = `upstream base URL restore failed: HTTP ${restored.status}`;
+      }
+    }
+    await new Promise((resolve) => relay.close(resolve));
+  }
+  report.status =
+    report.invalid_proxy_credential.status === 401 &&
+    report.stream_fault?.status === 200 &&
+    report.stream_fault?.provider_error?.shape === true &&
+    report.stream_fault?.provider_error?.event_error_count === 1 &&
+    report.stream_fault?.terminal === 'upstream_stream_error' &&
+    !report.restore_error
+      ? 'PASS'
+      : 'FAIL';
+  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  return report;
 }
 
 function stageWorkDir(workDir, ccLbBin, ccLbSha, ledgerPath, credentialsObj, offset = 0) {
@@ -525,13 +880,21 @@ async function runLiveSuite(opts) {
 
       const summaryPath = path.join(workDir, spec.id, 'summary.json');
       const summary = existsSync(summaryPath) ? JSON.parse(readFileSync(summaryPath, 'utf8')) : null;
-      const verdict =
+      const driverVerdict =
         summary?.verdict ??
         (summary?.verdicts && Object.values(summary.verdicts).every((v) => v === 'PASS')
           ? 'PASS'
           : summary?.scenarios && Object.values(summary.scenarios).every((v) => v?.verdict === 'PASS')
             ? 'PASS'
             : 'FAIL');
+      const regression =
+        spec.regression && exitCode === 0
+          ? await runProviderRegression(spec, workDir, offset, summary?.upstream_id)
+          : spec.regression
+            ? { status: 'BLOCKED', reason: 'provider-driver-failed' }
+            : null;
+      const verdict =
+        driverVerdict === 'PASS' && (!regression || regression.status === 'PASS') ? 'PASS' : driverVerdict;
 
       results.push({
         case: spec.alias,
@@ -539,6 +902,7 @@ async function runLiveSuite(opts) {
         exitCode,
         verdict,
         summaryPath,
+        ...(regression ? { regression } : {}),
       });
     }
   } finally {
