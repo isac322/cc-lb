@@ -48,6 +48,7 @@ const mockPrincipal: queries.Principal = {
     snapshot_max_bytes: 256000,
     min_cache_tokens: 12345,
     classifier: {
+      openai_responses_enabled: true,
       extra_wait_for_user_tools: ['custom_tool'],
       treat_end_turn_as_ambiguous: true,
     },
@@ -231,6 +232,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
           snapshot_max_bytes: 256000,
           min_cache_tokens: 12345,
           classifier: {
+            openai_responses_enabled: true,
             extra_wait_for_user_tools: ['custom_tool'],
             treat_end_turn_as_ambiguous: true,
           },
@@ -478,6 +480,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       expect.objectContaining({
         expected_revision: 43,
         cache_keepalive: expect.objectContaining({
+          openai_responses_enabled: true,
           refresh_lead_time_5m_secs: 77,
           refresh_lead_time_1h_secs: 301,
         }),
