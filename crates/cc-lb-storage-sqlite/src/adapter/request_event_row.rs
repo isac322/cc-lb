@@ -168,9 +168,7 @@ pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEven
         content_delta_count: optional_u64(row, "content_delta_count")?,
         ping_count: optional_u64(row, "ping_count")?,
         stream_inter_output_avg_ms: optional_u64(row, "stream_inter_output_avg_ms")?,
-        provider_session_id: row
-            .try_get("provider_session_id")
-            .map_err(map_sqlx_error)?,
+        provider_session_id: row.try_get("provider_session_id").map_err(map_sqlx_error)?,
         provider_connection_id: row
             .try_get("provider_connection_id")
             .map_err(map_sqlx_error)?,

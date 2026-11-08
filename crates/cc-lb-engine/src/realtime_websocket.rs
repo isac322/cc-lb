@@ -40,12 +40,14 @@ fn realtime_terminal_outcome(
     complete: bool,
 ) -> (StreamTerminationOutcome, StreamTerminationCause) {
     match termination {
-        RealtimeWebSocketTermination::Completed => {
-            (StreamTerminationOutcome::Completed, StreamTerminationCause::None)
-        }
-        RealtimeWebSocketTermination::ProviderClosed if complete => {
-            (StreamTerminationOutcome::Completed, StreamTerminationCause::None)
-        }
+        RealtimeWebSocketTermination::Completed => (
+            StreamTerminationOutcome::Completed,
+            StreamTerminationCause::None,
+        ),
+        RealtimeWebSocketTermination::ProviderClosed if complete => (
+            StreamTerminationOutcome::Completed,
+            StreamTerminationCause::None,
+        ),
         RealtimeWebSocketTermination::ProviderClosed => (
             StreamTerminationOutcome::UpstreamError,
             StreamTerminationCause::ProviderError,
@@ -54,9 +56,10 @@ fn realtime_terminal_outcome(
             StreamTerminationOutcome::ProxyError,
             StreamTerminationCause::TransportError,
         ),
-        RealtimeWebSocketTermination::DownstreamCancelled => {
-            (StreamTerminationOutcome::ClientCancelled, StreamTerminationCause::None)
-        }
+        RealtimeWebSocketTermination::DownstreamCancelled => (
+            StreamTerminationOutcome::ClientCancelled,
+            StreamTerminationCause::None,
+        ),
     }
 }
 
@@ -70,7 +73,6 @@ pub struct RealtimeStreamMetrics {
     total_bytes: u64,
     provider_session_id: Option<String>,
     provider_connection_id: Option<String>,
-
 }
 
 impl RealtimeStreamMetrics {
@@ -131,8 +133,7 @@ impl RealtimeStreamMetrics {
         self.ping_count = self.ping_count.saturating_add(1);
     }
     fn latency(&self, status: u16) -> StreamLatency {
-        let stream_total_ms =
-            self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let stream_total_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let inter_output_avg_ms = match (self.first_frame_ms, self.last_frame_ms) {
             (Some(first), Some(last)) if self.event_count > 1 => {
                 Some(last.saturating_sub(first) / (self.event_count - 1))
@@ -286,8 +287,8 @@ impl RealtimeWebSocketSession {
         // A provider close is successful only after its protocol completion
         // marker reached the usage worker. A transport close by itself is an
         // incomplete upstream termination.
-        let complete = usage.complete
-            || matches!(termination, RealtimeWebSocketTermination::Completed);
+        let complete =
+            usage.complete || matches!(termination, RealtimeWebSocketTermination::Completed);
         let (outcome, cause) = realtime_terminal_outcome(termination, complete);
         record_stream_termination_metric(
             outcome,
@@ -746,7 +747,12 @@ mod tests {
             )
             .as_bytes(),
         );
-        assert!(bounded.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16()).provider_session_id.is_none());
+        assert!(
+            bounded
+                .latency(StatusCode::SWITCHING_PROTOCOLS.as_u16())
+                .provider_session_id
+                .is_none()
+        );
     }
     #[test]
     fn realtime_terminal_outcome_requires_provider_completion_marker() {

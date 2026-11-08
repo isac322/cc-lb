@@ -19,9 +19,7 @@ use uuid::Uuid;
 
 use crate::authn_rail::{Authenticated, reject_unauthenticated};
 use crate::completion_observer::{StreamCompletionLog, StreamLatency};
-use crate::downstream_stream_drop_guard::{
-    record_stream_termination_metric,
-};
+use crate::downstream_stream_drop_guard::record_stream_termination_metric;
 use crate::lifecycle::Lifecycle;
 use crate::response_transform::ResponseTransformContext;
 use crate::terminal_observer::{
@@ -243,8 +241,7 @@ impl ResponsesStreamMetrics {
     }
 
     fn latency(&self, status: u16) -> StreamLatency {
-        let stream_total_ms =
-            self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let stream_total_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let inter_output_avg_ms = match (self.first_output_ms, self.last_output_ms) {
             (Some(first), Some(last)) if self.event_count > 1 => {
                 Some(last.saturating_sub(first) / (self.event_count - 1))
@@ -1653,10 +1650,12 @@ impl ResponsesWebSocketGateway {
             ),
             Some(error)
                 if error.native_code.is_some() || error.code == "upstream_connection_closed" =>
-            (
-                StreamTerminationOutcome::UpstreamError,
-                StreamTerminationCause::ProviderError,
-            ),
+            {
+                (
+                    StreamTerminationOutcome::UpstreamError,
+                    StreamTerminationCause::ProviderError,
+                )
+            }
             Some(_) => (
                 StreamTerminationOutcome::ProxyError,
                 StreamTerminationCause::TransportError,
@@ -1672,7 +1671,9 @@ impl ResponsesWebSocketGateway {
                 .unwrap_or("unknown"),
             Some(&turn.prepared.model),
         );
-        let latency = turn.metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        let latency = turn
+            .metrics
+            .latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
         latency.record_on_span(&turn.prepared.span);
         if let Some(observer) = turn.prepared.observer.as_ref() {
             let usage = turn.usage.take();
@@ -1708,14 +1709,16 @@ impl ResponsesWebSocketGateway {
                     Err(cc_lb_lifecycle::StreamError {
                         error_type: error
                             .map(|error| {
-                                error.native_code.as_deref().unwrap_or(error.code).to_owned()
+                                error
+                                    .native_code
+                                    .as_deref()
+                                    .unwrap_or(error.code)
+                                    .to_owned()
                             })
                             .unwrap_or_else(|| "responses_stream_incomplete".to_owned()),
-                        error_message: error
-                            .map(|error| error.message.clone())
-                            .unwrap_or_else(|| {
-                                "Responses WebSocket stream ended before completion".to_owned()
-                            }),
+                        error_message: error.map(|error| error.message.clone()).unwrap_or_else(
+                            || "Responses WebSocket stream ended before completion".to_owned(),
+                        ),
                     })
                 },
             });
@@ -1729,7 +1732,8 @@ impl ResponsesWebSocketGateway {
                     observer.set_client_closed(StatusCode::SWITCHING_PROTOCOLS);
                 }
                 (Some(error), _)
-                    if error.native_code.is_some() || error.code == "upstream_connection_closed" =>
+                    if error.native_code.is_some()
+                        || error.code == "upstream_connection_closed" =>
                 {
                     observer.set_upstream_error(
                         StatusCode::SWITCHING_PROTOCOLS,
@@ -1758,14 +1762,15 @@ impl ResponsesWebSocketGateway {
             )
             .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()))
             {
-                let _ = turn.prepared.completion_observer.enqueue(
-                    StreamCompletionLog::new(
+                let _ = turn
+                    .prepared
+                    .completion_observer
+                    .enqueue(StreamCompletionLog::new(
                         turn.prepared.request_id.clone(),
                         &turn.prepared.span,
                         latency,
                         dispatch,
-                    ),
-                );
+                    ));
             }
         } else if let Some(reservation) = turn.prepared.reservation.take() {
             // No event bus exists for this embedded caller. Settle business

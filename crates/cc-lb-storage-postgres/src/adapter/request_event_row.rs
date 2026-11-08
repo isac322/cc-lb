@@ -302,9 +302,7 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "request event stream_inter_output_avg_ms"))
             .transpose()?,
-        provider_session_id: row
-            .try_get("provider_session_id")
-            .map_err(map_sqlx_error)?,
+        provider_session_id: row.try_get("provider_session_id").map_err(map_sqlx_error)?,
         provider_connection_id: row
             .try_get("provider_connection_id")
             .map_err(map_sqlx_error)?,

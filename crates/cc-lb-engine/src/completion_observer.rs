@@ -233,7 +233,11 @@ impl StreamLatency {
             "stream_inter_output_avg_ms",
             self.stream_inter_output_avg_ms,
         );
-        record_optional_string(span, "provider_session_id", self.provider_session_id.as_deref());
+        record_optional_string(
+            span,
+            "provider_session_id",
+            self.provider_session_id.as_deref(),
+        );
         record_optional_string(
             span,
             "provider_connection_id",

@@ -399,7 +399,10 @@ mod tests {
         headers.insert("x-opencode-session", HeaderValue::from_static("opencode"));
         headers.insert("x-claude-session-id", HeaderValue::from_static("claude"));
         headers.insert("x-app", HeaderValue::from_static("voice-client"));
-        headers.insert("x-claude-code-agent-id", HeaderValue::from_static("not-claude"));
+        headers.insert(
+            "x-claude-code-agent-id",
+            HeaderValue::from_static("not-claude"),
+        );
 
         let identity = request_identity_metadata(&headers, None);
         assert_eq!(identity.thread_id.as_deref(), Some("claude"));
@@ -422,5 +425,4 @@ mod tests {
             Some("x-opencode-session")
         );
     }
-
 }
