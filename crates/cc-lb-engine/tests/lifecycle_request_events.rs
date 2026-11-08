@@ -178,6 +178,50 @@ async fn realtime_websocket_observers_classify_attempted_routes() {
 }
 
 #[tokio::test]
+async fn early_gemini_websocket_cancellation_uses_upgrade_status() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::new(TestState::default()),
+        Arc::new(CapturingDispatch::default()),
+        LifecycleConfig::default(),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let auth = lifecycle
+        .authenticate(messages_request(Bytes::new()).headers())
+        .await
+        .expect("test request authenticates");
+
+    lifecycle
+        .begin_realtime_websocket(
+            &auth,
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+        )
+        .finish_client_closed();
+
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(1), lifecycle_events.recv())
+            .await
+            .expect("cancellation lifecycle event arrives")
+            .expect("lifecycle event stream remains open");
+        if let cc_lb_lifecycle::LifecycleEvent::RequestTerminated {
+            reason,
+            client_status,
+            ..
+        } = event
+        {
+            assert_eq!(client_status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+            assert!(matches!(
+                reason,
+                cc_lb_lifecycle::TerminationReason::ErrorCode(code)
+                    if code == "client_closed_request"
+            ));
+            break;
+        }
+    }
+}
+
+#[tokio::test]
 async fn realtime_setup_identity_is_authenticated_and_persisted_before_routing() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();

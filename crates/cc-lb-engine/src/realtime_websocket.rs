@@ -85,6 +85,9 @@ pub struct RealtimeStreamMetrics {
     total_bytes: u64,
     provider_session_id: Option<String>,
     provider_connection_id: Option<String>,
+    /// Completion state for the current provider turn. `None` means that no
+    /// turn boundary has been observed on the relay path yet.
+    turn_complete: Option<bool>,
 }
 
 impl RealtimeStreamMetrics {
@@ -98,6 +101,7 @@ impl RealtimeStreamMetrics {
             total_bytes: 0,
             provider_session_id: None,
             provider_connection_id: None,
+            turn_complete: None,
         }
     }
 
@@ -107,6 +111,60 @@ impl RealtimeStreamMetrics {
         self.last_frame_ms = Some(elapsed_ms);
         self.event_count = self.event_count.saturating_add(1);
         self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
+    }
+
+    /// Observe provider turn boundaries on the relay path, which sees every
+    /// frame. Usage accounting is intentionally marker-filtered and therefore
+    /// cannot observe OpenAI `response.created` frames reliably.
+    pub fn observe_turn_boundary(&mut self, kind: RealtimeWebSocketKind, frame: &[u8]) {
+        let has_boundary_marker = match kind {
+            RealtimeWebSocketKind::Openai => {
+                frame.windows(b"response.created".len()).any(|window| {
+                    window == b"response.created"
+                }) || frame
+                    .windows(b"response.done".len())
+                    .any(|window| window == b"response.done")
+            }
+            RealtimeWebSocketKind::Gemini => {
+                frame.windows(b"modelTurn".len()).any(|window| window == b"modelTurn")
+                    || frame
+                        .windows(b"turnComplete".len())
+                        .any(|window| window == b"turnComplete")
+            }
+        };
+        if !has_boundary_marker {
+            return;
+        }
+        let Ok(value) = sonic_rs::from_slice::<Value>(frame) else {
+            return;
+        };
+        let complete = match kind {
+            RealtimeWebSocketKind::Openai => match value.get("type").and_then(Value::as_str) {
+                Some("response.created") => Some(false),
+                Some("response.done") => Some(true),
+                _ => None,
+            },
+            RealtimeWebSocketKind::Gemini => {
+                if value.pointer("/serverContent/modelTurn").is_some() {
+                    Some(false)
+                } else if value
+                    .pointer("/serverContent/turnComplete")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(complete) = complete {
+            self.turn_complete = Some(complete);
+        }
+    }
+
+    pub fn turn_complete(&self) -> Option<bool> {
+        self.turn_complete
     }
 
     /// Capture bounded provider-native setup/session identifiers without
@@ -238,9 +296,7 @@ impl RealtimeWebSocketObservation {
     /// successful WebSocket upgrade.
     pub fn finish_client_closed(self) {
         if let Some(observer) = &self.observer {
-            observer.set_client_closed(
-                StatusCode::from_u16(499).expect("499 is a valid client-closed status"),
-            );
+            observer.set_client_closed(StatusCode::SWITCHING_PROTOCOLS);
             observer.finish();
         }
     }
@@ -318,7 +374,10 @@ impl RealtimeWebSocketSession {
         // completion marker from an earlier turn on the same connection.
         // Completion is scoped to the terminal transport path, rather than
         // allowing sticky usage state to turn a later failure into success.
-        let complete = realtime_stream_complete(termination, usage.complete);
+        let complete = realtime_stream_complete(
+            termination,
+            metrics.turn_complete().unwrap_or(usage.complete),
+        );
         let (outcome, cause) = realtime_terminal_outcome(termination, complete);
         record_stream_termination_metric(
             outcome,
@@ -729,6 +788,43 @@ mod tests {
         );
         assert!(!gemini.complete);
     }
+    #[test]
+    fn relay_turn_boundaries_reset_completion_before_later_termination() {
+        let mut metrics = RealtimeStreamMetrics::new();
+        metrics.observe_turn_boundary(
+            RealtimeWebSocketKind::Openai,
+            br#"{"type":"response.done","response":{"usage":{"input_tokens":1}}}"#,
+        );
+        assert_eq!(metrics.turn_complete(), Some(true));
+        metrics.observe_turn_boundary(
+            RealtimeWebSocketKind::Openai,
+            br#"{"type":"response.created","response":{"id":"later"}}"#,
+        );
+        assert_eq!(metrics.turn_complete(), Some(false));
+
+        for (termination, expected) in [
+            (
+                RealtimeWebSocketTermination::ProviderClosed,
+                StreamTerminationOutcome::UpstreamError,
+            ),
+            (
+                RealtimeWebSocketTermination::ProxyRelayError,
+                StreamTerminationOutcome::ProxyError,
+            ),
+            (
+                RealtimeWebSocketTermination::DownstreamCancelled,
+                StreamTerminationOutcome::ClientCancelled,
+            ),
+        ] {
+            let complete = realtime_stream_complete(
+                termination,
+                metrics.turn_complete().unwrap_or_default(),
+            );
+            assert!(!complete);
+            assert_eq!(realtime_terminal_outcome(termination, complete).0, expected);
+        }
+    }
+
 
     #[test]
     fn realtime_openai_usage_propagates_image_details_only_for_openai() {

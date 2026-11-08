@@ -606,8 +606,8 @@ impl LifecycleContext {
         state.error_code = Some(code.as_str());
     }
 
-    /// Record a client-closed terminal outcome (499). Client disconnects are
-    /// not cc-lb internal failures, so no `InternalError` is synthesized.
+    /// Record a client-closed terminal outcome. HTTP callers use 499;
+    /// WebSocket callers use the established 101 lifecycle status.
     pub(crate) fn set_client_closed(&self, status: StatusCode) {
         let mut state = self.lock_state();
         state.status = status.as_u16();
@@ -912,9 +912,10 @@ fn record_terminal_span(
     duration_ms: u64,
     unaccounted_ms: u64,
 ) {
-    let outcome = match state.status {
-        499 => "client_cancelled",
-        408 | 504 => "timeout",
+    let outcome = match error_code {
+        Some(code) if code == error_codes::CLIENT_CLOSED_REQUEST => "client_cancelled",
+        _ if state.status == 499 => "client_cancelled",
+        _ if state.status == 408 || state.status == 504 => "timeout",
         _ if error_code.is_some() => "error",
         _ => "success",
     };
