@@ -203,6 +203,7 @@ pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEven
             .map_err(map_sqlx_error)?,
         cache_control_message_indices: Vec::new(),
         cache_breakpoints: Vec::new(),
+        native_cache: None,
         routing_trace: None,
         internal_errors: Vec::new(),
         iterations: None,
