@@ -1398,12 +1398,12 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_inter_output_avg_ms = partial
                     .stream_inter_output_avg_ms
                     .or(error.stream_inter_output_avg_ms);
-                partial
-                    .provider_session_id
-                    .get_or_insert(error.provider_session_id);
-                partial
-                    .provider_connection_id
-                    .get_or_insert(error.provider_connection_id);
+                if let Some(value) = error.provider_session_id {
+                    partial.provider_session_id.get_or_insert(value);
+                }
+                if let Some(value) = error.provider_connection_id {
+                    partial.provider_connection_id.get_or_insert(value);
+                }
             }
         },
         LifecycleEvent::RequestLogUpstreamErrorObserved {
