@@ -374,7 +374,7 @@ pub fn sample_filter_request_v2(provider: ProviderFamily) -> v2::FilterRequest {
         candidates: Box::new([v2::UpstreamCandidate {
             upstream_id: Box::from("conformance-upstream"),
             name: Box::from("Conformance upstream"),
-            kind: Box::from("direct"),
+            kind: Box::from(v2_candidate_kind(provider)),
             base_url: Some(Box::from("https://example.test")),
             observed_at_unix_secs: 1,
             predicted_cache_read_tokens: 0,
@@ -481,7 +481,7 @@ pub fn sample_gemini_shape_envelope_request() -> v2::ShapeEnvelopeGeminiRequest 
         }]),
         upstream: v2::UpstreamIdentity {
             provider: Box::from("gemini"),
-            credential_kind: Box::from("oauth"),
+            credential_kind: Box::from("gemini_oauth"),
             upstream_id: Box::from("conformance-upstream"),
             name: Box::from("Conformance Gemini OAuth"),
             base_url: Some(Box::from("https://example.test")),
@@ -515,6 +515,16 @@ fn v2_upstream_for(provider: ProviderFamily) -> v2::Upstream {
         ProviderFamily::Anthropic => v2::Upstream::AnthropicDirect { base_url },
         ProviderFamily::Openai => v2::Upstream::OpenaiDirect { base_url },
         ProviderFamily::Gemini => v2::Upstream::GeminiDirect { base_url },
+    }
+}
+
+// Mirrors `cc_lb_domain::UpstreamKind::as_str`; this crate only depends on the
+// public plugin wire crate.
+fn v2_candidate_kind(provider: ProviderFamily) -> &'static str {
+    match provider {
+        ProviderFamily::Anthropic => "anthropic_api_key",
+        ProviderFamily::Openai => "openai_api_key",
+        ProviderFamily::Gemini => "gemini_api_key",
     }
 }
 

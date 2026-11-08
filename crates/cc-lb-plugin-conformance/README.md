@@ -55,9 +55,11 @@ This is the static gate to run in CI whenever the plugin or host crates change.
 ## `run()`
 
 `run()` builds a live wasmtime runtime, registers the plugin, and exercises the
-hook boundary with canonical sample payloads selected from the declared wire
-version. Filter plugins receive a V1 request whose `service_tier` is
-`Some("priority")`.
+hook boundary with a canonical sample payload for each declared wire version.
+Legacy `for_filter` / `for_shape` suites retain the Anthropic V1 fixtures;
+their filter plugins receive a V1 request whose `service_tier` is
+`Some("priority")`. Provider-selected suites use provider-native fixtures for
+the selected hook's declared V1 or V2 wire version.
 
 It verifies allocator exports, hook exports, and rkyv encode/decode round-trips.
 It does not verify plugin business semantics such

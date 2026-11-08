@@ -60,12 +60,25 @@ fn provider_fixtures_use_native_upstreams_and_no_credentials() {
         "/v1beta/models/gemini-2.5-flash:streamGenerateContent"
     );
     let envelope = fixtures::sample_gemini_shape_envelope_request();
-    assert_eq!(envelope.upstream.credential_kind.as_ref(), "oauth");
+    assert_eq!(envelope.upstream.provider.as_ref(), "gemini");
+    assert_eq!(envelope.upstream.credential_kind.as_ref(), "gemini_oauth");
     assert_eq!(
         envelope.upstream.gemini_oauth_profile.as_deref(),
         Some("gemini_cli")
     );
     assert!(!String::from_utf8_lossy(&envelope.envelope_body).contains("token"));
+}
+
+#[test]
+fn v2_filter_fixture_uses_provider_upstream_kind() {
+    for (provider, expected_kind) in [
+        (ProviderFamily::Anthropic, "anthropic_api_key"),
+        (ProviderFamily::Openai, "openai_api_key"),
+        (ProviderFamily::Gemini, "gemini_api_key"),
+    ] {
+        let request = fixtures::sample_filter_request_v2(provider);
+        assert_eq!(request.candidates[0].kind.as_ref(), expected_kind);
+    }
 }
 
 #[test]

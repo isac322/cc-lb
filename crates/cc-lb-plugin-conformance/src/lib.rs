@@ -201,6 +201,9 @@ pub struct ConformanceSuite<'a> {
     wasm: &'a [u8],
     kind: ConformanceKind,
     provider: ProviderFamily,
+    // Explicit Anthropic selection uses provider-native fixtures; legacy
+    // constructors preserve the original no-base-url fixture.
+    provider_selected: bool,
     plugin_name: String,
     engine_config: HotEngineConfig,
 }
@@ -270,6 +273,7 @@ impl<'a> ConformanceSuite<'a> {
             wasm,
             kind,
             provider: ProviderFamily::Anthropic,
+            provider_selected: false,
             plugin_name: format!("conformance-{label}"),
             engine_config: HotEngineConfig::default(),
         }
@@ -278,6 +282,7 @@ impl<'a> ConformanceSuite<'a> {
     /// Select the provider-qualified exports and fixture family.
     pub fn with_provider(mut self, provider: ProviderFamily) -> Self {
         self.provider = provider;
+        self.provider_selected = true;
         self
     }
 
@@ -385,8 +390,12 @@ impl<'a> ConformanceSuite<'a> {
                 if let Some(version) = session.dispatch.shape_wire_version() {
                     match version {
                         WireVersion::V1 => {
-                            let _ = session
-                                .call_shape_wire(fixtures::sample_shape_request_for(self.provider));
+                            let request = if self.provider_selected {
+                                fixtures::sample_shape_request_for(self.provider)
+                            } else {
+                                fixtures::sample_shape_request()
+                            };
+                            let _ = session.call_shape_wire(request);
                         }
                         WireVersion::V2 => {
                             let _ = session

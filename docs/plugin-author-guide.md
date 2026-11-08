@@ -615,11 +615,14 @@ fn plugin_passes_boundary_smoke() {
 `assert_recognisable_by_current_host()` is the admission gate. It proves the
 current host can inspect, compile, fingerprint-check, and probe the plugin.
 
-`run()` builds a live runtime session and performs ABI round-trips using the
-canonical payload for each hook's declared wire version. A filter plugin
-receives the V1 request with `service_tier = Some("priority")`. It proves the
-boundary works; it does not replace semantic tests for your plugin's routing
-or shaping behavior.
+`run()` builds a live runtime session and performs ABI round-trips using a
+canonical payload for each hook's declared wire version. Legacy
+`ConformanceSuite::for_filter` and `for_shape` calls retain the Anthropic V1
+fixtures; their filter plugin receives the V1 request with
+`service_tier = Some("priority")`. Provider-selected suites use the
+provider-native fixture for each selected hook's declared V1 or V2 wire
+version. It proves the boundary works; it does not replace semantic tests for
+your plugin's routing or shaping behavior.
 
 ### Provider-qualified conformance workflow
 
