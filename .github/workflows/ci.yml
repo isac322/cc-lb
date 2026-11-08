@@ -380,21 +380,9 @@ jobs:
       - name: Install and run promtool
         run: |
           set -euo pipefail
-          case "$RUNNER_ARCH" in
-            X64) asset=linux-amd64 ;;
-            ARM64) asset=linux-arm64 ;;
-            *) echo "unsupported architecture $RUNNER_ARCH" >&2; exit 1 ;;
-          esac
-          archive="prometheus-3.15.0.${asset}.tar.gz"
-          curl --fail --silent --show-error --location \
-            "https://github.com/prometheus/prometheus/releases/download/v3.15.0/${archive}" \
-            --output "$RUNNER_TEMP/prometheus.tar.gz"
-          tar -xzf "$RUNNER_TEMP/prometheus.tar.gz" -C "$RUNNER_TEMP"
-          promtool="$RUNNER_TEMP/prometheus-3.15.0.${asset}/promtool"
-          mkdir -p "$RUNNER_TEMP/bin"
-          install -m 0755 "$promtool" "$RUNNER_TEMP/bin/promtool"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          export PATH="$RUNNER_TEMP/bin:$PATH"
+          go install github.com/prometheus/prometheus/cmd/promtool@v3.15.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          export PATH="$(go env GOPATH)/bin:$PATH"
           promtool --version
       - name: Check alert rule syntax
         run: promtool check rules deploy/alerts/*.yml
