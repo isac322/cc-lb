@@ -369,8 +369,7 @@ pub(crate) fn is_thread_sticky_subagent_seed(
     parent_session_id: Option<&str>,
 ) -> bool {
     let view = RequestView::new(value, observed_session_id, parent_session_id);
-    omp::is_thread_sticky_subagent_marker(&view)
-        || senpi::is_thread_sticky_subagent_marker(&view)
+    omp::is_thread_sticky_subagent_marker(&view) || senpi::is_thread_sticky_subagent_marker(&view)
 }
 
 fn billing_attribution(system: Option<&Value>) -> Option<BillingAttribution<'_>> {

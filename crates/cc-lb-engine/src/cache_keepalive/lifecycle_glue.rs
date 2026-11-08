@@ -1226,7 +1226,9 @@ mod tests {
                     request.expected_generation,
                 ));
             if self.state.fail_primary && is_primary {
-                Err(CacheKeepaliveEnqueueError("primary cancellation failed".to_owned()))
+                Err(CacheKeepaliveEnqueueError(
+                    "primary cancellation failed".to_owned(),
+                ))
             } else {
                 Ok(())
             }
@@ -1273,8 +1275,7 @@ mod tests {
         });
         let principal_id = cache_keepalive_principal_uuid("principal-test");
         let primary = SessionKey::from_thread_id(principal_id, "thread-1");
-        let sibling =
-            SessionKey::from_thread_and_agent(principal_id, "thread-1", "subagent");
+        let sibling = SessionKey::from_thread_and_agent(principal_id, "thread-1", "subagent");
         state
             .generations
             .lock()
@@ -1295,7 +1296,10 @@ mod tests {
             .await;
         assert_eq!(
             *state.cancellations.lock().expect("cancellation state"),
-            vec![(primary.to_string(), Some(3)), (sibling.to_string(), Some(9))]
+            vec![
+                (primary.to_string(), Some(3)),
+                (sibling.to_string(), Some(9))
+            ]
         );
     }
 
@@ -1304,8 +1308,7 @@ mod tests {
         let state = Arc::new(BackstopState::default());
         let principal_id = cache_keepalive_principal_uuid("principal-test");
         let primary = SessionKey::from_thread_id(principal_id, "thread-2");
-        let sibling =
-            SessionKey::from_thread_and_agent(principal_id, "thread-2", "subagent");
+        let sibling = SessionKey::from_thread_and_agent(principal_id, "thread-2", "subagent");
         let keepalive = backstop_keepalive(Arc::clone(&state));
         keepalive
             .cancel_session(
@@ -1344,10 +1347,7 @@ mod tests {
             .await;
         assert_eq!(
             *state.cancellations.lock().expect("cancellation state"),
-            vec![
-                (primary.to_string(), None),
-                (scoped.to_string(), Some(4)),
-            ]
+            vec![(primary.to_string(), None), (scoped.to_string(), Some(4)),]
         );
 
         let restarted = backstop_keepalive(Arc::clone(&state));

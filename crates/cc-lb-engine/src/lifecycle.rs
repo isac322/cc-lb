@@ -4,9 +4,9 @@ mod realtime_websocket_lifecycle;
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::convert::Infallible;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -18800,32 +18800,25 @@ mod tests {
             "system": "You are omp's trusted coding assistant.",
             "messages": [{"role": "user", "content": "Complete assignment thoroughly:\n\n# Target"}]
         });
-        let mut omp_metadata =
-            request_cache_metadata_from_value_with_analysis_for_capability(
-                &headers,
-                Some(&omp),
-                None,
-                None,
-            );
-        assert_eq!(omp_metadata.request_kind.as_deref(), Some("subagent"));
-        apply_thread_sticky_subagent_latch(
-            &latch,
-            "principal-a",
+        let mut omp_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
             Some(&omp),
-            &mut omp_metadata,
+            None,
+            None,
         );
+        assert_eq!(omp_metadata.request_kind.as_deref(), Some("subagent"));
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", Some(&omp), &mut omp_metadata);
 
         let senpi = json!({
             "system": "You are senpi, a coding agent.",
             "messages": [{"role": "user", "content": "Task: Review the auth change"}]
         });
-        let mut senpi_metadata =
-            request_cache_metadata_from_value_with_analysis_for_capability(
-                &headers,
-                Some(&senpi),
-                None,
-                None,
-            );
+        let mut senpi_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            Some(&senpi),
+            None,
+            None,
+        );
         assert_eq!(senpi_metadata.request_kind.as_deref(), Some("subagent"));
         apply_thread_sticky_subagent_latch(
             &latch,
@@ -18838,13 +18831,12 @@ mod tests {
             "system": "You are omp's trusted coding assistant.",
             "messages": [{"role": "user", "content": "continue"}]
         });
-        let mut ordinary_metadata =
-            request_cache_metadata_from_value_with_analysis_for_capability(
-                &headers,
-                Some(&ordinary),
-                None,
-                None,
-            );
+        let mut ordinary_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            Some(&ordinary),
+            None,
+            None,
+        );
         apply_thread_sticky_subagent_latch(
             &latch,
             "principal-a",
@@ -18853,13 +18845,12 @@ mod tests {
         );
         assert_eq!(ordinary_metadata.request_kind.as_deref(), Some("subagent"));
 
-        let mut isolated_metadata =
-            request_cache_metadata_from_value_with_analysis_for_capability(
-                &headers,
-                Some(&ordinary),
-                None,
-                None,
-            );
+        let mut isolated_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            Some(&ordinary),
+            None,
+            None,
+        );
         apply_thread_sticky_subagent_latch(
             &latch,
             "principal-c",
@@ -18876,12 +18867,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Complete assignment thoroughly:\n\n# Target"}]
         });
         let mut seed_metadata = sticky_metadata("sticky-thread", "subagent", None);
-        apply_thread_sticky_subagent_latch(
-            &latch,
-            "principal-a",
-            Some(&seed),
-            &mut seed_metadata,
-        );
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", Some(&seed), &mut seed_metadata);
         for request_kind in [
             "compaction",
             "recap",
@@ -18898,14 +18884,8 @@ mod tests {
         }
         let mut explicit_main = sticky_metadata("sticky-thread", "main", None);
         explicit_main.explicit_request_class = Some("main".to_owned());
-        apply_thread_sticky_subagent_latch(
-            &latch,
-            "principal-a",
-            None,
-            &mut explicit_main,
-        );
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", None, &mut explicit_main);
         assert_eq!(explicit_main.request_kind.as_deref(), Some("main"));
-
 
         let hermes = json!({
             "system": "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
@@ -18928,12 +18908,7 @@ mod tests {
         assert_eq!(hermes_ordinary.request_kind.as_deref(), Some("main"));
 
         let mut claude_seed = sticky_metadata("claude-thread", "subagent", Some("agent-1"));
-        apply_thread_sticky_subagent_latch(
-            &latch,
-            "principal-a",
-            Some(&seed),
-            &mut claude_seed,
-        );
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", Some(&seed), &mut claude_seed);
         let mut claude_ordinary = sticky_metadata("claude-thread", "main", None);
         apply_thread_sticky_subagent_latch(
             &latch,

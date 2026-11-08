@@ -70,8 +70,7 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     {
         return Some(ClientRequestKind::Compaction);
     }
-    if is_thread_sticky_subagent_marker(view)
-    {
+    if is_thread_sticky_subagent_marker(view) {
         return Some(ClientRequestKind::Subagent);
     }
     if view.session_id().is_some_and(|id| id.contains(":side:"))
