@@ -22,6 +22,7 @@ use cc_lb_domain::{
     Upstream,
 };
 use cc_lb_engine::{InternalFailure, Lifecycle, LifecycleConfig, LifecycleContext, ProviderScope};
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
@@ -84,6 +85,7 @@ async fn native_provider_stream_bytes_and_terminal_classification_are_preserved(
                 StatusCode::OK,
                 Body::from(Bytes::from_static(upstream_body)),
             ),
+            &test_bus,
             kind,
         );
         let mut request = http::Request::builder()
