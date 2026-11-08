@@ -1183,9 +1183,7 @@ impl ResponsesWebSocketGateway {
             )
         });
         let is_error = sonic_rs::get_from_slice(frame, &["type"])
-            .ok()
-            .and_then(|value| value.as_str())
-            == Some("error");
+            .is_ok_and(|value| value.as_str() == Some("error"));
         let Some(turn_id) = self.resolve_provider_turn_id(
             connection_id,
             response_id.as_deref(),
