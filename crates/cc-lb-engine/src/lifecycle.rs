@@ -11253,10 +11253,7 @@ mod tests {
     #[test]
     fn native_observation_tokens_keep_zero_distinct_from_absent() {
         assert_eq!(
-            super::native_tokens_for_evidence(
-                cc_lb_request_log::RequestCacheEvidence::Zero,
-                0,
-            ),
+            super::native_tokens_for_evidence(cc_lb_request_log::RequestCacheEvidence::Zero, 0,),
             Some(0)
         );
         assert_eq!(
@@ -11267,10 +11264,7 @@ mod tests {
             None
         );
         assert_eq!(
-            super::native_tokens_for_evidence(
-                cc_lb_request_log::RequestCacheEvidence::Invalid,
-                10,
-            ),
+            super::native_tokens_for_evidence(cc_lb_request_log::RequestCacheEvidence::Invalid, 10,),
             None
         );
     }

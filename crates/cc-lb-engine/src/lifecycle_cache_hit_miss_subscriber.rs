@@ -263,9 +263,7 @@ fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: 
                 | cc_lb_request_log::RequestCacheEvidence::Unreported => None,
             };
             if let (Some(predicted), Some(actual)) = (
-                partial
-                    .predicted_cache_read_tokens
-                    .map(|tokens| tokens > 0),
+                partial.predicted_cache_read_tokens.map(|tokens| tokens > 0),
                 actual,
             ) {
                 let outcome = match (predicted, actual) {
@@ -414,12 +412,7 @@ mod tests {
         }
         fn record_cache_observation_dropped(&self, _reason: &str) {}
         fn record_dropped_events_by(&self, _reason: &str, _count: u64) {}
-        fn record_routing_tier_selection(
-            &self,
-            _tier: &str,
-            _upstream: &str,
-            _principal_id: &str,
-        ) {
+        fn record_routing_tier_selection(&self, _tier: &str, _upstream: &str, _principal_id: &str) {
         }
     }
 

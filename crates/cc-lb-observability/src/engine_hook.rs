@@ -10,13 +10,7 @@ pub trait EngineMetricsHook: Send + Sync {
 
     fn record_native_cache_miss(&self, _provider: &str, _mode: &str) {}
 
-    fn record_native_cache_prediction(
-        &self,
-        _provider: &str,
-        _mode: &str,
-        _outcome: &str,
-    ) {
-    }
+    fn record_native_cache_prediction(&self, _provider: &str, _mode: &str, _outcome: &str) {}
 
     fn record_cache_observation_dropped(&self, reason: &str);
 

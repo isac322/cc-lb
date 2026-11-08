@@ -72,9 +72,7 @@ fn analyze_openai(
     if breakpoints.len() > MAX_EXPLICIT_WRITES {
         return Some(unknown_openai(scope, "explicit_write_limit"));
     }
-    if !modern
-        && (requested_mode == Some(OpenaiCacheMode::Explicit) || !breakpoints.is_empty())
-    {
+    if !modern && (requested_mode == Some(OpenaiCacheMode::Explicit) || !breakpoints.is_empty()) {
         return Some(unknown_openai(scope, "unsupported_older_explicit"));
     }
     let retention_secs = openai_retention_secs(body, modern, &breakpoints)?;
@@ -287,7 +285,9 @@ fn parse_ttl_secs(value: &Value) -> Option<u64> {
 fn supports_modern_openai_cache(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     let Some(version) = lower.strip_prefix("gpt-").and_then(|value| {
-        let version = value.split(|ch: char| !ch.is_ascii_digit() && ch != '.').next()?;
+        let version = value
+            .split(|ch: char| !ch.is_ascii_digit() && ch != '.')
+            .next()?;
         let mut parts = version.split('.');
         let major = parts.next()?.parse::<u64>().ok()?;
         let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;
