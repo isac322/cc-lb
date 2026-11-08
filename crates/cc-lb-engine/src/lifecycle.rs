@@ -34,8 +34,8 @@ use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision};
 use cc_lb_storage_api::{
     PrincipalKind as DbPrincipalKind, PrincipalKindLite, PromptCacheObservationRecord,
     ProviderPromptCacheObservationRecord, StoredApiKeyRecord, UpstreamAffinityBinding,
-    UpstreamAffinityKey, UpstreamAffinityStore, UpstreamRateLimitObservationRecord,
-    UpstreamRecord, upstream::UpstreamKind as StorageUpstreamKind,
+    UpstreamAffinityKey, UpstreamAffinityStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
+    upstream::UpstreamKind as StorageUpstreamKind,
 };
 #[cfg(test)]
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
@@ -76,7 +76,6 @@ use crate::error_format::{
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::limit_input_estimate::estimate_anthropic_input;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
-use crate::provider_cache;
 #[cfg(test)]
 use crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys;
 use crate::prompt_cache_simulator::{
@@ -84,6 +83,7 @@ use crate::prompt_cache_simulator::{
     PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
     analyze_v3_prompt_cache,
 };
+use crate::provider_cache;
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
@@ -1957,9 +1957,7 @@ pub(crate) fn prompt_cache_observation_context(
     selected_match: Option<SelectedCacheMatch>,
     native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
 ) -> Option<PromptCacheObservationContext> {
-    if canonical_model_id.is_empty()
-        || (cache_breakpoints.is_empty() && native_cache.is_none())
-    {
+    if canonical_model_id.is_empty() || (cache_breakpoints.is_empty() && native_cache.is_none()) {
         return None;
     }
     let sink = Arc::clone(&view.prompt_cache_observation_sink);
@@ -3354,7 +3352,9 @@ impl Lifecycle {
                         native_cache: provider_cache::analyze(
                             ProviderCapability::OpenaiResponses,
                             body.as_ref(),
-                            body.get("model").and_then(Value::as_str).unwrap_or_default(),
+                            body.get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
                             ingress.headers,
                         ),
                     }),
