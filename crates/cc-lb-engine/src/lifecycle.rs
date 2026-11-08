@@ -10010,10 +10010,10 @@ fn request_reasoning_metadata(
     }
 }
 fn openai_replay_identity(value: &Value) -> Option<String> {
-    if let Some(key) = value.get("prompt_cache_key").and_then(Value::as_str) {
-        if !key.is_empty() {
-            return Some(format!("prompt-cache-key:{key}"));
-        }
+    if let Some(key) = value.get("prompt_cache_key").and_then(Value::as_str)
+        && !key.is_empty()
+    {
+        return Some(format!("prompt-cache-key:{key}"));
     }
     if let Some(conversation_id) = value
         .get("conversation")

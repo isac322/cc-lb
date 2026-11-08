@@ -224,6 +224,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
     }
 }
 
+#[cfg(test)]
 fn keepalive_upstream_supported(upstream: &UpstreamRecord) -> Result<(), String> {
     match upstream.kind {
         UpstreamKind::AnthropicApiKey => Err(
@@ -591,6 +592,7 @@ fn classify_success_body_with_surface(
     }
 }
 
+#[cfg(test)]
 fn classify_success_body(
     body: &[u8],
     cache_anchor_age: Duration,

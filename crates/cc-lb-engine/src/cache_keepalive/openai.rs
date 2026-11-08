@@ -7,7 +7,6 @@
 use serde_json::Value;
 
 pub const MIN_PREFIX_TOKENS: u64 = 1_024;
-pub const MIN_MAX_OUTPUT_TOKENS: u64 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Lifetime {
@@ -15,13 +14,8 @@ pub enum Lifetime {
     TwelveHours,
 }
 
+#[cfg(test)]
 impl Lifetime {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ThirtyMinutes => "30m",
-            Self::TwelveHours => "12h",
-        }
-    }
 
     pub const fn seconds(self) -> u64 {
         match self {
@@ -33,6 +27,7 @@ impl Lifetime {
 
 /// Parses the request-level retention option. Any mixed or unknown values
 /// fail closed instead of guessing which provider lifetime was requested.
+#[cfg(test)]
 pub fn parse_lifetime(value: &Value) -> Option<Lifetime> {
     let mut declared = Vec::new();
     let mut unknown = false;
@@ -157,6 +152,7 @@ pub fn should_schedule_refresh(model: &str, lifetime: Lifetime, max_refreshes: u
         && read_break_even_reads(model, lifetime)
             .is_some_and(|break_even| u64::from(max_refreshes) >= break_even)
 }
+#[cfg(test)]
 pub fn cached_tokens(value: &Value) -> Option<u64> {
     value
         .get("usage")
@@ -164,7 +160,7 @@ pub fn cached_tokens(value: &Value) -> Option<u64> {
         .and_then(|details| details.get("cached_tokens"))
         .and_then(Value::as_u64)
 }
-
+#[cfg(test)]
 pub fn cache_write_tokens(value: &Value) -> Option<(u64, u64)> {
     let details = value
         .get("usage")
