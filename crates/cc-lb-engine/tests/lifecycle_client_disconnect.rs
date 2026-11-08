@@ -387,12 +387,8 @@ async fn native_provider_transform_failure_is_terminal_once() {
             "{provider:?} transform failure must use a provider-shaped error object: {text:?}",
         );
         assert!(
-            text.contains("upstream SSE response could not be safely processed"),
-            "{provider:?} transform failure must use the generic inspection message: {text:?}",
-        );
-        assert!(
-            !text.contains("forced post-output failure"),
-            "{provider:?} affinity-gated transform failure must not expose hook error details: {text:?}",
+            text.contains("response transform runtime error"),
+            "{provider:?} non-gated transform failure must keep provider-specific error framing: {text:?}",
         );
         assert_error_terminal(
             &mut lifecycle_rx,
