@@ -10009,32 +10009,85 @@ fn request_reasoning_metadata(
         _ => (None, None),
     }
 }
-fn bounded_openai_replay_identity(prefix: &str, raw: &str) -> Option<String> {
-    (raw.len() <= 512 && !raw.is_empty()).then(|| format!("{prefix}:{raw}"))
+fn bounded_openai_replay_component(raw: &str) -> String {
+    if raw.len() <= 512 {
+        return raw.to_owned();
+    }
+    let digest = Sha256::digest(raw.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn openai_replay_identity(value: &Value) -> Option<String> {
-    if let Some(key) = value.get("prompt_cache_key").and_then(Value::as_str)
-        && let Some(identity) = bounded_openai_replay_identity("prompt-cache-key", key)
-    {
-        return Some(identity);
-    }
-    if let Some(conversation_id) = value
+pub(crate) fn openai_replay_identity(
+    value: &Value,
+    headers: &HeaderMap,
+    model: &str,
+    ttl: Option<cc_lb_storage_api::CacheTtl>,
+    prefix_hash: Option<&str>,
+) -> Option<String> {
+    let prompt_cache_key = value
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let conversation_id = value
         .get("conversation")
         .and_then(|conversation| conversation.get("id"))
         .and_then(Value::as_str)
-        && let Some(identity) = bounded_openai_replay_identity("conversation", conversation_id)
-    {
-        return Some(identity);
-    }
-    let input = value.get("input")?;
-    let bytes = sonic_rs::to_vec(input).ok()?;
-    let digest = Sha256::digest(&bytes);
-    let digest_hex = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Some(format!("input-sha256:{digest_hex}"))
+        .unwrap_or_default();
+    let input_digest = value
+        .get("input")
+        .and_then(|input| sonic_rs::to_vec(input).ok())
+        .map(|input_bytes| {
+            Sha256::digest(&input_bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let organization = value
+        .get("organization")
+        .or_else(|| value.get("organization_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            headers
+                .get("openai-organization")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    let processing_region = value
+        .get("processing_region")
+        .or_else(|| value.get("inference_geo"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            headers
+                .get("openai-processing-region")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    let lifetime = ttl.map(|ttl| match ttl {
+        cc_lb_storage_api::CacheTtl::Ttl30m => "30m",
+        cc_lb_storage_api::CacheTtl::Ttl12h => "12h",
+        cc_lb_storage_api::CacheTtl::Ttl5m => "5m",
+        cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
+    });
+    let namespace = format!(
+        "openai-replay-v2|model={}|lifetime={}|prefix={}|organization={}|region={}|prompt_cache_key={}|conversation={}|input={}",
+        bounded_openai_replay_component(model),
+        lifetime.unwrap_or("unknown"),
+        bounded_openai_replay_component(prefix_hash.unwrap_or("")),
+        bounded_openai_replay_component(organization),
+        bounded_openai_replay_component(processing_region),
+        bounded_openai_replay_component(prompt_cache_key),
+        bounded_openai_replay_component(conversation_id),
+        input_digest,
+    );
+    let digest = Sha256::digest(namespace.as_bytes());
+    Some(format!(
+        "openai-replay-v2:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
 }
 
 fn request_cache_metadata_from_value_with_analysis_for_capability(
@@ -10166,7 +10219,15 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             (None, None)
         };
     let replay_identity = (capability == Some(ProviderCapability::OpenaiResponses))
-        .then(|| openai_replay_identity(value))
+        .then(|| {
+            openai_replay_identity(
+                value,
+                headers,
+                &canonical_model_id,
+                cache_keepalive_ttl,
+                cache_prefix_hash.as_deref(),
+            )
+        })
         .flatten();
     RequestCacheMetadata {
         request_json: None,
@@ -11159,6 +11220,100 @@ mod tests {
 
     use super::*;
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
+    #[test]
+    fn openai_replay_identity_namespaces_scope_dimensions() {
+        let value = serde_json::json!({
+            "model": "gpt-5.6",
+            "input": [{"role": "user", "content": "prompt"}],
+            "prompt_cache_key": "key-a",
+            "conversation": {"id": "conversation-a"},
+            "organization": "org-a",
+            "processing_region": "us-east"
+        });
+        let headers = HeaderMap::new();
+        let identity = super::openai_replay_identity(
+            &value,
+            &headers,
+            "gpt-5.6",
+            Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+            Some("prefix-a"),
+        )
+        .expect("identity");
+        for (model, ttl, prefix, organization, region, key, conversation) in [
+            (
+                "gpt-5.7",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl12h),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-b"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-b",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "eu-west",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-b",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-b",
+            ),
+        ] {
+            let mut scoped = value.clone();
+            scoped["organization"] = serde_json::Value::String(organization.to_owned());
+            scoped["processing_region"] = serde_json::Value::String(region.to_owned());
+            scoped["prompt_cache_key"] = serde_json::Value::String(key.to_owned());
+            scoped["conversation"]["id"] = serde_json::Value::String(conversation.to_owned());
+            let candidate = super::openai_replay_identity(&scoped, &headers, model, ttl, prefix)
+                .expect("scoped identity");
+            assert_ne!(identity, candidate);
+        }
+    }
 
     #[test]
     fn operations_filter_subscription_and_api_key_credentials() {
