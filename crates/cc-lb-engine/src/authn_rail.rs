@@ -77,10 +77,10 @@ fn generic_error_response(
         CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    if let Some(retry_after_secs) = retry_after_secs {
-        if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
-            response.headers_mut().insert(RETRY_AFTER, value);
-        }
+    if let Some(retry_after_secs) = retry_after_secs
+        && let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string())
+    {
+        response.headers_mut().insert(RETRY_AFTER, value);
     }
     response
 }
@@ -410,9 +410,10 @@ mod tests {
             );
         }
     }
+    type RouteAuthShapeCase = (Method, &'static str, Option<Provider>, fn(&Value) -> bool);
     #[tokio::test]
     async fn route_auth_rejections_classify_generation_paths_before_body_reads() {
-        let cases: [(Method, &str, Option<Provider>, fn(&Value) -> bool); 3] = [
+        let cases: [RouteAuthShapeCase; 3] = [
             (Method::POST, "/v1/responses", None, |value: &Value| {
                 value.get("error").and_then(Value::as_object).is_some()
                     && value.get("type").is_none()
