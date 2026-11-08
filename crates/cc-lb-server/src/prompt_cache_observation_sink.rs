@@ -8,16 +8,25 @@ use cc_lb_observability::{
     cache_observation_dropped_reason, inc_cache_observation_dropped,
     inc_cache_observation_write_failed,
 };
-use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
+use cc_lb_storage_api::{
+    PromptCacheObservationRecord, PromptCacheObservationStore,
+    ProviderPromptCacheObservationRecord,
+};
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
 
 pub const DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY: usize = 4096;
 
+#[derive(Debug)]
+enum Observation {
+    Anthropic(PromptCacheObservationRecord),
+    Provider(ProviderPromptCacheObservationRecord),
+}
+
 #[derive(Clone, Debug)]
 pub struct PromptCacheObservationSink {
-    tx: Sender<PromptCacheObservationRecord>,
+    tx: Sender<Observation>,
     dropped_counter: Arc<AtomicU64>,
 }
 
@@ -44,10 +53,16 @@ impl PromptCacheObservationSink {
         };
 
         let writer = tokio::spawn(async move {
-            while let Some(record) = rx.recv().await {
-                if let Err(e) = store.upsert_observation(&record).await {
+            while let Some(observation) = rx.recv().await {
+                let result = match observation {
+                    Observation::Anthropic(record) => store.upsert_observation(&record).await,
+                    Observation::Provider(record) => {
+                        store.upsert_provider_observation(&record).await
+                    }
+                };
+                if let Err(error) = result {
                     inc_cache_observation_write_failed(store_kind);
-                    tracing::warn!(error = ?e, "prompt cache observation write failed");
+                    tracing::warn!(error = ?error, "prompt cache observation write failed");
                 }
             }
         });
@@ -55,9 +70,8 @@ impl PromptCacheObservationSink {
         (sink, writer)
     }
 
-    /// Non-blocking enqueue. On full channel, increments dropped_counter and returns Err.
-    pub fn enqueue(&self, record: PromptCacheObservationRecord) -> Result<(), EnqueueError> {
-        match self.tx.try_send(record) {
+    fn try_enqueue(&self, observation: Observation) -> Result<(), EnqueueError> {
+        match self.tx.try_send(observation) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 self.dropped_counter.fetch_add(1, Ordering::Relaxed);
@@ -70,6 +84,19 @@ impl PromptCacheObservationSink {
                 Err(EnqueueError::ChannelClosed)
             }
         }
+    }
+
+    /// Non-blocking enqueue. On full channel, increments dropped_counter and returns Err.
+    pub fn enqueue(&self, record: PromptCacheObservationRecord) -> Result<(), EnqueueError> {
+        self.try_enqueue(Observation::Anthropic(record))
+    }
+
+    /// Non-blocking enqueue for provider-native cache observations.
+    pub fn enqueue_provider(
+        &self,
+        record: ProviderPromptCacheObservationRecord,
+    ) -> Result<(), EnqueueError> {
+        self.try_enqueue(Observation::Provider(record))
     }
 
     /// Reads the dropped counter.
@@ -88,6 +115,16 @@ impl PromptCacheObservationSinkLike for PromptCacheObservationSink {
             EnqueueError::ChannelClosed => PromptCacheObservationEnqueueError::ChannelClosed,
         })
     }
+
+    fn enqueue_provider(
+        &self,
+        record: ProviderPromptCacheObservationRecord,
+    ) -> Result<(), PromptCacheObservationEnqueueError> {
+        PromptCacheObservationSink::enqueue_provider(self, record).map_err(|error| match error {
+            EnqueueError::ChannelFull => PromptCacheObservationEnqueueError::ChannelFull,
+            EnqueueError::ChannelClosed => PromptCacheObservationEnqueueError::ChannelClosed,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -98,7 +135,9 @@ mod tests {
     use async_trait::async_trait;
     use cc_lb_domain::TtlClass;
     use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
-    use cc_lb_storage_api::{PromptCacheObservationRecord, StorageResult};
+    use cc_lb_storage_api::{
+        PromptCacheObservationRecord, ProviderPromptCacheObservationRecord, StorageResult,
+    };
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
@@ -107,6 +146,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MockStore {
         records: Arc<Mutex<Vec<PromptCacheObservationRecord>>>,
+        provider_records: Arc<Mutex<Vec<ProviderPromptCacheObservationRecord>>>,
     }
 
     #[async_trait]
@@ -118,6 +158,17 @@ mod tests {
             self.records
                 .lock()
                 .expect("mock store lock")
+                .push(record.clone());
+            Ok(())
+        }
+
+        async fn upsert_provider_observation(
+            &self,
+            record: &ProviderPromptCacheObservationRecord,
+        ) -> StorageResult<()> {
+            self.provider_records
+                .lock()
+                .expect("mock provider store lock")
                 .push(record.clone());
             Ok(())
         }
@@ -135,6 +186,24 @@ mod tests {
             prefix_content_block_index: 0,
             estimated_prefix_tokens: 0,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
+        }
+    }
+
+    fn provider_record() -> ProviderPromptCacheObservationRecord {
+        ProviderPromptCacheObservationRecord {
+            upstream_id: Uuid::from_u128(7),
+            provider: "openai".to_owned(),
+            canonical_model_id: "gpt-5".to_owned(),
+            mode: "implicit".to_owned(),
+            isolation_scope: "org=o1".to_owned(),
+            identity_hash: "sha256:identity".to_owned(),
+            boundary: "minimum_input_tokens=1_024".to_owned(),
+            evidence_source: "provider_usage_metadata".to_owned(),
+            observed_cached_tokens: Some(256),
+            observed_write_tokens: None,
+            retention_secs: Some(1_800),
+            expires_at_unix_secs: Some(1_800_001_800),
+            last_observed_at_unix_secs: 1_800_000_000,
         }
     }
 
@@ -171,6 +240,27 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert_eq!(records.lock().expect("mock store lock").len(), 3);
+
+        drop(sink);
+        writer.await.expect("writer exits cleanly");
+    }
+
+    #[tokio::test]
+    async fn writer_processes_provider_records_into_store() {
+        let store = MockStore::default();
+        let records = Arc::clone(&store.provider_records);
+        let expected = provider_record();
+        let (sink, writer) = PromptCacheObservationSink::new(Arc::new(store), 8, "sqlite");
+
+        sink.enqueue_provider(expected.clone())
+            .expect("provider record enqueued");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            records.lock().expect("mock provider store lock").as_slice(),
+            &[expected]
+        );
 
         drop(sink);
         writer.await.expect("writer exits cleanly");

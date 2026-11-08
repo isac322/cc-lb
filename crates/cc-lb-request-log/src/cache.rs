@@ -34,7 +34,7 @@ impl RequestCacheEvidence {
 
 /// Bounded provider-native cache facts. Raw prompts, credentials, and raw
 /// provider cache keys are intentionally not represented.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestNativeCacheObservation {
     pub provider: String,
     pub mode: String,

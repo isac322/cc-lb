@@ -43,7 +43,6 @@ pub struct ProviderPromptCacheObservationRecord {
     pub last_observed_at_unix_secs: u64,
 }
 
-
 #[async_trait]
 pub trait PromptCacheObservationStore: Send + Sync + 'static {
     /// Atomically records an observation. Writes are monotonic: the winner is
