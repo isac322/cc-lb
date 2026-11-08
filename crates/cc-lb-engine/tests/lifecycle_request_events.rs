@@ -235,15 +235,15 @@ async fn realtime_setup_identity_is_authenticated_and_persisted_before_routing()
         );
 
         let parse = loop {
-            match tokio::time::timeout(Duration::from_secs(1), lifecycle_events.recv())
+            let event = tokio::time::timeout(Duration::from_secs(1), lifecycle_events.recv())
                 .await
                 .expect("setup lifecycle event arrives")
-                .expect("lifecycle event stream remains open")
+                .expect("lifecycle event stream remains open");
+            if let cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
+                result: Ok(info), ..
+            } = event
             {
-                cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
-                    result: Ok(info), ..
-                } => break info,
-                _ => {}
+                break info;
             }
         };
         assert_eq!(parse.thread_id.as_deref(), Some("realtime-session"));
