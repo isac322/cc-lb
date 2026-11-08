@@ -101,6 +101,7 @@ pub(crate) fn install_test_pricing() {
     models.insert(
         "claude-test".to_owned(),
         Pricing {
+            native: None,
             model: "claude-test".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(2),
             output_per_million_usd: UsdPerMillion::from_whole_usd(3),

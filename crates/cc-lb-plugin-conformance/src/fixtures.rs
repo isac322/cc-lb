@@ -10,7 +10,7 @@
 use cc_lb_plugin_wire::v1::FilterRequest;
 use cc_lb_plugin_wire::{
     CachePricingSummary, Header, Principal, ShapeRequest, SseEvent, TransformResponseRequest,
-    TransformSseEventRequest, Upstream, schema::ProviderFamily, v2,
+    TransformSseEventRequest, Upstream, schema::ProviderFamily, v2, v3,
 };
 
 /// Build a `Header` from `(name, value)`. Value can be `&str`, `&[u8]`,
@@ -387,6 +387,89 @@ pub fn sample_filter_request_v2(provider: ProviderFamily) -> v2::FilterRequest {
             seat_tier: Box::from("default"),
             subscription_quotas: Box::new([]),
         }]),
+    }
+}
+
+/// V3 filter fixture with provider-native pricing in every supported state.
+pub fn sample_filter_request_v3(provider: ProviderFamily) -> v3::FilterRequest {
+    let request = sample_filter_request_v2(provider);
+    v3::FilterRequest {
+        request_id: request.request_id,
+        thread_id: request.thread_id,
+        service_tier: request.service_tier,
+        canonical_model_id: request.canonical_model_id,
+        cache_pricing: request.cache_pricing,
+        native_pricing: v3::NativeCachePricing {
+            version: 1,
+            provider: match provider {
+                ProviderFamily::Anthropic => v3::NativeCachePricingProvider::Anthropic,
+                ProviderFamily::Openai => v3::NativeCachePricingProvider::OpenAi,
+                ProviderFamily::Gemini => v3::NativeCachePricingProvider::Gemini,
+            },
+            rates: Box::new([
+                v3::NativeCachePricingRate {
+                    component: v3::NativeCachePricingComponent::OrdinaryInput,
+                    lifetime: None,
+                    status: v3::NativeCachePricingStatus::Known,
+                    micros_per_million: Some(2_000_000),
+                },
+                v3::NativeCachePricingRate {
+                    component: v3::NativeCachePricingComponent::CachedInputRead,
+                    lifetime: None,
+                    status: v3::NativeCachePricingStatus::Known,
+                    micros_per_million: Some(100_000),
+                },
+                v3::NativeCachePricingRate {
+                    component: v3::NativeCachePricingComponent::TotalWrite,
+                    lifetime: Some(v3::NativeCachePricingLifetime::ThirtyMinutes),
+                    status: v3::NativeCachePricingStatus::Unknown,
+                    micros_per_million: None,
+                },
+                v3::NativeCachePricingRate {
+                    component: v3::NativeCachePricingComponent::ExplicitResourceStorage,
+                    lifetime: Some(v3::NativeCachePricingLifetime::ExplicitResourceTtl),
+                    status: v3::NativeCachePricingStatus::NotApplicable,
+                    micros_per_million: None,
+                },
+            ]),
+        },
+        method: request.method,
+        path: request.path,
+        query: request.query,
+        headers: request
+            .headers
+            .into_iter()
+            .map(|header| v3::Header {
+                name: header.name,
+                value: header.value,
+            })
+            .collect(),
+        body: request.body,
+        principal: v3::Principal {
+            id: request.principal.id,
+            kind: request.principal.kind,
+            claims: request.principal.claims,
+        },
+        candidates: request
+            .candidates
+            .into_iter()
+            .map(|candidate| v3::UpstreamCandidate {
+                upstream_id: candidate.upstream_id,
+                name: candidate.name,
+                kind: candidate.kind,
+                base_url: candidate.base_url,
+                observed_at_unix_secs: candidate.observed_at_unix_secs,
+                predicted_cache_read_tokens: candidate.predicted_cache_read_tokens,
+                predicted_cache_creation_tokens_5m: candidate.predicted_cache_creation_tokens_5m,
+                predicted_cache_creation_tokens_1h: candidate.predicted_cache_creation_tokens_1h,
+                predicted_uncached_input_tokens: candidate.predicted_uncached_input_tokens,
+                plan_capacity_ratio: candidate.plan_capacity_ratio,
+                organization_type: candidate.organization_type,
+                rate_limit_tier: candidate.rate_limit_tier,
+                seat_tier: candidate.seat_tier,
+                subscription_quotas: candidate.subscription_quotas,
+            })
+            .collect(),
     }
 }
 

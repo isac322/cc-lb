@@ -3,6 +3,7 @@ use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
     PromptCacheObservationRecord, PromptCacheObservationStore,
     ProviderPromptCacheObservationRecord, StorageError, StorageResult,
+    prompt_cache_observation::MAX_PROVIDER_NATIVE_CANDIDATES,
 };
 use sqlx::{Row, postgres::PgRow};
 
@@ -121,6 +122,99 @@ impl PromptCacheObservationStore for PostgresStorage {
         .bind(mode)
         .bind(isolation_scope)
         .bind(identity_hash)
+        .bind(u64_to_i64(not_expired_at_unix_secs, "native lookup cutoff")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProviderPromptCacheObservationRecord {
+                    upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
+                    provider: row.try_get("provider").map_err(map_sqlx_error)?,
+                    canonical_model_id: row
+                        .try_get("canonical_model_id")
+                        .map_err(map_sqlx_error)?,
+                    mode: row.try_get("mode").map_err(map_sqlx_error)?,
+                    isolation_scope: row.try_get("isolation_scope").map_err(map_sqlx_error)?,
+                    identity_hash: row.try_get("identity_hash").map_err(map_sqlx_error)?,
+                    boundary: row.try_get("boundary").map_err(map_sqlx_error)?,
+                    evidence_source: row.try_get("evidence_source").map_err(map_sqlx_error)?,
+                    observed_cached_tokens: row
+                        .try_get::<Option<i64>, _>("observed_cached_tokens")
+                        .map_err(map_sqlx_error)?
+                        .map(|value| i64_to_u64(value, "native cached tokens"))
+                        .transpose()?,
+                    observed_write_tokens: row
+                        .try_get::<Option<i64>, _>("observed_write_tokens")
+                        .map_err(map_sqlx_error)?
+                        .map(|value| i64_to_u64(value, "native write tokens"))
+                        .transpose()?,
+                    retention_secs: row
+                        .try_get::<Option<i64>, _>("retention_secs")
+                        .map_err(map_sqlx_error)?
+                        .map(|value| i64_to_u64(value, "native retention"))
+                        .transpose()?,
+                    expires_at_unix_secs: row
+                        .try_get::<Option<i64>, _>("expires_at")
+                        .map_err(map_sqlx_error)?
+                        .map(|value| i64_to_u64(value, "native expiry"))
+                        .transpose()?,
+                    last_observed_at_unix_secs: i64_to_u64(
+                        row.try_get("last_observed_at").map_err(map_sqlx_error)?,
+                        "native observed_at",
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    async fn list_active_provider_observations_for_candidates(
+        &self,
+        upstream_ids: &[uuid::Uuid],
+        provider: &str,
+        canonical_model_id: &str,
+        mode: &str,
+        isolation_scope: &str,
+        identity_hash: &str,
+        required_retention_secs: Option<u64>,
+        not_expired_at_unix_secs: u64,
+    ) -> StorageResult<Vec<ProviderPromptCacheObservationRecord>> {
+        if upstream_ids.is_empty() || identity_hash.is_empty() {
+            return Ok(Vec::new());
+        }
+        if upstream_ids.len() > MAX_PROVIDER_NATIVE_CANDIDATES {
+            return Err(StorageError::InvalidInput {
+                field: "upstream_ids".to_owned(),
+                reason: format!(
+                    "provider native candidate lookup supports at most {MAX_PROVIDER_NATIVE_CANDIDATES} upstreams"
+                ),
+            });
+        }
+        let rows = sqlx::query(
+            "SELECT upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at \
+             FROM provider_native_cache_observations \
+             WHERE upstream_id = ANY($1) \
+               AND provider = $2 \
+               AND canonical_model_id = $3 \
+               AND mode = $4 \
+               AND isolation_scope = $5 \
+               AND identity_hash = $6 \
+               AND retention_secs IS NOT DISTINCT FROM $7 \
+               AND expires_at IS NOT NULL \
+               AND expires_at > $8 \
+             ORDER BY upstream_id, boundary",
+        )
+        .bind(upstream_ids)
+        .bind(provider)
+        .bind(canonical_model_id)
+        .bind(mode)
+        .bind(isolation_scope)
+        .bind(identity_hash)
+        .bind(
+            required_retention_secs
+                .map(|value| u64_to_i64(value, "native required retention"))
+                .transpose()?,
+        )
         .bind(u64_to_i64(not_expired_at_unix_secs, "native lookup cutoff")?)
         .fetch_all(&self.pool)
         .await

@@ -884,7 +884,7 @@ fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let mut prefix_hashes = Vec::new();
-    for breakpoint in &row.cache_breakpoints {
+    for breakpoint in row.cache_breakpoints.iter().rev() {
         if prefix_hashes.len() >= MAX_FOLLOW_UP_PREFIX_HASHES {
             break;
         }
@@ -5614,6 +5614,144 @@ mod tests {
         assert_eq!(
             native.evidence,
             cc_lb_request_log::RequestCacheEvidence::Positive
+        );
+    }
+    #[test]
+    fn follow_up_evidence_prioritizes_trailing_message_breakpoint_and_keeps_fingerprint() {
+        let make_lookbacks = |tag: &str| {
+            (0..20)
+                .map(|idx| cc_lb_request_log::RequestCacheLookbackPrefix {
+                    prefix_hash: format!("{tag}-lookback-{idx}"),
+                    content_block_index: idx,
+                    lookback_distance: idx + 1,
+                })
+                .collect::<Vec<_>>()
+        };
+        let row = RequestEvent {
+            ts: 1_700_000_000,
+            ts_ms: Some(1_700_000_000_000),
+            request_id: "req-multi-bp".to_owned(),
+            event_id: Some("ev-multi-bp".to_owned()),
+            principal_id: Some("principal-1".to_owned()),
+            upstream_id: Some(Uuid::from_u128(1)),
+            model: Some("claude-sonnet-5-5".to_owned()),
+            cache_read_input_tokens: Some(276_269),
+            cost_usd_micros: Some(27_634),
+            cache_breakpoints: vec![
+                RequestCacheBreakpoint {
+                    block_index: 20,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::Tools,
+                    path: "tools[20]".to_owned(),
+                    message_index: None,
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "tools-bp".to_owned(),
+                    prefix_token_count: 5_000,
+                    lookback_prefixes: make_lookbacks("tools"),
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+                RequestCacheBreakpoint {
+                    block_index: 22,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+                    path: "system[1]".to_owned(),
+                    message_index: None,
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "system-bp".to_owned(),
+                    prefix_token_count: 10_000,
+                    lookback_prefixes: make_lookbacks("system"),
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+                RequestCacheBreakpoint {
+                    block_index: 50,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::Message,
+                    path: "messages[12].content[0]".to_owned(),
+                    message_index: Some(12),
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "messages-bp".to_owned(),
+                    prefix_token_count: 276_269,
+                    lookback_prefixes: make_lookbacks("messages"),
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+            ],
+            ..RequestEvent::default()
+        };
+
+        let evidence = follow_up_evidence(&row);
+        let hashes: Vec<&str> = evidence
+            .iter()
+            .filter_map(|item| item.prefix_hash.as_deref())
+            .collect();
+        assert_eq!(hashes.first().copied(), Some("messages-bp"));
+        assert!(
+            hashes.contains(&"messages-lookback-0"),
+            "trailing message breakpoint lookbacks must be prioritized: {hashes:?}"
+        );
+        assert_eq!(evidence.len(), 32);
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.ttl == cc_lb_storage_api::CacheTtl::Ttl5m)
+        );
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.prefix_fingerprint.as_deref()
+                    == Some("40152992d9929a43afbeed9a0c7baee5c7e0ebd3ba782e7dd40c255610887c2f"))
+        );
+    }
+    #[test]
+    fn follow_up_evidence_keeps_first_owner_ttl_for_shared_lookback_hash() {
+        let shared_lookback = cc_lb_request_log::RequestCacheLookbackPrefix {
+            prefix_hash: "shared-lookback".to_owned(),
+            content_block_index: 0,
+            lookback_distance: 1,
+        };
+        let row = RequestEvent {
+            ts: 1_700_000_000,
+            ts_ms: Some(1_700_000_000_000),
+            request_id: "req-shared-lookback".to_owned(),
+            event_id: Some("ev-shared-lookback".to_owned()),
+            principal_id: Some("principal-1".to_owned()),
+            upstream_id: Some(Uuid::from_u128(1)),
+            model: Some("claude-sonnet-5-5".to_owned()),
+            cache_read_input_tokens: Some(100),
+            cache_breakpoints: vec![
+                RequestCacheBreakpoint {
+                    block_index: 1,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::Tools,
+                    path: "tools[1]".to_owned(),
+                    message_index: None,
+                    ttl: Some("1h".to_owned()),
+                    prefix_hash: "tools".to_owned(),
+                    prefix_token_count: 10,
+                    lookback_prefixes: vec![shared_lookback.clone()],
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+                RequestCacheBreakpoint {
+                    block_index: 2,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::Message,
+                    path: "messages[1].content[0]".to_owned(),
+                    message_index: Some(1),
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "messages".to_owned(),
+                    prefix_token_count: 100,
+                    lookback_prefixes: vec![shared_lookback],
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+            ],
+            ..RequestEvent::default()
+        };
+
+        let evidence = follow_up_evidence(&row);
+        let shared = evidence
+            .iter()
+            .find(|item| item.prefix_hash.as_deref() == Some("shared-lookback"))
+            .expect("shared lookback evidence");
+        assert_eq!(shared.ttl, cc_lb_storage_api::CacheTtl::Ttl1h);
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.prefix_fingerprint.as_deref()
+                    == Some("2f17cbc300efb947b8e8e27d65053030b35d33ff4eae4841e6b9a7ba8f8f8cb2"))
         );
     }
 }

@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::authn_rail::Authenticated;
 use crate::completion_observer::{StreamCompletionLog, StreamLatency};
 use crate::downstream_stream_drop_guard::record_stream_termination_metric;
-use crate::lifecycle::Lifecycle;
+use crate::lifecycle::{Lifecycle, PromptCacheObservationContext};
 use crate::response_transform::ResponseTransformContext;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
@@ -153,6 +153,7 @@ pub(crate) struct PreparedWebSocketTurn {
     pub candidates: Vec<WebSocketCandidate>,
     pub observer: Option<LifecycleContext>,
     pub completion_observer: Arc<crate::completion_observer::CompletionObserver>,
+    pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
     pub reservation: Option<Reservation>,
     pub limit_engine: Option<Arc<LimitEngine>>,
     pub principal_id: String,
@@ -962,6 +963,9 @@ impl ResponsesWebSocketGateway {
         if let Some(turn) = self.turns.get_mut(&turn_id) {
             turn.connection_id = Some(connection_id);
             turn.upstream_id = Some(upstream_id);
+            if let Some(context) = turn.prepared.prompt_cache_observation_context.as_mut() {
+                context.upstream_id = upstream_id;
+            }
             turn.prepared
                 .span
                 .record("cc_lb.responses.connection_id", connection_id);
@@ -1757,6 +1761,13 @@ impl ResponsesWebSocketGateway {
             .metrics
             .latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
         latency.record_on_span(&turn.prepared.span);
+        if let (Some(context), Some(usage)) = (
+            turn.prepared.prompt_cache_observation_context.take(),
+            turn.usage.as_ref(),
+        ) {
+            self.lifecycle
+                .publish_websocket_provider_cache_observation(&context, usage);
+        }
         if let Some(observer) = turn.prepared.observer.as_ref() {
             let usage = turn.usage.take();
             if let Some(usage) = usage.as_ref() {

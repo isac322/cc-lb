@@ -6,6 +6,7 @@ use core::fmt;
 pub enum WireVersion {
     V1 = 1,
     V2 = 2,
+    V3 = 3,
 }
 
 impl WireVersion {
@@ -16,6 +17,7 @@ impl WireVersion {
         match value {
             1 => Some(Self::V1),
             2 => Some(Self::V2),
+            3 => Some(Self::V3),
             _ => None,
         }
     }
@@ -23,6 +25,7 @@ impl WireVersion {
         match self {
             Self::V1 => "v1",
             Self::V2 => "v2",
+            Self::V3 => "v3",
         }
     }
 }
@@ -161,7 +164,8 @@ impl fmt::Display for HookKind {
         f.write_str(self.as_str())
     }
 }
-pub const HOST_SUPPORTED_FILTER_VERSIONS: &[WireVersion] = &[WireVersion::V1, WireVersion::V2];
+pub const HOST_SUPPORTED_FILTER_VERSIONS: &[WireVersion] =
+    &[WireVersion::V1, WireVersion::V2, WireVersion::V3];
 pub const HOST_SUPPORTED_SHAPE_VERSIONS: &[WireVersion] = &[WireVersion::V1, WireVersion::V2];
 pub const HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS: &[WireVersion] =
     &[WireVersion::V1, WireVersion::V2];

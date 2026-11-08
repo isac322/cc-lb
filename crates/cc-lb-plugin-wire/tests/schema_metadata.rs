@@ -45,6 +45,8 @@ fn root_schema_exports_describe_supported_hooks() {
     ));
     assert!(schema::host_supports(HookKind::Filter, WireVersion::V1));
     assert!(schema::host_supports(HookKind::Filter, WireVersion::V2));
+    assert!(schema::host_supports(HookKind::Filter, WireVersion::V3));
+    assert!(!schema::host_supports(HookKind::Shape, WireVersion::V3));
     assert_eq!(
         HookKind::parse_entrypoint("shape_envelope_gemini"),
         Some((

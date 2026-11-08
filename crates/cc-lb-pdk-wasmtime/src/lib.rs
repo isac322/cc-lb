@@ -101,6 +101,7 @@ pub mod __private {
             TransformSseEventRequest as TransformSseEventRequestV2,
             TransformSseEventResult as TransformSseEventResultV2,
         },
+        v3::{ArchivedFilterRequest as ArchivedFilterRequestV3, FilterRequest as FilterRequestV3},
     };
     use rkyv::rancor::Error;
 
@@ -520,6 +521,36 @@ pub mod __private {
         let response = handler(archived);
         free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
         encode_and_pack::<FilterResponseV2>(&response, "v2::FilterResponse")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_filter_v3<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(FilterRequestV3) -> FilterResponseV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedFilterRequestV3 =
+            rkyv::access::<ArchivedFilterRequestV3, Error>(in_bytes)
+                .expect("rkyv::access(v3::FilterRequest) failed");
+        let owned: FilterRequestV3 = rkyv::deserialize::<FilterRequestV3, Error>(archived)
+            .expect("rkyv::deserialize(v3::FilterRequest) failed");
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        let response = handler(owned);
+        encode_and_pack::<FilterResponseV2>(&response, "v3::FilterResponse")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_filter_v3_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&ArchivedFilterRequestV3) -> FilterResponseV2,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedFilterRequestV3 =
+            rkyv::access::<ArchivedFilterRequestV3, Error>(in_bytes)
+                .expect("rkyv::access(v3::FilterRequest) failed");
+        let response = handler(archived);
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        encode_and_pack::<FilterResponseV2>(&response, "v3::FilterResponse")
     }
 
     #[allow(unsafe_code)]

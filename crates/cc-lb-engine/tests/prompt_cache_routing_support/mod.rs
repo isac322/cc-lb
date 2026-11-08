@@ -40,6 +40,7 @@ pub fn known_base_quota_snapshots(util: f64) -> Vec<SubscriptionQuotaCandidateSn
 
 pub fn test_cache_pricing() -> cc_lb_domain::CachePricingSummary {
     cc_lb_domain::CachePricingSummary {
+        native: None,
         status: "known".to_owned(),
         input_micros_per_million: Some(5_000_000),
         cache_creation_5m_micros_per_million: Some(6_250_000),

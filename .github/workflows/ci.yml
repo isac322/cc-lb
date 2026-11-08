@@ -386,70 +386,17 @@ jobs:
       - name: Validate Grafana dashboards
         run: scripts/validate-grafana-dashboard.sh
 
-  # A sharded, multi-node version of this job is prepared (inactive) in
-  # coverage-sharded.yml. Do not run both: they enforce the same coverage gate.
-  nextest-cov:
+  nextest-cov-build:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 240
-
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: testpw
-          POSTGRES_DB: cc_lb_test
-        ports:
-          - 5432:5432
-        # Hosted service jobs reach Postgres through the mapped localhost port.
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-          --tmpfs /var/lib/postgresql:rw,size=2g
-
     env:
-      # Keep coverage build and test concurrency aligned with the hosted runner.
-      # Dial back toward 2 if Postgres visibility tests start timing out under
-      # llvm-cov.
       CARGO_BUILD_JOBS: "4"
-      # Coverage maps counters via embedded __llvm_covmap sections, not DWARF,
-      # so debuginfo only bloats object size and slows linking here. Drop it
-      # (test + dev profiles, overriding the runner's line-tables-only default)
-      # to cut link time; the only cost is less precise test-failure backtraces.
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
-      # Raised 120 -> 240: nextest-cov runs the full --all-features workspace
-      # suite under llvm-cov instrumentation on this 4-core, CARGO_BUILD_JOBS=4
-      # Runner contention can stall Postgres's xmin snapshot
-      # advancement (multi_instance_storage_tail's pg_snapshot_xmin visibility
-      # check, runtime_change_notifier's LISTEN/NOTIFY round-trip), so tests
-      # already scaled by this var still occasionally exceed 120s at full
-      # instance-count parallelism — observed here and independently on
-      # master (run 29223361998, a different test in the same category).
-      # 240 keeps the same env-scale convention (0696a516, 4013d027) with
-      # headroom for this runner's real contention envelope.
-      CC_LB_TEST_READY_TIMEOUT_SECS: "240"
-      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
-      # Alias the same Postgres URL under DATABASE_URL and DATABASE_URL_TEST so
-      # tests that check one of the latter env vars (cc-lb-scheduler integration
-      # tests) run instead of silently returning Ok(()) after an
-      # eprintln!("skip: ...").
-      # Literal URL (not ${{ env.CI_POSTGRES_URL }}) — same-map GitHub Actions
-      # env aliasing is not portable.
-      DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
-      DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
-      # Force offline sqlx macro verification. apalis-sqlite ships SQLite-flavored
-      # sqlx::query_file!() macros; with DATABASE_URL set to Postgres they would
-      # try to prepare their SQLite SQL against Postgres and fail with
-      # "relation \"jobs\" does not exist". Both apalis-sqlite and apalis-postgres
-      # ship .sqlx/ offline caches in their crate sources so this always compiles.
-      # This crate's own code uses no compile-time sqlx macros, only runtime
-      # queries — so runtime DB access is unaffected.
       SQLX_OFFLINE: "true"
-
+      LLVM_PROFILE_FILE_NAME: shard-0-%p-%m.profraw
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -459,11 +406,105 @@ jobs:
           components: llvm-tools-preview
       - name: Install wasm targets for pinned toolchain
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
-      # Unlike clippy, coverage executes fixture-backed WASM tests, so retain
-      # both targets installed above.
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
+          cache-job-key: "nextest-cov-0"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Export cargo-installed tools
+        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+
+      - name: Clean coverage artifacts
+        run: cargo llvm-cov clean --workspace
+
+      - name: Build and archive instrumented test binaries
+        run: |
+          cargo llvm-cov nextest-archive \
+            --workspace \
+            --exclude cc-lb-loadgen \
+            --exclude cc-lb-stress-suite \
+            --all-features \
+            --archive-file nextest-archive.tar.zst
+
+      - name: Run compile-fail contract tests
+        run: |
+          mkdir -p target/llvm-cov-target
+          cargo llvm-cov nextest \
+            --archive-file nextest-archive.tar.zst \
+            -E 'test(authn_rail_typestate_contracts)' \
+            --test-threads=2 \
+            --no-report
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-nextest-archive
+          path: |
+            nextest-archive.tar.zst
+            crates/cc-lb-admin/web/dist/**
+            target/wasm32-unknown-unknown/release/*.wasm
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-profraw-0
+          path: target/llvm-cov-target/*.profraw
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          fi
+
+  nextest-cov-shard:
+    needs: nextest-cov-build
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: cc_lb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --tmpfs /var/lib/postgresql:rw,size=2g
+
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CC_LB_TEST_READY_TIMEOUT_SECS: "240"
+      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      SQLX_OFFLINE: "true"
+      LLVM_PROFILE_FILE_NAME: shard-${{ matrix.shard }}-%p-%m.profraw
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: llvm-tools-preview
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
@@ -490,44 +531,74 @@ jobs:
           fi
           psql --version
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-nextest-archive
+
       - name: Run Postgres migrations
         run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
         env:
           DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
 
-      - name: Clean coverage artifacts
-        run: cargo llvm-cov clean --workspace
-
-      - name: Run tests with coverage instrumentation
+      - name: Run test shard ${{ matrix.shard }}/4
         run: |
-          # Pin test concurrency to the hosted runner's four-core request so
-          # coverage-instrumented processes cannot multiply unnecessarily.
+          mkdir -p target/llvm-cov-target
+          ln -sfn target/debug target/llvm-cov-target/debug
           cargo llvm-cov nextest \
-            --workspace \
-            --exclude cc-lb-loadgen \
-            --exclude cc-lb-stress-suite \
-            --all-features \
+            --archive-file nextest-archive.tar.zst \
+            -E 'not test(authn_rail_typestate_contracts)' \
+            --partition slice:${{ matrix.shard }}/4 \
             --test-threads=4 \
             --no-report
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-profraw-${{ matrix.shard }}
+          path: target/llvm-cov-target/*.profraw
+          if-no-files-found: error
+          retention-days: 1
+
+  nextest-cov:
+    name: nextest-cov
+    needs:
+      - changes
+      - nextest-cov-build
+      - nextest-cov-shard
+    if: ${{ !cancelled() && needs.nextest-cov-build.result == 'success' && needs.nextest-cov-shard.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-nextest-archive
+
+      - name: Collect every shard's raw profiles
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-profraw-*
+          path: target/llvm-cov-target
+          merge-multiple: true
+
       - name: Generate workspace lcov report
         run: |
+          tar --use-compress-program=unzstd -xf nextest-archive.tar.zst -C target/llvm-cov-target
           cargo llvm-cov report \
+            --nextest-archive-file nextest-archive.tar.zst \
             --lcov \
             --output-path target/coverage.lcov \
             --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
 
       - name: Check per-package coverage gates
         run: scripts/coverage-gate.sh target/coverage.lcov
-
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
-          fi
 
   e2e:
     needs: changes
@@ -583,6 +654,8 @@ jobs:
       - clippy
       - cargo-deny
       - promtool
+      - nextest-cov-build
+      - nextest-cov-shard
       - nextest-cov
       - e2e
     if: always()
@@ -609,7 +682,7 @@ jobs:
         run: |
           set -euo pipefail
           JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
-            cargo-deny promtool nextest-cov e2e)
+            cargo-deny promtool nextest-cov-build nextest-cov-shard nextest-cov e2e)
           if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
             "${JOBS[@]}" <<<"$RESULTS" >/dev/null; then
             echo "::error::needs context does not match the expected jobs: ${JOBS[*]}"

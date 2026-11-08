@@ -1,6 +1,26 @@
 use std::collections::BTreeMap;
 
+use crate::{NativePricingLifetime, NativePricingRate, NativePricingStatus, ProviderNativePricing};
 use crate::{Pricing, ThresholdBand, TierRate, UsdPerMillion};
+
+pub(crate) fn resolve_native_rate(
+    pricing: &ProviderNativePricing,
+    lifetime: NativePricingLifetime,
+) -> NativePricingRate {
+    pricing
+        .total_write
+        .get(&lifetime)
+        .cloned()
+        .unwrap_or_else(|| {
+            if lifetime == NativePricingLifetime::ModelRetention
+                && pricing.cached_input_read.status == NativePricingStatus::NotApplicable
+            {
+                NativePricingRate::not_applicable()
+            } else {
+                NativePricingRate::unknown()
+            }
+        })
+}
 
 pub(crate) fn resolve_tier_rate(pricing: &Pricing, tier: Option<&str>) -> TierRate {
     if let Some(rate) = tier.and_then(|name| pricing.by_tier.get(name)) {

@@ -13,9 +13,7 @@ pub use crate::{
     ConformanceSuite, FilterWireRequest, PluginSession, ShapeWireRequest,
     TransformResponseWireRequest, TransformSseWireRequest,
     fixtures::{
-        hdr, sample_filter_request, sample_filter_request_v2,
-        sample_gemini_generate_content_shape_request,
-        sample_gemini_generate_content_transform_response_request,
+        hdr, sample_filter_request, sample_filter_request_v2, sample_filter_request_v3,
         sample_gemini_generate_content_transform_sse_event_request,
         sample_gemini_shape_envelope_request, sample_gemini_stream_generate_content_shape_request,
         sample_gemini_stream_generate_content_transform_response_request,
@@ -44,6 +42,14 @@ pub use cc_lb_plugin_wire::{
         TransformSseEventRequest as TransformSseEventRequestV2,
         TransformSseEventResult as TransformSseEventResultV2, Upstream as UpstreamV2,
         UpstreamCandidate as UpstreamCandidateV2, UpstreamIdentity,
+    },
+    v3::{
+        FilterRequest as FilterRequestV3, NativeCachePricing as NativeCachePricingV3,
+        NativeCachePricingComponent as NativeCachePricingComponentV3,
+        NativeCachePricingLifetime as NativeCachePricingLifetimeV3,
+        NativeCachePricingProvider as NativeCachePricingProviderV3,
+        NativeCachePricingRate as NativeCachePricingRateV3,
+        NativeCachePricingStatus as NativeCachePricingStatusV3,
     },
 };
 pub use cc_lb_runtime_wasmtime::{HookKind, HotEngineConfig};

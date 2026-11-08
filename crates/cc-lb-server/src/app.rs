@@ -2411,6 +2411,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_clock::Clock) -> cc_lb_pricing::Cat
         models.insert(
             (*name).to_owned(),
             Pricing {
+                native: None,
                 model: (*name).to_owned(),
                 input_per_million_usd: UsdPerMillion::from_micros_usd(*input),
                 output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
@@ -4173,6 +4174,7 @@ mod tests {
         snapshot.models.insert(
             TIER_PRICING_TEST_MODEL.to_owned(),
             cc_lb_pricing::Pricing {
+                native: None,
                 model: TIER_PRICING_TEST_MODEL.to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
@@ -5178,6 +5180,7 @@ mod tests {
         models.insert(
             "operator-model-a".to_owned(),
             cc_lb_pricing::Pricing {
+                native: None,
                 model: "operator-model-a".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),

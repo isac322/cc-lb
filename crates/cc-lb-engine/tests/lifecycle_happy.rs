@@ -1556,6 +1556,7 @@ fn priced_catalog() -> Arc<PriceCatalog> {
         (
             model.to_owned(),
             Pricing {
+                native: None,
                 model: model.to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(if image_rate.is_some() {
                     5

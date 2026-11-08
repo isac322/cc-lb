@@ -25,6 +25,10 @@ pub(crate) fn classify(view: &RequestView<'_>) -> Option<ClientRequestKind> {
 
     None
 }
+pub(crate) fn is_thread_sticky_subagent_marker(view: &RequestView<'_>) -> bool {
+    view.any_user_starts_with(OMP_SUBAGENT_PROMPT_PREFIX)
+        || view.any_user_starts_with("Complete assignment thoroughly:")
+}
 
 pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequestKind> {
     if !view.has_provenance() {
@@ -66,9 +70,7 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     {
         return Some(ClientRequestKind::Compaction);
     }
-    if view.user_starts_with(OMP_SUBAGENT_PROMPT_PREFIX)
-        || view.user_starts_with("Complete assignment thoroughly:")
-    {
+    if is_thread_sticky_subagent_marker(view) {
         return Some(ClientRequestKind::Subagent);
     }
     if view.session_id().is_some_and(|id| id.contains(":side:"))
@@ -320,6 +322,38 @@ mod tests {
         });
         assert_eq!(
             classify(&RequestView::new(&value, Some("session"), None)),
+            Some(ClientRequestKind::Main)
+        );
+    }
+    #[test]
+    fn forked_subagent_stays_subagent_after_tool_result() {
+        let value = json!({
+            "system": "You are omp's trusted coding assistant.",
+            "messages": [
+                {"role": "user", "content": "historical session prompt"},
+                {"role": "user", "content": "Complete assignment thoroughly:\n\n# Target"},
+                {"role": "assistant", "content": "calling a tool"},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "done"}]}
+            ]
+        });
+        assert_eq!(
+            classify(&RequestView::new(&value, Some("session-1"), None)),
+            Some(ClientRequestKind::Subagent)
+        );
+    }
+
+    #[test]
+    fn subagent_marker_is_only_considered_in_user_messages() {
+        let value = json!({
+            "system": "You are omp's trusted coding assistant.",
+            "messages": [
+                {"role": "user", "content": "historical session prompt"},
+                {"role": "assistant", "content": "Complete assignment thoroughly:\n\n# Target"},
+                {"role": "user", "content": "continue"}
+            ]
+        });
+        assert_eq!(
+            classify(&RequestView::new(&value, Some("session-1"), None)),
             Some(ClientRequestKind::Main)
         );
     }

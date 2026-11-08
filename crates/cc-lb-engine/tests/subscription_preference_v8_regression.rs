@@ -474,6 +474,7 @@ fn cold_reprime_score(tokens: u32) -> CacheScore {
 fn install_test_pricing() {
     let model = MODEL_AGNOSTIC;
     let pricing = Pricing {
+        native: None,
         model: model.to_owned(),
         input_per_million_usd: UsdPerMillion::from_whole_usd(5),
         output_per_million_usd: UsdPerMillion::from_whole_usd(25),
@@ -632,6 +633,7 @@ fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RoutingContext {
 
 fn test_cache_pricing() -> CachePricingSummary {
     CachePricingSummary {
+        native: None,
         status: "known".to_owned(),
         input_micros_per_million: Some(5_000_000),
         cache_creation_5m_micros_per_million: Some(6_250_000),

@@ -158,6 +158,11 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
                     reason: "provider-qualified shape hook is missing upstream identity".to_owned(),
                 });
             }
+            Some(WireVersion::V3) => {
+                return Err(DialectError::UnsupportedRequest {
+                    reason: "V3 is supported only for filter hooks".to_owned(),
+                });
+            }
             None => {
                 if let Some(native) = &self.native_request {
                     return native.shape(context, upstream, principal, builder);
@@ -183,6 +188,7 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
                 self.dispatch.cookie_redaction(),
                 |in_bytes| self.call_shape_output(in_bytes, builder, upstream),
             ),
+            WireVersion::V3 => unreachable!("V3 shape hook was rejected above"),
         }
         .map_err(|e| DialectError::UnsupportedRequest {
             reason: format!("rkyv encode ShapeRequest: {e}"),
@@ -342,6 +348,11 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
                 };
                 host_to_wire_transform_response_v2(&request, identity)
             }
+            Some(WireVersion::V3) => {
+                return Err(response_runtime_error(
+                    "V3 is supported only for filter hooks".to_owned(),
+                ));
+            }
             None => {
                 return Err(response_runtime_error(
                     "shape plugin is missing transform_response metadata".to_owned(),
@@ -383,6 +394,11 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
                     ));
                 };
                 host_to_wire_transform_sse_event_v2(&request, identity)
+            }
+            Some(WireVersion::V3) => {
+                return Err(response_runtime_error(
+                    "V3 is supported only for filter hooks".to_owned(),
+                ));
             }
             None => {
                 return Err(response_runtime_error(

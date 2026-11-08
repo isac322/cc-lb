@@ -917,6 +917,7 @@ fn seed_price_catalog() {
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),
             input_image_per_million_usd: None,
             output_image_per_million_usd: None,
+            native: None,
             by_tier: Default::default(),
         },
     );
