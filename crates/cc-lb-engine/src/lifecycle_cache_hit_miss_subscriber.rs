@@ -425,6 +425,7 @@ mod tests {
                 .map_err(|()| StreamError {
                     error_type: "upstream_error".into(),
                     error_message: "stream failed after usage".into(),
+                    ..Default::default()
                 }),
         }
     }

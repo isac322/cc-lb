@@ -1383,6 +1383,26 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             Err(error) => {
                 partial.stream_error_type = Some(error.error_type);
                 partial.stream_error_message = Some(error.error_message);
+                // Preserve provider-neutral fields collected before an
+                // abnormal termination. Do not replace an earlier value with
+                // an empty error payload.
+                partial.stream_body_bytes =
+                    partial.stream_body_bytes.or(error.body_bytes);
+                partial.stream_body_chunk_count =
+                    partial.stream_body_chunk_count.or(error.body_chunk_count);
+                partial.stream_first_output_ms =
+                    partial.stream_first_output_ms.or(error.first_body_chunk_ms);
+                partial.stream_last_chunk_ms =
+                    partial.stream_last_chunk_ms.or(error.stream_last_chunk_ms);
+                partial.stream_total_ms = partial.stream_total_ms.or(error.stream_total_ms);
+                partial.stream_ping_count = partial.stream_ping_count.or(error.ping_count);
+                partial.stream_inter_output_avg_ms = partial
+                    .stream_inter_output_avg_ms
+                    .or(error.stream_inter_output_avg_ms);
+                partial.provider_session_id =
+                    partial.provider_session_id.or(error.provider_session_id);
+                partial.provider_connection_id =
+                    partial.provider_connection_id.or(error.provider_connection_id);
             }
         },
         LifecycleEvent::RequestLogUpstreamErrorObserved {
@@ -1979,6 +1999,15 @@ mod tests {
                 result: Err(StreamError {
                     error_type: "client_closed_request".to_owned(),
                     error_message: "downstream disconnected".to_owned(),
+                    body_bytes: Some(123),
+                    body_chunk_count: Some(7),
+                    first_body_chunk_ms: Some(12),
+                    stream_last_chunk_ms: Some(34),
+                    stream_total_ms: Some(56),
+                    ping_count: Some(2),
+                    stream_inter_output_avg_ms: Some(11),
+                    provider_session_id: Some("session-before-cancel".to_owned()),
+                    provider_connection_id: Some("connection-before-cancel".to_owned()),
                 }),
             },
         );
@@ -2013,6 +2042,21 @@ mod tests {
         assert_eq!(event.response_body_process_ms, Some(0.625));
         assert_eq!(event.response_body_downstream_poll_gap_ms, Some(12.75));
         assert_eq!(event.retry_overhead_ms, None);
+        assert_eq!(event.body_bytes, Some(123));
+        assert_eq!(event.body_chunk_count, Some(7));
+        assert_eq!(event.stream_first_output_ms, Some(12));
+        assert_eq!(event.stream_last_chunk_ms, Some(34));
+        assert_eq!(event.stream_total_ms, Some(56));
+        assert_eq!(event.stream_ping_count, Some(2));
+        assert_eq!(event.stream_inter_output_avg_ms, Some(11));
+        assert_eq!(
+            event.provider_session_id.as_deref(),
+            Some("session-before-cancel")
+        );
+        assert_eq!(
+            event.provider_connection_id.as_deref(),
+            Some("connection-before-cancel")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2673,6 +2717,7 @@ mod tests {
             result: Err(StreamError {
                 error_type: "overloaded_error".into(),
                 error_message: "please retry".into(),
+                ..Default::default()
             }),
         })
         .await
@@ -2845,6 +2890,7 @@ mod tests {
             result: Err(StreamError {
                 error_type: "upstream_response_body_error".into(),
                 error_message: "upstream response body failed".into(),
+                ..Default::default()
             }),
         })
         .await

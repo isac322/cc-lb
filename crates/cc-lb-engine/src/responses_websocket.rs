@@ -1789,6 +1789,15 @@ impl ResponsesWebSocketGateway {
                         error_message: error.map(|error| error.message.clone()).unwrap_or_else(
                             || "Responses WebSocket stream ended before completion".to_owned(),
                         ),
+                        body_bytes: Some(latency.total_bytes),
+                        body_chunk_count: Some(latency.stream_event_count),
+                        first_body_chunk_ms: latency.stream_first_output_ms,
+                        stream_last_chunk_ms: latency.stream_last_chunk_ms,
+                        stream_total_ms: Some(latency.stream_total_ms),
+                        stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
+                        provider_session_id: latency.provider_session_id.clone(),
+                        provider_connection_id: latency.provider_connection_id.clone(),
+                        ..Default::default()
                     })
                 },
             });
