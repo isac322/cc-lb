@@ -3005,9 +3005,12 @@ mod tests {
         let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
         let event_id = eid("websocket-neutral-fields");
 
-        tx.send(diagnostics_started(event_id.clone(), "req-websocket-neutral"))
-            .await
-            .expect("request starts");
+        tx.send(diagnostics_started(
+            event_id.clone(),
+            "req-websocket-neutral",
+        ))
+        .await
+        .expect("request starts");
         tx.send(LifecycleEvent::StreamCompleted {
             event_id: event_id.clone(),
             result: Ok(StreamSuccess {

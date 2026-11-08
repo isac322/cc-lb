@@ -6,18 +6,18 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
+use cc_lb_engine::responses_websocket::{ResponsesWebSocketGateway, WebSocketError};
 use cc_lb_engine::{
     BreakerRegistry, DispatchError, Lifecycle, LifecycleConfig, RealtimeWebSocketKind,
     RealtimeWebSocketTarget, UpstreamDispatch,
 };
-use cc_lb_engine::responses_websocket::{ResponsesWebSocketGateway, WebSocketError};
-use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::{HeaderValue, Response, StatusCode};
 use http_body_util::BodyExt;
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
 use crate::common::{
     TestAuthn, TestLifecycleBus, TestState, lifecycle_with_parts, managed_api_key, messages_request,
@@ -281,7 +281,6 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
         .map(|(_, outcome)| *outcome)
         .collect::<std::collections::BTreeSet<_>>();
 
-
     for (case, _) in cases {
         let test_bus = TestLifecycleBus::new();
         let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();
@@ -316,13 +315,8 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
             .authenticate(&headers)
             .await
             .expect("Responses WebSocket authenticates");
-        let mut gateway = ResponsesWebSocketGateway::new(
-            Arc::clone(&lifecycle),
-            &auth,
-            headers,
-            1 << 20,
-            8,
-        );
+        let mut gateway =
+            ResponsesWebSocketGateway::new(Arc::clone(&lifecycle), &auth, headers, 1 << 20, 8);
         let dispatch = gateway
             .client_message(
                 auth,
@@ -402,9 +396,10 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
         assert_eq!(stream_completed_count, 1, "{case} stream settles once");
         assert_eq!(terminal_count, 1, "{case} request settles once");
         assert!(
-            !lifecycle_events
-                .try_iter()
-                .any(|event| matches!(event, cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. })),
+            !lifecycle_events.try_iter().any(|event| matches!(
+                event,
+                cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+            )),
             "{case} close/task-drop race must not duplicate RequestTerminated"
         );
     }
@@ -426,7 +421,10 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
             .map(|label| (label.key(), label.value()))
             .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(
-            labels.keys().copied().collect::<std::collections::BTreeSet<_>>(),
+            labels
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
             ["cause", "model", "outcome", "upstream"]
                 .into_iter()
                 .collect()

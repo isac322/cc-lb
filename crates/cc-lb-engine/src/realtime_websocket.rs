@@ -819,7 +819,12 @@ mod tests {
                 StreamTerminationCause::None,
             ),
         ] {
-            record_stream_termination_metric(outcome, cause, "gemini-live-upstream", Some("gemini-live"));
+            record_stream_termination_metric(
+                outcome,
+                cause,
+                "gemini-live-upstream",
+                Some("gemini-live"),
+            );
         }
         let samples = snapshotter.snapshot().into_vec();
         assert_eq!(samples.len(), 4);

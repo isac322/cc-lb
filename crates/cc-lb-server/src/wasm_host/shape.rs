@@ -1085,11 +1085,9 @@ fn response_runtime_error(reason: String) -> ResponseTransformError {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use cc_lb_upstream::{DialectShapeContext, UpstreamDialect, shape_request};
-    use cc_lb_domain::{
-        PrincipalKind, Provider, Upstream, UpstreamIdentity,
-    };
+    use cc_lb_domain::{PrincipalKind, Provider, Upstream, UpstreamIdentity};
     use cc_lb_plugin_wire::{ArchivedShapeRequest, ArchivedShapeResponse, ShapeResponse};
+    use cc_lb_upstream::{DialectShapeContext, UpstreamDialect, shape_request};
     use http::{HeaderMap, HeaderValue, Method};
 
     use super::*;
@@ -1254,7 +1252,11 @@ mod tests {
             ),
         ] {
             for (kind, expected_kind, payload) in [
-                (RealtimeFrameKind::Json, "json", Bytes::from_static(br#"{}"#)),
+                (
+                    RealtimeFrameKind::Json,
+                    "json",
+                    Bytes::from_static(br#"{}"#),
+                ),
                 (
                     RealtimeFrameKind::Text,
                     "text",
@@ -1281,11 +1283,9 @@ mod tests {
                     &identity,
                 )
                 .expect("realtime frame request serializes");
-                let archived = rkyv::access::<
-                    v2::ArchivedTransformRealtimeFrameRequest,
-                    RkyvError,
-                >(&bytes)
-                .expect("realtime frame request archives");
+                let archived =
+                    rkyv::access::<v2::ArchivedTransformRealtimeFrameRequest, RkyvError>(&bytes)
+                        .expect("realtime frame request archives");
                 let method: &str = &archived.request_method;
                 let path: &str = &archived.request_path;
                 let direction: &str = &archived.direction;
@@ -1335,6 +1335,10 @@ mod tests {
     #[test]
     fn realtime_frame_plugin_output_is_rejected_at_the_wire_bound() {
         let error = reject_oversized_output(b"0123456789", 9).expect_err("bound is enforced");
-        assert!(error.to_string().contains("exceeds wire_bounds.output_body_bytes"));
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds wire_bounds.output_body_bytes")
+        );
     }
 }

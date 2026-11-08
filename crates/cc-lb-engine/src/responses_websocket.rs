@@ -2403,9 +2403,7 @@ mod tests {
     fn responses_metrics_bound_provider_response_ids() {
         let oversized = "x".repeat(513);
         let mut metrics = ResponsesStreamMetrics::new();
-        let frame = format!(
-            r#"{{"response":{{"id":"{oversized}"}},"response_id":"fallback"}}"#
-        );
+        let frame = format!(r#"{{"response":{{"id":"{oversized}"}},"response_id":"fallback"}}"#);
         metrics.observe(frame.as_bytes());
         assert_eq!(
             metrics.provider_session_id.as_deref(),
@@ -2422,7 +2420,10 @@ mod tests {
         let mut metrics = ResponsesStreamMetrics::new();
         let frame = format!(r#"{{"response":{{"id":"{accepted}"}}}}"#);
         metrics.observe(frame.as_bytes());
-        assert_eq!(metrics.provider_session_id.as_deref(), Some(accepted.as_str()));
+        assert_eq!(
+            metrics.provider_session_id.as_deref(),
+            Some(accepted.as_str())
+        );
     }
 
     #[test]
@@ -2430,9 +2431,7 @@ mod tests {
         let mut metrics = ResponsesStreamMetrics::new();
         metrics.observe(br#"{"type":"response.created","response":{"id":"resp-native"}}"#);
         metrics.observe(br#"{"type":"response.output_text.delta","delta":"a"}"#);
-        metrics.observe(
-            br#"{"type":"response.completed","response":{"id":"resp-native"}}"#,
-        );
+        metrics.observe(br#"{"type":"response.completed","response":{"id":"resp-native"}}"#);
         let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
         assert_eq!(latency.provider_session_id.as_deref(), Some("resp-native"));
         assert_eq!(latency.stream_event_count, 3);
