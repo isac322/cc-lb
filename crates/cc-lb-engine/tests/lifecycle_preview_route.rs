@@ -180,12 +180,15 @@ async fn preview_route_preserves_provider_metadata_trace_and_has_no_side_effects
         assert_eq!(outcome.winner_upstream_name.as_deref(), Some("upstream-0"));
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "{provider:?} filter invocation");
-        assert_eq!(calls[0].0, request_id, "{provider:?} request id");
-        assert_eq!(calls[0].1, path, "{provider:?} path");
-        assert_eq!(calls[0].2, expected_model, "{provider:?} canonical model");
-        assert_eq!(calls[0].3.as_ref(), Some(&Bytes::from_static(body)));
+        assert_eq!(calls[0].request_id, request_id, "{provider:?} request id");
+        assert_eq!(calls[0].path, path, "{provider:?} path");
         assert_eq!(
-            calls[0].4.as_deref(),
+            calls[0].canonical_model_id, expected_model,
+            "{provider:?} canonical model"
+        );
+        assert_eq!(calls[0].body.as_ref(), Some(&Bytes::from_static(body)));
+        assert_eq!(
+            calls[0].thread_id.as_deref(),
             (provider == cc_lb_domain::Provider::Anthropic)
                 .then_some("550e8400-e29b-41d4-a716-446655440000"),
             "{provider:?} cache session metadata",
@@ -919,8 +922,17 @@ impl FilterPlugin for ContextRecordingFilter {
     }
 }
 
+#[derive(Debug, PartialEq)]
+struct PreviewFilterCall {
+    request_id: String,
+    path: String,
+    canonical_model_id: String,
+    body: Option<Bytes>,
+    thread_id: Option<String>,
+}
+
 struct PreviewContractFilter {
-    calls: Arc<Mutex<Vec<(String, String, String, Option<Bytes>, Option<String>)>>>,
+    calls: Arc<Mutex<Vec<PreviewFilterCall>>>,
 }
 
 impl FilterPlugin for PreviewContractFilter {
@@ -930,13 +942,13 @@ impl FilterPlugin for PreviewContractFilter {
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        self.calls.lock().unwrap().push((
-            ctx.request_id.clone(),
-            ctx.path.clone(),
-            ctx.canonical_model_id.clone(),
-            Some(ctx.body_bytes.clone()),
-            ctx.thread_id.clone(),
-        ));
+        self.calls.lock().unwrap().push(PreviewFilterCall {
+            request_id: ctx.request_id.clone(),
+            path: ctx.path.clone(),
+            canonical_model_id: ctx.canonical_model_id.clone(),
+            body: Some(ctx.body_bytes.clone()),
+            thread_id: ctx.thread_id.clone(),
+        });
         Ok(FilterOutput {
             kept_upstream_ids: candidates
                 .iter()
