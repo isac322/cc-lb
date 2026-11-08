@@ -69,6 +69,7 @@ runs:
         # only at startup; export basedirs first so the server honors it.
         export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
         export SCCACHE_DIR="${RUNNER_TEMP}/sccache"
+        export SCCACHE_IDLE_TIMEOUT=3600
         mkdir -p "$SCCACHE_DIR"
         sccache_path="$(command -v sccache || true)"
         rustc_path="$(command -v rustc || true)"
@@ -109,6 +110,7 @@ runs:
         echo "SCCACHE_PATH=${{ steps.sccache-health.outputs.path }}" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+        echo "SCCACHE_IDLE_TIMEOUT=3600" >> "$GITHUB_ENV"
 
     - name: Warn when sccache is unavailable
       if: ${{ steps.sccache-probe.outputs.available != 'true' && steps.sccache-setup.outcome != 'success' }}

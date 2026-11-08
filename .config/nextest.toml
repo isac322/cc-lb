@@ -3,7 +3,7 @@ slow-timeout = { period = "60s" }
 
 [[profile.default.overrides]]
 filter = 'test(authn_rail_typestate_contracts)'
-threads-required = 'num-test-threads'
+threads-required = 2
 priority = 100
 
 [[profile.default.overrides]]
