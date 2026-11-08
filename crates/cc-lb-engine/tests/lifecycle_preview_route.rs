@@ -54,6 +54,118 @@ async fn happy_path_returns_trace_with_stages_and_winner() {
 }
 
 #[tokio::test]
+async fn preview_route_matches_dispatch_capability_and_gemini_path_model() {
+    let cases = [
+        (
+            cc_lb_domain::Provider::Anthropic,
+            "/v1/messages",
+            br#"{"model":"claude-test","messages":[]}"#,
+            StorageUpstreamKind::AnthropicApiKey,
+            "anthropic-preview",
+        ),
+        (
+            cc_lb_domain::Provider::Openai,
+            "/v1/responses",
+            br#"{"model":"gpt-5.2","input":[]}"#,
+            StorageUpstreamKind::OpenaiApiKey,
+            "openai-preview",
+        ),
+        (
+            cc_lb_domain::Provider::Gemini,
+            "/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent",
+            br#"{"contents":[]}"#,
+            StorageUpstreamKind::GeminiApiKey,
+            "gemini-preview",
+        ),
+    ];
+
+    for (provider, path, body, upstream_kind, filter_name) in cases {
+        let filter = kept_filter(filter_name, vec![0]);
+        let mut upstream = upstream_record(0);
+        upstream.kind = upstream_kind;
+        let lifecycle = build_lifecycle_with_status_snapshot(
+            principal_view_with_pipeline(vec![filter]),
+            vec![upstream.clone()],
+            UpstreamStatusSnapshot::default(),
+        );
+        let outcome = lifecycle
+            .preview_route(PreviewRouteInput {
+                principal_id: PRINCIPAL.to_owned(),
+                request_id: Some(format!("preview-{provider:?}")),
+                headers: HeaderMap::new(),
+                body_bytes: Bytes::from_static(body),
+                provider: Some(provider),
+                path: path.to_owned(),
+            })
+            .await
+            .expect("provider preview succeeds");
+
+        assert_eq!(outcome.winner_upstream_id, Some(upstream.id), "{provider:?}");
+        assert_eq!(
+            outcome.trace.stages[0].stage_name, filter_name,
+            "{provider:?} filter pipeline selected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn preview_route_rejects_unclassified_operation_instead_of_anthropic_fallback() {
+    let (lifecycle, _) = build_lifecycle(vec![kept_filter("keep-all", vec![0])]);
+    let error = lifecycle
+        .preview_route(PreviewRouteInput {
+            principal_id: PRINCIPAL.to_owned(),
+            request_id: Some("unsupported-preview".to_owned()),
+            headers: HeaderMap::new(),
+            body_bytes: Bytes::from_static(br#"{"model":"gpt-5.2","input":[]}"#),
+            provider: Some(cc_lb_domain::Provider::Openai),
+            path: "/v1/files".to_owned(),
+        })
+        .await
+        .expect_err("unsupported operation must fail closed");
+
+    assert!(matches!(
+        error,
+        PreviewRouteError::UnsupportedOperation { method, path }
+            if method == "POST" && path == "/v1/files"
+    ));
+}
+
+
+#[tokio::test]
+async fn preview_route_uses_path_model_as_canonical_gemini_model() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let filter = Arc::new(ContextRecordingFilter {
+        calls: calls.clone(),
+    });
+    let mut upstream = upstream_record(0);
+    upstream.kind = StorageUpstreamKind::GeminiApiKey;
+    let lifecycle = build_lifecycle_with_status_snapshot(
+        principal_view_with_pipeline(vec![filter]),
+        vec![upstream],
+        UpstreamStatusSnapshot::default(),
+    );
+
+    lifecycle
+        .preview_route(PreviewRouteInput {
+            principal_id: PRINCIPAL.to_owned(),
+            request_id: Some("gemini-path-model".to_owned()),
+            headers: HeaderMap::new(),
+            body_bytes: Bytes::from_static(br#"{"contents":[]}"#),
+            provider: Some(cc_lb_domain::Provider::Gemini),
+            path: "/v1beta/models/gemini-3.1-pro-preview:generateContent".to_owned(),
+        })
+        .await
+        .expect("Gemini preview succeeds");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &[(
+            "/v1beta/models/gemini-3.1-pro-preview:generateContent".to_owned(),
+            "gemini-3.1-pro-preview".to_owned(),
+        )]
+    );
+}
+#[tokio::test]
 async fn unknown_principal_returns_error() {
     let (lifecycle, _) = build_lifecycle(vec![kept_filter("keep-first", vec![0])]);
 
@@ -652,6 +764,38 @@ fn principal_view_with_broken_pipeline() -> Arc<PrincipalView> {
         Vec::new(),
         chains,
     ))
+}
+
+struct ContextRecordingFilter {
+    calls: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl FilterPlugin for ContextRecordingFilter {
+    fn filter(
+        &self,
+        ctx: &cc_lb_routing::RoutingContext,
+        _principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        self.calls.lock().unwrap().push((
+            ctx.path.clone(),
+            ctx.canonical_model_id.clone(),
+        ));
+        Ok(FilterOutput {
+            kept_upstream_ids: candidates.iter().map(|candidate| candidate.upstream_id).collect(),
+            reason: "recorded".to_owned(),
+            per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+        })
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        Uuid::from_u128(2)
+    }
+
+    fn plugin_name(&self) -> &str {
+        "context-recording"
+    }
 }
 
 fn default_upstream_records() -> Vec<UpstreamRecord> {

@@ -628,6 +628,11 @@ pub enum PreviewRouteError {
     PrincipalNotFound(String),
     #[error("router pipeline instantiation error: {0}")]
     PipelineInstantiationError(String),
+    #[error("operation not supported for preview: {method} {path}")]
+    UnsupportedOperation {
+        method: String,
+        path: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -2986,16 +2991,40 @@ impl Lifecycle {
         }
 
         let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
-        let request_capability =
-            classify_provider_capability(&http::Method::POST, &input.path, input.provider)
-                .unwrap_or(ProviderCapability::AnthropicMessages);
+        let method = http::Method::POST;
+        let request_capability = classify_provider_capability(&method, &input.path, input.provider)
+            .ok_or_else(|| PreviewRouteError::UnsupportedOperation {
+                method: method.to_string(),
+                path: input.path.clone(),
+            })?;
         let request_kind = RequestKind::from(request_capability);
+        let path_model = gemini_model_from_path(&input.path);
+        let prompt_cache_analysis = match (request_capability, body_value.as_ref()) {
+            (ProviderCapability::AnthropicMessages, Some(_))
+            | (ProviderCapability::AnthropicMessages, None) => None,
+            (_, Some(_)) => Some(PromptCacheAnalysisOutput {
+                analysis: V3PromptCacheAnalysis {
+                    blocks: Vec::new(),
+                    breakpoints: Vec::new(),
+                    literal_breakpoints: Vec::new(),
+                },
+                cacheable_breakpoint_prefix_keys: Vec::new(),
+                literal_cacheable_breakpoint_prefix_keys: Vec::new(),
+                timings: PromptCacheAnalysisTimings::default(),
+            }),
+            (_, None) => None,
+        };
         let cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
             &input.headers,
             body_value.as_ref(),
-            None,
+            prompt_cache_analysis,
             Some(request_capability),
         );
+        let canonical_model = path_model
+            .as_deref()
+            .map(canonical_model_id)
+            .unwrap_or(&cache_metadata.canonical_model_id)
+            .to_owned();
         let cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
 
         let request_id = input
@@ -3008,15 +3037,15 @@ impl Lifecycle {
             .requested_service_tier(cache_metadata.requested_service_tier.clone())
             .provider_scope(input.provider)
             .downstream_headers(input.headers)
-            .method(http::Method::POST)
+            .method(method)
             .path(input.path)
             .query(None)
             .body_bytes(input.body_bytes)
             .cache_breakpoints(cache_breakpoints)
-            .canonical_model_id(cache_metadata.canonical_model_id.clone())
+            .canonical_model_id(canonical_model.clone())
             .cache_pricing(cache_pricing_summary_for_model(
                 cc_lb_pricing::global_catalog(),
-                &cache_metadata.canonical_model_id,
+                &canonical_model,
                 cache_metadata.requested_service_tier.as_deref(),
             ))
             .build();
@@ -16449,6 +16478,39 @@ mod tests {
             &gemini_chunk,
             false,
         ));
+    }
+
+    #[test]
+    fn proxy_generated_stream_error_frames_use_selected_provider_envelope() {
+        for (capability, forbidden, required) in [
+            (
+                ProviderCapability::AnthropicMessages,
+                "\"code\"",
+                "\"type\":\"error\"",
+            ),
+            (
+                ProviderCapability::OpenaiResponses,
+                "\"type\":\"error\"",
+                "\"error\"",
+            ),
+            (
+                ProviderCapability::GeminiGenerateContent,
+                "\"type\":\"error\"",
+                "\"error\"",
+            ),
+        ] {
+            let frame = make_stream_error_frame(
+                capability,
+                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                "synthetic relay failure",
+                false,
+            );
+            let text = std::str::from_utf8(&frame).expect("SSE frame is UTF-8");
+            assert!(text.starts_with("event: error\ndata: "));
+            assert!(text.ends_with("\n\n"));
+            assert!(text.contains(required), "{text}");
+            assert!(!text.contains(forbidden), "{text}");
+        }
     }
 
     #[test]

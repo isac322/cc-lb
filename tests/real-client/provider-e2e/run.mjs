@@ -42,6 +42,11 @@ const CASE_SPECS = Object.freeze({
     protocol: 'openai-responses',
     envKeys: ['OPENAI_BACKEND_API_KEY', 'OPENAI_API_KEY', 'OPENAI_MANAGED_API_KEY'],
     scenarios: ['omp-gpt.stateless_tools', 'omp-gpt.stateful_previous_response_id', 'omp-gpt.session_continue'],
+    regression: {
+      stream: 'OpenAI Responses stream through loopback tap with provider error and invalid proxy credential',
+      faultRelay: 'owned-loopback-tap',
+      invalidCredential: true,
+    },
   },
   'omp-gemini': {
     id: 'omp-gemini',
@@ -63,6 +68,11 @@ const CASE_SPECS = Object.freeze({
       'omp-gemini.session_continue',
       'omp-gemini.flash_lite_transport',
     ],
+    regression: {
+      stream: 'Gemini streamGenerateContent through loopback tap with provider error and invalid proxy credential',
+      faultRelay: 'owned-loopback-tap',
+      invalidCredential: true,
+    },
   },
   codex: {
     id: 'codex',
@@ -285,6 +295,7 @@ async function runPreflight(opts) {
       model: spec.model,
       models: spec.models,
       scenarios: spec.scenarios,
+      regression: spec.regression,
       cli: { name: spec.cli, binary: cliBin, version, ready: Boolean(cliBin && version) },
       credential: {
         ready: cred.found,

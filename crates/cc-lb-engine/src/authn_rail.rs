@@ -170,6 +170,8 @@ fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
+    use serde_json::Value;
 
     /// A disabled principal is a 403, and `Unavailable` degrades to 503 with a
     /// Retry-After rather than looking like a bad credential.
@@ -206,5 +208,69 @@ mod tests {
             key_auth_failure_reason(&BuiltinAuthError::Expired),
             "Expired"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_rejections_use_native_envelopes_for_all_auth_statuses() {
+        for provider in [
+            cc_lb_domain::Provider::Anthropic,
+            cc_lb_domain::Provider::Openai,
+            cc_lb_domain::Provider::Gemini,
+        ] {
+            for error in [
+                BuiltinAuthError::MissingHeader,
+                BuiltinAuthError::PrincipalDisabled,
+                BuiltinAuthError::Unavailable,
+            ] {
+                let expected_status = match &error {
+                    BuiltinAuthError::MissingHeader => StatusCode::UNAUTHORIZED,
+                    BuiltinAuthError::PrincipalDisabled => StatusCode::FORBIDDEN,
+                    BuiltinAuthError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                    _ => unreachable!("fixture covers only status mapping"),
+                };
+                let response =
+                    reject_unauthenticated_for_provider(&error, Some(provider), None);
+                assert_eq!(response.status(), expected_status);
+                assert_eq!(
+                    response.headers().get(http::header::CONTENT_TYPE),
+                    Some(&http::HeaderValue::from_static(
+                        "application/json; charset=utf-8"
+                    ))
+                );
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(http::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok()),
+                    (error == BuiltinAuthError::Unavailable).then_some("1")
+                );
+                let body = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("auth response body collects")
+                    .to_bytes();
+                let value: Value =
+                    serde_json::from_slice(&body).expect("auth response is JSON");
+                match provider {
+                    cc_lb_domain::Provider::Anthropic => {
+                        assert!(value.get("error").and_then(Value::as_object).is_some());
+                        assert_eq!(value.get("type").and_then(Value::as_str), Some("error"));
+                    }
+                    cc_lb_domain::Provider::Openai => {
+                        assert!(value.get("error").and_then(Value::as_object).is_some());
+                        assert!(value.get("type").is_none());
+                    }
+                    cc_lb_domain::Provider::Gemini => {
+                        let error = value
+                            .get("error")
+                            .and_then(Value::as_object)
+                            .expect("Gemini error object");
+                        assert!(error.get("code").and_then(Value::as_u64).is_some());
+                        assert!(error.get("status").and_then(Value::as_str).is_some());
+                    }
+                }
+            }
+        }
     }
 }
