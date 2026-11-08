@@ -4408,6 +4408,9 @@ mod tests {
                             cache_creation_5m_micros: None,
                             cache_creation_1h_micros: None,
                             cache_read_micros: None,
+                            cache_write_micros: None,
+                            cache_write_30m_micros: None,
+                            cache_write_12h_micros: None,
                         },
                     });
                     break;
