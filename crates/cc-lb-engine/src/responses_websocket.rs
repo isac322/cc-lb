@@ -2376,4 +2376,18 @@ mod tests {
             assert!(lane_id.is_none() || lane_id.as_deref() == Some("main"));
         }
     }
+
+    #[test]
+    fn responses_metrics_keep_provider_neutral_timing_and_identity() {
+        let mut metrics = ResponsesStreamMetrics::new();
+        metrics.observe(br#"{"response":{"id":"resp_123"}}"#);
+        metrics.observe(br#"{"type":"response.output_text.delta","delta":"ok"}"#);
+        let latency = metrics.latency(101);
+        assert_eq!(latency.stream_event_count, 2);
+        assert!(latency.stream_first_output_ms.is_some());
+        assert!(latency.stream_last_output_ms.is_some());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("resp_123"));
+        assert_eq!(latency.sse_event_count, 0);
+        assert_eq!(latency.content_delta_count, 0);
+    }
 }
