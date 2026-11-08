@@ -37,7 +37,9 @@ pub(crate) fn probe_hook_dispatch(
 ) -> Result<(), WasmtimeRuntimeError> {
     let noop = matches!(
         hook,
-        HookKind::TransformResponse | HookKind::TransformSseEvent
+        HookKind::TransformResponse
+            | HookKind::TransformSseEvent
+            | HookKind::TransformRealtimeFrame
     ) && metadata
         .hooks
         .get(

@@ -41,11 +41,16 @@ fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     );
     let mut wasm = wat::parse_str(wat).expect("valid WAT");
     for (hook, _) in declared_hooks {
-        let fingerprint = expected_fingerprint(*hook, WireVersion::V1)
-            .expect("all test hooks have a V1 fingerprint");
+        let wire_version = if *hook == HookKind::TransformRealtimeFrame {
+            WireVersion::V2
+        } else {
+            WireVersion::V1
+        };
+        let fingerprint =
+            expected_fingerprint(*hook, wire_version).expect("test hook fingerprint");
         append_custom_section(
             &mut wasm,
-            &schema_section_name(*hook, WireVersion::V1),
+            &schema_section_name(*hook, wire_version),
             &fingerprint,
         );
     }
@@ -91,8 +96,13 @@ fn metadata(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     let hooks = declared_hooks
         .iter()
         .map(|(hook, mode)| {
+            let wire_version = if *hook == HookKind::TransformRealtimeFrame {
+                2
+            } else {
+                1
+            };
             let hook_metadata = serde_json::json!({
-                "wire_version": 1,
+                "wire_version": wire_version,
                 "description": format!("{} hook", hook.as_str()),
                 "usage": format!("call {}", hook.as_str()),
                 "mode": mode,
@@ -142,6 +152,7 @@ fn agnostic_admission_accepts_filter_and_shape_hooks() {
         (HookKind::Shape, "active"),
         (HookKind::TransformResponse, "noop"),
         (HookKind::TransformSseEvent, "noop"),
+        (HookKind::TransformRealtimeFrame, "noop"),
     ]);
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
 
@@ -151,7 +162,7 @@ fn agnostic_admission_accepts_filter_and_shape_hooks() {
         .expect("multi-hook artifact admitted");
 
     // Then: every declared contract is retained by the inspection.
-    assert_eq!(inspection.hook_versions.len(), 4);
+    assert_eq!(inspection.hook_versions.len(), 5);
     assert_eq!(
         inspection.hook_versions.get(&HookKind::Filter),
         Some(&WireVersion::V1)
