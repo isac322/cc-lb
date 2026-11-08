@@ -371,9 +371,22 @@ async fn native_provider_transform_failure_is_terminal_once() {
             .expect("native provider transform body collects")
             .to_bytes();
         let text = std::str::from_utf8(&body).expect("native provider transform body is UTF-8");
+        assert_eq!(
+            text.matches("event: error\n").count(),
+            1,
+            "{provider:?} transform failure must relay exactly one provider error frame: {text:?}",
+        );
         assert!(
-            text.contains("event: error\n"),
-            "{provider:?} transform failure must relay a provider error frame: {text:?}",
+            text.contains("\"api_error\""),
+            "{provider:?} transform failure must use the provider error envelope: {text:?}",
+        );
+        assert!(
+            text.contains("upstream SSE response could not be safely processed"),
+            "{provider:?} transform failure must use the generic inspection message: {text:?}",
+        );
+        assert!(
+            !text.contains("forced post-output failure"),
+            "{provider:?} transform failure must not expose hook error details: {text:?}",
         );
         assert_error_terminal(
             &mut lifecycle_rx,
