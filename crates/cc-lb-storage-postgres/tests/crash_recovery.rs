@@ -29,10 +29,14 @@ fn client_timeout_mid_commit() {
     Runtime::new()
         .expect("tokio runtime")
         .block_on(async move {
+            let schema = schema_name("timeout", 0);
+            let fixture = CrashFixture::create(&url, &schema, "timeout", 0.05).await?;
+            let storage = fixture.storage.clone();
+
             for iter in 0..TIMEOUT_ITERATIONS {
-                let schema = schema_name("timeout", iter);
-                let fixture = CrashFixture::create(&url, &schema, "timeout", 0.05).await?;
-                let storage = fixture.storage.clone();
+                if iter > 0 {
+                    fixture.reset_iteration().await?;
+                }
 
                 let result =
                     time::timeout(Duration::from_millis(1), storage.rollup_usage_once()).await;
@@ -49,9 +53,9 @@ fn client_timeout_mid_commit() {
                     "iter {iter}: partial commit detected: {}",
                     consistency.details()
                 );
-
-                fixture.drop_schema().await?;
             }
+
+            fixture.drop_schema().await?;
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -71,9 +75,14 @@ fn connection_drop_mid_commit() {
     Runtime::new()
         .expect("tokio runtime")
         .block_on(async move {
+            let schema = schema_name("drop", 0);
+            let mut fixture = CrashFixture::create(&url, &schema, "drop", 2.0).await?;
+
             for iter in 0..CONNECTION_DROP_ITERATIONS {
-                let schema = schema_name("drop", iter);
-                let fixture = CrashFixture::create(&url, &schema, "drop", 2.0).await?;
+                if iter > 0 {
+                    fixture.reset_iteration().await?;
+                }
+
                 let app_name = fixture.app_name.clone();
                 let storage = fixture.storage.clone();
                 let pool = fixture.pool.clone();
@@ -107,8 +116,10 @@ fn connection_drop_mid_commit() {
                     consistency.details()
                 );
 
-                verifier.drop_schema().await?;
+                fixture = verifier;
             }
+
+            fixture.drop_schema().await?;
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -172,6 +183,16 @@ impl CrashFixture {
         })
     }
 
+    async fn reset_iteration(&self) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::query(
+            "TRUNCATE TABLE request_events_v1, usage_rollups_v2, usage_rollup_checkpoints_v1 RESTART IDENTITY CASCADE",
+        )
+        .execute(&self.pool)
+        .await?;
+        seed_request_events(&self.storage).await?;
+        Ok(())
+    }
+
     async fn consistency(&self) -> Result<Consistency, Box<dyn std::error::Error>> {
         let checkpoint = self.storage.usage_rollup_checkpoint().await?;
         let mut rollups = Vec::new();
@@ -200,7 +221,7 @@ impl CrashFixture {
         &self,
         app_name: &str,
     ) -> Result<i32, Box<dyn std::error::Error>> {
-        for _ in 0..200 {
+        for _ in 0..1000 {
             let pid = sqlx::query_scalar::<_, i32>(
                 "SELECT pid FROM pg_stat_activity                  WHERE application_name = $1                    AND state = 'active'                    AND query LIKE '%usage_rollup_checkpoints_v1%'                  ORDER BY query_start ASC                  LIMIT 1",
             )
@@ -212,7 +233,7 @@ impl CrashFixture {
                 return Ok(pid);
             }
 
-            time::sleep(Duration::from_millis(10)).await;
+            time::sleep(Duration::from_millis(2)).await;
         }
 
         Err(format!("timed out waiting for active checkpoint query for {app_name}").into())
@@ -224,7 +245,7 @@ impl CrashFixture {
     // rollup deterministically reaches its checkpoint write instead of
     // committing an empty no-op (which would starve the crash injection below).
     async fn wait_for_events_eligible(&self) -> Result<(), Box<dyn std::error::Error>> {
-        for _ in 0..600 {
+        for _ in 0..7500 {
             let eligible = sqlx::query_scalar::<_, bool>(
                 "SELECT NOT EXISTS (                      SELECT 1 FROM request_events_v1                      WHERE tx_id >= pg_snapshot_xmin(pg_current_snapshot())                  )",
             )
@@ -235,7 +256,7 @@ impl CrashFixture {
                 return Ok(());
             }
 
-            time::sleep(Duration::from_millis(25)).await;
+            time::sleep(Duration::from_millis(2)).await;
         }
 
         Err(format!(

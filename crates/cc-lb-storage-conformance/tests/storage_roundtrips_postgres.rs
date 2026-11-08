@@ -80,14 +80,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(
-                PgConnectOptions::from_str(&fixture.url)?
-                    .options([("search_path", fixture.schema.as_str())]),
-            )
-            .await?;
-        Ok(PostgresStorage::new(pool, system_clock()))
+        Ok(PostgresStorage::new(fixture.pool.clone(), system_clock()))
     }
 
     async fn teardown(&self, fixture: Self::Fixture) -> anyhow::Result<()> {

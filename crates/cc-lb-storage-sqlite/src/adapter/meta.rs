@@ -8,6 +8,7 @@ use cc_lb_storage_api::{
 use crate::{SqliteStorage, map_sqlx_error};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+static COMPILED_FAST_INIT_SQL: &str = include_str!(concat!(env!("OUT_DIR"), "/fast_init.sql"));
 static FAST_INIT_SQL: OnceLock<String> = OnceLock::new();
 
 async fn get_or_build_fast_init_sql() -> Result<&'static String, StorageError> {
@@ -109,13 +110,22 @@ impl MetaStore for SqliteStorage {
         .map_err(map_sqlx_error)?;
 
         if existing_objects == 0 {
-            let fast_sql = get_or_build_fast_init_sql().await?;
-            sqlx::raw_sql(sqlx::AssertSqlSafe(fast_sql.as_str()))
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| StorageError::Fatal {
-                    message: error.to_string(),
-                })?;
+            if !COMPILED_FAST_INIT_SQL.is_empty() {
+                sqlx::raw_sql(sqlx::AssertSqlSafe(COMPILED_FAST_INIT_SQL))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| StorageError::Fatal {
+                        message: error.to_string(),
+                    })?;
+            } else {
+                let fast_sql = get_or_build_fast_init_sql().await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(fast_sql.as_str()))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| StorageError::Fatal {
+                        message: error.to_string(),
+                    })?;
+            }
             tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(());
         }

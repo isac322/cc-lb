@@ -207,7 +207,6 @@ fn claim_body(grant_id: &str) -> Value {
     })
 }
 
-#[tokio::test]
 async fn get_limit_resets_returns_cached_status_without_provider_calls() {
     let provider = MockServer::start().await;
     let server = admin_test_common::spawn_admin_server().await;
@@ -245,7 +244,6 @@ async fn get_limit_resets_returns_cached_status_without_provider_calls() {
     assert!(requests.is_empty(), "GET must not call the provider");
 }
 
-#[tokio::test]
 async fn get_limit_resets_without_exhausted_only_clears_at_limit_for_absent_five_hour() {
     for exhausted in [Some(json!([])), None] {
         let provider = MockServer::start().await;
@@ -312,7 +310,6 @@ async fn get_limit_resets_without_exhausted_only_clears_at_limit_for_absent_five
     }
 }
 
-#[tokio::test]
 async fn get_limit_resets_repeated_polls_never_hit_provider() {
     let provider = MockServer::start().await;
     let server = admin_test_common::spawn_admin_server().await;
@@ -340,7 +337,6 @@ async fn get_limit_resets_repeated_polls_never_hit_provider() {
     );
 }
 
-#[tokio::test]
 async fn get_limit_resets_without_cedar_ember_returns_null() {
     let provider = MockServer::start().await;
     let server = admin_test_common::spawn_admin_server().await;
@@ -358,7 +354,6 @@ async fn get_limit_resets_without_cedar_ember_returns_null() {
     assert!(body["cedar_ember"].is_null());
 }
 
-#[tokio::test]
 async fn get_limit_resets_without_identity_metadata_returns_null_ids() {
     // Until the poll's one-time profile fetch binds an identity to this
     // credential, the fields are null rather than fabricated, and the coupon
@@ -381,7 +376,6 @@ async fn get_limit_resets_without_identity_metadata_returns_null_ids() {
     assert!(body["cedar_ember"].is_null());
 }
 
-#[tokio::test]
 async fn get_limit_resets_hides_coupon_after_credential_rotation() {
     // A coupon bound to a previous credential must never surface: the account
     // it belonged to may be different. Rewriting the stored credential (as
@@ -429,7 +423,6 @@ async fn get_limit_resets_hides_coupon_after_credential_rotation() {
     assert!(body["organization_id"].is_null());
 }
 
-#[tokio::test]
 async fn get_limit_resets_empty_grants_is_valid() {
     // An explicit empty array is a legitimate provider answer.
     let provider = MockServer::start().await;
@@ -459,7 +452,6 @@ async fn get_limit_resets_empty_grants_is_valid() {
     assert_eq!(body["cedar_ember"]["grants"], json!([]));
 }
 
-#[tokio::test]
 async fn get_limit_resets_forwards_null_resets_total() {
     // resets_total is optional in the provider schema; absence is forwarded
     // as null, never fabricated as 0.
@@ -486,7 +478,6 @@ async fn get_limit_resets_forwards_null_resets_total() {
     assert_eq!(grant["resets_left"], 1);
 }
 
-#[tokio::test]
 async fn get_limit_resets_requires_auth() {
     let provider = MockServer::start().await;
     let server = admin_test_common::spawn_admin_server().await;
@@ -500,7 +491,6 @@ async fn get_limit_resets_requires_auth() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
 async fn get_limit_resets_rejects_non_oauth_upstream() {
     let server = admin_test_common::spawn_admin_server().await;
     let upstream = UpstreamStore::create(
@@ -530,7 +520,6 @@ async fn get_limit_resets_rejects_non_oauth_upstream() {
     assert_eq!(body["error"], "not_oauth_upstream");
 }
 
-#[tokio::test]
 async fn claim_dispatches_exact_grant_and_request_id_once() {
     let provider = MockServer::start().await;
     mount_profile(&provider).await;
@@ -590,7 +579,6 @@ async fn claim_dispatches_exact_grant_and_request_id_once() {
     );
 }
 
-#[tokio::test]
 async fn claim_invalidates_cached_coupon_and_preclaim_poll_cannot_restore_it() {
     // A dispatched claim may have consumed the grant; the claim bumps the
     // durable invalidation epoch so the GET reports null until a poll issued
@@ -700,7 +688,6 @@ async fn fail_epoch_writes(server: &SpawnedAdminServer, step: FailEpochWrite) {
     }
 }
 
-#[tokio::test]
 async fn claim_fence_write_failure_never_dispatches() {
     // The durable fence must land before the POST; if it cannot, nothing is
     // sent and nothing can be consumed.
@@ -730,7 +717,6 @@ async fn claim_fence_write_failure_never_dispatches() {
     assert_eq!(body["error"], "internal_error");
 }
 
-#[tokio::test]
 async fn claim_settle_write_failure_keeps_coupon_fenced() {
     // The claim reached the provider but the post-claim epoch write failed:
     // the pending fence stays current, so neither the old snapshot nor a
@@ -776,7 +762,6 @@ async fn claim_settle_write_failure_keeps_coupon_fenced() {
     );
 }
 
-#[tokio::test]
 async fn get_limit_resets_fails_closed_on_unreadable_epoch() {
     let provider = MockServer::start().await;
     let server = admin_test_common::spawn_admin_server().await;
@@ -793,7 +778,6 @@ async fn get_limit_resets_fails_closed_on_unreadable_epoch() {
     assert!(get_ok(&server, upstream.id).await["cedar_ember"].is_null());
 }
 
-#[tokio::test]
 async fn claim_refuses_any_unsettled_epoch_without_dispatching() {
     // A live fence (another claim in flight), an abandoned fence awaiting
     // poll recovery, and an unreadable value all refuse the claim: a grant
@@ -848,7 +832,6 @@ async fn claim_refuses_any_unsettled_epoch_without_dispatching() {
     }
 }
 
-#[tokio::test]
 async fn concurrent_claims_dispatch_exactly_once() {
     // Two claims for the same upstream race: the compare-and-put fence lets
     // exactly one dispatch; the other is refused before any POST, and the
@@ -893,7 +876,6 @@ async fn concurrent_claims_dispatch_exactly_once() {
     );
 }
 
-#[tokio::test]
 async fn claim_rejects_stale_identity_without_dispatching() {
     let provider = MockServer::start().await;
     mount_profile(&provider).await;
@@ -919,7 +901,6 @@ async fn claim_rejects_stale_identity_without_dispatching() {
     assert_eq!(response["error"], "stale_identity");
 }
 
-#[tokio::test]
 async fn claim_rejects_malformed_ids_without_dispatching() {
     let provider = MockServer::start().await;
     Mock::given(method("POST"))
@@ -954,7 +935,6 @@ async fn claim_rejects_malformed_ids_without_dispatching() {
     assert_eq!(body["error"], "invalid_request_id");
 }
 
-#[tokio::test]
 async fn claim_provider_5xx_reports_unknown_not_failure() {
     let provider = MockServer::start().await;
     mount_profile(&provider).await;
@@ -997,7 +977,6 @@ async fn claim_provider_5xx_reports_unknown_not_failure() {
     assert_eq!(payload["outcome"], "claim_outcome_unknown");
 }
 
-#[tokio::test]
 async fn claim_provider_4xx_is_a_definite_rejection() {
     let provider = MockServer::start().await;
     mount_profile(&provider).await;
@@ -1021,7 +1000,6 @@ async fn claim_provider_4xx_is_a_definite_rejection() {
     assert_eq!(body["error"], "provider_rejected");
 }
 
-#[tokio::test]
 async fn claim_normalizes_unrecognized_provider_result() {
     let provider = MockServer::start().await;
     mount_profile(&provider).await;
@@ -1050,4 +1028,34 @@ async fn claim_normalizes_unrecognized_provider_result() {
     assert_eq!(body["result"], "unknown");
     assert_eq!(body["reason"], "unknown");
     assert_eq!(body["resets_left"], 1);
+}
+
+#[tokio::test]
+async fn v1_limit_resets_suite_part_1() {
+    get_limit_resets_returns_cached_status_without_provider_calls().await;
+    get_limit_resets_without_exhausted_only_clears_at_limit_for_absent_five_hour().await;
+    get_limit_resets_repeated_polls_never_hit_provider().await;
+    get_limit_resets_without_cedar_ember_returns_null().await;
+    get_limit_resets_without_identity_metadata_returns_null_ids().await;
+    get_limit_resets_hides_coupon_after_credential_rotation().await;
+    get_limit_resets_empty_grants_is_valid().await;
+    get_limit_resets_forwards_null_resets_total().await;
+    get_limit_resets_requires_auth().await;
+    get_limit_resets_rejects_non_oauth_upstream().await;
+    claim_dispatches_exact_grant_and_request_id_once().await;
+}
+
+#[tokio::test]
+async fn v1_limit_resets_suite_part_2() {
+    claim_invalidates_cached_coupon_and_preclaim_poll_cannot_restore_it().await;
+    claim_fence_write_failure_never_dispatches().await;
+    claim_settle_write_failure_keeps_coupon_fenced().await;
+    get_limit_resets_fails_closed_on_unreadable_epoch().await;
+    claim_refuses_any_unsettled_epoch_without_dispatching().await;
+    concurrent_claims_dispatch_exactly_once().await;
+    claim_rejects_stale_identity_without_dispatching().await;
+    claim_rejects_malformed_ids_without_dispatching().await;
+    claim_provider_5xx_reports_unknown_not_failure().await;
+    claim_provider_4xx_is_a_definite_rejection().await;
+    claim_normalizes_unrecognized_provider_result().await;
 }

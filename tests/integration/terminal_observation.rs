@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 use url::Url;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -1207,14 +1207,21 @@ async fn terminal_bulkhead_full() -> Result<(), Box<dyn std::error::Error>> {
 
     // One upstream slot + a slow upstream: the second request overflows the
     // bulkhead queue and is rejected with 503 overloaded_error.
+    struct NotifyOnEnter(Arc<tokio::sync::Notify>);
+    impl wiremock::Respond for NotifyOnEnter {
+        fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            self.0.notify_one();
+            ResponseTemplate::new(200)
+                .set_body_json(happy_response())
+                .set_delay(Duration::from_secs(1))
+        }
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_wait = Arc::clone(&entered);
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(happy_response())
-                .set_delay(Duration::from_secs(5)),
-        )
+        .respond_with(NotifyOnEnter(entered))
         .mount(&upstream)
         .await;
     let litellm = start_price_mock().await;
@@ -1240,8 +1247,8 @@ async fn terminal_bulkhead_full() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
     });
-    // Give the first request a head start so it holds the only permit.
-    sleep(Duration::from_millis(300)).await;
+    // Wait until the first request has reached the upstream and holds the only permit.
+    timeout(Duration::from_secs(5), entered_wait.notified()).await?;
     let second = send_messages(&server, &plaintext_key, false).await?;
     assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
 

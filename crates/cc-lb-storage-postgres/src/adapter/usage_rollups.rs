@@ -301,11 +301,13 @@ impl UsageRollupStore for PostgresStorage {
 async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<UsageRollupRun> {
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
 
-    let locked = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(USAGE_ROLLUP_LOCK_KEY)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+    let locked = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_try_advisory_xact_lock($1 # hashtext(current_schema())::bigint)",
+    )
+    .bind(USAGE_ROLLUP_LOCK_KEY)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
 
     if !locked {
         let checkpoint = sqlx::query_scalar::<_, i64>(
