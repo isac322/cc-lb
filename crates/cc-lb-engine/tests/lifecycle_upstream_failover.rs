@@ -1482,6 +1482,7 @@ fn policy_limit_cost_estimator() -> Arc<dyn LimitCostEstimator> {
         models: HashMap::from([(
             "claude-test".to_owned(),
             cc_lb_pricing::Pricing {
+                native: None,
                 model: "claude-test".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(1),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(10),

@@ -40,6 +40,7 @@ fn install_priced_snapshot(catalog: &PriceCatalog, payload_hash: &str) {
     models.insert(
         "claude-sonnet-4-5".to_owned(),
         Pricing {
+            native: None,
             model: "claude-sonnet-4-5".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(3),
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),
@@ -293,6 +294,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
     partial_models.insert(
         "partial-model".to_owned(),
         Pricing {
+            native: None,
             model: "partial-model".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(1),
             input_image_per_million_usd: None,
@@ -488,6 +490,7 @@ fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
     models.insert(
         "overflow-model".to_owned(),
         Pricing {
+            native: None,
             model: "overflow-model".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(0),
             output_per_million_usd: UsdPerMillion::from_whole_usd(0),

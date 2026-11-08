@@ -18,9 +18,11 @@ use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheBreakpoint, CacheBreakpointSource,
     CacheLookbackPrefix, CachePricingSummary, CacheScore, CredentialKind, InternalError,
-    InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind, Provider,
-    RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream,
-    UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
+    InternalErrorKind, InternalErrorStage, NativeCachePricing, NativeCachePricingComponent,
+    NativeCachePricingLifetime, NativeCachePricingProvider, NativeCachePricingRate,
+    NativeCachePricingStatus, PrefixBytes, Principal, PrincipalKind, Provider, RoutingTrace,
+    StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
+    UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_quota::build_subscription_quota_samples;
 use cc_lb_quota::rate_limit_headers::{
@@ -790,6 +792,192 @@ async fn fetch_prompt_cache_warm_entries_for_bundles(
     }
     warm_entries
 }
+/// Fetch provider-native cache observations for a request's eligible upstreams.
+///
+/// The storage API is keyed by one upstream at a time, so this performs one
+/// bounded lookup per eligible candidate, before `route_guard` is entered.
+/// Invalid request metadata and lookup failures both produce a neutral result.
+async fn fetch_provider_native_cache_scores(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    canonical_model: &str,
+    native_cache: Option<&cc_lb_request_log::RequestNativeCacheObservation>,
+    clock: &dyn Clock,
+) -> HashMap<Uuid, CacheScore> {
+    let Some((provider, mode, scope, identity_hash, retention_secs)) =
+        provider_native_lookup_params(native_cache, canonical_model, request_kind)
+    else {
+        return HashMap::new();
+    };
+    let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
+        return HashMap::new();
+    };
+    let Some(store) = view.prompt_cache_observation_store_opt() else {
+        return HashMap::new();
+    };
+    let now_unix_secs = unix_secs(clock.now());
+    let upstream_ids: Vec<Uuid> = view
+        .upstreams_snapshot()
+        .iter()
+        .filter(|upstream| upstream.enabled)
+        .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
+        .filter(|upstream| request_kind.matches_upstream(upstream.kind))
+        .filter(|upstream| allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id))
+        .filter(|upstream| upstream_credentials_routable(view, upstream))
+        .map(|upstream| upstream.id)
+        .collect();
+
+    let lookup_span = tracing::info_span!(
+        "proxy.provider_prompt_cache_observation_lookup",
+        otel.status_code = tracing::field::Empty,
+    );
+    let records = store
+        .list_active_provider_observations_for_candidates(
+            &upstream_ids,
+            provider,
+            canonical_model,
+            mode,
+            scope,
+            identity_hash,
+            Some(retention_secs),
+            now_unix_secs,
+        )
+        .instrument(lookup_span.clone())
+        .await;
+    let records = match records {
+        Ok(records) => records,
+        Err(error) => {
+            lookup_span.record("otel.status_code", "ERROR");
+            cc_lb_observability::inc_cache_observation_read_failed();
+            tracing::warn!(
+                %error,
+                "provider prompt-cache observation lookup failed; routing without native cache preference"
+            );
+            return HashMap::new();
+        }
+    };
+    let mut scores: HashMap<Uuid, CacheScore> = HashMap::new();
+    for record in records {
+        if !upstream_ids.contains(&record.upstream_id)
+            || record.provider != provider
+            || record.canonical_model_id != canonical_model
+            || record.mode != mode
+            || record.isolation_scope != scope
+            || record.identity_hash != identity_hash
+            || record.retention_secs != Some(retention_secs)
+            || !record
+                .expires_at_unix_secs
+                .is_some_and(|expires| expires > now_unix_secs)
+            || !record
+                .observed_cached_tokens
+                .is_some_and(|tokens| tokens > 0)
+        {
+            continue;
+        }
+        scores
+            .entry(record.upstream_id)
+            .and_modify(|score| {
+                if record.observed_cached_tokens.unwrap_or_default()
+                    > score.predicted_cache_read_tokens.into()
+                {
+                    *score = native_cache_score_from_record(&record);
+                }
+            })
+            .or_insert_with(|| native_cache_score_from_record(&record));
+    }
+    scores
+}
+
+fn native_cache_scope(scope: Option<&str>) -> Option<&str> {
+    let scope = scope?;
+    let (organization, region) = scope.strip_prefix("org=")?.split_once(";region=")?;
+    (!organization.is_empty()
+        && !organization.contains(';')
+        && !region.is_empty()
+        && !region.contains(';'))
+    .then_some(scope)
+}
+fn provider_native_lookup_params<'a>(
+    native_cache: Option<&'a cc_lb_request_log::RequestNativeCacheObservation>,
+    canonical_model: &str,
+    request_kind: RequestKind,
+) -> Option<(&'a str, &'a str, &'a str, &'a str, u64)> {
+    let native = native_cache?;
+    if native.provider == "openai" && provider_cache::supports_modern_openai_cache(canonical_model)
+    {
+        return None;
+    }
+    let scope = native_cache_scope(native.scope.as_deref())?;
+    let identity_hash = native
+        .identity_hash
+        .as_deref()
+        .filter(|identity| is_provider_native_identity(identity))?;
+    let retention_secs = native.retention_secs?;
+    (native.provider == "openai"
+        && !native.mode.is_empty()
+        && !canonical_model.is_empty()
+        && (request_kind.matches_upstream(StorageUpstreamKind::OpenaiApiKey)
+            || request_kind.matches_upstream(StorageUpstreamKind::OpenaiOauth)))
+    .then_some((
+        native.provider.as_str(),
+        native.mode.as_str(),
+        scope,
+        identity_hash,
+        retention_secs,
+    ))
+}
+
+fn is_provider_native_identity(identity_hash: &str) -> bool {
+    let Some(digest) = identity_hash.strip_prefix("sha256:") else {
+        return false;
+    };
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn native_cache_score_from_record(record: &ProviderPromptCacheObservationRecord) -> CacheScore {
+    CacheScore {
+        predicted_cache_read_tokens: record
+            .observed_cached_tokens
+            .unwrap_or_default()
+            .min(u64::from(u32::MAX)) as u32,
+        predicted_cache_creation_tokens_5m: 0,
+        predicted_cache_creation_tokens_1h: 0,
+        predicted_uncached_input_tokens: 0,
+        predicted_expires_at_unix_secs: record.expires_at_unix_secs,
+        matched_breakpoint_index: None,
+        confidence: 1.0,
+        ambiguity_reason: Some("provider_native_observation".to_owned()),
+        matched_v3_cache_key: None,
+        breakpoint_content_block_index: None,
+        matched_content_block_index: None,
+        lookback_distance: None,
+        token_estimate_source: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_candidates_with_native_cache_for_bundles(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    request_breakpoints: &[CacheBreakpoint],
+    warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
+    bundles: Option<&PromptCacheBundles>,
+    native_cache_scores: &HashMap<Uuid, CacheScore>,
+    clock: &dyn Clock,
+) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
+    build_candidates_with_matches_for_bundles_and_native(
+        view,
+        principal_id,
+        request_kind,
+        request_breakpoints,
+        warm_entries,
+        bundles,
+        Some(native_cache_scores),
+        clock,
+    )
+}
 
 pub fn build_candidates(
     view: &DynamicView,
@@ -818,6 +1006,29 @@ pub(crate) fn build_candidates_with_matches_for_bundles(
     request_breakpoints: &[CacheBreakpoint],
     warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
     bundles: Option<&PromptCacheBundles>,
+    clock: &dyn Clock,
+) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
+    build_candidates_with_matches_for_bundles_and_native(
+        view,
+        principal_id,
+        request_kind,
+        request_breakpoints,
+        warm_entries,
+        bundles,
+        None,
+        clock,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_candidates_with_matches_for_bundles_and_native(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    request_breakpoints: &[CacheBreakpoint],
+    warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
+    bundles: Option<&PromptCacheBundles>,
+    native_cache_scores: Option<&HashMap<Uuid, CacheScore>>,
     clock: &dyn Clock,
 ) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
@@ -853,25 +1064,30 @@ pub(crate) fn build_candidates_with_matches_for_bundles(
             let bundle_breakpoints = bundles
                 .map(|bundles| bundles.for_upstream(upstream).cache_breakpoints.as_slice())
                 .unwrap_or(request_breakpoints);
-            let cache_score = warm_entries.get(&upstream.id).and_then(|entries| {
-                let matched =
-                    resolve_longest_warm_match(entries, bundle_breakpoints, now_unix_secs);
-                let score = build_cache_score_from_match(bundle_breakpoints, matched.as_ref());
-                if score.is_some()
-                    && let Some(matched) = matched.as_ref()
-                {
-                    selected_matches.insert(
-                        upstream.id,
-                        SelectedCacheMatch {
-                            prefix_hash: matched.prefix_hash.clone(),
-                            content_block_index: matched.content_block_index,
-                            ttl_class: matched.entry.ttl_class,
-                            estimated_prefix_bytes: matched.entry.estimated_prefix_bytes,
-                        },
-                    );
-                }
-                score
-            });
+            let cache_score = native_cache_scores
+                .and_then(|scores| scores.get(&upstream.id).cloned())
+                .or_else(|| {
+                    warm_entries.get(&upstream.id).and_then(|entries| {
+                        let matched =
+                            resolve_longest_warm_match(entries, bundle_breakpoints, now_unix_secs);
+                        let score =
+                            build_cache_score_from_match(bundle_breakpoints, matched.as_ref());
+                        if score.is_some()
+                            && let Some(matched) = matched.as_ref()
+                        {
+                            selected_matches.insert(
+                                upstream.id,
+                                SelectedCacheMatch {
+                                    prefix_hash: matched.prefix_hash.clone(),
+                                    content_block_index: matched.content_block_index,
+                                    ttl_class: matched.entry.ttl_class,
+                                    estimated_prefix_bytes: matched.entry.estimated_prefix_bytes,
+                                },
+                            );
+                        }
+                        score
+                    })
+                });
 
             let plan_info = view.plan_info_by_upstream.get(&upstream.id);
             candidates.push(UpstreamCandidate {
@@ -1135,7 +1351,8 @@ mod cache_score_tests {
         WarmCacheEntry,
     };
     use cc_lb_pricing::{
-        CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, TierRate, UsdPerMillion,
+        CatalogSnapshot, CatalogStatus, NativePricingLifetime, NativePricingProvider,
+        NativePricingRate, PriceCatalog, Pricing, ProviderNativePricing, TierRate, UsdPerMillion,
     };
     use proptest::prelude::*;
 
@@ -1331,6 +1548,7 @@ mod cache_score_tests {
         snapshot.models.insert(
             "tier-model".to_owned(),
             Pricing {
+                native: None,
                 model: "tier-model".to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(8),
@@ -1376,6 +1594,120 @@ mod cache_score_tests {
             Some(6_000_000)
         );
         assert_eq!(pricing.cache_read_micros_per_million, Some(2_000_000));
+    }
+    #[test]
+    fn native_cache_pricing_context_maps_rates_without_legacy_fallback() {
+        let catalog = PriceCatalog::new_empty();
+        let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = CatalogStatus::Ok;
+        snapshot.models.insert(
+            "gpt-native".to_owned(),
+            Pricing {
+                native: Some(ProviderNativePricing {
+                    provider: NativePricingProvider::OpenAi,
+                    ordinary_input: NativePricingRate::known(UsdPerMillion::from_whole_usd(2)),
+                    cached_input_read: NativePricingRate::known(UsdPerMillion::from_micros_usd(
+                        100_000,
+                    )),
+                    total_write: BTreeMap::from([(
+                        NativePricingLifetime::ThirtyMinutes,
+                        NativePricingRate::known(UsdPerMillion::from_whole_usd(3)),
+                    )]),
+                    explicit_resource: Default::default(),
+                }),
+                model: "gpt-native".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        snapshot
+            .cache_creation_per_million_usd
+            .insert("gpt-native".to_owned(), UsdPerMillion::from_whole_usd(3));
+        snapshot
+            .cache_read_per_million_usd
+            .insert("gpt-native".to_owned(), UsdPerMillion::from_whole_usd(1));
+        catalog.install_snapshot(snapshot);
+
+        let pricing = cache_pricing_summary_for_model(&catalog, "gpt-native", None);
+
+        assert_eq!(pricing.status, "unknown");
+        assert_eq!(pricing.input_micros_per_million, None);
+        assert_eq!(pricing.cache_read_micros_per_million, None);
+        assert_eq!(pricing.cache_creation_5m_micros_per_million, None);
+        assert_eq!(pricing.cache_creation_1h_micros_per_million, None);
+        let native = pricing.native.expect("native pricing context");
+        assert_eq!(native.version, 1);
+        assert_eq!(
+            native.provider,
+            cc_lb_domain::NativeCachePricingProvider::OpenAi
+        );
+        let ordinary = native
+            .rates
+            .iter()
+            .find(|rate| rate.component == cc_lb_domain::NativeCachePricingComponent::OrdinaryInput)
+            .expect("ordinary input rate");
+        assert_eq!(
+            ordinary.status,
+            cc_lb_domain::NativeCachePricingStatus::Known
+        );
+        assert_eq!(ordinary.micros_per_million, Some(2_000_000));
+        let total_write = native
+            .rates
+            .iter()
+            .find(|rate| {
+                rate.component == cc_lb_domain::NativeCachePricingComponent::TotalWrite
+                    && rate.lifetime
+                        == Some(cc_lb_domain::NativeCachePricingLifetime::ThirtyMinutes)
+            })
+            .expect("total write rate");
+        assert_eq!(
+            total_write.status,
+            cc_lb_domain::NativeCachePricingStatus::Known
+        );
+        assert_eq!(total_write.micros_per_million, Some(3_000_000));
+    }
+
+    #[test]
+    fn native_zero_rate_is_not_emitted_as_known_zero() {
+        let catalog = PriceCatalog::new_empty();
+        let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = CatalogStatus::Ok;
+        snapshot.models.insert(
+            "gpt-zero-native".to_owned(),
+            Pricing {
+                native: Some(ProviderNativePricing {
+                    provider: NativePricingProvider::OpenAi,
+                    ordinary_input: NativePricingRate::known(UsdPerMillion::from_micros_usd(0)),
+                    cached_input_read: NativePricingRate::unknown(),
+                    total_write: BTreeMap::new(),
+                    explicit_resource: Default::default(),
+                }),
+                model: "gpt-zero-native".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        catalog.install_snapshot(snapshot);
+
+        let pricing = cache_pricing_summary_for_model(&catalog, "gpt-zero-native", None);
+        let ordinary = pricing
+            .native
+            .expect("native pricing context")
+            .rates
+            .into_iter()
+            .find(|rate| rate.component == cc_lb_domain::NativeCachePricingComponent::OrdinaryInput)
+            .expect("ordinary input rate");
+        assert_eq!(
+            ordinary.status,
+            cc_lb_domain::NativeCachePricingStatus::Unknown
+        );
+        assert_eq!(ordinary.micros_per_million, None);
     }
 
     #[test]
@@ -1763,6 +2095,231 @@ mod cache_score_tests {
     }
 }
 
+#[cfg(test)]
+mod provider_native_cache_tests {
+    use super::{
+        RequestKind, extract_request_affinity_keys, native_cache_score_from_record,
+        provider_native_lookup_params,
+    };
+    use cc_lb_request_log::{RequestCacheEvidence, RequestNativeCacheObservation};
+    use cc_lb_storage_api::ProviderPromptCacheObservationRecord;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn native(
+        provider: &str,
+        mode: &str,
+        scope: Option<&str>,
+        identity_hash: Option<&str>,
+        retention_secs: Option<u64>,
+    ) -> RequestNativeCacheObservation {
+        RequestNativeCacheObservation {
+            provider: provider.to_owned(),
+            mode: mode.to_owned(),
+            scope: scope.map(str::to_owned),
+            identity_hash: identity_hash.map(str::to_owned),
+            retention_secs,
+            evidence: RequestCacheEvidence::Unreported,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn native_lookup_requires_complete_scope_hashed_key_and_matching_request() {
+        let valid = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(86_400),
+        );
+        assert!(
+            provider_native_lookup_params(Some(&valid), "gpt-5", RequestKind::OpenaiResponses,)
+                .is_some()
+        );
+
+        for invalid in [
+            native(
+                "openai",
+                "implicit",
+                Some("org=acme;region="),
+                Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Some(86_400),
+            ),
+            native(
+                "openai",
+                "implicit",
+                Some("org=acme"),
+                Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Some(86_400),
+            ),
+            native(
+                "openai",
+                "implicit",
+                Some("org=acme;region=us"),
+                None,
+                Some(86_400),
+            ),
+            native(
+                "openai",
+                "implicit",
+                Some("org=acme;region=us"),
+                Some("v3:local-anthropic-prefix"),
+                Some(86_400),
+            ),
+            native(
+                "gemini",
+                "implicit",
+                Some("org=acme;region=us"),
+                Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Some(86_400),
+            ),
+        ] {
+            assert!(
+                provider_native_lookup_params(
+                    Some(&invalid),
+                    "gpt-5",
+                    RequestKind::OpenaiResponses,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn native_lookup_includes_api_key_only_openai_candidates() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(86_400),
+        );
+        assert_eq!(
+            provider_native_lookup_params(
+                Some(&request),
+                "gpt-5",
+                RequestKind::OpenaiResponsesInputTokens,
+            )
+            .map(|(_, _, _, _, retention_secs)| retention_secs),
+            Some(86_400)
+        );
+    }
+
+    #[test]
+    fn native_lookup_rejects_missing_retention() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            None,
+        );
+        assert!(
+            provider_native_lookup_params(Some(&request), "gpt-4o", RequestKind::OpenaiResponses,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_lookup_preserves_zero_in_memory_retention() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(0),
+        );
+        assert_eq!(
+            provider_native_lookup_params(Some(&request), "gpt-4o", RequestKind::OpenaiResponses,)
+                .map(|(_, _, _, _, retention_secs)| retention_secs),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn missing_key_has_no_native_score_even_for_modern_openai() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            None,
+            Some(1_800),
+        );
+        assert!(
+            provider_native_lookup_params(Some(&request), "gpt-5.6", RequestKind::OpenaiResponses,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn present_key_has_no_native_score_for_modern_openai() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(1_800),
+        );
+        assert!(
+            provider_native_lookup_params(Some(&request), "gpt-5.6", RequestKind::OpenaiResponses,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gemini_native_evidence_never_becomes_soft_score_but_cached_content_stays_affine() {
+        for mode in ["implicit", "explicit"] {
+            let request = native(
+                "gemini",
+                mode,
+                Some("project"),
+                Some("sha256:cached-content"),
+                Some(1_800),
+            );
+            assert!(
+                provider_native_lookup_params(
+                    Some(&request),
+                    "gemini-2.5-pro",
+                    RequestKind::GeminiGenerateContent,
+                )
+                .is_none()
+            );
+        }
+
+        let keys = extract_request_affinity_keys(
+            RequestKind::GeminiGenerateContent.capability(),
+            &json!({"cachedContent": "projects/acme/locations/us/cachedContents/1"}),
+            "principal",
+        )
+        .expect("cachedContent affinity extraction");
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn native_score_exposes_observed_tokens_without_anthropic_cache_key() {
+        let record = ProviderPromptCacheObservationRecord {
+            upstream_id: Uuid::from_u128(1),
+            provider: "openai".to_owned(),
+            canonical_model_id: "gpt-5".to_owned(),
+            mode: "implicit".to_owned(),
+            isolation_scope: "org=acme;region=us".to_owned(),
+            identity_hash: "sha256:key".to_owned(),
+            boundary: "provider".to_owned(),
+            evidence_source: "provider_usage_metadata".to_owned(),
+            observed_cached_tokens: Some(u64::from(u32::MAX) + 1),
+            observed_write_tokens: None,
+            retention_secs: Some(86_400),
+            expires_at_unix_secs: Some(1_800_000_000),
+            last_observed_at_unix_secs: 1_799_999_000,
+        };
+        let score = native_cache_score_from_record(&record);
+        assert_eq!(score.predicted_cache_read_tokens, u32::MAX);
+        assert_eq!(score.predicted_expires_at_unix_secs, Some(1_800_000_000));
+        assert!(score.matched_v3_cache_key.is_none());
+    }
+}
+
 fn cache_pricing_summary_for_model(
     catalog: &cc_lb_pricing::PriceCatalog,
     model: &str,
@@ -1770,6 +2327,7 @@ fn cache_pricing_summary_for_model(
 ) -> CachePricingSummary {
     if model.is_empty() {
         return CachePricingSummary {
+            native: None,
             status: "unknown".to_owned(),
             input_micros_per_million: None,
             cache_creation_5m_micros_per_million: None,
@@ -1779,6 +2337,18 @@ fn cache_pricing_summary_for_model(
     }
 
     let normalized = cc_lb_pricing::normalize_model_id(model);
+    let native = catalog
+        .native_pricing(model, service_tier)
+        .map(native_cache_pricing_from_catalog);
+    if matches!(
+        native.as_ref().map(|pricing| pricing.provider),
+        Some(NativeCachePricingProvider::OpenAi | NativeCachePricingProvider::Gemini)
+    ) {
+        return CachePricingSummary {
+            native,
+            ..CachePricingSummary::default()
+        };
+    }
     let pricing = catalog.routing_cache_pricing(model, service_tier);
     let input = pricing.map(|rates| rates.input_per_million_usd.as_micros_usd());
     let cache_creation_5m = pricing.and_then(|rates| {
@@ -1799,13 +2369,15 @@ fn cache_pricing_summary_for_model(
     let status = if input.is_some() && cache_creation_5m.is_some() && cache_read.is_some() {
         "known"
     } else {
-        if let Some(fallback) = anthropic_family_cache_pricing_summary(&normalized) {
+        if let Some(mut fallback) = anthropic_family_cache_pricing_summary(&normalized) {
+            fallback.native = native;
             return fallback;
         }
         "unknown"
     };
 
     CachePricingSummary {
+        native,
         status: status.to_owned(),
         input_micros_per_million: input,
         cache_creation_5m_micros_per_million: cache_creation_5m,
@@ -1814,9 +2386,119 @@ fn cache_pricing_summary_for_model(
     }
 }
 
+fn native_cache_pricing_from_catalog(
+    pricing: cc_lb_pricing::ProviderNativePricing,
+) -> NativeCachePricing {
+    let mut rates = Vec::with_capacity(5 + pricing.total_write.len());
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::OrdinaryInput,
+        None,
+        pricing.ordinary_input,
+    ));
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::CachedInputRead,
+        None,
+        pricing.cached_input_read,
+    ));
+    for (lifetime, rate) in pricing.total_write {
+        rates.push(native_cache_pricing_rate(
+            NativeCachePricingComponent::TotalWrite,
+            Some(native_cache_pricing_lifetime(lifetime)),
+            rate,
+        ));
+    }
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::ExplicitResourceToken,
+        None,
+        pricing.explicit_resource.token,
+    ));
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::ExplicitResourceStorage,
+        Some(NativeCachePricingLifetime::ExplicitResourceTtl),
+        pricing.explicit_resource.storage,
+    ));
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::ExplicitResourceTtl,
+        Some(NativeCachePricingLifetime::ExplicitResourceTtl),
+        pricing.explicit_resource.ttl,
+    ));
+    NativeCachePricing {
+        version: 1,
+        provider: native_cache_pricing_provider(pricing.provider),
+        rates,
+    }
+}
+
+fn native_cache_pricing_provider(
+    provider: cc_lb_pricing::NativePricingProvider,
+) -> NativeCachePricingProvider {
+    match provider {
+        cc_lb_pricing::NativePricingProvider::Anthropic => NativeCachePricingProvider::Anthropic,
+        cc_lb_pricing::NativePricingProvider::OpenAi => NativeCachePricingProvider::OpenAi,
+        cc_lb_pricing::NativePricingProvider::Gemini => NativeCachePricingProvider::Gemini,
+        cc_lb_pricing::NativePricingProvider::Unknown => NativeCachePricingProvider::Unknown,
+    }
+}
+
+fn native_cache_pricing_lifetime(
+    lifetime: cc_lb_pricing::NativePricingLifetime,
+) -> NativeCachePricingLifetime {
+    match lifetime {
+        cc_lb_pricing::NativePricingLifetime::ModelRetention => {
+            NativeCachePricingLifetime::ModelRetention
+        }
+        cc_lb_pricing::NativePricingLifetime::ThirtyMinutes => {
+            NativeCachePricingLifetime::ThirtyMinutes
+        }
+        cc_lb_pricing::NativePricingLifetime::OneHour => NativeCachePricingLifetime::OneHour,
+        cc_lb_pricing::NativePricingLifetime::TwelveHours => {
+            NativeCachePricingLifetime::TwelveHours
+        }
+        cc_lb_pricing::NativePricingLifetime::ExplicitResourceTtl => {
+            NativeCachePricingLifetime::ExplicitResourceTtl
+        }
+    }
+}
+
+fn native_cache_pricing_rate(
+    component: NativeCachePricingComponent,
+    lifetime: Option<NativeCachePricingLifetime>,
+    rate: cc_lb_pricing::NativePricingRate,
+) -> NativeCachePricingRate {
+    let status = match rate.status {
+        cc_lb_pricing::NativePricingStatus::Known
+            if rate
+                .price_per_million_usd
+                .map(|price| price.as_micros_usd())
+                != Some(0) =>
+        {
+            NativeCachePricingStatus::Known
+        }
+        cc_lb_pricing::NativePricingStatus::NotApplicable => {
+            NativeCachePricingStatus::NotApplicable
+        }
+        cc_lb_pricing::NativePricingStatus::Known | cc_lb_pricing::NativePricingStatus::Unknown => {
+            NativeCachePricingStatus::Unknown
+        }
+    };
+    let micros_per_million = if status == NativeCachePricingStatus::Known {
+        rate.price_per_million_usd
+            .map(|price| price.as_micros_usd())
+    } else {
+        None
+    };
+    NativeCachePricingRate {
+        component,
+        lifetime,
+        status,
+        micros_per_million,
+    }
+}
+
 fn anthropic_family_cache_pricing_summary(model: &str) -> Option<CachePricingSummary> {
     let input_micros_per_million = anthropic_family_input_micros_per_million(model)?;
     Some(CachePricingSummary {
+        native: None,
         status: "known".to_owned(),
         input_micros_per_million: Some(input_micros_per_million),
         cache_creation_5m_micros_per_million: Some(cache_creation_5m_micros_from_input(
@@ -3252,13 +3934,23 @@ impl Lifecycle {
             &*self.clock,
         )
         .await;
-        let candidates = build_candidates_with_matches_for_bundles(
+        let native_cache_scores = fetch_provider_native_cache_scores(
+            &view,
+            &principal.id,
+            request_kind,
+            &ctx.canonical_model_id,
+            cache_metadata.native_cache.as_ref(),
+            &*self.clock,
+        )
+        .await;
+        let candidates = build_candidates_with_native_cache_for_bundles(
             &view,
             &principal.id,
             request_kind,
             &ctx.cache_breakpoints,
             &warm_entries,
             Some(&cache_metadata.bundles),
+            &native_cache_scores,
             &*self.clock,
         )
         .0;
@@ -3472,6 +4164,18 @@ impl Lifecycle {
         )
     }
 
+    pub(crate) fn publish_websocket_provider_cache_observation(
+        &self,
+        context: &PromptCacheObservationContext,
+        usage: &UsageCounts,
+    ) {
+        publish_provider_cache_observation(
+            context,
+            PromptCacheUsage::from(usage),
+            unix_secs(self.clock.now()),
+        );
+    }
+
     /// Route and reserve one logical create; never dispatch an HTTP request.
     /// The gateway records authentication before parsing any client frame.
     pub(crate) async fn prepare_websocket_turn(
@@ -3624,6 +4328,20 @@ impl Lifecycle {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            let prompt_cache_observation_context = prompt_cache_observation_context(
+                &view,
+                selected_id,
+                &ctx.canonical_model_id,
+                &[],
+                &HashSet::new(),
+                None,
+                provider_cache::analyze(
+                    ProviderCapability::OpenaiResponses,
+                    body.as_ref(),
+                    &ctx.canonical_model_id,
+                    ingress.headers,
+                ),
+            );
             span.record("gen_ai.request.model", model.as_str());
             span.record("cc_lb.upstream.id", tracing::field::display(selected_id));
             let route_info = route_info_for_routed(&routed, Some(&model));
@@ -3717,6 +4435,7 @@ impl Lifecycle {
                 candidates,
                 route_info,
                 observer: observer.clone(),
+                prompt_cache_observation_context,
                 reservation: active_limit
                     .as_mut()
                     .and_then(|limit| limit.reservation.take()),
@@ -3903,14 +4622,32 @@ impl Lifecycle {
             id: auth.principal_id().to_owned(),
             kind: PrincipalKind::InternalKey,
         };
-        let mut candidates = build_candidates(
+        let native_cache = provider_cache::analyze(
+            ProviderCapability::OpenaiResponses,
+            body,
+            &canonical_model,
+            ingress.headers,
+        );
+        let native_cache_scores = fetch_provider_native_cache_scores(
+            view,
+            &principal.id,
+            RequestKind::OpenaiResponses,
+            &canonical_model,
+            native_cache.as_ref(),
+            &*self.clock,
+        )
+        .await;
+        let mut candidates = build_candidates_with_native_cache_for_bundles(
             view,
             auth.principal_id(),
             RequestKind::OpenaiResponses,
             &[],
             &HashMap::new(),
+            None,
+            &native_cache_scores,
             &*self.clock,
-        );
+        )
+        .0;
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
@@ -4607,6 +5344,15 @@ impl Lifecycle {
             &*self.clock,
         )
         .await;
+        let native_cache_scores = fetch_provider_native_cache_scores(
+            &view,
+            &principal.id,
+            request_kind,
+            &ctx.canonical_model_id,
+            cache_metadata.native_cache.as_ref(),
+            &*self.clock,
+        )
+        .await;
         // Synchronous routing region: no .await is permitted while `route_guard` is held.
         let route_span = tracing::info_span!(
             "proxy.route",
@@ -4618,13 +5364,14 @@ impl Lifecycle {
         );
         let route_guard = route_span.enter();
         let (mut candidates, mut selected_cache_matches) =
-            build_candidates_with_matches_for_bundles(
+            build_candidates_with_native_cache_for_bundles(
                 &view,
                 &principal.id,
                 request_kind,
                 &ctx.cache_breakpoints,
                 &warm_entries,
                 Some(&cache_metadata.bundles),
+                &native_cache_scores,
                 &*self.clock,
             );
         if let Some(affinity) = request_affinity.as_ref() {
@@ -12550,6 +13297,43 @@ mod tests {
         };
         assert_eq!(record.retention_secs, None);
         assert_eq!(record.expires_at_unix_secs, None);
+    }
+
+    #[test]
+    fn websocket_native_observation_publication_uses_lifecycle_clock() {
+        let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+        let lifecycle =
+            read_inference_lifecycle(upstream_response(StatusCode::OK, b""), sink.clone(), None);
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1_126),
+            canonical_model_id: "gpt-5.6".to_owned(),
+            cache_breakpoints: Vec::new(),
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: None,
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                ..Default::default()
+            }),
+            sink: sink.clone(),
+            grace_margin_secs: 0,
+        };
+        let usage = UsageCounts {
+            cache_read_input_tokens: 128,
+            cache_read_evidence: usage_parser::CacheTokenEvidence::Positive,
+            ..UsageCounts::default()
+        };
+
+        lifecycle.publish_websocket_provider_cache_observation(&context, &usage);
+
+        let records = sink.provider_upserts();
+        let [record] = records.as_slice() else {
+            panic!("expected one provider observation");
+        };
+        assert_eq!(record.upstream_id, context.upstream_id);
+        assert_eq!(record.canonical_model_id, context.canonical_model_id);
+        assert_eq!(record.observed_cached_tokens, Some(128));
+        assert_eq!(record.last_observed_at_unix_secs, 1_800_000_000);
     }
 
     #[test]

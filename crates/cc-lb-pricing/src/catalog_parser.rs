@@ -6,7 +6,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::loader::LoaderError;
 use crate::{
-    CatalogSnapshot, CatalogStatus, Pricing, ThresholdBand, ThresholdRate, TierRate, UsdPerMillion,
+    CatalogSnapshot, CatalogStatus, NativePricingLifetime, NativePricingProvider,
+    NativePricingRate, Pricing, ProviderNativePricing, ThresholdBand, ThresholdRate, TierRate,
+    UsdPerMillion,
 };
 
 type RawTierCosts<'a> = BTreeMap<String, (&'a str, f64)>;
@@ -31,9 +33,11 @@ pub(crate) fn parse_litellm_json(
         let Some(object) = value.as_object() else {
             continue;
         };
-
         let image_generation =
             object.get("mode").and_then(Value::as_str) == Some("image_generation");
+        let native_provider = native_provider(object);
+        let preserve_legacy_cache_fields =
+            native_provider.is_none() || native_provider == Some(NativePricingProvider::Anthropic);
         let Some((input_field, input_cost)) = preferred_cost(
             object,
             "input_cost_per_token",
@@ -81,32 +85,34 @@ pub(crate) fn parse_litellm_json(
             None
         };
 
-        if let Some(cache_creation_cost) = object
-            .get("cache_creation_input_token_cost")
-            .and_then(Value::as_f64)
-        {
-            cache_creation_per_million_usd.insert(
-                model.clone(),
-                usd_per_token_to_per_million(
-                    &model,
-                    "cache_creation_input_token_cost",
-                    cache_creation_cost,
-                )?,
-            );
-        }
+        if preserve_legacy_cache_fields {
+            if let Some(cache_creation_cost) = object
+                .get("cache_creation_input_token_cost")
+                .and_then(Value::as_f64)
+            {
+                cache_creation_per_million_usd.insert(
+                    model.clone(),
+                    usd_per_token_to_per_million(
+                        &model,
+                        "cache_creation_input_token_cost",
+                        cache_creation_cost,
+                    )?,
+                );
+            }
 
-        if let Some(cache_read_cost) = object
-            .get("cache_read_input_token_cost")
-            .and_then(Value::as_f64)
-        {
-            cache_read_per_million_usd.insert(
-                model.clone(),
-                usd_per_token_to_per_million(
-                    &model,
-                    "cache_read_input_token_cost",
-                    cache_read_cost,
-                )?,
-            );
+            if let Some(cache_read_cost) = object
+                .get("cache_read_input_token_cost")
+                .and_then(Value::as_f64)
+            {
+                cache_read_per_million_usd.insert(
+                    model.clone(),
+                    usd_per_token_to_per_million(
+                        &model,
+                        "cache_read_input_token_cost",
+                        cache_read_cost,
+                    )?,
+                );
+            }
         }
 
         let input_by_tier = discover_tier_costs(object, "input_cost_per_token");
@@ -137,16 +143,18 @@ pub(crate) fn parse_litellm_json(
             );
         }
 
-        insert_cache_tier_costs(
-            &mut cache_creation_per_million_usd_by_tier,
-            &model,
-            discover_tier_costs(object, "cache_creation_input_token_cost"),
-        )?;
-        insert_cache_tier_costs(
-            &mut cache_read_per_million_usd_by_tier,
-            &model,
-            discover_tier_costs(object, "cache_read_input_token_cost"),
-        )?;
+        if preserve_legacy_cache_fields {
+            insert_cache_tier_costs(
+                &mut cache_creation_per_million_usd_by_tier,
+                &model,
+                discover_tier_costs(object, "cache_creation_input_token_cost"),
+            )?;
+            insert_cache_tier_costs(
+                &mut cache_read_per_million_usd_by_tier,
+                &model,
+                discover_tier_costs(object, "cache_read_input_token_cost"),
+            )?;
+        }
 
         let mut model_above_tokens_rates = BTreeMap::<u64, ThresholdBand>::new();
         insert_above_token_costs(
@@ -163,24 +171,27 @@ pub(crate) fn parse_litellm_json(
             "output_cost_per_token",
             |rate| &mut rate.output_per_million_usd,
         )?;
-        insert_above_token_costs(
-            &mut model_above_tokens_rates,
-            &model,
-            object,
-            "cache_creation_input_token_cost",
-            |rate| &mut rate.cache_creation_per_million_usd,
-        )?;
-        insert_above_token_costs(
-            &mut model_above_tokens_rates,
-            &model,
-            object,
-            "cache_read_input_token_cost",
-            |rate| &mut rate.cache_read_per_million_usd,
-        )?;
+        if preserve_legacy_cache_fields {
+            insert_above_token_costs(
+                &mut model_above_tokens_rates,
+                &model,
+                object,
+                "cache_creation_input_token_cost",
+                |rate| &mut rate.cache_creation_per_million_usd,
+            )?;
+            insert_above_token_costs(
+                &mut model_above_tokens_rates,
+                &model,
+                object,
+                "cache_read_input_token_cost",
+                |rate| &mut rate.cache_read_per_million_usd,
+            )?;
+        }
         if !model_above_tokens_rates.is_empty() {
             above_tokens_rates.insert(model.clone(), model_above_tokens_rates);
         }
 
+        let native = parse_native_pricing(&model, object, native_provider, input_per_million_usd)?;
         models.insert(
             model.clone(),
             Pricing {
@@ -190,6 +201,7 @@ pub(crate) fn parse_litellm_json(
                 input_image_per_million_usd,
                 output_image_per_million_usd,
                 by_tier,
+                native,
             },
         );
     }
@@ -244,7 +256,117 @@ fn parse_optional_cost(
         .map(|cost| usd_per_token_to_per_million(model, field, cost).map(Some))
         .unwrap_or(Ok(None))
 }
+fn native_provider(object: &Map<String, Value>) -> Option<NativePricingProvider> {
+    match object
+        .get("litellm_provider")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("anthropic") | Some("bedrock") => Some(NativePricingProvider::Anthropic),
+        Some("openai") | Some("azure") => Some(NativePricingProvider::OpenAi),
+        Some("gemini") | Some("vertex_ai") | Some("vertex_ai_beta") => {
+            Some(NativePricingProvider::Gemini)
+        }
+        _ => None,
+    }
+}
 
+fn native_rate(
+    model: &str,
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<NativePricingRate, LoaderError> {
+    object
+        .get(field)
+        .and_then(Value::as_f64)
+        .map(|cost| usd_per_token_to_per_million(model, field, cost).map(NativePricingRate::known))
+        .transpose()
+        .map(|rate| rate.unwrap_or_else(NativePricingRate::unknown))
+}
+
+fn parse_native_pricing(
+    model: &str,
+    object: &Map<String, Value>,
+    provider: Option<NativePricingProvider>,
+    ordinary_input: UsdPerMillion,
+) -> Result<Option<ProviderNativePricing>, LoaderError> {
+    let Some(provider) = provider else {
+        return Ok(None);
+    };
+    let mut native = ProviderNativePricing::unknown(provider);
+    native.ordinary_input = NativePricingRate::known(ordinary_input);
+    if provider == NativePricingProvider::OpenAi {
+        native.cached_input_read = native_rate(model, object, "cache_read_input_token_cost")?;
+        for (field, lifetime) in [
+            (
+                "cache_creation_input_token_cost_above_30m",
+                NativePricingLifetime::ThirtyMinutes,
+            ),
+            (
+                "cache_creation_input_token_cost_above_30min",
+                NativePricingLifetime::ThirtyMinutes,
+            ),
+            (
+                "cache_creation_input_token_cost_above_1hr",
+                NativePricingLifetime::OneHour,
+            ),
+            (
+                "cache_creation_input_token_cost_above_12hr",
+                NativePricingLifetime::TwelveHours,
+            ),
+        ] {
+            if object.contains_key(field) {
+                native
+                    .total_write
+                    .insert(lifetime, native_rate(model, object, field)?);
+            }
+        }
+    } else if provider == NativePricingProvider::Anthropic {
+        native.cached_input_read = native_rate(model, object, "cache_read_input_token_cost")?;
+    } else if provider == NativePricingProvider::Gemini {
+        native.explicit_resource.token = first_native_rate(
+            model,
+            object,
+            &[
+                "cache_creation_input_token_cost",
+                "cache_creation_token_cost",
+            ],
+        )?;
+        native.explicit_resource.storage = first_native_rate(
+            model,
+            object,
+            &[
+                "cache_storage_input_token_cost",
+                "cache_storage_cost_per_token",
+                "cache_storage_token_cost",
+            ],
+        )?;
+        native.explicit_resource.ttl = first_native_rate(
+            model,
+            object,
+            &[
+                "cache_storage_cost_per_hour",
+                "cache_storage_ttl_cost_per_hour",
+                "cache_ttl_cost_per_hour",
+            ],
+        )?;
+    }
+    Ok(Some(native))
+}
+
+fn first_native_rate(
+    model: &str,
+    object: &Map<String, Value>,
+    fields: &[&str],
+) -> Result<NativePricingRate, LoaderError> {
+    for field in fields {
+        if object.contains_key(*field) {
+            return native_rate(model, object, field);
+        }
+    }
+    Ok(NativePricingRate::unknown())
+}
 fn discover_tier_costs<'a>(object: &'a Map<String, Value>, base: &str) -> RawTierCosts<'a> {
     object
         .iter()
@@ -404,6 +526,7 @@ fn record_missing_catalog_field(model: &str, field: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NativePricingStatus;
 
     #[test]
     fn image_generation_falls_back_to_image_output_price() {
@@ -485,5 +608,90 @@ mod tests {
             Some(46)
         );
         assert_eq!(catalog.estimate_max("regular-model", 11, 3, None), Some(78));
+    }
+
+    #[test]
+    fn provider_native_rates_are_only_taken_from_present_catalog_fields() {
+        let snapshot = parse_litellm_json(
+            br#"{
+                "gpt-5.6": {
+                    "litellm_provider": "openai",
+                    "input_cost_per_token": 0.000002,
+                    "output_cost_per_token": 0.000014,
+                    "cache_read_input_token_cost": 0.0000001,
+                    "cache_creation_input_token_cost_above_30m": 0.0000025,
+                    "cache_creation_input_token_cost_above_12hr": 0.000005
+                },
+                "gpt-5.2": {
+                    "litellm_provider": "openai",
+                    "input_cost_per_token": 0.000002,
+                    "output_cost_per_token": 0.000014
+                },
+                "gemini-explicit": {
+                    "litellm_provider": "gemini",
+                    "input_cost_per_token": 0.000001,
+                    "output_cost_per_token": 0.000008,
+                    "cache_storage_input_token_cost": 0.0000002,
+                    "cache_storage_cost_per_hour": 0.0000003
+                }
+            }"#,
+            &cc_lb_clock::TestClock::new_at_secs(1_700_000_000),
+        )
+        .expect("catalog should parse");
+
+        let openai = snapshot
+            .models
+            .get("gpt-5.6")
+            .unwrap()
+            .native
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            openai
+                .total_write
+                .get(&NativePricingLifetime::ThirtyMinutes)
+                .unwrap()
+                .status,
+            NativePricingStatus::Known
+        );
+        assert_eq!(
+            openai
+                .total_write
+                .get(&NativePricingLifetime::TwelveHours)
+                .unwrap()
+                .price_per_million_usd,
+            Some(UsdPerMillion::from_micros_usd(5_000_000))
+        );
+        assert!(
+            snapshot
+                .models
+                .get("gpt-5.2")
+                .unwrap()
+                .native
+                .as_ref()
+                .unwrap()
+                .total_write
+                .is_empty()
+        );
+
+        let gemini = snapshot
+            .models
+            .get("gemini-explicit")
+            .unwrap()
+            .native
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            gemini.explicit_resource.storage.status,
+            NativePricingStatus::Known
+        );
+        assert_eq!(
+            gemini.explicit_resource.ttl.status,
+            NativePricingStatus::Known
+        );
+        assert_eq!(
+            gemini.cached_input_read.status,
+            NativePricingStatus::Unknown
+        );
     }
 }

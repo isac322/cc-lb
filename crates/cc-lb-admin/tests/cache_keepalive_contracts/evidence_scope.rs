@@ -174,6 +174,7 @@ async fn list_and_detail_include_follow_up_at_turn_boundary_like_summary_async()
         models: HashMap::from([(
             "claude-sonnet-4-5".to_owned(),
             Pricing {
+                native: None,
                 model: "claude-sonnet-4-5".to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(3),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(15),
@@ -286,6 +287,7 @@ async fn list_and_detail_include_follow_up_at_subsecond_ttl_boundary_async() {
         models: HashMap::from([(
             "claude-sonnet-4-5".to_owned(),
             Pricing {
+                native: None,
                 model: "claude-sonnet-4-5".to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(3),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(15),

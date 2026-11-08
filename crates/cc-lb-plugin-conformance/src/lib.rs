@@ -73,7 +73,7 @@ mod tests;
 use cc_lb_plugin_wire::{
     FilterRequest, FilterResponse, ShapeRequest, ShapeResponse,
     schema::{ProviderFamily, WireVersion},
-    v1, v2,
+    v1, v2, v3,
 };
 use cc_lb_runtime_wasmtime::{
     HookKind, HotEngineConfig, ModuleInspection, RuntimeSlotKey, WasmPluginWireDispatch,
@@ -149,6 +149,13 @@ impl_wire_request!(
     v2::FilterResponse,
     v2::ArchivedFilterResponse,
     WireVersion::V2
+);
+impl_wire_request!(
+    FilterWireRequest,
+    v3::FilterRequest,
+    v2::FilterResponse,
+    v2::ArchivedFilterResponse,
+    WireVersion::V3
 );
 impl_wire_request!(
     ShapeWireRequest,
@@ -384,6 +391,10 @@ impl<'a> ConformanceSuite<'a> {
                     let _ =
                         session.call_filter_wire(fixtures::sample_filter_request_v2(self.provider));
                 }
+                Some(WireVersion::V3) => {
+                    let _ =
+                        session.call_filter_wire(fixtures::sample_filter_request_v3(self.provider));
+                }
                 None => unreachable!(),
             },
             ConformanceKind::Shape => {
@@ -401,6 +412,7 @@ impl<'a> ConformanceSuite<'a> {
                             let _ = session
                                 .call_shape_wire(fixtures::sample_shape_request_v2(self.provider));
                         }
+                        WireVersion::V3 => unreachable!("shape V3 is not host-supported"),
                     }
                 }
                 if session.dispatch.has_response_transform() {
@@ -417,6 +429,9 @@ impl<'a> ConformanceSuite<'a> {
                             let _ = session.call_transform_response(
                                 fixtures::sample_transform_response_request_v2(self.provider),
                             );
+                        }
+                        Some(WireVersion::V3) => {
+                            unreachable!("response transform V3 is not host-supported")
                         }
                         None => unreachable!(),
                     }
@@ -435,6 +450,9 @@ impl<'a> ConformanceSuite<'a> {
                             let _ = session.call_transform_sse_event(
                                 fixtures::sample_transform_sse_event_request_v2(self.provider),
                             );
+                        }
+                        Some(WireVersion::V3) => {
+                            unreachable!("SSE transform V3 is not host-supported")
                         }
                         None => unreachable!(),
                     }

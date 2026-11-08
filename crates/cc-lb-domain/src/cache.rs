@@ -188,6 +188,104 @@ pub struct CacheScore {
     pub token_estimate_source: Option<String>,
 }
 
+/// Provider carrying a native cache pricing contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeCachePricingProvider {
+    /// Anthropic pricing.
+    Anthropic,
+    /// OpenAI pricing.
+    OpenAi,
+    /// Gemini pricing.
+    Gemini,
+    /// Provider not recognized.
+    Unknown,
+}
+
+/// Explicit state of an individual provider-native rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeCachePricingStatus {
+    /// Rate is published and known.
+    Known,
+    /// Rate is not available in the catalog.
+    Unknown,
+    /// Rate does not apply to this provider or model.
+    NotApplicable,
+}
+
+/// Lifetime attached to a native total-write rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeCachePricingLifetime {
+    /// Lifetime follows the model's cache retention policy.
+    ModelRetention,
+    /// 30-minute lifetime.
+    ThirtyMinutes,
+    /// 1-hour lifetime.
+    OneHour,
+    /// 12-hour lifetime.
+    TwelveHours,
+    /// Lifetime set by the explicit resource TTL.
+    ExplicitResourceTtl,
+}
+
+/// Native pricing component. `TotalWrite` is a complete write rate, not an
+/// additive surcharge on ordinary input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeCachePricingComponent {
+    /// Ordinary (uncached) input tokens.
+    OrdinaryInput,
+    /// Tokens read from the cache.
+    CachedInputRead,
+    /// Complete cache write rate covering the whole write.
+    TotalWrite,
+    /// Explicit cache resource tokens.
+    ExplicitResourceToken,
+    /// Explicit cache resource storage.
+    ExplicitResourceStorage,
+    /// Explicit cache resource TTL.
+    ExplicitResourceTtl,
+}
+
+/// Single provider-native rate for one pricing component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeCachePricingRate {
+    /// Pricing component this rate applies to.
+    pub component: NativeCachePricingComponent,
+    /// Lifetime of the write rate, when the component has one.
+    pub lifetime: Option<NativeCachePricingLifetime>,
+    /// Explicit state of this rate.
+    pub status: NativeCachePricingStatus,
+    /// Rate in micros USD per million tokens; present when `status` is `Known`.
+    #[serde(default)]
+    pub micros_per_million: Option<u64>,
+}
+
+/// Versioned provider-native pricing context for downstream routing and
+/// plugin consumers. Missing catalog data is carried as `Unknown`; it is
+/// never represented by a zero-valued rate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeCachePricing {
+    /// Schema version of this pricing context.
+    pub version: u8,
+    /// Provider whose native cache pricing these rates describe.
+    pub provider: NativeCachePricingProvider,
+    /// Per-component native rates. Components without an entry are not priced.
+    pub rates: Vec<NativeCachePricingRate>,
+}
+
+impl Default for NativeCachePricing {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            provider: NativeCachePricingProvider::Unknown,
+            rates: Vec::new(),
+        }
+    }
+}
+
 /// Model-specific cache/input pricing exposed to router plugins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachePricingSummary {
@@ -201,6 +299,10 @@ pub struct CachePricingSummary {
     pub cache_creation_1h_micros_per_million: Option<u64>,
     /// Cache read token price.
     pub cache_read_micros_per_million: Option<u64>,
+    /// Provider-native pricing. This is additive to the legacy Anthropic
+    /// fields, whose meanings and formulas remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeCachePricing>,
 }
 
 impl Default for CachePricingSummary {
@@ -211,6 +313,7 @@ impl Default for CachePricingSummary {
             cache_creation_5m_micros_per_million: None,
             cache_creation_1h_micros_per_million: None,
             cache_read_micros_per_million: None,
+            native: None,
         }
     }
 }

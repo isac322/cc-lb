@@ -22,6 +22,7 @@ fn tier_snapshot(with_explicit_tiers: bool) -> CatalogSnapshot {
         BTreeMap::new()
     };
     let pricing = Pricing {
+        native: None,
         model: MODEL.to_owned(),
         input_per_million_usd: UsdPerMillion::from_whole_usd(2),
         output_per_million_usd: UsdPerMillion::from_whole_usd(8),

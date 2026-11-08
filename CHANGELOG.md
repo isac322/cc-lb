@@ -30,6 +30,8 @@ All notable changes to this project will be documented in this file.
 
 - OpenAI Responses stateless reasoning `encrypted_content` items now retain upstream affinity across buffered and streaming responses, preventing replay from silently crossing to another credential when the owning upstream is unavailable. ([#1077](https://github.com/isac322/cc-lb/issues/1077))
 - Provider-native prompt-cache observations now preserve OpenAI Responses boundaries and scoped identities plus Gemini implicit and explicit cache evidence, while leaving Anthropic breakpoint semantics unchanged. Request events and diagnostics distinguish positive, zero, invalid, and absent provider evidence without recording raw prompts or cache keys. (#1126)
+- Provider-native prompt-cache routing now gives older OpenAI Responses requests a scoped soft preference when `prompt_cache_key` evidence and native pricing are available. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` keeps hard owner affinity. (#1127)
+
 ### Fixed
 - Overview `Pool quota usage` now carries the latest fresh reading forward to the end of the visible time range and clamps pre-range anchors to the range start when quota utilization is unchanged between hourly heartbeat snapshots, while keeping the snapshot count caption limited to recorded snapshots.
 - Provider-specific generation requests with an effective `OutputTokens` limit now require an output bound recognized for that operation; requests without one are rejected before upstream dispatch with `400 invalid_request_error` and no retry hint, while requests without that limit remain unchanged. ([#1089](https://github.com/isac322/cc-lb/issues/1089))
