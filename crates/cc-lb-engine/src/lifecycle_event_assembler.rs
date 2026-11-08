@@ -371,6 +371,8 @@ impl Partial {
             cache_write_input_tokens: self.usage.cache_write_input_tokens,
             cache_write_input_tokens_30m: self.usage.cache_write_input_tokens_30m,
             cache_write_input_tokens_12h: self.usage.cache_write_input_tokens_12h,
+            thinking_tokens: (self.usage_seen && self.usage.thinking_tokens > 0)
+                .then_some(self.usage.thinking_tokens),
             service_tier: self.usage.service_tier.clone(),
             cost_usd_micros: cost.total,
             cost_input_micros: cost.input,
