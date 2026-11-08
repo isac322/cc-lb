@@ -1,12 +1,14 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest, CacheKeepaliveReplaceRequest,
-    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
-    CacheTtl, MetaStore, cache_keepalive_job_key,
+    CacheKeepaliveEnqueueState, CacheKeepaliveEvidenceRow, CacheKeepaliveHitRefreshRequest,
+    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore,
+    CacheKeepaliveTerminalReason, CacheTtl, MetaStore, RequestEvent, RequestEventStore,
+    cache_keepalive_job_key,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -29,14 +31,576 @@ fn cache_keepalive_postgres_conformance() {
         .expect("cache keepalive postgres conformance");
 }
 
+async fn append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_id = Uuid::from_u128(8);
+    let overlapping_cycle_id = Uuid::from_u128(9);
+    let evidence =
+        |id: &str, kind: &str, start: u64, cycle_id: Option<Uuid>| CacheKeepaliveEvidenceRow {
+            evidence_id: id.to_owned(),
+            cycle_id,
+            evidence_kind: kind.to_owned(),
+            request_start_ms: start,
+            prefix_fingerprint: Some("fingerprint".to_owned()),
+            prefix_hash: Some("prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id,
+            model: "model".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(1),
+            cost_micros: Some(1),
+            request_ref: Some(id.to_owned()),
+            event_ref: Some(id.to_owned()),
+        };
+    let mut invalid = evidence("invalid", "follow_up", 1_400, None);
+    invalid.cache_read_input_tokens = Some(0);
+    let mut unmatched = evidence("unmatched", "follow_up", 1_500, None);
+    unmatched.prefix_hash = Some("other-prefix".to_owned());
+    let cursor = storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 1,
+                ts_ms: Some(1_000),
+                event_id: Some("filtered-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[
+                evidence("renewal", "renewal", 1_000, Some(cycle_id)),
+                evidence(
+                    "overlapping-renewal",
+                    "renewal",
+                    1_100,
+                    Some(overlapping_cycle_id),
+                ),
+                evidence("first-follow-up", "follow_up", 1_200, None),
+                evidence("second-follow-up", "follow_up", 1_300, None),
+                invalid,
+                unmatched,
+            ],
+        )
+        .await?;
+    assert!(cursor > 0);
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id IN ('first-follow-up', 'overlapping-renewal', 'renewal')
+         ORDER BY evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await?;
+    assert_eq!(
+        ids,
+        vec!["first-follow-up", "overlapping-renewal", "renewal",]
+    );
+    sqlx::query(
+        "DELETE FROM cache_keepalive_evidence
+         WHERE evidence_id IN ('first-follow-up', 'overlapping-renewal', 'renewal')",
+    )
+    .execute(storage.pool())
+    .await?;
+    Ok(())
+}
+async fn append_evidence_deduplicates_follow_ups_across_sibling_renewals(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_id = Uuid::from_u128(80);
+    let evidence = |id: &str, kind: &str, start: u64, prefix: &str| CacheKeepaliveEvidenceRow {
+        evidence_id: id.to_owned(),
+        cycle_id: (kind == "renewal").then_some(cycle_id),
+        evidence_kind: kind.to_owned(),
+        request_start_ms: start,
+        prefix_fingerprint: Some("fingerprint".to_owned()),
+        prefix_hash: Some(prefix.to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id,
+        model: "model".to_owned(),
+        ttl: CacheTtl::Ttl5m,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(1),
+        cost_micros: Some(1),
+        request_ref: Some(id.to_owned()),
+        event_ref: Some(id.to_owned()),
+    };
+
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 1,
+                ts_ms: Some(1_000),
+                event_id: Some("sibling-append-first-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[
+                evidence("sibling-renewal-a", "renewal", 1_000, "prefix-a"),
+                evidence("sibling-follow-up-a", "follow_up", 1_100, "prefix-a"),
+            ],
+        )
+        .await?;
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 2,
+                ts_ms: Some(2_000),
+                event_id: Some("sibling-append-second-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[
+                evidence("sibling-renewal-b", "renewal", 1_050, "prefix-b"),
+                evidence("sibling-follow-up-b", "follow_up", 1_200, "prefix-b"),
+            ],
+        )
+        .await?;
+
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'sibling-%'
+         ORDER BY request_start_ms, evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await?;
+    assert_eq!(
+        ids,
+        vec![
+            "sibling-renewal-a",
+            "sibling-renewal-b",
+            "sibling-follow-up-a",
+        ]
+    );
+    sqlx::query("DELETE FROM cache_keepalive_evidence WHERE evidence_id LIKE 'sibling-%'")
+        .execute(storage.pool())
+        .await?;
+    Ok(())
+}
+
+async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_id = Uuid::from_u128(82);
+    let evidence = |id: &str, kind: &str, start: u64, prefix: &str| CacheKeepaliveEvidenceRow {
+        evidence_id: id.to_owned(),
+        cycle_id: (kind == "renewal").then_some(cycle_id),
+        evidence_kind: kind.to_owned(),
+        request_start_ms: start,
+        prefix_fingerprint: Some("fingerprint".to_owned()),
+        prefix_hash: Some(prefix.to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id,
+        model: "model".to_owned(),
+        ttl: CacheTtl::Ttl1h,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(1),
+        cost_micros: Some(1),
+        request_ref: Some(id.to_owned()),
+        event_ref: Some(id.to_owned()),
+    };
+
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 1,
+                ts_ms: Some(3_300_001),
+                event_id: Some("long-lived-anchor-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence(
+                "long-lived-renewal-a",
+                "renewal",
+                3_300_001,
+                "prefix-a",
+            )],
+        )
+        .await?;
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 2,
+                ts_ms: Some(3_400_000),
+                event_id: Some("long-lived-proof-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence(
+                "long-lived-proof",
+                "follow_up",
+                3_400_000,
+                "prefix-a",
+            )],
+        )
+        .await?;
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 3,
+                ts_ms: Some(18_000_000),
+                event_id: Some("long-lived-sibling-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence(
+                "long-lived-renewal-b",
+                "renewal",
+                18_000_000,
+                "prefix-b",
+            )],
+        )
+        .await?;
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 4,
+                ts_ms: Some(21_500_000),
+                event_id: Some("long-lived-duplicate-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence(
+                "long-lived-duplicate",
+                "follow_up",
+                21_500_000,
+                "prefix-b",
+            )],
+        )
+        .await?;
+
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'long-lived-%'
+         ORDER BY request_start_ms, evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await?;
+    assert_eq!(
+        ids,
+        vec![
+            "long-lived-renewal-a",
+            "long-lived-proof",
+            "long-lived-renewal-b",
+        ]
+    );
+    sqlx::query("DELETE FROM cache_keepalive_evidence WHERE evidence_id LIKE 'long-lived-%'")
+        .execute(storage.pool())
+        .await?;
+    Ok(())
+}
+
+async fn append_evidence_waits_for_pair_advisory_lock(storage: &PostgresStorage) -> Result<()> {
+    let upstream_id = Uuid::from_u128(7);
+    let lock_key = format!("principal:{upstream_id}");
+    let mut connection = storage.pool().acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *connection)
+        .await?;
+
+    let cycle_id = Uuid::from_u128(83);
+    let evidence = |id: &str, kind: &str, start: u64| CacheKeepaliveEvidenceRow {
+        evidence_id: id.to_owned(),
+        cycle_id: (kind == "renewal").then_some(cycle_id),
+        evidence_kind: kind.to_owned(),
+        request_start_ms: start,
+        prefix_fingerprint: Some("fingerprint".to_owned()),
+        prefix_hash: Some("prefix".to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id,
+        model: "model".to_owned(),
+        ttl: CacheTtl::Ttl5m,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(1),
+        cost_micros: Some(1),
+        request_ref: Some(id.to_owned()),
+        event_ref: Some(id.to_owned()),
+    };
+    let request_event = RequestEvent {
+        ts: 1,
+        ts_ms: Some(1_000),
+        event_id: Some("advisory-lock-event".to_owned()),
+        ..RequestEvent::default()
+    };
+    let evidence_rows = [
+        evidence("advisory-lock-renewal", "renewal", 1_000),
+        evidence("advisory-lock-follow-up", "follow_up", 1_100),
+    ];
+    let append = storage.append_request_event_with_evidence(&request_event, &evidence_rows);
+    tokio::pin!(append);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut append)
+            .await
+            .is_err(),
+        "append did not wait for the pair advisory lock"
+    );
+
+    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *connection)
+        .await?;
+    append.await?;
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'advisory-lock-%'",
+    )
+    .fetch_one(storage.pool())
+    .await?;
+    assert_eq!(count, 2);
+    sqlx::query("DELETE FROM cache_keepalive_evidence WHERE evidence_id LIKE 'advisory-lock-%'")
+        .execute(storage.pool())
+        .await?;
+    Ok(())
+}
+
+async fn purge_expired_prunes_unmatched_and_invalid_follow_ups_without_changing_count(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let key = "expired-evidence-session";
+    let mut request = replace_request(key, b"payload", 0);
+    request.cycle_id = Uuid::from_u128(8);
+    let session = storage.replace_from_real_request(&request).await?;
+    storage
+        .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
+        .await?;
+    assert!(
+        storage
+            .claim_cache_keepalive_turn(&session.session_key_hash, session.generation, 2)
+            .await?
+    );
+    let cycle_id = Uuid::from_u128(8);
+    let zero_cycle_id = Uuid::from_u128(9);
+    let null_cycle_id = Uuid::from_u128(10);
+    for (id, cycle, kind, start, prefix_hash, read_tokens) in [
+        (
+            "renewal",
+            Some(cycle_id),
+            "renewal",
+            1_000_i64,
+            Some("prefix"),
+            Some(1_i64),
+        ),
+        (
+            "earliest",
+            None,
+            "follow_up",
+            1_100,
+            Some("prefix"),
+            Some(1),
+        ),
+        ("later", None, "follow_up", 1_200, Some("prefix"), Some(1)),
+        ("invalid", None, "follow_up", 1_300, Some("prefix"), Some(0)),
+        (
+            "zero-renewal",
+            Some(zero_cycle_id),
+            "renewal",
+            2_000,
+            Some("prefix"),
+            Some(1),
+        ),
+        (
+            "zero-only",
+            None,
+            "follow_up",
+            2_100,
+            Some("prefix"),
+            Some(0),
+        ),
+        (
+            "null-renewal",
+            Some(null_cycle_id),
+            "renewal",
+            3_000,
+            Some("prefix"),
+            Some(1),
+        ),
+        ("null-only", None, "follow_up", 3_100, None, Some(1)),
+    ] {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence
+             (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+              prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+              upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+              request_ref, event_ref, created_at_ms)
+             VALUES ($1, $2, $3, $4, 'fingerprint', $5, 'policy', 'schema',
+                     'principal', $6, 'model', '5m', 'hit', $7, 1, $1, $1, $4)",
+        )
+        .bind(id)
+        .bind(cycle)
+        .bind(kind)
+        .bind(start)
+        .bind(prefix_hash)
+        .bind(Uuid::from_u128(7))
+        .bind(read_tokens)
+        .execute(storage.pool())
+        .await?;
+    }
+    assert_eq!(storage.purge_cache_keepalive_expired(400).await?, 1);
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT evidence_id FROM cache_keepalive_evidence ORDER BY evidence_id")
+            .fetch_all(storage.pool())
+            .await?;
+    assert_eq!(
+        ids,
+        vec!["earliest", "null-renewal", "renewal", "zero-renewal"]
+    );
+    Ok(())
+}
+async fn purge_expired_prunes_later_follow_up_across_sibling_renewals(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let cycle_id = Uuid::from_u128(81);
+    let mut request = replace_request("sibling-purge-session", b"payload", 0);
+    request.cycle_id = cycle_id;
+    let session = storage.replace_from_real_request(&request).await?;
+    storage
+        .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
+        .await?;
+    assert!(
+        storage
+            .claim_cache_keepalive_turn(&session.session_key_hash, session.generation, 2)
+            .await?
+    );
+
+    for (id, kind, start, prefix_hash) in [
+        ("sibling-purge-renewal-a", "renewal", 1_000_i64, "prefix-a"),
+        ("sibling-purge-renewal-b", "renewal", 1_050, "prefix-b"),
+        ("sibling-purge-earliest", "follow_up", 1_100, "prefix-a"),
+        ("sibling-purge-later", "follow_up", 1_200, "prefix-b"),
+    ] {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence
+             (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+              prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+              upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+              request_ref, event_ref, created_at_ms)
+             VALUES ($1, $2, $3, $4, 'fingerprint', $5, 'policy', 'schema',
+                     'principal', $6, 'model', '5m', 'hit', 1, 1, $1, $1, $4)",
+        )
+        .bind(id)
+        .bind((kind == "renewal").then_some(cycle_id))
+        .bind(kind)
+        .bind(start)
+        .bind(prefix_hash)
+        .bind(Uuid::from_u128(7))
+        .execute(storage.pool())
+        .await?;
+    }
+
+    assert_eq!(storage.purge_cache_keepalive_expired(400).await?, 1);
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'sibling-purge-%'
+         ORDER BY evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await?;
+    assert_eq!(
+        ids,
+        vec![
+            "sibling-purge-earliest",
+            "sibling-purge-renewal-a",
+            "sibling-purge-renewal-b",
+        ]
+    );
+    Ok(())
+}
+
+async fn purge_expired_preserves_follow_up_earliest_for_one_matching_cycle(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_one = Uuid::from_u128(83);
+    let cycle_two = Uuid::from_u128(84);
+    let mut request = replace_request("multi-cycle-purge-session", b"payload", 0);
+    request.cycle_id = cycle_one;
+    let session = storage.replace_from_real_request(&request).await?;
+    storage
+        .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
+        .await?;
+    assert!(
+        storage
+            .claim_cache_keepalive_turn(&session.session_key_hash, session.generation, 2)
+            .await?
+    );
+
+    for (id, cycle, kind, start) in [
+        (
+            "multi-cycle-renewal-earlier",
+            Some(cycle_two),
+            "renewal",
+            1_000_i64,
+        ),
+        ("multi-cycle-earlier-proof", None, "follow_up", 1_500),
+        (
+            "multi-cycle-renewal-later",
+            Some(cycle_one),
+            "renewal",
+            2_000,
+        ),
+        ("multi-cycle-later-proof", None, "follow_up", 2_500),
+    ] {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence
+             (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+              prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+              upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+              request_ref, event_ref, created_at_ms)
+             VALUES ($1, $2, $3, $4, 'fingerprint', 'shared-prefix', 'policy', 'schema',
+                     'principal', $5, 'model', '5m', 'hit', 1, 1, $1, $1, $4)",
+        )
+        .bind(id)
+        .bind(cycle)
+        .bind(kind)
+        .bind(start)
+        .bind(upstream_id)
+        .execute(storage.pool())
+        .await?;
+    }
+
+    assert_eq!(storage.purge_cache_keepalive_expired(400).await?, 1);
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'multi-cycle-%'
+         ORDER BY request_start_ms, evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await?;
+    assert_eq!(
+        ids,
+        vec![
+            "multi-cycle-renewal-earlier",
+            "multi-cycle-earlier-proof",
+            "multi-cycle-renewal-later",
+            "multi-cycle-later-proof",
+        ]
+    );
+    Ok(())
+}
+
 async fn run_conformance(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
     storage.initialize().await?;
-
     replace_from_real_request_fenced_persists_cycle_id_and_preserves_fences(&storage).await?;
     replace_from_real_request_bumps_generation_and_resets_counters(&storage).await?;
     replace_roundtrips_optional_accounting_key_id(&storage).await?;
+    append_evidence_deduplicates_follow_ups_across_sibling_renewals(&storage).await?;
+    append_evidence_rejects_duplicate_follow_up_with_long_lived_proof(&storage).await?;
+    append_evidence_waits_for_pair_advisory_lock(&storage).await?;
+    append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles(&storage).await?;
+    purge_expired_prunes_unmatched_and_invalid_follow_ups_without_changing_count(&storage).await?;
+    purge_expired_prunes_later_follow_up_across_sibling_renewals(&storage).await?;
+    purge_expired_preserves_follow_up_earliest_for_one_matching_cycle(&storage).await?;
     update_payload_only_mutates_matching_pending_generation(&storage).await?;
     cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_generation(&storage).await?;
     conditional_enqueue_terminal_and_purge_are_generation_safe(&storage).await?;

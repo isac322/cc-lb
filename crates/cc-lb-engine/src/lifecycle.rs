@@ -133,7 +133,7 @@ pub type Body = AxumBody;
 /// Version 6 excludes the official Anthropic billing-header system block from
 /// effective cache identity while preserving literal custom-upstream identity.
 /// The version filter cold-starts older persisted observations.
-pub const HASH_SCHEMA_VERSION: u8 = 6;
+pub use cc_lb_domain::HASH_SCHEMA_VERSION;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
