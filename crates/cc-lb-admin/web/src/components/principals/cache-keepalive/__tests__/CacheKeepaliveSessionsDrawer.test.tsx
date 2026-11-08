@@ -341,6 +341,11 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(screen.getByText('decision-2d8077e9a1c4')).toBeDefined();
 
     await user.click(within(statusGroup).getByTestId('status-chip-renewed'));
+    expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenCalledWith(
+      'p-123',
+      { horizon: '24h', status: 'renewed', error: undefined },
+      true,
+    );
     expect(screen.getByText('a1f39c2b7e04')).toBeDefined();
     expect(screen.queryByText('f4b71a0c9d52')).toBeNull();
     expect(screen.queryByText('decision-2d8077e9a1c4')).toBeNull();
@@ -371,6 +376,63 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         .getAttribute('aria-pressed'),
     ).toBe('true');
     expect(screen.getByTestId('status-filter-reset')).toBeDefined();
+  });
+
+  it('drains older pages so matching sessions and chip counts across pages are not omitted', () => {
+    const fetchNextPage = vi.fn();
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+      data: {
+        pages: [
+          {
+            summary: summaryBase,
+            rows: [
+              {
+                ...cacheKeepaliveApiRows[5]!,
+                id: 'not-tracked-page-1',
+                state: 'not_tracked',
+              },
+            ],
+            next_cursor: 'cursor-page-2',
+          },
+          {
+            summary: summaryBase,
+            rows: [
+              {
+                ...cacheKeepaliveApiRows[0]!,
+                id: 'older-renewed-page-2',
+                state: 'renewed',
+                error: null,
+              },
+            ],
+            next_cursor: 'cursor-page-3',
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      isFetchNextPageError: false,
+      hasNextPage: true,
+      isFetchingNextPage: false,
+      fetchNextPage,
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    expect(screen.getByText('older-renewed-page-2')).toBeDefined();
+    expect(screen.queryByText('not-tracked-page-1')).toBeNull();
+    expect(screen.getByTestId('status-chip-renewed').textContent).toContain(
+      '1',
+    );
+    expect(screen.getByTestId('toggle-not-tracked').textContent).toContain(
+      '+ Show not tracked (1)',
+    );
+    expect(fetchNextPage).toHaveBeenCalled();
   });
 
   it('expands and collapses selected row details inline at full width', () => {

@@ -509,14 +509,29 @@ export function CacheKeepaliveSessionsDrawer({
   }, [principal.id]);
 
   const enabled = principal.cache_keepalive?.enabled ?? false;
+  const selectedQueryStatus =
+    enabled && !showNotTracked && selectedStatuses.size === 1
+      ? [...selectedStatuses][0]
+      : undefined;
+
   const query = useCacheKeepaliveSessions(
+    principal.id,
+    {
+      horizon,
+      status: selectedQueryStatus === 'error' ? undefined : selectedQueryStatus,
+      error: selectedQueryStatus === 'error' ? true : undefined,
+    },
+    open,
+  );
+
+  const unfilteredQuery = useCacheKeepaliveSessions(
     principal.id,
     {
       horizon,
       status: undefined,
       error: undefined,
     },
-    open,
+    open && enabled,
   );
 
   const allRows = useMemo(() => {
@@ -527,6 +542,16 @@ export function CacheKeepaliveSessionsDrawer({
     );
     return mergeLiveSessions(rawRows, maxRows);
   }, [query.data]);
+
+  const unfilteredRows = useMemo(() => {
+    const sourcePages = unfilteredQuery.data?.pages ?? query.data?.pages;
+    const rawRows = sourcePages?.flatMap((p) => p.rows ?? []) ?? [];
+    const maxRows = Math.max(
+      100,
+      sourcePages?.length ? sourcePages.length * 100 : 100,
+    );
+    return mergeLiveSessions(rawRows, maxRows);
+  }, [query.data, unfilteredQuery.data]);
 
   const visibleRows = useMemo(
     () =>
@@ -551,21 +576,26 @@ export function CacheKeepaliveSessionsDrawer({
   }, [visibleRows]);
 
   useFlipReorder(listElement, visibleRows);
+
+  const clientSideFiltered =
+    enabled &&
+    selectedQueryStatus === undefined &&
+    (!showNotTracked || selectedStatuses.size < TRACKED_STATUS_OPTIONS.length);
+
   useEffect(() => {
     if (
       open &&
-      enabled &&
+      clientSideFiltered &&
       !query.isLoading &&
       !query.isError &&
       !query.isFetchNextPageError &&
       !query.isFetchingNextPage &&
-      visibleRows.length === 0 &&
       query.hasNextPage
     ) {
       query.fetchNextPage();
     }
   }, [
-    enabled,
+    clientSideFiltered,
     open,
     query.fetchNextPage,
     query.hasNextPage,
@@ -573,7 +603,29 @@ export function CacheKeepaliveSessionsDrawer({
     query.isFetchNextPageError,
     query.isFetchingNextPage,
     query.isLoading,
-    visibleRows.length,
+  ]);
+
+  useEffect(() => {
+    if (
+      open &&
+      enabled &&
+      !unfilteredQuery.isLoading &&
+      !unfilteredQuery.isError &&
+      !unfilteredQuery.isFetchNextPageError &&
+      !unfilteredQuery.isFetchingNextPage &&
+      unfilteredQuery.hasNextPage
+    ) {
+      unfilteredQuery.fetchNextPage();
+    }
+  }, [
+    enabled,
+    open,
+    unfilteredQuery.fetchNextPage,
+    unfilteredQuery.hasNextPage,
+    unfilteredQuery.isError,
+    unfilteredQuery.isFetchNextPageError,
+    unfilteredQuery.isFetchingNextPage,
+    unfilteredQuery.isLoading,
   ]);
 
   const liveCounts = useMemo(() => {
@@ -585,13 +637,23 @@ export function CacheKeepaliveSessionsDrawer({
       error: 0,
       not_tracked: 0,
     };
-    for (const row of allRows) {
+    for (const row of unfilteredRows) {
       const key = row.error != null ? 'error' : row.state;
       computed[key] = (computed[key] ?? 0) + 1;
     }
+    if (selectedQueryStatus !== undefined) {
+      computed[selectedQueryStatus] = Math.max(
+        computed[selectedQueryStatus],
+        allRows.filter(
+          (row) =>
+            (row.error != null ? 'error' : row.state) === selectedQueryStatus,
+        ).length,
+      );
+    }
     return computed;
-  }, [allRows]);
-  const summary = query.data?.pages[0]?.summary;
+  }, [allRows, selectedQueryStatus, unfilteredRows]);
+  const summary =
+    query.data?.pages[0]?.summary ?? unfilteredQuery.data?.pages[0]?.summary;
   const notTrackedCount = liveCounts.not_tracked;
   const handleStatusClick = (key: TrackedStatus) => {
     if (selectedStatuses.size === TRACKED_STATUS_OPTIONS.length) {
@@ -664,7 +726,7 @@ export function CacheKeepaliveSessionsDrawer({
                 const selectedStatus = selectedStatuses.has(option.value);
                 const dotClassName =
                   option.value === 'renewed'
-                    ? 'bg-success-text'
+                    ? 'bg-traffic-success-text'
                     : option.value === 'scheduled'
                       ? 'bg-accent'
                       : option.value === 'error'
