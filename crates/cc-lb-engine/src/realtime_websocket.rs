@@ -341,7 +341,9 @@ mod tests {
                 br#"{"type":"response.done","response":{"usage":{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cache_write_tokens":30,"cache_write_tokens_details":{"ttl_30m_tokens":20,"ttl_12h_tokens":10}}}}}"#,
             ),
         );
-        let counts = usage.counts.expect("provider cache writes should be present");
+        let counts = usage
+            .counts
+            .expect("provider cache writes should be present");
         assert_eq!(counts.cache_write_input_tokens, Some(30));
         assert_eq!(counts.cache_write_input_tokens_30m, Some(20));
         assert_eq!(counts.cache_write_input_tokens_12h, Some(10));
