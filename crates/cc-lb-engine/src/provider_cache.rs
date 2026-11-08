@@ -14,6 +14,11 @@ use crate::provider_capability::ProviderCapability;
 use cc_lb_request_log::{RequestCacheEvidence, RequestNativeCacheObservation};
 
 const MAX_EXPLICIT_WRITES: usize = 4;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenaiCacheMode {
+    Explicit,
+    Implicit,
+}
 const MAX_LOOKBACK_BOUNDARIES: usize = 20;
 const MAX_BOUNDARY_BYTES: usize = 512;
 const MAX_SCOPE_BYTES: usize = 256;
@@ -50,19 +55,16 @@ fn analyze_openai(
     }
     let scope = openai_scope(headers);
     let options = body.get("prompt_cache_options");
-    let explicit_mode = options
+    let requested_mode = match options
         .and_then(|value| value.get("mode"))
         .and_then(Value::as_str)
-        .map(|mode| mode.eq_ignore_ascii_case("explicit"));
-    let implicit_mode = options
-        .and_then(|value| value.get("mode"))
-        .and_then(Value::as_str)
-        .map(|mode| mode.eq_ignore_ascii_case("implicit"));
+    {
+        None => None,
+        Some(mode) if mode.eq_ignore_ascii_case("explicit") => Some(OpenaiCacheMode::Explicit),
+        Some(mode) if mode.eq_ignore_ascii_case("implicit") => Some(OpenaiCacheMode::Implicit),
+        Some(_) => return None,
+    };
     let modern = supports_modern_openai_cache(model);
-    if explicit_mode == Some(false) || implicit_mode == Some(false) {
-        return None;
-    }
-
     if !modern && !supports_older_openai_cache(model) {
         return None;
     }
@@ -76,14 +78,14 @@ fn analyze_openai(
         .and_then(Value::as_str)
         .filter(|key| !key.is_empty())
         .map(hash_identity);
-    let mode = if explicit_mode == Some(true) || !breakpoints.is_empty() {
+    let mode = if requested_mode == Some(OpenaiCacheMode::Explicit) || !breakpoints.is_empty() {
         "explicit"
     } else {
         "implicit"
     };
     let boundary = if !breakpoints.is_empty() {
         Some(boundary_label("explicit", breakpoints.len()))
-    } else if modern || implicit_mode == Some(true) {
+    } else if modern || requested_mode == Some(OpenaiCacheMode::Implicit) {
         implicit_boundary(body)
     } else {
         Some("opaque_provider_boundary".to_owned())
@@ -376,6 +378,39 @@ mod tests {
         assert_eq!(
             observed.boundary.as_deref(),
             Some("explicit_writes=4;lookup=first_two_latest_50")
+        );
+    }
+    #[test]
+    fn modern_openai_implicit_mode_analyzes_successfully() {
+        let body = json!({
+            "prompt_cache_options": {"mode": "implicit"},
+            "input": [{"role":"user","content":"hello"}]
+        });
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &body,
+            "gpt-5.6",
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(observed.mode, "implicit");
+        assert_eq!(
+            observed.boundary.as_deref(),
+            Some("initial_developer=0;latest_message=0;earlier_messages=1")
+        );
+    }
+
+    #[test]
+    fn unsupported_openai_mode_is_unknown() {
+        let body = json!({"prompt_cache_options":{"mode":"unsupported"}});
+        assert!(
+            analyze(
+                ProviderCapability::OpenaiResponses,
+                &body,
+                "gpt-5.6",
+                &HeaderMap::new(),
+            )
+            .is_none()
         );
     }
 
