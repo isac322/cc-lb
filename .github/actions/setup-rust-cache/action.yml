@@ -42,7 +42,7 @@ runs:
 
     - name: Resolve sccache cache key metadata
       id: sccache-key
-      if: ${{ steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success' }}
+      if: ${{ inputs.stable-build-metadata == 'true' && (steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success') }}
       shell: bash
       run: |
         rustc_vv="$(rustc -vV 2>/dev/null | tr '\n' ';' | sha256sum | cut -d' ' -f1)"
@@ -51,15 +51,14 @@ runs:
         echo "sccache_ver=${sccache_ver}" >> "$GITHUB_OUTPUT"
 
     - name: Restore and save sccache directory
-      if: ${{ steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success' }}
+      if: ${{ inputs.stable-build-metadata == 'true' && (steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success') }}
       uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}/sccache
-        key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ strategy.job-index }}-${{ steps.sccache-key.outputs.rustc_hash }}-${{ steps.sccache-key.outputs.sccache_ver }}-${{ github.sha }}
+        key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ strategy.job-index }}-${{ steps.sccache-key.outputs.rustc_hash }}-${{ steps.sccache-key.outputs.sccache_ver }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ strategy.job-index }}-${{ steps.sccache-key.outputs.rustc_hash }}-${{ steps.sccache-key.outputs.sccache_ver }}-
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ strategy.job-index }}-${{ steps.sccache-key.outputs.rustc_hash }}-
-          sccache-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Validate sccache compiler wrapper
       id: sccache-health
