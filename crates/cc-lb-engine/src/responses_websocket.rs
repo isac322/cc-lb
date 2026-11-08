@@ -17,7 +17,7 @@ use tracing::Span;
 use url::Url;
 use uuid::Uuid;
 
-use crate::authn_rail::{Authenticated, reject_unauthenticated};
+use crate::authn_rail::Authenticated;
 use crate::completion_observer::{StreamCompletionLog, StreamLatency};
 use crate::downstream_stream_drop_guard::record_stream_termination_metric;
 use crate::lifecycle::Lifecycle;
