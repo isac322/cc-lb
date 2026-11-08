@@ -14,6 +14,7 @@ path = "tests/all.rs"
 [lib]
 name = "cc_lb_load_tests"
 path = "src/lib.rs"
+test = false
 
 [[bin]]
 name = "cc-lb-loadgen"

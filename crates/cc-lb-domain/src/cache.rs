@@ -1,4 +1,10 @@
 use serde::{Deserialize, Serialize};
+/// Prefix-hash schema persisted with prompt-cache observations.
+///
+/// Version 6 excludes the official Anthropic billing-header system block from
+/// effective cache identity while preserving literal custom-upstream identity.
+/// The version filter cold-starts older persisted observations.
+pub const HASH_SCHEMA_VERSION: u8 = 6;
 
 /// Prompt cache TTL class: immutable after entry creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
