@@ -1227,3 +1227,138 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     assert_eq!(follow_up_turns[1]["pending"], false);
     assert_eq!(follow_up_turns[1]["followed_up"], true);
 }
+
+#[test]
+fn summary_respects_horizon_and_ignores_follow_up_only_evidence() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::summary_respects_horizon_and_ignores_follow_up_only_evidence";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build isolated regression runtime")
+            .block_on(summary_respects_horizon_and_ignores_follow_up_only_evidence_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+
+    sqlx::query(
+        "INSERT INTO cache_keepalive_evidence
+         (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+          prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+          upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+          request_ref, event_ref, created_at_ms)
+         VALUES ('follow-up-only', NULL, 'follow_up', ?, 'fp', 'prefix', 'policy', 'schema',
+                 ?, ?, ?, '5m', 'hit', 20000, 6000, 'req-1', 'ev-1', ?)",
+    )
+    .bind(i64::try_from(NOW_UNIX_SECS * 1_000).unwrap())
+    .bind(&principal_id)
+    .bind(UPSTREAM_ID.to_string())
+    .bind(MODEL)
+    .bind(i64::try_from(NOW_UNIX_SECS * 1_000).unwrap())
+    .execute(storage.pool())
+    .await
+    .expect("insert follow-up-only evidence");
+
+    let (status, empty_summary) = get_json(
+        &state,
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?limit=0"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        empty_summary["summary"]["retained_from_ms"].is_null(),
+        "follow_up-only evidence must not populate retained_from_ms: {empty_summary:?}"
+    );
+
+    let old_ts = NOW_UNIX_SECS - 3 * 24 * 60 * 60;
+    let mut old_decision =
+        cache_keepalive_decision(&principal_id, "legacy-old-turn", old_ts * 1_000);
+    old_decision.session_key_hash = Some("legacy-session".to_owned());
+    old_decision.upstream_id = UPSTREAM_ID;
+    storage
+        .append_request_event_with_projections(
+            &RequestEvent {
+                ts: old_ts,
+                ts_ms: Some(old_ts * 1_000),
+                request_id: "req-legacy-old".to_owned(),
+                source_kind: Some("renewal".to_owned()),
+                source_ref_id: Some("legacy-old-turn".to_owned()),
+                event_id: Some("ev-legacy-old".to_owned()),
+                principal_id: Some(principal_id.clone()),
+                upstream_id: Some(UPSTREAM_ID),
+                model: Some(MODEL.to_owned()),
+                status: 200,
+                duration_ms: 1,
+                ..RequestEvent::default()
+            },
+            &RequestEventProjections {
+                turn: Some(CacheKeepaliveTurnRow {
+                    source_ref_id: "legacy-old-turn".to_owned(),
+                    session_key_hash: "legacy-session".to_owned(),
+                    principal_id: principal_id.clone(),
+                    accounting_key_id: None,
+                    upstream_id: UPSTREAM_ID,
+                    cycle_id: None,
+                    model: MODEL.to_owned(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_creation_input_tokens_5m: 0,
+                    cache_creation_input_tokens_1h: 0,
+                    cache_read_input_tokens: 20_000,
+                    cost_micros: 15_000,
+                    hit_miss: "hit".to_owned(),
+                    ts: old_ts,
+                }),
+                decision: old_decision,
+                evidence: Vec::new(),
+            },
+        )
+        .await
+        .expect("seed legacy old turn");
+
+    seed_session(&storage, &principal_id, "recent-observed", CYCLE_ONE, true).await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "recent-observed",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "recent-observed-turn",
+            ts: NOW_UNIX_SECS,
+            cache_read_input_tokens: 20_000,
+            cost_micros: 6_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+
+    let (status_24h, body_24h) = get_json(
+        &state,
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?horizon=24h&limit=10"),
+    )
+    .await;
+    assert_eq!(status_24h, StatusCode::OK);
+    assert_eq!(body_24h["summary"]["renewals_fired"], 1);
+    assert_eq!(body_24h["summary"]["evidence_status"], "observed");
+    assert_json_dollars(&body_24h["summary"]["total_spent"], 6_000);
+    assert_json_dollars(&body_24h["summary"]["total_avoided"], 75_000);
+    assert_json_dollars(&body_24h["summary"]["cost_saved"], 69_000);
+
+    let (status_7d, body_7d) = get_json(
+        &state,
+        &format!("/admin/v1/principals/{principal_id}/cache-keepalive?horizon=7d&limit=10"),
+    )
+    .await;
+    assert_eq!(status_7d, StatusCode::OK);
+    assert_eq!(body_7d["summary"]["renewals_fired"], 2);
+    assert_eq!(body_7d["summary"]["evidence_status"], "unknown");
+    assert_json_dollars(&body_7d["summary"]["total_spent"], 21_000);
+    assert!(body_7d["summary"]["cost_saved"].is_null());
+}
