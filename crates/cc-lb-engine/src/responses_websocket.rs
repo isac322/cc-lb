@@ -233,7 +233,7 @@ impl ResponsesStreamMetrics {
         self.event_count = self.event_count.saturating_add(1);
         self.total_bytes = self.total_bytes.saturating_add(frame.len() as u64);
         if self.provider_session_id.is_none() {
-            let bounded = |value| {
+            let bounded = |value: Option<sonic_rs::LazyValue<'_>>| {
                 let value = value.and_then(|value| value.as_str().map(str::to_owned))?;
                 (!value.is_empty() && value.len() <= 512).then_some(value)
             };
