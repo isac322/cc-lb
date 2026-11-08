@@ -1,11 +1,12 @@
 #[path = "realtime_websocket_lifecycle.rs"]
 mod realtime_websocket_lifecycle;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -88,7 +89,9 @@ use crate::provider_cache;
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
-use crate::request_classification::classify_client_request_kind_with_class;
+use crate::request_classification::{
+    classify_client_request_kind_with_class, is_thread_sticky_subagent_seed,
+};
 use crate::request_context::{ProviderScope, RequestContext};
 use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
 use crate::responses_websocket::{
@@ -2889,6 +2892,102 @@ impl UpstreamDispatch for HyperDispatcher {
     }
 }
 
+const THREAD_STICKY_SUBAGENT_SHARD_COUNT: usize = 16;
+const MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD: usize = 512;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ThreadStickySubagentKey {
+    principal_id: String,
+    observed_session_id: String,
+}
+
+#[derive(Clone)]
+struct ThreadStickySubagentLatch {
+    next_sequence: Arc<AtomicU64>,
+    shards: Arc<[Mutex<HashMap<ThreadStickySubagentKey, u64>>; THREAD_STICKY_SUBAGENT_SHARD_COUNT]>,
+}
+
+impl ThreadStickySubagentLatch {
+    fn new() -> Self {
+        Self {
+            next_sequence: Arc::new(AtomicU64::new(0)),
+            shards: Arc::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
+        }
+    }
+
+    fn shard_index(key: &ThreadStickySubagentKey) -> usize {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % THREAD_STICKY_SUBAGENT_SHARD_COUNT
+    }
+
+    fn observe(&self, key: ThreadStickySubagentKey, seed: bool) -> bool {
+        let shard = &self.shards[Self::shard_index(&key)];
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if seed {
+            let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+            if !shard.contains_key(&key)
+                && shard.len() >= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD
+                && let Some(oldest_key) = shard
+                    .iter()
+                    .min_by_key(|(_, sequence)| **sequence)
+                    .map(|(key, _)| key.clone())
+            {
+                shard.remove(&oldest_key);
+            }
+            shard.insert(key, sequence);
+            true
+        } else {
+            shard.contains_key(&key)
+        }
+    }
+}
+
+impl Default for ThreadStickySubagentLatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn apply_thread_sticky_subagent_latch(
+    latch: &ThreadStickySubagentLatch,
+    principal_id: &str,
+    value: Option<&Value>,
+    metadata: &mut RequestCacheMetadata,
+) {
+    if metadata.claude_agent_id.is_some() || metadata.explicit_request_class.is_some() {
+        return;
+    }
+    let Some(observed_session_id) = metadata
+        .observed_session_id
+        .as_deref()
+        .or(metadata.thread_id.as_deref())
+    else {
+        return;
+    };
+    let key = ThreadStickySubagentKey {
+        principal_id: principal_id.to_owned(),
+        observed_session_id: observed_session_id.to_owned(),
+    };
+    if metadata.request_kind.as_deref() == Some("subagent")
+        && value.is_some_and(|value| {
+            is_thread_sticky_subagent_seed(
+                value,
+                Some(observed_session_id),
+                metadata.parent_session_id.as_deref(),
+            )
+        })
+    {
+        latch.observe(key, true);
+    } else if matches!(metadata.request_kind.as_deref(), Some("main" | "unknown"))
+        && latch.observe(key, false)
+    {
+        metadata.request_kind = Some("subagent".to_owned());
+    }
+}
+
 pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
     dynamic_view: Arc<DynamicViewHolder>,
@@ -2904,6 +3003,7 @@ pub struct Lifecycle {
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     cache_keepalive_enqueuer: Option<Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>>,
     cache_keepalive: crate::cache_keepalive::LifecycleKeepalive,
+    thread_sticky_subagent_latch: ThreadStickySubagentLatch,
     prompt_cache_analysis_executor: PromptCacheAnalysisExecutor,
     completion_observer: Arc<CompletionObserver>,
     clock: ClockHandle,
@@ -2935,6 +3035,7 @@ impl Lifecycle {
                 None,
                 Arc::clone(&dynamic_view),
             ),
+            thread_sticky_subagent_latch: ThreadStickySubagentLatch::default(),
             cache_keepalive_enqueuer: None,
             prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
             completion_observer: Arc::new(CompletionObserver::new()),
@@ -4352,6 +4453,12 @@ impl Lifecycle {
             body_view.value(),
             prompt_cache_analysis,
             Some(request_capability),
+        );
+        apply_thread_sticky_subagent_latch(
+            &self.thread_sticky_subagent_latch,
+            &principal.id,
+            body_view.value(),
+            &mut cache_metadata,
         );
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
@@ -9900,6 +10007,7 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) thread_id: Option<String>,
     pub(crate) observed_session_id: Option<String>,
     pub(crate) request_kind: Option<String>,
+    pub(crate) explicit_request_class: Option<String>,
     pub(crate) explicit_auxiliary: bool,
     pub(crate) claude_agent_id: Option<String>,
     pub(crate) claude_parent_agent_id: Option<String>,
@@ -10362,6 +10470,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     let thread_id = identity.thread_id.clone();
     let observed_session_id = identity.observed_session_id.clone();
     let request_kind = identity.request_kind.clone();
+    let explicit_request_class = identity.explicit_request_class.clone();
     let explicit_auxiliary = identity.explicit_auxiliary;
     let claude_agent_id = identity.claude_agent_id.clone();
     let claude_parent_agent_id = identity.claude_parent_agent_id.clone();
@@ -10374,6 +10483,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             thread_id,
             observed_session_id,
             request_kind,
+            explicit_request_class,
             explicit_auxiliary,
             claude_agent_id,
             claude_parent_agent_id,
@@ -10499,6 +10609,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         thread_id,
         observed_session_id,
         request_kind,
+        explicit_request_class,
         explicit_auxiliary,
         claude_agent_id,
         claude_parent_agent_id,
@@ -10542,6 +10653,7 @@ struct RequestIdentityMetadata {
     thread_id: Option<String>,
     observed_session_id: Option<String>,
     request_kind: Option<String>,
+    explicit_request_class: Option<String>,
     explicit_auxiliary: bool,
     claude_agent_id: Option<String>,
     claude_parent_agent_id: Option<String>,
@@ -10703,6 +10815,7 @@ fn request_identity_metadata(
         })
         .filter(|parent| observed_session_id.as_deref() != Some(parent.as_str()));
     let claude_request_class = header_identity(headers, "x-claude-code-request-class");
+    let explicit_request_class = claude_request_class.clone();
     let explicit_auxiliary = claude_request_class
         .as_deref()
         .is_some_and(|class| class.trim().eq_ignore_ascii_case("auxiliary"));
@@ -10719,6 +10832,7 @@ fn request_identity_metadata(
         thread_id: observed_session_id.clone(),
         observed_session_id,
         request_kind,
+        explicit_request_class,
         explicit_auxiliary,
         claude_agent_id,
         claude_parent_agent_id,
@@ -18659,5 +18773,214 @@ mod tests {
         assert!(sse_bytes_may_carry_anthropic_provider_state(
             &buffer[probe_start..]
         ));
+    }
+    fn sticky_metadata(
+        session_id: &str,
+        request_kind: &str,
+        claude_agent_id: Option<&str>,
+    ) -> RequestCacheMetadata {
+        RequestCacheMetadata {
+            thread_id: Some(session_id.to_owned()),
+            observed_session_id: Some(session_id.to_owned()),
+            request_kind: Some(request_kind.to_owned()),
+            claude_agent_id: claude_agent_id.map(ToOwned::to_owned),
+            ..RequestCacheMetadata::default()
+        }
+    }
+
+    #[test]
+    fn thread_sticky_subagent_latch_seeds_omp_and_senpi_and_rewrites_main() {
+        let latch = ThreadStickySubagentLatch::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-session-affinity"),
+            HeaderValue::from_static("sticky-thread"),
+        );
+        let omp = json!({
+            "system": "You are omp's trusted coding assistant.",
+            "messages": [{"role": "user", "content": "Complete assignment thoroughly:\n\n# Target"}]
+        });
+        let mut omp_metadata =
+            request_cache_metadata_from_value_with_analysis_for_capability(
+                &headers,
+                Some(&omp),
+                None,
+                None,
+            );
+        assert_eq!(omp_metadata.request_kind.as_deref(), Some("subagent"));
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&omp),
+            &mut omp_metadata,
+        );
+
+        let senpi = json!({
+            "system": "You are senpi, a coding agent.",
+            "messages": [{"role": "user", "content": "Task: Review the auth change"}]
+        });
+        let mut senpi_metadata =
+            request_cache_metadata_from_value_with_analysis_for_capability(
+                &headers,
+                Some(&senpi),
+                None,
+                None,
+            );
+        assert_eq!(senpi_metadata.request_kind.as_deref(), Some("subagent"));
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-b",
+            Some(&senpi),
+            &mut senpi_metadata,
+        );
+
+        let ordinary = json!({
+            "system": "You are omp's trusted coding assistant.",
+            "messages": [{"role": "user", "content": "continue"}]
+        });
+        let mut ordinary_metadata =
+            request_cache_metadata_from_value_with_analysis_for_capability(
+                &headers,
+                Some(&ordinary),
+                None,
+                None,
+            );
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&ordinary),
+            &mut ordinary_metadata,
+        );
+        assert_eq!(ordinary_metadata.request_kind.as_deref(), Some("subagent"));
+
+        let mut isolated_metadata =
+            request_cache_metadata_from_value_with_analysis_for_capability(
+                &headers,
+                Some(&ordinary),
+                None,
+                None,
+            );
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-c",
+            Some(&ordinary),
+            &mut isolated_metadata,
+        );
+        assert_eq!(isolated_metadata.request_kind.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn thread_sticky_subagent_latch_preserves_one_shot_and_exclusion_results() {
+        let latch = ThreadStickySubagentLatch::default();
+        let seed = json!({
+            "messages": [{"role": "user", "content": "Complete assignment thoroughly:\n\n# Target"}]
+        });
+        let mut seed_metadata = sticky_metadata("sticky-thread", "subagent", None);
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&seed),
+            &mut seed_metadata,
+        );
+        for request_kind in [
+            "compaction",
+            "recap",
+            "session_title",
+            "auto_thinking",
+            "side",
+            "advisor",
+            "notification",
+            "look_at",
+        ] {
+            let mut metadata = sticky_metadata("sticky-thread", request_kind, None);
+            apply_thread_sticky_subagent_latch(&latch, "principal-a", None, &mut metadata);
+            assert_eq!(metadata.request_kind.as_deref(), Some(request_kind));
+        }
+        let mut explicit_main = sticky_metadata("sticky-thread", "main", None);
+        explicit_main.explicit_request_class = Some("main".to_owned());
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            None,
+            &mut explicit_main,
+        );
+        assert_eq!(explicit_main.request_kind.as_deref(), Some("main"));
+
+
+        let hermes = json!({
+            "system": "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
+            "messages": [{"role": "user", "content": "Review the conversation above and consider saving to memory if appropriate."}]
+        });
+        let mut hermes_metadata = sticky_metadata("hermes-thread", "subagent", None);
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&hermes),
+            &mut hermes_metadata,
+        );
+        let mut hermes_ordinary = sticky_metadata("hermes-thread", "main", None);
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&hermes),
+            &mut hermes_ordinary,
+        );
+        assert_eq!(hermes_ordinary.request_kind.as_deref(), Some("main"));
+
+        let mut claude_seed = sticky_metadata("claude-thread", "subagent", Some("agent-1"));
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&seed),
+            &mut claude_seed,
+        );
+        let mut claude_ordinary = sticky_metadata("claude-thread", "main", None);
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&seed),
+            &mut claude_ordinary,
+        );
+        assert_eq!(claude_ordinary.request_kind.as_deref(), Some("main"));
+
+        let mut no_thread = RequestCacheMetadata {
+            request_kind: Some("subagent".to_owned()),
+            ..RequestCacheMetadata::default()
+        };
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", Some(&seed), &mut no_thread);
+        assert!(!latch.observe(
+            ThreadStickySubagentKey {
+                principal_id: "principal-a".to_owned(),
+                observed_session_id: "no-thread".to_owned(),
+            },
+            false,
+        ));
+    }
+
+    #[test]
+    fn thread_sticky_subagent_latch_evicts_oldest_entry_per_shard() {
+        let latch = ThreadStickySubagentLatch::default();
+        let first = ThreadStickySubagentKey {
+            principal_id: "principal".to_owned(),
+            observed_session_id: "thread-0".to_owned(),
+        };
+        let shard = ThreadStickySubagentLatch::shard_index(&first);
+        let mut keys = vec![first];
+        let mut index = 1;
+        while keys.len() <= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD {
+            let key = ThreadStickySubagentKey {
+                principal_id: "principal".to_owned(),
+                observed_session_id: format!("thread-{index}"),
+            };
+            index += 1;
+            if ThreadStickySubagentLatch::shard_index(&key) == shard {
+                keys.push(key);
+            }
+        }
+        for key in &keys {
+            assert!(latch.observe(key.clone(), true));
+        }
+        assert!(!latch.observe(keys[0].clone(), false));
+        assert!(latch.observe(keys[1].clone(), false));
     }
 }

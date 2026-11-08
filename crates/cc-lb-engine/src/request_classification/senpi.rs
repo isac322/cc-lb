@@ -28,6 +28,15 @@ pub(crate) fn classify_main(view: &RequestView<'_>) -> Option<ClientRequestKind>
     is_main(view).then_some(ClientRequestKind::Main)
 }
 
+pub(crate) fn is_thread_sticky_subagent_marker(view: &RequestView<'_>) -> bool {
+    view.any_system_starts_with("You are running as an omo senpi-task child ")
+        || view.any_system_contains("\nYou are running as an omo senpi-task child ")
+        || view.first_user_starts_with(
+            "Extract durable facts from this payload and record each accepted fact with record_fact.",
+        )
+        || (is_main(view) && view.first_user_starts_with(SENPI_SUBAGENT_USER_PREFIX))
+}
+
 pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequestKind> {
     if view
         .session_id()
@@ -39,14 +48,6 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     if view.any_system_starts_with(SENPI_LOOK_AT_SYSTEM_PREFIX) {
         return Some(ClientRequestKind::LookAt);
     }
-    if view.any_system_starts_with("You are running as an omo senpi-task child ")
-        || view.any_system_contains("\nYou are running as an omo senpi-task child ")
-        || view.first_user_starts_with(
-            "Extract durable facts from this payload and record each accepted fact with record_fact.",
-        )
-    {
-        return Some(ClientRequestKind::Subagent);
-    }
     // Senpi's shipped opt-in subagent example launches a fresh
     // `senpi --no-session` process and encodes the delegated prompt as the
     // first user message.
@@ -54,7 +55,7 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     // stable wire marker is the `Task: ` prefix rather than header absence.
     // This intentionally fails toward `subagent`: an interactive first prompt
     // beginning with `Task: ` is indistinguishable on the wire.
-    if is_main(view) && view.first_user_starts_with(SENPI_SUBAGENT_USER_PREFIX) {
+    if is_thread_sticky_subagent_marker(view) {
         return Some(ClientRequestKind::Subagent);
     }
     if view.any_system_starts_with(SENPI_SESSION_TITLE_SYSTEM_PREFIX) {

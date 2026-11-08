@@ -363,6 +363,15 @@ pub(crate) fn classify_client_request_kind_with_class(
 
     (view.has_provenance() || explicit_class.is_some()).then(|| ClientRequestKind::Unknown.as_str())
 }
+pub(crate) fn is_thread_sticky_subagent_seed(
+    value: &Value,
+    observed_session_id: Option<&str>,
+    parent_session_id: Option<&str>,
+) -> bool {
+    let view = RequestView::new(value, observed_session_id, parent_session_id);
+    omp::is_thread_sticky_subagent_marker(&view)
+        || senpi::is_thread_sticky_subagent_marker(&view)
+}
 
 fn billing_attribution(system: Option<&Value>) -> Option<BillingAttribution<'_>> {
     let text = text_blocks(system?).find(|text| {

@@ -204,7 +204,7 @@ async fn append_filtered_evidence_uses_bounded_cycle_window() {
         "unrelated historical rows are fast-rejected"
     );
 
-    let cycle_id = Uuid::from_u128(0x1149_01);
+    let cycle_id = Uuid::from_u128(0x0011_4901);
     let mut old_renewal = economics_projection("sqlite-old-renewal", Some(cycle_id), 0, "hit", 1);
     old_renewal.evidence[0].prefix_hash = Some("retained-prefix-hash".to_owned());
     storage
@@ -248,7 +248,7 @@ async fn append_filtered_evidence_uses_bounded_cycle_window() {
         "a follow-up older than one hour still blocks through same-cycle sibling renewals"
     );
 
-    let boundary_cycle = Uuid::from_u128(0x1149_02);
+    let boundary_cycle = Uuid::from_u128(0x0011_4902);
     let mut boundary_renewal = economics_projection(
         "sqlite-boundary-renewal",
         Some(boundary_cycle),

@@ -25,6 +25,10 @@ pub(crate) fn classify(view: &RequestView<'_>) -> Option<ClientRequestKind> {
 
     None
 }
+pub(crate) fn is_thread_sticky_subagent_marker(view: &RequestView<'_>) -> bool {
+    view.any_user_starts_with(OMP_SUBAGENT_PROMPT_PREFIX)
+        || view.any_user_starts_with("Complete assignment thoroughly:")
+}
 
 pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequestKind> {
     if !view.has_provenance() {
@@ -66,8 +70,7 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     {
         return Some(ClientRequestKind::Compaction);
     }
-    if view.any_user_starts_with(OMP_SUBAGENT_PROMPT_PREFIX)
-        || view.any_user_starts_with("Complete assignment thoroughly:")
+    if is_thread_sticky_subagent_marker(view)
     {
         return Some(ClientRequestKind::Subagent);
     }
