@@ -432,6 +432,10 @@ prompt_cache_observation_sqlite_test!(
     provider_unknown_expiry_is_retained_and_not_active
 );
 prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_provider_newer_unreported_counts_replace_prior_counts_sqlite,
+    provider_newer_unreported_counts_replace_prior_counts
+);
+prompt_cache_observation_sqlite_test!(
     prompt_cache_observation_hydrate_after_restart_filters_expired_sqlite,
     hydrate_after_restart_filters_expired
 );

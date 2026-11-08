@@ -23,6 +23,7 @@ const MAX_LOOKBACK_BOUNDARIES: usize = 20;
 const MAX_BOUNDARY_BYTES: usize = 512;
 const MAX_SCOPE_BYTES: usize = 256;
 const OPENAI_LONG_RETENTION_SECS: u64 = 12 * 60 * 60;
+const OPENAI_MODERN_DEFAULT_RETENTION_SECS: u64 = 30 * 60;
 
 /// Analyze only the supported provider-native request paths.
 ///
@@ -54,13 +55,17 @@ fn analyze_openai(
     }
     let scope = openai_scope(headers);
     let options = body.get("prompt_cache_options");
-    let requested_mode = match options
-        .and_then(|value| value.get("mode"))
-        .and_then(Value::as_str)
-    {
+    if options.is_some_and(|value| !value.is_object()) {
+        return None;
+    }
+    let requested_mode = match options.and_then(|value| value.get("mode")) {
         None => None,
-        Some(mode) if mode.eq_ignore_ascii_case("explicit") => Some(OpenaiCacheMode::Explicit),
-        Some(mode) if mode.eq_ignore_ascii_case("implicit") => Some(OpenaiCacheMode::Implicit),
+        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("explicit") => {
+            Some(OpenaiCacheMode::Explicit)
+        }
+        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("implicit") => {
+            Some(OpenaiCacheMode::Implicit)
+        }
         Some(_) => return None,
     };
     let modern = supports_modern_openai_cache(model);
@@ -256,7 +261,18 @@ fn openai_retention_secs(
         }
         breakpoint_ttl = Some(parsed);
     }
-    Some(breakpoint_ttl.or(retention).or(options_ttl))
+    let configured = breakpoint_ttl.or(retention).or(options_ttl);
+    let metadata_only_breakpoint = body
+        .get("metadata")
+        .and_then(|metadata| metadata.get("prompt_cache_breakpoint"))
+        .is_some();
+    let supported_request_form = body
+        .get("input")
+        .is_some_and(|input| input.is_array() || input.is_string());
+    Some(configured.or_else(|| {
+        (modern && supported_request_form && !metadata_only_breakpoint)
+            .then_some(OPENAI_MODERN_DEFAULT_RETENTION_SECS)
+    }))
 }
 
 fn parse_ttl_secs(value: &Value) -> Option<u64> {
@@ -430,6 +446,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observed.mode, "implicit");
+        assert_eq!(observed.retention_secs, Some(OPENAI_MODERN_DEFAULT_RETENTION_SECS));
         assert_eq!(
             observed.boundary.as_deref(),
             Some("initial_developer=0;latest_message=0;earlier_messages=1")
@@ -437,12 +454,55 @@ mod tests {
     }
 
     #[test]
+    fn modern_openai_explicit_mode_uses_implicit_thirty_minute_retention() {
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &json!({
+                "prompt_cache_options":{"mode":"explicit"},
+                "input":[{"prompt_cache_breakpoint":{}}]
+            }),
+            "gpt-5.6",
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(observed.mode, "explicit");
+        assert_eq!(observed.retention_secs, Some(OPENAI_MODERN_DEFAULT_RETENTION_SECS));
+    }
+
+    #[test]
+    fn modern_openai_unknown_request_form_has_no_implicit_retention() {
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &json!({"prompt_cache_options":{"mode":"implicit"}}),
+            "gpt-5.6",
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(observed.retention_secs, None);
+    }
+    #[test]
     fn unsupported_openai_mode_is_unknown() {
         let body = json!({"prompt_cache_options":{"mode":"unsupported"}});
         assert!(
             analyze(
                 ProviderCapability::OpenaiResponses,
                 &body,
+                "gpt-5.6",
+                &HeaderMap::new(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_openai_mode_type_is_unknown() {
+        assert!(
+            analyze(
+                ProviderCapability::OpenaiResponses,
+                &json!({
+                    "prompt_cache_options":{"mode":42},
+                    "input":[{"role":"user","content":"hello"}]
+                }),
                 "gpt-5.6",
                 &HeaderMap::new(),
             )

@@ -35,7 +35,7 @@ pub struct RequestDiagnostics {
 }
 
 impl RequestDiagnostics {
-    /// Moves the five fields out of `event`, leaving their empty defaults so
+    /// Moves the diagnostic fields out of `event`, leaving their empty defaults so
     /// the row serializes without them.
     pub fn take_from(event: &mut RequestEvent) -> Self {
         let mut cache_breakpoints = std::mem::take(&mut event.cache_breakpoints);
@@ -48,7 +48,7 @@ impl RequestDiagnostics {
             routing_trace: event.routing_trace.take(),
             iterations: event.iterations.take(),
             internal_errors: std::mem::take(&mut event.internal_errors),
-            native_cache: event.native_cache.clone(),
+            native_cache: std::mem::take(&mut event.native_cache),
             ..Self::default()
         }
     }
@@ -136,7 +136,7 @@ impl RequestDiagnosticsRecord {
     /// Builds the record for a persisted row.
     ///
     /// `seq` is the storage cursor returned by the insert (Postgres `seq`,
-    /// SQLite `id`). The five diagnostic fields come from `diagnostics`, not
+    /// SQLite `id`). The diagnostic fields come from `diagnostics`, not
     /// from `event`, so callers that stripped the row before persisting still
     /// emit them. `ts_ms` falls back to `ts * 1000` for legacy rows without
     /// millisecond precision.
@@ -226,9 +226,10 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     const PREFIX: &str = "{\"schema\":\"cc_lb.request_diagnostics.v1\",";
-    const DIAGNOSTIC_KEYS: [&str; 5] = [
+    const DIAGNOSTIC_KEYS: [&str; 6] = [
         "cache_breakpoints",
         "cache_control_message_indices",
+        "native_cache",
         "routing_trace",
         "iterations",
         "internal_errors",
@@ -442,14 +443,20 @@ mod tests {
     }
 
     #[test]
-    fn take_from_removes_the_five_keys_from_row_serialization() -> TestResult {
+    fn take_from_removes_diagnostic_keys_from_row_serialization() -> TestResult {
         let mut event = sample_event();
         let mut expected = sample_diagnostics();
         event.cache_breakpoints = expected.cache_breakpoints.clone();
         event.cache_control_message_indices = expected.cache_control_message_indices.clone();
-        event.routing_trace = Some(RoutingTrace::default());
         event.iterations = expected.iterations.clone();
         event.internal_errors = expected.internal_errors.clone();
+        event.native_cache = Some(crate::RequestNativeCacheObservation {
+            provider: "openai".to_owned(),
+            mode: "implicit".to_owned(),
+            cached_tokens: Some(256),
+            evidence: crate::RequestCacheEvidence::Positive,
+            ..Default::default()
+        });
 
         let cloned = RequestDiagnostics::cloned_from(&event);
         assert!(!event.cache_breakpoints[0].lookback_prefixes.is_empty());
@@ -465,6 +472,10 @@ mod tests {
         }
 
         let taken = RequestDiagnostics::take_from(&mut event);
+        assert_eq!(
+            taken.native_cache.as_ref().and_then(|cache| cache.cached_tokens),
+            Some(256)
+        );
         assert_eq!(taken, cloned);
         assert_eq!(taken.cache_breakpoints, expected.cache_breakpoints);
         assert_eq!(taken.routing_trace, Some(RoutingTrace::default()));
