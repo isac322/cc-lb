@@ -357,18 +357,16 @@ async fn compaction_response_fences_matching_generation_and_allows_fresh_complet
             .filter(|request| request.reason == CancelReason::UserTurnDetected)
             .collect::<Vec<_>>();
         assert_eq!(completion_cancellations.len(), 2);
-        assert!(
-            completion_cancellations
-                .iter()
-                .any(|request| request.session_key_hash.ends_with("/thread:compaction-fence"))
-        );
-        assert!(
-            completion_cancellations.iter().any(|request| {
-                request
-                    .session_key_hash
-                    .ends_with("/thread:compaction-fence/agent:subagent")
-            })
-        );
+        assert!(completion_cancellations.iter().any(|request| {
+            request
+                .session_key_hash
+                .ends_with("/thread:compaction-fence")
+        }));
+        assert!(completion_cancellations.iter().any(|request| {
+            request
+                .session_key_hash
+                .ends_with("/thread:compaction-fence/agent:subagent")
+        }));
         assert!(
             completion_cancellations
                 .iter()

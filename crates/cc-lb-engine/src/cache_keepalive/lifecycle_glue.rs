@@ -1429,7 +1429,6 @@ mod tests {
         );
     }
 
-
     impl LifecycleKeepalive {
         // Called from lifecycle's metadata tests so the auxiliary identity is built
         // by the real header/body constructor, without exposing a production API.
