@@ -1771,7 +1771,7 @@ impl ResponsesWebSocketGateway {
         if let Some(observer) = turn.prepared.observer.as_ref() {
             let usage = turn.usage.take();
             if let Some(usage) = usage.as_ref() {
-                observer.set_usage_counts(usage, complete);
+                observer.set_usage_counts(usage, complete && turn.usage_complete);
                 observer.emit_lifecycle(LifecycleEvent::UsageObserved {
                     event_id: observer.event_id().to_owned(),
                     usage: usage_snapshot(usage.clone()),
