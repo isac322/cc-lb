@@ -1,4 +1,4 @@
-use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
+use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireVersion};
 use cc_lb_plugin_wire::v1::{FilterResponse, ShapeResponse};
 
 use crate::inspect::{expected_fingerprint, schema_section_name};
@@ -53,7 +53,15 @@ fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
             &fingerprint,
         );
     }
-    append_custom_section(&mut wasm, "cc_lb.plugin.v1", &metadata(declared_hooks));
+    let metadata_section = if declared_hooks
+        .iter()
+        .any(|(hook, _)| *hook == HookKind::TransformRealtimeFrame)
+    {
+        "cc_lb.plugin.v2"
+    } else {
+        "cc_lb.plugin.v1"
+    };
+    append_custom_section(&mut wasm, metadata_section, &metadata(declared_hooks));
     wasm
 }
 
@@ -80,10 +88,10 @@ fn hook_export(hook: HookKind, filter_packed: u64, shape_packed: u64) -> String 
             r#"(func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)"#
                 .to_owned()
         }
-        HookKind::TransformRealtimeFrame => {
-            r#"(func (export "cc_lb_transform_realtime_frame") (param i32 i32) (result i64) i64.const 0)"#
-                .to_owned()
-        }
+        HookKind::TransformRealtimeFrame => format!(
+            r#"(func (export "{}") (param i32 i32) (result i64) i64.const 0)"#,
+            HookKind::TransformRealtimeFrame.qualified_export_name(ProviderFamily::Openai)
+        ),
         HookKind::ShapeEnvelopeGemini => {
             r#"(func (export "cc_lb_shape_envelope_gemini") (param i32 i32) (result i64) i64.const 0)"#
                 .to_owned()
@@ -106,7 +114,15 @@ fn metadata(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
                 "usage": format!("call {}", hook.as_str()),
                 "mode": mode,
             });
-            (hook.as_str().to_owned(), hook_metadata)
+            let hook_name = if *hook == HookKind::TransformRealtimeFrame {
+                HookKind::TransformRealtimeFrame
+                    .qualified_export_name(ProviderFamily::Openai)
+                    .strip_prefix("cc_lb_")
+                    .expect("qualified hook export has cc_lb prefix")
+            } else {
+                hook.as_str()
+            };
+            (hook_name.to_owned(), hook_metadata)
         })
         .collect::<serde_json::Map<_, _>>();
     serde_json::to_vec(&serde_json::json!({
