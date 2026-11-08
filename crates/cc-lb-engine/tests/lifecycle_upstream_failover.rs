@@ -2630,15 +2630,15 @@ async fn responses_websocket_terminal_status_matches_success_failure_and_cancell
     for (kind, expected_status, expected_reason) in [
         (
             "response.failed",
-            502,
+            101,
             TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
         ),
         (
             "client.close",
-            499,
+            101,
             TerminationReason::ErrorCode("client_closed_request".to_owned()),
         ),
-        ("response.completed", 200, TerminationReason::Success),
+        ("response.completed", 101, TerminationReason::Success),
     ] {
         let bus = Arc::new(cc_lb_control::InMemoryBus::new());
         let mut events = bus.subscribe_lifecycle();
