@@ -1255,6 +1255,8 @@ fn cache_keepalive_ttl_to_db(ttl: cc_lb_storage_api::CacheTtl) -> &'static str {
     match ttl {
         cc_lb_storage_api::CacheTtl::Ttl5m => "5m",
         cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
+        cc_lb_storage_api::CacheTtl::Ttl30m => "30m",
+        cc_lb_storage_api::CacheTtl::Ttl12h => "12h",
     }
 }
 

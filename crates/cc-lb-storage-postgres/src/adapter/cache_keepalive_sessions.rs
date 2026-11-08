@@ -770,6 +770,8 @@ fn ttl_to_db(ttl: CacheTtl) -> &'static str {
     match ttl {
         CacheTtl::Ttl5m => "5m",
         CacheTtl::Ttl1h => "1h",
+        CacheTtl::Ttl30m => "30m",
+        CacheTtl::Ttl12h => "12h",
     }
 }
 
@@ -777,6 +779,8 @@ fn ttl_from_db(value: &str) -> StorageResult<CacheTtl> {
     match value {
         "5m" => Ok(CacheTtl::Ttl5m),
         "1h" => Ok(CacheTtl::Ttl1h),
+        "30m" => Ok(CacheTtl::Ttl30m),
+        "12h" => Ok(CacheTtl::Ttl12h),
         value => Err(StorageError::Corrupted {
             message: format!("invalid cache keepalive ttl {value}"),
         }),

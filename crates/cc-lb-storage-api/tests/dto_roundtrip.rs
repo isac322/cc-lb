@@ -274,6 +274,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         snapshot_max_bytes: 262_144,
         min_cache_tokens: 10_000,
         classifier: ClassifierConfig {
+            openai_responses_enabled: false,
             extra_wait_for_user_tools: vec!["ask_human".to_owned()],
             treat_end_turn_as_ambiguous: true,
             llm_judge: Some(LlmJudgeConfig {

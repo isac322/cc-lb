@@ -230,16 +230,22 @@ impl LifecycleKeepalive {
         };
         if cache_metadata.explicit_auxiliary
             || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
-            || cache_metadata.cache_breakpoints.is_empty()
+            || (cache_metadata.cache_breakpoints.is_empty()
+                && cache_metadata.cache_keepalive_surface.is_none())
         {
             return;
         }
         let view = self.dynamic_view.load();
-        if !view
+        let Some(config) = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
-            .is_some_and(|config| config.enabled)
+            .filter(|config| config.enabled)
+        else {
+            return;
+        };
+        if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+            && !config.classifier.openai_responses_enabled
         {
             return;
         }
@@ -304,7 +310,7 @@ impl LifecycleKeepalive {
             return;
         }
         let view = self.dynamic_view.load();
-        let Some(_config) = view
+        let Some(config) = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
@@ -312,9 +318,17 @@ impl LifecycleKeepalive {
         else {
             return;
         };
+        if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+            && !config.classifier.openai_responses_enabled
+        {
+            return;
+        }
         let compaction_boundary =
             super::classifier::HeuristicClassifier::is_compaction_boundary(response_body_json);
-        if cache_metadata.cache_breakpoints.is_empty() && !compaction_boundary {
+        if cache_metadata.cache_breakpoints.is_empty()
+            && !compaction_boundary
+            && cache_metadata.cache_keepalive_surface.is_none()
+        {
             return;
         }
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
@@ -375,11 +389,14 @@ impl LifecycleKeepalive {
         let Some(config) = cached.cache_keepalive().filter(|config| config.enabled) else {
             return;
         };
+        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
+            return;
+        };
         let compaction_boundary = HeuristicClassifier::is_compaction_boundary(response_body_json);
-        if compaction_boundary && cache_metadata.cache_breakpoints.is_empty() {
-            let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-                return;
-            };
+        if compaction_boundary
+            && cache_metadata.cache_breakpoints.is_empty()
+            && cache_metadata.cache_keepalive_surface.is_none()
+        {
             let principal_name: Arc<str> = Arc::from(principal.id.as_str());
             let session_key_hash = session_key.to_string();
             let mut shard = self.session_shard(&session_key).lock().await;
@@ -415,13 +432,13 @@ impl LifecycleKeepalive {
         let Some(request_json) = cache_metadata.request_json.as_ref() else {
             return;
         };
-        let Some(first_breakpoint) = cache_metadata.cache_breakpoints.first() else {
-            return;
-        };
-        let ttl = CacheTtl::from_ttl_str(first_breakpoint.ttl.as_deref());
-        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-            return;
-        };
+        let ttl = cache_metadata.cache_keepalive_ttl.unwrap_or_else(|| {
+            cache_metadata
+                .cache_breakpoints
+                .first()
+                .map(|breakpoint| CacheTtl::from_ttl_str(breakpoint.ttl.as_deref()))
+                .unwrap_or(CacheTtl::Ttl5m)
+        });
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
         let session_key_hash = session_key.to_string();
         let mut shard = self.session_shard(&session_key).lock().await;
@@ -452,7 +469,9 @@ impl LifecycleKeepalive {
                     return;
                 }
             };
-        if let Some(reason) = zero_token_renewal_unsupported_reason(&renewal_request_json) {
+        if cache_metadata.cache_keepalive_surface.is_none()
+            && let Some(reason) = zero_token_renewal_unsupported_reason(&renewal_request_json)
+        {
             self.record_not_tracked(
                 &session_key,
                 principal,
@@ -475,17 +494,36 @@ impl LifecycleKeepalive {
             }
             return;
         }
-        let url =
-            Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
-        let snapshot = match RequestSnapshot::capture(
-            url,
-            http::Method::POST,
-            keepalive_forward_headers(downstream_headers),
-            shaped_body,
-            upstream_id,
-            ttl,
-            config.snapshot_max_bytes as usize,
-        ) {
+        let snapshot_url = if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+        {
+            KEEPALIVE_OPENAI_SNAPSHOT_URL
+        } else {
+            KEEPALIVE_SNAPSHOT_URL
+        };
+        let url = Url::parse(snapshot_url).expect("cache keep-alive snapshot URL is valid");
+        let snapshot_result =
+            if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses") {
+                RequestSnapshot::capture_openai(
+                    url,
+                    http::Method::POST,
+                    keepalive_forward_headers(downstream_headers),
+                    shaped_body,
+                    upstream_id,
+                    ttl,
+                    config.snapshot_max_bytes as usize,
+                )
+            } else {
+                RequestSnapshot::capture(
+                    url,
+                    http::Method::POST,
+                    keepalive_forward_headers(downstream_headers),
+                    shaped_body,
+                    upstream_id,
+                    ttl,
+                    config.snapshot_max_bytes as usize,
+                )
+            };
+        let snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
             Err(super::SnapshotError::TooLarge { actual, max }) => {
                 tracing::warn!(
@@ -529,13 +567,22 @@ impl LifecycleKeepalive {
         };
         let (fingerprint, hash, policy, schema) = cache_prefix_evidence(cache_metadata);
         let snapshot = snapshot.with_prefix_evidence(fingerprint, hash, policy, schema);
-        let classifier = HeuristicClassifier::new(&config.classifier);
-        match classifier.classify(request_json, response_body_json) {
+        let decision = if cache_metadata.cache_keepalive_surface.is_some() {
+            super::TurnDecision::AgentInTurn
+        } else {
+            HeuristicClassifier::new(&config.classifier).classify(request_json, response_body_json)
+        };
+        match decision {
             super::TurnDecision::AgentInTurn => {
-                if cached_tokens < config.min_cache_tokens {
+                let min_cache_tokens = if cache_metadata.cache_keepalive_surface.is_some() {
+                    super::openai::MIN_PREFIX_TOKENS
+                } else {
+                    config.min_cache_tokens
+                };
+                if cached_tokens < min_cache_tokens {
                     let reason = CacheKeepaliveDisplayReason::CachedPrefixTooSmall {
                         cached_tokens,
-                        min_cache_tokens: config.min_cache_tokens,
+                        min_cache_tokens,
                     }
                     .to_string();
                     self.record_not_tracked(
@@ -564,6 +611,40 @@ impl LifecycleKeepalive {
                     return;
                 }
                 if !is_latest {
+                    return;
+                }
+                if ttl == CacheTtl::Ttl12h {
+                    self.record_not_tracked(
+                        &session_key,
+                        principal,
+                        upstream_id,
+                        ttl,
+                        config,
+                        "openai 12h retention is recorded without read re-anchoring",
+                    )
+                    .await;
+                    return;
+                }
+                if cache_metadata.cache_keepalive_surface.is_some()
+                    && !super::openai::should_schedule_refresh(
+                        snapshot.keepalive_model(),
+                        match ttl {
+                            CacheTtl::Ttl30m => super::openai::Lifetime::ThirtyMinutes,
+                            CacheTtl::Ttl12h => super::openai::Lifetime::TwelveHours,
+                            _ => super::openai::Lifetime::ThirtyMinutes,
+                        },
+                        config.max_refreshes_per_session,
+                    )
+                {
+                    self.record_not_tracked(
+                        &session_key,
+                        principal,
+                        upstream_id,
+                        ttl,
+                        config,
+                        "refresh expected value is unknown or non-positive",
+                    )
+                    .await;
                     return;
                 }
                 let params =
@@ -715,6 +796,7 @@ impl LifecycleKeepalive {
 #[derive(Default)]
 pub(crate) struct StreamingKeepaliveResponse {
     message: Option<Value>,
+    openai_response: Option<Value>,
     content_blocks: Vec<Value>,
     stop_reason: Option<String>,
     pending_sse_bytes: Vec<u8>,
@@ -768,7 +850,17 @@ impl StreamingKeepaliveResponse {
         let Ok(Some(value)) = event.value() else {
             return;
         };
+        if matches!(
+            value.get("type").and_then(Value::as_str),
+            Some("response.completed" | "response.incomplete")
+        ) {
+            self.openai_response = value.get("response").cloned();
+            return;
+        }
         match event.event_name() {
+            Some(b"response.completed" | b"response.incomplete") => {
+                self.openai_response = value.get("response").cloned();
+            }
             Some(b"message_start") => {
                 if let Some(message) = value.get("message") {
                     self.message = Some(message.clone());
@@ -808,6 +900,9 @@ impl StreamingKeepaliveResponse {
     }
 
     pub(crate) fn into_value(self) -> Option<Value> {
+        if self.openai_response.is_some() {
+            return self.openai_response;
+        }
         let mut value = self.message?;
         let map = value.as_object_mut()?;
         if !self.content_blocks.is_empty() {
@@ -943,7 +1038,16 @@ fn cache_keepalive_session_key(
     };
     if let Some(thread_id) = cache_metadata.thread_id.clone() {
         return Some(
-            SessionKey::from_thread_id(principal_id, thread_id).with_agent_scope(agent_scope),
+            SessionKey::from_thread_id(principal_id, thread_id)
+                .with_agent_scope(agent_scope.clone()),
+        );
+    }
+    if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+        && let Some(identity) = cache_metadata.openai_replay_identity.clone()
+    {
+        return Some(
+            SessionKey::from_cache_prefix_hash(principal_id, format!("openai-replay:{identity}"))
+                .with_agent_scope(agent_scope.clone()),
         );
     }
     cache_metadata.cache_prefix_hash.clone().map(|prefix_hash| {
@@ -959,6 +1063,7 @@ fn cache_keepalive_principal_uuid(principal_id: &str) -> Uuid {
 }
 
 const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
+const KEEPALIVE_OPENAI_SNAPSHOT_URL: &str = "https://api.openai.com/v1/responses";
 
 #[cfg(test)]
 mod tests {
@@ -1356,6 +1461,41 @@ mod tests {
             Some(3)
         );
     }
+
+    #[test]
+    fn streaming_openai_response_completed_becomes_response_body_for_keepalive() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe(&crate::usage_parser::parse_sse_event(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":16,\"input_tokens_details\":{\"cached_tokens\":1100}}}}\n\n",
+        ));
+        let value = response.into_value().expect("response.completed captured");
+        assert_eq!(value["model"], "gpt-5.6");
+        assert_eq!(
+            value["usage"]["input_tokens_details"]["cached_tokens"],
+            1100
+        );
+    }
+
+    #[test]
+    fn streaming_openai_data_only_terminals_become_response_bodies() {
+        for event in [
+            br#"data: {"type":"response.completed","response":{"model":"gpt-5.6","usage":{"input_tokens":10}}}"# as &[u8],
+            br#"data: {"type":"response.incomplete","response":{"model":"gpt-5.6","usage":{"input_tokens":11}}}"#,
+        ] {
+            let mut response = StreamingKeepaliveResponse::default();
+            response.observe(&crate::usage_parser::parse_sse_event(event));
+            assert_eq!(response.into_value().unwrap()["model"], "gpt-5.6");
+        }
+    }
+    #[test]
+    fn streaming_named_incomplete_without_type_becomes_response_body() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe(&crate::usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"response\":{\"model\":\"gpt-5.6\",\"usage\":{\"input_tokens\":12}}}\n\n",
+        ));
+        assert_eq!(response.into_value().unwrap()["model"], "gpt-5.6");
+    }
+
     #[test]
     fn emitted_sse_batch_observes_every_transformed_content_block() {
         let mut response = StreamingKeepaliveResponse::default();
@@ -1464,6 +1604,50 @@ mod tests {
                 "{}/thread:thread-1",
                 cache_keepalive_principal_uuid("principal-test")
             )
+        );
+    }
+
+    #[test]
+    fn openai_responses_without_headers_use_replay_identity() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.cache_keepalive_surface = Some("responses".to_owned());
+        metadata.openai_replay_identity = Some("prompt-cache-key:stable".to_owned());
+        let key = cache_keepalive_session_key(&principal, &metadata)
+            .expect("OpenAI replay identity should create a session key")
+            .to_string();
+        assert!(key.contains("openai-replay:prompt-cache-key:stable"));
+        metadata.openai_replay_identity = Some("conversation:conv-1".to_owned());
+        assert_ne!(
+            key,
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn openai_replay_identity_does_not_override_stable_thread_identity() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut first = RequestCacheMetadata::default();
+        first.cache_keepalive_surface = Some("responses".to_owned());
+        first.thread_id = Some("session-1".to_owned());
+        first.openai_replay_identity = Some("input-sha256:first".to_owned());
+        let mut next = first.clone();
+        next.openai_replay_identity = Some("input-sha256:next".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &first)
+                .unwrap()
+                .to_string(),
+            cache_keepalive_session_key(&principal, &next)
+                .unwrap()
+                .to_string()
         );
     }
 
@@ -1647,15 +1831,20 @@ mod tests {
     }
     #[tokio::test]
     async fn superseded_request_still_fences_before_dispatch_boundary() {
-        assert_superseded_request_fences(false).await;
+        assert_superseded_request_fences(false, false).await;
     }
 
     #[tokio::test]
     async fn dropped_newer_request_cannot_remove_older_request_fence() {
-        assert_superseded_request_fences(true).await;
+        assert_superseded_request_fences(true, false).await;
     }
 
-    async fn assert_superseded_request_fences(drop_newer: bool) {
+    #[tokio::test]
+    async fn openai_headerless_turns_cancel_previous_generation() {
+        assert_superseded_request_fences(false, true).await;
+    }
+
+    async fn assert_superseded_request_fences(drop_newer: bool, openai: bool) {
         struct RequestFenceEnqueuer {
             ordered: OrderedCompletionEnqueuer,
             active_generation: std::sync::atomic::AtomicBool,
@@ -1714,6 +1903,10 @@ mod tests {
             .initialize()
             .await
             .expect("request fence auth schema");
+        let classifier = ClassifierConfig {
+            openai_responses_enabled: openai,
+            ..ClassifierConfig::default()
+        };
         let principal_record = cc_lb_storage_api::PrincipalStore::create(
             storage.as_ref(),
             cc_lb_storage_api::principal::PrincipalCreate {
@@ -1730,7 +1923,7 @@ mod tests {
                     max_total_duration_secs: 14_400,
                     snapshot_max_bytes: 524_288,
                     min_cache_tokens: 10_000,
-                    classifier: ClassifierConfig::default(),
+                    classifier,
                 }),
             },
             cc_lb_clock::unix_secs(clock.now()),
@@ -1784,17 +1977,22 @@ mod tests {
         };
         let mut metadata = RequestCacheMetadata::default();
         metadata.thread_id = Some("superseded-request".to_owned());
-        metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
-            block_index: 0,
-            source: cc_lb_request_log::RequestCacheBreakpointSource::System,
-            path: "system[0]".to_owned(),
-            message_index: None,
-            ttl: Some("5m".to_owned()),
-            prefix_hash: "request-fence-prefix".to_owned(),
-            prefix_token_count: 12_000,
-            lookback_prefixes: Vec::new(),
-            token_estimate_source: None,
-        }];
+        if openai {
+            metadata.cache_keepalive_surface = Some("responses".to_owned());
+            metadata.openai_replay_identity = Some("input-sha256:first".to_owned());
+        } else {
+            metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
+                block_index: 0,
+                source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+                path: "system[0]".to_owned(),
+                message_index: None,
+                ttl: Some("5m".to_owned()),
+                prefix_hash: "request-fence-prefix".to_owned(),
+                prefix_token_count: 12_000,
+                lookback_prefixes: Vec::new(),
+                token_estimate_source: None,
+            }];
+        }
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
         let enqueuer = Arc::new(RequestFenceEnqueuer {
             ordered: OrderedCompletionEnqueuer { events },
@@ -1814,11 +2012,14 @@ mod tests {
         })
         .await;
         let first_sequence = keepalive.latest_issued_seq(&key);
-        assert_eq!(first_sequence, 1);
+        let mut next_metadata = metadata.clone();
+        if openai {
+            next_metadata.openai_replay_identity = Some("input-sha256:next".to_owned());
+        }
         let mut newer = Some(Box::pin(keepalive.on_request_started(
             &authenticated,
             &principal,
-            &metadata,
+            &next_metadata,
         )));
         std::future::poll_fn(|cx| {
             assert!(

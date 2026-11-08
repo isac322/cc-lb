@@ -55,6 +55,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::Instrument as _;
 use url::Url;
@@ -4450,7 +4451,8 @@ impl Lifecycle {
         let keepalive_response_enabled =
             self.cache_keepalive_enqueuer.is_some() && cached.cache_keepalive().is_some();
         let track_keepalive_response = keepalive_response_enabled
-            && (!cache_metadata.bundles.official.cache_breakpoints.is_empty()
+            && (cache_metadata.cache_keepalive_surface.is_some()
+                || !cache_metadata.bundles.official.cache_breakpoints.is_empty()
                 || !cache_metadata.bundles.literal.cache_breakpoints.is_empty());
         if track_keepalive_response {
             cache_metadata.request_json = body_view.value().cloned();
@@ -9904,6 +9906,9 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) parent_session_id: Option<String>,
     pub(crate) client_app: Option<String>,
     pub(crate) session_id_source: Option<String>,
+    pub(crate) cache_keepalive_surface: Option<String>,
+    pub(crate) cache_keepalive_ttl: Option<cc_lb_storage_api::CacheTtl>,
+    pub(crate) openai_replay_identity: Option<String>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
@@ -10259,6 +10264,93 @@ fn request_reasoning_metadata(
         _ => (None, None),
     }
 }
+fn bounded_openai_replay_component(raw: &str) -> String {
+    let digest = Sha256::digest(raw.as_bytes());
+    format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+pub(crate) fn openai_replay_identity(
+    value: &Value,
+    headers: &HeaderMap,
+    model: &str,
+    ttl: Option<cc_lb_storage_api::CacheTtl>,
+    prefix_hash: Option<&str>,
+) -> Option<String> {
+    let prompt_cache_key = value
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let conversation_identity = match value.get("conversation") {
+        Some(Value::String(id)) => format!("string:{id}"),
+        Some(Value::Object(object)) => object
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| format!("object:{id}"))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let input_digest = value
+        .get("input")
+        .and_then(|input| sonic_rs::to_vec(input).ok())
+        .map(|input_bytes| {
+            Sha256::digest(&input_bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let organization = value
+        .get("organization")
+        .or_else(|| value.get("organization_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            headers
+                .get("openai-organization")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    let processing_region = value
+        .get("processing_region")
+        .or_else(|| value.get("inference_geo"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            headers
+                .get("openai-processing-region")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    let lifetime = ttl.map(|ttl| match ttl {
+        cc_lb_storage_api::CacheTtl::Ttl30m => "30m",
+        cc_lb_storage_api::CacheTtl::Ttl12h => "12h",
+        cc_lb_storage_api::CacheTtl::Ttl5m => "5m",
+        cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
+    });
+    let namespace = format!(
+        "openai-replay-v2|model={}|lifetime={}|prefix={}|organization={}|region={}|prompt_cache_key={}|conversation={}|input={}",
+        bounded_openai_replay_component(model),
+        bounded_openai_replay_component(lifetime.unwrap_or("unknown")),
+        bounded_openai_replay_component(prefix_hash.unwrap_or("")),
+        bounded_openai_replay_component(organization),
+        bounded_openai_replay_component(processing_region),
+        bounded_openai_replay_component(prompt_cache_key),
+        bounded_openai_replay_component(&conversation_identity),
+        bounded_openai_replay_component(&input_digest),
+    );
+    let digest = Sha256::digest(namespace.as_bytes());
+    Some(format!(
+        "openai-replay-v2:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
 
 fn request_cache_metadata_from_value_with_analysis_for_capability(
     headers: &HeaderMap,
@@ -10359,12 +10451,49 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
     let cache_control_block_count = raw_cache_breakpoints.len() as u64;
-
     let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
-
+    let (cache_keepalive_surface, cache_keepalive_ttl) =
+        if capability == Some(ProviderCapability::OpenaiResponses) {
+            let lifetime = crate::cache_keepalive::openai::parse_lifetime_conservative(value);
+            let eligible = lifetime.is_some_and(|lifetime| {
+                crate::cache_keepalive::openai::eligible_prefix(
+                    &canonical_model_id,
+                    crate::cache_keepalive::openai::visible_prefix_tokens(value),
+                    Some(lifetime),
+                )
+            });
+            if eligible {
+                (
+                    Some("responses".to_owned()),
+                    lifetime.map(|lifetime| match lifetime {
+                        crate::cache_keepalive::openai::Lifetime::ThirtyMinutes => {
+                            cc_lb_storage_api::CacheTtl::Ttl30m
+                        }
+                        crate::cache_keepalive::openai::Lifetime::TwelveHours => {
+                            cc_lb_storage_api::CacheTtl::Ttl12h
+                        }
+                    }),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+    let replay_identity = (capability == Some(ProviderCapability::OpenaiResponses))
+        .then(|| {
+            openai_replay_identity(
+                value,
+                headers,
+                &canonical_model_id,
+                cache_keepalive_ttl,
+                cache_prefix_hash.as_deref(),
+            )
+        })
+        .flatten();
     RequestCacheMetadata {
         request_json: None,
         thread_id,
@@ -10376,6 +10505,9 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         parent_session_id,
         client_app,
         session_id_source,
+        cache_keepalive_surface,
+        cache_keepalive_ttl,
+        openai_replay_identity: replay_identity,
         requested_service_tier,
         message_id,
         message_index,
@@ -11399,6 +11531,229 @@ mod tests {
 
     use super::*;
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
+    #[test]
+    fn openai_replay_identity_namespaces_scope_dimensions() {
+        let value = serde_json::json!({
+            "model": "gpt-5.6",
+            "input": [{"role": "user", "content": "prompt"}],
+            "prompt_cache_key": "key-a",
+            "conversation": {"id": "conversation-a"},
+            "organization": "org-a",
+            "processing_region": "us-east"
+        });
+        let headers = HeaderMap::new();
+        let identity = super::openai_replay_identity(
+            &value,
+            &headers,
+            "gpt-5.6",
+            Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+            Some("prefix-a"),
+        )
+        .expect("identity");
+        for (model, ttl, prefix, organization, region, key, conversation) in [
+            (
+                "gpt-5.7",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl12h),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-b"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-b",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "eu-west",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-b",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-b",
+            ),
+        ] {
+            let mut scoped = value.clone();
+            scoped["organization"] = serde_json::Value::String(organization.to_owned());
+            scoped["processing_region"] = serde_json::Value::String(region.to_owned());
+            scoped["prompt_cache_key"] = serde_json::Value::String(key.to_owned());
+            scoped["conversation"]["id"] = serde_json::Value::String(conversation.to_owned());
+            let candidate = super::openai_replay_identity(&scoped, &headers, model, ttl, prefix)
+                .expect("scoped identity");
+            assert_ne!(identity, candidate);
+        }
+        let mut delimiter_left = value.clone();
+        delimiter_left["organization"] = serde_json::Value::String("acme|region=us".to_owned());
+        delimiter_left["processing_region"] = serde_json::Value::String("eu".to_owned());
+        let mut delimiter_right = value.clone();
+        delimiter_right["organization"] = serde_json::Value::String("acme".to_owned());
+        delimiter_right["processing_region"] = serde_json::Value::String("us|region=eu".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &delimiter_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &delimiter_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut prefix_left = value.clone();
+        prefix_left["organization"] = serde_json::Value::String("tail".to_owned());
+        let mut prefix_right = value.clone();
+        prefix_right["organization"] =
+            serde_json::Value::String("org-a|organization=tail".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &prefix_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a|organization=org-a"),
+            ),
+            super::openai_replay_identity(
+                &prefix_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut region_left = value.clone();
+        region_left["processing_region"] =
+            serde_json::Value::String("us|prompt_cache_key=key-a".to_owned());
+        let mut region_right = value.clone();
+        region_right["processing_region"] = serde_json::Value::String("us".to_owned());
+        region_right["prompt_cache_key"] =
+            serde_json::Value::String("key-a|prompt_cache_key=tail".to_owned());
+        region_left["prompt_cache_key"] = serde_json::Value::String("tail".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &region_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &region_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut key_left = value.clone();
+        key_left["prompt_cache_key"] =
+            serde_json::Value::String("key-a|conversation=left".to_owned());
+        key_left["conversation"]["id"] = serde_json::Value::String("right".to_owned());
+        let mut key_right = value.clone();
+        key_right["prompt_cache_key"] = serde_json::Value::String("key-a".to_owned());
+        key_right["conversation"]["id"] =
+            serde_json::Value::String("left|conversation=right".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &key_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &key_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut string_conversation = value.clone();
+        string_conversation["conversation"] = serde_json::Value::String("conv-a".to_owned());
+        let mut string_conversation_other = value.clone();
+        string_conversation_other["conversation"] = serde_json::Value::String("conv-b".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &string_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &string_conversation_other,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut object_conversation = value.clone();
+        object_conversation["conversation"] = serde_json::json!({"id": "conv-a"});
+        assert_ne!(
+            super::openai_replay_identity(
+                &string_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &object_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+    }
 
     #[test]
     fn native_observation_tokens_keep_zero_distinct_from_absent() {
