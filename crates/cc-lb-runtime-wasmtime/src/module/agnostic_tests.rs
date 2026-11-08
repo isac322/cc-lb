@@ -46,8 +46,7 @@ fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
         } else {
             WireVersion::V1
         };
-        let fingerprint =
-            expected_fingerprint(*hook, wire_version).expect("test hook fingerprint");
+        let fingerprint = expected_fingerprint(*hook, wire_version).expect("test hook fingerprint");
         append_custom_section(
             &mut wasm,
             &schema_section_name(*hook, wire_version),

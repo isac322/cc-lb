@@ -638,8 +638,8 @@ pub fn gemini_setup_model(_auth: &crate::Authenticated, frame: &[u8]) -> Option<
 #[cfg(test)]
 mod tests {
     use super::{
-        realtime_stream_complete, record_stream_termination_metric, realtime_terminal_outcome,
         RealtimeStreamMetrics, RealtimeUsage, RealtimeWebSocketKind, RealtimeWebSocketTermination,
+        realtime_stream_complete, realtime_terminal_outcome, record_stream_termination_metric,
     };
     use crate::terminal_observer::{StreamTerminationCause, StreamTerminationOutcome};
     use bytes::Bytes;

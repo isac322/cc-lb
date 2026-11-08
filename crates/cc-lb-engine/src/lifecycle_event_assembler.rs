@@ -1386,8 +1386,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 // Preserve provider-neutral fields collected before an
                 // abnormal termination. Do not replace an earlier value with
                 // an empty error payload.
-                partial.stream_body_bytes =
-                    partial.stream_body_bytes.or(error.body_bytes);
+                partial.stream_body_bytes = partial.stream_body_bytes.or(error.body_bytes);
                 partial.stream_body_chunk_count =
                     partial.stream_body_chunk_count.or(error.body_chunk_count);
                 partial.stream_first_output_ms =
@@ -1401,8 +1400,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                     .or(error.stream_inter_output_avg_ms);
                 partial.provider_session_id =
                     partial.provider_session_id.or(error.provider_session_id);
-                partial.provider_connection_id =
-                    partial.provider_connection_id.or(error.provider_connection_id);
+                partial.provider_connection_id = partial
+                    .provider_connection_id
+                    .or(error.provider_connection_id);
             }
         },
         LifecycleEvent::RequestLogUpstreamErrorObserved {
