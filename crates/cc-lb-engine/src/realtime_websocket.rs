@@ -3,6 +3,7 @@ use crate::completion_observer::{CompletionObserver, StreamCompletionLog, Stream
 use crate::responses_websocket::WebSocketCandidate;
 use crate::terminal_observer::{InternalFailure, LifecycleContext, UpstreamErrorCode};
 use crate::usage_parser::{UsageCounts, merge_usage_value, merge_usage_value_for_shape};
+use bytes::Bytes;
 use cc_lb_control::api_keys::limit_engine::{LimitEngine, Reservation};
 use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, Provider};
 use cc_lb_lifecycle::{LifecycleEvent, StreamError, StreamSuccess, UsageSnapshot, UsageSource};
