@@ -526,11 +526,15 @@ export const RequestEventPartialSchema = z.looseObject({
   stream_first_content_delta_ms: z.number().nullable().optional(),
   stream_last_content_delta_ms: z.number().nullable().optional(),
   stream_message_stop_ms: z.number().nullable().optional(),
+  stream_first_output_ms: z.number().nullable().optional(),
   stream_last_chunk_ms: z.number().nullable().optional(),
   stream_total_ms: z.number().nullable().optional(),
   sse_event_count: z.number().nullable().optional(),
   content_delta_count: z.number().nullable().optional(),
   ping_count: z.number().nullable().optional(),
+  stream_inter_output_avg_ms: z.number().nullable().optional(),
+  provider_session_id: z.string().nullable().optional(),
+  provider_connection_id: z.string().nullable().optional(),
   inter_token_avg_ms: z.number().nullable().optional(),
   error_code: z.string().nullable().optional(),
 });
@@ -645,11 +649,15 @@ export interface RequestEvent {
   stream_first_content_delta_ms?: number;
   stream_last_content_delta_ms?: number;
   stream_message_stop_ms?: number;
+  stream_first_output_ms?: number | null;
   stream_last_chunk_ms?: number;
   stream_total_ms?: number;
   sse_event_count?: number;
   content_delta_count?: number;
   ping_count?: number;
+  stream_inter_output_avg_ms?: number | null;
+  provider_session_id?: string | null;
+  provider_connection_id?: string | null;
   inter_token_avg_ms?: number;
   error_code?: string;
 }

@@ -165,6 +165,8 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_message_stop_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_output_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_last_chunk_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_total_ms: Option<u64>,
@@ -295,6 +297,29 @@ mod tests {
         let restored: RequestEvent =
             serde_json::from_value(json).expect("deserialize request latency fields");
         assert_eq!(restored, event);
+    }
+
+    #[test]
+    fn websocket_neutral_timing_and_provider_identity_roundtrip() {
+        let event = RequestEvent {
+            stream_first_output_ms: Some(8),
+            stream_last_chunk_ms: Some(34),
+            body_chunk_count: Some(4),
+            stream_total_ms: Some(40),
+            stream_inter_output_avg_ms: Some(8),
+            provider_session_id: Some("resp_123".to_owned()),
+            provider_connection_id: Some("conn_456".to_owned()),
+            ..RequestEvent::default()
+        };
+        let json = serde_json::to_value(&event).expect("serialize websocket fields");
+        assert_eq!(json["stream_first_output_ms"], 8);
+        assert_eq!(json["stream_inter_output_avg_ms"], 8);
+        assert_eq!(json["provider_session_id"], "resp_123");
+        assert_eq!(json["provider_connection_id"], "conn_456");
+        assert_eq!(
+            serde_json::from_value::<RequestEvent>(json).expect("deserialize websocket fields"),
+            event
+        );
     }
 
     const DIAGNOSTIC_KEYS: [&str; 11] = [

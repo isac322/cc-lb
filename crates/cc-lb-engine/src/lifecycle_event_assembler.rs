@@ -221,6 +221,7 @@ struct Partial {
     stream_first_content_delta_ms: Option<u64>,
     stream_last_content_delta_ms: Option<u64>,
     stream_message_stop_ms: Option<u64>,
+    stream_first_output_ms: Option<u64>,
     stream_last_chunk_ms: Option<u64>,
     stream_total_ms: Option<u64>,
     stream_content_delta_count: Option<u64>,
@@ -1369,6 +1370,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_first_content_delta_ms = success.stream_first_content_delta_ms;
                 partial.stream_last_content_delta_ms = success.stream_last_content_delta_ms;
                 partial.stream_message_stop_ms = success.stream_message_stop_ms;
+                partial.stream_first_output_ms = success.first_body_chunk_ms;
                 partial.stream_last_chunk_ms = success.stream_last_chunk_ms;
                 partial.stream_total_ms = success.stream_total_ms;
                 partial.stream_content_delta_count = success.content_delta_count;
@@ -1601,6 +1603,7 @@ fn finalize_base(
         stream_message_stop_ms: partial
             .stream_message_stop_ms
             .or_else(|| diagnostics.and_then(|d| d.message_stop_ms)),
+        stream_first_output_ms: partial.stream_first_output_ms,
         stream_last_chunk_ms: partial.stream_last_chunk_ms,
         stream_total_ms: partial.stream_total_ms,
         content_delta_count: partial.stream_content_delta_count,

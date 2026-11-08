@@ -643,11 +643,12 @@ async fn insert_request_event_in_tx(
         "list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms, ",
         "event_kind, principal_kind, body_chunk_count, body_bytes, ",
         "stream_message_start_ms, stream_content_block_start_ms, ",
-        "stream_message_stop_ms, stream_last_chunk_ms, stream_total_ms, ",
-        "sse_event_count, content_delta_count, ping_count, upstream_http_version, ",
-        "upstream_request_id, upstream_content_encoding, upstream_content_length, ",
-        "upstream_body_bytes, upstream_body_end, upstream_body_error_cause, ",
-        "upstream_body_error_io_kind, upstream_body_error_h2_reason, ",
+        "stream_message_stop_ms, stream_first_output_ms, stream_last_chunk_ms, ",
+        "stream_total_ms, sse_event_count, content_delta_count, ping_count, ",
+        "stream_inter_output_avg_ms, provider_session_id, provider_connection_id, ",
+        "upstream_http_version, upstream_request_id, upstream_content_encoding, ",
+        "upstream_content_length, upstream_body_bytes, upstream_body_end, ",
+        "upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, ",
         "upstream_stream_warning_type, upstream_stream_warning_message",
         ") VALUES (",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -658,6 +659,7 @@ async fn insert_request_event_in_tx(
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
+        "?, ?, ?, ?, ",
         "?, ?, ?, ?, ?",
         ") ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING ",
         "RETURNING id",
@@ -848,6 +850,10 @@ async fn insert_request_event_in_tx(
         "request event stream_message_stop_ms",
     )?)
     .bind(option_u64_to_i64(
+        event.stream_first_output_ms,
+        "request event stream_first_output_ms",
+    )?)
+    .bind(option_u64_to_i64(
         event.stream_last_chunk_ms,
         "request event stream_last_chunk_ms",
     )?)
@@ -867,6 +873,12 @@ async fn insert_request_event_in_tx(
         event.ping_count,
         "request event ping_count",
     )?)
+    .bind(option_u64_to_i64(
+        event.stream_inter_output_avg_ms,
+        "request event stream_inter_output_avg_ms",
+    )?)
+    .bind(event.provider_session_id.as_deref())
+    .bind(event.provider_connection_id.as_deref())
     .bind(event.upstream_http_version.as_deref())
     .bind(event.upstream_request_id.as_deref())
     .bind(event.upstream_content_encoding.as_deref())
