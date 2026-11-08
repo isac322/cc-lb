@@ -581,8 +581,7 @@ impl PluginSession {
         );
         let in_bytes =
             rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeEnvelopeGeminiRequest");
-        let out_bytes = self
-            .dispatch
+        self.dispatch
             .call_shape_envelope_gemini_scoped(&in_bytes, |bytes| {
                 let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
                 aligned.extend_from_slice(bytes);
@@ -592,7 +591,6 @@ impl PluginSession {
                 rkyv::deserialize::<v2::ShapeEnvelopeGeminiResponse, RkyvError>(archived)
                     .expect("rkyv deserialize ShapeEnvelopeGeminiResponse")
             })
-            .expect("guest Gemini envelope hook must complete without trap");
-        out_bytes
+            .expect("guest Gemini envelope hook must complete without trap")
     }
 }
