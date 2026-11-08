@@ -233,10 +233,13 @@ impl ResponsesStreamMetrics {
         self.event_count = self.event_count.saturating_add(1);
         self.total_bytes = self.total_bytes.saturating_add(frame.len() as u64);
         if self.provider_session_id.is_none() {
-            self.provider_session_id = sonic_rs::get_from_slice(frame, &["response", "id"])
-                .ok()
-                .or_else(|| sonic_rs::get_from_slice(frame, &["response_id"]).ok())
-                .and_then(|value| value.as_str().map(str::to_owned));
+            let bounded = |value: Option<&Value>| {
+                let value = value.and_then(Value::as_str)?;
+                (!value.is_empty() && value.len() <= 512).then(|| value.to_owned())
+            };
+            let response_id = sonic_rs::get_from_slice(frame, &["response", "id"]).ok();
+            let fallback_id = sonic_rs::get_from_slice(frame, &["response_id"]).ok();
+            self.provider_session_id = bounded(response_id).or_else(|| bounded(fallback_id));
         }
     }
 
@@ -2394,6 +2397,32 @@ mod tests {
         assert_eq!(latency.provider_session_id.as_deref(), Some("resp_123"));
         assert_eq!(latency.sse_event_count, 0);
         assert_eq!(latency.content_delta_count, 0);
+    }
+
+    #[test]
+    fn responses_metrics_bound_provider_response_ids() {
+        let oversized = "x".repeat(513);
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(
+            r#"{{"response":{{"id":"{oversized}"}},"response_id":"fallback"}}"#
+        );
+        metrics.observe(frame.as_bytes());
+        assert_eq!(
+            metrics.provider_session_id.as_deref(),
+            Some("fallback"),
+            "an oversized primary ID must not block a bounded fallback ID",
+        );
+
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(r#"{{"response_id":"{oversized}"}}"#);
+        metrics.observe(frame.as_bytes());
+        assert_eq!(metrics.provider_session_id, None);
+
+        let accepted = "y".repeat(512);
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(r#"{{"response":{{"id":"{accepted}"}}}}"#);
+        metrics.observe(frame.as_bytes());
+        assert_eq!(metrics.provider_session_id.as_deref(), Some(accepted.as_str()));
     }
 
     #[test]
