@@ -393,6 +393,7 @@ async fn relay_realtime_websocket(
     // accounting lossless without ever blocking the media relay task.
     let (usage_tx, usage_worker) = spawn_realtime_usage_worker(kind);
     let mut metrics = RealtimeStreamMetrics::new();
+    let mut setup_pending = matches!(kind, RealtimeWebSocketKind::Openai);
     let relay = async {
         loop {
             tokio::select! {
@@ -410,9 +411,14 @@ async fn relay_realtime_websocket(
                         }
                         Some(Err(_)) | None => return RealtimeWebSocketTermination::DownstreamCancelled,
                     };
+                    let direction = if setup_pending {
+                        cc_lb_upstream::RealtimeFrameDirection::Setup
+                    } else {
+                        cc_lb_upstream::RealtimeFrameDirection::ClientToProvider
+                    };
                     let message = match transform_realtime_message(
                         &session,
-                        cc_lb_upstream::RealtimeFrameDirection::ClientToProvider,
+                        direction,
                         message,
                     ) {
                         Ok(Some(message)) => message,
@@ -422,6 +428,7 @@ async fn relay_realtime_websocket(
                     if upstream.send(message).await.is_err() {
                         return RealtimeWebSocketTermination::ProxyRelayError;
                     }
+                    setup_pending = false;
                 }
                 message = upstream.next() => {
                     let message = match message {

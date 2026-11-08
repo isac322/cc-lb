@@ -3249,9 +3249,25 @@ impl Lifecycle {
             http.request.method = "GET",
             url.path = "/v1/responses",
         );
+        let stream_span = tracing::info_span!(
+            "proxy.response_stream",
+            cc_lb.request.id = request_id,
+            cc_lb.event.id = observer.as_ref().map(|observer| observer.event_id()),
+            cc_lb.responses.stream_id = tracing::field::Empty,
+            cc_lb.responses.connection_id = tracing::field::Empty,
+            cc_lb.upstream.id = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
+            gen_ai.request.stream = true,
+            transport = "websocket",
+            stream_first_output_ms = tracing::field::Empty,
+            stream_last_output_ms = tracing::field::Empty,
+            stream_event_count = tracing::field::Empty,
+            stream_inter_output_avg_ms = tracing::field::Empty,
+        );
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
             observer.set_request_span(span.clone());
+            observer.set_response_stream_span(stream_span.clone());
             observer.emit_request_started(true);
         }
         let result = async {
@@ -3462,6 +3478,7 @@ impl Lifecycle {
                 candidates,
                 route_info,
                 observer: observer.clone(),
+                completion_observer: Arc::clone(&self.completion_observer),
                 reservation: active_limit
                     .as_mut()
                     .and_then(|limit| limit.reservation.take()),
@@ -3470,7 +3487,7 @@ impl Lifecycle {
                 key_id: auth.key_id().to_owned(),
                 model,
                 store: body.get("store").and_then(Value::as_bool).unwrap_or(true),
-                span: span.clone(),
+                span: stream_span.clone(),
                 request_id: request_id.to_owned(),
             })
         }
