@@ -2033,7 +2033,7 @@ mod tests {
         assert_eq!(event.request_body_bytes, Some(917_567));
         assert_eq!(event.upstream_body_ms, Some(41));
         assert_eq!(event.finalize_ms, Some(4));
-        assert_eq!(event.stream_total_ms, None);
+        assert_eq!(event.stream_total_ms, Some(56));
         assert_eq!(event.request_body_first_chunk_ms, Some(0.0));
         assert_eq!(event.request_body_receive_ms, Some(2.25));
         assert_eq!(event.request_body_wait_ms, Some(7.5));
