@@ -2858,6 +2858,8 @@ async fn responses_websocket_three_create_fifo_and_parallel_lane_preserve_payloa
         completions,
         vec![
             (Some(2), Some("resp_fifo_1".to_owned())),
+            (Some(2), Some("resp_fifo_2".to_owned())),
+            (Some(2), Some("resp_fifo_3".to_owned())),
             (Some(3), Some("resp_parallel".to_owned())),
         ],
         "each in-flight response on one provider connection owns its own timing metrics",
