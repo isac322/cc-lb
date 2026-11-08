@@ -450,6 +450,7 @@ mod tests {
         event.cache_control_message_indices = expected.cache_control_message_indices.clone();
         event.iterations = expected.iterations.clone();
         event.internal_errors = expected.internal_errors.clone();
+        event.routing_trace = Some(RoutingTrace::default());
         event.native_cache = Some(crate::RequestNativeCacheObservation {
             provider: "openai".to_owned(),
             mode: "implicit".to_owned(),
