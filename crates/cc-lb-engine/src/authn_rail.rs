@@ -29,7 +29,7 @@ use cc_lb_control::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, Bui
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_domain::Provider;
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
-use http::{Method, HeaderValue, StatusCode};
+use http::{HeaderValue, Method, StatusCode};
 
 use crate::error_format::{provider_error_response, provider_error_response_with_retry_after};
 use crate::provider_capability::{ProviderCapability, classify};
@@ -48,13 +48,15 @@ fn auth_capability_for_route(
     path: &str,
     provider: Option<Provider>,
 ) -> Option<ProviderCapability> {
-    provider.map(|provider| auth_capability(Some(provider))).or_else(|| {
-        // The shared Responses WebSocket route is GET-only and therefore
-        // does not appear in the POST capability classifier.
-        (method == Method::GET && path == "/v1/responses")
-            .then_some(ProviderCapability::OpenaiResponses)
-            .or_else(|| classify(method, path, None))
-    })
+    provider
+        .map(|provider| auth_capability(Some(provider)))
+        .or_else(|| {
+            // The shared Responses WebSocket route is GET-only and therefore
+            // does not appear in the POST capability classifier.
+            (method == Method::GET && path == "/v1/responses")
+                .then_some(ProviderCapability::OpenaiResponses)
+                .or_else(|| classify(method, path, None))
+        })
 }
 
 fn generic_error_response(
@@ -71,9 +73,10 @@ fn generic_error_response(
         .to_string(),
     ));
     *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
     if let Some(retry_after_secs) = retry_after_secs {
         if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
             response.headers_mut().insert(RETRY_AFTER, value);
@@ -147,11 +150,7 @@ pub fn reject_unauthenticated_for_provider(
     provider: Option<Provider>,
     observer: Option<&LifecycleContext>,
 ) -> Response<Body> {
-    reject_unauthenticated_with_capability(
-        error,
-        Some(auth_capability(provider)),
-        observer,
-    )
+    reject_unauthenticated_with_capability(error, Some(auth_capability(provider)), observer)
 }
 
 /// Build a provider-native rejection from route metadata available before the
@@ -414,15 +413,10 @@ mod tests {
     #[tokio::test]
     async fn route_auth_rejections_classify_generation_paths_before_body_reads() {
         let cases: [(Method, &str, Option<Provider>, fn(&Value) -> bool); 3] = [
-            (
-                Method::POST,
-                "/v1/responses",
-                None,
-                |value: &Value| {
-                    value.get("error").and_then(Value::as_object).is_some()
-                        && value.get("type").is_none()
-                },
-            ),
+            (Method::POST, "/v1/responses", None, |value: &Value| {
+                value.get("error").and_then(Value::as_object).is_some()
+                    && value.get("type").is_none()
+            }),
             (
                 Method::POST,
                 "/v1beta/models/gemini-2.5-pro:generateContent",
@@ -437,16 +431,10 @@ mod tests {
                         })
                 },
             ),
-            (
-                Method::POST,
-                "/v1/unknown",
-                None,
-                |value: &Value| {
-                    value.get("error").and_then(Value::as_str)
-                        == Some("authentication_error")
-                        && value.get("type").is_none()
-                },
-            ),
+            (Method::POST, "/v1/unknown", None, |value: &Value| {
+                value.get("error").and_then(Value::as_str) == Some("authentication_error")
+                    && value.get("type").is_none()
+            }),
         ];
 
         for (method, path, provider, assert_shape) in cases {

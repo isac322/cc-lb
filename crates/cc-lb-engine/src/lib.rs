@@ -92,8 +92,8 @@ mod usage_parser;
 pub mod warmup_attempts;
 #[cfg(not(loom))]
 pub use authn_rail::{
-    Authenticated, authenticate_first, reject_unauthenticated,
-    reject_unauthenticated_for_provider, reject_unauthenticated_for_route,
+    Authenticated, authenticate_first, reject_unauthenticated, reject_unauthenticated_for_provider,
+    reject_unauthenticated_for_route,
 };
 #[cfg(not(loom))]
 pub use bulkhead::{
