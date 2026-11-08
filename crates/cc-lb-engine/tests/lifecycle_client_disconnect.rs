@@ -41,10 +41,9 @@ use client_disconnect_support::{
     assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_stream_error,
     assert_success_terminal, canonical_error_frame, encoded_sse_dispatch, json_dispatch, lifecycle,
     lifecycle_receiver, lifecycle_with_upstream_kind, normal_sse_frame, pending_sse,
-    persistent_upstream_frame_error,
-    refusal_sse_body, sqlite_storage, sse_dispatch, transform_body, transform_lifecycle,
-    transform_lifecycle_with_kind,
-    upstream_frame_error, upstream_frame_error_after,
+    persistent_upstream_frame_error, refusal_sse_body, sqlite_storage, sse_dispatch,
+    transform_body, transform_lifecycle, transform_lifecycle_with_kind, upstream_frame_error,
+    upstream_frame_error_after,
 };
 use common::{TestAuthn, TestLifecycleBus, TestState, messages_request};
 use tokio::sync::mpsc::error::TrySendError;
@@ -93,9 +92,7 @@ async fn native_provider_stream_bytes_and_terminal_classification_are_preserved(
             .header("x-api-key", common::managed_api_key())
             .body(Bytes::from_static(request_body))
             .expect("native provider stream request builds");
-        request
-            .extensions_mut()
-            .insert(ProviderScope(provider));
+        request.extensions_mut().insert(ProviderScope(provider));
 
         let auth = lifecycle
             .authenticate(request.headers())
@@ -157,9 +154,7 @@ async fn native_provider_stream_fault_emits_one_relay_error_and_terminal() {
             .header("x-api-key", common::managed_api_key())
             .body(Bytes::from_static(request_body))
             .expect("native provider fault request builds");
-        request
-            .extensions_mut()
-            .insert(ProviderScope(provider));
+        request.extensions_mut().insert(ProviderScope(provider));
 
         let auth = lifecycle
             .authenticate(request.headers())
@@ -185,8 +180,12 @@ async fn native_provider_stream_fault_emits_one_relay_error_and_terminal() {
             text.contains("\"api_error\""),
             "{provider:?} proxy error frame must use the provider error envelope: {text:?}",
         );
-        assert_error_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16(), "upstream_stream_error")
-            .await;
+        assert_error_terminal(
+            &mut lifecycle_rx,
+            StatusCode::OK.as_u16(),
+            "upstream_stream_error",
+        )
+        .await;
     }
 }
 
@@ -213,7 +212,10 @@ async fn native_provider_error_body_is_forwarded_without_rewrite() {
         let test_bus = TestLifecycleBus::new();
         let mut lifecycle_rx = lifecycle_receiver(&test_bus);
         let lifecycle = lifecycle_with_upstream_kind(
-            json_dispatch(StatusCode::TOO_MANY_REQUESTS, Bytes::from_static(error_body)),
+            json_dispatch(
+                StatusCode::TOO_MANY_REQUESTS,
+                Bytes::from_static(error_body),
+            ),
             &test_bus,
             kind,
         );
@@ -223,9 +225,7 @@ async fn native_provider_error_body_is_forwarded_without_rewrite() {
             .header("x-api-key", common::managed_api_key())
             .body(Bytes::from_static(request_body))
             .expect("native provider error request builds");
-        request
-            .extensions_mut()
-            .insert(ProviderScope(provider));
+        request.extensions_mut().insert(ProviderScope(provider));
         let auth = lifecycle
             .authenticate(request.headers())
             .await
@@ -241,7 +241,11 @@ async fn native_provider_error_body_is_forwarded_without_rewrite() {
             .await
             .expect("native provider error body collects")
             .to_bytes();
-        assert_eq!(body.as_ref(), error_body, "{provider:?} body must be unchanged");
+        assert_eq!(
+            body.as_ref(),
+            error_body,
+            "{provider:?} body must be unchanged"
+        );
         assert_error_terminal(
             &mut lifecycle_rx,
             StatusCode::TOO_MANY_REQUESTS.as_u16(),
@@ -258,7 +262,8 @@ async fn native_provider_affinity_failure_is_terminal_without_dispatch() {
             StorageUpstreamKind::OpenaiApiKey,
             cc_lb_domain::Provider::Openai,
             "/v1/responses",
-            br#"{"model":"gpt-test","input":[],"previous_response_id":"resp-owner"}"# as &'static [u8],
+            br#"{"model":"gpt-test","input":[],"previous_response_id":"resp-owner"}"#
+                as &'static [u8],
         ),
         (
             StorageUpstreamKind::GeminiApiKey,
@@ -282,9 +287,7 @@ async fn native_provider_affinity_failure_is_terminal_without_dispatch() {
             .header("x-api-key", common::managed_api_key())
             .body(Bytes::from_static(request_body))
             .expect("native provider affinity request builds");
-        request
-            .extensions_mut()
-            .insert(ProviderScope(provider));
+        request.extensions_mut().insert(ProviderScope(provider));
         let auth = lifecycle
             .authenticate(request.headers())
             .await
@@ -312,10 +315,8 @@ async fn native_provider_affinity_failure_is_terminal_without_dispatch() {
         )
         .await;
         assert!(
-            !std::iter::from_fn(|| lifecycle_rx.try_recv().ok()).any(|event| matches!(
-                event,
-                LifecycleEvent::UpstreamAttempt { .. }
-            )),
+            !std::iter::from_fn(|| lifecycle_rx.try_recv().ok())
+                .any(|event| matches!(event, LifecycleEvent::UpstreamAttempt { .. })),
             "{provider:?} affinity failure must not dispatch",
         );
     }
@@ -352,9 +353,7 @@ async fn native_provider_transform_failure_is_terminal_once() {
             .header("x-api-key", common::managed_api_key())
             .body(Bytes::from_static(request_body))
             .expect("native provider transform request builds");
-        request
-            .extensions_mut()
-            .insert(ProviderScope(provider));
+        request.extensions_mut().insert(ProviderScope(provider));
         let auth = lifecycle
             .authenticate(request.headers())
             .await
@@ -374,8 +373,12 @@ async fn native_provider_transform_failure_is_terminal_once() {
             text.contains("event: error\n"),
             "{provider:?} transform failure must relay a provider error frame: {text:?}",
         );
-        assert_error_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16(), "upstream_stream_error")
-            .await;
+        assert_error_terminal(
+            &mut lifecycle_rx,
+            StatusCode::OK.as_u16(),
+            "upstream_stream_error",
+        )
+        .await;
     }
 }
 

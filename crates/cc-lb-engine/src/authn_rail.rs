@@ -272,7 +272,7 @@ mod tests {
             }
         }
     }
- 
+
     #[tokio::test]
     async fn provider_rejections_emit_one_auth_failure_and_terminal_event() {
         for provider in [
@@ -282,8 +282,7 @@ mod tests {
         ] {
             let bus = std::sync::Arc::new(cc_lb_control::InMemoryBus::new());
             let mut events = bus.subscribe_lifecycle();
-            let clock: cc_lb_clock::ClockHandle =
-                std::sync::Arc::new(cc_lb_clock::SystemClock);
+            let clock: cc_lb_clock::ClockHandle = std::sync::Arc::new(cc_lb_clock::SystemClock);
             let observer = LifecycleContext::new(
                 format!("auth-rejection-{provider:?}"),
                 bus.clone() as std::sync::Arc<dyn cc_lb_control::RequestEventBus>,

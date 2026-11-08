@@ -119,7 +119,8 @@ async fn preview_route_preserves_provider_metadata_trace_and_has_no_side_effects
             cc_lb_domain::Provider::Anthropic,
             StorageUpstreamKind::AnthropicApiKey,
             "/v1/messages",
-            br#"{"model":"claude-test","messages":[],"metadata":{"user_id":"session-preview"}}"# as &'static [u8],
+            br#"{"model":"claude-test","messages":[],"metadata":{"user_id":"session-preview"}}"#
+                as &'static [u8],
             "claude-test",
         ),
         (
@@ -162,7 +163,11 @@ async fn preview_route_preserves_provider_metadata_trace_and_has_no_side_effects
             .await
             .expect("provider preview succeeds");
 
-        assert_eq!(outcome.winner_upstream_id, Some(upstream.id), "{provider:?}");
+        assert_eq!(
+            outcome.winner_upstream_id,
+            Some(upstream.id),
+            "{provider:?}"
+        );
         assert_eq!(
             outcome
                 .trace
@@ -185,7 +190,9 @@ async fn preview_route_preserves_provider_metadata_trace_and_has_no_side_effects
             "{provider:?} cache session metadata",
         );
         assert_eq!(
-            state.upstream_calls.load(std::sync::atomic::Ordering::Relaxed),
+            state
+                .upstream_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "{provider:?} preview must never dispatch or reserve a provider request",
         );
