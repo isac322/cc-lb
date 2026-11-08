@@ -3425,6 +3425,7 @@ impl Lifecycle {
             stream_inter_output_avg_ms = tracing::field::Empty,
             provider_session_id = tracing::field::Empty,
             provider_connection_id = tracing::field::Empty,
+            total_bytes = tracing::field::Empty,
         );
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
