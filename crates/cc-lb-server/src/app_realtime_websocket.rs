@@ -29,6 +29,13 @@ fn realtime_payload_kind(payload: &[u8], binary: bool) -> cc_lb_upstream::Realti
     }
 }
 
+fn realtime_data_frame(message: &UpstreamMessage) -> bool {
+    matches!(
+        message,
+        UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)
+    )
+}
+
 fn transform_realtime_message(
     session: &RealtimeWebSocketSession,
     direction: cc_lb_upstream::RealtimeFrameDirection,
@@ -295,7 +302,10 @@ pub(super) async fn gemini_live_websocket_handler(
                 }
             };
             let Some(first) = first else {
-                observation.finish(StatusCode::SWITCHING_PROTOCOLS);
+                // Authentication and lifecycle admission have already
+                // completed, but no provider setup was received. Record this
+                // as a client cancellation rather than a successful upgrade.
+                observation.finish_client_closed();
                 let _ = downstream.send(Message::Close(None)).now_or_never();
                 return;
             };
@@ -411,6 +421,7 @@ async fn relay_realtime_websocket(
                         }
                         Some(Err(_)) | None => return RealtimeWebSocketTermination::DownstreamCancelled,
                     };
+                    let is_data = realtime_data_frame(&message);
                     let direction = if setup_pending {
                         cc_lb_upstream::RealtimeFrameDirection::Setup
                     } else {
@@ -428,7 +439,11 @@ async fn relay_realtime_websocket(
                     if upstream.send(message).await.is_err() {
                         return RealtimeWebSocketTermination::ProxyRelayError;
                     }
-                    setup_pending = false;
+                    // Ping/Pong control frames are relayed but do not
+                    // consume OpenAI's first-data-frame setup state.
+                    if is_data {
+                        setup_pending = false;
+                    }
                 }
                 message = upstream.next() => {
                     let message = match message {
@@ -519,5 +534,15 @@ mod tests {
         }
         drop(usage_tx);
         usage_worker.await.expect("usage worker must drain");
+    }
+
+    #[test]
+    fn realtime_control_frames_do_not_consume_openai_setup_state() {
+        assert!(!realtime_data_frame(&UpstreamMessage::Ping(Bytes::new())));
+        assert!(!realtime_data_frame(&UpstreamMessage::Pong(Bytes::new())));
+        assert!(realtime_data_frame(&UpstreamMessage::Text(
+            "response.create".to_owned().into()
+        )));
+        assert!(realtime_data_frame(&UpstreamMessage::Binary(Bytes::new())));
     }
 }

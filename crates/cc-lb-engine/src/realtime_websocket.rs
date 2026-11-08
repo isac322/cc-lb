@@ -35,6 +35,18 @@ pub enum RealtimeWebSocketTermination {
     DownstreamCancelled,
 }
 
+fn realtime_stream_complete(
+    termination: RealtimeWebSocketTermination,
+    usage_complete: bool,
+) -> bool {
+    match termination {
+        RealtimeWebSocketTermination::Completed => true,
+        RealtimeWebSocketTermination::ProviderClosed => usage_complete,
+        RealtimeWebSocketTermination::ProxyRelayError
+        | RealtimeWebSocketTermination::DownstreamCancelled => false,
+    }
+}
+
 fn realtime_terminal_outcome(
     termination: RealtimeWebSocketTermination,
     complete: bool,
@@ -220,6 +232,18 @@ impl RealtimeWebSocketObservation {
             observer.finish();
         }
     }
+
+    /// Finish an authenticated handshake whose client disconnected before
+    /// sending the provider setup frame. This is a cancellation, not a
+    /// successful WebSocket upgrade.
+    pub fn finish_client_closed(self) {
+        if let Some(observer) = &self.observer {
+            observer.set_client_closed(
+                StatusCode::from_u16(499).expect("499 is a valid client-closed status"),
+            );
+            observer.finish();
+        }
+    }
 }
 
 pub struct RealtimeWebSocketSession {
@@ -290,11 +314,11 @@ impl RealtimeWebSocketSession {
         termination: RealtimeWebSocketTermination,
     ) {
         let status = StatusCode::SWITCHING_PROTOCOLS;
-        // A provider close is successful only after its protocol completion
-        // marker reached the usage worker. A transport close by itself is an
-        // incomplete upstream termination.
-        let complete =
-            usage.complete || matches!(termination, RealtimeWebSocketTermination::Completed);
+        // A proxy relay error or downstream cancellation always wins over a
+        // completion marker from an earlier turn on the same connection.
+        // Completion is scoped to the terminal transport path, rather than
+        // allowing sticky usage state to turn a later failure into success.
+        let complete = realtime_stream_complete(termination, usage.complete);
         let (outcome, cause) = realtime_terminal_outcome(termination, complete);
         record_stream_termination_metric(
             outcome,
@@ -373,6 +397,15 @@ impl RealtimeWebSocketSession {
                         .to_owned(),
                         error_message: "realtime WebSocket stream ended before completion"
                             .to_owned(),
+                        body_bytes: Some(latency.total_bytes),
+                        body_chunk_count: Some(latency.stream_event_count),
+                        first_body_chunk_ms: latency.stream_first_output_ms,
+                        stream_last_chunk_ms: latency.stream_last_chunk_ms,
+                        stream_total_ms: Some(latency.stream_total_ms),
+                        ping_count: Some(latency.ping_count),
+                        stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
+                        provider_session_id: latency.provider_session_id.clone(),
+                        provider_connection_id: latency.provider_connection_id.clone(),
                     })
                 },
             });
@@ -487,8 +520,16 @@ impl RealtimeUsage {
             |value: &Value, name: &str| value.get(name).and_then(Value::as_u64).unwrap_or(0);
         match kind {
             RealtimeWebSocketKind::Openai => {
-                if value.get("type").and_then(Value::as_str) != Some("response.done") {
-                    return;
+                match value.get("type").and_then(Value::as_str) {
+                    Some("response.created") => {
+                        // A single OpenAI Realtime connection can carry
+                        // multiple response turns. Completion belongs to the
+                        // current turn, not the lifetime of the socket.
+                        self.complete = false;
+                        return;
+                    }
+                    Some("response.done") => {}
+                    _ => return,
                 }
                 self.complete = true;
                 let Some(usage) = value
@@ -535,6 +576,11 @@ impl RealtimeUsage {
                 }
             }
             RealtimeWebSocketKind::Gemini => {
+                if value.pointer("/serverContent/modelTurn").is_some() {
+                    // Live turns can share one session; a new model turn
+                    // invalidates the prior turn's completion marker.
+                    self.complete = false;
+                }
                 if value
                     .pointer("/serverContent/turnComplete")
                     .and_then(Value::as_bool)
@@ -592,8 +638,8 @@ pub fn gemini_setup_model(_auth: &crate::Authenticated, frame: &[u8]) -> Option<
 #[cfg(test)]
 mod tests {
     use super::{
+        realtime_stream_complete, record_stream_termination_metric, realtime_terminal_outcome,
         RealtimeStreamMetrics, RealtimeUsage, RealtimeWebSocketKind, RealtimeWebSocketTermination,
-        realtime_terminal_outcome, record_stream_termination_metric,
     };
     use crate::terminal_observer::{StreamTerminationCause, StreamTerminationOutcome};
     use bytes::Bytes;
@@ -624,6 +670,35 @@ mod tests {
             (12, 6, 8)
         );
     }
+    #[test]
+    fn realtime_usage_completion_is_reset_for_new_turns() {
+        let mut openai = RealtimeUsage::default();
+        openai.observe(
+            RealtimeWebSocketKind::Openai,
+            &Bytes::from_static(
+                br#"{"type":"response.done","response":{"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            ),
+        );
+        assert!(openai.complete);
+        openai.observe(
+            RealtimeWebSocketKind::Openai,
+            &Bytes::from_static(br#"{"type":"response.created"}"#),
+        );
+        assert!(!openai.complete);
+
+        let mut gemini = RealtimeUsage::default();
+        gemini.observe(
+            RealtimeWebSocketKind::Gemini,
+            &Bytes::from_static(br#"{"serverContent":{"turnComplete":true}}"#),
+        );
+        assert!(gemini.complete);
+        gemini.observe(
+            RealtimeWebSocketKind::Gemini,
+            &Bytes::from_static(br#"{"serverContent":{"modelTurn":{"parts":[]}}}"#),
+        );
+        assert!(!gemini.complete);
+    }
+
     #[test]
     fn realtime_openai_usage_propagates_image_details_only_for_openai() {
         let mut openai = RealtimeUsage::default();
@@ -826,6 +901,22 @@ mod tests {
                 (expected_outcome, expected_cause)
             );
         }
+    }
+
+    #[test]
+    fn realtime_completion_does_not_stick_to_later_failures() {
+        assert!(realtime_stream_complete(
+            RealtimeWebSocketTermination::ProviderClosed,
+            true
+        ));
+        assert!(!realtime_stream_complete(
+            RealtimeWebSocketTermination::ProxyRelayError,
+            true
+        ));
+        assert!(!realtime_stream_complete(
+            RealtimeWebSocketTermination::DownstreamCancelled,
+            true
+        ));
     }
 
     #[test]
