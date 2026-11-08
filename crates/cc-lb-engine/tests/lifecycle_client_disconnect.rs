@@ -385,6 +385,10 @@ async fn native_provider_transform_failure_is_terminal_once() {
             "{provider:?} transform failure must use the generic inspection message: {text:?}",
         );
         assert!(
+            !text.contains("response_transform_error"),
+            "{provider:?} affinity-gated transform failure must not expose hook error framing: {text:?}",
+        );
+        assert!(
             !text.contains("forced post-output failure"),
             "{provider:?} transform failure must not expose hook error details: {text:?}",
         );

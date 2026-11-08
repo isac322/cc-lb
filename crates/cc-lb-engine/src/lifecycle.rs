@@ -7034,12 +7034,21 @@ impl Lifecycle {
                                                     || transformed_output_started
                                                     || !downstream_stream_is_identity
                                                 {
-                                                    let frame = make_stream_error_frame(
-                                                        response_affinity_context.capability,
-                                                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                                        false,
-                                                    );
+                                                    let frame = if success_sse_affinity_gate {
+                                                        // The affinity gate must not expose transform
+                                                        // hook details to the client.
+                                                        make_stream_error_frame(
+                                                            response_affinity_context.capability,
+                                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                            false,
+                                                        )
+                                                    } else {
+                                                        make_response_transform_error_frame(
+                                                            response_affinity_context.capability,
+                                                            &error,
+                                                        )
+                                                    };
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
                                                         && !upstream_error_status
