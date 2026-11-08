@@ -446,7 +446,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observed.mode, "implicit");
-        assert_eq!(observed.retention_secs, Some(OPENAI_MODERN_DEFAULT_RETENTION_SECS));
+        assert_eq!(
+            observed.retention_secs,
+            Some(OPENAI_MODERN_DEFAULT_RETENTION_SECS)
+        );
         assert_eq!(
             observed.boundary.as_deref(),
             Some("initial_developer=0;latest_message=0;earlier_messages=1")
@@ -466,7 +469,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observed.mode, "explicit");
-        assert_eq!(observed.retention_secs, Some(OPENAI_MODERN_DEFAULT_RETENTION_SECS));
+        assert_eq!(
+            observed.retention_secs,
+            Some(OPENAI_MODERN_DEFAULT_RETENTION_SECS)
+        );
     }
 
     #[test]

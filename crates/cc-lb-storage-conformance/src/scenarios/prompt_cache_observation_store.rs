@@ -329,7 +329,6 @@ where
     .await
 }
 
-
 /// Populate a store, drop the first storage handle, reopen the same backing
 /// storage, and verify hydration/listing at the injected clock timestamp returns
 /// only non-expired observations. This covers persistence across restart,

@@ -473,7 +473,10 @@ mod tests {
 
         let taken = RequestDiagnostics::take_from(&mut event);
         assert_eq!(
-            taken.native_cache.as_ref().and_then(|cache| cache.cached_tokens),
+            taken
+                .native_cache
+                .as_ref()
+                .and_then(|cache| cache.cached_tokens),
             Some(256)
         );
         assert_eq!(taken, cloned);
