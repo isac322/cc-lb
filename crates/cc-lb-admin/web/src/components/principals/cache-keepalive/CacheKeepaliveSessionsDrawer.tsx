@@ -407,22 +407,31 @@ function SessionListSkeleton() {
 function useFlipReorder(
   listElement: HTMLUListElement | null,
   items: unknown[],
+  layoutKey: string,
 ) {
   const oldRects = React.useRef<Record<string, DOMRect>>({});
+  const oldOrder = React.useRef<Record<string, number>>({});
   const seenIds = React.useRef<Set<string>>(new Set());
+  const prevLayoutKey = React.useRef<string>(layoutKey);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: items is the trigger
+  // biome-ignore lint/correctness/useExhaustiveDependencies: items and layoutKey are the triggers
   React.useLayoutEffect(() => {
     if (!listElement) return;
     if (window.PAUSE_ANIMATIONS) return;
 
+    const layoutChanged = prevLayoutKey.current !== layoutKey;
+    prevLayoutKey.current = layoutKey;
+
     const children = Array.from(listElement.children) as HTMLElement[];
     const previousRects = oldRects.current;
+    const previousOrder = oldOrder.current;
     const nextRects: Record<string, DOMRect> = {};
+    const nextOrder: Record<string, number> = {};
     const measurements: {
       child: HTMLElement;
       key: string;
       rect: DOMRect;
+      index: number;
     }[] = [];
 
     // FLIP's geometry phase must finish before any transform/style write.
@@ -431,17 +440,28 @@ function useFlipReorder(
       if (!key) continue;
 
       const rect = child.getBoundingClientRect();
+      const index = measurements.length;
       nextRects[key] = rect;
-      measurements.push({ child, key, rect });
+      nextOrder[key] = index;
+      measurements.push({ child, key, rect, index });
     }
     oldRects.current = nextRects;
+    oldOrder.current = nextOrder;
 
-    for (const { child, key, rect } of measurements) {
+    if (layoutChanged) {
+      for (const { key } of measurements) {
+        seenIds.current.add(key);
+      }
+      return;
+    }
+
+    for (const { child, key, rect, index } of measurements) {
       const oldRect = previousRects[key];
+      const oldIndex = previousOrder[key];
 
       if (oldRect) {
         const deltaY = oldRect.top - rect.top;
-        if (deltaY !== 0) {
+        if (oldIndex !== undefined && oldIndex !== index && deltaY !== 0) {
           child.style.transform = `translateY(${deltaY}px)`;
           child.style.transition = 'none';
           child.style.position = 'relative';
@@ -478,7 +498,7 @@ function useFlipReorder(
     for (const { key } of measurements) {
       seenIds.current.add(key);
     }
-  }, [items, listElement]);
+  }, [items, layoutKey, listElement]);
 }
 
 export function CacheKeepaliveSessionsDrawer({
@@ -575,7 +595,8 @@ export function CacheKeepaliveSessionsDrawer({
     return [...groups.entries()];
   }, [visibleRows]);
 
-  useFlipReorder(listElement, visibleRows);
+  const flipLayoutKey = `${groupMode}:${selected?.id ?? ''}:${showNotTracked}:${[...selectedStatuses].sort().join(',')}:${[...collapsedGroups].sort().join(',')}`;
+  useFlipReorder(listElement, visibleRows, flipLayoutKey);
 
   // Pagination remains strictly user-driven via the "Loading older sessions..."
   // control so opening the drawer never auto-drains multi-page retention history.
