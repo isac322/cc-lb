@@ -71,6 +71,7 @@ pub mod prelude;
 mod tests;
 
 use cc_lb_plugin_wire::{
+    FilterRequest, FilterResponse, ShapeRequest, ShapeResponse,
     schema::{ProviderFamily, WireVersion},
     v1, v2,
 };
@@ -375,7 +376,8 @@ impl<'a> ConformanceSuite<'a> {
                     let _ = session.call_filter(fixtures::sample_filter_request());
                 }
                 Some(WireVersion::V2) => {
-                    let _ = session.call_filter(fixtures::sample_filter_request_v2(self.provider));
+                    let _ =
+                        session.call_filter_wire(fixtures::sample_filter_request_v2(self.provider));
                 }
                 None => unreachable!(),
             },
@@ -384,11 +386,11 @@ impl<'a> ConformanceSuite<'a> {
                     match version {
                         WireVersion::V1 => {
                             let _ = session
-                                .call_shape(fixtures::sample_shape_request_for(self.provider));
+                                .call_shape_wire(fixtures::sample_shape_request_for(self.provider));
                         }
                         WireVersion::V2 => {
                             let _ = session
-                                .call_shape(fixtures::sample_shape_request_v2(self.provider));
+                                .call_shape_wire(fixtures::sample_shape_request_v2(self.provider));
                         }
                     }
                 }
@@ -482,14 +484,30 @@ impl PluginSession {
         self.dispatch.has_sse_event_transform()
     }
 
+    /// Round-trip a [`FilterRequest`] through the V1 guest boundary.
+    /// Panics if this session is not Filter-kind or does not select wire V1.
+    pub fn call_filter(&self, request: FilterRequest) -> FilterResponse {
+        assert!(
+            matches!(self.kind, ConformanceKind::Filter),
+            "call_filter requires HookKind::Filter, got {:?}",
+            self.kind.slot_kind()
+        );
+        assert_eq!(
+            self.dispatch.filter_wire_version(),
+            Some(WireVersion::V1),
+            "legacy call_filter requires a V1 filter hook"
+        );
+        self.call_filter_wire(request)
+    }
+
     /// Round-trip a filter request using the selected hook's declared wire version.
-    pub fn call_filter<R>(&self, request: R) -> R::Response
+    pub fn call_filter_wire<R>(&self, request: R) -> R::Response
     where
         R: FilterWireRequest,
     {
         assert!(
             matches!(self.kind, ConformanceKind::Filter),
-            "call_filter requires HookKind::Filter, got {:?}",
+            "call_filter_wire requires HookKind::Filter, got {:?}",
             self.kind.slot_kind()
         );
         assert_eq!(
@@ -503,14 +521,30 @@ impl PluginSession {
             .expect("guest filter hook must complete without trap")
     }
 
+    /// Round-trip a [`ShapeRequest`] through the V1 guest boundary.
+    /// Panics if this session is not Shape-kind or does not select wire V1.
+    pub fn call_shape(&self, request: ShapeRequest) -> ShapeResponse {
+        assert!(
+            matches!(self.kind, ConformanceKind::Shape),
+            "call_shape requires HookKind::Shape, got {:?}",
+            self.kind.slot_kind()
+        );
+        assert_eq!(
+            self.dispatch.shape_wire_version(),
+            Some(WireVersion::V1),
+            "legacy call_shape requires a V1 shape hook"
+        );
+        self.call_shape_wire(request)
+    }
+
     /// Round-trip a shape request using the selected hook's declared wire version.
-    pub fn call_shape<R>(&self, request: R) -> R::Response
+    pub fn call_shape_wire<R>(&self, request: R) -> R::Response
     where
         R: ShapeWireRequest,
     {
         assert!(
             matches!(self.kind, ConformanceKind::Shape),
-            "call_shape requires HookKind::Shape, got {:?}",
+            "call_shape_wire requires HookKind::Shape, got {:?}",
             self.kind.slot_kind()
         );
         assert_eq!(
