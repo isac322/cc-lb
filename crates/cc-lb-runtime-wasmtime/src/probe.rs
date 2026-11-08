@@ -79,6 +79,10 @@ pub(crate) fn probe_hook_dispatch(
         (HookKind::TransformSseEvent, WireVersion::V2) => {
             probe_transform_sse_event_v2(&cell, provider, export)
         }
+        (HookKind::TransformRealtimeFrame, WireVersion::V1) => Err(probe_failed(
+            HookKind::TransformRealtimeFrame,
+            "wire v1 is unsupported for realtime frame".into(),
+        )),
         (HookKind::TransformRealtimeFrame, WireVersion::V2) => {
             probe_transform_realtime_frame_v2(&cell, provider, export)
         }

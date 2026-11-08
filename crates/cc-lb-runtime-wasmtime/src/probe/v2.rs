@@ -173,7 +173,7 @@ fn sample_frame(provider: ProviderFamily) -> TransformRealtimeFrameRequest {
         canonical_model_id: Box::from(sample_model(provider)),
         direction: Box::from("provider_to_client"),
         kind: Box::from("json"),
-        payload: Box::from(br#"{"type":"probe"}"#),
+        payload: Box::from(&br#"{"type":"probe"}"#[..]),
     }
 }
 
