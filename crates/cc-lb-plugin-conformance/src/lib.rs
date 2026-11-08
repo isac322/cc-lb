@@ -71,15 +71,127 @@ pub mod prelude;
 mod tests;
 
 use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ShapeRequest,
-    ShapeResponse,
+    FilterRequest, FilterResponse, ShapeRequest, ShapeResponse,
+    schema::{ProviderFamily, WireVersion},
+    v1, v2,
 };
 use cc_lb_runtime_wasmtime::{
-    HookKind, HotEngineConfig, ModuleInspection, RuntimeSlotKey, WasmtimeRuntime, admit_wasm,
-    inspect_wasm,
+    HookKind, HotEngineConfig, ModuleInspection, RuntimeSlotKey, WasmPluginWireDispatch,
+    WasmtimeRuntime, admit_wasm, inspect_wasm,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
+
+/// A request that can be encoded for a selected filter wire version.
+pub trait FilterWireRequest {
+    type Response;
+    const VERSION: WireVersion;
+    fn encode(&self) -> AlignedVec<16>;
+    fn decode(bytes: &[u8]) -> Self::Response;
+}
+
+/// A request that can be encoded for a selected shape wire version.
+pub trait ShapeWireRequest {
+    type Response;
+    const VERSION: WireVersion;
+    fn encode(&self) -> AlignedVec<16>;
+    fn decode(bytes: &[u8]) -> Self::Response;
+}
+
+/// A request that can be encoded for a selected buffered-response wire version.
+pub trait TransformResponseWireRequest {
+    type Response;
+    const VERSION: WireVersion;
+    fn encode(&self) -> AlignedVec<16>;
+    fn decode(bytes: &[u8]) -> Self::Response;
+}
+
+/// A request that can be encoded for a selected SSE-event wire version.
+pub trait TransformSseWireRequest {
+    type Response;
+    const VERSION: WireVersion;
+    fn encode(&self) -> AlignedVec<16>;
+    fn decode(bytes: &[u8]) -> Self::Response;
+}
+
+macro_rules! impl_wire_request {
+    ($trait_name:ident, $request:path, $response:path, $archived:path, $version:expr) => {
+        impl $trait_name for $request {
+            type Response = $response;
+            const VERSION: WireVersion = $version;
+
+            fn encode(&self) -> AlignedVec<16> {
+                rkyv::to_bytes::<RkyvError>(self).expect("rkyv encode conformance request")
+            }
+
+            fn decode(bytes: &[u8]) -> Self::Response {
+                let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
+                aligned.extend_from_slice(bytes);
+                let archived = rkyv::access::<$archived, RkyvError>(&aligned)
+                    .expect("rkyv access conformance response");
+                rkyv::deserialize::<$response, RkyvError>(archived)
+                    .expect("rkyv deserialize conformance response")
+            }
+        }
+    };
+}
+
+impl_wire_request!(
+    FilterWireRequest,
+    v1::FilterRequest,
+    v1::FilterResponse,
+    v1::ArchivedFilterResponse,
+    WireVersion::V1
+);
+impl_wire_request!(
+    FilterWireRequest,
+    v2::FilterRequest,
+    v2::FilterResponse,
+    v2::ArchivedFilterResponse,
+    WireVersion::V2
+);
+impl_wire_request!(
+    ShapeWireRequest,
+    v1::ShapeRequest,
+    v1::ShapeResponse,
+    v1::ArchivedShapeResponse,
+    WireVersion::V1
+);
+impl_wire_request!(
+    ShapeWireRequest,
+    v2::ShapeRequest,
+    v2::ShapeResponse,
+    v2::ArchivedShapeResponse,
+    WireVersion::V2
+);
+impl_wire_request!(
+    TransformResponseWireRequest,
+    v1::TransformResponseRequest,
+    v1::TransformResponseResult,
+    v1::ArchivedTransformResponseResult,
+    WireVersion::V1
+);
+impl_wire_request!(
+    TransformResponseWireRequest,
+    v2::TransformResponseRequest,
+    v2::TransformResponseResult,
+    v2::ArchivedTransformResponseResult,
+    WireVersion::V2
+);
+impl_wire_request!(
+    TransformSseWireRequest,
+    v1::TransformSseEventRequest,
+    v1::TransformSseEventResult,
+    v1::ArchivedTransformSseEventResult,
+    WireVersion::V1
+);
+impl_wire_request!(
+    TransformSseWireRequest,
+    v2::TransformSseEventRequest,
+    v2::TransformSseEventResult,
+    v2::ArchivedTransformSseEventResult,
+    WireVersion::V2
+);
 
 /// Fluent builder pinning the wasm bytes + slot kind + engine budget.
 ///
@@ -88,6 +200,10 @@ use rkyv::util::AlignedVec;
 pub struct ConformanceSuite<'a> {
     wasm: &'a [u8],
     kind: ConformanceKind,
+    provider: ProviderFamily,
+    // Explicit Anthropic selection uses provider-native fixtures; legacy
+    // constructors preserve the original no-base-url fixture.
+    provider_selected: bool,
     plugin_name: String,
     engine_config: HotEngineConfig,
 }
@@ -127,6 +243,16 @@ impl<'a> ConformanceSuite<'a> {
         Self::with_kind(wasm, ConformanceKind::Shape)
     }
 
+    /// Build a Filter-slot suite for a selected provider.
+    pub fn for_filter_provider(wasm: &'a [u8], provider: ProviderFamily) -> Self {
+        Self::for_filter(wasm).with_provider(provider)
+    }
+
+    /// Build a Shape-slot suite for a selected provider.
+    pub fn for_shape_provider(wasm: &'a [u8], provider: ProviderFamily) -> Self {
+        Self::for_shape(wasm).with_provider(provider)
+    }
+
     pub fn from_wasm(wasm: &'a [u8]) -> Self {
         let mut matches = ConformanceKind::ALL
             .into_iter()
@@ -146,9 +272,23 @@ impl<'a> ConformanceSuite<'a> {
         Self {
             wasm,
             kind,
+            provider: ProviderFamily::Anthropic,
+            provider_selected: false,
             plugin_name: format!("conformance-{label}"),
             engine_config: HotEngineConfig::default(),
         }
+    }
+
+    /// Select the provider-qualified exports and fixture family.
+    pub fn with_provider(mut self, provider: ProviderFamily) -> Self {
+        self.provider = provider;
+        self.provider_selected = true;
+        self
+    }
+
+    /// The provider selected by this suite.
+    pub fn provider(&self) -> ProviderFamily {
+        self.provider
     }
 
     /// Override the plugin name the suite uses when registering the slot.
@@ -192,22 +332,29 @@ impl<'a> ConformanceSuite<'a> {
         let runtime = WasmtimeRuntime::new(self.engine_config.clone())
             .expect("wasmtime engine build must succeed");
         let slot_key = RuntimeSlotKey::global(self.plugin_name.clone());
-        match self.kind {
-            ConformanceKind::Filter => {
-                runtime
-                    .register_filter(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                    .expect("register_filter must accept a conforming plugin");
-            }
-            ConformanceKind::Shape => {
-                runtime
-                    .register_shape(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                    .expect("register_shape must accept a conforming plugin");
-            }
-        }
+        let slot = match self.kind {
+            ConformanceKind::Filter => runtime
+                .register_filter(slot_key.clone(), self.plugin_name.clone(), self.wasm)
+                .expect("register_filter must accept a conforming plugin"),
+            ConformanceKind::Shape => runtime
+                .register_shape(slot_key.clone(), self.plugin_name.clone(), self.wasm)
+                .expect("register_shape must accept a conforming plugin"),
+        };
+        let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc())
+            .for_provider(self.provider)
+            .unwrap_or_else(|| {
+                panic!(
+                    "plugin does not export a usable {:?} hook for {:?}",
+                    self.kind.slot_kind(),
+                    self.provider
+                )
+            });
         PluginSession {
             runtime,
             slot_key,
             kind: self.kind,
+            provider: self.provider,
+            dispatch,
         }
     }
 
@@ -229,11 +376,76 @@ impl<'a> ConformanceSuite<'a> {
     pub fn run(&self) {
         let session = self.session();
         match self.kind {
-            ConformanceKind::Filter => {
-                let _ = session.call_filter(fixtures::sample_filter_request());
-            }
+            ConformanceKind::Filter => match session.dispatch.filter_wire_version() {
+                Some(WireVersion::V1) => {
+                    let _ = session.call_filter(fixtures::sample_filter_request());
+                }
+                Some(WireVersion::V2) => {
+                    let _ =
+                        session.call_filter_wire(fixtures::sample_filter_request_v2(self.provider));
+                }
+                None => unreachable!(),
+            },
             ConformanceKind::Shape => {
-                let _ = session.call_shape(fixtures::sample_shape_request());
+                if let Some(version) = session.dispatch.shape_wire_version() {
+                    match version {
+                        WireVersion::V1 => {
+                            let request = if self.provider_selected {
+                                fixtures::sample_shape_request_for(self.provider)
+                            } else {
+                                fixtures::sample_shape_request()
+                            };
+                            let _ = session.call_shape_wire(request);
+                        }
+                        WireVersion::V2 => {
+                            let _ = session
+                                .call_shape_wire(fixtures::sample_shape_request_v2(self.provider));
+                        }
+                    }
+                }
+                if session.dispatch.has_response_transform() {
+                    match session.dispatch.response_wire_version() {
+                        Some(WireVersion::V1) => {
+                            let request = if self.provider_selected {
+                                fixtures::sample_transform_response_request_for(self.provider)
+                            } else {
+                                fixtures::sample_transform_response_request()
+                            };
+                            let _ = session.call_transform_response(request);
+                        }
+                        Some(WireVersion::V2) => {
+                            let _ = session.call_transform_response(
+                                fixtures::sample_transform_response_request_v2(self.provider),
+                            );
+                        }
+                        None => unreachable!(),
+                    }
+                }
+                if session.dispatch.has_sse_event_transform() {
+                    match session.dispatch.sse_wire_version() {
+                        Some(WireVersion::V1) => {
+                            let request = if self.provider_selected {
+                                fixtures::sample_transform_sse_event_request_for(self.provider)
+                            } else {
+                                fixtures::sample_transform_sse_event_request()
+                            };
+                            let _ = session.call_transform_sse_event(request);
+                        }
+                        Some(WireVersion::V2) => {
+                            let _ = session.call_transform_sse_event(
+                                fixtures::sample_transform_sse_event_request_v2(self.provider),
+                            );
+                        }
+                        None => unreachable!(),
+                    }
+                }
+                if self.provider == ProviderFamily::Gemini
+                    && session.dispatch.has_shape_envelope_gemini()
+                {
+                    let _ = session.call_shape_envelope_gemini(
+                        fixtures::sample_gemini_shape_envelope_request(),
+                    );
+                }
             }
         }
     }
@@ -246,6 +458,8 @@ pub struct PluginSession {
     runtime: WasmtimeRuntime,
     slot_key: RuntimeSlotKey,
     kind: ConformanceKind,
+    provider: ProviderFamily,
+    dispatch: WasmPluginWireDispatch,
 }
 
 impl PluginSession {
@@ -265,45 +479,167 @@ impl PluginSession {
         &self.runtime
     }
 
-    /// Round-trip a [`FilterRequest`] through the guest boundary.
-    /// Panics if this session is not Filter-kind.
+    /// Provider selected for this session.
+    pub fn provider(&self) -> ProviderFamily {
+        self.provider
+    }
+
+    /// Whether the optional Gemini envelope export is present and active.
+    pub fn has_shape_envelope_gemini(&self) -> bool {
+        self.dispatch.has_shape_envelope_gemini()
+    }
+
+    /// Whether a buffered response transform is present and active.
+    pub fn has_response_transform(&self) -> bool {
+        self.dispatch.has_response_transform()
+    }
+
+    /// Whether an SSE transform is present and active.
+    pub fn has_sse_event_transform(&self) -> bool {
+        self.dispatch.has_sse_event_transform()
+    }
+
+    /// Round-trip a [`FilterRequest`] through the V1 guest boundary.
+    /// Panics if this session is not Filter-kind or does not select wire V1.
     pub fn call_filter(&self, request: FilterRequest) -> FilterResponse {
         assert!(
             matches!(self.kind, ConformanceKind::Filter),
             "call_filter requires HookKind::Filter, got {:?}",
             self.kind.slot_kind()
         );
-        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
-        let out_bytes = self
-            .runtime
-            .call_filter(&self.slot_key, in_bytes.as_slice())
-            .expect("guest cc_lb_filter must complete without trap");
-        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
-        aligned.extend_from_slice(&out_bytes);
-        let archived = rkyv::access::<ArchivedFilterResponse, RkyvError>(&aligned)
-            .expect("rkyv access FilterResponse");
-        rkyv::deserialize::<FilterResponse, RkyvError>(archived)
-            .expect("rkyv deserialize FilterResponse")
+        assert_eq!(
+            self.dispatch.filter_wire_version(),
+            Some(WireVersion::V1),
+            "legacy call_filter requires a V1 filter hook"
+        );
+        self.call_filter_wire(request)
     }
 
-    /// Round-trip a [`ShapeRequest`] through the guest boundary.
-    /// Panics if this session is not Shape-kind.
+    /// Round-trip a filter request using the selected hook's declared wire version.
+    pub fn call_filter_wire<R>(&self, request: R) -> R::Response
+    where
+        R: FilterWireRequest,
+    {
+        assert!(
+            matches!(self.kind, ConformanceKind::Filter),
+            "call_filter_wire requires HookKind::Filter, got {:?}",
+            self.kind.slot_kind()
+        );
+        assert_eq!(
+            self.dispatch.filter_wire_version(),
+            Some(R::VERSION),
+            "filter fixture wire version does not match the plugin declaration"
+        );
+        let in_bytes = request.encode();
+        self.dispatch
+            .call_filter_scoped(&in_bytes, R::decode)
+            .expect("guest filter hook must complete without trap")
+    }
+
+    /// Round-trip a [`ShapeRequest`] through the V1 guest boundary.
+    /// Panics if this session is not Shape-kind or does not select wire V1.
     pub fn call_shape(&self, request: ShapeRequest) -> ShapeResponse {
         assert!(
             matches!(self.kind, ConformanceKind::Shape),
             "call_shape requires HookKind::Shape, got {:?}",
             self.kind.slot_kind()
         );
-        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeRequest");
-        let out_bytes = self
-            .runtime
-            .call_shape(&self.slot_key, in_bytes.as_slice())
-            .expect("guest cc_lb_shape must complete without trap");
-        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
-        aligned.extend_from_slice(&out_bytes);
-        let archived = rkyv::access::<ArchivedShapeResponse, RkyvError>(&aligned)
-            .expect("rkyv access ShapeResponse");
-        rkyv::deserialize::<ShapeResponse, RkyvError>(archived)
-            .expect("rkyv deserialize ShapeResponse")
+        assert_eq!(
+            self.dispatch.shape_wire_version(),
+            Some(WireVersion::V1),
+            "legacy call_shape requires a V1 shape hook"
+        );
+        self.call_shape_wire(request)
+    }
+
+    /// Round-trip a shape request using the selected hook's declared wire version.
+    pub fn call_shape_wire<R>(&self, request: R) -> R::Response
+    where
+        R: ShapeWireRequest,
+    {
+        assert!(
+            matches!(self.kind, ConformanceKind::Shape),
+            "call_shape_wire requires HookKind::Shape, got {:?}",
+            self.kind.slot_kind()
+        );
+        assert_eq!(
+            self.dispatch.shape_wire_version(),
+            Some(R::VERSION),
+            "shape fixture wire version does not match the plugin declaration"
+        );
+        let in_bytes = request.encode();
+        self.dispatch
+            .call_shape_scoped(&in_bytes, R::decode)
+            .expect("guest shape hook must complete without trap")
+    }
+
+    /// Round-trip a buffered response request using V1 or V2 as declared by the hook.
+    pub fn call_transform_response<R>(&self, request: R) -> R::Response
+    where
+        R: TransformResponseWireRequest,
+    {
+        assert!(
+            matches!(self.kind, ConformanceKind::Shape),
+            "call_transform_response requires a Shape-kind session"
+        );
+        assert_eq!(
+            self.dispatch.response_wire_version(),
+            Some(R::VERSION),
+            "response fixture wire version does not match the plugin declaration"
+        );
+        let in_bytes = request.encode();
+        self.dispatch
+            .call_transform_response_scoped(&in_bytes, R::decode)
+            .expect("guest response hook must complete without trap")
+    }
+
+    /// Round-trip an SSE event request using V1 or V2 as declared by the hook.
+    pub fn call_transform_sse_event<R>(&self, request: R) -> R::Response
+    where
+        R: TransformSseWireRequest,
+    {
+        assert!(
+            matches!(self.kind, ConformanceKind::Shape),
+            "call_transform_sse_event requires a Shape-kind session"
+        );
+        assert_eq!(
+            self.dispatch.sse_wire_version(),
+            Some(R::VERSION),
+            "SSE fixture wire version does not match the plugin declaration"
+        );
+        let in_bytes = request.encode();
+        self.dispatch
+            .call_transform_sse_event_scoped(&in_bytes, R::decode)
+            .expect("guest SSE hook must complete without trap")
+    }
+
+    /// Round-trip the optional Gemini envelope hook.
+    pub fn call_shape_envelope_gemini(
+        &self,
+        request: v2::ShapeEnvelopeGeminiRequest,
+    ) -> v2::ShapeEnvelopeGeminiResponse {
+        assert_eq!(
+            self.provider,
+            ProviderFamily::Gemini,
+            "Gemini envelope calls require a Gemini-selected session"
+        );
+        assert_eq!(
+            self.dispatch.envelope_wire_version(),
+            Some(WireVersion::V2),
+            "Gemini envelope must declare wire V2"
+        );
+        let in_bytes =
+            rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeEnvelopeGeminiRequest");
+        self.dispatch
+            .call_shape_envelope_gemini_scoped(&in_bytes, |bytes| {
+                let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
+                aligned.extend_from_slice(bytes);
+                let archived =
+                    rkyv::access::<v2::ArchivedShapeEnvelopeGeminiResponse, RkyvError>(&aligned)
+                        .expect("rkyv access ShapeEnvelopeGeminiResponse");
+                rkyv::deserialize::<v2::ShapeEnvelopeGeminiResponse, RkyvError>(archived)
+                    .expect("rkyv deserialize ShapeEnvelopeGeminiResponse")
+            })
+            .expect("guest Gemini envelope hook must complete without trap")
     }
 }
