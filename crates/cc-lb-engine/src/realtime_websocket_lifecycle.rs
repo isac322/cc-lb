@@ -320,6 +320,10 @@ impl Lifecycle {
                 reservation: limit.as_mut().and_then(|limit| limit.reservation.take()),
                 limit_engine: self.limit_engine.clone(),
                 model: model.unwrap_or_default().to_owned(),
+                principal: principal.clone(),
+                upstream: routed.route.upstream.clone(),
+                path: path.to_owned(),
+                dialect: routed.route.dialect.clone(),
             })
         }
         .await;

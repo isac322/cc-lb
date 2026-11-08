@@ -107,6 +107,55 @@ pub trait SseEventTransformHook: Send + Sync {
         request: TransformSseEventRequest,
     ) -> Result<TransformSseEventResult, ResponseTransformError>;
 }
+/// Direction of a provider realtime/live frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RealtimeFrameDirection {
+    Setup,
+    ClientToProvider,
+    ProviderToClient,
+}
+
+/// Payload encoding of a provider realtime/live frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RealtimeFrameKind {
+    Json,
+    Text,
+    Binary,
+}
+
+/// Provider-qualified realtime/live frame transform input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransformRealtimeFrameRequest {
+    pub request_id: String,
+    pub principal: Principal,
+    pub upstream: Upstream,
+    pub request_method: Method,
+    pub request_path: String,
+    pub canonical_model_id: String,
+    pub direction: RealtimeFrameDirection,
+    pub kind: RealtimeFrameKind,
+    pub payload: Bytes,
+}
+
+/// Provider-qualified realtime/live frame transform output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TransformRealtimeFrameResult {
+    Unchanged,
+    Replace {
+        kind: RealtimeFrameKind,
+        payload: Bytes,
+    },
+    Drop,
+}
+
+/// Provider-qualified realtime/live frame response transform boundary.
+pub trait RealtimeFrameTransformHook: Send + Sync {
+    fn transform_realtime_frame(
+        &self,
+        request: TransformRealtimeFrameRequest,
+    ) -> Result<TransformRealtimeFrameResult, ResponseTransformError>;
+}
+
 
 /// Final Code Assist envelope, before the signer applies stored credentials.
 #[derive(Clone, Copy, Debug)]

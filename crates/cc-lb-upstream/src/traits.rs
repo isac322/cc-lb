@@ -30,6 +30,10 @@ pub trait UpstreamDialect: Send + Sync {
     fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
         None
     }
+    /// Provider-qualified realtime/live frame transform hook, if any.
+    fn realtime_frame_transform_hook(&self) -> Option<&dyn crate::RealtimeFrameTransformHook> {
+        None
+    }
 }
 
 /// Signer boundary for applying credentials to shaped requests.

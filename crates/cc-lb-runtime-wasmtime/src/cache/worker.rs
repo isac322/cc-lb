@@ -13,6 +13,7 @@ pub(super) struct WorkerInstance {
     pub(super) shape_fn: Option<TypedFunc<(u32, u32), u64>>,
     pub(super) transform_response_fn: Option<TypedFunc<(u32, u32), u64>>,
     pub(super) transform_sse_event_fn: Option<TypedFunc<(u32, u32), u64>>,
+    pub(super) transform_realtime_frame_fn: Option<TypedFunc<(u32, u32), u64>>,
     pub(super) shape_envelope_gemini_fn: Option<TypedFunc<(u32, u32), u64>>,
 }
 
@@ -57,13 +58,15 @@ pub(super) fn build_worker_instance(
         shape_fn,
         transform_response_fn,
         transform_sse_event_fn,
+        transform_realtime_frame_fn,
         shape_envelope_gemini_fn,
     ) = match hook {
-        HookKind::Filter => (Some(hook_fn), None, None, None, None),
-        HookKind::Shape => (None, Some(hook_fn), None, None, None),
-        HookKind::TransformResponse => (None, None, Some(hook_fn), None, None),
-        HookKind::TransformSseEvent => (None, None, None, Some(hook_fn), None),
-        HookKind::ShapeEnvelopeGemini => (None, None, None, None, Some(hook_fn)),
+        HookKind::Filter => (Some(hook_fn), None, None, None, None, None),
+        HookKind::Shape => (None, Some(hook_fn), None, None, None, None),
+        HookKind::TransformResponse => (None, None, Some(hook_fn), None, None, None),
+        HookKind::TransformSseEvent => (None, None, None, Some(hook_fn), None, None),
+        HookKind::TransformRealtimeFrame => (None, None, None, None, Some(hook_fn), None),
+        HookKind::ShapeEnvelopeGemini => (None, None, None, None, None, Some(hook_fn)),
     };
 
     Ok(WorkerInstance {
@@ -74,6 +77,7 @@ pub(super) fn build_worker_instance(
         shape_fn,
         transform_response_fn,
         transform_sse_event_fn,
+        transform_realtime_frame_fn,
         shape_envelope_gemini_fn,
     })
 }

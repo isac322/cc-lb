@@ -19,7 +19,55 @@ fn upstream_close_frame(
         reason: frame.reason.to_string().into(),
     }
 }
+fn realtime_payload_kind(payload: &[u8], binary: bool) -> cc_lb_upstream::RealtimeFrameKind {
+    if binary {
+        cc_lb_upstream::RealtimeFrameKind::Binary
+    } else if sonic_rs::from_slice::<serde_json::Value>(payload).is_ok() {
+        cc_lb_upstream::RealtimeFrameKind::Json
+    } else {
+        cc_lb_upstream::RealtimeFrameKind::Text
+    }
+}
 
+fn transform_realtime_message(
+    session: &RealtimeWebSocketSession,
+    direction: cc_lb_upstream::RealtimeFrameDirection,
+    message: UpstreamMessage,
+) -> Result<Option<UpstreamMessage>, ()> {
+    let (kind, payload) = match &message {
+        UpstreamMessage::Text(frame) => (
+            realtime_payload_kind(frame.as_bytes(), false),
+            Bytes::from(frame.clone()),
+        ),
+        UpstreamMessage::Binary(frame) => (
+            realtime_payload_kind(frame, true),
+            frame.clone(),
+        ),
+        _ => return Ok(Some(message)),
+    };
+    match session
+        .transform_frame(direction, kind, payload)
+        .map_err(|_| ())?
+    {
+        cc_lb_upstream::TransformRealtimeFrameResult::Unchanged => Ok(Some(message)),
+        cc_lb_upstream::TransformRealtimeFrameResult::Drop => Ok(None),
+        cc_lb_upstream::TransformRealtimeFrameResult::Replace { kind, payload } => {
+            Ok(Some(match kind {
+                cc_lb_upstream::RealtimeFrameKind::Binary => UpstreamMessage::Binary(payload),
+                cc_lb_upstream::RealtimeFrameKind::Json
+                | cc_lb_upstream::RealtimeFrameKind::Text => UpstreamMessage::Text(
+                    String::from_utf8(payload.to_vec())
+                        .map_err(|_| ())?
+                        .into(),
+                ),
+            }))
+        }
+    }
+}
+
+fn realtime_client_closed() -> StatusCode {
+    StatusCode::from_u16(499).expect("valid client-closed status")
+}
 type RealtimeProvider = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 fn websocket_http_error(error: &WebSocketError) -> Response<Body> {
@@ -298,6 +346,18 @@ pub(super) async fn gemini_live_websocket_handler(
                 }
             };
             session.connected();
+            let first = match transform_realtime_message(
+                &session,
+                cc_lb_upstream::RealtimeFrameDirection::Setup,
+                first,
+            ) {
+                Ok(Some(first)) => first,
+                Ok(None) | Err(()) => {
+                    session.finish(RealtimeUsage::default(), StatusCode::BAD_GATEWAY);
+                    let _ = downstream.send(Message::Close(None)).now_or_never();
+                    return;
+                }
+            };
             let sent = tokio::select! {
                 sent = upstream.send(first) => sent.is_ok(),
                 _ = state.drain_controller.wait_for_draining() => false,
@@ -342,28 +402,41 @@ async fn relay_realtime_websocket(
                             let frame = frame.map(downstream_close_frame);
                             let _ = upstream.send(UpstreamMessage::Close(frame)).await;
                             let _ = downstream.flush().await;
-                            return StatusCode::SWITCHING_PROTOCOLS;
+                            return realtime_client_closed();
                         }
-                        Some(Err(_)) | None => return StatusCode::SWITCHING_PROTOCOLS,
+                        Some(Err(_)) | None => return realtime_client_closed(),
+                    };
+                    let message = match transform_realtime_message(
+                        &session,
+                        cc_lb_upstream::RealtimeFrameDirection::ClientToProvider,
+                        message,
+                    ) {
+                        Ok(Some(message)) => message,
+                        Ok(None) => continue,
+                        Err(()) => return StatusCode::BAD_GATEWAY,
                     };
                     if upstream.send(message).await.is_err() { return StatusCode::BAD_GATEWAY; }
                 }
                 message = upstream.next() => {
                     let message = match message {
-                        Some(Ok(UpstreamMessage::Text(frame))) => {
-                            if kind.may_report_usage(frame.as_bytes()) {
+                        Some(Ok(message @ UpstreamMessage::Text(_))) => {
+                            if let UpstreamMessage::Text(frame) = &message
+                                && kind.may_report_usage(frame.as_bytes())
+                            {
                                 let _ = usage_tx.send(Bytes::from(frame.clone()));
                             }
-                            Message::Text(Bytes::from(frame).try_into().expect("valid provider text"))
+                            message
                         }
-                        Some(Ok(UpstreamMessage::Binary(frame))) => {
-                            if kind.may_report_usage(&frame) {
+                        Some(Ok(message @ UpstreamMessage::Binary(_))) => {
+                            if let UpstreamMessage::Binary(frame) = &message
+                                && kind.may_report_usage(frame)
+                            {
                                 let _ = usage_tx.send(frame.clone());
                             }
-                            Message::Binary(frame)
+                            message
                         }
-                        Some(Ok(UpstreamMessage::Ping(frame))) => Message::Ping(frame),
-                        Some(Ok(UpstreamMessage::Pong(frame))) => Message::Pong(frame),
+                        Some(Ok(message @ UpstreamMessage::Ping(_))) => message,
+                        Some(Ok(message @ UpstreamMessage::Pong(_))) => message,
                         Some(Ok(UpstreamMessage::Close(frame))) => {
                             let frame = frame.map(upstream_close_frame);
                             let _ = downstream.send(Message::Close(frame)).await;
@@ -373,7 +446,25 @@ async fn relay_realtime_websocket(
                         Some(Ok(UpstreamMessage::Frame(_))) => continue,
                         Some(Err(_)) | None => return StatusCode::BAD_GATEWAY,
                     };
-                    if downstream.send(message).await.is_err() { return StatusCode::SWITCHING_PROTOCOLS; }
+                    let message = match transform_realtime_message(
+                        &session,
+                        cc_lb_upstream::RealtimeFrameDirection::ProviderToClient,
+                        message,
+                    ) {
+                        Ok(Some(message)) => message,
+                        Ok(None) => continue,
+                        Err(()) => return StatusCode::BAD_GATEWAY,
+                    };
+                    let message = match message {
+                        UpstreamMessage::Text(frame) => {
+                            Message::Text(Bytes::from(frame).try_into().expect("valid provider text"))
+                        }
+                        UpstreamMessage::Binary(frame) => Message::Binary(frame),
+                        UpstreamMessage::Ping(frame) => Message::Ping(frame),
+                        UpstreamMessage::Pong(frame) => Message::Pong(frame),
+                        UpstreamMessage::Close(_) | UpstreamMessage::Frame(_) => continue,
+                    };
+                    if downstream.send(message).await.is_err() { return realtime_client_closed(); }
                 }
             }
         }

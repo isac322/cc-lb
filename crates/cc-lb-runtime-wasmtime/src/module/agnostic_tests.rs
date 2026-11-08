@@ -76,6 +76,10 @@ fn hook_export(hook: HookKind, filter_packed: u64, shape_packed: u64) -> String 
             r#"(func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)"#
                 .to_owned()
         }
+        HookKind::TransformRealtimeFrame => {
+            r#"(func (export "cc_lb_transform_realtime_frame") (param i32 i32) (result i64) i64.const 0)"#
+                .to_owned()
+        }
         HookKind::ShapeEnvelopeGemini => {
             r#"(func (export "cc_lb_shape_envelope_gemini") (param i32 i32) (result i64) i64.const 0)"#
                 .to_owned()

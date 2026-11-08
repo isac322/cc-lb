@@ -23,6 +23,7 @@ mod v2;
 use filter::probe_filter;
 use v2::{
     probe_envelope as probe_shape_envelope_gemini_v2,
+    probe_frame as probe_transform_realtime_frame_v2,
     probe_response as probe_transform_response_v2, probe_shape as probe_shape_v2,
     probe_sse as probe_transform_sse_event_v2,
 };
@@ -77,6 +78,9 @@ pub(crate) fn probe_hook_dispatch(
         }
         (HookKind::TransformSseEvent, WireVersion::V2) => {
             probe_transform_sse_event_v2(&cell, provider, export)
+        }
+        (HookKind::TransformRealtimeFrame, WireVersion::V2) => {
+            probe_transform_realtime_frame_v2(&cell, provider, export)
         }
         (HookKind::ShapeEnvelopeGemini, WireVersion::V2) => {
             probe_shape_envelope_gemini_v2(&cell, provider, export)

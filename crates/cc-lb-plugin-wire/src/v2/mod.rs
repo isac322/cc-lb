@@ -396,6 +396,53 @@ pub enum TransformSseEventResult {
     Replace { events: Box<[SseEvent]> },
     Drop,
 }
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[rkyv(derive(Debug))]
+pub struct TransformRealtimeFrameRequest {
+    pub request_id: Box<str>,
+    pub principal: Principal,
+    pub upstream: Upstream,
+    pub upstream_identity: UpstreamIdentity,
+    pub request_method: Box<str>,
+    pub request_path: Box<str>,
+    pub canonical_model_id: Box<str>,
+    pub direction: Box<str>,
+    pub kind: Box<str>,
+    pub payload: Box<[u8]>,
+}
+
+#[derive(Archive, Serialize)]
+pub struct TransformRealtimeFrameRequestRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub request_id: &'a str,
+    pub principal: PrincipalRef<'a>,
+    pub upstream: UpstreamRef<'a>,
+    pub upstream_identity: UpstreamIdentityRef<'a>,
+    #[rkyv(with = InlineAsBox)]
+    pub request_method: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub request_path: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub canonical_model_id: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub direction: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub kind: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub payload: &'a [u8],
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[rkyv(derive(Debug))]
+pub enum TransformRealtimeFrameResult {
+    Unchanged,
+    Replace {
+        kind: Box<str>,
+        payload: Box<[u8]>,
+    },
+    Drop,
+}
+
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]

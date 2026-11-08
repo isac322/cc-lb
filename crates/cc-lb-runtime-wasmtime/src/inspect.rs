@@ -36,10 +36,11 @@ const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v1";
 const QUALIFIED_PLUGIN_META_SECTION: &str = "cc_lb.plugin.v2";
 const REQUIRED_MEMORY_EXPORT: &str = "memory";
 const ALWAYS_REQUIRED_FUNC_EXPORTS: &[&str] = &["cc_lb_alloc", "cc_lb_free"];
-const SHAPE_OWNED_HOOKS: [HookKind; 4] = [
+const SHAPE_OWNED_HOOKS: [HookKind; 5] = [
     HookKind::Shape,
     HookKind::TransformResponse,
     HookKind::TransformSseEvent,
+    HookKind::TransformRealtimeFrame,
     HookKind::ShapeEnvelopeGemini,
 ];
 
@@ -283,9 +284,9 @@ fn require_hooks_for_slot(
         require_declared_hook_contracts(metadata)
     } else {
         match kind {
-            HookKind::TransformResponse | HookKind::TransformSseEvent => {
-                reject_shape_owned_hook_as_slot(kind)
-            }
+            HookKind::TransformResponse
+            | HookKind::TransformSseEvent
+            | HookKind::TransformRealtimeFrame => reject_shape_owned_hook_as_slot(kind),
             _ => require_declared_hook(metadata, kind, "this slot"),
         }
     }
@@ -355,7 +356,9 @@ fn reject_non_response_noop_modes(metadata: &PluginMetadata) -> Result<(), Wasmt
         if HookKind::parse_entrypoint(name).is_some_and(|(hook, _)| {
             matches!(
                 hook,
-                HookKind::Filter | HookKind::Shape | HookKind::ShapeEnvelopeGemini
+                HookKind::Filter
+                    | HookKind::Shape
+                    | HookKind::ShapeEnvelopeGemini
             )
         }) && hook_metadata.mode.is_noop()
         {
@@ -471,6 +474,11 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         }
         (HookKind::TransformSseEvent, WireVersion::V2) => {
             Some(<cc_lb_plugin_wire::v2::TransformSseEventRequest as WireSchema>::FINGERPRINT)
+        }
+        (HookKind::TransformRealtimeFrame, WireVersion::V2) => {
+            Some(
+                <cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT,
+            )
         }
         (HookKind::ShapeEnvelopeGemini, WireVersion::V2) => {
             Some(<cc_lb_plugin_wire::v2::ShapeEnvelopeGeminiRequest as WireSchema>::FINGERPRINT)

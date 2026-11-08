@@ -62,6 +62,7 @@ pub enum HookKind {
     Shape,
     TransformResponse,
     TransformSseEvent,
+    TransformRealtimeFrame,
     ShapeEnvelopeGemini,
 }
 impl HookKind {
@@ -71,6 +72,7 @@ impl HookKind {
             Self::Shape => "shape",
             Self::TransformResponse => "transform_response",
             Self::TransformSseEvent => "transform_sse_event",
+            Self::TransformRealtimeFrame => "transform_realtime_frame",
             Self::ShapeEnvelopeGemini => "shape_envelope_gemini",
         }
     }
@@ -80,6 +82,7 @@ impl HookKind {
             Self::Shape => "cc_lb_shape",
             Self::TransformResponse => "cc_lb_transform_response",
             Self::TransformSseEvent => "cc_lb_transform_sse_event",
+            Self::TransformRealtimeFrame => "cc_lb_transform_realtime_frame",
             Self::ShapeEnvelopeGemini => "cc_lb_shape_envelope_gemini",
         }
     }
@@ -99,8 +102,21 @@ impl HookKind {
             (Self::TransformSseEvent, ProviderFamily::Anthropic) => {
                 "cc_lb_transform_sse_event_anthropic"
             }
-            (Self::TransformSseEvent, ProviderFamily::Openai) => "cc_lb_transform_sse_event_openai",
-            (Self::TransformSseEvent, ProviderFamily::Gemini) => "cc_lb_transform_sse_event_gemini",
+            (Self::TransformSseEvent, ProviderFamily::Openai) => {
+                "cc_lb_transform_sse_event_openai"
+            }
+            (Self::TransformSseEvent, ProviderFamily::Gemini) => {
+                "cc_lb_transform_sse_event_gemini"
+            }
+            (Self::TransformRealtimeFrame, ProviderFamily::Anthropic) => {
+                "cc_lb_transform_realtime_frame_anthropic"
+            }
+            (Self::TransformRealtimeFrame, ProviderFamily::Openai) => {
+                "cc_lb_transform_realtime_frame_openai"
+            }
+            (Self::TransformRealtimeFrame, ProviderFamily::Gemini) => {
+                "cc_lb_transform_realtime_frame_gemini"
+            }
             (Self::ShapeEnvelopeGemini, _) => "cc_lb_shape_envelope_gemini",
         }
     }
@@ -121,6 +137,7 @@ impl HookKind {
             Self::Shape => "cc_lb.schema.shape",
             Self::TransformResponse => "cc_lb.schema.transform_response",
             Self::TransformSseEvent => "cc_lb.schema.transform_sse_event",
+            Self::TransformRealtimeFrame => "cc_lb.schema.transform_realtime_frame",
             Self::ShapeEnvelopeGemini => "cc_lb.schema.shape_envelope_gemini",
         }
     }
@@ -129,6 +146,7 @@ impl HookKind {
         Self::Shape,
         Self::TransformResponse,
         Self::TransformSseEvent,
+        Self::TransformRealtimeFrame,
     ];
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -136,6 +154,7 @@ impl HookKind {
             "shape" => Some(Self::Shape),
             "transform_response" => Some(Self::TransformResponse),
             "transform_sse_event" => Some(Self::TransformSseEvent),
+            "transform_realtime_frame" => Some(Self::TransformRealtimeFrame),
             "shape_envelope_gemini" => Some(Self::ShapeEnvelopeGemini),
             _ => None,
         }
@@ -152,6 +171,7 @@ pub const HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS: &[WireVersion] =
     &[WireVersion::V1, WireVersion::V2];
 pub const HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS: &[WireVersion] =
     &[WireVersion::V1, WireVersion::V2];
+pub const HOST_SUPPORTED_TRANSFORM_REALTIME_FRAME_VERSIONS: &[WireVersion] = &[WireVersion::V2];
 pub const HOST_SUPPORTED_SHAPE_ENVELOPE_GEMINI_VERSIONS: &[WireVersion] = &[WireVersion::V2];
 pub fn host_supported_versions(hook: HookKind) -> &'static [WireVersion] {
     match hook {
@@ -159,6 +179,7 @@ pub fn host_supported_versions(hook: HookKind) -> &'static [WireVersion] {
         HookKind::Shape => HOST_SUPPORTED_SHAPE_VERSIONS,
         HookKind::TransformResponse => HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS,
         HookKind::TransformSseEvent => HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS,
+        HookKind::TransformRealtimeFrame => HOST_SUPPORTED_TRANSFORM_REALTIME_FRAME_VERSIONS,
         HookKind::ShapeEnvelopeGemini => HOST_SUPPORTED_SHAPE_ENVELOPE_GEMINI_VERSIONS,
     }
 }

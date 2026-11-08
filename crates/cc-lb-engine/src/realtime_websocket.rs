@@ -7,11 +7,13 @@ use http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
 use url::Url;
-
 use crate::responses_websocket::WebSocketCandidate;
 use crate::terminal_observer::{LifecycleContext, UpstreamErrorCode};
 use crate::usage_parser::{UsageCounts, merge_usage_value, merge_usage_value_for_shape};
-
+use cc_lb_upstream::{
+    RealtimeFrameDirection, RealtimeFrameKind, RealtimeFrameTransformHook,
+    TransformRealtimeFrameRequest, TransformRealtimeFrameResult,
+};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RealtimeWebSocketKind {
     Openai,
@@ -65,11 +67,45 @@ pub struct RealtimeWebSocketSession {
     pub(crate) reservation: Option<Reservation>,
     pub(crate) limit_engine: Option<Arc<LimitEngine>>,
     pub(crate) model: String,
+    pub(crate) principal: cc_lb_domain::Principal,
+    pub(crate) upstream: cc_lb_domain::Upstream,
+    pub(crate) path: String,
+    pub(crate) dialect: Arc<dyn cc_lb_upstream::UpstreamDialect>,
 }
 
 impl RealtimeWebSocketSession {
+    pub(crate) fn transform_frame(
+        &self,
+        direction: RealtimeFrameDirection,
+        kind: RealtimeFrameKind,
+        payload: Bytes,
+    ) -> Result<TransformRealtimeFrameResult, cc_lb_upstream::ResponseTransformError> {
+        let Some(hook) = self.dialect.realtime_frame_transform_hook() else {
+            return Ok(TransformRealtimeFrameResult::Unchanged);
+        };
+        hook.transform_realtime_frame(TransformRealtimeFrameRequest {
+            request_id: self
+                .observer
+                .as_ref()
+                .map(|observer| observer.event_id().to_owned())
+                .unwrap_or_default(),
+            principal: self.principal.clone(),
+            upstream: self.upstream.clone(),
+            request_method: http::Method::GET,
+            request_path: self.path.clone(),
+            canonical_model_id: self.model.clone(),
+            direction,
+            kind,
+            payload,
+        })
+    }
     pub fn connected(&self) {
         if let Some(observer) = &self.observer {
+            observer.set_response_stream_span(tracing::info_span!(
+                "proxy.realtime_stream",
+                upstream_id = %self.candidate.upstream_id,
+                model = %self.model,
+            ));
             observer.emit_lifecycle(LifecycleEvent::UpstreamAttempt {
                 event_id: observer.event_id().to_owned(),
                 attempt_num: 1,
