@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_clock::{ClockHandle, unix_secs};
-use cc_lb_domain::TtlClass;
-use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
+use cc_lb_domain::{HASH_SCHEMA_VERSION, TtlClass};
 use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
 use uuid::Uuid;
 

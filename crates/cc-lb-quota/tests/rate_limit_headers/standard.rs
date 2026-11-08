@@ -3,7 +3,7 @@ use cc_lb_quota::rate_limit_headers::{
     clamp_utilization_fraction, parse_anthropic_rate_limit_headers, percent_to_utilization_fraction,
 };
 
-use crate::headers;
+use super::headers;
 
 #[test]
 fn parses_default_request_and_token_families() {

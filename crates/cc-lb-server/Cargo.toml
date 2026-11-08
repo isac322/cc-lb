@@ -33,6 +33,7 @@ postgres = [
 [[bin]]
 name = "cc-lb"
 path = "src/main.rs"
+test = false
 
 [[test]]
 name = "integration"

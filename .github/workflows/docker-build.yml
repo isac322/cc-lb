@@ -124,6 +124,7 @@ jobs:
           build-args: |
             CARGO_BUILD_JOBS=4
             CARGO_PROFILE_RELEASE_LTO=thin
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
             SCCACHE_LOCAL_MOUNT=1
             REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
@@ -141,6 +142,7 @@ jobs:
           build-args: |
             CARGO_BUILD_JOBS=4
             CARGO_PROFILE_RELEASE_LTO=thin
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
             SCCACHE_LOCAL_MOUNT=1
             REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
