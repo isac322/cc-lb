@@ -99,7 +99,6 @@ async fn get_or_build_fast_init_sql() -> Result<&'static String, StorageError> {
 #[async_trait]
 impl MetaStore for SqliteStorage {
     async fn initialize(&self) -> StorageResult<()> {
-        let fast_sql = get_or_build_fast_init_sql().await?;
         let mut tx = crate::begin_immediate(self.pool()).await?;
 
         let (existing_objects,): (i64,) = sqlx::query_as(
@@ -110,6 +109,7 @@ impl MetaStore for SqliteStorage {
         .map_err(map_sqlx_error)?;
 
         if existing_objects == 0 {
+            let fast_sql = get_or_build_fast_init_sql().await?;
             sqlx::raw_sql(sqlx::AssertSqlSafe(fast_sql.as_str()))
                 .execute(&mut *tx)
                 .await
