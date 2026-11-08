@@ -2999,6 +2999,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn websocket_neutral_timing_and_provider_identity_persist_in_request_row() {
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("websocket-neutral-fields");
+
+        tx.send(diagnostics_started(event_id.clone(), "req-websocket-neutral"))
+            .await
+            .expect("request starts");
+        tx.send(LifecycleEvent::StreamCompleted {
+            event_id: event_id.clone(),
+            result: Ok(StreamSuccess {
+                body_bytes: Some(12),
+                body_chunk_count: Some(3),
+                first_body_chunk_ms: Some(4),
+                stream_last_chunk_ms: Some(9),
+                stream_total_ms: Some(11),
+                stream_inter_output_avg_ms: Some(2),
+                provider_session_id: Some("provider-session".to_owned()),
+                provider_connection_id: Some("provider-connection".to_owned()),
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect("stream completion arrives");
+        tx.send(diagnostics_terminated(
+            event_id,
+            TerminationReason::Success,
+            101,
+        ))
+        .await
+        .expect("request terminates");
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.status, 101);
+        assert_eq!(row.body_bytes, Some(12));
+        assert_eq!(row.body_chunk_count, Some(3));
+        assert_eq!(row.stream_first_output_ms, Some(4));
+        assert_eq!(row.stream_last_chunk_ms, Some(9));
+        assert_eq!(row.stream_total_ms, Some(11));
+        assert_eq!(row.stream_inter_output_avg_ms, Some(2));
+        assert_eq!(row.provider_session_id.as_deref(), Some("provider-session"));
+        assert_eq!(
+            row.provider_connection_id.as_deref(),
+            Some("provider-connection")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn parse_failed_terminated_still_persists_error_code() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());

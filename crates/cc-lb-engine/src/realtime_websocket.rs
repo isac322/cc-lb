@@ -565,7 +565,7 @@ pub fn gemini_setup_model(_auth: &crate::Authenticated, frame: &[u8]) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
     #[test]
     fn realtime_usage_sums_only_response_done() {
@@ -755,27 +755,99 @@ mod tests {
         );
     }
     #[test]
-    fn realtime_terminal_outcome_requires_provider_completion_marker() {
-        assert_eq!(
-            realtime_terminal_outcome(RealtimeWebSocketTermination::ProviderClosed, false),
+    fn realtime_terminal_outcomes_cover_every_transport_path() {
+        let cases = [
             (
+                RealtimeWebSocketTermination::Completed,
+                false,
+                StreamTerminationOutcome::Completed,
+                StreamTerminationCause::None,
+            ),
+            (
+                RealtimeWebSocketTermination::ProviderClosed,
+                false,
                 StreamTerminationOutcome::UpstreamError,
-                StreamTerminationCause::ProviderError
-            )
-        );
-        assert_eq!(
-            realtime_terminal_outcome(RealtimeWebSocketTermination::ProviderClosed, true),
+                StreamTerminationCause::ProviderError,
+            ),
+            (
+                RealtimeWebSocketTermination::ProviderClosed,
+                true,
+                StreamTerminationOutcome::Completed,
+                StreamTerminationCause::None,
+            ),
+            (
+                RealtimeWebSocketTermination::ProxyRelayError,
+                false,
+                StreamTerminationOutcome::ProxyError,
+                StreamTerminationCause::TransportError,
+            ),
+            (
+                RealtimeWebSocketTermination::DownstreamCancelled,
+                false,
+                StreamTerminationOutcome::ClientCancelled,
+                StreamTerminationCause::None,
+            ),
+        ];
+        for (termination, complete, expected_outcome, expected_cause) in cases {
+            assert_eq!(
+                realtime_terminal_outcome(termination, complete),
+                (expected_outcome, expected_cause)
+            );
+        }
+    }
+
+    #[test]
+    fn realtime_terminal_metric_is_bounded_and_emitted_once_per_outcome() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        for (outcome, cause) in [
             (
                 StreamTerminationOutcome::Completed,
-                StreamTerminationCause::None
-            )
-        );
-        assert_eq!(
-            realtime_terminal_outcome(RealtimeWebSocketTermination::DownstreamCancelled, false),
+                StreamTerminationCause::None,
+            ),
+            (
+                StreamTerminationOutcome::UpstreamError,
+                StreamTerminationCause::ProviderError,
+            ),
+            (
+                StreamTerminationOutcome::ProxyError,
+                StreamTerminationCause::TransportError,
+            ),
             (
                 StreamTerminationOutcome::ClientCancelled,
-                StreamTerminationCause::None
-            )
+                StreamTerminationCause::None,
+            ),
+        ] {
+            record_stream_termination_metric(outcome, cause, "gemini-live-upstream", Some("gemini-live"));
+        }
+        let samples = snapshotter.snapshot().into_vec();
+        assert_eq!(samples.len(), 4);
+        for (key, _, _, value) in samples {
+            assert_eq!(key.key().name(), "cc_lb_stream_terminations_total");
+            let labels = key.key().labels().collect::<Vec<_>>();
+            assert_eq!(labels.len(), 4);
+            assert!(labels.iter().all(|label| label.value().len() <= 128));
+            assert!(matches!(value, DebugValue::Counter(1)));
+        }
+    }
+
+    #[test]
+    fn realtime_timing_keeps_native_live_markers_out_of_anthropic_counters() {
+        let mut metrics = RealtimeStreamMetrics::new();
+        metrics.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"sessionResumptionUpdate":{"newSessionId":"live-session"}}"#,
         );
+        metrics.observe_frame(br#"{"serverContent":{"modelTurn":{"parts":[{"text":"hi"}]}}}"#);
+        metrics.observe_frame(br#"{"serverContent":{"turnComplete":true}}"#);
+        let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("live-session"));
+        assert_eq!(latency.stream_event_count, 2);
+        assert!(latency.stream_first_output_ms.is_some());
+        assert!(latency.stream_last_output_ms.is_some());
+        assert_eq!(latency.sse_event_count, 0);
+        assert_eq!(latency.content_delta_count, 0);
+        assert_eq!(latency.ping_count, 0);
     }
 }

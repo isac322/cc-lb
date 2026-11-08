@@ -2395,4 +2395,22 @@ mod tests {
         assert_eq!(latency.sse_event_count, 0);
         assert_eq!(latency.content_delta_count, 0);
     }
+
+    #[test]
+    fn responses_timing_tracks_output_events_without_anthropic_counters() {
+        let mut metrics = ResponsesStreamMetrics::new();
+        metrics.observe(br#"{"type":"response.created","response":{"id":"resp-native"}}"#);
+        metrics.observe(br#"{"type":"response.output_text.delta","delta":"a"}"#);
+        metrics.observe(
+            br#"{"type":"response.completed","response":{"id":"resp-native"}}"#,
+        );
+        let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("resp-native"));
+        assert_eq!(latency.stream_event_count, 3);
+        assert!(latency.stream_first_output_ms.is_some());
+        assert!(latency.stream_last_output_ms.is_some());
+        assert_eq!(latency.sse_event_count, 0);
+        assert_eq!(latency.content_delta_count, 0);
+        assert_eq!(latency.ping_count, 0);
+    }
 }

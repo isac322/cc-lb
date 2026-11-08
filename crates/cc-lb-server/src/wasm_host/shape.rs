@@ -1085,9 +1085,11 @@ fn response_runtime_error(reason: String) -> ResponseTransformError {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use cc_lb_domain::{PrincipalKind, Upstream};
-    use cc_lb_plugin_wire::{ArchivedShapeRequest, ArchivedShapeResponse, ShapeResponse};
     use cc_lb_upstream::{DialectShapeContext, UpstreamDialect, shape_request};
+    use cc_lb_domain::{
+        PrincipalKind, Provider, Upstream, UpstreamIdentity,
+    };
+    use cc_lb_plugin_wire::{ArchivedShapeRequest, ArchivedShapeResponse, ShapeResponse};
     use http::{HeaderMap, HeaderValue, Method};
 
     use super::*;
@@ -1227,5 +1229,112 @@ mod tests {
         )
         .expect("shape request");
         assert_eq!(shaped.url().query(), Some("keep=1"));
+    }
+
+    #[test]
+    fn realtime_frame_wire_contract_preserves_host_owned_identity_and_transport_shape() {
+        let identity = UpstreamIdentity {
+            provider: Provider::Gemini,
+            credential_kind: "gemini_api_key".to_owned(),
+            upstream_id: "upstream-42".to_owned(),
+            name: "live-primary".to_owned(),
+            base_url: Some("https://provider.example/".to_owned()),
+            gemini_oauth_profile: None,
+            code_assist_project_id: None,
+        };
+        for (direction, expected_direction) in [
+            (RealtimeFrameDirection::Setup, "setup"),
+            (
+                RealtimeFrameDirection::ClientToProvider,
+                "client_to_provider",
+            ),
+            (
+                RealtimeFrameDirection::ProviderToClient,
+                "provider_to_client",
+            ),
+        ] {
+            for (kind, expected_kind, payload) in [
+                (RealtimeFrameKind::Json, "json", Bytes::from_static(br#"{}"#)),
+                (
+                    RealtimeFrameKind::Text,
+                    "text",
+                    Bytes::from_static(b"voice"),
+                ),
+                (
+                    RealtimeFrameKind::Binary,
+                    "binary",
+                    Bytes::from_static(&[0, 1, 255]),
+                ),
+            ] {
+                let bytes = host_to_wire_transform_realtime_frame_v2(
+                    &TransformRealtimeFrameRequest {
+                        request_id: "request-1".to_owned(),
+                        principal: principal(),
+                        upstream: Upstream::GeminiDirect { base_url: None },
+                        request_method: Method::GET,
+                        request_path: "/ws/live".to_owned(),
+                        canonical_model_id: "gemini-live".to_owned(),
+                        direction,
+                        kind,
+                        payload: payload.clone(),
+                    },
+                    &identity,
+                )
+                .expect("realtime frame request serializes");
+                let archived = rkyv::access::<
+                    v2::ArchivedTransformRealtimeFrameRequest,
+                    RkyvError,
+                >(&bytes)
+                .expect("realtime frame request archives");
+                let method: &str = &archived.request_method;
+                let path: &str = &archived.request_path;
+                let direction: &str = &archived.direction;
+                let kind: &str = &archived.kind;
+                let upstream_id: &str = &archived.upstream_identity.upstream_id;
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/ws/live");
+                assert_eq!(direction, expected_direction);
+                assert_eq!(kind, expected_kind);
+                assert_eq!(upstream_id, "upstream-42");
+                assert_eq!(archived.payload.as_slice(), payload.as_ref());
+            }
+        }
+    }
+
+    #[test]
+    fn realtime_frame_wire_results_cover_unchanged_replace_and_drop() {
+        let cases = [
+            (
+                v2::TransformRealtimeFrameResult::Unchanged,
+                TransformRealtimeFrameResult::Unchanged,
+            ),
+            (
+                v2::TransformRealtimeFrameResult::Replace {
+                    kind: "binary".into(),
+                    payload: vec![0, 1, 255].into_boxed_slice(),
+                },
+                TransformRealtimeFrameResult::Replace {
+                    kind: RealtimeFrameKind::Binary,
+                    payload: Bytes::from_static(&[0, 1, 255]),
+                },
+            ),
+            (
+                v2::TransformRealtimeFrameResult::Drop,
+                TransformRealtimeFrameResult::Drop,
+            ),
+        ];
+        for (wire, expected) in cases {
+            let bytes = rkyv::to_bytes::<RkyvError>(&wire).expect("realtime result serializes");
+            assert_eq!(
+                wire_to_host_transform_realtime_frame(&bytes).expect("realtime result decodes"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn realtime_frame_plugin_output_is_rejected_at_the_wire_bound() {
+        let error = reject_oversized_output(b"0123456789", 9).expect_err("bound is enforced");
+        assert!(error.to_string().contains("exceeds wire_bounds.output_body_bytes"));
     }
 }

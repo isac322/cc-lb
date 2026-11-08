@@ -500,6 +500,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn websocket_terminal_paths_enqueue_without_waiting_for_export() {
+        let _serial = SERIAL.lock().await;
+        TEST_DROPS.lock().expect("test drop lock").clear();
+        let probe = Arc::new(LogProbe::default());
+        let observer = CompletionObserver::with_capacity_and_recorder(4, test_record_drop);
+
+        for request_id in [
+            "responses-completed",
+            "realtime-provider-error",
+            "realtime-proxy-error",
+            "live-client-cancelled",
+        ] {
+            assert_eq!(
+                observer.enqueue(log(request_id, &probe)),
+                Ok(()),
+                "{request_id} terminal telemetry is non-blocking"
+            );
+        }
+        observer.shutdown().await;
+
+        assert_eq!(
+            probe.request_ids(),
+            [
+                "responses-completed",
+                "realtime-provider-error",
+                "realtime-proxy-error",
+                "live-client-cancelled"
+            ]
+        );
+        assert!(TEST_DROPS.lock().expect("test drop lock").is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn shutdown_drains_observation_from_sender_loaded_before_close() {
         let _serial = SERIAL.lock().await;
         TEST_DROPS.lock().expect("test drop lock").clear();
