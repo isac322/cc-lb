@@ -12,9 +12,10 @@ use cc_lb_upstream::{
     TransformSseEventResult, UpstreamDialect,
 };
 
-use crate::hop_by_hop::strip_hop_by_hop;
 use crate::lifecycle::RequestEventContext;
-use crate::sse_error_frame::make_error_frame;
+use crate::provider_capability::ProviderCapability;
+use crate::sse_error_frame::make_provider_error_frame;
+use crate::strip_hop_by_hop;
 
 #[derive(Clone)]
 pub(crate) struct ResponseTransformContext {
@@ -364,6 +365,15 @@ fn format_sse_events(events: &[SseEvent]) -> Result<Bytes, ResponseTransformErro
     Ok(Bytes::from(output))
 }
 
-pub(crate) fn make_response_transform_error_frame(error: &ResponseTransformError) -> Bytes {
-    make_error_frame("response_transform_error", &error.to_string())
+pub(crate) fn make_response_transform_error_frame(
+    capability: ProviderCapability,
+    error: &ResponseTransformError,
+) -> Bytes {
+    make_provider_error_frame(
+        capability,
+        http::StatusCode::BAD_GATEWAY,
+        "response_transform_error",
+        &error.to_string(),
+        None,
+    )
 }

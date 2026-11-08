@@ -19,8 +19,8 @@ use cc_lb_domain::{
     CacheLookbackPrefix, CachePricingSummary, CacheScore, CredentialKind, InternalError,
     InternalErrorKind, InternalErrorStage, NativeCachePricing, NativeCachePricingComponent,
     NativeCachePricingLifetime, NativeCachePricingProvider, NativeCachePricingRate,
-    NativeCachePricingStatus, PrefixBytes, Principal, PrincipalKind, RoutingTrace, StageDecision,
-    TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
+    NativeCachePricingStatus, PrefixBytes, Principal, PrincipalKind, Provider, RoutingTrace,
+    StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
     UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_quota::build_subscription_quota_samples;
@@ -57,6 +57,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::Instrument as _;
 use url::Url;
@@ -96,7 +97,7 @@ use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
     WebSocketPluginRequest,
 };
-use crate::sse_error_frame::{make_error_frame, make_provider_error_frame};
+use crate::sse_error_frame::make_provider_error_frame;
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamErrorClassification, StreamTerminationCause,
@@ -120,7 +121,7 @@ use cc_lb_control::api_keys::limit_engine::{
 use cc_lb_control::api_keys::principal_view::{
     PrincipalSpecCached, PrincipalView, RouterPipelineCache,
 };
-use cc_lb_control::api_keys::types::LimitKind;
+use cc_lb_control::api_keys::types::{Limit, LimitKind};
 use cc_lb_control::dynamic_view::{DynamicView, DynamicViewHolder};
 use cc_lb_control::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use cc_lb_control::{
@@ -612,6 +613,10 @@ pub struct PreviewRouteInput {
     pub request_id: Option<String>,
     pub headers: HeaderMap,
     pub body_bytes: Bytes,
+    /// Provider scope selected by the admin caller.
+    pub provider: Option<cc_lb_domain::Provider>,
+    /// Provider-native path used to classify the request capability.
+    pub path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -627,6 +632,8 @@ pub enum PreviewRouteError {
     PrincipalNotFound(String),
     #[error("router pipeline instantiation error: {0}")]
     PipelineInstantiationError(String),
+    #[error("operation not supported for preview: {method} {path}")]
+    UnsupportedOperation { method: String, path: String },
 }
 
 #[derive(Clone, Debug)]
@@ -3754,7 +3761,40 @@ impl Lifecycle {
         }
 
         let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
-        let cache_metadata = request_cache_metadata_from_value(&input.headers, body_value.as_ref());
+        let method = http::Method::POST;
+        let request_capability = classify_provider_capability(&method, &input.path, input.provider)
+            .ok_or_else(|| PreviewRouteError::UnsupportedOperation {
+                method: method.to_string(),
+                path: input.path.clone(),
+            })?;
+        let request_kind = RequestKind::from(request_capability);
+        let path_model = gemini_model_from_path(&input.path);
+        let prompt_cache_analysis = match (request_capability, body_value.as_ref()) {
+            (ProviderCapability::AnthropicMessages, Some(_))
+            | (ProviderCapability::AnthropicMessages, None) => None,
+            (_, Some(_)) => Some(PromptCacheAnalysisOutput {
+                analysis: V3PromptCacheAnalysis {
+                    blocks: Vec::new(),
+                    breakpoints: Vec::new(),
+                    literal_breakpoints: Vec::new(),
+                },
+                cacheable_breakpoint_prefix_keys: Vec::new(),
+                literal_cacheable_breakpoint_prefix_keys: Vec::new(),
+                timings: PromptCacheAnalysisTimings::default(),
+            }),
+            (_, None) => None,
+        };
+        let cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &input.headers,
+            body_value.as_ref(),
+            prompt_cache_analysis,
+            Some(request_capability),
+        );
+        let canonical_model = path_model
+            .as_deref()
+            .map(canonical_model_id)
+            .unwrap_or(&cache_metadata.canonical_model_id)
+            .to_owned();
         let cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
 
         let request_id = input
@@ -3765,16 +3805,17 @@ impl Lifecycle {
             .request_id(request_id)
             .thread_id(cache_metadata.thread_id.clone())
             .requested_service_tier(cache_metadata.requested_service_tier.clone())
+            .provider_scope(input.provider)
             .downstream_headers(input.headers)
-            .method(http::Method::POST)
-            .path("/v1/messages".to_owned())
+            .method(method)
+            .path(input.path)
             .query(None)
             .body_bytes(input.body_bytes)
             .cache_breakpoints(cache_breakpoints)
-            .canonical_model_id(cache_metadata.canonical_model_id.clone())
+            .canonical_model_id(canonical_model.clone())
             .cache_pricing(cache_pricing_summary_for_model(
                 cc_lb_pricing::global_catalog(),
-                &cache_metadata.canonical_model_id,
+                &canonical_model,
                 cache_metadata.requested_service_tier.as_deref(),
             ))
             .build();
@@ -3786,7 +3827,7 @@ impl Lifecycle {
         let warm_entries = fetch_prompt_cache_warm_entries_for_bundles(
             &view,
             &principal.id,
-            RequestKind::AnthropicMessages,
+            request_kind,
             &ctx.canonical_model_id,
             &cache_metadata.bundles,
             &*self.clock,
@@ -3795,7 +3836,7 @@ impl Lifecycle {
         let candidates = build_candidates_with_matches_for_bundles(
             &view,
             &principal.id,
-            RequestKind::AnthropicMessages,
+            request_kind,
             &ctx.cache_breakpoints,
             &warm_entries,
             Some(&cache_metadata.bundles),
@@ -3803,7 +3844,7 @@ impl Lifecycle {
         )
         .0;
         let pipeline_result = execute_filter_pipeline(
-            resolved_pipeline.filters_for(cc_lb_domain::Provider::Anthropic),
+            resolved_pipeline.filters_for(request_capability.provider()),
             &ctx,
             &principal,
             candidates,
@@ -3990,11 +4031,26 @@ impl Lifecycle {
         error: &BuiltinAuthError,
         path: &str,
     ) -> Response<Body> {
+        self.reject_responses_websocket_authentication_for_provider(error, path, None)
+    }
+
+    pub fn reject_responses_websocket_authentication_for_provider(
+        &self,
+        error: &BuiltinAuthError,
+        path: &str,
+        provider: Option<cc_lb_domain::Provider>,
+    ) -> Response<Body> {
         let (observer, _) = self.websocket_observer(path);
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
-        crate::authn_rail::reject_unauthenticated(error, observer.as_ref())
+        crate::authn_rail::reject_unauthenticated_for_route(
+            error,
+            &http::Method::GET,
+            path,
+            provider,
+            observer.as_ref(),
+        )
     }
 
     /// Route and reserve one logical create; never dispatch an HTTP request.
@@ -5077,7 +5133,8 @@ impl Lifecycle {
         let keepalive_response_enabled =
             self.cache_keepalive_enqueuer.is_some() && cached.cache_keepalive().is_some();
         let track_keepalive_response = keepalive_response_enabled
-            && (!cache_metadata.bundles.official.cache_breakpoints.is_empty()
+            && (cache_metadata.cache_keepalive_surface.is_some()
+                || !cache_metadata.bundles.official.cache_breakpoints.is_empty()
                 || !cache_metadata.bundles.literal.cache_breakpoints.is_empty());
         if track_keepalive_response {
             cache_metadata.request_json = body_view.value().cloned();
@@ -5505,7 +5562,11 @@ impl Lifecycle {
                         "failed to prepare upstream credentials",
                         None,
                     );
-                    self.attach_limit_headers(&mut response, active_limit.as_ref());
+                    self.attach_limit_headers(
+                        &mut response,
+                        active_limit.as_ref(),
+                        request_capability.provider(),
+                    );
                     if let Some(o) = observer.as_ref() {
                         o.terminate_failure(InternalFailure {
                             status: StatusCode::BAD_GATEWAY,
@@ -5564,6 +5625,7 @@ impl Lifecycle {
                         active_limit.as_ref(),
                         observer.as_ref(),
                         &attempt_timings,
+                        request_capability.provider(),
                     ));
                 }
             };
@@ -5593,7 +5655,11 @@ impl Lifecycle {
                         // A proxy-generated body is not an upstream response:
                         // do not pass it through the custom response hook.
                         let mut response = response_from_collected(unauthorized);
-                        self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        self.attach_limit_headers(
+                            &mut response,
+                            active_limit.as_ref(),
+                            request_capability.provider(),
+                        );
                         if let Some(o) = observer.as_ref() {
                             o.set_upstream_error(response.status(), UpstreamErrorCode::Upstream5xx);
                             o.finish();
@@ -5644,6 +5710,7 @@ impl Lifecycle {
                             active_limit.as_ref(),
                             observer.as_ref(),
                             &attempt_timings,
+                            request_capability.provider(),
                         ));
                     }
                 };
@@ -5666,7 +5733,11 @@ impl Lifecycle {
                     let unauthorized = collect_error_response(response).await;
                     if unauthorized.body.is_none() {
                         let mut response = response_from_collected(unauthorized);
-                        self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        self.attach_limit_headers(
+                            &mut response,
+                            active_limit.as_ref(),
+                            request_capability.provider(),
+                        );
                         if let Some(o) = observer.as_ref() {
                             o.set_upstream_error(response.status(), UpstreamErrorCode::Upstream5xx);
                             o.finish();
@@ -5869,23 +5940,26 @@ impl Lifecycle {
                 }
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
                 let reason_label = "limit_rejected".to_owned();
+                let capability = crate::provider_capability::classify(
+                    &ctx.method,
+                    &ctx.path,
+                    ctx.provider_scope,
+                )
+                .unwrap_or(ProviderCapability::AnthropicMessages);
                 let mut response = limit_rejection_response(
-                    crate::provider_capability::classify(
-                        &ctx.method,
-                        &ctx.path,
-                        ctx.provider_scope,
-                    )
-                    .unwrap_or(ProviderCapability::AnthropicMessages),
+                    capability,
                     reason,
                     &limit_request.model,
                     &subject.principal_id,
                     retry_after_seconds,
                 );
-                attach_limit_headers_from_engine(
+                attach_limit_headers_from_record(
                     response.headers_mut(),
                     limit_engine.as_ref(),
+                    capability.provider(),
                     &subject.key_id,
-                    &subject.principal_id,
+                    &subject.record,
+                    view.default_limits(&subject.principal_id),
                 );
                 let info = LimitRejectionInfo {
                     subject: cc_lb_lifecycle::LimitSubject {
@@ -5961,6 +6035,7 @@ impl Lifecycle {
             response_affinity_context.capability,
         ) || (stream_response && !buffered_transform_required)
         {
+            let provider = response_affinity_context.capability.provider();
             let response_status = response.status();
             let mut response = self.relay_response(
                 response,
@@ -5977,7 +6052,7 @@ impl Lifecycle {
                 dispatch_started,
                 dispatch_unix_secs,
             );
-            self.attach_limit_headers(&mut response, None);
+            self.attach_limit_headers(&mut response, None, provider);
             return response;
         }
 
@@ -6305,15 +6380,16 @@ impl Lifecycle {
         }
         // Hand the reservation to the reconcile subscriber for every buffered outcome:
         // it reconciles a measured success and refunds errors on `RequestTerminated`.
-        if let (Some(limit_engine), Some(active_limit), Some(response_accounting_guard)) = (
-            self.limit_engine.as_ref(),
-            active_limit.as_ref(),
-            response_accounting_guard,
-        ) {
+        if let Some(response_accounting_guard) = response_accounting_guard {
             response_accounting_guard.forget();
+        }
+        if let (Some(limit_engine), Some(active_limit)) =
+            (self.limit_engine.as_ref(), active_limit.as_ref())
+        {
             attach_limit_headers_from_engine(
                 &mut parts.headers,
                 limit_engine.as_ref(),
+                response_affinity_context.capability.provider(),
                 &active_limit.subject.key_id,
                 &active_limit.subject.principal_id,
             );
@@ -6521,9 +6597,10 @@ impl Lifecycle {
         active_limit: Option<&ActiveLimit>,
         observer: Option<&LifecycleContext>,
         attempt_timings: &AttemptTimings,
+        provider: Provider,
     ) -> Response<Body> {
         let (mut response, failure) = failure.into_response_and_failure(capability);
-        self.attach_limit_headers(&mut response, active_limit);
+        self.attach_limit_headers(&mut response, active_limit, provider);
         if let Some(o) = observer {
             o.set_attempt_timings(
                 attempt_timings.shape_ms,
@@ -6569,6 +6646,7 @@ impl Lifecycle {
         &self,
         response: &mut Response<Body>,
         active_limit: Option<&ActiveLimit>,
+        provider: Provider,
     ) {
         let (Some(limit_engine), Some(active_limit)) = (self.limit_engine.as_ref(), active_limit)
         else {
@@ -6577,6 +6655,7 @@ impl Lifecycle {
         attach_limit_headers_from_engine(
             response.headers_mut(),
             limit_engine.as_ref(),
+            provider,
             &active_limit.subject.key_id,
             &active_limit.subject.principal_id,
         );
@@ -7132,9 +7211,11 @@ impl Lifecycle {
                                     error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
                                     error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
                                 });
-                                let frame = make_error_frame(
+                                let frame = make_stream_error_frame(
+                                    response_affinity_context.capability,
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                    false,
                                 );
                                 if let Some(o) = observer.as_ref() {
                                     o.set_upstream_error(
@@ -7238,9 +7319,11 @@ impl Lifecycle {
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
                                             });
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         if let Some(o) = observer.as_ref() {
                                             o.set_upstream_error(
@@ -7274,9 +7357,11 @@ impl Lifecycle {
                                         if transformed_output_started
                                             || !downstream_stream_is_identity
                                         {
-                                            let frame = make_error_frame(
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 &error_message,
+                                                false,
                                             );
                                             stream_upstream_error_frame_emitted = true;
                                             if let Some(o) = observer.as_ref()
@@ -7312,7 +7397,10 @@ impl Lifecycle {
                                                     },
                                                 };
                                             let frame =
-                                                make_response_transform_error_frame(&transform_error);
+                                                make_response_transform_error_frame(
+                                                    response_affinity_context.capability,
+                                                    &transform_error,
+                                                );
                                             stream_transform_error = Some(transform_error);
                                             if let Some(o) = observer.as_ref()
                                                 && !upstream_error_status
@@ -7420,9 +7508,11 @@ impl Lifecycle {
                                             parse_sse_events_active = false;
                                             buffer.clear();
                                             raw_before_transform_output.clear();
-                                            let frame = make_error_frame(
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                false,
                                             );
                                             batch_index = batch_index.saturating_add(1);
                                             if let Some(o) = observer.as_ref() {
@@ -7508,9 +7598,11 @@ impl Lifecycle {
                                         || sse_transform_active
                                         || downstream_stream_is_identity
                                     {
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             "api_error",
                                             UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                            false,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         for chunk in std::mem::take(&mut deferred_terminal_chunks) {
@@ -7721,7 +7813,10 @@ impl Lifecycle {
                                                         },
                                                     };
                                                     let frame =
-                                                        make_response_transform_error_frame(&error);
+                                                        make_response_transform_error_frame(
+                                                            response_affinity_context.capability,
+                                                            &error,
+                                                        );
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
                                                         && !upstream_error_status
@@ -7765,12 +7860,19 @@ impl Lifecycle {
                                                     || !downstream_stream_is_identity
                                                 {
                                                     let frame = if success_sse_affinity_gate {
-                                                        make_error_frame(
+                                                        // The affinity gate must not expose transform
+                                                        // hook details to the client.
+                                                        make_stream_error_frame(
+                                                            response_affinity_context.capability,
                                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                            false,
                                                         )
                                                     } else {
-                                                        make_response_transform_error_frame(&error)
+                                                        make_response_transform_error_frame(
+                                                            response_affinity_context.capability,
+                                                            &error,
+                                                        )
                                                     };
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
@@ -7813,9 +7915,11 @@ impl Lifecycle {
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
                                             });
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         yield Ok::<Bytes, Infallible>(frame);
                                         break 'upstream;
@@ -7912,9 +8016,11 @@ impl Lifecycle {
                                             error_message:
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
                                         });
-                                    let frame = make_error_frame(
+                                    let frame = make_stream_error_frame(
+                                        response_affinity_context.capability,
                                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                         UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                        false,
                                     );
                                     if let Some(o) = observer.as_ref() {
                                         o.set_upstream_error(
@@ -7947,7 +8053,10 @@ impl Lifecycle {
                                                 )
                                             },
                                         };
-                                        let frame = make_response_transform_error_frame(&error);
+                                        let frame = make_response_transform_error_frame(
+                                            response_affinity_context.capability,
+                                            &error,
+                                        );
                                         stream_transform_error = Some(error);
                                         if let Some(o) = observer.as_ref()
                                             && !upstream_error_status
@@ -8156,9 +8265,11 @@ impl Lifecycle {
                                         parse_sse_events_active = false;
                                         buffer.clear();
                                         raw_before_transform_output.clear();
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(frame);
@@ -8232,9 +8343,11 @@ impl Lifecycle {
                                     || sse_transform_active
                                     || downstream_stream_is_identity
                                 {
-                                    let frame = make_error_frame(
+                                    let frame = make_stream_error_frame(
+                                        response_affinity_context.capability,
                                         "api_error",
                                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                        false,
                                     );
                                     batch_index = batch_index.saturating_add(1);
                                     yield Ok::<Bytes, Infallible>(frame);
@@ -8331,9 +8444,11 @@ impl Lifecycle {
                                             StreamTerminationCause::FramingError,
                                             None,
                                         );
-                                        let frame = make_error_frame(
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(frame);
@@ -8369,9 +8484,11 @@ impl Lifecycle {
                                             downstream_drop_guard.mark_proxy_error(
                                                 StreamTerminationCause::TransformError,
                                             );
-                                            let frame = make_error_frame(
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                false,
                                             );
                                             batch_index = batch_index.saturating_add(1);
                                             yield Ok::<Bytes, Infallible>(frame);
@@ -8424,9 +8541,11 @@ impl Lifecycle {
                                     StreamTerminationCause::FramingError,
                                     None,
                                 );
-                                let frame = make_error_frame(
+                                let frame = make_stream_error_frame(
+                                    response_affinity_context.capability,
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                    false,
                                 );
                                 yield Ok::<Bytes, Infallible>(frame);
                             } else if sse_transform_active && stream_transform_error.is_none() {
@@ -8444,7 +8563,10 @@ impl Lifecycle {
                                             )
                                         },
                                     };
-                                    let frame = make_response_transform_error_frame(&error);
+                                    let frame = make_response_transform_error_frame(
+                                        response_affinity_context.capability,
+                                        &error,
+                                    );
                                     stream_transform_error = Some(error);
                                     downstream_drop_guard.mark_proxy_error(
                                         StreamTerminationCause::TransformError,
@@ -8537,9 +8659,11 @@ impl Lifecycle {
                             StreamTerminationCause::DecodeError,
                             None,
                         );
-                        let frame = make_error_frame(
+                        let frame = make_stream_error_frame(
+                            response_affinity_context.capability,
                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                            false,
                         );
                         yield Ok::<Bytes, Infallible>(frame);
                     } else if upstream_is_sse
@@ -8572,9 +8696,11 @@ impl Lifecycle {
                                 .expect("upstream stream error set above")
                                 .error_message
                                 .clone();
-                            let frame = make_error_frame(
+                            let frame = make_stream_error_frame(
+                                response_affinity_context.capability,
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 &error_message,
+                                false,
                             );
                             if let Some(o) = observer.as_ref()
                                 && !upstream_error_status
@@ -8600,7 +8726,10 @@ impl Lifecycle {
                                     )
                                 },
                             };
-                            let frame = make_response_transform_error_frame(&transform_error);
+                            let frame = make_response_transform_error_frame(
+                                response_affinity_context.capability,
+                                &transform_error,
+                            );
                             stream_transform_error = Some(transform_error);
                             downstream_drop_guard.mark_proxy_error(
                                 StreamTerminationCause::TransformError,
@@ -8722,9 +8851,11 @@ impl Lifecycle {
                         || sse_transform_active
                         || downstream_stream_is_identity)
                 {
-                    let frame = make_error_frame(
+                    let frame = make_stream_error_frame(
+                        response_affinity_context.capability,
                         "api_error",
                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                        false,
                     );
                     batch_index = batch_index.saturating_add(1);
                     yield Ok::<Bytes, Infallible>(frame);
@@ -10467,6 +10598,9 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) parent_session_id: Option<String>,
     pub(crate) client_app: Option<String>,
     pub(crate) session_id_source: Option<String>,
+    pub(crate) cache_keepalive_surface: Option<String>,
+    pub(crate) cache_keepalive_ttl: Option<cc_lb_storage_api::CacheTtl>,
+    pub(crate) openai_replay_identity: Option<String>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
@@ -10822,6 +10956,93 @@ fn request_reasoning_metadata(
         _ => (None, None),
     }
 }
+fn bounded_openai_replay_component(raw: &str) -> String {
+    let digest = Sha256::digest(raw.as_bytes());
+    format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+pub(crate) fn openai_replay_identity(
+    value: &Value,
+    headers: &HeaderMap,
+    model: &str,
+    ttl: Option<cc_lb_storage_api::CacheTtl>,
+    prefix_hash: Option<&str>,
+) -> Option<String> {
+    let prompt_cache_key = value
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let conversation_identity = match value.get("conversation") {
+        Some(Value::String(id)) => format!("string:{id}"),
+        Some(Value::Object(object)) => object
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| format!("object:{id}"))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let input_digest = value
+        .get("input")
+        .and_then(|input| sonic_rs::to_vec(input).ok())
+        .map(|input_bytes| {
+            Sha256::digest(&input_bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let organization = value
+        .get("organization")
+        .or_else(|| value.get("organization_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            headers
+                .get("openai-organization")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    let processing_region = value
+        .get("processing_region")
+        .or_else(|| value.get("inference_geo"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            headers
+                .get("openai-processing-region")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    let lifetime = ttl.map(|ttl| match ttl {
+        cc_lb_storage_api::CacheTtl::Ttl30m => "30m",
+        cc_lb_storage_api::CacheTtl::Ttl12h => "12h",
+        cc_lb_storage_api::CacheTtl::Ttl5m => "5m",
+        cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
+    });
+    let namespace = format!(
+        "openai-replay-v2|model={}|lifetime={}|prefix={}|organization={}|region={}|prompt_cache_key={}|conversation={}|input={}",
+        bounded_openai_replay_component(model),
+        bounded_openai_replay_component(lifetime.unwrap_or("unknown")),
+        bounded_openai_replay_component(prefix_hash.unwrap_or("")),
+        bounded_openai_replay_component(organization),
+        bounded_openai_replay_component(processing_region),
+        bounded_openai_replay_component(prompt_cache_key),
+        bounded_openai_replay_component(&conversation_identity),
+        bounded_openai_replay_component(&input_digest),
+    );
+    let digest = Sha256::digest(namespace.as_bytes());
+    Some(format!(
+        "openai-replay-v2:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
 
 fn request_cache_metadata_from_value_with_analysis_for_capability(
     headers: &HeaderMap,
@@ -10922,12 +11143,49 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
     let cache_control_block_count = raw_cache_breakpoints.len() as u64;
-
     let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
-
+    let (cache_keepalive_surface, cache_keepalive_ttl) =
+        if capability == Some(ProviderCapability::OpenaiResponses) {
+            let lifetime = crate::cache_keepalive::openai::parse_lifetime_conservative(value);
+            let eligible = lifetime.is_some_and(|lifetime| {
+                crate::cache_keepalive::openai::eligible_prefix(
+                    &canonical_model_id,
+                    crate::cache_keepalive::openai::visible_prefix_tokens(value),
+                    Some(lifetime),
+                )
+            });
+            if eligible {
+                (
+                    Some("responses".to_owned()),
+                    lifetime.map(|lifetime| match lifetime {
+                        crate::cache_keepalive::openai::Lifetime::ThirtyMinutes => {
+                            cc_lb_storage_api::CacheTtl::Ttl30m
+                        }
+                        crate::cache_keepalive::openai::Lifetime::TwelveHours => {
+                            cc_lb_storage_api::CacheTtl::Ttl12h
+                        }
+                    }),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+    let replay_identity = (capability == Some(ProviderCapability::OpenaiResponses))
+        .then(|| {
+            openai_replay_identity(
+                value,
+                headers,
+                &canonical_model_id,
+                cache_keepalive_ttl,
+                cache_prefix_hash.as_deref(),
+            )
+        })
+        .flatten();
     RequestCacheMetadata {
         request_json: None,
         thread_id,
@@ -10939,6 +11197,9 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         parent_session_id,
         client_app,
         session_id_source,
+        cache_keepalive_surface,
+        cache_keepalive_ttl,
+        openai_replay_identity: replay_identity,
         requested_service_tier,
         message_id,
         message_index,
@@ -11219,10 +11480,31 @@ fn duration_to_us(duration: Duration) -> u64 {
 fn attach_limit_headers_from_engine(
     headers: &mut HeaderMap,
     limit_engine: &LimitEngine,
+    provider: Provider,
     key_id: &str,
     principal_id: &str,
 ) {
-    for (name, value) in limit_engine.headers_for(key_id, principal_id) {
+    for (name, value) in limit_engine.headers_for_provider(provider, key_id, principal_id) {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+}
+
+fn attach_limit_headers_from_record(
+    headers: &mut HeaderMap,
+    limit_engine: &LimitEngine,
+    provider: Provider,
+    key_id: &str,
+    record: &StoredApiKeyRecord,
+    default_limits: &[Limit],
+) {
+    for (name, value) in
+        limit_engine.headers_for_provider_record(provider, key_id, record, default_limits)
+    {
         if let (Ok(name), Ok(value)) = (
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(&value),
@@ -11901,6 +12183,9 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
             }
         },
         cache_read_input_tokens: u.cache_read_input_tokens,
+        cache_write_input_tokens: u.cache_write_input_tokens,
+        cache_write_input_tokens_30m: u.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: u.cache_write_input_tokens_12h,
         thinking_tokens: u.thinking_tokens,
         web_search_requests: u.web_search_requests,
         web_fetch_requests: u.web_fetch_requests,
@@ -11941,6 +12226,229 @@ mod tests {
 
     use super::*;
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
+    #[test]
+    fn openai_replay_identity_namespaces_scope_dimensions() {
+        let value = serde_json::json!({
+            "model": "gpt-5.6",
+            "input": [{"role": "user", "content": "prompt"}],
+            "prompt_cache_key": "key-a",
+            "conversation": {"id": "conversation-a"},
+            "organization": "org-a",
+            "processing_region": "us-east"
+        });
+        let headers = HeaderMap::new();
+        let identity = super::openai_replay_identity(
+            &value,
+            &headers,
+            "gpt-5.6",
+            Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+            Some("prefix-a"),
+        )
+        .expect("identity");
+        for (model, ttl, prefix, organization, region, key, conversation) in [
+            (
+                "gpt-5.7",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl12h),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-b"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-b",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "eu-west",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-b",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-b",
+            ),
+        ] {
+            let mut scoped = value.clone();
+            scoped["organization"] = serde_json::Value::String(organization.to_owned());
+            scoped["processing_region"] = serde_json::Value::String(region.to_owned());
+            scoped["prompt_cache_key"] = serde_json::Value::String(key.to_owned());
+            scoped["conversation"]["id"] = serde_json::Value::String(conversation.to_owned());
+            let candidate = super::openai_replay_identity(&scoped, &headers, model, ttl, prefix)
+                .expect("scoped identity");
+            assert_ne!(identity, candidate);
+        }
+        let mut delimiter_left = value.clone();
+        delimiter_left["organization"] = serde_json::Value::String("acme|region=us".to_owned());
+        delimiter_left["processing_region"] = serde_json::Value::String("eu".to_owned());
+        let mut delimiter_right = value.clone();
+        delimiter_right["organization"] = serde_json::Value::String("acme".to_owned());
+        delimiter_right["processing_region"] = serde_json::Value::String("us|region=eu".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &delimiter_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &delimiter_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut prefix_left = value.clone();
+        prefix_left["organization"] = serde_json::Value::String("tail".to_owned());
+        let mut prefix_right = value.clone();
+        prefix_right["organization"] =
+            serde_json::Value::String("org-a|organization=tail".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &prefix_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a|organization=org-a"),
+            ),
+            super::openai_replay_identity(
+                &prefix_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut region_left = value.clone();
+        region_left["processing_region"] =
+            serde_json::Value::String("us|prompt_cache_key=key-a".to_owned());
+        let mut region_right = value.clone();
+        region_right["processing_region"] = serde_json::Value::String("us".to_owned());
+        region_right["prompt_cache_key"] =
+            serde_json::Value::String("key-a|prompt_cache_key=tail".to_owned());
+        region_left["prompt_cache_key"] = serde_json::Value::String("tail".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &region_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &region_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut key_left = value.clone();
+        key_left["prompt_cache_key"] =
+            serde_json::Value::String("key-a|conversation=left".to_owned());
+        key_left["conversation"]["id"] = serde_json::Value::String("right".to_owned());
+        let mut key_right = value.clone();
+        key_right["prompt_cache_key"] = serde_json::Value::String("key-a".to_owned());
+        key_right["conversation"]["id"] =
+            serde_json::Value::String("left|conversation=right".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &key_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &key_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut string_conversation = value.clone();
+        string_conversation["conversation"] = serde_json::Value::String("conv-a".to_owned());
+        let mut string_conversation_other = value.clone();
+        string_conversation_other["conversation"] = serde_json::Value::String("conv-b".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &string_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &string_conversation_other,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut object_conversation = value.clone();
+        object_conversation["conversation"] = serde_json::json!({"id": "conv-a"});
+        assert_ne!(
+            super::openai_replay_identity(
+                &string_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &object_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+    }
 
     #[test]
     fn native_observation_tokens_keep_zero_distinct_from_absent() {
@@ -17325,6 +17833,39 @@ mod tests {
             &gemini_chunk,
             false,
         ));
+    }
+
+    #[test]
+    fn proxy_generated_stream_error_frames_use_selected_provider_envelope() {
+        for (capability, forbidden, required) in [
+            (
+                ProviderCapability::AnthropicMessages,
+                "\"code\"",
+                "\"type\":\"error\"",
+            ),
+            (
+                ProviderCapability::OpenaiResponses,
+                "\"type\":\"error\"",
+                "\"error\"",
+            ),
+            (
+                ProviderCapability::GeminiGenerateContent,
+                "\"type\":\"error\"",
+                "\"error\"",
+            ),
+        ] {
+            let frame = make_stream_error_frame(
+                capability,
+                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                "synthetic relay failure",
+                false,
+            );
+            let text = std::str::from_utf8(&frame).expect("SSE frame is UTF-8");
+            assert!(text.starts_with("event: error\ndata: "));
+            assert!(text.ends_with("\n\n"));
+            assert!(text.contains(required), "{text}");
+            assert!(!text.contains(forbidden), "{text}");
+        }
     }
 
     #[test]

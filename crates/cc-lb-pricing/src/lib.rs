@@ -17,6 +17,7 @@ pub use cost::{
     NativeCostBreakdown, cache_creation_1h_micros_from_input, native_cost_micros,
     virtual_cost_micros_full, virtual_cost_micros_full_with_context,
     virtual_cost_micros_full_with_context_and_images,
+    virtual_cost_micros_full_with_context_and_provider_writes,
 };
 use cost::{record_missing_price_field, resolved_cache_creation_1h_price};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
@@ -208,6 +209,9 @@ pub struct ComputedCostBreakdown {
     pub cache_creation_5m_micros: i64,
     pub cache_creation_1h_micros: i64,
     pub cache_read_micros: i64,
+    pub cache_write_micros: Option<i64>,
+    pub cache_write_30m_micros: Option<i64>,
+    pub cache_write_12h_micros: Option<i64>,
     pub total_micros: i64,
     pub pricing_status: PricingStatus,
 }
@@ -220,6 +224,9 @@ impl ComputedCostBreakdown {
             cache_creation_5m_micros: 0,
             cache_creation_1h_micros: 0,
             cache_read_micros: 0,
+            cache_write_micros: None,
+            cache_write_30m_micros: None,
+            cache_write_12h_micros: None,
             total_micros: 0,
             pricing_status: PricingStatus::Unknown,
         }
@@ -236,6 +243,9 @@ impl From<ComputedCostBreakdown> for cc_lb_request_log::CostBreakdown {
                 cache_creation_5m_micros: Some(breakdown.cache_creation_5m_micros),
                 cache_creation_1h_micros: Some(breakdown.cache_creation_1h_micros),
                 cache_read_micros: Some(breakdown.cache_read_micros),
+                cache_write_micros: breakdown.cache_write_micros,
+                cache_write_30m_micros: breakdown.cache_write_30m_micros,
+                cache_write_12h_micros: breakdown.cache_write_12h_micros,
             },
             PricingStatus::Unknown => Self::default(),
         }

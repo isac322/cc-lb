@@ -1278,6 +1278,13 @@ impl SignerFactory for DbCompositeSignerFactory {
                         refresh_handle,
                         refresh_locks: self.refresh_locks.clone(),
                     }))
+                } else if tokens.never_refresh {
+                    Ok(Arc::new(PersistedAccessOnlySubscriptionSigner {
+                        signer,
+                        store: self.upstream_store.clone(),
+                        upstream_id: record.id,
+                        oauth_token_generation: record.oauth_token_generation,
+                    }))
                 } else {
                     Ok(signer)
                 }
@@ -1401,6 +1408,46 @@ fn build_subscription_signer_with_policy(
         _ => Err(SignerError::SigningFailed {
             reason: "subscription signer requires OpenAI or Gemini OAuth".to_owned(),
         }),
+    }
+}
+/// Persists a terminal provider rejection for an access-only subscription
+/// credential without retrying or changing the provider signer behavior.
+struct PersistedAccessOnlySubscriptionSigner {
+    signer: Arc<dyn Signer>,
+    store: Arc<dyn UpstreamStore>,
+    upstream_id: Uuid,
+    oauth_token_generation: u64,
+}
+
+#[async_trait]
+impl Signer for PersistedAccessOnlySubscriptionSigner {
+    async fn sign(
+        &self,
+        shaped: ShapedRequest,
+        capability: &mut SigningCapability,
+    ) -> Result<SignedRequest, SignerError> {
+        self.signer.sign(shaped, capability).await
+    }
+
+    async fn on_unauthorized(&self, _error: &UpstreamError) -> RetryDecision {
+        let status = UpstreamStatusUpdate {
+            last_apply_error: Some(Some("status_401".to_owned())),
+            expected_oauth_token_generation: Some(self.oauth_token_generation),
+            ..UpstreamStatusUpdate::default()
+        };
+        match self.store.set_status(self.upstream_id, status).await {
+            Ok(()) | Err(StorageError::Conflict { .. }) => {}
+            Err(error) => tracing::warn!(
+                upstream_id = %self.upstream_id,
+                %error,
+                "failed to record status_401 for rejected access-only oauth credential",
+            ),
+        }
+        RetryDecision::Fail
+    }
+
+    fn scrub_secrets<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        self.signer.scrub_secrets(text)
     }
 }
 

@@ -70,6 +70,9 @@ struct Partial {
     cache_creation_5m: u64,
     cache_creation_1h: u64,
     cache_read: u64,
+    cache_write: Option<u64>,
+    cache_write_30m: Option<u64>,
+    cache_write_12h: Option<u64>,
     usage_seen: bool,
 }
 
@@ -184,6 +187,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_creation_5m = usage.cache_creation_input_tokens_5m;
             partial.cache_creation_1h = usage.cache_creation_input_tokens_1h;
             partial.cache_read = usage.cache_read_input_tokens;
+            partial.cache_write = usage.cache_write_input_tokens;
+            partial.cache_write_30m = usage.cache_write_input_tokens_30m;
+            partial.cache_write_12h = usage.cache_write_input_tokens_12h;
             partial.service_tier = usage.service_tier;
             partial.usage_seen = true;
         }
@@ -199,6 +205,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_creation_5m = success.usage.cache_creation_input_tokens_5m;
             partial.cache_creation_1h = success.usage.cache_creation_input_tokens_1h;
             partial.cache_read = success.usage.cache_read_input_tokens;
+            partial.cache_write = success.usage.cache_write_input_tokens;
+            partial.cache_write_30m = success.usage.cache_write_input_tokens_30m;
+            partial.cache_write_12h = success.usage.cache_write_input_tokens_12h;
             partial.service_tier = success.usage.service_tier;
             partial.usage_seen = true;
         }
@@ -211,7 +220,7 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         return None;
     }
     let model = partial.model.as_deref()?;
-    let breakdown = crate::virtual_cost_micros_full_with_context_and_images(
+    let breakdown = crate::virtual_cost_micros_full_with_context_and_provider_writes(
         model,
         partial.input_tokens,
         partial.output_tokens,
@@ -221,6 +230,9 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         partial.cache_creation_5m,
         partial.cache_creation_1h,
         partial.cache_read,
+        partial.cache_write,
+        partial.cache_write_30m,
+        partial.cache_write_12h,
         partial.service_tier.as_deref(),
     )
     .unwrap_or_else(crate::ComputedCostBreakdown::unknown);

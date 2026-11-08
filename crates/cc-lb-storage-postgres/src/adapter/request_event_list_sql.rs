@@ -57,6 +57,9 @@ SELECT \
     r.list_cost_cache_creation_5m_micros AS cost_cache_creation_5m_micros, \
     r.list_cost_cache_creation_1h_micros AS cost_cache_creation_1h_micros, \
     r.list_cost_cache_read_micros AS cost_cache_read_micros, \
+    r.list_cost_cache_write_micros AS cost_cache_write_micros, \
+    r.list_cost_cache_write_30m_micros AS cost_cache_write_30m_micros, \
+    r.list_cost_cache_write_12h_micros AS cost_cache_write_12h_micros, \
     r.list_ts_ms AS ts_ms, \
     r.event_id, \
     r.source_kind, \
@@ -86,7 +89,10 @@ SELECT \
     r.cache_creation_input_tokens, \
     r.cache_creation_input_tokens_5m, \
     r.cache_creation_input_tokens_1h, \
-    r.cache_read_input_tokens \
+    r.cache_read_input_tokens, \
+    r.cache_write_input_tokens, \
+    r.cache_write_input_tokens_30m, \
+    r.cache_write_input_tokens_12h \
 FROM request_events_v1 r \
 WHERE r.ts >= ";
 
@@ -136,6 +142,9 @@ pub(super) struct ListRow {
     pub(super) cost_cache_creation_5m_micros: Option<i64>,
     pub(super) cost_cache_creation_1h_micros: Option<i64>,
     pub(super) cost_cache_read_micros: Option<i64>,
+    pub(super) cost_cache_write_micros: Option<i64>,
+    pub(super) cost_cache_write_30m_micros: Option<i64>,
+    pub(super) cost_cache_write_12h_micros: Option<i64>,
     pub(super) ts_ms: Option<i64>,
     pub(super) event_id: Option<String>,
     pub(super) source_kind: Option<String>,
@@ -166,6 +175,9 @@ pub(super) struct ListRow {
     pub(super) cache_creation_input_tokens_5m: Option<i64>,
     pub(super) cache_creation_input_tokens_1h: Option<i64>,
     pub(super) cache_read_input_tokens: Option<i64>,
+    pub(super) cache_write_input_tokens: Option<i64>,
+    pub(super) cache_write_input_tokens_30m: Option<i64>,
+    pub(super) cache_write_input_tokens_12h: Option<i64>,
 }
 
 pub(super) async fn list_request_events(

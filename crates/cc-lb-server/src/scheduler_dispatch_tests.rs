@@ -1843,8 +1843,11 @@ async fn assert_renewal_cadence(
         cc_lb_storage_api::CacheTtl::Ttl5m => {
             request.config_snapshot.refresh_lead_time_5m_secs = lead_secs
         }
-        cc_lb_storage_api::CacheTtl::Ttl1h => {
+        cc_lb_storage_api::CacheTtl::Ttl1h | cc_lb_storage_api::CacheTtl::Ttl12h => {
             request.config_snapshot.refresh_lead_time_1h_secs = lead_secs
+        }
+        cc_lb_storage_api::CacheTtl::Ttl30m => {
+            request.config_snapshot.refresh_lead_time_5m_secs = lead_secs
         }
     }
     fixture

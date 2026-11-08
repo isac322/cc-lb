@@ -225,6 +225,78 @@ async fn every_relational_scalar_roundtrips_without_persisting_diagnostics() {
     );
 }
 
+#[tokio::test]
+async fn usage_rollup_conflict_accumulates_nullable_provider_cache_writes() {
+    let (_dir, storage) = storage("usage-rollup-cache-writes.sqlite").await;
+    let upstream_id = Uuid::from_u128(7);
+    let batches = [
+        ("null-cache-writes", None, None),
+        ("zero-cache-writes", Some((0, 0, 0)), Some((0, 0, 0))),
+        ("first-cache-writes", Some((3, 5, 7)), Some((3, 5, 7))),
+        (
+            "second-cache-writes",
+            Some((11, 13, 17)),
+            Some((14, 18, 24)),
+        ),
+    ];
+
+    for (request_id, cache_writes, expected) in batches {
+        let (cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h) =
+            match cache_writes {
+                Some((five_minute, thirty_minute, twelve_hour)) => {
+                    (Some(five_minute), Some(thirty_minute), Some(twelve_hour))
+                }
+                None => (None, None, None),
+            };
+        let event = RequestEvent {
+            ts: 1_800_000_000,
+            ts_ms: Some(1_800_000_000_000),
+            request_id: request_id.to_owned(),
+            event_id: Some(format!("rollup-cache-write-{request_id}")),
+            upstream_id: Some(upstream_id),
+            upstream_name: Some("rollup-upstream".to_owned()),
+            model: Some("rollup-model".to_owned()),
+            status: 200,
+            duration_ms: 1,
+            cache_write_input_tokens,
+            cache_write_input_tokens_30m,
+            cache_write_input_tokens_12h,
+            ..RequestEvent::default()
+        };
+        storage
+            .append_request_event(&event)
+            .await
+            .expect("append cache-write rollup event");
+        storage
+            .rollup_usage_once()
+            .await
+            .expect("roll up cache-write event");
+
+        let rollups = storage
+            .query_usage_rollups_in_range(
+                UsageRollupResolution::Minute,
+                0,
+                u64::try_from(i64::MAX).expect("max"),
+            )
+            .await
+            .expect("query cache-write rollup");
+        assert_eq!(rollups.len(), 1);
+        let rollup = &rollups[0];
+        match expected {
+            Some((five_minute, thirty_minute, twelve_hour)) => {
+                assert_eq!(rollup.cache_write_input_tokens, Some(five_minute));
+                assert_eq!(rollup.cache_write_input_tokens_30m, Some(thirty_minute));
+                assert_eq!(rollup.cache_write_input_tokens_12h, Some(twelve_hour));
+            }
+            None => {
+                assert_eq!(rollup.cache_write_input_tokens, None);
+                assert_eq!(rollup.cache_write_input_tokens_30m, None);
+                assert_eq!(rollup.cache_write_input_tokens_12h, None);
+            }
+        }
+    }
+}
+
 fn pool_record(
     at: i64,
     window: SubscriptionQuotaWindow,

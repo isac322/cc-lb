@@ -39,6 +39,7 @@ pub struct RequestSnapshot {
     pub(crate) prefix_schema_version: Option<String>,
     keepalive_body: Bytes,
     keepalive_model: String,
+    pub(crate) surface: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -57,6 +58,8 @@ pub struct PersistedRequestSnapshot {
     pub prefix_policy_version: Option<String>,
     #[serde(default)]
     pub prefix_schema_version: Option<String>,
+    #[serde(default)]
+    pub surface: Option<String>,
 }
 
 impl fmt::Debug for PersistedRequestSnapshot {
@@ -148,6 +151,58 @@ impl RequestSnapshot {
             prefix_schema_version: None,
             keepalive_body: Bytes::from(keepalive_body),
             keepalive_model,
+            surface: None,
+        })
+    }
+
+    /// Captures an OpenAI Responses request without applying Anthropic
+    /// message trimming or cache-control rewriting.
+    pub fn capture_openai(
+        url: Url,
+        method: Method,
+        headers: HeaderMap,
+        body: Bytes,
+        upstream_id: Uuid,
+        ttl: CacheTtl,
+        max_bytes: usize,
+    ) -> Result<Self, SnapshotError> {
+        if body.len() > max_bytes {
+            return Err(SnapshotError::TooLarge {
+                actual: body.len(),
+                max: max_bytes,
+            });
+        }
+        let value: Value = sonic_rs::from_slice(&body).map_err(|_| SnapshotError::InvalidJson)?;
+        if !value.is_object() {
+            return Err(SnapshotError::NotAnObject);
+        }
+        let keepalive_body = rewrite_object(
+            &body,
+            &[
+                ("max_output_tokens", Some(br#"16"#)),
+                ("stream", Some(br#"false"#)),
+            ],
+        )?;
+        let keepalive_model = value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let surface = Some("responses".to_owned());
+        Ok(Self {
+            url,
+            method,
+            headers,
+            body,
+            upstream_id,
+            ttl,
+            prefix_fingerprint: None,
+            prefix_hash: None,
+            prefix_policy_version: None,
+            prefix_schema_version: None,
+            keepalive_body: Bytes::from(keepalive_body),
+            keepalive_model,
+            surface,
         })
     }
     pub(crate) fn with_prefix_evidence(
@@ -187,6 +242,16 @@ impl RequestSnapshot {
     pub fn build_keepalive_body(&self) -> Result<Bytes, SnapshotError> {
         Ok(self.keepalive_body.clone())
     }
+    pub fn cache_input_token_estimate(&self) -> u64 {
+        if self.surface.as_deref() == Some("responses") {
+            self.body.len().saturating_div(4) as u64
+        } else {
+            4_000
+        }
+    }
+    pub fn surface(&self) -> Option<&str> {
+        self.surface.as_deref()
+    }
 
     pub fn to_persisted(&self) -> PersistedRequestSnapshot {
         PersistedRequestSnapshot {
@@ -207,6 +272,7 @@ impl RequestSnapshot {
             prefix_hash: self.prefix_hash.clone(),
             prefix_policy_version: self.prefix_policy_version.clone(),
             prefix_schema_version: self.prefix_schema_version.clone(),
+            surface: self.surface.clone(),
         }
     }
 
@@ -228,15 +294,30 @@ impl RequestSnapshot {
         let prefix_hash = persisted.prefix_hash;
         let prefix_policy_version = persisted.prefix_policy_version;
         let prefix_schema_version = persisted.prefix_schema_version;
-        let snapshot = Self::capture(
-            url,
-            method,
-            headers,
-            Bytes::from(persisted.body),
-            persisted.upstream_id,
-            persisted.ttl,
-            usize::MAX,
-        )?;
+        let surface = persisted.surface;
+        let body = Bytes::from(persisted.body);
+        let mut snapshot = if surface.as_deref() == Some("responses") {
+            Self::capture_openai(
+                url,
+                method,
+                headers,
+                body,
+                persisted.upstream_id,
+                persisted.ttl,
+                usize::MAX,
+            )?
+        } else {
+            Self::capture(
+                url,
+                method,
+                headers,
+                body,
+                persisted.upstream_id,
+                persisted.ttl,
+                usize::MAX,
+            )?
+        };
+        snapshot.surface = surface;
         Ok(snapshot.with_prefix_evidence(
             prefix_fingerprint,
             prefix_hash,
@@ -1034,6 +1115,7 @@ mod tests {
             prefix_hash: None,
             prefix_policy_version: None,
             prefix_schema_version: None,
+            surface: None,
         };
         let debug = format!("{snapshot:?}");
 

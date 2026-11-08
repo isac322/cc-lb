@@ -18,6 +18,8 @@ pub struct RoutePreviewInput {
     pub request_id: Option<String>,
     pub headers: HeaderMap,
     pub body_bytes: Bytes,
+    pub provider: Option<cc_lb_domain::Provider>,
+    pub path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +38,7 @@ pub struct RoutePreviewOutcome {
 pub enum RoutePreviewError {
     PrincipalNotFound(String),
     PipelineInstantiationError(String),
+    UnsupportedOperation { method: String, path: String },
 }
 
 #[async_trait]

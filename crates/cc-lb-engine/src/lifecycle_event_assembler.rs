@@ -154,6 +154,9 @@ struct CostBreakdownOptions {
     cache_creation_5m: Option<i64>,
     cache_creation_1h: Option<i64>,
     cache_read: Option<i64>,
+    cache_write: Option<i64>,
+    cache_write_30m: Option<i64>,
+    cache_write_12h: Option<i64>,
 }
 
 #[derive(Default)]
@@ -365,6 +368,9 @@ impl Partial {
             cache_read_input_tokens: self
                 .usage_seen
                 .then_some(self.usage.cache_read_input_tokens),
+            cache_write_input_tokens: self.usage.cache_write_input_tokens,
+            cache_write_input_tokens_30m: self.usage.cache_write_input_tokens_30m,
+            cache_write_input_tokens_12h: self.usage.cache_write_input_tokens_12h,
             thinking_tokens: (self.usage_seen && self.usage.thinking_tokens > 0)
                 .then_some(self.usage.thinking_tokens),
             service_tier: self.usage.service_tier.clone(),
@@ -374,6 +380,9 @@ impl Partial {
             cost_cache_creation_5m_micros: cost.cache_creation_5m,
             cost_cache_creation_1h_micros: cost.cache_creation_1h,
             cost_cache_read_micros: cost.cache_read,
+            cost_cache_write_micros: cost.cache_write,
+            cost_cache_write_30m_micros: cost.cache_write_30m,
+            cost_cache_write_12h_micros: cost.cache_write_12h,
             thinking_budget_tokens: self.thinking_budget_tokens,
             reasoning_effort: self.reasoning_effort.clone(),
             request_body_read_ms: self.request_body_read_ms,
@@ -428,6 +437,9 @@ impl Partial {
                 cache_creation_5m: cost.cache_creation_5m_micros,
                 cache_creation_1h: cost.cache_creation_1h_micros,
                 cache_read: cost.cache_read_micros,
+                cache_write: cost.cache_write_micros,
+                cache_write_30m: cost.cache_write_30m_micros,
+                cache_write_12h: cost.cache_write_12h_micros,
             };
         }
         self.estimated_cost_options().unwrap_or_default()
@@ -438,14 +450,19 @@ impl Partial {
     // reconciliation, which must stay driven solely by the real `Priced` event.
     fn estimated_cost_options(&self) -> Option<CostBreakdownOptions> {
         self.estimated_cost_options_with(|model, usage| {
-            cc_lb_pricing::virtual_cost_micros_full_with_context(
+            cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
                 model,
                 usage.input_tokens,
                 usage.output_tokens,
+                0,
+                0,
                 usage.cache_creation_input_tokens,
                 usage.cache_creation_input_tokens_5m,
                 usage.cache_creation_input_tokens_1h,
                 usage.cache_read_input_tokens,
+                usage.cache_write_input_tokens,
+                usage.cache_write_input_tokens_30m,
+                usage.cache_write_input_tokens_12h,
                 usage.service_tier.as_deref(),
             )
             .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown)
@@ -527,6 +544,9 @@ impl From<LifecycleCostBreakdown> for CostBreakdownOptions {
             cache_creation_5m: cost.cache_creation_5m_micros,
             cache_creation_1h: cost.cache_creation_1h_micros,
             cache_read: cost.cache_read_micros,
+            cache_write: cost.cache_write_micros,
+            cache_write_30m: cost.cache_write_30m_micros,
+            cache_write_12h: cost.cache_write_12h_micros,
         }
     }
 }
@@ -1581,6 +1601,9 @@ fn finalize_base(
         cache_read_input_tokens: partial
             .usage_seen
             .then_some(partial.usage.cache_read_input_tokens),
+        cache_write_input_tokens: partial.usage.cache_write_input_tokens,
+        cache_write_input_tokens_30m: partial.usage.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: partial.usage.cache_write_input_tokens_12h,
         thinking_budget_tokens: partial.thinking_budget_tokens,
         reasoning_effort: partial.reasoning_effort.clone(),
         cache_breakpoints: partial.cache_breakpoints.clone(),
@@ -1592,6 +1615,9 @@ fn finalize_base(
         cost_cache_creation_5m_micros: cost.cache_creation_5m,
         cost_cache_creation_1h_micros: cost.cache_creation_1h,
         cost_cache_read_micros: cost.cache_read,
+        cost_cache_write_micros: cost.cache_write,
+        cost_cache_write_30m_micros: cost.cache_write_30m,
+        cost_cache_write_12h_micros: cost.cache_write_12h,
         thinking_tokens: (partial.usage.thinking_tokens > 0)
             .then_some(partial.usage.thinking_tokens),
         service_tier: partial.usage.service_tier.clone(),
@@ -4436,6 +4462,9 @@ mod tests {
                             cache_creation_5m_micros: None,
                             cache_creation_1h_micros: None,
                             cache_read_micros: None,
+                            cache_write_micros: None,
+                            cache_write_30m_micros: None,
+                            cache_write_12h_micros: None,
                         },
                     });
                     break;

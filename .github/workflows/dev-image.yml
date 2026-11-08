@@ -35,8 +35,10 @@ jobs:
         id: source
         run: |
           set -euo pipefail
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+          echo "CACHE_KEY=docker-mounts-thin-arm64-$sha" >> "$GITHUB_ENV"
 
       - name: Log in to ghcr.io
         uses: docker/login-action@v4
@@ -45,12 +47,51 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Restore BuildKit cache mounts
+        id: cache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/docker-mounts.tar
+          key: ${{ env.CACHE_KEY }}
+          restore-keys: |
+            docker-mounts-thin-arm64-
 
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      - name: Inject restored BuildKit cache mounts
+        if: steps.cache-restore.outputs.cache-matched-key != ''
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/buildkit-cache-inject"
+          rm -rf "$ctx"
+          mkdir -p "$ctx"
+          mv "$RUNNER_TEMP/docker-mounts.tar" "$ctx/docker-mounts.tar"
+          cat > "$ctx/Dockerfile" <<'EOF'
+          # syntax=docker/dockerfile:1
+          FROM alpine:3.24 AS inject
+          COPY docker-mounts.tar /docker-mounts.tar
+          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+              --mount=type=cache,id=bun-linux-arm64,target=/bun \
+              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+              tar -C / -xf /docker-mounts.tar && \
+              mkdir -p /out && \
+              du -sk /cargo-home /bun /sccache > /out/restored.txt
+          FROM scratch
+          COPY --from=inject /out/ /
+          EOF
+          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
+          cat "$ctx/out/restored.txt"
+          rm -rf "$ctx"
       - name: Build and push arm64 dev image
         uses: docker/build-push-action@v7
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
           target: distroless
           platforms: linux/arm64
@@ -64,12 +105,46 @@ jobs:
             CARGO_BUILD_JOBS=4
             CARGO_PROFILE_RELEASE_LTO=thin
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
-            SCCACHE_LOCAL_MOUNT=0
-            REQUIRE_SCCACHE=0
+            SCCACHE_LOCAL_MOUNT=1
+            REQUIRE_SCCACHE=1
           # Avoid an unknown/unknown attestation entry in the mutable tag. The
           # remote verification below must see exactly one runnable platform.
           provenance: false
 
+
+      - name: Extract populated BuildKit cache mounts
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/buildkit-cache-extract"
+          rm -rf "$ctx" "$RUNNER_TEMP/docker-mounts.tar"
+          mkdir -p "$ctx"
+          cat > "$ctx/Dockerfile" <<'EOF'
+          # syntax=docker/dockerfile:1
+          FROM alpine:3.24 AS extract
+          RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+              --mount=type=cache,id=bun-linux-arm64,target=/bun \
+              --mount=type=cache,id=sccache,sharing=shared,target=/sccache \
+              mkdir -p /out && \
+              du -sk /cargo-home /bun /sccache > /out/extracted.txt && \
+              tar -C / -cf /out/docker-mounts.tar cargo-home bun sccache
+          FROM scratch
+          COPY --from=extract /out/ /
+          EOF
+          docker buildx build --builder "$BUILDER" --progress=plain --output "type=local,dest=$ctx/out" "$ctx"
+          cat "$ctx/out/extracted.txt"
+          mv "$ctx/out/docker-mounts.tar" "$RUNNER_TEMP/docker-mounts.tar"
+          test -s "$RUNNER_TEMP/docker-mounts.tar"
+          rm -rf "$ctx"
+
+      - name: Save BuildKit cache mounts
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/docker-mounts.tar
+          key: ${{ env.CACHE_KEY }}
       - name: Verify remote image platform and revision
         env:
           IMAGE: ghcr.io/isac322/cc-lb:dev

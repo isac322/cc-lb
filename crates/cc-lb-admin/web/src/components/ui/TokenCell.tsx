@@ -12,6 +12,8 @@ function tokenBreakdown(e: RequestEventWithPhase): TokenBreakdown {
     cache_read: e.cache_read_input_tokens ?? 0,
     cache_create_5m: e.cache_creation_input_tokens_5m ?? 0,
     cache_create_1h: e.cache_creation_input_tokens_1h ?? 0,
+    cache_write_30m: e.cache_write_input_tokens_30m ?? 0,
+    cache_write_12h: e.cache_write_input_tokens_12h ?? 0,
     input: e.input_tokens ?? 0,
     output: e.output_tokens ?? 0,
   };

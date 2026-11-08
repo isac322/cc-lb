@@ -897,7 +897,7 @@ describe('RequestEventDrawer', () => {
       expect(screen.getByText('priority')).toBeDefined();
     });
 
-    it('renders standard as a field when service_tier is standard', () => {
+    it('does not render a badge when service_tier is standard', () => {
       const event = {
         event_id: 'evt_standard',
         request_id: 'req_standard',
@@ -918,7 +918,7 @@ describe('RequestEventDrawer', () => {
         />,
       );
 
-      expect(screen.getByText('standard')).toBeDefined();
+      expect(screen.queryByText('standard')).toBeNull();
       expect(screen.queryByText('priority')).toBeNull();
     });
 

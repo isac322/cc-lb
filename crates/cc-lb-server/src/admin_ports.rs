@@ -41,6 +41,8 @@ impl RoutePreviewPort for ServerRoutePreviewPort {
                 request_id: input.request_id,
                 headers: input.headers,
                 body_bytes: input.body_bytes,
+                provider: input.provider,
+                path: input.path,
             })
             .await
             .map_err(map_preview_error)?;
@@ -60,6 +62,9 @@ fn map_preview_error(error: PreviewRouteError) -> RoutePreviewError {
         PreviewRouteError::PrincipalNotFound(id) => RoutePreviewError::PrincipalNotFound(id),
         PreviewRouteError::PipelineInstantiationError(detail) => {
             RoutePreviewError::PipelineInstantiationError(detail)
+        }
+        PreviewRouteError::UnsupportedOperation { method, path } => {
+            RoutePreviewError::UnsupportedOperation { method, path }
         }
     }
 }

@@ -19,6 +19,7 @@ fn encrypt_v1_snapshot(aead: &AeadService) -> (PersistedRequestSnapshot, Vec<u8>
         prefix_hash: None,
         prefix_policy_version: None,
         prefix_schema_version: None,
+        surface: None,
     };
     let plaintext = serde_json::to_vec(&expected).expect("snapshot serializes");
     let encrypted = aead

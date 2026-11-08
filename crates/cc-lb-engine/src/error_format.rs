@@ -32,19 +32,6 @@ pub fn anthropic_error_response(
     response
 }
 
-pub fn anthropic_error_response_with_retry_after(
-    status: StatusCode,
-    error_type: &str,
-    message: &str,
-    retry_after_secs: u64,
-) -> Response<Body> {
-    let mut response = anthropic_error_response(status, error_type, message);
-    if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
-        response.headers_mut().insert(RETRY_AFTER, value);
-    }
-    response
-}
-
 pub(crate) fn provider_error_body(
     capability: ProviderCapability,
     status: StatusCode,
