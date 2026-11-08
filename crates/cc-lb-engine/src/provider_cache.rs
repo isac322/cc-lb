@@ -50,7 +50,7 @@ fn analyze_openai(
     model: &str,
     headers: &http::HeaderMap,
 ) -> Option<RequestNativeCacheObservation> {
-    if model.is_empty() || !model.starts_with("gpt-") {
+    if model.is_empty() {
         return None;
     }
     let scope = openai_scope(headers);
@@ -72,7 +72,12 @@ fn analyze_openai(
     if breakpoints.len() > MAX_EXPLICIT_WRITES {
         return Some(unknown_openai(scope, "explicit_write_limit"));
     }
-    let retention_secs = openai_retention_secs(body, modern)?;
+    if !modern
+        && (requested_mode == Some(OpenaiCacheMode::Explicit) || !breakpoints.is_empty())
+    {
+        return Some(unknown_openai(scope, "unsupported_older_explicit"));
+    }
+    let retention_secs = openai_retention_secs(body, modern, &breakpoints)?;
     let identity_hash = body
         .get("prompt_cache_key")
         .and_then(Value::as_str)
@@ -163,7 +168,7 @@ fn analyze_gemini(body: &Value, model: &str) -> RequestNativeCacheObservation {
         cached_tokens: None,
         write_tokens: None,
         evidence: RequestCacheEvidence::Unreported,
-        retention_secs: explicit_resource.map(|_| 60 * 60),
+        retention_secs: None,
         expires_at_unix_secs: None,
         analysis_ms: None,
     }
@@ -171,7 +176,9 @@ fn analyze_gemini(body: &Value, model: &str) -> RequestNativeCacheObservation {
 
 fn find_openai_breakpoints(body: &Value) -> Vec<&Value> {
     let mut found = Vec::new();
-    collect_breakpoints(body, &mut found);
+    if let Some(input) = body.get("input") {
+        collect_breakpoints(input, &mut found);
+    }
     found
 }
 
@@ -220,21 +227,44 @@ fn implicit_boundary(body: &Value) -> Option<String> {
     ))
 }
 
-fn openai_retention_secs(body: &Value, modern: bool) -> Option<Option<u64>> {
-    let retention = match body.get("prompt_cache_retention").and_then(Value::as_str) {
+fn openai_retention_secs(
+    body: &Value,
+    modern: bool,
+    breakpoints: &[&Value],
+) -> Option<Option<u64>> {
+    let retention = match body.get("prompt_cache_retention") {
         None => None,
-        Some("in_memory") => Some(0),
-        Some("24h") if !modern => Some(24 * 60 * 60),
+        Some(Value::String(value)) if value == "in_memory" => Some(0),
+        Some(Value::String(value)) if value == "24h" && !modern => Some(24 * 60 * 60),
         Some(_) => return None,
     };
-    let ttl = body
+    let options_ttl = match body
         .get("prompt_cache_options")
         .and_then(|options| options.get("ttl"))
-        .and_then(parse_ttl_secs);
-    if ttl.is_some_and(|value| value == 0 || value > OPENAI_LONG_RETENTION_SECS) {
-        return None;
+    {
+        None => None,
+        Some(value) => Some(parse_ttl_secs(value)?),
+    };
+    let mut breakpoint_ttl = None;
+    for breakpoint in breakpoints {
+        let marker = breakpoint
+            .get("prompt_cache_breakpoint")
+            .and_then(Value::as_object)?;
+        let Some(value) = marker.get("ttl") else {
+            continue;
+        };
+        let parsed = parse_ttl_secs(value)?;
+        if breakpoint_ttl.is_some_and(|previous| previous != parsed) {
+            return None;
+        }
+        breakpoint_ttl = Some(parsed);
     }
-    Some(retention.or(ttl).or(Some(OPENAI_DEFAULT_RETENTION_SECS)))
+    Some(
+        breakpoint_ttl
+            .or(retention)
+            .or(options_ttl)
+            .or(Some(OPENAI_DEFAULT_RETENTION_SECS)),
+    )
 }
 
 fn parse_ttl_secs(value: &Value) -> Option<u64> {
@@ -256,9 +286,16 @@ fn parse_ttl_secs(value: &Value) -> Option<u64> {
 
 fn supports_modern_openai_cache(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
-    ["gpt-5.6", "gpt-5.7", "gpt-5.8", "gpt-6"]
-        .iter()
-        .any(|prefix| lower.starts_with(prefix))
+    let Some(version) = lower.strip_prefix("gpt-").and_then(|value| {
+        let version = value.split(|ch: char| !ch.is_ascii_digit() && ch != '.').next()?;
+        let mut parts = version.split('.');
+        let major = parts.next()?.parse::<u64>().ok()?;
+        let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+        Some((major, minor))
+    }) else {
+        return false;
+    };
+    version >= (5, 6)
 }
 
 fn supports_gemini_cache(model: &str) -> bool {
@@ -438,6 +475,101 @@ mod tests {
     }
 
     #[test]
+    fn openai_metadata_breakpoint_is_not_cache_boundary() {
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &json!({
+                "metadata":{"prompt_cache_breakpoint":{"ttl":"2h"}},
+                "input":[{"role":"user","content":"hello"}]
+            }),
+            "gpt-5.6",
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(observed.mode, "implicit");
+        assert_eq!(observed.retention_secs, Some(30 * 60));
+    }
+
+    #[test]
+    fn older_o_models_are_accepted_without_the_gpt_prefix() {
+        for model in ["o1", "o3-mini", "o4-mini"] {
+            let observed = analyze(
+                ProviderCapability::OpenaiResponses,
+                &json!({"prompt_cache_key":"opaque"}),
+                model,
+                &HeaderMap::new(),
+            )
+            .unwrap();
+            assert_eq!(observed.mode, "implicit");
+        }
+    }
+
+    #[test]
+    fn older_explicit_boundaries_are_unknown() {
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &json!({
+                "prompt_cache_options":{"mode":"explicit"},
+                "input":[{"prompt_cache_breakpoint":{}}]
+            }),
+            "o3",
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(observed.mode, "unknown");
+        assert_eq!(
+            observed.boundary.as_deref(),
+            Some("unsupported_older_explicit")
+        );
+    }
+
+    #[test]
+    fn modern_breakpoint_ttl_overrides_request_ttl() {
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &json!({
+                "prompt_cache_options":{"ttl":"30m"},
+                "input":[{"content":[
+                    {"prompt_cache_breakpoint":{"ttl":"2h"}}
+                ]}]
+            }),
+            "gpt-5.9-preview",
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(observed.retention_secs, Some(2 * 60 * 60));
+    }
+
+    #[test]
+    fn unsupported_openai_ttl_is_unknown() {
+        assert!(
+            analyze(
+                ProviderCapability::OpenaiResponses,
+                &json!({"prompt_cache_options":{"ttl":"forever"}}),
+                "gpt-5.6",
+                &HeaderMap::new(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn gemini_explicit_resource_has_unknown_retention() {
+        let body = json!({"cachedContent":"projects/p1/locations/us/models/gemini-2.5/cache/abc"});
+        let observed = analyze(
+            ProviderCapability::GeminiGenerateContent,
+            &body,
+            "gemini-2.5-pro",
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(observed.mode, "explicit");
+        assert_eq!(observed.scope.as_deref(), Some("p1"));
+        assert_eq!(observed.retention_secs, None);
+        assert_eq!(observed.expires_at_unix_secs, None);
+        assert!(observed.identity_hash.is_some());
+    }
+    #[test]
     fn older_openai_key_is_hashed_and_retention_is_preserved() {
         let body = json!({"model":"gpt-4.1","prompt_cache_key":"secret-key","prompt_cache_retention":"24h"});
         let observed = analyze(
@@ -475,7 +607,8 @@ mod tests {
         .unwrap();
         assert_eq!(observed.mode, "explicit");
         assert_eq!(observed.scope.as_deref(), Some("p1"));
-        assert_eq!(observed.retention_secs, Some(3600));
+        assert_eq!(observed.retention_secs, None);
+        assert_eq!(observed.expires_at_unix_secs, None);
         assert!(observed.identity_hash.is_some());
     }
 }

@@ -63,8 +63,10 @@ impl PromptCacheObservationStore for SqliteStorage {
              (upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary) DO UPDATE SET \
-             evidence_source = excluded.evidence_source, observed_cached_tokens = excluded.observed_cached_tokens, \
-             observed_write_tokens = excluded.observed_write_tokens, retention_secs = excluded.retention_secs, \
+             evidence_source = excluded.evidence_source, \
+             observed_cached_tokens = COALESCE(excluded.observed_cached_tokens, provider_native_cache_observations.observed_cached_tokens), \
+             observed_write_tokens = COALESCE(excluded.observed_write_tokens, provider_native_cache_observations.observed_write_tokens), \
+             retention_secs = excluded.retention_secs, \
              expires_at = excluded.expires_at, last_observed_at = excluded.last_observed_at \
              WHERE excluded.last_observed_at > provider_native_cache_observations.last_observed_at",
         )

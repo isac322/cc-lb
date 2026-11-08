@@ -6,6 +6,18 @@ pub trait EngineMetricsHook: Send + Sync {
     /// default keeps third-party hooks source-compatible.
     fn record_native_cache_outcome(&self, _provider: &str, _mode: &str, _outcome: &str) {}
 
+    fn record_native_cache_hit(&self, _provider: &str, _mode: &str) {}
+
+    fn record_native_cache_miss(&self, _provider: &str, _mode: &str) {}
+
+    fn record_native_cache_prediction(
+        &self,
+        _provider: &str,
+        _mode: &str,
+        _outcome: &str,
+    ) {
+    }
+
     fn record_cache_observation_dropped(&self, reason: &str);
 
     fn record_dropped_events_by(&self, reason: &str, count: u64);
@@ -52,6 +64,34 @@ impl EngineMetricsHook for MetricsCrateHook {
     fn record_native_cache_outcome(&self, provider: &str, mode: &str, outcome: &str) {
         metrics::counter!(
             "cc_lb_cache_native_outcome_total",
+            "provider" => provider.to_owned(),
+            "mode" => mode.to_owned(),
+            "outcome" => outcome.to_owned()
+        )
+        .increment(1);
+    }
+
+    fn record_native_cache_hit(&self, provider: &str, mode: &str) {
+        metrics::counter!(
+            "cc_lb_cache_native_hit_total",
+            "provider" => provider.to_owned(),
+            "mode" => mode.to_owned()
+        )
+        .increment(1);
+    }
+
+    fn record_native_cache_miss(&self, provider: &str, mode: &str) {
+        metrics::counter!(
+            "cc_lb_cache_native_miss_total",
+            "provider" => provider.to_owned(),
+            "mode" => mode.to_owned()
+        )
+        .increment(1);
+    }
+
+    fn record_native_cache_prediction(&self, provider: &str, mode: &str, outcome: &str) {
+        metrics::counter!(
+            "cc_lb_cache_native_prediction_total",
             "provider" => provider.to_owned(),
             "mode" => mode.to_owned(),
             "outcome" => outcome.to_owned()

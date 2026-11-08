@@ -194,6 +194,12 @@ fn apply_native_usage(
 
 fn derive_cache_state(partial: &Partial) -> RequestCacheState {
     if let Some(native) = partial.native_cache.as_ref() {
+        if native.provider == "gemini"
+            && native.mode == "explicit"
+            && native.evidence != cc_lb_request_log::RequestCacheEvidence::Positive
+        {
+            return RequestCacheState::Unknown;
+        }
         return match (native.evidence, native.write_tokens.unwrap_or_default() > 0) {
             (cc_lb_request_log::RequestCacheEvidence::Positive, true) => RequestCacheState::Refresh,
             (cc_lb_request_log::RequestCacheEvidence::Positive, false) => RequestCacheState::Hit,
@@ -433,5 +439,21 @@ mod tests {
             }
         }
         assert!(!observed_any);
+    }
+    #[test]
+    fn gemini_explicit_zero_evidence_is_unknown() {
+        let partial = super::Partial {
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "gemini".into(),
+                mode: "explicit".into(),
+                evidence: cc_lb_request_log::RequestCacheEvidence::Zero,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::derive_cache_state(&partial),
+            RequestCacheState::Unknown
+        );
     }
 }

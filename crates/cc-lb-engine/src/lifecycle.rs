@@ -1911,6 +1911,8 @@ pub struct PromptCacheObservationContext {
 pub(crate) struct PromptCacheUsage {
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_read_input_tokens: u64,
+    pub(crate) cache_creation_evidence: cc_lb_request_log::RequestCacheEvidence,
+    pub(crate) cache_read_evidence: cc_lb_request_log::RequestCacheEvidence,
     /// True only for present valid positive reads and complete numeric zero
     /// creation evidence, never from accounting counters' zero defaults.
     pub(crate) read_only_evidence: bool,
@@ -1921,8 +1923,39 @@ impl From<&UsageCounts> for PromptCacheUsage {
         Self {
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_evidence: request_cache_evidence(usage.cache_creation_evidence),
+            cache_read_evidence: request_cache_evidence(usage.cache_read_evidence),
             read_only_evidence: usage.has_affirmative_read_only_cache_usage(),
         }
+    }
+}
+
+fn request_cache_evidence(
+    evidence: usage_parser::CacheTokenEvidence,
+) -> cc_lb_request_log::RequestCacheEvidence {
+    match evidence {
+        usage_parser::CacheTokenEvidence::Unreported => {
+            cc_lb_request_log::RequestCacheEvidence::Unreported
+        }
+        usage_parser::CacheTokenEvidence::Zero => cc_lb_request_log::RequestCacheEvidence::Zero,
+        usage_parser::CacheTokenEvidence::Positive => {
+            cc_lb_request_log::RequestCacheEvidence::Positive
+        }
+        usage_parser::CacheTokenEvidence::Invalid => {
+            cc_lb_request_log::RequestCacheEvidence::Invalid
+        }
+    }
+}
+
+fn native_tokens_for_evidence(
+    evidence: cc_lb_request_log::RequestCacheEvidence,
+    tokens: u64,
+) -> Option<u64> {
+    match evidence {
+        cc_lb_request_log::RequestCacheEvidence::Zero
+        | cc_lb_request_log::RequestCacheEvidence::Positive => Some(tokens),
+        cc_lb_request_log::RequestCacheEvidence::Unreported
+        | cc_lb_request_log::RequestCacheEvidence::Invalid => None,
     }
 }
 
@@ -2133,10 +2166,14 @@ fn publish_provider_cache_observation(
         identity_hash: native.identity_hash.clone().unwrap_or_default(),
         boundary: native.boundary.clone().unwrap_or_default(),
         evidence_source: native.evidence_source.clone().unwrap_or_default(),
-        observed_cached_tokens: (usage.cache_read_input_tokens > 0)
-            .then_some(usage.cache_read_input_tokens),
-        observed_write_tokens: (usage.cache_creation_input_tokens > 0)
-            .then_some(usage.cache_creation_input_tokens),
+        observed_cached_tokens: native_tokens_for_evidence(
+            usage.cache_read_evidence,
+            usage.cache_read_input_tokens,
+        ),
+        observed_write_tokens: native_tokens_for_evidence(
+            usage.cache_creation_evidence,
+            usage.cache_creation_input_tokens,
+        ),
         retention_secs: native.retention_secs,
         expires_at_unix_secs: native.expires_at_unix_secs.or_else(|| {
             native
@@ -9631,6 +9668,7 @@ mod prompt_cache_policy_tests {
                 cache_creation_input_tokens: 8_192,
                 cache_read_input_tokens: 0,
                 read_only_evidence: false,
+                ..PromptCacheUsage::default()
             },
             1_800_000_000,
         );
@@ -11213,6 +11251,31 @@ mod tests {
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 
     #[test]
+    fn native_observation_tokens_keep_zero_distinct_from_absent() {
+        assert_eq!(
+            super::native_tokens_for_evidence(
+                cc_lb_request_log::RequestCacheEvidence::Zero,
+                0,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            super::native_tokens_for_evidence(
+                cc_lb_request_log::RequestCacheEvidence::Unreported,
+                0,
+            ),
+            None
+        );
+        assert_eq!(
+            super::native_tokens_for_evidence(
+                cc_lb_request_log::RequestCacheEvidence::Invalid,
+                10,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn operations_filter_subscription_and_api_key_credentials() {
         use StorageRecordKind as K;
         let all_kinds = [
@@ -11752,6 +11815,7 @@ mod tests {
                             cache_creation_input_tokens: if is_hit { 0 } else { 2_400 },
                             cache_read_input_tokens: if is_hit { 2_400 } else { 0 },
                             read_only_evidence: false,
+                            ..PromptCacheUsage::default()
                         },
                         dispatch,
                     );

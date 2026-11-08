@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 29] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 32] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -79,6 +79,24 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 29] = [
         name: "cc_lb_cache_native_outcome_total",
         kind: MetricKind::Counter,
         description: "Provider-native cache outcomes by provider, mode, and bounded outcome.",
+        labels: &["provider", "mode", "outcome"],
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_native_hit_total",
+        kind: MetricKind::Counter,
+        description: "Provider-native cache hits by bounded provider and mode.",
+        labels: &["provider", "mode"],
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_native_miss_total",
+        kind: MetricKind::Counter,
+        description: "Provider-native cache misses by bounded provider and mode.",
+        labels: &["provider", "mode"],
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_native_prediction_total",
+        kind: MetricKind::Counter,
+        description: "Provider-native cache prediction outcomes by provider and mode.",
         labels: &["provider", "mode", "outcome"],
     },
     MetricDefinition {
@@ -246,6 +264,21 @@ pub(crate) fn register_prometheus14_metrics() {
         "Provider-native cache outcomes by provider, mode, and bounded outcome."
     );
     metrics::describe_counter!(
+        "cc_lb_cache_native_hit_total",
+        Unit::Count,
+        "Provider-native cache hits by bounded provider and mode."
+    );
+    metrics::describe_counter!(
+        "cc_lb_cache_native_miss_total",
+        Unit::Count,
+        "Provider-native cache misses by bounded provider and mode."
+    );
+    metrics::describe_counter!(
+        "cc_lb_cache_native_prediction_total",
+        Unit::Count,
+        "Provider-native cache prediction outcomes by provider and mode."
+    );
+    metrics::describe_counter!(
         "cc_lb_cache_observation_dropped_total",
         Unit::Count,
         "Total prompt-cache observations dropped by fixed reason."
@@ -390,6 +423,25 @@ pub fn touch_prometheus14_metrics() {
         "provider" => "openai",
         "mode" => "implicit",
         "outcome" => "hit"
+    )
+    .increment(1);
+    metrics::counter!(
+        "cc_lb_cache_native_hit_total",
+        "provider" => "openai",
+        "mode" => "implicit"
+    )
+    .increment(1);
+    metrics::counter!(
+        "cc_lb_cache_native_miss_total",
+        "provider" => "openai",
+        "mode" => "explicit"
+    )
+    .increment(1);
+    metrics::counter!(
+        "cc_lb_cache_native_prediction_total",
+        "provider" => "openai",
+        "mode" => "implicit",
+        "outcome" => "predicted_hit_actual_hit"
     )
     .increment(1);
     metrics::counter!(
