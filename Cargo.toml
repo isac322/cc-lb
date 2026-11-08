@@ -47,6 +47,7 @@ cc-lb-plugin-conformance = { version = "0.4", path = "crates/cc-lb-plugin-confor
 
 wasmtime = { version = "50.0.1", default-features = false, features = [
     "anyhow",
+    "wat",
     "cranelift",
     "pooling-allocator",
     "threads",
