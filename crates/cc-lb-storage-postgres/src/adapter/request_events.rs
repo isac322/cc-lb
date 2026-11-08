@@ -972,21 +972,28 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         .iter()
         .map(|row| row.upstream_id)
         .collect::<std::collections::BTreeSet<_>>();
-    let min_request_start_ms = candidates
-        .iter()
-        .map(|row| row.request_start_ms)
-        .min()
-        .unwrap_or(0);
     let max_request_start_ms = candidates
         .iter()
         .map(|row| row.request_start_ms)
         .max()
         .unwrap_or(0);
-    // Load every renewal and follow-up in the bounded principal/upstream/time
-    // precheck. Cycle-wide deduplication must see sibling renewals and their
-    // follow-ups even when their prefix hashes differ from the candidate.
-    // The cache-keepalive contract uses a four-hour max_total_duration_secs
-    // session window; keep the full window here so append and purge agree.
+    // Load every renewal and follow-up for the candidate principal/upstream
+    // pairs up to the latest candidate. Cycle-wide deduplication must see
+    // sibling renewals and their follow-ups even when their prefix hashes
+    // differ from the candidate. Precise TTL and cycle qualification remain
+    // in-memory below.
+    let candidate_pairs = candidates
+        .iter()
+        .map(|row| (row.principal_id.clone(), row.upstream_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    for (principal_id, upstream_id) in &candidate_pairs {
+        let lock_key = format!("{principal_id}:{upstream_id}");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_key)
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    }
     let existing = sqlx::query(
         "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
                 prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
@@ -995,15 +1002,10 @@ async fn insert_filtered_keepalive_evidence_in_tx(
          WHERE evidence_kind IN ('renewal', 'follow_up')
            AND principal_id = ANY($1)
            AND upstream_id = ANY($2)
-           AND request_start_ms > $3
-           AND request_start_ms <= $4",
+           AND request_start_ms <= $3",
     )
     .bind(principals.iter().cloned().collect::<Vec<_>>())
     .bind(upstreams.iter().copied().collect::<Vec<_>>())
-    .bind(u64_to_i64(
-        min_request_start_ms.saturating_sub(4 * 60 * 60 * 1_000),
-        "cache keepalive evidence request_start_ms",
-    )?)
     .bind(u64_to_i64(
         max_request_start_ms,
         "cache keepalive evidence request_start_ms",

@@ -699,14 +699,14 @@ async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof() {
         .append_request_event_with_evidence(
             &RequestEvent {
                 ts: 3,
-                ts_ms: Some(8_000_000),
+                ts_ms: Some(18_000_000),
                 event_id: Some("long-lived-sibling-event".to_owned()),
                 ..RequestEvent::default()
             },
             &[evidence(
                 "long-lived-renewal-b",
                 "renewal",
-                8_000_000,
+                18_000_000,
                 "prefix-b",
             )],
         )
@@ -716,14 +716,14 @@ async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof() {
         .append_request_event_with_evidence(
             &RequestEvent {
                 ts: 4,
-                ts_ms: Some(11_500_000),
+                ts_ms: Some(21_500_000),
                 event_id: Some("long-lived-duplicate-event".to_owned()),
                 ..RequestEvent::default()
             },
             &[evidence(
                 "long-lived-duplicate",
                 "follow_up",
-                11_500_000,
+                21_500_000,
                 "prefix-b",
             )],
         )

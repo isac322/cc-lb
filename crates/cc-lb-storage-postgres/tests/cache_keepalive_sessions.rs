@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use cc_lb_clock::SystemClock;
@@ -231,14 +232,14 @@ async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof(
         .append_request_event_with_evidence(
             &RequestEvent {
                 ts: 3,
-                ts_ms: Some(8_000_000),
+                ts_ms: Some(18_000_000),
                 event_id: Some("long-lived-sibling-event".to_owned()),
                 ..RequestEvent::default()
             },
             &[evidence(
                 "long-lived-renewal-b",
                 "renewal",
-                8_000_000,
+                18_000_000,
                 "prefix-b",
             )],
         )
@@ -247,14 +248,14 @@ async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof(
         .append_request_event_with_evidence(
             &RequestEvent {
                 ts: 4,
-                ts_ms: Some(11_500_000),
+                ts_ms: Some(21_500_000),
                 event_id: Some("long-lived-duplicate-event".to_owned()),
                 ..RequestEvent::default()
             },
             &[evidence(
                 "long-lived-duplicate",
                 "follow_up",
-                11_500_000,
+                21_500_000,
                 "prefix-b",
             )],
         )
@@ -279,6 +280,70 @@ async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof(
     sqlx::query("DELETE FROM cache_keepalive_evidence WHERE evidence_id LIKE 'long-lived-%'")
         .execute(storage.pool())
         .await?;
+    Ok(())
+}
+
+async fn append_evidence_waits_for_pair_advisory_lock(storage: &PostgresStorage) -> Result<()> {
+    let upstream_id = Uuid::from_u128(7);
+    let lock_key = format!("principal:{upstream_id}");
+    let mut connection = storage.pool().acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *connection)
+        .await?;
+
+    let cycle_id = Uuid::from_u128(83);
+    let evidence = |id: &str, kind: &str, start: u64| CacheKeepaliveEvidenceRow {
+        evidence_id: id.to_owned(),
+        cycle_id: (kind == "renewal").then_some(cycle_id),
+        evidence_kind: kind.to_owned(),
+        request_start_ms: start,
+        prefix_fingerprint: Some("fingerprint".to_owned()),
+        prefix_hash: Some("prefix".to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id,
+        model: "model".to_owned(),
+        ttl: CacheTtl::Ttl5m,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(1),
+        cost_micros: Some(1),
+        request_ref: Some(id.to_owned()),
+        event_ref: Some(id.to_owned()),
+    };
+    let request_event = RequestEvent {
+        ts: 1,
+        ts_ms: Some(1_000),
+        event_id: Some("advisory-lock-event".to_owned()),
+        ..RequestEvent::default()
+    };
+    let evidence_rows = [
+        evidence("advisory-lock-renewal", "renewal", 1_000),
+        evidence("advisory-lock-follow-up", "follow_up", 1_100),
+    ];
+    let append = storage.append_request_event_with_evidence(&request_event, &evidence_rows);
+    tokio::pin!(append);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut append)
+            .await
+            .is_err(),
+        "append did not wait for the pair advisory lock"
+    );
+
+    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *connection)
+        .await?;
+    append.await?;
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'advisory-lock-%'",
+    )
+    .fetch_one(storage.pool())
+    .await?;
+    assert_eq!(count, 2);
     Ok(())
 }
 
@@ -518,6 +583,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     replace_roundtrips_optional_accounting_key_id(&storage).await?;
     append_evidence_deduplicates_follow_ups_across_sibling_renewals(&storage).await?;
     append_evidence_rejects_duplicate_follow_up_with_long_lived_proof(&storage).await?;
+    append_evidence_waits_for_pair_advisory_lock(&storage).await?;
     append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles(&storage).await?;
     purge_expired_prunes_unmatched_and_invalid_follow_ups_without_changing_count(&storage).await?;
     purge_expired_prunes_later_follow_up_across_sibling_renewals(&storage).await?;
