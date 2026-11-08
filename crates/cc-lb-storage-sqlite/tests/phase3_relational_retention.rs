@@ -242,11 +242,9 @@ async fn usage_rollup_conflict_accumulates_nullable_provider_cache_writes() {
     for (request_id, cache_writes, expected) in batches {
         let (cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h) =
             match cache_writes {
-                Some((five_minute, thirty_minute, twelve_hour)) => (
-                    Some(five_minute),
-                    Some(thirty_minute),
-                    Some(twelve_hour),
-                ),
+                Some((five_minute, thirty_minute, twelve_hour)) => {
+                    (Some(five_minute), Some(thirty_minute), Some(twelve_hour))
+                }
                 None => (None, None, None),
             };
         let event = RequestEvent {
@@ -284,14 +282,8 @@ async fn usage_rollup_conflict_accumulates_nullable_provider_cache_writes() {
         match expected {
             Some((five_minute, thirty_minute, twelve_hour)) => {
                 assert_eq!(rollup.cache_write_input_tokens, Some(five_minute));
-                assert_eq!(
-                    rollup.cache_write_input_tokens_30m,
-                    Some(thirty_minute)
-                );
-                assert_eq!(
-                    rollup.cache_write_input_tokens_12h,
-                    Some(twelve_hour)
-                );
+                assert_eq!(rollup.cache_write_input_tokens_30m, Some(thirty_minute));
+                assert_eq!(rollup.cache_write_input_tokens_12h, Some(twelve_hour));
             }
             None => {
                 assert_eq!(rollup.cache_write_input_tokens, None);
