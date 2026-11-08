@@ -5450,17 +5450,19 @@ mod tests {
     }
     #[test]
     fn positive_older_openai_cached_tokens_never_serialize_zero() {
-        let mut partial = Partial::default();
-        partial.parse = Some(ParseInfo {
-            model: Some("gpt-5".to_owned()),
-            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
-                provider: "openai".to_owned(),
-                mode: "implicit".to_owned(),
+        let mut partial = Partial {
+            parse: Some(ParseInfo {
+                model: Some("gpt-5".to_owned()),
+                native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                    provider: "openai".to_owned(),
+                    mode: "implicit".to_owned(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
+            usage_seen: true,
             ..Default::default()
-        });
-        partial.usage_seen = true;
+        };
         partial.usage.cache_read_input_tokens = 64;
         partial.usage.cache_read_evidence = Some(cc_lb_request_log::RequestCacheEvidence::Positive);
 
