@@ -3833,13 +3833,23 @@ impl Lifecycle {
             &*self.clock,
         )
         .await;
-        let candidates = build_candidates_with_matches_for_bundles(
+        let native_cache_scores = fetch_provider_native_cache_scores(
+            &view,
+            &principal.id,
+            request_kind,
+            &ctx.canonical_model_id,
+            cache_metadata.native_cache.as_ref(),
+            &*self.clock,
+        )
+        .await;
+        let candidates = build_candidates_with_native_cache_for_bundles(
             &view,
             &principal.id,
             request_kind,
             &ctx.cache_breakpoints,
             &warm_entries,
             Some(&cache_metadata.bundles),
+            &native_cache_scores,
             &*self.clock,
         )
         .0;
@@ -4484,14 +4494,32 @@ impl Lifecycle {
             id: auth.principal_id().to_owned(),
             kind: PrincipalKind::InternalKey,
         };
-        let mut candidates = build_candidates(
+        let native_cache = provider_cache::analyze(
+            ProviderCapability::OpenaiResponses,
+            body,
+            &canonical_model,
+            ingress.headers,
+        );
+        let native_cache_scores = fetch_provider_native_cache_scores(
+            view,
+            &principal.id,
+            RequestKind::OpenaiResponses,
+            &canonical_model,
+            native_cache.as_ref(),
+            &*self.clock,
+        )
+        .await;
+        let mut candidates = build_candidates_with_native_cache_for_bundles(
             view,
             auth.principal_id(),
             RequestKind::OpenaiResponses,
             &[],
             &HashMap::new(),
+            None,
+            &native_cache_scores,
             &*self.clock,
-        );
+        )
+        .0;
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
