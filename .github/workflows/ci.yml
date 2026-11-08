@@ -387,6 +387,7 @@ jobs:
           esac
           archive="prometheus-3.15.0.${asset}.tar.gz"
           curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 2 --retry-all-errors \
             "https://github.com/prometheus/prometheus/releases/download/v3.15.0/${archive}" \
             --output "$RUNNER_TEMP/prometheus.tar.gz"
           tar -xzf "$RUNNER_TEMP/prometheus.tar.gz" -C "$RUNNER_TEMP"
