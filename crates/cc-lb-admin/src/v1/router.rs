@@ -121,6 +121,11 @@ async fn preview_route(
             "router_pipeline_instantiation_error",
             &detail,
         ),
+        Err(RoutePreviewError::UnsupportedOperation { method, path }) => error_response(
+            StatusCode::BAD_REQUEST,
+            "unsupported_operation",
+            &format!("unsupported operation: {method} {path}"),
+        ),
     }
 }
 
