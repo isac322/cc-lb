@@ -78,7 +78,7 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
+    use cc_lb_domain::HASH_SCHEMA_VERSION;
 
     fn record_with_ttl(ttl_class: TtlClass) -> PromptCacheObservationRecord {
         PromptCacheObservationRecord {
