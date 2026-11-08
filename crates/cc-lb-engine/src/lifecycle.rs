@@ -11920,11 +11920,7 @@ mod tests {
             grace_margin_secs: 0,
         };
 
-        publish_provider_cache_observation(
-            &context,
-            PromptCacheUsage::default(),
-            1_800_000_000,
-        );
+        publish_provider_cache_observation(&context, PromptCacheUsage::default(), 1_800_000_000);
 
         let records = sink.provider_upserts();
         let [record] = records.as_slice() else {
