@@ -344,6 +344,9 @@ async fn append_evidence_waits_for_pair_advisory_lock(storage: &PostgresStorage)
     .fetch_one(storage.pool())
     .await?;
     assert_eq!(count, 2);
+    sqlx::query("DELETE FROM cache_keepalive_evidence WHERE evidence_id LIKE 'advisory-lock-%'")
+        .execute(storage.pool())
+        .await?;
     Ok(())
 }
 
