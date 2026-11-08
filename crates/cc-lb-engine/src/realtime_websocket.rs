@@ -167,6 +167,12 @@ impl RealtimeStreamMetrics {
     }
 }
 
+impl Default for RealtimeStreamMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Provider endpoint details used when preparing a pinned WebSocket connection.
 pub struct RealtimeWebSocketTarget<'a> {
     pub path: &'a str,
