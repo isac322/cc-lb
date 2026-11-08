@@ -149,7 +149,6 @@ pub async fn authenticate_first(
     Ok(Authenticated { success, auth_ms })
 }
 
-
 /// Coarse reason label consumed by the api-key metrics subscriber to tag
 /// `cclb_key_auth_failures_total`. The buckets are deliberately coarse: a
 /// per-variant label would let an attacker probe which part of a credential

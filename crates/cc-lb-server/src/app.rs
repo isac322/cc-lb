@@ -4,8 +4,8 @@ use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -3581,10 +3581,7 @@ async fn lifecycle_handler(
     let auth = match state.lifecycle.authenticate(&parts.headers).await {
         Ok(auth) => auth,
         Err(error) => {
-            let provider = parts
-                .extensions
-                .get::<ProviderScope>()
-                .map(|scope| scope.0);
+            let provider = parts.extensions.get::<ProviderScope>().map(|scope| scope.0);
             return cc_lb_engine::reject_unauthenticated_for_provider(
                 &error,
                 provider,

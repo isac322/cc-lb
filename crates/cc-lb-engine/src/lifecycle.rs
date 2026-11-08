@@ -2986,12 +2986,9 @@ impl Lifecycle {
         }
 
         let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
-        let request_capability = classify_provider_capability(
-            &http::Method::POST,
-            &input.path,
-            input.provider,
-        )
-        .unwrap_or(ProviderCapability::AnthropicMessages);
+        let request_capability =
+            classify_provider_capability(&http::Method::POST, &input.path, input.provider)
+                .unwrap_or(ProviderCapability::AnthropicMessages);
         let request_kind = RequestKind::from(request_capability);
         let cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
             &input.headers,
