@@ -70,6 +70,11 @@ jobs:
   # win (fan-out of run time, not N-times-duplicated build time).
   coverage-build:
     runs-on: ubuntu-26.04
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -138,6 +143,7 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+          --tmpfs /var/lib/postgresql:rw,size=2g
 
     env:
       # Keep this coverage env in sync with ci.yml's nextest-cov job.
@@ -185,6 +191,7 @@ jobs:
 
       - name: Run test shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
         run: |
+          mkdir -p target/llvm-cov-target
           cargo llvm-cov nextest \
             --archive-file nextest-archive.tar.zst \
             --partition slice:${{ matrix.shard }}/${{ env.SHARD_TOTAL }} \

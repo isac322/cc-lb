@@ -10,18 +10,41 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 #[async_trait]
 impl MetaStore for PostgresStorage {
     async fn initialize(&self) -> StorageResult<()> {
-        MIGRATOR
-            .run(&self.pool)
-            .await
-            .map_err(|error| StorageError::Fatal {
+        let mut conn = self.pool.acquire().await.map_err(map_sqlx_error)?;
+        let (is_non_public,): (bool,) =
+            sqlx::query_as("SELECT current_schema() IS DISTINCT FROM 'public'")
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(map_sqlx_error)?;
+
+        if is_non_public {
+            sqlx::query("SELECT pg_advisory_lock(hashtext(current_schema()))")
+                .execute(&mut *conn)
+                .await
+                .map_err(map_sqlx_error)?;
+            let mut unlocked_migrator = sqlx::migrate!("./migrations");
+            unlocked_migrator.set_locking(false);
+            let run_res = unlocked_migrator.run_direct(None, &mut *conn, false).await;
+            let _ = sqlx::query("SELECT pg_advisory_unlock(hashtext(current_schema()))")
+                .execute(&mut *conn)
+                .await;
+            run_res.map_err(|error| StorageError::Fatal {
                 message: error.to_string(),
             })?;
+        } else {
+            MIGRATOR
+                .run_direct(None, &mut *conn, false)
+                .await
+                .map_err(|error| StorageError::Fatal {
+                    message: error.to_string(),
+                })?;
+        }
 
         sqlx::query(
             "INSERT INTO meta (key, value) VALUES ('backend_kind', $1)              ON CONFLICT (key) DO NOTHING",
         )
         .bind(BackendKind::Postgres.as_str())
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
 
