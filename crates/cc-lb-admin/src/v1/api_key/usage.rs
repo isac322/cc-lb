@@ -22,9 +22,10 @@ use cc_lb_control::anthropic_api_key::{
     },
 };
 use cc_lb_storage_api::{
-    ApiKeyClass, ApiKeyOrgCapability, ApiUsageAttribution, RemediationCode, Storage,
-    UpstreamApiKeyDetailsRecord, UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord,
-    UpstreamKind, UpstreamRecord, UsageRollupResolution,
+    ApiKeyClass, ApiKeyOrgCapability, ApiUsageAttribution, Provider, ProviderProjectSource,
+    ProviderReportState, RemediationCode, Storage, UpstreamApiKeyDetailsRecord,
+    UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord, UpstreamKind, UpstreamRecord,
+    UsageRollupResolution,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -59,6 +60,12 @@ struct UpstreamKeyUsageResponse {
     usage: DashboardUsageResponse,
     #[serde(flatten)]
     envelope: KeyUsageEnvelope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<Provider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_report_state: Option<ProviderReportState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
 }
 
 pub(crate) async fn get_upstream_usage(
@@ -79,16 +86,44 @@ pub(crate) async fn get_upstream_usage(
     let storage = storage(&state)?;
     let record = load_api_key_or_provider_upstream(storage, &id).await?;
     let details = storage.get_api_key_details(record.id).await?;
-    let provenance = if matches!(
-        record.kind,
-        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
-    ) {
-        Provenance::estimated(None)
-    } else {
-        let on_org_origin = state
-            .anthropic_org_api
-            .applies_to(&upstream_base_url(&record)?);
-        derive_provenance(on_org_origin, &record, details.as_ref())
+    let (provenance, provider, provider_report_state, project_id) = match record.kind {
+        UpstreamKind::OpenaiApiKey => {
+            let provenance = derive_openai_provenance(&record, details.as_ref());
+            (
+                provenance,
+                Some(Provider::Openai),
+                provider_report_state_for_response(record.kind, details.as_ref()),
+                details
+                    .as_ref()
+                    .and_then(|details| details.project_id.clone()),
+            )
+        }
+        UpstreamKind::GeminiApiKey => (
+            derive_gemini_provenance(),
+            Some(Provider::Gemini),
+            Some(
+                provider_report_state_for_response(record.kind, details.as_ref())
+                    .unwrap_or(ProviderReportState::NotApplicable),
+            ),
+            details
+                .as_ref()
+                .and_then(|details| details.project_id.clone()),
+        ),
+        _ => {
+            let on_org_origin = state
+                .anthropic_org_api
+                .applies_to(&upstream_base_url(&record)?);
+            (
+                derive_provenance(on_org_origin, &record, details.as_ref()),
+                details.as_ref().and_then(|details| details.provider),
+                details
+                    .as_ref()
+                    .and_then(|details| details.provider_report_state),
+                details
+                    .as_ref()
+                    .and_then(|details| details.project_id.clone()),
+            )
+        }
     };
 
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
@@ -199,7 +234,14 @@ pub(crate) async fn get_upstream_usage(
             billing_stop,
         },
     };
-    Ok(Json(UpstreamKeyUsageResponse { usage, envelope }).into_response())
+    Ok(Json(UpstreamKeyUsageResponse {
+        usage,
+        envelope,
+        provider,
+        provider_report_state,
+        project_id,
+    })
+    .into_response())
 }
 
 fn bad_request(error: &'static str, detail: &str) -> UpstreamError {
@@ -270,6 +312,72 @@ fn derive_provenance(
         )
         | None => Provenance::estimated(None),
     }
+}
+
+/// Provider-neutral OpenAI reporting is usable only when the scheduler has
+/// persisted a report and a stable subject to query. Failed or unavailable
+/// organization reports deliberately keep the request-log estimate.
+fn derive_openai_provenance(
+    _record: &UpstreamRecord,
+    details: Option<&UpstreamApiKeyDetailsRecord>,
+) -> Provenance {
+    let Some(details) = details.filter(|details| details.verified) else {
+        return Provenance::estimated(None);
+    };
+    let stale = match details.provider_report_state {
+        Some(ProviderReportState::Reported) => false,
+        Some(ProviderReportState::Stale) => true,
+        Some(
+            ProviderReportState::Estimated
+            | ProviderReportState::NotConfigured
+            | ProviderReportState::Unavailable
+            | ProviderReportState::Denied
+            | ProviderReportState::NotApplicable
+            | ProviderReportState::Failed,
+        )
+        | None => return Provenance::estimated(None),
+    };
+    let Some(subject) = openai_report_subject(details) else {
+        return Provenance::estimated(None);
+    };
+    Provenance {
+        subject: Some(subject),
+        stale,
+        fix: None,
+    }
+}
+
+fn openai_report_subject(details: &UpstreamApiKeyDetailsRecord) -> Option<ReportSubject> {
+    if let Some(api_key_id) = details.api_key_id.as_ref() {
+        return Some(ReportSubject {
+            attribution: ApiUsageAttribution::ApiKey,
+            subject_id: api_key_id.clone(),
+        });
+    }
+    if matches!(
+        details.project_source,
+        Some(ProviderProjectSource::Configured | ProviderProjectSource::AdminResolved)
+    ) {
+        return details.project_id.as_ref().map(|project_id| ReportSubject {
+            attribution: ApiUsageAttribution::Workspace,
+            subject_id: project_id.clone(),
+        });
+    }
+    None
+}
+
+fn derive_gemini_provenance() -> Provenance {
+    Provenance::estimated(None)
+}
+
+fn provider_report_state_for_response(
+    kind: UpstreamKind,
+    details: Option<&UpstreamApiKeyDetailsRecord>,
+) -> Option<ProviderReportState> {
+    if kind == UpstreamKind::GeminiApiKey {
+        return Some(ProviderReportState::NotApplicable);
+    }
+    details.and_then(|details| details.provider_report_state)
 }
 
 /// Reported figures for the current key, else its workspace. A row with no
@@ -560,6 +668,11 @@ mod tests {
             },
             remediation: Vec::new(),
             usage_report_state: state,
+            provider: None,
+            project_id: None,
+            project_source: None,
+            provider_report_state: None,
+            provider_report_status_metadata: None,
             last_error: None,
             checked_at_unix_secs: Some(1),
             last_attempt_at_unix_secs: Some(1),
@@ -580,6 +693,130 @@ mod tests {
             attribution: ApiUsageAttribution::ApiKey,
             subject_id: id.to_owned(),
         })
+    }
+
+    fn provider_record(kind: UpstreamKind) -> UpstreamRecord {
+        let mut record = record(None);
+        record.kind = kind;
+        record
+    }
+
+    fn openai_details(
+        state: ProviderReportState,
+        project_id: Option<&str>,
+        project_source: Option<ProviderProjectSource>,
+        api_key_id: Option<&str>,
+    ) -> UpstreamApiKeyDetailsRecord {
+        let mut details = details(ApiKeyClass::OrgScoped, None, Some(5), 0, api_key_id);
+        details.provider = Some(Provider::Openai);
+        details.project_id = project_id.map(str::to_owned);
+        details.project_source = project_source;
+        details.provider_report_state = Some(state);
+        details
+    }
+
+    #[test]
+    fn openai_reported_buckets_use_the_configured_project_subject() {
+        let details = openai_details(
+            ProviderReportState::Reported,
+            Some("proj-production"),
+            Some(ProviderProjectSource::Configured),
+            None,
+        );
+        assert_eq!(
+            derive_openai_provenance(&provider_record(UpstreamKind::OpenaiApiKey), Some(&details),),
+            Provenance {
+                subject: Some(ReportSubject {
+                    attribution: ApiUsageAttribution::Workspace,
+                    subject_id: "proj-production".to_owned(),
+                }),
+                stale: false,
+                fix: None,
+            }
+        );
+        let key_scoped = openai_details(
+            ProviderReportState::Reported,
+            Some("proj-production"),
+            Some(ProviderProjectSource::Configured),
+            Some("key-production"),
+        );
+        assert_eq!(
+            derive_openai_provenance(
+                &provider_record(UpstreamKind::OpenaiApiKey),
+                Some(&key_scoped),
+            )
+            .subject,
+            Some(ReportSubject {
+                attribution: ApiUsageAttribution::ApiKey,
+                subject_id: "key-production".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn openai_stale_buckets_preserve_the_project_subject() {
+        let details = openai_details(
+            ProviderReportState::Stale,
+            Some("proj-admin"),
+            Some(ProviderProjectSource::AdminResolved),
+            None,
+        );
+        let provenance =
+            derive_openai_provenance(&provider_record(UpstreamKind::OpenaiApiKey), Some(&details));
+        assert_eq!(
+            provenance
+                .subject
+                .as_ref()
+                .map(|subject| subject.subject_id.as_str()),
+            Some("proj-admin"),
+        );
+        assert!(provenance.stale);
+    }
+
+    #[test]
+    fn openai_unconfigured_or_failed_reports_remain_estimates() {
+        for state in [
+            ProviderReportState::NotConfigured,
+            ProviderReportState::Unavailable,
+            ProviderReportState::Denied,
+            ProviderReportState::Failed,
+        ] {
+            let details = openai_details(
+                state,
+                Some("proj-production"),
+                Some(ProviderProjectSource::Configured),
+                None,
+            );
+            assert_eq!(
+                derive_openai_provenance(
+                    &provider_record(UpstreamKind::OpenaiApiKey),
+                    Some(&details),
+                ),
+                Provenance::estimated(None),
+                "{state:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_usage_is_explicitly_not_applicable_and_estimated() {
+        assert_eq!(
+            provider_report_state_for_response(UpstreamKind::GeminiApiKey, None),
+            Some(ProviderReportState::NotApplicable),
+        );
+        assert_eq!(
+            provider_report_state_for_response(
+                UpstreamKind::GeminiApiKey,
+                Some(&openai_details(
+                    ProviderReportState::Reported,
+                    Some("project"),
+                    Some(ProviderProjectSource::Configured),
+                    None,
+                )),
+            ),
+            Some(ProviderReportState::NotApplicable),
+        );
+        assert_eq!(derive_gemini_provenance(), Provenance::estimated(None),);
     }
 
     #[test]

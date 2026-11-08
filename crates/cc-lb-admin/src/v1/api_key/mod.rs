@@ -6,5 +6,6 @@ pub(crate) mod access;
 pub(crate) mod poll_enqueue;
 pub(crate) mod preflight;
 pub(crate) mod recheck;
+pub(crate) mod reporting;
 pub(crate) mod usage;
 pub(crate) mod workspaces;

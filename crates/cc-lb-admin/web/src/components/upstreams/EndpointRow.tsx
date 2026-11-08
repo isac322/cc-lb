@@ -1,8 +1,9 @@
 // Where an upstream sends requests, as one settings row shared by both kinds:
 // Access row 1 on API-key panes, the Credential footer on OAuth panes. The
-// effective endpoint is always shown — `Anthropic (default)` or the custom
+// effective endpoint is always shown — `Provider (default)` or the custom
 // URL — with a quiet `Change` that swaps the row into its inline editor.
-// Anthropic's own URL is the default and is never stored as a custom value.
+// Each provider's official base URL is the default and is never stored as a
+// custom value.
 
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -18,10 +19,59 @@ import { isStaleRevision, STALE_EDITOR_MESSAGE } from './staleRevision';
 const CLEAR_UNCONFIRMED =
   'Server did not confirm the switch to the default endpoint; the custom URL may still be set.';
 
-const HINT: Record<'api_key' | 'oauth', string> = {
-  api_key: 'Requests and key checks go here instead of Anthropic.',
-  oauth: 'Requests go here instead of Anthropic.',
-};
+const DEFAULT_ENDPOINTS = {
+  anthropic_api_key: {
+    label: 'Anthropic',
+    baseUrl: 'https://api.anthropic.com/',
+  },
+  anthropic_oauth: {
+    label: 'Anthropic',
+    baseUrl: 'https://api.anthropic.com/',
+  },
+  openai_api_key: {
+    label: 'OpenAI',
+    baseUrl: 'https://api.openai.com/',
+  },
+  openai_oauth: {
+    label: 'OpenAI',
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+  },
+  gemini_api_key: {
+    label: 'Gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/',
+  },
+  gemini_oauth: {
+    label: 'Gemini',
+    baseUrl: 'https://cloudcode-pa.googleapis.com/v1internal',
+  },
+} satisfies Record<Upstream['kind'], { label: string; baseUrl: string }>;
+
+function isDefaultBaseUrl(baseUrl: string, defaultBaseUrl: string) {
+  if (defaultBaseUrl === DEFAULT_ENDPOINTS.anthropic_api_key.baseUrl) {
+    return isAnthropicBaseUrl(baseUrl);
+  }
+
+  const trimmed = baseUrl.trim();
+  if (trimmed === '') return true;
+  // URL drops empty query/hash markers, but those are not the bare provider
+  // root and must remain editable custom URLs.
+  if (trimmed.includes('?') || trimmed.includes('#')) return false;
+
+  try {
+    const actual = new URL(trimmed);
+    const expected = new URL(defaultBaseUrl);
+    return (
+      actual.protocol === expected.protocol &&
+      actual.hostname === expected.hostname &&
+      actual.port === expected.port &&
+      actual.pathname === expected.pathname &&
+      actual.username === '' &&
+      actual.password === ''
+    );
+  } catch {
+    return false;
+  }
+}
 
 export function EndpointRow({
   upstream,
@@ -44,9 +94,14 @@ export function EndpointRow({
     setOwnEditing(next);
     onEditingChange?.(next);
   };
-  // Older rows may store Anthropic's own URL; that is still the default.
+  const endpoint = DEFAULT_ENDPOINTS[upstream.kind];
+  const hint =
+    kind === 'api_key'
+      ? `Requests and key checks go here instead of ${endpoint.label}.`
+      : `Requests go here instead of ${endpoint.label}.`;
   const custom =
-    upstream.base_url != null && !isAnthropicBaseUrl(upstream.base_url);
+    upstream.base_url != null &&
+    !isDefaultBaseUrl(upstream.base_url, endpoint.baseUrl);
   const customUrl = custom ? (upstream.base_url ?? '') : '';
   const [baseUrl, setBaseUrl] = useState(customUrl);
   // Value and revision captured when editing began. Save intent is judged
@@ -92,7 +147,7 @@ export function EndpointRow({
         toast.error(`Undo failed: ${errorMessage(e)}`);
       });
 
-  /** Switch back to Anthropic; undo restores the custom URL. */
+  /** Switch back to the provider default; undo restores the custom URL. */
   const switchToDefault = () => {
     const previous = custom ? upstream.base_url : null;
     update.mutate(
@@ -123,8 +178,8 @@ export function EndpointRow({
 
   const save = () => {
     if (trimmed === '' || unchanged || update.isPending) return;
-    // Anthropic's own URL is the default, never stored as a custom value.
-    if (isAnthropicBaseUrl(trimmed)) {
+    // A provider's own URL is the default, never stored as a custom value.
+    if (isDefaultBaseUrl(trimmed, endpoint.baseUrl)) {
       switchToDefault();
       return;
     }
@@ -198,7 +253,7 @@ export function EndpointRow({
               if (e.key === 'Enter') save();
             }}
           />
-          <span className="text-caption text-text-faint">{HINT[kind]}</span>
+          <span className="text-caption text-text-faint">{hint}</span>
           {update.error ? (
             <span role="alert" className="text-caption text-danger-text">
               {isStaleRevision(update.error)
@@ -233,12 +288,13 @@ export function EndpointRow({
             {upstream.base_url}
           </span>
           <span className="mt-0.5 block text-caption text-text-faint">
-            {HINT[kind]}
+            {hint}
           </span>
         </>
       ) : (
         <>
-          Anthropic<span className="text-text-muted"> (default)</span>
+          {endpoint.label}
+          <span className="text-text-muted"> (default)</span>
         </>
       )}
     </DetailRow>

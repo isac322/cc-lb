@@ -2,8 +2,9 @@
 //! (the web `ApiKeyAccessSchema`).
 
 use cc_lb_storage_api::{
-    ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability, ApiKeyType, ApiKeyWorkspace,
-    UpstreamApiKeyDetailsRecord, UpstreamKind, UpstreamRecord,
+    ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability, ApiKeyType, ApiKeyWorkspace, Provider,
+    ProviderProjectSource, ProviderReportState, UpstreamApiKeyDetailsRecord, UpstreamKind,
+    UpstreamRecord,
 };
 use serde::Serialize;
 
@@ -23,6 +24,17 @@ pub(crate) struct ApiKeyAccessResponse {
     pub(crate) usage_report: ApiKeyOrgCapability,
     pub(crate) key_type: Option<ApiKeyType>,
     pub(crate) last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider: Option<Provider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) project_source: Option<ProviderProjectSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_report_state: Option<ProviderReportState>,
+    /// Adapter-redacted metadata only; never credential or authorization data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_report_status_metadata: Option<String>,
 }
 
 /// OAuth upstreams and API-key upstreams without a details row (never
@@ -56,6 +68,11 @@ pub(crate) fn api_key_access_response(
             .unwrap_or(ApiKeyOrgCapability::NotApplicable),
         key_type: details.capabilities.key_type,
         last_error: details.last_error.clone(),
+        provider: details.provider,
+        project_id: details.project_id.clone(),
+        project_source: details.project_source,
+        provider_report_state: details.provider_report_state,
+        provider_report_status_metadata: details.provider_report_status_metadata.clone(),
     })
 }
 
@@ -99,6 +116,11 @@ mod tests {
             },
             remediation: vec![RemediationCode::KeyIdUnresolved],
             usage_report_state: Some(ApiKeyOrgCapability::Denied),
+            provider: None,
+            project_id: None,
+            project_source: None,
+            provider_report_state: None,
+            provider_report_status_metadata: None,
             last_error: Some("usage report denied".to_owned()),
             checked_at_unix_secs: Some(1_700),
             last_attempt_at_unix_secs: Some(1_700),
@@ -176,13 +198,55 @@ mod tests {
 
     #[test]
     fn oauth_and_unchecked_upstreams_have_no_access() {
-        assert_eq!(
-            api_key_access_response(&record(UpstreamKind::AnthropicOauth), Some(&details())),
-            None
-        );
+        for kind in [
+            UpstreamKind::AnthropicOauth,
+            UpstreamKind::OpenaiOauth,
+            UpstreamKind::GeminiOauth,
+        ] {
+            assert_eq!(
+                api_key_access_response(&record(kind), Some(&details())),
+                None
+            );
+        }
         assert_eq!(
             api_key_access_response(&record(UpstreamKind::AnthropicApiKey), None),
             None
         );
+    }
+
+    #[test]
+    fn provider_access_fields_reach_the_response_without_key_material() {
+        for (kind, provider) in [
+            (UpstreamKind::OpenaiApiKey, Provider::Openai),
+            (UpstreamKind::GeminiApiKey, Provider::Gemini),
+        ] {
+            let mut details = details();
+            details.provider = Some(provider);
+            details.project_id = Some("project-production".to_owned());
+            details.project_source = Some(ProviderProjectSource::Configured);
+            details.provider_report_state = Some(ProviderReportState::Stale);
+            details.provider_report_status_metadata =
+                Some(r#"{"status":"stale","reason":"permission_denied"}"#.to_owned());
+            let response = api_key_access_response(&record(kind), Some(&details))
+                .expect("API-key access snapshot");
+            let json = serde_json::to_value(response).expect("serialized access snapshot");
+            assert_eq!(
+                json["provider"],
+                serde_json::to_value(provider).expect("serialized provider"),
+            );
+            assert_eq!(json["project_id"], "project-production");
+            assert_eq!(json["project_source"], "configured");
+            assert_eq!(json["provider_report_state"], "stale");
+            assert_eq!(
+                json["provider_report_status_metadata"],
+                r#"{"status":"stale","reason":"permission_denied"}"#,
+            );
+            for secret_field in ["key_hint", "api_key_id", "encrypted_secret_ciphertext"] {
+                assert!(
+                    json.get(secret_field).is_none(),
+                    "{secret_field} must stay private"
+                );
+            }
+        }
     }
 }

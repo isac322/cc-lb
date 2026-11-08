@@ -12,6 +12,7 @@ pub mod audit_payload;
 pub mod audit_writer;
 pub mod dynamic_view;
 pub mod event_bus;
+pub mod openai_org_api;
 pub mod subscription_metadata_hook;
 pub mod traits;
 
@@ -23,6 +24,12 @@ pub use dynamic_view::{
 };
 pub use event_bus::{
     DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, InMemoryBus, RequestEventBus, new_in_memory_bus,
+};
+pub use openai_org_api::{
+    OpenAiBucketWidth, OpenAiCostAmount, OpenAiCostResult, OpenAiCostsBucket, OpenAiCostsPage,
+    OpenAiCostsQuery, OpenAiOrgApi, OpenAiOrgApiError, OpenAiOrgLimits, OpenAiOrganizationProject,
+    OpenAiProjectListing, OpenAiTextUsageBucket, OpenAiTextUsagePage, OpenAiTextUsageResult,
+    OpenAiUsageQuery,
 };
 pub use subscription_metadata_hook::{
     MetadataHookEnqueueError, MetadataHookHandle, MetadataHookRequest, MetadataRefreshEnqueue,

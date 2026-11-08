@@ -277,6 +277,7 @@ pub fn router() -> Router<AdminState> {
             "/admin/v1/upstreams/{id}/usage",
             get(super::api_key::usage::get_upstream_usage),
         )
+        .merge(super::api_key::reporting::router())
 }
 
 #[derive(Deserialize)]
@@ -896,7 +897,13 @@ async fn create_upstream(
             )?
         }
         _ => {
-            if body.oauth_token_bundle.is_some() || body.project_id.is_some() {
+            if body.oauth_token_bundle.is_some()
+                || (body.project_id.is_some()
+                    && !matches!(
+                        kind,
+                        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+                    ))
+            {
                 return Err(UpstreamError::BadRequest {
                     error: "unexpected_oauth_tokens",
                     detail: "OAuth token import is supported only for OpenAI and Gemini OAuth"
@@ -922,6 +929,7 @@ async fn create_upstream(
                     body.api_key_value.as_deref(),
                     body.base_url.as_ref(),
                     body.workspace_id.as_deref(),
+                    body.project_id.as_deref(),
                     body.skip_preflight,
                 )
                 .await?,
@@ -2021,7 +2029,13 @@ async fn update_upstream(
             }
         }
         _ => {
-            if body.oauth_token_bundle.is_some() || body.project_id.is_some() {
+            if body.oauth_token_bundle.is_some()
+                || (body.project_id.is_some()
+                    && !matches!(
+                        current.kind,
+                        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+                    ))
+            {
                 return Err(UpstreamError::BadRequest {
                     error: "unexpected_oauth_tokens",
                     detail: "OAuth token import is supported only for OpenAI and Gemini OAuth"
@@ -2137,6 +2151,24 @@ async fn update_upstream(
             UpstreamKind::AnthropicApiKey
             | UpstreamKind::OpenaiApiKey
             | UpstreamKind::GeminiApiKey => {
+                if current.kind == UpstreamKind::AnthropicApiKey && body.project_id.is_some() {
+                    return Err(UpstreamError::BadRequest {
+                        error: "unexpected_oauth_tokens",
+                        detail: "OAuth token import is supported only for OpenAI and Gemini OAuth"
+                            .to_owned(),
+                    });
+                }
+                let existing_details = match storage.get_api_key_details(current.id).await {
+                    Ok(details) => details,
+                    Err(error) => {
+                        tracing::warn!(
+                            upstream_id = %current.id,
+                            ?error,
+                            "admin upstream update proceeds without api-key details after a failed read"
+                        );
+                        None
+                    }
+                };
                 prepare_api_key_update(
                     &state,
                     &current,
@@ -2144,6 +2176,8 @@ async fn update_upstream(
                         api_key_value: body.api_key_value.as_deref(),
                         workspace_id: body.workspace_id.as_deref(),
                         clear_workspace_id: body.clear_workspace_id,
+                        project_id: body.project_id.as_deref(),
+                        existing_details: existing_details.as_ref(),
                         base_url: target_base_url.as_ref(),
                         skip_preflight: body.skip_preflight,
                     },
@@ -2857,6 +2891,9 @@ fn changed_fields(body: &UpstreamUpdateBody) -> Vec<&'static str> {
     }
     if body.api_key_value.is_some() {
         fields.push("api_key_ciphertext");
+    }
+    if body.project_id.is_some() {
+        fields.push("project_id");
     }
     if body.enabled.is_some() {
         fields.push("enabled");

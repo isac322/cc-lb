@@ -17,6 +17,34 @@ pub const PROMPT_CACHE_PURGE_ROWS_REMOVED_TOTAL: &str =
 pub const METADATA_REFRESH_STATUS_TOTAL: &str = "cclb_scheduler_metadata_refresh_status_total";
 pub const API_KEY_USAGE_POLL_TOTAL: &str = "cclb_scheduler_api_key_usage_poll_total";
 
+/// Bounded labels retained by the API-key usage poll metric.
+pub const API_KEY_USAGE_POLL_PROVIDERS: &[&str] = &["anthropic", "openai", "gemini", "unknown"];
+pub const API_KEY_USAGE_POLL_KINDS: &[&str] = &[
+    "anthropic_api_key",
+    "anthropic_oauth",
+    "openai_api_key",
+    "openai_oauth",
+    "gemini_api_key",
+    "gemini_oauth",
+    "unknown",
+];
+pub const API_KEY_USAGE_POLL_STATUSES: &[&str] = &[
+    "success",
+    "probed",
+    "denied",
+    "rate_limited",
+    "failed",
+    "unavailable",
+    "not_configured",
+    "not_applicable",
+    "no_subject",
+    "conflict",
+    "claim_lost",
+    "lease_spent",
+    "storage_error",
+    "unknown",
+];
+
 /// Bounded `outcome` label values of [`API_KEY_USAGE_POLL_TOTAL`], one per
 /// polled upstream per tick.
 pub const API_KEY_USAGE_POLL_OUTCOMES: &[&str] = &[
@@ -26,6 +54,8 @@ pub const API_KEY_USAGE_POLL_OUTCOMES: &[&str] = &[
     "rate_limited",
     "failed",
     "decrypt_failed",
+    "not_configured",
+    "unavailable",
     "not_applicable",
     "no_subject",
     "conflict",
@@ -107,7 +137,7 @@ pub fn describe_scheduler_metrics() {
         ::metrics::describe_counter!(
             API_KEY_USAGE_POLL_TOTAL,
             Unit::Count,
-            "Anthropic API-key usage poll outcomes by bounded outcome, one per polled upstream."
+            "API-key usage poll outcomes by bounded outcome, provider, kind, and status."
         );
     });
 }
@@ -135,7 +165,20 @@ pub fn touch_scheduler_metric_handles() {
     ::metrics::counter!(METADATA_REFRESH_STATUS_TOTAL, "status" => "unknown").increment(0);
     ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "upstream_api_usage").increment(0);
     for outcome in API_KEY_USAGE_POLL_OUTCOMES {
-        ::metrics::counter!(API_KEY_USAGE_POLL_TOTAL, "outcome" => *outcome).increment(0);
+        for provider in API_KEY_USAGE_POLL_PROVIDERS {
+            for kind in API_KEY_USAGE_POLL_KINDS {
+                for status in API_KEY_USAGE_POLL_STATUSES {
+                    ::metrics::counter!(
+                        API_KEY_USAGE_POLL_TOTAL,
+                        "outcome" => *outcome,
+                        "provider" => *provider,
+                        "kind" => *kind,
+                        "status" => *status
+                    )
+                    .increment(0);
+                }
+            }
+        }
     }
 }
 
@@ -160,9 +203,26 @@ pub fn set_scheduler_init_failure(failed: bool) {
     ::metrics::gauge!(INIT_FAILURE).set(if failed { 1.0 } else { 0.0 });
 }
 
-/// Counts polled upstreams for one outcome; `outcome` must be one of
-/// [`API_KEY_USAGE_POLL_OUTCOMES`].
-pub fn record_api_key_usage_poll_outcome(outcome: &'static str, count: u64) {
+/// Counts a poll with bounded outcome, provider, kind, and status labels.
+pub fn record_api_key_usage_poll_outcome_with_labels(
+    outcome: &'static str,
+    provider: &'static str,
+    kind: &'static str,
+    status: &'static str,
+    count: u64,
+) {
     describe_scheduler_metrics();
-    ::metrics::counter!(API_KEY_USAGE_POLL_TOTAL, "outcome" => outcome).increment(count);
+    ::metrics::counter!(
+        API_KEY_USAGE_POLL_TOTAL,
+        "outcome" => outcome,
+        "provider" => provider,
+        "kind" => kind,
+        "status" => status
+    )
+    .increment(count);
+}
+
+/// Compatibility helper for callers that only have the generic outcome.
+pub fn record_api_key_usage_poll_outcome(outcome: &'static str, count: u64) {
+    record_api_key_usage_poll_outcome_with_labels(outcome, "unknown", "unknown", "unknown", count);
 }

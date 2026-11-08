@@ -400,6 +400,11 @@ fn org_access(
         key_class: ApiKeyClass::OrgScoped,
         key_hint: "sk-ant-api03-...test".to_owned(),
         api_key_id: api_key_id.map(str::to_owned),
+        provider: None,
+        project_id: None,
+        project_source: None,
+        provider_report_state: None,
+        provider_report_status_metadata: None,
         needs_workspace: true,
         capabilities: ApiKeyCapabilities {
             inference: ApiKeyInference::Ok,

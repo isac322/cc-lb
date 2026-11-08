@@ -31,6 +31,8 @@ const PLAIN: &str = "sk-ant-api03-PLAINkey00000000000000000000PPPP";
 const CANARY: &str = "sk-ant-api03-CANARYc4n4ryQ7xZp2Lm9Vw3Rt8Ks5Hj1Nb6AAAA";
 /// A second canary that Anthropic rejects with 401.
 const CANARY_401: &str = "sk-ant-api03-CANARYr3v0kdG4hT8yU2iO6pE1aS9dF5gBBBB";
+const OPENAI: &str = "sk-ant-api03-PROVIDEROPENAIkey000000000000000";
+const GEMINI: &str = "sk-ant-api03-PROVIDERGEMINIkey000000000000000";
 const CANARY_HINT: &str = "sk-ant-api03-...AAAA";
 
 const COUNT_TOKENS: &str = "/v1/messages/count_tokens";
@@ -1647,4 +1649,123 @@ async fn ctr_02_error_envelopes() {
     ] {
         assert_flat(&response, status, error);
     }
+}
+
+// ------------------------------------------------------ PROVIDER-NATIVE KEYS
+
+#[tokio::test]
+async fn openai_api_key_create_requires_preflight() {
+    let harness = harness().await;
+    let response = harness
+        .create_api_key_upstream(
+            "openai-strict-create",
+            OPENAI,
+            json!({"kind": "openai_api_key"}),
+        )
+        .await;
+    // The fixture serves model discovery, but not the required chat
+    // completion route. A successful model list alone must not create a row.
+    assert_remediation(&response, StatusCode::BAD_REQUEST, "key_invalid");
+    assert_eq!(harness.upstream_count().await, 0);
+}
+
+#[tokio::test]
+async fn gemini_api_key_update_requires_preflight() {
+    let harness = harness().await;
+    let id = create_ok(
+        &harness,
+        "gemini-strict-update",
+        GEMINI,
+        json!({"kind": "gemini_api_key", "skip_preflight": true}),
+    )
+    .await;
+    let before = harness.record(id).await;
+    let response = harness
+        .put(
+            id,
+            &etag(&harness, id).await,
+            json!({"api_key_value": GEMINI}),
+        )
+        .await;
+    // Gemini model discovery is intentionally not enough; the native
+    // generate/count-token sequence must pass before a replacement persists.
+    assert_remediation(&response, StatusCode::BAD_REQUEST, "key_invalid");
+    let after = harness.record(id).await;
+    assert_eq!(after.api_key_ciphertext, before.api_key_ciphertext);
+    assert_eq!(after.revision, before.revision);
+}
+
+#[tokio::test]
+async fn skip_preflight_persists_unverified_provider_state() {
+    let harness = harness().await;
+    let id = create_ok(
+        &harness,
+        "openai-explicit-skip",
+        OPENAI,
+        json!({"kind": "openai_api_key", "skip_preflight": true}),
+    )
+    .await;
+    let details = harness.details(id).await.expect("details row");
+    assert!(!details.verified);
+    assert_eq!(details.capabilities.inference, ApiKeyInference::Unverified);
+    assert_eq!(
+        details.remediation,
+        vec![RemediationCode::UsageNeverChecked]
+    );
+    assert_eq!(details.checked_at_unix_secs, None);
+}
+
+#[tokio::test]
+async fn host_change_rechecks_stored_provider_key() {
+    let harness = harness().await;
+    let id = create_ok(
+        &harness,
+        "openai-host-change",
+        OPENAI,
+        json!({"kind": "openai_api_key", "skip_preflight": true}),
+    )
+    .await;
+    let response = harness
+        .put(
+            id,
+            &etag(&harness, id).await,
+            json!({"base_url": custom_host(&harness)}),
+        )
+        .await;
+    // Host-only failures are persisted as the new-host result and do not
+    // reject the host update.
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    let record = harness.record(id).await;
+    assert_eq!(
+        record.base_url.as_ref().map(|url| url.host_str()),
+        Some(Some("localhost"))
+    );
+    let details = harness.details(id).await.expect("details row");
+    assert!(!details.verified);
+    assert_eq!(details.remediation, vec![RemediationCode::KeyInvalid]);
+}
+
+#[tokio::test]
+async fn provider_native_preflight_preserves_model_list_failure_classification() {
+    let harness = harness().await;
+    let response = harness
+        .preflight(
+            GEMINI,
+            json!({"kind": "gemini_api_key", "base_url": harness.fake_url.as_str()}),
+        )
+        .await;
+    // There is no Gemini model-list route in the Anthropic fixture. The
+    // discovery failure is returned directly; no inference request follows.
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["verdict"], "rejected");
+    assert_eq!(codes(&response), vec!["key_invalid".to_owned()]);
+    assert_eq!(
+        harness
+            .requests("/v1beta/models")
+            .iter()
+            .filter(|request| request.method == "GET")
+            .count(),
+        1
+    );
+    assert!(harness.requests("/v1beta/models/").is_empty());
 }

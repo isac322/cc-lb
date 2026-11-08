@@ -25,7 +25,9 @@ use cc_lb_storage_api::{
 use uuid::Uuid;
 
 use super::poll_enqueue::enqueue_usage_poll;
-use super::preflight::{no_store, provider_native_preflight, verdict_label};
+use super::preflight::{
+    no_store, preserve_provider_metadata, provider_native_preflight, verdict_label,
+};
 use crate::v1::post_commit::complete_after_commit;
 use crate::v1::upstreams::{UpstreamError, audit_upstream_action, storage, upstream_base_url};
 use crate::{AdminState, auth::AdminIdentity};
@@ -92,9 +94,9 @@ pub(crate) async fn recheck_upstream_api_key(
     let record = load_api_key_or_provider_upstream(storage, &id).await?;
     let key = stored_api_key(&state, &record)?;
     let base_url = upstream_base_url(&record)?;
-    let previous_usage_report = storage
-        .get_api_key_details(record.id)
-        .await?
+    let previous_details = storage.get_api_key_details(record.id).await?;
+    let previous_usage_report = previous_details
+        .as_ref()
         .and_then(|details| details.usage_report_state);
 
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
@@ -102,7 +104,7 @@ pub(crate) async fn recheck_upstream_api_key(
         record.kind,
         UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
     ) {
-        provider_native_preflight(&state, &key, &base_url, record.kind, now_unix_secs).await
+        provider_native_preflight(&state, &key, &base_url, record.kind, None, now_unix_secs).await
     } else {
         run_preflight(
             &state.anthropic_org_api,
@@ -118,6 +120,12 @@ pub(crate) async fn recheck_upstream_api_key(
         )
         .await
     };
+    if matches!(
+        record.kind,
+        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
+        preserve_provider_metadata(&mut outcome.access, previous_details.as_ref(), false);
+    }
     drop(key);
     // A stored key that is now refused (401/403) leaves the operator a
     // reason on the Access row; the probe only phrases transport failures.

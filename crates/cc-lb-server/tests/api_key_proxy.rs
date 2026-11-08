@@ -366,6 +366,11 @@ fn access(verified: bool, inference: ApiKeyInference) -> ApiKeyAccessWrite {
             ..ApiKeyCapabilities::not_checked()
         },
         remediation: vec![RemediationCode::KeyForbidden],
+        provider: None,
+        project_id: None,
+        project_source: None,
+        provider_report_state: None,
+        provider_report_status_metadata: None,
         usage_report_state: None,
         last_error: Some("Anthropic refused the key".to_owned()),
         checked_at_unix_secs: verified.then_some(1_700_000_000),

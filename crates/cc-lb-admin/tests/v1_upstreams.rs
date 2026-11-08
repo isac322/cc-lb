@@ -54,8 +54,22 @@ async fn provider_probe_handler(
         .get("x-goog-api-key")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    seen.lock().unwrap().push((path, authorization, google_key));
-    (StatusCode::OK, "")
+    seen.lock()
+        .unwrap()
+        .push((path.clone(), authorization, google_key));
+    let body = match path.as_str() {
+        "/v1/models" => r#"{"data":[{"id":"gpt-test"}]}"#,
+        "/v1/chat/completions" => {
+            r#"{"id":"chatcmpl-test","choices":[{"message":{"role":"assistant","content":"pong"}}]}"#
+        }
+        "/v1beta/models" => r#"{"models":[{"name":"models/gemini-test"}]}"#,
+        path if path.ends_with(":generateContent") => {
+            r#"{"candidates":[{"content":{"parts":[{"text":"pong"}],"role":"model"},"finishReason":"STOP"}]}"#
+        }
+        path if path.ends_with(":countTokens") => r#"{"totalTokens":1}"#,
+        _ => return (StatusCode::NOT_FOUND, ""),
+    };
+    (StatusCode::OK, body)
 }
 
 struct TestResponse {
@@ -1355,7 +1369,8 @@ async fn openai_and_gemini_api_key_writes_are_not_cacheable() {
             Some(json!({
                 "name": format!("non-anthropic-default-preflight-{index}"),
                 "kind": kind,
-                "api_key_value": "provider-secret-key"
+                "api_key_value": "provider-secret-key",
+                "skip_preflight": true
             })),
             None,
         )
@@ -1374,7 +1389,7 @@ async fn openai_and_gemini_api_key_writes_are_not_cacheable() {
             app,
             "PATCH",
             &format!("/admin/v1/upstreams/{id}"),
-            Some(json!({ "api_key_value": "replacement-provider-secret-key" })),
+            Some(json!({ "api_key_value": "replacement-provider-secret-key", "skip_preflight": true })),
             Some("W/\"1\""),
         )
         .await;
@@ -1453,11 +1468,15 @@ async fn api_key_warmup_and_dialects_are_rejected() {
             );
         }
 
+        let mut successful_create_body = create_body.clone();
+        if kind.ends_with("_api_key") {
+            successful_create_body["skip_preflight"] = json!(true);
+        }
         let created = request(
             app.clone(),
             "POST",
             "/admin/v1/upstreams",
-            Some(create_body),
+            Some(successful_create_body),
             None,
         )
         .await;
@@ -1642,19 +1661,9 @@ async fn provider_warmup_plugins_require_the_upstreams_qualified_shape_export() 
 
 #[tokio::test]
 async fn provider_api_key_preflight_and_recheck_use_native_models_probe() {
-    for (index, (kind, expected_path, expected_auth, expected_google_key)) in [
-        (
-            "openai_api_key",
-            "/v1/models",
-            Some("Bearer provider-secret-key"),
-            None,
-        ),
-        (
-            "gemini_api_key",
-            "/v1beta/models",
-            None,
-            Some("provider-secret-key"),
-        ),
+    for (index, (kind, expected_auth, expected_google_key)) in [
+        ("openai_api_key", Some("Bearer provider-secret-key"), None),
+        ("gemini_api_key", None, Some("provider-secret-key")),
     ]
     .into_iter()
     .enumerate()
@@ -1717,9 +1726,22 @@ async fn provider_api_key_preflight_and_recheck_use_native_models_probe() {
         assert_eq!(body(&detail)["api_key_access"]["verified"], true);
         assert!(body(&detail)["api_key_access"]["workspace"]["id"].is_null());
         let requests = seen.lock().unwrap();
-        assert_eq!(requests.len(), 2, "{kind}");
-        for (path, authorization, google_key) in requests.iter() {
-            assert_eq!(path, expected_path, "{kind}");
+        let expected_paths: Vec<&str> = match kind {
+            "openai_api_key" => vec!["/v1/models", "/v1/chat/completions"],
+            "gemini_api_key" => vec![
+                "/v1beta/models",
+                "/v1beta/models/gemini-test:generateContent",
+                "/v1beta/models/gemini-test:countTokens",
+            ],
+            _ => unreachable!("provider probe test only covers native API-key kinds"),
+        };
+        assert_eq!(requests.len(), expected_paths.len() * 2, "{kind}");
+        for (request_index, (path, authorization, google_key)) in requests.iter().enumerate() {
+            assert_eq!(
+                path,
+                expected_paths[request_index % expected_paths.len()],
+                "{kind}"
+            );
             assert_eq!(authorization.as_deref(), expected_auth, "{kind}");
             assert_eq!(google_key.as_deref(), expected_google_key, "{kind}");
         }
