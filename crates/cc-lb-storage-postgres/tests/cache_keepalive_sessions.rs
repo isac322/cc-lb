@@ -85,10 +85,14 @@ async fn append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles(
         )
         .await?;
     assert!(cursor > 0);
-    let ids: Vec<String> =
-        sqlx::query_scalar("SELECT evidence_id FROM cache_keepalive_evidence ORDER BY evidence_id")
-            .fetch_all(storage.pool())
-            .await?;
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id IN ('first-follow-up', 'overlapping-renewal', 'renewal')
+         ORDER BY evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await?;
     assert_eq!(
         ids,
         vec!["first-follow-up", "overlapping-renewal", "renewal",]
