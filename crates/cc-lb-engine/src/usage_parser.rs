@@ -42,6 +42,9 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_creation_input_tokens_5m: u64,
     pub(crate) cache_creation_input_tokens_1h: u64,
     pub(crate) cache_read_input_tokens: u64,
+    /// Numeric OpenAI image-token details, when reported by an eligible usage shape.
+    pub(crate) input_image_tokens: Option<u64>,
+    pub(crate) output_image_tokens: Option<u64>,
     /// Attribution evidence is separate from numeric accounting, which defaults
     /// absent or malformed cache counters to zero in some provider shapes.
     pub(crate) cache_creation_evidence: CacheTokenEvidence,
@@ -485,7 +488,7 @@ fn accumulate_sse_usage_value(
     usage.present = true;
     usage.billable_present = true;
     usage.thinking_progress_present = false;
-    merge_usage_value(usage, reported);
+    merge_usage_value_for_shape(usage, reported, shape);
     if usage.service_tier.is_none()
         && let Some(tier) = service_tier_from_envelope(value)
     {
@@ -590,7 +593,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
                 continue;
             };
             usage.present = true;
-            merge_usage_value(&mut usage, usage_value);
+            merge_usage_value_for_shape(&mut usage, usage_value, shape);
             if usage.service_tier.is_none()
                 && let Some(tier) = service_tier_from_envelope(element)
             {
@@ -609,7 +612,7 @@ fn usage_from_value_for_shape(value: &Value, shape: Option<UsageShape>) -> Usage
         billable_present: true,
         ..UsageCounts::default()
     };
-    merge_usage_value(&mut usage, usage_value);
+    merge_usage_value_for_shape(&mut usage, usage_value, shape);
     if usage.service_tier.is_none()
         && let Some(tier) = service_tier_from_envelope(value)
     {
@@ -631,6 +634,14 @@ fn service_tier_from_envelope(value: &Value) -> Option<&str> {
 }
 
 pub(crate) fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
+    merge_usage_value_for_shape(usage, reported, None);
+}
+
+pub(crate) fn merge_usage_value_for_shape(
+    usage: &mut UsageCounts,
+    reported: &Value,
+    shape: Option<UsageShape>,
+) {
     usage
         .cache_creation_evidence
         .merge(cache_creation_evidence(reported));
@@ -668,6 +679,33 @@ pub(crate) fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
         .and_then(Value::as_u64)
     {
         usage.output_tokens = output_tokens;
+    }
+    if matches!(
+        shape,
+        Some(
+            UsageShape::OpenaiResponses
+                | UsageShape::OpenaiChatCompletions
+                | UsageShape::OpenaiCompletions
+                | UsageShape::OpenaiImages
+        )
+    ) {
+        let input_image_tokens = reported
+            .get("input_tokens_details")
+            .or_else(|| reported.get("input_token_details"))
+            .or_else(|| reported.get("prompt_tokens_details"))
+            .and_then(|details| details.get("image_tokens"))
+            .and_then(Value::as_u64);
+        if let Some(image_tokens) = input_image_tokens {
+            usage.input_image_tokens = Some(image_tokens);
+        }
+        let output_image_tokens = reported
+            .get("output_tokens_details")
+            .or_else(|| reported.get("completion_tokens_details"))
+            .and_then(|details| details.get("image_tokens"))
+            .and_then(Value::as_u64);
+        if let Some(image_tokens) = output_image_tokens {
+            usage.output_image_tokens = Some(image_tokens);
+        }
     }
     let cached_tokens = reported
         .get("input_tokens_details")
@@ -2875,13 +2913,21 @@ mod tests {
         let image = serde_json::json!({
             "created": 1,
             "data": [{"b64_json": "encoded"}],
-            "usage": {"input_tokens": 11, "output_tokens": 3, "total_tokens": 14}
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 3,
+                "total_tokens": 14,
+                "input_tokens_details": {"image_tokens": 7},
+                "output_tokens_details": {"image_tokens": 2}
+            }
         });
         let image_usage =
             observe_non_stream_json_value_for_shape(&image, UsageShape::OpenaiImages).usage;
         assert!(image_usage.present);
         assert_eq!(image_usage.input_tokens, 11);
         assert_eq!(image_usage.output_tokens, 3);
+        assert_eq!(image_usage.input_image_tokens, Some(7));
+        assert_eq!(image_usage.output_image_tokens, Some(2));
 
         let audio = serde_json::json!({
             "text": "transcribed",
@@ -2907,6 +2953,72 @@ mod tests {
                 .usage
                 .present
         );
+        let non_image = serde_json::json!({
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 3,
+                "input_tokens_details": {"image_tokens": 7},
+                "output_tokens_details": {"image_tokens": 2}
+            }
+        });
+        let non_image_usage =
+            observe_non_stream_json_value_for_shape(&non_image, UsageShape::OpenaiEmbeddings).usage;
+        assert_eq!(non_image_usage.input_image_tokens, None);
+        assert_eq!(non_image_usage.output_image_tokens, None);
+    }
+    #[test]
+    fn openai_image_details_retain_only_numeric_cumulative_values() {
+        let first = serde_json::json!({
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 8,
+                "input_tokens_details": {"image_tokens": 6},
+                "output_tokens_details": {"image_tokens": 3}
+            }
+        });
+        let mut usage =
+            observe_non_stream_json_value_for_shape(&first, UsageShape::OpenaiImages).usage;
+        assert_eq!(usage.input_image_tokens, Some(6));
+        assert_eq!(usage.output_image_tokens, Some(3));
+
+        let second = serde_json::json!({
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 8,
+                "input_tokens_details": null,
+                "output_tokens_details": {"image_tokens": "3"}
+            }
+        });
+        let second_value = second.get("usage").expect("usage object");
+        merge_usage_value_for_shape(&mut usage, second_value, Some(UsageShape::OpenaiImages));
+        assert_eq!(usage.input_image_tokens, Some(6));
+        assert_eq!(usage.output_image_tokens, Some(3));
+
+        let omitted = serde_json::json!({
+            "usage": {"input_tokens": 20, "output_tokens": 8}
+        });
+        let omitted_value = omitted.get("usage").expect("usage object");
+        merge_usage_value_for_shape(&mut usage, omitted_value, Some(UsageShape::OpenaiImages));
+        assert_eq!(usage.input_image_tokens, Some(6));
+        assert_eq!(usage.output_image_tokens, Some(3));
+    }
+    #[test]
+    fn streamed_openai_image_details_retain_when_cumulative_frame_omits_them() {
+        let first = parse_sse_event(
+            br#"data: {"usage":{"input_tokens":20,"output_tokens":8,"input_tokens_details":{"image_tokens":6},"output_tokens_details":{"image_tokens":3}}}
+
+"#,
+        );
+        let second = parse_sse_event(
+            br#"data: {"usage":{"input_tokens":20,"output_tokens":8}}
+
+"#,
+        );
+        let mut usage = UsageCounts::default();
+        accumulate_sse_usage_for_shape(&first, &mut usage, UsageShape::OpenaiImages);
+        accumulate_sse_usage_for_shape(&second, &mut usage, UsageShape::OpenaiImages);
+        assert_eq!(usage.input_image_tokens, Some(6));
+        assert_eq!(usage.output_image_tokens, Some(3));
     }
 
     #[test]

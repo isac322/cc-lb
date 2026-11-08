@@ -433,6 +433,8 @@ fn test_catalog() -> CatalogSnapshot {
             model: MODEL.to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(3),
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
             by_tier: BTreeMap::new(),
         },
     );

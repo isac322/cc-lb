@@ -108,6 +108,8 @@ fn install_renewal_pricing() {
             model: "claude-renewal".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(2),
             output_per_million_usd: UsdPerMillion::from_whole_usd(3),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
             by_tier: Default::default(),
         },
     );

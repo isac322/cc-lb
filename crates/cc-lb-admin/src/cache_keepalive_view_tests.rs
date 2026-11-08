@@ -43,6 +43,8 @@ fn install_priced_snapshot(catalog: &PriceCatalog, payload_hash: &str) {
             model: "claude-sonnet-4-5".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(3),
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
             by_tier: BTreeMap::new(),
         },
     );
@@ -293,6 +295,8 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
         Pricing {
             model: "partial-model".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(1),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
             output_per_million_usd: UsdPerMillion::from_whole_usd(1),
             by_tier: BTreeMap::new(),
         },
@@ -487,6 +491,8 @@ fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
             model: "overflow-model".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(0),
             output_per_million_usd: UsdPerMillion::from_whole_usd(0),
+            input_image_per_million_usd: None,
+            output_image_per_million_usd: None,
             by_tier: BTreeMap::new(),
         },
     );

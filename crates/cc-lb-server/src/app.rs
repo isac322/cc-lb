@@ -284,6 +284,29 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
             )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+
+    fn estimate_max_with_cache_and_images(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache_and_images(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                use_image_rates,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
     fn estimate_max_with_local_cache(
         &self,
         model: &str,
@@ -293,6 +316,24 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
     ) -> Option<i64> {
         self.catalog
             .estimate_max_with_local_cache(model, input, max_output, service_tier)
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
+    fn estimate_max_with_local_cache_and_images(
+        &self,
+        model: &str,
+        input: cc_lb_pricing::LocalCacheInputEstimate,
+        max_output: u64,
+        use_image_rates: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_local_cache_and_images(
+                model,
+                input,
+                max_output,
+                use_image_rates,
+                service_tier,
+            )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
 }
@@ -2373,6 +2414,8 @@ fn claude_default_snapshot(clock: &dyn cc_lb_clock::Clock) -> cc_lb_pricing::Cat
                 model: (*name).to_owned(),
                 input_per_million_usd: UsdPerMillion::from_micros_usd(*input),
                 output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: Default::default(),
             },
         );
@@ -4115,6 +4158,8 @@ mod tests {
                 model: TIER_PRICING_TEST_MODEL.to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier,
             },
         );
@@ -5008,6 +5053,8 @@ mod tests {
                 model: "operator-model-a".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
                 by_tier: Default::default(),
             },
         );
