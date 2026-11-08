@@ -5,10 +5,10 @@ use crate::{
     ConfigDraftState, HistoryEntry, IssueParams, OverviewExcludedErrorBucket,
     PriceCatalogSnapshotFetch, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
-    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStreamFilters,
-    RuntimeChangeNotifier, StorageError, StorageResult, StoredApiKeyRecord, UsageRollup,
-    UsageRollupResolution, UsageRollupRun, UsageTokenInterval, UsageTokenIntervalSum,
+    RequestEventListItem, RequestEventListQuery, RequestEventProjections,
+    RequestEventStreamFilters, RuntimeChangeNotifier, StorageError, StorageResult,
+    StoredApiKeyRecord, UsageRollup, UsageRollupResolution, UsageRollupRun, UsageTokenInterval,
+    UsageTokenIntervalSum,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     oauth_pkce::OAuthPkceStore,
@@ -144,14 +144,6 @@ pub trait RequestEventStore: Send + Sync {
             message: "request_event_key_last_used is not implemented for this storage backend"
                 .to_owned(),
         })
-    }
-
-    async fn request_event_principal_costs(
-        &self,
-        query: &RequestEventPrincipalCostQuery,
-    ) -> StorageResult<Vec<RequestEventPrincipalCostBucket>> {
-        let _ = query;
-        Ok(Vec::new())
     }
 
     async fn request_event_histogram(

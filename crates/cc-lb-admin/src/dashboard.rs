@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cc_lb_storage_api::{
-    Provider, RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, Storage,
-    StorageError, UpstreamStore, UsageRollup, UsageRollupResolution,
+    Provider, Storage, StorageError, UpstreamStore, UsageRollup, UsageRollupResolution,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -11,7 +10,6 @@ const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const MAX_BUCKETS_PER_SERIES: u64 = 1_440;
 const MAX_GROUPED_SERIES: usize = 20;
-const MAX_PRINCIPAL_COST_SERIES: usize = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ProviderFamily {
     Anthropic,
@@ -276,7 +274,7 @@ struct GroupAccumulator {
 struct TotalGroupAccumulator {
     total_request_count: u64,
     upstream_name: Option<String>,
-    buckets: BTreeMap<u64, UsageBucket>,
+    bucket: UsageBucket,
 }
 
 pub fn parse_range(value: &str) -> Result<DashboardRange, ParseRangeError> {
@@ -375,7 +373,7 @@ pub(crate) async fn build_dashboard_summary_filtered(
         .collect::<Vec<_>>();
     let observed = !rollups.is_empty();
     for rollup in &rollups {
-        add_rollup_to_buckets(&mut buckets, rollup, window_start_unix_secs, step);
+        add_rollup_to_buckets(&mut buckets, rollup, window_start_unix_secs, step, false);
     }
     if provider_scope.upstream_ids.is_none() {
         let excluded_errors = storage
@@ -437,7 +435,7 @@ async fn build_dashboard_usage_with_projection(
         })
         .collect::<Vec<_>>();
     let observed = !rollups.is_empty();
-    let (mut series, truncated_series_count) = match projection {
+    let (series, truncated_series_count) = match projection {
         _ if principal_id.is_some() && !observed => (Vec::new(), None),
         UsageProjection::Full => build_usage_series_with_provider(
             group_by,
@@ -454,63 +452,6 @@ async fn build_dashboard_usage_with_projection(
             &provider_scope.family_by_upstream,
         ),
     };
-    if group_by == UsageGroupBy::Principal && !series.is_empty() {
-        let principal_keys = selected_principal_cost_keys(&series);
-        let bucket_width_secs = step_width_secs(step);
-        let selected_upstream_ids = provider_scope
-            .upstream_ids
-            .as_deref()
-            .map(|ids| ids.iter().copied().map(Some).collect::<Vec<_>>())
-            .unwrap_or_else(|| vec![upstream_id]);
-        let mut costs_by_key = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
-        for selected_upstream_id in selected_upstream_ids {
-            let costs = storage
-                .request_event_principal_costs(&RequestEventPrincipalCostQuery {
-                    since_unix_secs: window_start_unix_secs,
-                    until_unix_secs: window_end_unix_secs,
-                    bucket_width_secs,
-                    upstream_id: selected_upstream_id,
-                    principal_keys: principal_keys.clone(),
-                })
-                .await?;
-            for cost in costs {
-                let entry = costs_by_key
-                    .entry((cost.principal.clone(), cost.bucket_start_unix_secs))
-                    .or_insert_with(|| RequestEventPrincipalCostBucket {
-                        principal: cost.principal.clone(),
-                        bucket_start_unix_secs: cost.bucket_start_unix_secs,
-                        ..RequestEventPrincipalCostBucket::default()
-                    });
-                entry.total_cost_micros = entry
-                    .total_cost_micros
-                    .saturating_add(cost.total_cost_micros);
-                entry.component_costs_recorded |= cost.component_costs_recorded;
-                entry.cost_input_micros = entry
-                    .cost_input_micros
-                    .saturating_add(cost.cost_input_micros);
-                entry.cost_output_micros = entry
-                    .cost_output_micros
-                    .saturating_add(cost.cost_output_micros);
-                entry.cost_cache_creation_5m_micros = entry
-                    .cost_cache_creation_5m_micros
-                    .saturating_add(cost.cost_cache_creation_5m_micros);
-                entry.cost_cache_creation_1h_micros = entry
-                    .cost_cache_creation_1h_micros
-                    .saturating_add(cost.cost_cache_creation_1h_micros);
-                entry.cost_cache_read_micros = entry
-                    .cost_cache_read_micros
-                    .saturating_add(cost.cost_cache_read_micros);
-            }
-        }
-        let costs = costs_by_key.into_values().collect::<Vec<_>>();
-        if projection == UsageProjection::Totals {
-            seed_principal_cost_buckets(&mut series, &costs);
-        }
-        enrich_principal_costs(&mut series, costs);
-    }
-    if projection == UsageProjection::Totals {
-        collapse_usage_series(&mut series, window_start_unix_secs);
-    }
 
     Ok(DashboardUsageResponse {
         range: range.as_str(),
@@ -677,6 +618,7 @@ fn add_rollup_to_buckets(
     rollup: &UsageRollup,
     window_start_unix_secs: u64,
     step: UsageRollupResolution,
+    include_cost_components: bool,
 ) {
     let width = step_width_secs(step);
     let Some(offset) = rollup.bucket_start.checked_sub(window_start_unix_secs) else {
@@ -690,10 +632,14 @@ fn add_rollup_to_buckets(
         return;
     }
 
-    add_rollup_to_bucket(bucket, rollup);
+    add_rollup_to_bucket(bucket, rollup, include_cost_components);
 }
 
-fn add_rollup_to_bucket(bucket: &mut UsageBucket, rollup: &UsageRollup) {
+fn add_rollup_to_bucket(
+    bucket: &mut UsageBucket,
+    rollup: &UsageRollup,
+    include_cost_components: bool,
+) {
     bucket.request_count += rollup.request_count;
     bucket.input_tokens += rollup.input_tokens;
     bucket.output_tokens += rollup.output_tokens;
@@ -701,6 +647,24 @@ fn add_rollup_to_bucket(bucket: &mut UsageBucket, rollup: &UsageRollup) {
     bucket.cache_read_input_tokens += rollup.cache_read_input_tokens;
     bucket.error_count += rollup.error_count;
     bucket.virtual_cost_micros += rollup.virtual_cost_micros;
+    if include_cost_components && rollup.cost_components_event_count > 0 {
+        bucket.cost_input_micros =
+            sum_optional(bucket.cost_input_micros, Some(rollup.cost_input_micros));
+        bucket.cost_output_micros =
+            sum_optional(bucket.cost_output_micros, Some(rollup.cost_output_micros));
+        bucket.cost_cache_creation_5m_micros = sum_optional(
+            bucket.cost_cache_creation_5m_micros,
+            Some(rollup.cost_cache_creation_5m_micros),
+        );
+        bucket.cost_cache_creation_1h_micros = sum_optional(
+            bucket.cost_cache_creation_1h_micros,
+            Some(rollup.cost_cache_creation_1h_micros),
+        );
+        bucket.cost_cache_read_micros = sum_optional(
+            bucket.cost_cache_read_micros,
+            Some(rollup.cost_cache_read_micros),
+        );
+    }
     bucket.latency_ms_sum += rollup.latency_ms_sum;
     bucket.latency_count += rollup.latency_count;
     bucket.latency_ms_min = min_option(bucket.latency_ms_min, rollup.latency_ms_min);
@@ -819,7 +783,10 @@ fn build_usage_series_with_provider(
     if group_by == UsageGroupBy::None {
         let mut buckets = zero_filled_buckets(window_start_unix_secs, window_end_unix_secs, step);
         for rollup in rollups {
-            add_rollup_to_buckets(&mut buckets, rollup, window_start_unix_secs, step);
+            add_rollup_to_buckets(&mut buckets, rollup, window_start_unix_secs, step, false);
+        }
+        for bucket in &mut buckets {
+            sanitize_bucket_cost_components(bucket);
         }
         return (
             vec![UsageSeries {
@@ -842,7 +809,13 @@ fn build_usage_series_with_provider(
             buckets: zero_filled_buckets(window_start_unix_secs, window_end_unix_secs, step),
         });
         entry.total_request_count += rollup.request_count;
-        add_rollup_to_buckets(&mut entry.buckets, rollup, window_start_unix_secs, step);
+        add_rollup_to_buckets(
+            &mut entry.buckets,
+            rollup,
+            window_start_unix_secs,
+            step,
+            group_by == UsageGroupBy::Principal,
+        );
     }
 
     let mut ranked = groups.into_iter().collect::<Vec<_>>();
@@ -857,10 +830,15 @@ fn build_usage_series_with_provider(
     let series = ranked
         .into_iter()
         .take(MAX_GROUPED_SERIES)
-        .map(|(key, group)| UsageSeries {
-            key,
-            upstream_name: group.upstream_name,
-            buckets: group.buckets,
+        .map(|(key, mut group)| {
+            for bucket in &mut group.buckets {
+                sanitize_bucket_cost_components(bucket);
+            }
+            UsageSeries {
+                key,
+                upstream_name: group.upstream_name,
+                buckets: group.buckets,
+            }
         })
         .collect();
 
@@ -881,8 +859,9 @@ fn build_usage_totals_series(
     if group_by == UsageGroupBy::None {
         let mut bucket = empty_bucket(window_start_unix_secs);
         for rollup in rollups {
-            add_rollup_to_bucket(&mut bucket, rollup);
+            add_rollup_to_bucket(&mut bucket, rollup, false);
         }
+        sanitize_bucket_cost_components(&mut bucket);
         return (
             vec![UsageSeries {
                 key: "all".to_owned(),
@@ -901,14 +880,14 @@ fn build_usage_totals_series(
         let entry = groups.entry(key).or_insert_with(|| TotalGroupAccumulator {
             total_request_count: 0,
             upstream_name,
-            buckets: BTreeMap::new(),
+            bucket: empty_bucket(window_start_unix_secs),
         });
         entry.total_request_count += rollup.request_count;
-        let bucket = entry
-            .buckets
-            .entry(rollup.bucket_start)
-            .or_insert_with(|| empty_bucket(rollup.bucket_start));
-        add_rollup_to_bucket(bucket, rollup);
+        add_rollup_to_bucket(
+            &mut entry.bucket,
+            rollup,
+            group_by == UsageGroupBy::Principal,
+        );
     }
 
     let mut ranked = groups.into_iter().collect::<Vec<_>>();
@@ -919,165 +898,62 @@ fn build_usage_totals_series(
             .then_with(|| left_key.cmp(right_key))
     });
 
-    let truncated_count = ranked.len().saturating_sub(MAX_GROUPED_SERIES);
     let series = ranked
         .into_iter()
-        .take(MAX_GROUPED_SERIES)
-        .map(|(key, group)| UsageSeries {
-            key,
-            upstream_name: group.upstream_name,
-            buckets: group.buckets.into_values().collect(),
+        .map(|(key, mut group)| {
+            sanitize_bucket_cost_components(&mut group.bucket);
+            UsageSeries {
+                key,
+                upstream_name: group.upstream_name,
+                buckets: vec![group.bucket],
+            }
         })
         .collect();
-    let truncated_series_count = if truncated_count == 0 {
-        None
-    } else {
-        Some(truncated_count as u64)
-    };
-    (series, truncated_series_count)
-}
-
-fn collapse_usage_series(series: &mut [UsageSeries], window_start_unix_secs: u64) {
-    for item in series {
-        let mut total = empty_bucket(window_start_unix_secs);
-        for bucket in &item.buckets {
-            add_usage_bucket_to_bucket(&mut total, bucket);
-        }
-        item.buckets.clear();
-        item.buckets.push(total);
-    }
-}
-
-fn add_usage_bucket_to_bucket(total: &mut UsageBucket, bucket: &UsageBucket) {
-    total.request_count += bucket.request_count;
-    total.input_tokens += bucket.input_tokens;
-    total.output_tokens += bucket.output_tokens;
-    total.cache_creation_input_tokens += bucket.cache_creation_input_tokens;
-    total.cache_read_input_tokens += bucket.cache_read_input_tokens;
-    total.error_count += bucket.error_count;
-    total.virtual_cost_micros += bucket.virtual_cost_micros;
-    total.cost_input_micros = sum_optional(total.cost_input_micros, bucket.cost_input_micros);
-    total.cost_output_micros = sum_optional(total.cost_output_micros, bucket.cost_output_micros);
-    total.cost_cache_creation_5m_micros = sum_optional(
-        total.cost_cache_creation_5m_micros,
-        bucket.cost_cache_creation_5m_micros,
-    );
-    total.cost_cache_creation_1h_micros = sum_optional(
-        total.cost_cache_creation_1h_micros,
-        bucket.cost_cache_creation_1h_micros,
-    );
-    total.cost_cache_read_micros =
-        sum_optional(total.cost_cache_read_micros, bucket.cost_cache_read_micros);
-    total.latency_ms_sum += bucket.latency_ms_sum;
-    total.latency_count += bucket.latency_count;
-    total.latency_ms_min = min_option(total.latency_ms_min, bucket.latency_ms_min);
-    total.latency_ms_max = max_option(total.latency_ms_max, bucket.latency_ms_max);
-    total.proxy_setup_ms_sum += bucket.proxy_setup_ms_sum;
-    total.proxy_setup_ms_count += bucket.proxy_setup_ms_count;
-    total.shape_ms_sum += bucket.shape_ms_sum;
-    total.shape_ms_count += bucket.shape_ms_count;
-    total.sign_ms_sum += bucket.sign_ms_sum;
-    total.sign_ms_count += bucket.sign_ms_count;
-    total.upstream_ttfb_ms_sum += bucket.upstream_ttfb_ms_sum;
-    total.upstream_ttfb_ms_count += bucket.upstream_ttfb_ms_count;
-    total.upstream_body_ms_sum += bucket.upstream_body_ms_sum;
-    total.upstream_body_ms_count += bucket.upstream_body_ms_count;
+    (series, None)
 }
 
 fn sum_optional(current: Option<u64>, next: Option<u64>) -> Option<u64> {
     match (current, next) {
-        (Some(current), Some(next)) => Some(current + next),
+        (Some(current), Some(next)) => Some(current.saturating_add(next)),
         (Some(current), None) => Some(current),
         (None, Some(next)) => Some(next),
         (None, None) => None,
     }
 }
 
-fn selected_principal_cost_keys(series: &[UsageSeries]) -> Vec<String> {
-    let mut ranked = series
-        .iter()
-        .map(|series| {
-            let total_virtual_cost_micros = series.buckets.iter().fold(0_u128, |total, bucket| {
-                total + u128::from(bucket.virtual_cost_micros)
-            });
-            (series.key.as_str(), total_virtual_cost_micros)
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_unstable_by(
-        |(left_key, left_cost_micros), (right_key, right_cost_micros)| {
-            right_cost_micros
-                .cmp(left_cost_micros)
-                .then_with(|| left_key.cmp(right_key))
-        },
-    );
-    ranked
-        .into_iter()
-        .take(MAX_PRINCIPAL_COST_SERIES)
-        .map(|(key, _)| key.to_owned())
-        .collect()
+fn clear_bucket_cost_components(bucket: &mut UsageBucket) {
+    bucket.cost_input_micros = None;
+    bucket.cost_output_micros = None;
+    bucket.cost_cache_creation_5m_micros = None;
+    bucket.cost_cache_creation_1h_micros = None;
+    bucket.cost_cache_read_micros = None;
 }
 
-fn seed_principal_cost_buckets(
-    series: &mut [UsageSeries],
-    costs: &[RequestEventPrincipalCostBucket],
-) {
-    for cost in costs {
-        let Some(principal_series) = series
-            .iter_mut()
-            .find(|principal_series| principal_series.key == cost.principal)
-        else {
-            continue;
-        };
-        match principal_series
-            .buckets
-            .binary_search_by_key(&cost.bucket_start_unix_secs, |bucket| {
-                bucket.bucket_start_unix_secs
-            }) {
-            Ok(_) => {}
-            Err(index) => principal_series
-                .buckets
-                .insert(index, empty_bucket(cost.bucket_start_unix_secs)),
-        }
+fn sanitize_bucket_cost_components(bucket: &mut UsageBucket) {
+    let components = [
+        bucket.cost_input_micros,
+        bucket.cost_output_micros,
+        bucket.cost_cache_creation_5m_micros,
+        bucket.cost_cache_creation_1h_micros,
+        bucket.cost_cache_read_micros,
+    ];
+    if components.iter().all(Option::is_none) {
+        return;
     }
-}
-
-fn enrich_principal_costs(series: &mut [UsageSeries], costs: Vec<RequestEventPrincipalCostBucket>) {
-    let mut costs_by_principal =
-        BTreeMap::<String, BTreeMap<u64, RequestEventPrincipalCostBucket>>::new();
-    for cost in costs {
-        costs_by_principal
-            .entry(cost.principal.clone())
-            .or_default()
-            .insert(cost.bucket_start_unix_secs, cost);
-    }
-
-    for principal_series in series {
-        let Some(cost_buckets) = costs_by_principal.get(&principal_series.key) else {
-            continue;
+    let mut component_total = 0_u64;
+    for value in components {
+        let Some(value) = value else {
+            clear_bucket_cost_components(bucket);
+            return;
         };
-        for bucket in &mut principal_series.buckets {
-            let Some(costs) = cost_buckets.get(&bucket.bucket_start_unix_secs) else {
-                continue;
-            };
-            let component_total = costs
-                .cost_input_micros
-                .checked_add(costs.cost_output_micros)
-                .and_then(|total| total.checked_add(costs.cost_cache_creation_5m_micros))
-                .and_then(|total| total.checked_add(costs.cost_cache_creation_1h_micros))
-                .and_then(|total| total.checked_add(costs.cost_cache_read_micros));
-            if !costs.component_costs_recorded
-                || component_total.is_none_or(|total| total > costs.total_cost_micros)
-                || costs.total_cost_micros > bucket.virtual_cost_micros
-            {
-                continue;
-            }
-
-            bucket.cost_input_micros = Some(costs.cost_input_micros);
-            bucket.cost_output_micros = Some(costs.cost_output_micros);
-            bucket.cost_cache_creation_5m_micros = Some(costs.cost_cache_creation_5m_micros);
-            bucket.cost_cache_creation_1h_micros = Some(costs.cost_cache_creation_1h_micros);
-            bucket.cost_cache_read_micros = Some(costs.cost_cache_read_micros);
-        }
+        let Some(sum) = component_total.checked_add(value) else {
+            clear_bucket_cost_components(bucket);
+            return;
+        };
+        component_total = sum;
+    }
+    if component_total > bucket.virtual_cost_micros {
+        clear_bucket_cost_components(bucket);
     }
 }
 
@@ -1217,12 +1093,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn totals_series_materializes_only_observed_rollup_buckets() {
-        let rollup = |bucket_start, request_count| UsageRollup {
+    fn test_rollup(
+        principal: &str,
+        bucket_start: u64,
+        request_count: u64,
+        virtual_cost_micros: u64,
+    ) -> UsageRollup {
+        UsageRollup {
             resolution: UsageRollupResolution::Minute,
             bucket_start,
-            principal: "principal-a".to_owned(),
+            principal: principal.to_owned(),
             upstream_id: Uuid::from_u128(1),
             upstream_name: "upstream-a".to_owned(),
             model: "model-a".to_owned(),
@@ -1246,101 +1126,112 @@ mod tests {
             upstream_ttfb_ms_sum: 0,
             upstream_body_ms_count: 0,
             upstream_body_ms_sum: 0,
-            virtual_cost_micros: request_count,
-        };
-        let rollups = [rollup(MINUTE_SECS, 1), rollup(59 * MINUTE_SECS, 2)];
+            virtual_cost_micros,
+            cost_input_micros: 0,
+            cost_output_micros: 0,
+            cost_cache_creation_5m_micros: 0,
+            cost_cache_creation_1h_micros: 0,
+            cost_cache_read_micros: 0,
+            cost_components_event_count: 0,
+        }
+    }
 
-        let (mut series, truncated_series_count) =
+    #[test]
+    fn totals_series_collapses_observed_rollup_buckets() {
+        let rollups = [
+            test_rollup("principal-a", MINUTE_SECS, 1, 1),
+            test_rollup("principal-a", 59 * MINUTE_SECS, 2, 2),
+        ];
+
+        let (series, truncated_series_count) =
             build_usage_totals_series(UsageGroupBy::Principal, &rollups, 0, &HashMap::new());
 
         assert_eq!(truncated_series_count, None);
         assert_eq!(series.len(), 1);
-        assert_eq!(
-            series[0]
-                .buckets
-                .iter()
-                .map(|bucket| bucket.bucket_start_unix_secs)
-                .collect::<Vec<_>>(),
-            vec![MINUTE_SECS, 59 * MINUTE_SECS]
-        );
-        collapse_usage_series(&mut series, 0);
         assert_eq!(series[0].buckets.len(), 1);
+        assert_eq!(series[0].buckets[0].bucket_start_unix_secs, 0);
         assert_eq!(series[0].buckets[0].request_count, 3);
     }
 
     #[test]
-    fn principal_cost_keys_are_limited_and_ranked_by_summed_virtual_cost() {
-        let principal_series = |key: &str, costs: &[u64]| UsageSeries {
-            key: key.to_owned(),
-            upstream_name: None,
-            buckets: costs
-                .iter()
-                .map(|cost| {
-                    let mut bucket = empty_bucket(0);
-                    bucket.virtual_cost_micros = *cost;
-                    bucket
-                })
-                .collect(),
-        };
-        let series = vec![
-            principal_series("principal-a", &[5]),
-            principal_series("principal-b", &[50, 25]),
-            principal_series("principal-c", &[100]),
-            principal_series("principal-d", &[90]),
-            principal_series("principal-e", &[80]),
-            principal_series("principal-f", &[70]),
-            principal_series("principal-g", &[70]),
-        ];
-        assert_eq!(
-            selected_principal_cost_keys(&series),
-            vec![
-                "principal-c",
-                "principal-d",
-                "principal-e",
-                "principal-b",
-                "principal-f",
-            ]
+    fn rollup_component_aggregation_preserves_recorded_values() {
+        let mut first = test_rollup("principal-a", 0, 1, 15);
+        first.cost_input_micros = 1;
+        first.cost_output_micros = 2;
+        first.cost_cache_creation_5m_micros = 3;
+        first.cost_cache_creation_1h_micros = 4;
+        first.cost_cache_read_micros = 5;
+        first.cost_components_event_count = 1;
+        let mut second = first.clone();
+        second.virtual_cost_micros = 150;
+        second.cost_input_micros = 10;
+        second.cost_output_micros = 20;
+        second.cost_cache_creation_5m_micros = 30;
+        second.cost_cache_creation_1h_micros = 40;
+        second.cost_cache_read_micros = 50;
+        second.cost_components_event_count = 2;
+
+        let (series, _) = build_usage_series_with_provider(
+            UsageGroupBy::Principal,
+            &[first, second],
+            0,
+            MINUTE_SECS,
+            UsageRollupResolution::Minute,
+            &HashMap::new(),
         );
+        let bucket = &series[0].buckets[0];
+        assert_eq!(bucket.cost_input_micros, Some(11));
+        assert_eq!(bucket.cost_output_micros, Some(22));
+        assert_eq!(bucket.cost_cache_creation_5m_micros, Some(33));
+        assert_eq!(bucket.cost_cache_creation_1h_micros, Some(44));
+        assert_eq!(bucket.cost_cache_read_micros, Some(55));
     }
 
-    struct DefaultPrincipalCostStore;
+    #[test]
+    fn unrecorded_components_are_absent_and_recorded_zeroes_are_present() {
+        let unrecorded = test_rollup("unrecorded", 0, 1, 0);
+        let mut recorded = test_rollup("recorded", MINUTE_SECS, 1, 0);
+        recorded.cost_components_event_count = 1;
 
-    #[async_trait::async_trait]
-    impl cc_lb_storage_api::RequestEventStore for DefaultPrincipalCostStore {
-        async fn append_request_event(
-            &self,
-            _event: &cc_lb_storage_api::RequestEvent,
-        ) -> cc_lb_storage_api::StorageResult<u64> {
-            Ok(0)
-        }
+        let (series, _) = build_usage_series_with_provider(
+            UsageGroupBy::Principal,
+            &[unrecorded, recorded],
+            0,
+            2 * MINUTE_SECS,
+            UsageRollupResolution::Minute,
+            &HashMap::new(),
+        );
+        let unrecorded_bucket = &series
+            .iter()
+            .find(|series| series.key == "unrecorded")
+            .unwrap()
+            .buckets[0];
+        assert_eq!(unrecorded_bucket.cost_input_micros, None);
+        let recorded_bucket = &series
+            .iter()
+            .find(|series| series.key == "recorded")
+            .unwrap()
+            .buckets[1];
+        assert_eq!(recorded_bucket.cost_input_micros, Some(0));
+        assert_eq!(recorded_bucket.cost_output_micros, Some(0));
+        assert_eq!(recorded_bucket.cost_cache_creation_5m_micros, Some(0));
+        assert_eq!(recorded_bucket.cost_cache_creation_1h_micros, Some(0));
+        assert_eq!(recorded_bucket.cost_cache_read_micros, Some(0));
     }
 
-    #[tokio::test]
-    async fn optional_principal_cost_enrichment_defaults_to_absent_fields() {
-        let rows = cc_lb_storage_api::RequestEventStore::request_event_principal_costs(
-            &DefaultPrincipalCostStore,
-            &RequestEventPrincipalCostQuery {
-                since_unix_secs: 0,
-                until_unix_secs: MINUTE_SECS,
-                bucket_width_secs: MINUTE_SECS,
-                upstream_id: None,
-                principal_keys: vec!["principal-a".to_owned()],
-            },
-        )
-        .await
-        .expect("optional principal cost enrichment");
-
-        assert!(rows.is_empty());
-
-        let mut bucket = empty_bucket(0);
-        bucket.virtual_cost_micros = 10;
-        let mut series = vec![UsageSeries {
-            key: "principal-a".to_owned(),
-            upstream_name: None,
-            buckets: vec![bucket],
-        }];
-        enrich_principal_costs(&mut series, rows);
-
+    #[test]
+    fn component_sum_above_virtual_cost_is_sanitized() {
+        let mut rollup = test_rollup("principal-a", 0, 1, 10);
+        rollup.cost_input_micros = 11;
+        rollup.cost_components_event_count = 1;
+        let (series, _) = build_usage_series_with_provider(
+            UsageGroupBy::Principal,
+            &[rollup],
+            0,
+            MINUTE_SECS,
+            UsageRollupResolution::Minute,
+            &HashMap::new(),
+        );
         let bucket = &series[0].buckets[0];
         assert_eq!(bucket.cost_input_micros, None);
         assert_eq!(bucket.cost_output_micros, None);
@@ -1350,33 +1241,71 @@ mod tests {
     }
 
     #[test]
-    fn principal_cost_enrichment_omits_inconsistent_component_sum() {
-        let bucket_start = 1_700_000_000;
-        let mut bucket = empty_bucket(bucket_start);
-        bucket.virtual_cost_micros = 10;
-        let mut series = vec![UsageSeries {
-            key: "principal-a".to_owned(),
-            upstream_name: None,
-            buckets: vec![bucket],
-        }];
-
-        enrich_principal_costs(
-            &mut series,
-            vec![RequestEventPrincipalCostBucket {
-                principal: "principal-a".to_owned(),
-                bucket_start_unix_secs: bucket_start,
-                total_cost_micros: 10,
-                component_costs_recorded: true,
-                cost_input_micros: 11,
-                ..RequestEventPrincipalCostBucket::default()
-            }],
-        );
-
-        let bucket = &series[0].buckets[0];
+    fn component_sum_overflow_is_sanitized() {
+        let mut bucket = empty_bucket(0);
+        bucket.virtual_cost_micros = u64::MAX;
+        bucket.cost_input_micros = Some(u64::MAX);
+        bucket.cost_output_micros = Some(1);
+        bucket.cost_cache_creation_5m_micros = Some(0);
+        bucket.cost_cache_creation_1h_micros = Some(0);
+        bucket.cost_cache_read_micros = Some(0);
+        sanitize_bucket_cost_components(&mut bucket);
         assert_eq!(bucket.cost_input_micros, None);
         assert_eq!(bucket.cost_output_micros, None);
         assert_eq!(bucket.cost_cache_creation_5m_micros, None);
         assert_eq!(bucket.cost_cache_creation_1h_micros, None);
         assert_eq!(bucket.cost_cache_read_micros, None);
+    }
+
+    #[test]
+    fn totals_series_is_not_capped_at_twenty_principals() {
+        let rollups = (0..25)
+            .map(|index| test_rollup(&format!("principal-{index:02}"), 0, 1, 1))
+            .collect::<Vec<_>>();
+        let (series, truncated_series_count) =
+            build_usage_totals_series(UsageGroupBy::Principal, &rollups, 0, &HashMap::new());
+        assert_eq!(series.len(), 25);
+        assert_eq!(truncated_series_count, None);
+    }
+
+    #[test]
+    fn non_principal_groupings_omit_cost_components_even_when_recorded() {
+        let mut rollup = test_rollup("principal-a", 0, 1, 15);
+        rollup.cost_input_micros = 5;
+        rollup.cost_output_micros = 10;
+        rollup.cost_components_event_count = 1;
+        for group_by in [
+            UsageGroupBy::None,
+            UsageGroupBy::Model,
+            UsageGroupBy::Upstream,
+        ] {
+            let (series, _) =
+                build_usage_totals_series(group_by, &[rollup.clone()], 0, &HashMap::new());
+            let bucket = &series[0].buckets[0];
+            assert_eq!(bucket.cost_input_micros, None);
+            assert_eq!(bucket.cost_output_micros, None);
+        }
+    }
+
+    #[test]
+    fn mixed_recorded_and_unrecorded_rollups_preserve_partial_components() {
+        let unrecorded = test_rollup("principal-a", 0, 1, 20);
+        let mut recorded = test_rollup("principal-a", 0, 1, 15);
+        recorded.cost_input_micros = 5;
+        recorded.cost_output_micros = 10;
+        recorded.cost_components_event_count = 1;
+        let (series, _) = build_usage_totals_series(
+            UsageGroupBy::Principal,
+            &[unrecorded, recorded],
+            0,
+            &HashMap::new(),
+        );
+        let bucket = &series[0].buckets[0];
+        assert_eq!(bucket.virtual_cost_micros, 35);
+        assert_eq!(bucket.cost_input_micros, Some(5));
+        assert_eq!(bucket.cost_output_micros, Some(10));
+        assert_eq!(bucket.cost_cache_creation_5m_micros, Some(0));
+        assert_eq!(bucket.cost_cache_creation_1h_micros, Some(0));
+        assert_eq!(bucket.cost_cache_read_micros, Some(0));
     }
 }
