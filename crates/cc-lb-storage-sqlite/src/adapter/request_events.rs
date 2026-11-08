@@ -6,7 +6,7 @@ use cc_lb_storage_api::{
     RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
 };
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 use std::time::Instant;
 
 use super::request_event_list_sql;
@@ -75,9 +75,7 @@ impl RequestEventStore for SqliteStorage {
             Some(id) => id,
             None => select_existing_event_id_in_tx(&mut tx, event_id).await?,
         };
-        for evidence in evidence {
-            insert_keepalive_evidence_in_tx(&mut tx, evidence).await?;
-        }
+        insert_filtered_keepalive_evidence_in_tx(&mut tx, evidence).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(id, "request event cursor")
     }
@@ -977,6 +975,301 @@ async fn insert_keepalive_decision_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn insert_filtered_keepalive_evidence_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    evidence: &[CacheKeepaliveEvidenceRow],
+) -> StorageResult<()> {
+    for row in evidence
+        .iter()
+        .filter(|row| row.evidence_kind != "follow_up")
+    {
+        insert_keepalive_evidence_in_tx(tx, row).await?;
+    }
+    let mut candidates = evidence
+        .iter()
+        .filter(|row| {
+            row.evidence_kind == "follow_up"
+                && row.cache_read_input_tokens.is_some_and(|tokens| tokens > 0)
+                && row.prefix_hash.is_some()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|a, b| {
+        a.request_start_ms
+            .cmp(&b.request_start_ms)
+            .then_with(|| a.evidence_id.cmp(&b.evidence_id))
+    });
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let principals = candidates
+        .iter()
+        .map(|row| row.principal_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let upstreams = candidates
+        .iter()
+        .map(|row| row.upstream_id.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    let min_request_start_ms = candidates
+        .iter()
+        .map(|row| row.request_start_ms)
+        .min()
+        .unwrap_or(0);
+    let max_request_start_ms = candidates
+        .iter()
+        .map(|row| row.request_start_ms)
+        .max()
+        .unwrap_or(0);
+    // Load every renewal and follow-up in the bounded principal/upstream/time
+    // precheck. Cycle-wide deduplication must see sibling renewals and their
+    // follow-ups even when their prefix hashes differ from the candidate.
+    // The cache-keepalive contract uses a four-hour max_total_duration_secs
+    // session window; keep the full window here so append and purge agree.
+    let sql = format!(
+        "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
+                prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
+                model, ttl, cache_read_input_tokens
+         FROM cache_keepalive_evidence
+         WHERE evidence_kind IN ('renewal', 'follow_up')
+           AND principal_id IN ({})
+           AND upstream_id IN ({})
+           AND request_start_ms > ?
+           AND request_start_ms <= ?",
+        std::iter::repeat_n("?", principals.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+        std::iter::repeat_n("?", upstreams.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    let mut query = sqlx::query(AssertSqlSafe(sql));
+    for value in &principals {
+        query = query.bind(value);
+    }
+    for value in &upstreams {
+        query = query.bind(value);
+    }
+    let existing = query
+        .bind(u64_to_i64(
+            min_request_start_ms.saturating_sub(4 * 60 * 60 * 1_000),
+            "cache keepalive evidence request_start_ms",
+        )?)
+        .bind(u64_to_i64(
+            max_request_start_ms,
+            "cache keepalive evidence request_start_ms",
+        )?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+    let running_sql = format!(
+        "SELECT DISTINCT principal_id, upstream_id
+         FROM cache_keepalive_sessions
+         WHERE status = 'active' AND enqueue_state = 'running'
+           AND principal_id IN ({}) AND upstream_id IN ({})",
+        std::iter::repeat_n("?", principals.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+        std::iter::repeat_n("?", upstreams.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    let mut running_query = sqlx::query(AssertSqlSafe(running_sql));
+    for value in &principals {
+        running_query = running_query.bind(value);
+    }
+    for value in &upstreams {
+        running_query = running_query.bind(value);
+    }
+    let running_pairs = running_query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<String, _>("principal_id")
+                    .map_err(map_sqlx_error)?,
+                row.try_get::<String, _>("upstream_id")
+                    .map_err(map_sqlx_error)?,
+            ))
+        })
+        .collect::<StorageResult<std::collections::HashSet<_>>>()?;
+
+    let mut accepted_cycles = std::collections::HashSet::new();
+    for candidate in candidates {
+        let candidate_start = u64_to_i64(
+            candidate.request_start_ms,
+            "cache keepalive evidence request_start_ms",
+        )?;
+        let running = running_pairs.contains(&(
+            candidate.principal_id.clone(),
+            candidate.upstream_id.to_string(),
+        ));
+        let mut qualifying_cycles = std::collections::HashSet::new();
+        if !running {
+            for renewal in &existing {
+                if renewal
+                    .try_get::<String, _>("evidence_kind")
+                    .map_err(map_sqlx_error)?
+                    != "renewal"
+                {
+                    continue;
+                }
+                let Some(cycle_id) = renewal
+                    .try_get::<Option<String>, _>("cycle_id")
+                    .map_err(map_sqlx_error)?
+                    .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+                else {
+                    continue;
+                };
+                if renewal
+                    .try_get::<Option<String>, _>("prefix_policy_version")
+                    .map_err(map_sqlx_error)?
+                    .is_none()
+                    || renewal
+                        .try_get::<Option<String>, _>("prefix_schema_version")
+                        .map_err(map_sqlx_error)?
+                        .is_none()
+                    || renewal
+                        .try_get::<String, _>("principal_id")
+                        .map_err(map_sqlx_error)?
+                        != candidate.principal_id
+                    || renewal
+                        .try_get::<String, _>("upstream_id")
+                        .map_err(map_sqlx_error)?
+                        != candidate.upstream_id.to_string()
+                    || renewal
+                        .try_get::<String, _>("model")
+                        .map_err(map_sqlx_error)?
+                        != candidate.model
+                    || renewal
+                        .try_get::<Option<String>, _>("prefix_hash")
+                        .map_err(map_sqlx_error)?
+                        .as_deref()
+                        != candidate.prefix_hash.as_deref()
+                {
+                    continue;
+                }
+                let renewal_start = renewal
+                    .try_get::<i64, _>("request_start_ms")
+                    .map_err(map_sqlx_error)?;
+                let ttl_ms = match renewal
+                    .try_get::<String, _>("ttl")
+                    .map_err(map_sqlx_error)?
+                    .as_str()
+                {
+                    "1h" => 60 * 60 * 1_000,
+                    _ => 300_000,
+                };
+                if candidate_start <= renewal_start
+                    || candidate_start > renewal_start.saturating_add(ttl_ms)
+                {
+                    continue;
+                }
+                qualifying_cycles.insert(cycle_id);
+            }
+        }
+
+        let mut accepted = running;
+        if !running {
+            for cycle_id in qualifying_cycles.iter().copied() {
+                if accepted_cycles.contains(&cycle_id) {
+                    continue;
+                }
+                // A persisted follow-up blocks this candidate if it qualifies
+                // against any renewal in the same cycle, not only the renewal
+                // that first matched the candidate.
+                let earlier_follow_up = existing.iter().any(|follow_up| {
+                    let Ok(kind) = follow_up.try_get::<String, _>("evidence_kind") else {
+                        return false;
+                    };
+                    if kind != "follow_up"
+                        || !follow_up
+                            .try_get::<Option<i64>, _>("cache_read_input_tokens")
+                            .ok()
+                            .flatten()
+                            .is_some_and(|tokens| tokens > 0)
+                        || follow_up
+                            .try_get::<Option<String>, _>("prefix_hash")
+                            .ok()
+                            .flatten()
+                            .is_none()
+                    {
+                        return false;
+                    }
+                    let Ok(follow_up_start) = follow_up.try_get::<i64, _>("request_start_ms")
+                    else {
+                        return false;
+                    };
+                    let Ok(follow_up_id) = follow_up.try_get::<String, _>("evidence_id") else {
+                        return false;
+                    };
+                    if !(follow_up_start < candidate_start
+                        || (follow_up_start == candidate_start
+                            && follow_up_id.as_str() < candidate.evidence_id.as_str()))
+                    {
+                        return false;
+                    }
+                    existing.iter().any(|renewal| {
+                        let Ok(kind) = renewal.try_get::<String, _>("evidence_kind") else {
+                            return false;
+                        };
+                        if kind != "renewal"
+                            || renewal
+                                .try_get::<Option<String>, _>("cycle_id")
+                                .ok()
+                                .flatten()
+                                .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+                                != Some(cycle_id)
+                            || renewal
+                                .try_get::<Option<String>, _>("prefix_policy_version")
+                                .ok()
+                                .flatten()
+                                .is_none()
+                            || renewal
+                                .try_get::<Option<String>, _>("prefix_schema_version")
+                                .ok()
+                                .flatten()
+                                .is_none()
+                        {
+                            return false;
+                        }
+                        let Ok(renewal_start) = renewal.try_get::<i64, _>("request_start_ms")
+                        else {
+                            return false;
+                        };
+                        let Ok(ttl) = renewal.try_get::<String, _>("ttl") else {
+                            return false;
+                        };
+                        let ttl_ms = if ttl == "1h" { 3_600_000 } else { 300_000 };
+                        follow_up_start > renewal_start
+                            && follow_up_start <= renewal_start.saturating_add(ttl_ms)
+                            && follow_up.try_get::<String, _>("principal_id").ok()
+                                == renewal.try_get::<String, _>("principal_id").ok()
+                            && follow_up.try_get::<String, _>("upstream_id").ok()
+                                == renewal.try_get::<String, _>("upstream_id").ok()
+                            && follow_up.try_get::<String, _>("model").ok()
+                                == renewal.try_get::<String, _>("model").ok()
+                            && follow_up.try_get::<Option<String>, _>("prefix_hash").ok()
+                                == renewal.try_get::<Option<String>, _>("prefix_hash").ok()
+                    })
+                });
+                if !earlier_follow_up {
+                    accepted = true;
+                    break;
+                }
+            }
+        }
+        if accepted {
+            insert_keepalive_evidence_in_tx(tx, candidate).await?;
+            if !running {
+                accepted_cycles.extend(qualifying_cycles);
+            }
+        }
+    }
     Ok(())
 }
 
