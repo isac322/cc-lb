@@ -10031,11 +10031,15 @@ pub(crate) fn openai_replay_identity(
         .get("prompt_cache_key")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let conversation_id = value
-        .get("conversation")
-        .and_then(|conversation| conversation.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let conversation_identity = match value.get("conversation") {
+        Some(Value::String(id)) => format!("string:{id}"),
+        Some(Value::Object(object)) => object
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| format!("object:{id}"))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
     let input_digest = value
         .get("input")
         .and_then(|input| sonic_rs::to_vec(input).ok())
@@ -10080,7 +10084,7 @@ pub(crate) fn openai_replay_identity(
         bounded_openai_replay_component(organization),
         bounded_openai_replay_component(processing_region),
         bounded_openai_replay_component(prompt_cache_key),
-        bounded_openai_replay_component(conversation_id),
+        bounded_openai_replay_component(&conversation_identity),
         bounded_openai_replay_component(&input_digest),
     );
     let digest = Sha256::digest(namespace.as_bytes());
@@ -11338,14 +11342,59 @@ mod tests {
                 Some("prefix-a"),
             )
         );
+        let mut prefix_left = value.clone();
+        prefix_left["organization"] = serde_json::Value::String("tail".to_owned());
+        let mut prefix_right = value.clone();
+        prefix_right["organization"] =
+            serde_json::Value::String("org-a|organization=tail".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &prefix_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a|organization=org-a"),
+            ),
+            super::openai_replay_identity(
+                &prefix_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut region_left = value.clone();
+        region_left["processing_region"] =
+            serde_json::Value::String("us|prompt_cache_key=key-a".to_owned());
+        let mut region_right = value.clone();
+        region_right["processing_region"] = serde_json::Value::String("us".to_owned());
+        region_right["prompt_cache_key"] =
+            serde_json::Value::String("key-a|prompt_cache_key=tail".to_owned());
+        region_left["prompt_cache_key"] = serde_json::Value::String("tail".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &region_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &region_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
         let mut key_left = value.clone();
         key_left["prompt_cache_key"] =
-            serde_json::Value::String("key|conversation=left".to_owned());
+            serde_json::Value::String("key-a|conversation=left".to_owned());
         key_left["conversation"]["id"] = serde_json::Value::String("right".to_owned());
         let mut key_right = value.clone();
-        key_right["prompt_cache_key"] = serde_json::Value::String("key".to_owned());
+        key_right["prompt_cache_key"] = serde_json::Value::String("key-a".to_owned());
         key_right["conversation"]["id"] =
-            serde_json::Value::String("conversation=left|right".to_owned());
+            serde_json::Value::String("left|conversation=right".to_owned());
         assert_ne!(
             super::openai_replay_identity(
                 &key_left,
@@ -11356,6 +11405,44 @@ mod tests {
             ),
             super::openai_replay_identity(
                 &key_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut string_conversation = value.clone();
+        string_conversation["conversation"] = serde_json::Value::String("conv-a".to_owned());
+        let mut string_conversation_other = value.clone();
+        string_conversation_other["conversation"] = serde_json::Value::String("conv-b".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &string_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &string_conversation_other,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut object_conversation = value.clone();
+        object_conversation["conversation"] = serde_json::json!({"id": "conv-a"});
+        assert_ne!(
+            super::openai_replay_identity(
+                &string_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &object_conversation,
                 &headers,
                 "gpt-5.6",
                 Some(cc_lb_storage_api::CacheTtl::Ttl30m),
