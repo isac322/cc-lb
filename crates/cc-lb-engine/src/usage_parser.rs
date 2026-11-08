@@ -1749,10 +1749,7 @@ mod tests {
                 serde_json::json!({"cacheCreationTokenCount": "7"}),
                 CacheTokenEvidence::Invalid,
             ),
-            (
-                serde_json::json!({}),
-                CacheTokenEvidence::Unreported,
-            ),
+            (serde_json::json!({}), CacheTokenEvidence::Unreported),
         ] {
             let mut usage = UsageCounts::default();
             merge_usage_value(&mut usage, &reported);

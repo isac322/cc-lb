@@ -5462,8 +5462,7 @@ mod tests {
         });
         partial.usage_seen = true;
         partial.usage.cache_read_input_tokens = 64;
-        partial.usage.cache_read_evidence =
-            Some(cc_lb_request_log::RequestCacheEvidence::Positive);
+        partial.usage.cache_read_evidence = Some(cc_lb_request_log::RequestCacheEvidence::Positive);
 
         let native = native_cache_with_usage(&partial).expect("native cache observation");
         assert_eq!(native.cached_tokens, Some(1));
@@ -5472,5 +5471,4 @@ mod tests {
             cc_lb_request_log::RequestCacheEvidence::Positive
         );
     }
-
 }

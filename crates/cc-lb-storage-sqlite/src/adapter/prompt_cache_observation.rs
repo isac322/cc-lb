@@ -257,9 +257,7 @@ impl PromptCacheObservationStore for SqliteStorage {
             .map_err(map_sqlx_error)?
             .rows_affected();
             total_removed = total_removed.saturating_add(provider_removed);
-            if removed < PURGE_BATCH_SIZE as u64
-                && provider_removed < PURGE_BATCH_SIZE as u64
-            {
+            if removed < PURGE_BATCH_SIZE as u64 && provider_removed < PURGE_BATCH_SIZE as u64 {
                 break;
             }
         }

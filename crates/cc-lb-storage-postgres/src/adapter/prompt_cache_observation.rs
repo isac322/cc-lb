@@ -256,9 +256,7 @@ impl PromptCacheObservationStore for PostgresStorage {
                 provider_deleted_count,
                 "provider cache purge deleted count",
             )?);
-            if candidate_count < PURGE_BATCH_SIZE
-                && provider_candidate_count < PURGE_BATCH_SIZE
-            {
+            if candidate_count < PURGE_BATCH_SIZE && provider_candidate_count < PURGE_BATCH_SIZE {
                 break;
             }
         }

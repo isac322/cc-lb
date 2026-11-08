@@ -9,8 +9,7 @@ use std::{error::Error, str::FromStr};
 
 use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
-    PromptCacheObservationRecord, PromptCacheObservationStore,
-    ProviderPromptCacheObservationRecord,
+    PromptCacheObservationRecord, PromptCacheObservationStore, ProviderPromptCacheObservationRecord,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
