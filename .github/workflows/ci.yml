@@ -430,8 +430,7 @@ jobs:
 
       - name: Run compile-fail contract tests
         run: |
-          mkdir -p target/llvm-cov-target/target
-          ln -sfn target/debug target/llvm-cov-target/debug
+          mkdir -p target/llvm-cov-target
           cargo llvm-cov nextest \
             --archive-file nextest-archive.tar.zst \
             -E 'test(authn_rail_typestate_contracts)' \
@@ -543,7 +542,7 @@ jobs:
 
       - name: Run test shard ${{ matrix.shard }}/4
         run: |
-          mkdir -p target/llvm-cov-target/target
+          mkdir -p target/llvm-cov-target
           ln -sfn target/debug target/llvm-cov-target/debug
           cargo llvm-cov nextest \
             --archive-file nextest-archive.tar.zst \
