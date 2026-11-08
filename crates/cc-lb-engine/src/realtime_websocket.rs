@@ -119,14 +119,17 @@ impl RealtimeStreamMetrics {
     pub fn observe_turn_boundary(&mut self, kind: RealtimeWebSocketKind, frame: &[u8]) {
         let has_boundary_marker = match kind {
             RealtimeWebSocketKind::Openai => {
-                frame.windows(b"response.created".len()).any(|window| {
-                    window == b"response.created"
-                }) || frame
-                    .windows(b"response.done".len())
-                    .any(|window| window == b"response.done")
+                frame
+                    .windows(b"response.created".len())
+                    .any(|window| window == b"response.created")
+                    || frame
+                        .windows(b"response.done".len())
+                        .any(|window| window == b"response.done")
             }
             RealtimeWebSocketKind::Gemini => {
-                frame.windows(b"modelTurn".len()).any(|window| window == b"modelTurn")
+                frame
+                    .windows(b"modelTurn".len())
+                    .any(|window| window == b"modelTurn")
                     || frame
                         .windows(b"turnComplete".len())
                         .any(|window| window == b"turnComplete")
@@ -816,15 +819,12 @@ mod tests {
                 StreamTerminationOutcome::ClientCancelled,
             ),
         ] {
-            let complete = realtime_stream_complete(
-                termination,
-                metrics.turn_complete().unwrap_or_default(),
-            );
+            let complete =
+                realtime_stream_complete(termination, metrics.turn_complete().unwrap_or_default());
             assert!(!complete);
             assert_eq!(realtime_terminal_outcome(termination, complete).0, expected);
         }
     }
-
 
     #[test]
     fn realtime_openai_usage_propagates_image_details_only_for_openai() {

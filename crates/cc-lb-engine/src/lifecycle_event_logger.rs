@@ -25,10 +25,10 @@ use std::{
     sync::Arc,
 };
 
+use crate::terminal_observer::error_codes;
 use cc_lb_lifecycle::{
     LifecycleEvent, LimitDecisionKind, RequestIoTimings, RouteFailure, TerminationReason,
 };
-use crate::terminal_observer::error_codes;
 use cc_lb_observability::UNRESOLVED_ATTRIBUTION_LABEL;
 use metrics::SharedString;
 use tokio::sync::{mpsc, oneshot};
@@ -1397,9 +1397,7 @@ mod tests {
 
         let response_body = named(&samples, "cc_lb_request_stage_duration_seconds")
             .into_iter()
-            .find(|sample| {
-                sample.labels.get("stage").map(String::as_str) == Some("response_body")
-            })
+            .find(|sample| sample.labels.get("stage").map(String::as_str) == Some("response_body"))
             .expect("websocket response-body metric");
         assert_labels(
             response_body,
