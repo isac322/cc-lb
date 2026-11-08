@@ -882,6 +882,9 @@ impl ResponsesWebSocketGateway {
         if let Some(turn) = self.turns.get_mut(&turn_id) {
             turn.connection_id = Some(connection_id);
             turn.upstream_id = Some(upstream_id);
+            if let Some(context) = turn.prepared.prompt_cache_observation_context.as_mut() {
+                context.upstream_id = upstream_id;
+            }
             turn.prepared
                 .span
                 .record("cc_lb.responses.connection_id", connection_id);
