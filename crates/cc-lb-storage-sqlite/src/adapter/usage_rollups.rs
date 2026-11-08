@@ -532,6 +532,8 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
              cost_cache_creation_5m_micros = cost_cache_creation_5m_micros + ?, \
              cost_cache_creation_1h_micros = cost_cache_creation_1h_micros + ?, \
              cost_cache_read_micros = cost_cache_read_micros + ?, \
+             cost_cache_write_30m_micros = cost_cache_write_30m_micros + ?, \
+             cost_cache_write_12h_micros = cost_cache_write_12h_micros + ?, \
              cost_components_event_count = cost_components_event_count + ?, \
              updated_at = unixepoch() \
              WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
@@ -553,9 +555,14 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
             delta.cost_cache_creation_1h_micros,
             "rollup cost_cache_creation_1h_micros",
         )?)
+        .bind(u64_to_i64(delta.cost_cache_read_micros, "rollup cost_cache_read_micros")?)
         .bind(u64_to_i64(
-            delta.cost_cache_read_micros,
-            "rollup cost_cache_read_micros",
+            delta.cost_cache_write_30m_micros,
+            "rollup cost_cache_write_30m_micros",
+        )?)
+        .bind(u64_to_i64(
+            delta.cost_cache_write_12h_micros,
+            "rollup cost_cache_write_12h_micros",
         )?)
         .bind(u64_to_i64(
             delta.cost_components_event_count,
@@ -690,6 +697,8 @@ async fn upsert_rollup_delta(
               cost_cache_creation_5m_micros = usage_rollups_v2.cost_cache_creation_5m_micros + excluded.cost_cache_creation_5m_micros, \
               cost_cache_creation_1h_micros = usage_rollups_v2.cost_cache_creation_1h_micros + excluded.cost_cache_creation_1h_micros, \
               cost_cache_read_micros = usage_rollups_v2.cost_cache_read_micros + excluded.cost_cache_read_micros, \
+              cost_cache_write_30m_micros = usage_rollups_v2.cost_cache_write_30m_micros + excluded.cost_cache_write_30m_micros, \
+              cost_cache_write_12h_micros = usage_rollups_v2.cost_cache_write_12h_micros + excluded.cost_cache_write_12h_micros, \
               cost_components_event_count = usage_rollups_v2.cost_components_event_count + excluded.cost_components_event_count, \
               updated_at = unixepoch()",
     )
@@ -746,6 +755,14 @@ async fn upsert_rollup_delta(
         "rollup cost_cache_creation_1h_micros",
     )?)
     .bind(u64_to_i64(delta.cost_cache_read_micros, "rollup cost_cache_read_micros")?)
+    .bind(u64_to_i64(
+        delta.cost_cache_write_30m_micros,
+        "rollup cost_cache_write_30m_micros",
+    )?)
+    .bind(u64_to_i64(
+        delta.cost_cache_write_12h_micros,
+        "rollup cost_cache_write_12h_micros",
+    )?)
     .bind(u64_to_i64(
         delta.cost_components_event_count,
         "rollup cost_components_event_count",
