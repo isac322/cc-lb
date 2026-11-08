@@ -316,7 +316,7 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
             .client_message(
                 auth,
                 Bytes::from_static(
-                    br#"{"type":"response.create","stream_id":"main","model":"gpt-test"}"#,
+                    br#"{"type":"response.create","stream_id":"main","model":"gpt-test","store":false,"input":"responses matrix fixture"}"#,
                 ),
             )
             .await
@@ -345,7 +345,7 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
                     .provider_message(
                         1131,
                         &Bytes::from_static(
-                            br#"{"type":"response.created","stream_id":"main","response":{"id":"resp-1131"}}"#,
+                            br#"{"type":"response.created","stream_id":"main","response":{"id":"resp-1131","store":false}}"#,
                         ),
                     )
                     .await
