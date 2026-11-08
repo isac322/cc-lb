@@ -66,9 +66,10 @@ export function CostCell({
   isPartial?: boolean;
   className?: string;
 }) {
-
   const c = costBreakdown(event);
-  const segments = costCategorySegments(c.components).filter((segment) => segment.key !== 'unattributed' && c.available[segment.key]);
+  const segments = costCategorySegments(c.components).filter(
+    (segment) => segment.key !== 'unattributed' && c.available[segment.key],
+  );
 
   const cellClassName = cx(className, COST_EDGE_CLASS);
 
