@@ -634,7 +634,11 @@ fn service_tier_from_envelope(value: &Value) -> Option<&str> {
         .or_else(|| {
             value
                 .get("response")
-                .and_then(|response| response.get("service_tier").or_else(|| response.get("serviceTier")))
+                .and_then(|response| {
+                    response
+                        .get("service_tier")
+                        .or_else(|| response.get("serviceTier"))
+                })
                 .and_then(Value::as_str)
         })
 }

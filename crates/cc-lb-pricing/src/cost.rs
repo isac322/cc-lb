@@ -155,7 +155,8 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
         .unwrap_or_default()
         .saturating_add(cache_write_12h_input.unwrap_or_default());
     if write_total > 0
-        && (cache_write_30m_input.is_none() || cache_write_12h_input.is_none()
+        && (cache_write_30m_input.is_none()
+            || cache_write_12h_input.is_none()
             || write_detail_total != write_total)
     {
         record_missing_price_field(&normalized, "cache_write_tokens_details");
@@ -212,14 +213,18 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
             0
         });
 
-    let write_30m_micros = cache_write_30m_input
-        .map(|tokens| component_cost(tokens, UsdPerMillion::from_micros_usd(
-            input_price.as_micros_usd().saturating_mul(5) / 4,
-        )));
-    let write_12h_micros = cache_write_12h_input
-        .map(|tokens| component_cost(tokens, UsdPerMillion::from_micros_usd(
-            input_price.as_micros_usd().saturating_mul(5) / 2,
-        )));
+    let write_30m_micros = cache_write_30m_input.map(|tokens| {
+        component_cost(
+            tokens,
+            UsdPerMillion::from_micros_usd(input_price.as_micros_usd().saturating_mul(5) / 4),
+        )
+    });
+    let write_12h_micros = cache_write_12h_input.map(|tokens| {
+        component_cost(
+            tokens,
+            UsdPerMillion::from_micros_usd(input_price.as_micros_usd().saturating_mul(5) / 2),
+        )
+    });
     let write_micros = cache_write_input.map(|_| {
         write_30m_micros
             .unwrap_or_default()

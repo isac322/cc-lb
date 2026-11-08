@@ -80,7 +80,10 @@ impl RollupDelta {
         self.cache_read_input_tokens = self
             .cache_read_input_tokens
             .saturating_add(event.cache_read_input_tokens.unwrap_or(0));
-        add_optional(&mut self.cache_write_input_tokens, event.cache_write_input_tokens);
+        add_optional(
+            &mut self.cache_write_input_tokens,
+            event.cache_write_input_tokens,
+        );
         add_optional(
             &mut self.cache_write_input_tokens_30m,
             event.cache_write_input_tokens_30m,
