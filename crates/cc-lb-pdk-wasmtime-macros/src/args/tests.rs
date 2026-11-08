@@ -1,6 +1,21 @@
 use super::HandlerArgs;
 
 #[test]
+fn realtime_frame_handler_parses() {
+    let args = syn::parse2::<HandlerArgs>(quote::quote!(
+        transform_realtime_frame,
+        provider = "openai",
+        wire = 2,
+        description = "OpenAI realtime frame",
+        usage = "Test only"
+    ))
+    .expect("realtime frame handler parses");
+
+    assert_eq!(args.kind, super::HandlerKind::TransformRealtimeFrame);
+    assert_eq!(args.provider, Some(super::ProviderFamily::Openai));
+}
+
+#[test]
 fn provider_qualified_handler_accepts_wire_two() {
     let args = syn::parse2::<HandlerArgs>(quote::quote!(
         filter,

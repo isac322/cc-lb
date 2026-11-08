@@ -87,6 +87,7 @@ impl Parse for HandlerArgs {
                         || path.is_ident("shape")
                         || path.is_ident("transform_response")
                         || path.is_ident("transform_sse_event")
+                        || path.is_ident("transform_realtime_frame")
                         || path.is_ident("shape_envelope_gemini") =>
                 {
                     kind = Some(HandlerKind::from_path(&path).ok_or_else(|| {
@@ -236,6 +237,7 @@ impl HandlerKind {
             "transform_sse_event" => Self::TransformSseEvent,
             "transform_realtime_frame" => Self::TransformRealtimeFrame,
             "shape_envelope_gemini" => Self::ShapeEnvelopeGemini,
+            _ => return None,
         })
     }
 
