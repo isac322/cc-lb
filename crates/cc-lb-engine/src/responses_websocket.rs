@@ -1166,20 +1166,12 @@ impl ResponsesWebSocketGateway {
                 (!value.is_empty() && value.len() <= max_len).then(|| value.to_owned())
             })
         };
-        let lane = bounded(
-            sonic_rs::get_from_slice(frame, &["stream_id"]).ok(),
-            256,
-        );
+        let lane = bounded(sonic_rs::get_from_slice(frame, &["stream_id"]).ok(), 256);
         let response_id = bounded(
             sonic_rs::get_from_slice(frame, &["response", "id"]).ok(),
             512,
         )
-        .or_else(|| {
-            bounded(
-                sonic_rs::get_from_slice(frame, &["response_id"]).ok(),
-                512,
-            )
-        });
+        .or_else(|| bounded(sonic_rs::get_from_slice(frame, &["response_id"]).ok(), 512));
         let parent_response_id = bounded(
             sonic_rs::get_from_slice(frame, &["response", "previous_response_id"]).ok(),
             512,
