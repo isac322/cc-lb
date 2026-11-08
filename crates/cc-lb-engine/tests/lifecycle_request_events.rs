@@ -343,7 +343,7 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
                     .provider_message(
                         1131,
                         &Bytes::from_static(
-                            br#"{"type":"response.created","response":{"id":"resp-1131"}}"#,
+                            br#"{"type":"response.created","stream_id":"main","response":{"id":"resp-1131"}}"#,
                         ),
                     )
                     .await
@@ -352,7 +352,7 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
                     .provider_message(
                         1131,
                         &Bytes::from_static(
-                            br#"{"type":"response.completed","response":{"id":"resp-1131","usage":{"input_tokens":2,"output_tokens":3}}}"#,
+                            br#"{"type":"response.completed","stream_id":"main","response":{"id":"resp-1131","usage":{"input_tokens":2,"output_tokens":3}}}"#,
                         ),
                     )
                     .await
