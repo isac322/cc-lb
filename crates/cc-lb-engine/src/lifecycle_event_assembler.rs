@@ -1398,11 +1398,12 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_inter_output_avg_ms = partial
                     .stream_inter_output_avg_ms
                     .or(error.stream_inter_output_avg_ms);
-                partial.provider_session_id =
-                    partial.provider_session_id.or(error.provider_session_id);
-                partial.provider_connection_id = partial
+                partial
+                    .provider_session_id
+                    .get_or_insert(error.provider_session_id);
+                partial
                     .provider_connection_id
-                    .or(error.provider_connection_id);
+                    .get_or_insert(error.provider_connection_id);
             }
         },
         LifecycleEvent::RequestLogUpstreamErrorObserved {
@@ -2047,7 +2048,7 @@ mod tests {
         assert_eq!(event.stream_first_output_ms, Some(12));
         assert_eq!(event.stream_last_chunk_ms, Some(34));
         assert_eq!(event.stream_total_ms, Some(56));
-        assert_eq!(event.stream_ping_count, Some(2));
+        assert_eq!(event.ping_count, Some(2));
         assert_eq!(event.stream_inter_output_avg_ms, Some(11));
         assert_eq!(
             event.provider_session_id.as_deref(),
