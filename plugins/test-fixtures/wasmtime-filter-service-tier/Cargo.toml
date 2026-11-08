@@ -9,6 +9,7 @@ description = "Filter service-tier fixture for cc-lb runtime integration tests."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+test = false
 
 [dependencies]
 cc-lb-pdk-wasmtime.workspace = true

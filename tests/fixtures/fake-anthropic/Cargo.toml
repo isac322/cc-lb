@@ -11,6 +11,11 @@ autotests = false
 name = "integration"
 path = "tests/all.rs"
 
+[[bin]]
+name = "fake-anthropic"
+path = "src/main.rs"
+test = false
+
 [features]
 default = []
 debug-endpoints = []

@@ -18,6 +18,63 @@ pub(crate) fn lock() -> File {
     lock_file
 }
 
+pub(crate) fn run_without_coverage_instrumentation(test_name: &str, f: impl FnOnce()) {
+    let needs_scrubbing = env::var_os("CC_LB_TRYBUILD_SCRUBBED").is_none()
+        && (env::var("RUSTFLAGS").is_ok_and(|value| value.contains("instrument-coverage"))
+            || env::var("CARGO_ENCODED_RUSTFLAGS")
+                .is_ok_and(|value| value.contains("instrument-coverage")));
+    if needs_scrubbing {
+        let exe = env::current_exe().expect("resolve current test executable");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env("CC_LB_TRYBUILD_SCRUBBED", "1");
+        if let Ok(flags) = env::var("RUSTFLAGS") {
+            let scrubbed = scrub_flags(flags.split_whitespace(), " ");
+            if scrubbed.is_empty() {
+                cmd.env_remove("RUSTFLAGS");
+            } else {
+                cmd.env("RUSTFLAGS", scrubbed);
+            }
+        }
+        if let Ok(flags) = env::var("CARGO_ENCODED_RUSTFLAGS") {
+            let scrubbed = scrub_flags(flags.split('\x1f'), "\x1f");
+            if scrubbed.is_empty() {
+                cmd.env_remove("CARGO_ENCODED_RUSTFLAGS");
+            } else {
+                cmd.env("CARGO_ENCODED_RUSTFLAGS", scrubbed);
+            }
+        }
+        let status = cmd.status().expect("spawn scrubbed trybuild subprocess");
+        assert!(
+            status.success(),
+            "scrubbed trybuild subprocess failed: {status}"
+        );
+        return;
+    }
+
+    let _lock = lock();
+    f();
+}
+
+fn scrub_flags<'a>(flags: impl IntoIterator<Item = &'a str>, separator: &str) -> String {
+    let flags = flags.into_iter().collect::<Vec<_>>();
+    let mut scrubbed = Vec::with_capacity(flags.len());
+    let mut index = 0;
+    while index < flags.len() {
+        if flags[index] == "-Cinstrument-coverage" {
+            index += 1;
+        } else if flags[index] == "-C" && flags.get(index + 1) == Some(&"instrument-coverage") {
+            index += 2;
+        } else {
+            scrubbed.push(flags[index]);
+            index += 1;
+        }
+    }
+    scrubbed.join(separator)
+}
+
 fn target_dir() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert!(

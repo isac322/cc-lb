@@ -32,12 +32,34 @@ runs:
       shell: bash
       run: |
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache" >> "$GITHUB_ENV"
         if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
           echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=0" >> "$GITHUB_ENV"
         else
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
         fi
+
+    - name: Resolve sccache cache key metadata
+      id: sccache-key
+      if: ${{ steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success' }}
+      shell: bash
+      run: |
+        rustc_vv="$(rustc -vV 2>/dev/null | tr '\n' ';' | sha256sum | cut -d' ' -f1)"
+        sccache_ver="$(sccache --version 2>/dev/null | tr ' ' '-' || echo unknown)"
+        echo "rustc_hash=${rustc_vv}" >> "$GITHUB_OUTPUT"
+        echo "sccache_ver=${sccache_ver}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore and save sccache directory
+      if: ${{ steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success' }}
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/sccache
+        key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ steps.sccache-key.outputs.rustc_hash }}-${{ steps.sccache-key.outputs.sccache_ver }}-${{ github.sha }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ runner.arch }}-${{ steps.sccache-key.outputs.rustc_hash }}-${{ steps.sccache-key.outputs.sccache_ver }}-
+          sccache-${{ runner.os }}-${{ runner.arch }}-${{ steps.sccache-key.outputs.rustc_hash }}-
+          sccache-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Validate sccache compiler wrapper
       id: sccache-health
@@ -47,6 +69,8 @@ runs:
         # The probe below starts the sccache server, which reads its config
         # only at startup; export basedirs first so the server honors it.
         export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
+        export SCCACHE_DIR="${RUNNER_TEMP}/sccache"
+        mkdir -p "$SCCACHE_DIR"
         sccache_path="$(command -v sccache || true)"
         rustc_path="$(command -v rustc || true)"
 

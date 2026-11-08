@@ -11,6 +11,9 @@ autotests = false
 name = "integration"
 path = "tests/all.rs"
 
+[lib]
+test = false
+
 [dependencies]
 cc-lb-domain.workspace = true
 bytes.workspace = true
