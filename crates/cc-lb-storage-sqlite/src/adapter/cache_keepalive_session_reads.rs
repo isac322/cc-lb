@@ -619,6 +619,8 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .bind(principal_id)
         .bind(cutoff_ms)
         .bind(principal_id)
+        .bind(cutoff_ms)
+        .bind(principal_id)
         .bind(horizon_start_ms)
         .bind(horizon_start_ms)
         .bind(principal_id)
