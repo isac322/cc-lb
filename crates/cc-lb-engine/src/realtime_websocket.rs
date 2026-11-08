@@ -1,7 +1,11 @@
 //! Connection-pinned OpenAI Realtime and Gemini Live admission/accounting.
 use crate::completion_observer::{CompletionObserver, StreamCompletionLog, StreamLatency};
+use crate::downstream_stream_drop_guard::record_stream_termination_metric;
 use crate::responses_websocket::WebSocketCandidate;
-use crate::terminal_observer::{InternalFailure, LifecycleContext, UpstreamErrorCode};
+use crate::terminal_observer::{
+    InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
+    UpstreamErrorCode,
+};
 use crate::usage_parser::{UsageCounts, merge_usage_value, merge_usage_value_for_shape};
 use bytes::Bytes;
 use cc_lb_control::api_keys::limit_engine::{LimitEngine, Reservation};
@@ -31,6 +35,31 @@ pub enum RealtimeWebSocketTermination {
     DownstreamCancelled,
 }
 
+fn realtime_terminal_outcome(
+    termination: RealtimeWebSocketTermination,
+    complete: bool,
+) -> (StreamTerminationOutcome, StreamTerminationCause) {
+    match termination {
+        RealtimeWebSocketTermination::Completed => {
+            (StreamTerminationOutcome::Completed, StreamTerminationCause::None)
+        }
+        RealtimeWebSocketTermination::ProviderClosed if complete => {
+            (StreamTerminationOutcome::Completed, StreamTerminationCause::None)
+        }
+        RealtimeWebSocketTermination::ProviderClosed => (
+            StreamTerminationOutcome::UpstreamError,
+            StreamTerminationCause::ProviderError,
+        ),
+        RealtimeWebSocketTermination::ProxyRelayError => (
+            StreamTerminationOutcome::ProxyError,
+            StreamTerminationCause::TransportError,
+        ),
+        RealtimeWebSocketTermination::DownstreamCancelled => {
+            (StreamTerminationOutcome::ClientCancelled, StreamTerminationCause::None)
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RealtimeStreamMetrics {
     started: Instant,
@@ -39,6 +68,9 @@ pub struct RealtimeStreamMetrics {
     event_count: u64,
     ping_count: u64,
     total_bytes: u64,
+    provider_session_id: Option<String>,
+    provider_connection_id: Option<String>,
+
 }
 
 impl RealtimeStreamMetrics {
@@ -50,6 +82,8 @@ impl RealtimeStreamMetrics {
             event_count: 0,
             ping_count: 0,
             total_bytes: 0,
+            provider_session_id: None,
+            provider_connection_id: None,
         }
     }
 
@@ -61,11 +95,50 @@ impl RealtimeStreamMetrics {
         self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
     }
 
+    /// Capture bounded provider-native setup/session identifiers without
+    /// retaining arbitrary frame payloads.
+    pub fn observe_provider_metadata(&mut self, kind: RealtimeWebSocketKind, frame: &[u8]) {
+        let Ok(value) = sonic_rs::from_slice::<Value>(frame) else {
+            return;
+        };
+        let bounded = |value: Option<&Value>| {
+            let value = value.and_then(Value::as_str)?;
+            (!value.is_empty() && value.len() <= 512).then(|| value.to_owned())
+        };
+        match kind {
+            RealtimeWebSocketKind::Openai
+                if value.get("type").and_then(Value::as_str) == Some("session.created") =>
+            {
+                self.provider_session_id =
+                    bounded(value.pointer("/session/id")).or(self.provider_session_id.take());
+                self.provider_connection_id = bounded(value.pointer("/session/connection_id"))
+                    .or(self.provider_connection_id.take());
+            }
+            RealtimeWebSocketKind::Gemini => {
+                self.provider_session_id = bounded(value.pointer("/setupComplete/sessionId"))
+                    .or_else(|| bounded(value.pointer("/setupComplete/session_id")))
+                    .or_else(|| bounded(value.pointer("/sessionResumptionUpdate/newSessionId")))
+                    .or(self.provider_session_id.take());
+                self.provider_connection_id = bounded(value.pointer("/setupComplete/connectionId"))
+                    .or_else(|| bounded(value.pointer("/setupComplete/connection_id")))
+                    .or(self.provider_connection_id.take());
+            }
+            _ => {}
+        }
+    }
+
     pub fn observe_ping(&mut self) {
         self.ping_count = self.ping_count.saturating_add(1);
     }
-
     fn latency(&self, status: u16) -> StreamLatency {
+        let stream_total_ms =
+            self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let inter_output_avg_ms = match (self.first_frame_ms, self.last_frame_ms) {
+            (Some(first), Some(last)) if self.event_count > 1 => {
+                Some(last.saturating_sub(first) / (self.event_count - 1))
+            }
+            _ => None,
+        };
         StreamLatency {
             status,
             stream_first_chunk_ms: self.first_frame_ms,
@@ -75,8 +148,16 @@ impl RealtimeStreamMetrics {
             stream_last_content_delta_ms: None,
             stream_message_stop_ms: None,
             stream_last_chunk_ms: self.last_frame_ms,
-            stream_total_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-            sse_event_count: self.event_count,
+            stream_first_output_ms: self.first_frame_ms,
+            stream_last_output_ms: self.last_frame_ms,
+            stream_event_count: self.event_count,
+            stream_inter_output_avg_ms: inter_output_avg_ms,
+            provider_session_id: self.provider_session_id.clone(),
+            provider_connection_id: self.provider_connection_id.clone(),
+            stream_total_ms,
+            // Realtime and Gemini Live frames are not SSE events or
+            // Anthropic content deltas. Keep those legacy counters at zero.
+            sse_event_count: 0,
             content_delta_count: 0,
             ping_count: self.ping_count,
             inter_token_avg_ms: None,
@@ -202,12 +283,18 @@ impl RealtimeWebSocketSession {
         termination: RealtimeWebSocketTermination,
     ) {
         let status = StatusCode::SWITCHING_PROTOCOLS;
+        // A provider close is successful only after its protocol completion
+        // marker reached the usage worker. A transport close by itself is an
+        // incomplete upstream termination.
         let complete = usage.complete
-            || matches!(
-                termination,
-                RealtimeWebSocketTermination::Completed
-                    | RealtimeWebSocketTermination::ProviderClosed
-            );
+            || matches!(termination, RealtimeWebSocketTermination::Completed);
+        let (outcome, cause) = realtime_terminal_outcome(termination, complete);
+        record_stream_termination_metric(
+            outcome,
+            cause,
+            &self.candidate.upstream_name,
+            Some(&self.model),
+        );
         if let Some(observer) = &self.observer {
             if let Some(counts) = usage.counts.as_ref() {
                 observer.set_usage_counts(counts, complete);
@@ -234,12 +321,17 @@ impl RealtimeWebSocketSession {
                         usage_present: usage.counts.is_some(),
                         sse_event_count: latency.sse_event_count,
                         body_bytes: Some(latency.total_bytes),
-                        body_chunk_count: Some(latency.sse_event_count),
-                        first_body_chunk_ms: latency.stream_first_chunk_ms,
-                        stream_first_content_delta_ms: latency.stream_first_content_delta_ms,
-                        stream_last_content_delta_ms: latency.stream_last_content_delta_ms,
+                        // WebSocket output frames use the provider-neutral
+                        // chunk count; never expose them as Anthropic SSE
+                        // events or content deltas.
+                        body_chunk_count: Some(latency.stream_event_count),
+                        first_body_chunk_ms: latency.stream_first_output_ms,
+                        stream_last_chunk_ms: latency.stream_last_output_ms,
                         stream_total_ms: Some(latency.stream_total_ms),
                         ping_count: Some(latency.ping_count),
+                        stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
+                        provider_session_id: latency.provider_session_id.clone(),
+                        provider_connection_id: latency.provider_connection_id.clone(),
                         ..Default::default()
                     })
                 } else {
@@ -282,9 +374,14 @@ impl RealtimeWebSocketSession {
                         },
                     });
                 }
-                RealtimeWebSocketTermination::Completed
-                | RealtimeWebSocketTermination::ProviderClosed => {
+                RealtimeWebSocketTermination::Completed => {
                     observer.set_success_status(status);
+                }
+                RealtimeWebSocketTermination::ProviderClosed if complete => {
+                    observer.set_success_status(status);
+                }
+                RealtimeWebSocketTermination::ProviderClosed => {
+                    observer.set_upstream_error(status, UpstreamErrorCode::StreamError);
                 }
             }
             observer.finish();
@@ -603,9 +700,76 @@ mod tests {
         metrics.observe_ping();
         metrics.observe_frame(b"more");
         let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
-        assert_eq!(latency.sse_event_count, 2);
+        assert_eq!(latency.sse_event_count, 0);
+        assert_eq!(latency.content_delta_count, 0);
+        assert_eq!(latency.stream_event_count, 2);
+        assert!(latency.stream_first_output_ms.is_some());
+        assert!(latency.stream_last_output_ms.is_some());
+        assert!(latency.stream_inter_output_avg_ms.is_some());
         assert_eq!(latency.ping_count, 1);
         assert_eq!(latency.total_bytes, 9);
         assert_eq!(latency.status, 101);
+    }
+
+    #[test]
+    fn realtime_provider_metadata_is_bounded_and_protocol_specific() {
+        let mut metrics = RealtimeStreamMetrics::new();
+        metrics.observe_provider_metadata(
+            RealtimeWebSocketKind::Openai,
+            br#"{"type":"session.created","session":{"id":"rt-session","connection_id":"rt-connection"}}"#,
+        );
+        let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("rt-session"));
+        assert_eq!(
+            latency.provider_connection_id.as_deref(),
+            Some("rt-connection")
+        );
+
+        let mut gemini = RealtimeStreamMetrics::new();
+        gemini.observe_provider_metadata(
+            RealtimeWebSocketKind::Gemini,
+            br#"{"setupComplete":{"sessionId":"live-session","connectionId":"live-connection"}}"#,
+        );
+        let latency = gemini.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("live-session"));
+        assert_eq!(
+            latency.provider_connection_id.as_deref(),
+            Some("live-connection")
+        );
+
+        let mut bounded = RealtimeStreamMetrics::new();
+        bounded.observe_provider_metadata(
+            RealtimeWebSocketKind::Openai,
+            format!(
+                r#"{{"type":"session.created","session":{{"id":"{}"}}}}"#,
+                "x".repeat(513)
+            )
+            .as_bytes(),
+        );
+        assert!(bounded.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16()).provider_session_id.is_none());
+    }
+    #[test]
+    fn realtime_terminal_outcome_requires_provider_completion_marker() {
+        assert_eq!(
+            realtime_terminal_outcome(RealtimeWebSocketTermination::ProviderClosed, false),
+            (
+                StreamTerminationOutcome::UpstreamError,
+                StreamTerminationCause::ProviderError
+            )
+        );
+        assert_eq!(
+            realtime_terminal_outcome(RealtimeWebSocketTermination::ProviderClosed, true),
+            (
+                StreamTerminationOutcome::Completed,
+                StreamTerminationCause::None
+            )
+        );
+        assert_eq!(
+            realtime_terminal_outcome(RealtimeWebSocketTermination::DownstreamCancelled, false),
+            (
+                StreamTerminationOutcome::ClientCancelled,
+                StreamTerminationCause::None
+            )
+        );
     }
 }

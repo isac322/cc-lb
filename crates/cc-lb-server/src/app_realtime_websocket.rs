@@ -428,6 +428,7 @@ async fn relay_realtime_websocket(
                         Some(Ok(message @ UpstreamMessage::Text(_))) => {
                             if let UpstreamMessage::Text(frame) = &message {
                                 metrics.observe_frame(frame.as_bytes());
+                                metrics.observe_provider_metadata(kind, frame.as_bytes());
                                 if kind.may_report_usage(frame.as_bytes()) {
                                     let _ = usage_tx.send(Bytes::from(frame.clone()));
                                 }
@@ -437,6 +438,7 @@ async fn relay_realtime_websocket(
                         Some(Ok(message @ UpstreamMessage::Binary(_))) => {
                             if let UpstreamMessage::Binary(frame) = &message {
                                 metrics.observe_frame(frame);
+                                metrics.observe_provider_metadata(kind, frame);
                                 if kind.may_report_usage(frame) {
                                     let _ = usage_tx.send(frame.clone());
                                 }

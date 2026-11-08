@@ -44,13 +44,22 @@ impl Lifecycle {
             completion_observer,
             request_id,
         } = observation;
-        let session_id = headers
-            .get("x-claude-code-session-id")
-            .or_else(|| headers.get("x-claude-session-id"))
-            .or_else(|| headers.get("x-session-affinity"))
-            .or_else(|| headers.get("x-session-id"))
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+        // Realtime setup frames are provider control payloads, not the
+        // request-body formats handled by the shared metadata fallbacks.
+        // Header identity is still parsed after authentication, with the
+        // canonical twelve-header precedence and 512-byte bounds.
+        let identity = request_identity_metadata(headers, None);
+        let thread_id = identity.thread_id.clone();
+        let observed_session_id = identity.observed_session_id.clone();
+        let client_app = identity.client_app.clone();
+        let session_id_source = identity.session_id_source.clone();
+        let request_kind = Some(
+            match kind {
+                RealtimeWebSocketKind::Openai => "realtime",
+                RealtimeWebSocketKind::Gemini => "live",
+            }
+            .to_owned(),
+        );
         if let Some(observer) = observer.as_ref() {
             observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: observer.event_id().to_owned(),
@@ -65,20 +74,17 @@ impl Lifecycle {
                     reasoning_effort: None,
                     cache_breakpoints: Vec::new(),
                     cache_prefix_hash: None,
-                    thread_id: session_id.clone(),
-                    observed_session_id: session_id.clone(),
-                    request_kind: Some(
-                        match kind {
-                            RealtimeWebSocketKind::Openai => "realtime",
-                            RealtimeWebSocketKind::Gemini => "live",
-                        }
-                        .to_owned(),
-                    ),
+                    thread_id,
+                    observed_session_id,
+                    request_kind,
+                    // These fields describe Claude's request ancestry. Live
+                    // protocols must not inherit values from similarly named
+                    // headers supplied by a non-Claude client.
                     claude_agent_id: None,
                     claude_parent_agent_id: None,
                     parent_session_id: None,
-                    client_app: None,
-                    session_id_source: session_id.as_ref().map(|_| "header".to_owned()),
+                    client_app,
+                    session_id_source,
                     message_id: None,
                     message_index: None,
                     message_count: None,
@@ -340,6 +346,12 @@ impl Lifecycle {
                     provider = ?kind.provider(),
                     principal_id = %principal.id,
                     model = %model.unwrap_or_default(),
+                    stream_first_output_ms = tracing::field::Empty,
+                    stream_last_output_ms = tracing::field::Empty,
+                    stream_event_count = tracing::field::Empty,
+                    stream_inter_output_avg_ms = tracing::field::Empty,
+                    provider_session_id = tracing::field::Empty,
+                    provider_connection_id = tracing::field::Empty,
                 ),
                 reservation: limit.as_mut().and_then(|limit| limit.reservation.take()),
                 limit_engine: self.limit_engine.clone(),
@@ -379,4 +391,36 @@ mod tests {
         assert!(realtime_use_image_rates(RealtimeWebSocketKind::Openai));
         assert!(!realtime_use_image_rates(RealtimeWebSocketKind::Gemini));
     }
+
+    #[test]
+    fn realtime_identity_uses_shared_bounded_header_precedence() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", HeaderValue::from_static("fallback"));
+        headers.insert("x-opencode-session", HeaderValue::from_static("opencode"));
+        headers.insert("x-claude-session-id", HeaderValue::from_static("claude"));
+        headers.insert("x-app", HeaderValue::from_static("voice-client"));
+        headers.insert("x-claude-code-agent-id", HeaderValue::from_static("not-claude"));
+
+        let identity = request_identity_metadata(&headers, None);
+        assert_eq!(identity.thread_id.as_deref(), Some("claude"));
+        assert_eq!(identity.observed_session_id.as_deref(), Some("claude"));
+        assert_eq!(
+            identity.session_id_source.as_deref(),
+            Some("x-claude-session-id")
+        );
+        assert_eq!(identity.client_app.as_deref(), Some("voice-client"));
+        assert_eq!(identity.claude_agent_id.as_deref(), Some("not-claude"));
+
+        headers.insert(
+            "x-claude-session-id",
+            HeaderValue::from_str(&"x".repeat(MAX_IDENTITY_VALUE_BYTES + 1)).unwrap(),
+        );
+        let identity = request_identity_metadata(&headers, None);
+        assert_eq!(identity.thread_id.as_deref(), Some("opencode"));
+        assert_eq!(
+            identity.session_id_source.as_deref(),
+            Some("x-opencode-session")
+        );
+    }
+
 }

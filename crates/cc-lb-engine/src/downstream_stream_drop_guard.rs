@@ -36,6 +36,29 @@ impl StreamTerminationAttribution {
     }
 }
 
+/// Emit the shared terminal metric for transports that do not use the HTTP
+/// body drop guard (currently realtime WebSockets). Callers own the terminal
+/// state machine and must invoke this exactly once.
+pub(crate) fn record_stream_termination_metric(
+    outcome: StreamTerminationOutcome,
+    cause: StreamTerminationCause,
+    upstream: &str,
+    model: Option<&str>,
+) {
+    let model = model.map_or(
+        SharedString::const_str(UNRESOLVED_ATTRIBUTION_LABEL),
+        SharedString::from,
+    );
+    metrics::counter!(
+        "cc_lb_stream_terminations_total",
+        "outcome" => outcome.as_str(),
+        "cause" => cause.as_str(),
+        "upstream" => upstream.to_owned(),
+        "model" => model
+    )
+    .increment(1);
+}
+
 struct StreamCompletionOwner {
     keepalive: LifecycleKeepalive,
     context: LifecycleKeepaliveContext,
@@ -372,18 +395,12 @@ impl DownstreamStreamDropGuard {
         }
         // `finalized` makes this the only emission for the guard, so the
         // attribution strings move into the label set instead of being cloned.
-        let model = self.attribution.model.take().map_or(
-            SharedString::const_str(UNRESOLVED_ATTRIBUTION_LABEL),
-            SharedString::from,
+        record_stream_termination_metric(
+            outcome,
+            cause,
+            &std::mem::take(&mut self.attribution.upstream),
+            self.attribution.model.take().as_deref(),
         );
-        metrics::counter!(
-            "cc_lb_stream_terminations_total",
-            "outcome" => outcome.as_str(),
-            "cause" => cause.as_str(),
-            "upstream" => std::mem::take(&mut self.attribution.upstream),
-            "model" => model
-        )
-        .increment(1);
     }
 }
 

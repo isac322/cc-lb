@@ -292,6 +292,9 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "request event ping_count"))
             .transpose()?,
+        stream_inter_output_avg_ms: None,
+        provider_session_id: None,
+        provider_connection_id: None,
         inter_token_avg_ms: row
             .try_get::<Option<i64>, _>("inter_token_avg_ms")
             .map_err(map_sqlx_error)?

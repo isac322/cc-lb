@@ -87,6 +87,14 @@ pub struct StreamSuccess {
     pub content_delta_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ping_count: Option<u64>,
+    /// Provider-neutral average time between consecutive output frames.
+    /// Anthropic SSE streams continue to use `inter_token_avg_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_inter_output_avg_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inter_token_avg_ms: Option<u64>,
 }

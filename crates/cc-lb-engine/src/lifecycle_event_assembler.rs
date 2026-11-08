@@ -225,9 +225,11 @@ struct Partial {
     stream_total_ms: Option<u64>,
     stream_content_delta_count: Option<u64>,
     stream_ping_count: Option<u64>,
+    stream_inter_output_avg_ms: Option<u64>,
+    provider_session_id: Option<String>,
+    provider_connection_id: Option<String>,
     stream_inter_token_avg_ms: Option<u64>,
 }
-
 struct TerminationInfo {
     reason: TerminationReason,
     client_status: u16,
@@ -1371,6 +1373,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_total_ms = success.stream_total_ms;
                 partial.stream_content_delta_count = success.content_delta_count;
                 partial.stream_ping_count = success.ping_count;
+                partial.stream_inter_output_avg_ms = success.stream_inter_output_avg_ms;
+                partial.provider_session_id = success.provider_session_id;
+                partial.provider_connection_id = success.provider_connection_id;
                 partial.stream_inter_token_avg_ms = success.inter_token_avg_ms;
             }
             Err(error) => {
@@ -1600,6 +1605,9 @@ fn finalize_base(
         stream_total_ms: partial.stream_total_ms,
         content_delta_count: partial.stream_content_delta_count,
         ping_count: partial.stream_ping_count,
+        stream_inter_output_avg_ms: partial.stream_inter_output_avg_ms,
+        provider_session_id: partial.provider_session_id,
+        provider_connection_id: partial.provider_connection_id,
         inter_token_avg_ms: partial.stream_inter_token_avg_ms,
         routing_trace,
         internal_errors: partial.internal_errors.clone(),
