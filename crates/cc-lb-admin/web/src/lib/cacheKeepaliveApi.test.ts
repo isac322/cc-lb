@@ -129,9 +129,16 @@ describe('CacheKeepaliveRowSchema malformed input', () => {
     );
   });
 
-  it('rejects a row with an out-of-domain ttl', () => {
-    const bad: unknown = { ...validRow, ttl: '30m' };
-    expect(CacheKeepaliveRowSchema.safeParse(bad).success).toBe(false);
+  it('accepts OpenAI retention TTLs and rejects unknown values', () => {
+    expect(
+      CacheKeepaliveRowSchema.safeParse({ ...validRow, ttl: '30m' }).success,
+    ).toBe(true);
+    expect(
+      CacheKeepaliveRowSchema.safeParse({ ...validRow, ttl: '12h' }).success,
+    ).toBe(true);
+    expect(
+      CacheKeepaliveRowSchema.safeParse({ ...validRow, ttl: '24h' }).success,
+    ).toBe(false);
   });
 
   it('accepts a null ttl for a decision-backed row', () => {

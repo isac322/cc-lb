@@ -48,19 +48,58 @@ fn realtime_request(address: SocketAddr, path: &str) -> http::Request<()> {
 
 #[tokio::test]
 async fn realtime_and_live_reject_authentication_before_upgrade_or_connect() {
-    for path in ["/openai/v1/realtime?model=gpt-realtime", "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("provider listener");
+    for (path, provider) in [
+        (
+            "/openai/v1/realtime?model=gpt-realtime",
+            cc_lb_domain::Provider::Openai,
+        ),
+        (
+            "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+            cc_lb_domain::Provider::Gemini,
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("provider listener");
         let address = listener.local_addr().unwrap();
-        let mut record = websocket_upstream(1, "provider", Url::parse(&format!("http://{address}/")).unwrap());
-        if path.starts_with("/gemini") { record.kind = UpstreamKind::GeminiApiKey; }
+        let mut record = websocket_upstream(
+            1,
+            "provider",
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        );
+        if provider == cc_lb_domain::Provider::Gemini {
+            record.kind = UpstreamKind::GeminiApiKey;
+        }
         let router = websocket_test_router(vec![record], TerminalStrategy::FirstPick).await;
         let (proxy, task) = spawn_proxy_router(router).await;
         let mut request = realtime_request(proxy, path);
         request.headers_mut().remove("x-api-key");
-        let error = tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await.unwrap().unwrap_err();
-        let tokio_tungstenite::tungstenite::Error::Http(response) = error else { panic!("HTTP auth rejection expected") };
+        let error = tokio::time::timeout(Duration::from_secs(5), connect_async(request))
+            .await
+            .unwrap()
+            .unwrap_err();
+        let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+            panic!("HTTP auth rejection expected")
+        };
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert!(listener.accept().now_or_never().is_none(), "unauthenticated caller never connects to provider");
+        let body: serde_json::Value =
+            serde_json::from_slice(response.body().as_ref().expect("error body"))
+                .expect("auth response is JSON");
+        match provider {
+            cc_lb_domain::Provider::Openai => {
+                assert!(body["error"].is_object());
+                assert!(body.get("type").is_none());
+            }
+            cc_lb_domain::Provider::Gemini => {
+                assert!(body["error"]["code"].is_u64());
+                assert!(body["error"]["status"].is_string());
+            }
+            cc_lb_domain::Provider::Anthropic => unreachable!("fixture covers both routes"),
+        }
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "unauthenticated caller never connects to provider"
+        );
         task.abort();
     }
 }

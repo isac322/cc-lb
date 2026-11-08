@@ -305,6 +305,7 @@ struct Turn {
 /// dispatches, not already admitted provider output.
 pub struct ResponsesWebSocketGateway {
     lifecycle: Arc<Lifecycle>,
+    provider: Option<cc_lb_domain::Provider>,
     headers: HeaderMap,
     query: Option<String>,
     byte_cap: usize,
@@ -319,7 +320,6 @@ pub struct ResponsesWebSocketGateway {
     connections: HashMap<u64, Uuid>,
     successors: HashMap<String, u64>,
 }
-
 impl ResponsesWebSocketGateway {
     pub fn new(
         lifecycle: Arc<Lifecycle>,
@@ -330,6 +330,7 @@ impl ResponsesWebSocketGateway {
     ) -> Self {
         Self {
             lifecycle,
+            provider: None,
             headers: original_headers,
             query: None,
             byte_cap: budget_bytes,
@@ -356,6 +357,11 @@ impl ResponsesWebSocketGateway {
         self
     }
 
+    pub fn with_provider(mut self, provider: Option<cc_lb_domain::Provider>) -> Self {
+        self.provider = provider;
+        self
+    }
+
     fn successor_for_parent(&self, parent: &str) -> Option<u64> {
         self.successors.get(parent).copied().or_else(|| {
             self.turns.iter().find_map(|(id, turn)| {
@@ -372,7 +378,13 @@ impl ResponsesWebSocketGateway {
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
-        let _ = reject_unauthenticated(error, observer.as_ref());
+        let _ = crate::authn_rail::reject_unauthenticated_for_route(
+            error,
+            &http::Method::GET,
+            "/v1/responses",
+            self.provider,
+            observer.as_ref(),
+        );
         WebSocketError::new(
             error.http_status(),
             "authentication_error",
@@ -2162,6 +2174,30 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
         cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_read_evidence: match usage.cache_read_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
+        cache_creation_evidence: match usage.cache_creation_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
         thinking_tokens: usage.thinking_tokens,
         tool_use_prompt_tokens: usage.tool_use_prompt_tokens,
         web_search_requests: usage.web_search_requests,

@@ -55,6 +55,8 @@ pub(super) fn ttl_name(ttl: CacheTtl) -> &'static str {
     match ttl {
         CacheTtl::Ttl5m => "5m",
         CacheTtl::Ttl1h => "1h",
+        CacheTtl::Ttl30m => "30m",
+        CacheTtl::Ttl12h => "12h",
     }
 }
 

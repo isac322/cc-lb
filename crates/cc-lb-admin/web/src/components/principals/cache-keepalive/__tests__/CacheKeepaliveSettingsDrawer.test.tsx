@@ -48,6 +48,7 @@ const mockPrincipal: queries.Principal = {
     snapshot_max_bytes: 256000,
     min_cache_tokens: 12345,
     classifier: {
+      openai_responses_enabled: true,
       extra_wait_for_user_tools: ['custom_tool'],
       treat_end_turn_as_ambiguous: true,
     },
@@ -231,11 +232,40 @@ describe('CacheKeepaliveSettingsDrawer', () => {
           snapshot_max_bytes: 256000,
           min_cache_tokens: 12345,
           classifier: {
+            openai_responses_enabled: true,
             extra_wait_for_user_tools: ['custom_tool'],
             treat_end_turn_as_ambiguous: true,
           },
         },
       },
+      expect.any(Object),
+    );
+  });
+
+  it('enables OpenAI Responses keepalive from the default-off toggle', () => {
+    const principal = freshPrincipal();
+    principal.cache_keepalive!.classifier!.openai_responses_enabled = false;
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={principal}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole('switch', {
+        name: 'OpenAI Responses GPT-5.6+ keepalive',
+      }),
+    );
+    fireEvent.click(screen.getAllByText('Save changes').at(-1)!);
+    expect(mutateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cache_keepalive: expect.objectContaining({
+          classifier: expect.objectContaining({
+            openai_responses_enabled: true,
+          }),
+        }),
+      }),
       expect.any(Object),
     );
   });
@@ -480,6 +510,9 @@ describe('CacheKeepaliveSettingsDrawer', () => {
         cache_keepalive: expect.objectContaining({
           refresh_lead_time_5m_secs: 77,
           refresh_lead_time_1h_secs: 301,
+          classifier: expect.objectContaining({
+            openai_responses_enabled: true,
+          }),
         }),
       }),
       expect.any(Object),

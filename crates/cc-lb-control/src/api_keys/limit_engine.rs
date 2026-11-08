@@ -22,7 +22,7 @@ use crate::api_keys::concurrent_guard::{
 use crate::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use crate::api_keys::types::{Limit, LimitKind};
 use cc_lb_clock::{ClockHandle, unix_secs};
-
+use cc_lb_domain::Provider;
 /// Stable identifier for a live [`Reservation`].
 ///
 /// The engine stores reservation state by this ID so out-of-band consumers
@@ -785,7 +785,16 @@ impl LimitEngine {
         true
     }
 
-    pub fn headers_for(&self, key_id: &str, principal_id: &str) -> Vec<(String, String)> {
+    /// Format the local request/token windows for a provider's response.
+    ///
+    /// Gemini deliberately uses a neutral `x-cc-lb-ratelimit-*` namespace:
+    /// these values describe proxy-enforced limits, not a provider contract.
+    pub fn headers_for_provider(
+        &self,
+        provider: Provider,
+        key_id: &str,
+        principal_id: &str,
+    ) -> Vec<(String, String)> {
         let Some(limits) = self
             .inner
             .effective_limits
@@ -796,6 +805,31 @@ impl LimitEngine {
             return Vec::new();
         };
 
+        self.format_provider_headers(provider, key_id, &limits)
+    }
+
+    /// Format local request/token windows from the current record and defaults.
+    ///
+    /// Unlike [`Self::headers_for_provider`], this does not consult or update the
+    /// successful-admission cache, so rejected reservations can be formatted
+    /// without changing the limits reported for an admitted request.
+    pub fn headers_for_provider_record(
+        &self,
+        provider: Provider,
+        key_id: &str,
+        record: &StoredApiKeyRecord,
+        default_limits: &[Limit],
+    ) -> Vec<(String, String)> {
+        let limits = effective_limits(record, default_limits);
+        self.format_provider_headers(provider, key_id, &limits)
+    }
+
+    fn format_provider_headers(
+        &self,
+        provider: Provider,
+        key_id: &str,
+        limits: &[Limit],
+    ) -> Vec<(String, String)> {
         let now_sec = unix_secs(self.inner.clock.now());
         let mut headers = Vec::new();
         let mut emitted_requests = false;
@@ -806,14 +840,14 @@ impl LimitEngine {
                 break;
             }
 
-            let prefix = match limit.kind {
+            let kind_name = match limit.kind {
                 LimitKind::Requests if !emitted_requests => {
                     emitted_requests = true;
-                    "anthropic-ratelimit-requests"
+                    "requests"
                 }
                 LimitKind::TotalTokens if !emitted_tokens => {
                     emitted_tokens = true;
-                    "anthropic-ratelimit-tokens"
+                    "tokens"
                 }
                 _ => continue,
             };
@@ -823,12 +857,39 @@ impl LimitEngine {
                 self.current_total_and_oldest(key_id, limit.kind, window_sec, now_sec);
             let remaining = limit.cap_micros.saturating_sub(total).max(0);
             let reset_sec = oldest.unwrap_or(now_sec).saturating_add(window_sec);
-            headers.push((format!("{prefix}-remaining"), remaining.to_string()));
-            headers.push((format!("{prefix}-limit"), limit.cap_micros.to_string()));
-            headers.push((format!("{prefix}-reset"), unix_to_iso8601(reset_sec)));
+            match provider {
+                Provider::Anthropic => {
+                    let prefix = format!("anthropic-ratelimit-{kind_name}");
+                    headers.push((format!("{prefix}-remaining"), remaining.to_string()));
+                    headers.push((format!("{prefix}-limit"), limit.cap_micros.to_string()));
+                    headers.push((format!("{prefix}-reset"), unix_to_iso8601(reset_sec)));
+                }
+                Provider::Openai | Provider::Gemini => {
+                    let prefix = match provider {
+                        Provider::Openai => "x-ratelimit",
+                        Provider::Gemini => "x-cc-lb-ratelimit",
+                        Provider::Anthropic => unreachable!(),
+                    };
+                    let reset = format!("{}s", reset_sec.saturating_sub(now_sec));
+                    headers.push((
+                        format!("{prefix}-remaining-{kind_name}"),
+                        remaining.to_string(),
+                    ));
+                    headers.push((
+                        format!("{prefix}-limit-{kind_name}"),
+                        limit.cap_micros.to_string(),
+                    ));
+                    headers.push((format!("{prefix}-reset-{kind_name}"), reset));
+                }
+            }
         }
 
         headers
+    }
+
+    /// Backward-compatible Anthropic formatter for non-HTTP accounting probes.
+    pub fn headers_for(&self, key_id: &str, principal_id: &str) -> Vec<(String, String)> {
+        self.headers_for_provider(Provider::Anthropic, key_id, principal_id)
     }
 }
 
@@ -1665,6 +1726,397 @@ mod tests {
 
         assert_eq!(header("anthropic-ratelimit-requests-limit"), Some("10"));
         assert_eq!(header("anthropic-ratelimit-requests-remaining"), Some("7"));
+    }
+    fn formatter_fixture(limits: Vec<Limit>) -> (Arc<LimitEngine>, Arc<cc_lb_clock::TestClock>) {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000));
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        engine
+            .inner
+            .effective_limits
+            .write()
+            .insert(("key-a".to_owned(), "principal-a".to_owned()), limits);
+        (engine, clock)
+    }
+
+    fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn provider_formatter_uses_anthropic_iso_contract() {
+        let (engine, _) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 120,
+                cap_micros: 20,
+            },
+        ]);
+
+        let headers = engine.headers_for_provider(Provider::Anthropic, "key-a", "principal-a");
+
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-requests-reset"),
+            Some("2023-11-14T22:14:20Z")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-requests-limit"),
+            Some("10")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-tokens-limit"),
+            Some("20")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-tokens-reset"),
+            Some("2023-11-14T22:15:20Z")
+        );
+        assert!(headers.iter().all(|(name, _)| !name.starts_with("x-")));
+    }
+
+    #[test]
+    fn provider_formatter_reports_anthropic_remaining_and_oldest_bucket_reset() {
+        let (engine, clock) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 120,
+                cap_micros: 20,
+            },
+        ]);
+        let now = unix_secs(clock.now());
+        engine.record_amount("key-a", LimitKind::Requests, 60, 3, now);
+        engine.record_amount("key-a", LimitKind::TotalTokens, 120, 5, now);
+        clock.advance_secs(10);
+
+        let headers = engine.headers_for_provider(Provider::Anthropic, "key-a", "principal-a");
+
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-requests-remaining"),
+            Some("7")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-tokens-remaining"),
+            Some("15")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-requests-reset"),
+            Some("2023-11-14T22:14:20Z")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-tokens-reset"),
+            Some("2023-11-14T22:15:00Z")
+        );
+    }
+
+    #[test]
+    fn provider_formatter_emits_only_requests_tokens_or_nothing() {
+        let (engine, _) = formatter_fixture(vec![Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 10,
+        }]);
+
+        let anthropic = engine.headers_for_provider(Provider::Anthropic, "key-a", "principal-a");
+        assert_eq!(anthropic.len(), 3);
+        assert!(
+            anthropic
+                .iter()
+                .all(|(name, _)| name.starts_with("anthropic-ratelimit-requests-"))
+        );
+        let openai = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(openai.len(), 3);
+        assert!(
+            openai
+                .iter()
+                .all(|(name, _)| name.starts_with("x-ratelimit-") && name.ends_with("-requests"))
+        );
+        let gemini = engine.headers_for_provider(Provider::Gemini, "key-a", "principal-a");
+        assert_eq!(gemini.len(), 3);
+        assert!(gemini.iter().all(|(name, _)| {
+            name.starts_with("x-cc-lb-ratelimit-") && name.ends_with("-requests")
+        }));
+
+        let (engine, _) = formatter_fixture(vec![Limit {
+            kind: LimitKind::TotalTokens,
+            window_secs: 60,
+            cap_micros: 20,
+        }]);
+        let anthropic = engine.headers_for_provider(Provider::Anthropic, "key-a", "principal-a");
+        assert_eq!(anthropic.len(), 3);
+        assert!(
+            anthropic
+                .iter()
+                .all(|(name, _)| name.starts_with("anthropic-ratelimit-tokens-"))
+        );
+        let openai = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(openai.len(), 3);
+        assert!(
+            openai
+                .iter()
+                .all(|(name, _)| name.starts_with("x-ratelimit-") && name.ends_with("-tokens"))
+        );
+        let gemini = engine.headers_for_provider(Provider::Gemini, "key-a", "principal-a");
+        assert_eq!(gemini.len(), 3);
+        assert!(gemini.iter().all(|(name, _)| {
+            name.starts_with("x-cc-lb-ratelimit-") && name.ends_with("-tokens")
+        }));
+
+        let (engine, _) = formatter_fixture(Vec::new());
+        assert!(
+            engine
+                .headers_for_provider(Provider::Anthropic, "key-a", "principal-a")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .headers_for_provider(Provider::Openai, "key-a", "principal-a")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .headers_for_provider(Provider::Gemini, "key-a", "principal-a")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn provider_formatter_uses_openai_and_gemini_duration_contracts() {
+        let (engine, clock) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 120,
+                cap_micros: 20,
+            },
+        ]);
+        let now = unix_secs(clock.now());
+        engine.record_amount("key-a", LimitKind::Requests, 60, 15, now);
+        engine.record_amount("key-a", LimitKind::TotalTokens, 120, 5, now);
+        clock.advance_secs(10);
+
+        let openai = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-remaining-requests"),
+            Some("0")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-limit-tokens"),
+            Some("20")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-reset-requests"),
+            Some("50s")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-reset-tokens"),
+            Some("90s")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-remaining-tokens"),
+            Some("15")
+        );
+        assert!(
+            openai
+                .iter()
+                .all(|(name, _)| !name.starts_with("anthropic-"))
+        );
+
+        let gemini = engine.headers_for_provider(Provider::Gemini, "key-a", "principal-a");
+        assert_eq!(
+            header_value(&gemini, "x-cc-lb-ratelimit-reset-requests"),
+            Some("50s")
+        );
+        assert_eq!(
+            header_value(&gemini, "x-cc-lb-ratelimit-reset-tokens"),
+            Some("90s")
+        );
+        assert!(
+            gemini
+                .iter()
+                .all(|(name, _)| !name.starts_with("anthropic-"))
+        );
+    }
+
+    #[test]
+    fn provider_formatter_clamps_reset_at_now_and_omits_unsupported_duplicates() {
+        let (engine, _) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::CostUsd,
+                window_secs: 60,
+                cap_micros: 100,
+            },
+            Limit {
+                kind: LimitKind::InputTokens,
+                window_secs: 60,
+                cap_micros: 100,
+            },
+            Limit {
+                kind: LimitKind::OutputTokens,
+                window_secs: 60,
+                cap_micros: 100,
+            },
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 100,
+            },
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 0,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 20,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 30,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 120,
+                cap_micros: 40,
+            },
+        ]);
+
+        let openai = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-reset-requests"),
+            Some("0s")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-limit-requests"),
+            Some("10")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-limit-tokens"),
+            Some("30")
+        );
+        assert_eq!(openai.len(), 6);
+        assert!(openai.iter().all(|(name, _)| {
+            !name.starts_with("anthropic-")
+                && !name.starts_with("x-cc-lb-ratelimit-")
+                && !name.contains("input")
+                && !name.contains("output")
+                && !name.contains("concurrent")
+                && !name.contains("cost")
+        }));
+
+        let headers = engine.headers_for_provider(Provider::Gemini, "key-a", "principal-a");
+
+        assert_eq!(
+            header_value(&headers, "x-cc-lb-ratelimit-reset-requests"),
+            Some("0s")
+        );
+        assert_eq!(
+            header_value(&headers, "x-cc-lb-ratelimit-limit-requests"),
+            Some("10")
+        );
+        assert_eq!(
+            header_value(&headers, "x-cc-lb-ratelimit-limit-tokens"),
+            Some("30")
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|(name, _)| name.ends_with("-limit-requests"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|(name, _)| name.ends_with("-limit-tokens"))
+                .count(),
+            1
+        );
+        assert_eq!(headers.len(), 6);
+        assert!(
+            headers
+                .iter()
+                .all(|(name, _)| !name.starts_with("anthropic-")
+                    && !name.starts_with("x-ratelimit-")
+                    && !name.contains("input")
+                    && !name.contains("output")
+                    && !name.contains("concurrent")
+                    && !name.contains("cost"))
+        );
+    }
+
+    #[test]
+    fn provider_record_formatter_does_not_mutate_cached_effective_limits() {
+        let (engine, _) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 20,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 40,
+            },
+        ]);
+        let record = StoredApiKeyRecord {
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 7,
+            }],
+            ..StoredApiKeyRecord::default()
+        };
+        let defaults = vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 12,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 14,
+            },
+        ];
+
+        let rejection_headers =
+            engine.headers_for_provider_record(Provider::Openai, "key-a", &record, &defaults);
+        assert_eq!(
+            header_value(&rejection_headers, "x-ratelimit-limit-requests"),
+            Some("7")
+        );
+        assert_eq!(
+            header_value(&rejection_headers, "x-ratelimit-limit-tokens"),
+            Some("14")
+        );
+
+        let cached_headers = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(
+            header_value(&cached_headers, "x-ratelimit-limit-requests"),
+            Some("20")
+        );
+        assert_eq!(
+            header_value(&cached_headers, "x-ratelimit-limit-tokens"),
+            Some("40")
+        );
     }
 
     fn engine_with_output_token_limit(

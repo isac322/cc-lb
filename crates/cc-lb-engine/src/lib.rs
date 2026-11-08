@@ -55,6 +55,8 @@ pub mod model_resolution;
 pub mod pg_notify_fanout;
 #[cfg(not(loom))]
 pub mod prompt_cache_simulator;
+#[cfg(not(loom))]
+mod provider_cache;
 pub(crate) mod provider_capability;
 #[cfg(not(loom))]
 mod request_classification;
@@ -91,7 +93,10 @@ mod usage_parser;
 #[cfg(not(loom))]
 pub mod warmup_attempts;
 #[cfg(not(loom))]
-pub use authn_rail::{Authenticated, authenticate_first, reject_unauthenticated};
+pub use authn_rail::{
+    Authenticated, authenticate_first, reject_unauthenticated, reject_unauthenticated_for_provider,
+    reject_unauthenticated_for_route,
+};
 #[cfg(not(loom))]
 pub use bulkhead::{
     Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,

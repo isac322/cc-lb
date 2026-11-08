@@ -76,6 +76,8 @@ impl PreviewFixture {
                 request_id: Some(request_id.to_owned()),
                 headers: HeaderMap::new(),
                 body_bytes: Bytes::from(body),
+                provider: Some(cc_lb_domain::Provider::Anthropic),
+                path: "/v1/messages".to_owned(),
             })
             .await
             .expect("preview succeeds")

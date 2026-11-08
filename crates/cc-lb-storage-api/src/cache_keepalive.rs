@@ -65,6 +65,11 @@ pub struct CacheKeepaliveConfig {
 /// AgentInTurn / UserTurn / Ambiguous.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ClassifierConfig {
+    /// Enables the separate OpenAI Responses GPT-5.6+ keepalive policy.
+    /// Defaults to false so existing Anthropic-enabled principals do not
+    /// authorize OpenAI replay.
+    #[serde(default)]
+    pub openai_responses_enabled: bool,
     /// Extra tool names to treat as "wait-for-user" on top of the built-in
     /// list. When a `stop_reason: "tool_use"` response's only client tools
     /// are wait-for-user tools, the session is classified as UserTurn and
@@ -196,6 +201,12 @@ impl CacheKeepaliveConfig {
         let (ttl_secs, lead) = match ttl {
             CacheTtl::Ttl5m => (300u64, u64::from(self.refresh_lead_time_5m_secs)),
             CacheTtl::Ttl1h => (3600u64, u64::from(self.refresh_lead_time_1h_secs)),
+            // OpenAI uses the existing 5-minute lead knob as the conservative
+            // operator-controlled lead for its 30-minute read window.
+            CacheTtl::Ttl30m => (1800u64, u64::from(self.refresh_lead_time_5m_secs)),
+            // Reads never re-anchor a 12-hour entry; this value is only used
+            // when recording its initial expiry.
+            CacheTtl::Ttl12h => (43_200u64, u64::from(self.refresh_lead_time_1h_secs)),
         };
         ttl_secs.saturating_sub(lead).max(1)
     }
@@ -205,10 +216,14 @@ impl CacheKeepaliveConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheTtl {
-    /// Default 5-minute ephemeral cache.
+    /// Default 5-minute Anthropic ephemeral cache.
     Ttl5m,
-    /// Extended 1-hour cache (requires `ttl: "1h"` on the breakpoint).
+    /// Extended 1-hour Anthropic cache.
     Ttl1h,
+    /// OpenAI Responses 30-minute minimum retention.
+    Ttl30m,
+    /// OpenAI Responses 12-hour minimum retention.
+    Ttl12h,
 }
 
 impl CacheTtl {
@@ -219,6 +234,9 @@ impl CacheTtl {
     pub fn from_ttl_str(ttl: Option<&str>) -> Self {
         match ttl {
             Some("1h") => Self::Ttl1h,
+            // OpenAI retention strings are parsed by its provider-specific
+            // dialect; this Anthropic helper preserves its historical
+            // fallback semantics.
             _ => Self::Ttl5m,
         }
     }
@@ -227,6 +245,8 @@ impl CacheTtl {
         match self {
             Self::Ttl5m => 300,
             Self::Ttl1h => 3600,
+            Self::Ttl30m => 1800,
+            Self::Ttl12h => 43_200,
         }
     }
 }
@@ -290,6 +310,8 @@ mod tests {
         assert_eq!(CacheTtl::from_ttl_str(None), CacheTtl::Ttl5m);
         assert_eq!(CacheTtl::from_ttl_str(Some("garbage")), CacheTtl::Ttl5m);
         assert_eq!(CacheTtl::from_ttl_str(Some("5m")), CacheTtl::Ttl5m);
+        assert_eq!(CacheTtl::from_ttl_str(Some("30m")), CacheTtl::Ttl5m);
+        assert_eq!(CacheTtl::from_ttl_str(Some("12h")), CacheTtl::Ttl5m);
         assert_eq!(CacheTtl::from_ttl_str(Some("1h")), CacheTtl::Ttl1h);
     }
 

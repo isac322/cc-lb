@@ -89,6 +89,7 @@ impl Lifecycle {
                     message_index: None,
                     message_count: None,
                     cache_control_message_indices: Vec::new(),
+                    native_cache: None,
                 }),
             });
         }

@@ -37,6 +37,7 @@ interface CacheKeepaliveDraftSnapshot {
   snapshotBytes: number | null;
   extraTools: string[];
   treatAmbiguous: boolean;
+  openaiResponsesEnabled: boolean;
 }
 
 function getDraftSnapshot(principal: Principal): CacheKeepaliveDraftSnapshot {
@@ -50,9 +51,10 @@ function getDraftSnapshot(principal: Principal): CacheKeepaliveDraftSnapshot {
     snapshotBytes: config?.snapshot_max_bytes ?? 8_388_608,
     extraTools: [...(config?.classifier?.extra_wait_for_user_tools ?? [])],
     treatAmbiguous: config?.classifier?.treat_end_turn_as_ambiguous ?? false,
+    openaiResponsesEnabled:
+      config?.classifier?.openai_responses_enabled ?? false,
   };
 }
-
 export function CacheKeepaliveSettingsDrawer({
   open,
   onOpenChange,
@@ -85,6 +87,7 @@ export function CacheKeepaliveSettingsDrawer({
   const [snapshotBytes, setSnapshotBytes] = useState<number | null>(8_388_608);
   const [extraTools, setExtraTools] = useState<string[]>([]);
   const [treatAmbiguous, setTreatAmbiguous] = useState(false);
+  const [openaiResponsesEnabled, setOpenaiResponsesEnabled] = useState(false);
   const [newTool, setNewTool] = useState('');
   const toolInputId = useId();
   const toolHintId = useId();
@@ -112,6 +115,7 @@ export function CacheKeepaliveSettingsDrawer({
     setSnapshotBytes(snapshot.snapshotBytes);
     setExtraTools(snapshot.extraTools);
     setTreatAmbiguous(snapshot.treatAmbiguous);
+    setOpenaiResponsesEnabled(snapshot.openaiResponsesEnabled);
     setNewTool('');
   }, [open, principal.id]);
 
@@ -127,6 +131,7 @@ export function CacheKeepaliveSettingsDrawer({
     setSnapshotBytes(snapshot.snapshotBytes);
     setExtraTools(snapshot.extraTools);
     setTreatAmbiguous(snapshot.treatAmbiguous);
+    setOpenaiResponsesEnabled(snapshot.openaiResponsesEnabled);
     setNewTool('');
   };
   const latestPrincipal =
@@ -145,6 +150,7 @@ export function CacheKeepaliveSettingsDrawer({
       snapshotBytes,
       extraTools,
       treatAmbiguous,
+      openaiResponsesEnabled,
     };
     const next =
       preserveDraft && initial
@@ -182,6 +188,10 @@ export function CacheKeepaliveSettingsDrawer({
               current.treatAmbiguous !== initial.treatAmbiguous
                 ? current.treatAmbiguous
                 : server.treatAmbiguous,
+            openaiResponsesEnabled:
+              current.openaiResponsesEnabled !== initial.openaiResponsesEnabled
+                ? current.openaiResponsesEnabled
+                : server.openaiResponsesEnabled,
           }
         : server;
 
@@ -195,6 +205,7 @@ export function CacheKeepaliveSettingsDrawer({
     setSnapshotBytes(next.snapshotBytes);
     setExtraTools(next.extraTools);
     setTreatAmbiguous(next.treatAmbiguous);
+    setOpenaiResponsesEnabled(next.openaiResponsesEnabled);
     if (!preserveDraft) initialDraftRef.current = server;
     setConflict(false);
     setConflictPrincipal(null);
@@ -245,6 +256,7 @@ export function CacheKeepaliveSettingsDrawer({
           classifier: {
             extra_wait_for_user_tools: extraTools,
             treat_end_turn_as_ambiguous: treatAmbiguous,
+            openai_responses_enabled: openaiResponsesEnabled,
           },
         },
       },
@@ -525,6 +537,15 @@ export function CacheKeepaliveSettingsDrawer({
             aria-label="Treat end of turn as ambiguous"
             checked={treatAmbiguous}
             onChange={(e) => setTreatAmbiguous(e.target.checked)}
+            disabled={busy}
+          />
+          <ToggleSwitch
+            role="switch"
+            label="OpenAI Responses GPT-5.6+ keepalive"
+            description="Opt in to cost-aware 30m prompt-cache read refreshes for OpenAI Responses only. Off by default."
+            aria-label="OpenAI Responses GPT-5.6+ keepalive"
+            checked={openaiResponsesEnabled}
+            onChange={(e) => setOpenaiResponsesEnabled(e.target.checked)}
             disabled={busy}
           />
         </div>

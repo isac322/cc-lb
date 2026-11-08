@@ -56,9 +56,17 @@ struct PreviewRequest {
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
+    provider: Option<cc_lb_domain::Provider>,
+    #[serde(default = "default_preview_path")]
+    path: String,
+    #[serde(default)]
     headers: HashMap<String, String>,
     #[serde(default)]
     body: Option<Value>,
+}
+
+fn default_preview_path() -> String {
+    "/v1/messages".to_owned()
 }
 
 async fn preview_route(
@@ -97,6 +105,8 @@ async fn preview_route(
             request_id: req.request_id,
             headers,
             body_bytes,
+            provider: req.provider,
+            path: req.path,
         })
         .await
     {
@@ -110,6 +120,11 @@ async fn preview_route(
             StatusCode::BAD_GATEWAY,
             "router_pipeline_instantiation_error",
             &detail,
+        ),
+        Err(RoutePreviewError::UnsupportedOperation { method, path }) => error_response(
+            StatusCode::BAD_REQUEST,
+            "unsupported_operation",
+            &format!("unsupported operation: {method} {path}"),
         ),
     }
 }

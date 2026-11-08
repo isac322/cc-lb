@@ -37,11 +37,37 @@ use url::Url;
 use super::common::{TestAuthn, TestLifecycleBus, TestState};
 
 pub fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycleBus) -> Lifecycle {
+    lifecycle_with_upstream_kind(dispatcher, test_bus, StorageUpstreamKind::AnthropicApiKey)
+}
+
+pub fn lifecycle_with_upstream_kind(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+    upstream_kind: StorageUpstreamKind,
+) -> Lifecycle {
     let state = TestState::default();
-    super::common::lifecycle_with_parts(
-        TestAuthn::new(state),
+    let authn = TestAuthn::new(state.clone());
+    let upstream_id = uuid::Uuid::from_u128(1);
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![UpstreamRecord {
+            id: upstream_id,
+            name: "test-upstream".to_owned(),
+            kind: upstream_kind,
+            base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            revision: 1,
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
-        cc_lb_engine::LifecycleConfig::default(),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .with_event_bus(test_bus.bus_arc())
 }
@@ -49,6 +75,14 @@ pub fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycle
 pub fn transform_lifecycle(
     dispatcher: Arc<dyn UpstreamDispatch>,
     test_bus: &TestLifecycleBus,
+) -> Lifecycle {
+    transform_lifecycle_with_kind(dispatcher, test_bus, StorageUpstreamKind::AnthropicApiKey)
+}
+
+pub fn transform_lifecycle_with_kind(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+    upstream_kind: StorageUpstreamKind,
 ) -> Lifecycle {
     let state = TestState::default();
     let dialect = Arc::new(FailAfterFirstDialect::default());
@@ -88,7 +122,7 @@ pub fn transform_lifecycle(
         .upstream_records(vec![UpstreamRecord {
             id: upstream_id,
             name: "test-upstream".to_owned(),
-            kind: StorageUpstreamKind::AnthropicApiKey,
+            kind: upstream_kind,
             base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
             enabled: true,
             api_key_ciphertext: Some(Vec::new()),

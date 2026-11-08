@@ -3035,6 +3035,10 @@ async fn assert_gzip_transform_failure_before_output(transform: Arc<dyn SseEvent
     let text = std::str::from_utf8(&output).expect("error frame is utf8");
     assert!(text.contains("event: error\n"));
     assert!(text.contains("response_transform_error"));
+    assert!(
+        !text.contains("upstream SSE response could not be safely processed"),
+        "non-gated transform failures must preserve the detailed transform error frame: {text:?}",
+    );
 }
 
 #[tokio::test]

@@ -39,6 +39,9 @@ pub fn rates_from_catalog(
     let avoided_create_micros_per_million = match ttl {
         CacheTtl::Ttl5m => pricing.cache_creation_5m_per_million_usd?,
         CacheTtl::Ttl1h => pricing.cache_creation_1h_per_million_usd?,
+        // OpenAI-specific pricing is not represented by the Anthropic
+        // catalog's cache-creation fields; keep the generic panel truthful.
+        CacheTtl::Ttl30m | CacheTtl::Ttl12h => return None,
     }
     .as_micros_usd();
     Some(CacheKeepalivePnlRates {

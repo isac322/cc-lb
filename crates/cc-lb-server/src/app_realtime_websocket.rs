@@ -145,6 +145,7 @@ pub(super) async fn openai_realtime_websocket_handler(
     State(state): State<ProxyState>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
     let Some(guard) = state.drain_controller.try_track() else {
@@ -155,7 +156,11 @@ pub(super) async fn openai_realtime_websocket_handler(
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error, "/v1/realtime");
+                .reject_responses_websocket_authentication_for_provider(
+                    &error,
+                    "/v1/realtime",
+                    provider_scope.as_ref().map(|scope| scope.0.0),
+                );
         }
     };
     let model = uri.query().and_then(|query| {
@@ -215,6 +220,7 @@ pub(super) async fn gemini_live_websocket_handler(
     State(state): State<ProxyState>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
     let Some(guard) = state.drain_controller.try_track() else {
@@ -230,7 +236,11 @@ pub(super) async fn gemini_live_websocket_handler(
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error, &path);
+                .reject_responses_websocket_authentication_for_provider(
+                    &error,
+                    &path,
+                    provider_scope.as_ref().map(|scope| scope.0.0),
+                );
         }
     };
     if uri.path()

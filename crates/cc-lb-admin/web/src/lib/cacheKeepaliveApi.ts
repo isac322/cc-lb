@@ -20,7 +20,7 @@ export const CACHE_KEEPALIVE_STATES = [
 export const CacheKeepaliveStateSchema = z.enum(CACHE_KEEPALIVE_STATES);
 export type CacheKeepaliveState = z.infer<typeof CacheKeepaliveStateSchema>;
 
-export const CacheKeepaliveTtlSchema = z.enum(['5m', '1h']);
+export const CacheKeepaliveTtlSchema = z.enum(['5m', '1h', '30m', '12h']);
 export type CacheKeepaliveTtl = z.infer<typeof CacheKeepaliveTtlSchema>;
 
 export const CacheKeepaliveHorizonSchema = z.enum(['24h', '7d', 'all']);

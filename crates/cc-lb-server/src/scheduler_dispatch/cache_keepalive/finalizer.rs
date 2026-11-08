@@ -36,17 +36,21 @@ impl SchedulerDispatch {
                 )
             })?;
         let model = keepalive_model(snapshot);
-        let cost = virtual_cost_micros_full_with_context(
-            model,
-            finalization.usage.input_tokens,
-            finalization.usage.output_tokens,
-            finalization.usage.cache_creation_input_tokens,
-            finalization.usage.cache_creation_input_tokens_5m,
-            finalization.usage.cache_creation_input_tokens_1h,
-            finalization.usage.cache_read_input_tokens,
-            None,
-        )
-        .unwrap_or_else(ComputedCostBreakdown::unknown);
+        let cost = if finalization.usage.provider_cost_unknown {
+            ComputedCostBreakdown::unknown()
+        } else {
+            virtual_cost_micros_full_with_context(
+                model,
+                finalization.usage.input_tokens,
+                finalization.usage.output_tokens,
+                finalization.usage.cache_creation_input_tokens,
+                finalization.usage.cache_creation_input_tokens_5m,
+                finalization.usage.cache_creation_input_tokens_1h,
+                finalization.usage.cache_read_input_tokens,
+                None,
+            )
+            .unwrap_or_else(ComputedCostBreakdown::unknown)
+        };
         let ts = unix_secs(self.clock.now());
         let duration_ms = duration_ms(finalization.duration);
         let thread_id = SessionKey::extract_thread_id(&record.session_key_hash);

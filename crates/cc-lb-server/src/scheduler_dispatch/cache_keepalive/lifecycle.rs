@@ -48,6 +48,7 @@ pub(super) fn publish_renewal_lifecycle(
             cache_control_block_count: None,
             cache_breakpoints: Vec::new(),
             cache_prefix_hash: None,
+            native_cache: None,
             thread_id: input.thread_id,
             observed_session_id: None,
             request_kind: None,

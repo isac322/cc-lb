@@ -190,6 +190,144 @@ where
     .await
 }
 
+/// Provider-native rows with unknown expiry stay durable evidence but are never
+/// returned as active cache warmth or selected by the expiry purge.
+pub async fn provider_unknown_expiry_is_retained_and_not_active<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let upstream_id = upstream_id(5);
+        let base = cc_lb_storage_api::ProviderPromptCacheObservationRecord {
+            upstream_id,
+            provider: "gemini".to_owned(),
+            canonical_model_id: "gemini-2.5-pro".to_owned(),
+            mode: "explicit".to_owned(),
+            isolation_scope: "scope".to_owned(),
+            identity_hash: "sha256:identity".to_owned(),
+            boundary: "unknown".to_owned(),
+            evidence_source: "provider_usage_metadata".to_owned(),
+            observed_cached_tokens: Some(256),
+            observed_write_tokens: None,
+            retention_secs: None,
+            expires_at_unix_secs: None,
+            last_observed_at_unix_secs: now,
+        };
+        let mut expired = base.clone();
+        expired.boundary = "expired".to_owned();
+        expired.expires_at_unix_secs = Some(now - 100);
+        let mut active = base.clone();
+        active.boundary = "active".to_owned();
+        active.expires_at_unix_secs = Some(now + 600);
+
+        for record in [&base, &expired, &active] {
+            storage.upsert_provider_observation(record).await?;
+        }
+
+        let records = storage
+            .list_active_provider_observations(
+                upstream_id,
+                "gemini",
+                "gemini-2.5-pro",
+                "explicit",
+                "scope",
+                "sha256:identity",
+                now,
+            )
+            .await?;
+        ensure!(records.len() == 1, "only the active row should be visible");
+        ensure!(
+            records[0].boundary == "active",
+            "unknown and expired rows must not provide cache warmth"
+        );
+
+        ensure!(
+            storage.purge_expired_before(now).await? == 1,
+            "purge should delete only the expired row"
+        );
+
+        let records = storage
+            .list_active_provider_observations(
+                upstream_id,
+                "gemini",
+                "gemini-2.5-pro",
+                "explicit",
+                "scope",
+                "sha256:identity",
+                now,
+            )
+            .await?;
+        ensure!(
+            records.len() == 1 && records[0].boundary == "active",
+            "active provider evidence should remain after purge"
+        );
+        Ok(())
+    })
+    .await
+}
+/// A newer observation replaces previously reported token counts with null when
+/// the provider no longer reports valid counts. This prevents stale counts from
+/// surviving a newer unreported or invalid observation.
+pub async fn provider_newer_unreported_counts_replace_prior_counts<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let upstream_id = upstream_id(13);
+        let older = cc_lb_storage_api::ProviderPromptCacheObservationRecord {
+            upstream_id,
+            provider: "openai".to_owned(),
+            canonical_model_id: "gpt-5.6".to_owned(),
+            mode: "implicit".to_owned(),
+            isolation_scope: "scope".to_owned(),
+            identity_hash: "sha256:identity".to_owned(),
+            boundary: "implicit".to_owned(),
+            evidence_source: "provider_usage_metadata".to_owned(),
+            observed_cached_tokens: Some(256),
+            observed_write_tokens: Some(128),
+            retention_secs: Some(1_800),
+            expires_at_unix_secs: Some(now + 1_800),
+            last_observed_at_unix_secs: now,
+        };
+        let mut newer = older.clone();
+        newer.evidence_source = "provider_usage_metadata_invalid".to_owned();
+        newer.observed_cached_tokens = None;
+        newer.observed_write_tokens = None;
+        newer.last_observed_at_unix_secs = now + 1;
+
+        storage.upsert_provider_observation(&older).await?;
+        storage.upsert_provider_observation(&newer).await?;
+
+        let records = storage
+            .list_active_provider_observations(
+                upstream_id,
+                "openai",
+                "gpt-5.6",
+                "implicit",
+                "scope",
+                "sha256:identity",
+                now,
+            )
+            .await?;
+        ensure!(
+            records == vec![newer],
+            "newer unreported counts must replace prior counts, got {records:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
 /// Populate a store, drop the first storage handle, reopen the same backing
 /// storage, and verify hydration/listing at the injected clock timestamp returns
 /// only non-expired observations. This covers persistence across restart,
