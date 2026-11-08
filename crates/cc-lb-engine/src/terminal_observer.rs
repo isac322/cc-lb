@@ -116,6 +116,27 @@ pub(crate) struct StreamErrorClassification {
     pub(crate) io_os_error: Option<i32>,
     pub(crate) h2_reason: Option<String>,
 }
+/// Record the terminal outcome and bounded provider close/error diagnostics on
+/// a WebSocket stream span. WebSocket close reasons are provider-controlled,
+/// so they must pass through the same redaction and size cap as HTTP errors.
+pub(crate) fn record_websocket_terminal_span(
+    span: &tracing::Span,
+    outcome: StreamTerminationOutcome,
+    cause: StreamTerminationCause,
+    error_type: Option<&str>,
+    error_message: Option<&str>,
+) {
+    span.record("stream.outcome", outcome.as_str());
+    span.record("error.cause", cause.as_str());
+    if let Some(error_type) = error_type {
+        span.record("error.type", error_type);
+    }
+    if let Some(error_message) = error_message {
+        let policy = RedactionPolicy::default();
+        let bounded = truncate_reason(&policy.redact_text(error_message));
+        span.record("error.chain", bounded.as_str());
+    }
+}
 
 pub(crate) fn classify_stream_error(error: &(dyn StdError + 'static)) -> StreamErrorClassification {
     let policy = RedactionPolicy::default();
@@ -585,8 +606,8 @@ impl LifecycleContext {
         state.error_code = Some(code.as_str());
     }
 
-    /// Record a client-closed terminal outcome (499). Client disconnects are
-    /// not cc-lb internal failures, so no `InternalError` is synthesized.
+    /// Record a client-closed terminal outcome. HTTP callers use 499;
+    /// WebSocket callers use the established 101 lifecycle status.
     pub(crate) fn set_client_closed(&self, status: StatusCode) {
         let mut state = self.lock_state();
         state.status = status.as_u16();
@@ -891,9 +912,10 @@ fn record_terminal_span(
     duration_ms: u64,
     unaccounted_ms: u64,
 ) {
-    let outcome = match state.status {
-        499 => "client_cancelled",
-        408 | 504 => "timeout",
+    let outcome = match error_code {
+        Some(code) if code == error_codes::CLIENT_CLOSED_REQUEST => "client_cancelled",
+        _ if state.status == 499 => "client_cancelled",
+        _ if state.status == 408 || state.status == 504 => "timeout",
         _ if error_code.is_some() => "error",
         _ => "success",
     };
@@ -1261,6 +1283,11 @@ mod tests {
                     cc_lb.request.unaccounted_ms = tracing::field::Empty,
                     http.response.status_code = tracing::field::Empty,
                     error.type = tracing::field::Empty,
+                    error.cause = tracing::field::Empty,
+                    error.chain = tracing::field::Empty,
+                    stream.outcome = tracing::field::Empty,
+                    provider_session_id = tracing::field::Empty,
+                    provider_connection_id = tracing::field::Empty,
                     otel.status_code = tracing::field::Empty,
                     cc_lb.request.finalize_ms = tracing::field::Empty,
                     cc_lb.upstream.bulkhead_wait_ms = tracing::field::Empty,
@@ -1281,6 +1308,41 @@ mod tests {
             };
         }
         [span!("proxy.handle"), span!("proxy.response_stream")]
+    }
+    #[test]
+    fn websocket_terminal_span_records_bounded_close_diagnostics() {
+        let (spans, values) = terminal_spans();
+        let message = "provider close ".to_owned() + &"x".repeat(4096);
+        record_websocket_terminal_span(
+            &spans[1],
+            StreamTerminationOutcome::UpstreamError,
+            StreamTerminationCause::ProviderError,
+            Some("upstream_connection_closed"),
+            Some(&message),
+        );
+        let values = values.lock().expect("terminal span values lock");
+        let recorded = values
+            .values()
+            .find(|values| values.get("stream.outcome").is_some())
+            .expect("websocket terminal span was recorded");
+        assert_eq!(
+            recorded.get("stream.outcome").map(String::as_str),
+            Some("upstream_error")
+        );
+        assert_eq!(
+            recorded.get("error.cause").map(String::as_str),
+            Some("provider_error")
+        );
+        assert_eq!(
+            recorded.get("error.type").map(String::as_str),
+            Some("upstream_connection_closed")
+        );
+        assert!(
+            recorded
+                .get("error.chain")
+                .is_some_and(|value| value.len() < message.len()),
+            "provider close diagnostics must be bounded",
+        );
     }
 
     #[test]

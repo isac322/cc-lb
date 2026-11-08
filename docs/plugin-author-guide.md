@@ -232,6 +232,19 @@ dropped WebSocket frames. Buffered-response transforms do not apply to frames.
 Shape failures fall back to the raw frame as they do for HTTP. SSE transform
 failures emit a WebSocket error event and terminate that turn.
 
+### Realtime and Live frame transforms
+
+Provider-qualified `transform_realtime_frame` handlers use wire version 2 and
+receive `TransformRealtimeFrameRequest`. The request identifies the provider
+upstream, principal, direction (`setup`, `client_to_provider`, or
+`provider_to_client`), payload kind (`json`, `text`, or `binary`), and raw
+payload bytes. A handler returns `Unchanged`, `Replace { kind, payload }`, or
+`Drop`. The host owns the WebSocket URL, method, credentials, and connection;
+the hook can only transform or drop individual frames. Setup and every data
+frame are transformed independently, so the host never buffers a whole
+session. Invalid replacement encoding or a hook error terminates the relay
+with a proxy error.
+
 For Gemini OAuth, Code Assist wrapping is removed before a custom buffered
 response hook runs, including `streamGenerateContent` JSON-array responses.
 

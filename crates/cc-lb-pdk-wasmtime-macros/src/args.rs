@@ -87,12 +87,13 @@ impl Parse for HandlerArgs {
                         || path.is_ident("shape")
                         || path.is_ident("transform_response")
                         || path.is_ident("transform_sse_event")
+                        || path.is_ident("transform_realtime_frame")
                         || path.is_ident("shape_envelope_gemini") =>
                 {
                     kind = Some(HandlerKind::from_path(&path).ok_or_else(|| {
                         Error::new_spanned(
                             &path,
-                            "unknown handler kind (supported: filter, shape, transform_response, transform_sse_event, shape_envelope_gemini)",
+"unknown handler kind (supported: filter, shape, transform_response, transform_sse_event, transform_realtime_frame, shape_envelope_gemini)",
                         )
                     })?);
                 }
@@ -223,6 +224,7 @@ pub(crate) enum HandlerKind {
     Shape,
     TransformResponse,
     TransformSseEvent,
+    TransformRealtimeFrame,
     ShapeEnvelopeGemini,
 }
 
@@ -233,6 +235,7 @@ impl HandlerKind {
             "shape" => Self::Shape,
             "transform_response" => Self::TransformResponse,
             "transform_sse_event" => Self::TransformSseEvent,
+            "transform_realtime_frame" => Self::TransformRealtimeFrame,
             "shape_envelope_gemini" => Self::ShapeEnvelopeGemini,
             _ => return None,
         })
@@ -244,12 +247,16 @@ impl HandlerKind {
             Self::Shape => "shape",
             Self::TransformResponse => "transform_response",
             Self::TransformSseEvent => "transform_sse_event",
+            Self::TransformRealtimeFrame => "transform_realtime_frame",
             Self::ShapeEnvelopeGemini => "shape_envelope_gemini",
         }
     }
 
     pub(crate) const fn supports_noop_mode(self) -> bool {
-        matches!(self, Self::TransformResponse | Self::TransformSseEvent)
+        matches!(
+            self,
+            Self::TransformResponse | Self::TransformSseEvent | Self::TransformRealtimeFrame
+        )
     }
 
     pub(crate) const fn supports_wire_version(
@@ -264,6 +271,7 @@ impl HandlerKind {
             Self::Filter | Self::Shape | Self::TransformResponse | Self::TransformSseEvent => {
                 wire_version == 1 || (wire_version == 2 && provider.is_some())
             }
+            Self::TransformRealtimeFrame => wire_version == 2 && provider.is_some(),
         }
     }
 
@@ -273,6 +281,7 @@ impl HandlerKind {
             Self::Shape => "cc_lb_shape",
             Self::TransformResponse => "cc_lb_transform_response",
             Self::TransformSseEvent => "cc_lb_transform_sse_event",
+            Self::TransformRealtimeFrame => "cc_lb_transform_realtime_frame",
             Self::ShapeEnvelopeGemini => "cc_lb_shape_envelope_gemini",
         };
         if matches!(self, Self::ShapeEnvelopeGemini) {
@@ -312,6 +321,8 @@ impl HandlerKind {
             (Self::TransformSseEvent, 1, true) => Some("run_transform_sse_event_view"),
             (Self::TransformSseEvent, 2, false) => Some("run_transform_sse_event_v2"),
             (Self::TransformSseEvent, 2, true) => Some("run_transform_sse_event_v2_view"),
+            (Self::TransformRealtimeFrame, 2, false) => Some("run_transform_realtime_frame_v2"),
+            (Self::TransformRealtimeFrame, 2, true) => Some("run_transform_realtime_frame_v2_view"),
             (Self::ShapeEnvelopeGemini, 2, false) => Some("run_shape_envelope_gemini"),
             (Self::ShapeEnvelopeGemini, 2, true) => Some("run_shape_envelope_gemini_view"),
             _ => None,
@@ -340,6 +351,9 @@ impl HandlerKind {
             (Self::TransformSseEvent, 2) => {
                 Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::TransformSseEventRequest })
             }
+            (Self::TransformRealtimeFrame, 2) => {
+                Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::TransformRealtimeFrameRequest })
+            }
             (Self::ShapeEnvelopeGemini, 2) => {
                 Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::ShapeEnvelopeGeminiRequest })
             }
@@ -353,6 +367,7 @@ impl HandlerKind {
             Self::Shape => "SHAPE",
             Self::TransformResponse => "TRANSFORM_RESPONSE",
             Self::TransformSseEvent => "TRANSFORM_SSE_EVENT",
+            Self::TransformRealtimeFrame => "TRANSFORM_REALTIME_FRAME",
             Self::ShapeEnvelopeGemini => "SHAPE_ENVELOPE_GEMINI",
         }
     }

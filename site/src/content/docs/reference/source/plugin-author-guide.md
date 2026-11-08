@@ -217,6 +217,19 @@ flag. They relay chunks immediately when no buffered hook is installed; a
 buffered hook receives the complete body within the request path's body cap.
 JSON audio responses retain the ordinary buffered response behavior.
 
+### Realtime and Live frame transforms
+
+Provider-qualified `transform_realtime_frame` handlers use wire version 2 and
+receive `TransformRealtimeFrameRequest`. The request identifies the provider
+upstream, principal, direction (`setup`, `client_to_provider`, or
+`provider_to_client`), payload kind (`json`, `text`, or `binary`), and raw
+payload bytes. A handler returns `Unchanged`, `Replace { kind, payload }`, or
+`Drop`. The host owns the WebSocket URL, method, credentials, and connection;
+the hook can only transform or drop individual frames. Setup and every data
+frame are transformed independently, so the host never buffers a whole
+session. Invalid replacement encoding or a hook error terminates the relay
+with a proxy error.
+
 ### Legacy compatibility and migration
 
 Omitting `provider` preserves the unqualified export and V1 metadata. All

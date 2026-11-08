@@ -27,6 +27,7 @@ pub struct WasmPluginWireDispatch {
     shape: Option<ResolvedHook>,
     response: Option<ResolvedHook>,
     sse: Option<ResolvedHook>,
+    realtime_frame: Option<ResolvedHook>,
     envelope: Option<ResolvedHook>,
 }
 
@@ -42,6 +43,7 @@ impl WasmPluginWireDispatch {
             shape: None,
             response: None,
             sse: None,
+            realtime_frame: None,
             envelope: None,
         };
         dispatch.resolve(ProviderFamily::Anthropic);
@@ -55,6 +57,7 @@ impl WasmPluginWireDispatch {
         let applicable = match selected.kind {
             HookKind::Filter => selected.filter.is_some(),
             HookKind::ShapeEnvelopeGemini => selected.envelope.is_some(),
+            HookKind::TransformRealtimeFrame => selected.realtime_frame.is_some_and(|h| h.active),
             _ => {
                 selected.shape.is_some()
                     || selected.response.is_some_and(|h| h.active)
@@ -68,9 +71,9 @@ impl WasmPluginWireDispatch {
         self.shape = self.resolve_hook(HookKind::Shape, provider);
         self.response = self.resolve_hook(HookKind::TransformResponse, provider);
         self.sse = self.resolve_hook(HookKind::TransformSseEvent, provider);
+        self.realtime_frame = self.resolve_hook(HookKind::TransformRealtimeFrame, provider);
         self.envelope = self.resolve_hook(HookKind::ShapeEnvelopeGemini, provider);
     }
-
     fn resolve_hook(&self, hook: HookKind, provider: ProviderFamily) -> Option<ResolvedHook> {
         if hook == HookKind::ShapeEnvelopeGemini && provider != ProviderFamily::Gemini {
             return None;
@@ -185,6 +188,17 @@ impl WasmPluginWireDispatch {
     {
         self.call(HookKind::TransformSseEvent, self.sse, input, with_output)
     }
+    pub fn call_transform_realtime_frame(
+        &self,
+        input: &[u8],
+    ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
+        self.call(
+            HookKind::TransformRealtimeFrame,
+            self.realtime_frame,
+            input,
+            copy_aligned,
+        )
+    }
     pub fn call_shape_envelope_gemini_scoped<R, F>(
         &self,
         input: &[u8],
@@ -212,6 +226,9 @@ impl WasmPluginWireDispatch {
     ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
         self.call_transform_sse_event_scoped(input, copy_aligned)
     }
+    pub fn realtime_frame_wire_version(&self) -> Option<WireVersion> {
+        self.realtime_frame.map(|h| h.version)
+    }
     pub fn filter_wire_version(&self) -> Option<WireVersion> {
         self.filter.map(|h| h.version)
     }
@@ -236,6 +253,9 @@ impl WasmPluginWireDispatch {
     }
     pub fn has_sse_event_transform(&self) -> bool {
         self.sse.is_some_and(|h| h.active)
+    }
+    pub fn has_realtime_frame_transform(&self) -> bool {
+        self.realtime_frame.is_some_and(|h| h.active)
     }
 }
 

@@ -2631,15 +2631,15 @@ async fn responses_websocket_terminal_status_matches_success_failure_and_cancell
     for (kind, expected_status, expected_reason) in [
         (
             "response.failed",
-            502,
+            101,
             TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
         ),
         (
             "client.close",
-            499,
+            101,
             TerminationReason::ErrorCode("client_closed_request".to_owned()),
         ),
-        ("response.completed", 200, TerminationReason::Success),
+        ("response.completed", 101, TerminationReason::Success),
     ] {
         let bus = Arc::new(cc_lb_control::InMemoryBus::new());
         let mut events = bus.subscribe_lifecycle();
@@ -2747,11 +2747,14 @@ async fn responses_websocket_terminal_status_matches_success_failure_and_cancell
 
 #[tokio::test]
 async fn responses_websocket_three_create_fifo_and_parallel_lane_preserve_payloads() {
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
     let fixture = Fixture::new(vec![TestUpstream::new(
         50_001,
         "openai",
         UpstreamKind::OpenaiApiKey,
-    )]);
+    )])
+    .with_lifecycle(|lifecycle| lifecycle.with_event_bus(bus));
     let (mut gateway, dispatch) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
     let first = websocket_admit(&mut gateway, websocket_create("main", None))
         .await
@@ -2839,6 +2842,28 @@ async fn responses_websocket_three_create_fifo_and_parallel_lane_preserve_payloa
     assert!(
         dispatch.hosts.lock().expect("dispatch log lock").is_empty(),
         "WS never dispatches through the HTTP body lifecycle"
+    );
+    gateway.close();
+    let mut completions = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let LifecycleEvent::StreamCompleted {
+            result: Ok(success),
+            ..
+        } = event
+        {
+            completions.push((success.body_chunk_count, success.provider_session_id));
+        }
+    }
+    completions.sort_by_key(|(count, session)| (*count, session.clone()));
+    assert_eq!(
+        completions,
+        vec![
+            (Some(2), Some("resp_fifo_1".to_owned())),
+            (Some(2), Some("resp_fifo_2".to_owned())),
+            (Some(2), Some("resp_fifo_3".to_owned())),
+            (Some(3), Some("resp_parallel".to_owned())),
+        ],
+        "each in-flight response on one provider connection owns its own timing metrics",
     );
 }
 

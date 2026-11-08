@@ -101,16 +101,45 @@ pub struct StreamSuccess {
     pub content_delta_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ping_count: Option<u64>,
+    /// Provider-neutral average time between consecutive output frames.
+    /// Anthropic SSE streams continue to use `inter_token_avg_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_inter_output_avg_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inter_token_avg_ms: Option<u64>,
 }
 
 /// Stream terminated on an error before completion (e.g. mid-stream
 /// `event: error` payload from Anthropic).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StreamError {
     pub error_type: String,
     pub error_message: String,
+    /// Provider-neutral stream fields captured before an abnormal
+    /// termination. These remain available to the lifecycle row even when
+    /// the stream result is `Err`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_chunk_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_body_chunk_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_last_chunk_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_total_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_inter_output_avg_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_connection_id: Option<String>,
 }
 
 #[cfg(test)]

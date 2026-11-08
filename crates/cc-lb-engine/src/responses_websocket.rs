@@ -18,9 +18,14 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::authn_rail::Authenticated;
+use crate::completion_observer::{StreamCompletionLog, StreamLatency};
+use crate::downstream_stream_drop_guard::record_stream_termination_metric;
 use crate::lifecycle::{Lifecycle, PromptCacheObservationContext};
 use crate::response_transform::ResponseTransformContext;
-use crate::terminal_observer::{InternalFailure, LifecycleContext, UpstreamErrorCode};
+use crate::terminal_observer::{
+    InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
+    UpstreamErrorCode, record_websocket_terminal_span,
+};
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value};
 use cc_lb_upstream::{SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
@@ -147,6 +152,7 @@ pub(crate) struct WebSocketIngress<'a> {
 pub(crate) struct PreparedWebSocketTurn {
     pub candidates: Vec<WebSocketCandidate>,
     pub observer: Option<LifecycleContext>,
+    pub completion_observer: Arc<crate::completion_observer::CompletionObserver>,
     pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
     pub reservation: Option<Reservation>,
     pub limit_engine: Option<Arc<LimitEngine>>,
@@ -199,6 +205,78 @@ struct Lane {
     queued: VecDeque<u64>,
 }
 
+#[derive(Debug)]
+struct ResponsesStreamMetrics {
+    started: std::time::Instant,
+    first_output_ms: Option<u64>,
+    last_output_ms: Option<u64>,
+    event_count: u64,
+    total_bytes: u64,
+    provider_session_id: Option<String>,
+}
+
+impl ResponsesStreamMetrics {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            first_output_ms: None,
+            last_output_ms: None,
+            event_count: 0,
+            total_bytes: 0,
+            provider_session_id: None,
+        }
+    }
+
+    fn observe(&mut self, frame: &[u8]) {
+        let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.first_output_ms.get_or_insert(elapsed);
+        self.last_output_ms = Some(elapsed);
+        self.event_count = self.event_count.saturating_add(1);
+        self.total_bytes = self.total_bytes.saturating_add(frame.len() as u64);
+        if self.provider_session_id.is_none() {
+            let bounded = |value: Option<sonic_rs::LazyValue<'_>>| {
+                let value = value.and_then(|value| value.as_str().map(str::to_owned))?;
+                (!value.is_empty() && value.len() <= 512).then_some(value)
+            };
+            let response_id = sonic_rs::get_from_slice(frame, &["response", "id"]).ok();
+            let fallback_id = sonic_rs::get_from_slice(frame, &["response_id"]).ok();
+            self.provider_session_id = bounded(response_id).or_else(|| bounded(fallback_id));
+        }
+    }
+
+    fn latency(&self, status: u16) -> StreamLatency {
+        let stream_total_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let inter_output_avg_ms = match (self.first_output_ms, self.last_output_ms) {
+            (Some(first), Some(last)) if self.event_count > 1 => {
+                Some(last.saturating_sub(first) / (self.event_count - 1))
+            }
+            _ => None,
+        };
+        StreamLatency {
+            status,
+            stream_first_chunk_ms: self.first_output_ms,
+            stream_message_start_ms: None,
+            stream_content_block_start_ms: None,
+            stream_first_content_delta_ms: None,
+            stream_last_content_delta_ms: None,
+            stream_message_stop_ms: None,
+            stream_last_chunk_ms: self.last_output_ms,
+            stream_first_output_ms: self.first_output_ms,
+            stream_last_output_ms: self.last_output_ms,
+            stream_event_count: self.event_count,
+            stream_inter_output_avg_ms: inter_output_avg_ms,
+            provider_session_id: self.provider_session_id.clone(),
+            provider_connection_id: None,
+            stream_total_ms,
+            sse_event_count: 0,
+            content_delta_count: 0,
+            ping_count: 0,
+            inter_token_avg_ms: None,
+            total_bytes: self.total_bytes,
+        }
+    }
+}
+
 struct Turn {
     auth: Authenticated,
     prepared: PreparedWebSocketTurn,
@@ -220,6 +298,7 @@ struct Turn {
     usage: Option<UsageCounts>,
     usage_complete: bool,
     plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
+    metrics: ResponsesStreamMetrics,
 }
 
 /// A session owns no authenticated proof until a fresh client check succeeds.
@@ -502,6 +581,7 @@ impl ResponsesWebSocketGateway {
                 usage: None,
                 usage_complete: false,
                 plugin_request: None,
+                metrics: ResponsesStreamMetrics::new(),
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -672,6 +752,7 @@ impl ResponsesWebSocketGateway {
                 usage: None,
                 usage_complete: false,
                 plugin_request: None,
+                metrics: ResponsesStreamMetrics::new(),
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -1048,11 +1129,100 @@ impl ResponsesWebSocketGateway {
         ready
     }
 
+    fn resolve_provider_turn_id(
+        &self,
+        connection_id: u64,
+        response_id: Option<&str>,
+        parent_response_id: Option<&str>,
+        lane: Option<&str>,
+        is_error: bool,
+    ) -> Option<u64> {
+        let mut turn_id = response_id
+            .and_then(|id| self.owners.get(id))
+            .map(|owner| owner.turn_id);
+        if turn_id.is_none() && !is_error {
+            let active = self
+                .lanes
+                .iter()
+                .find_map(|(candidate, lane_state)| {
+                    (candidate.as_deref() == lane).then_some(lane_state.active)
+                })
+                .flatten();
+            turn_id = parent_response_id
+                .and_then(|parent| self.successor_for_parent(parent))
+                .or_else(|| {
+                    active
+                        .and_then(|active| self.turns.get(&active))
+                        .and_then(|active| active.response_id.as_deref())
+                        .and_then(|parent| self.successor_for_parent(parent))
+                })
+                .or(active);
+        }
+        if is_error && turn_id.is_none() {
+            turn_id = self
+                .lanes
+                .iter()
+                .find_map(|(candidate, lane_state)| {
+                    (candidate.as_deref() == lane).then_some(lane_state.active)
+                })
+                .flatten()
+                .filter(|id| {
+                    self.turns
+                        .get(id)
+                        .is_some_and(|turn| turn.connection_id == Some(connection_id) && turn.sent)
+                });
+        }
+        turn_id
+    }
+
+    fn observe_provider_metrics(&mut self, connection_id: u64, frame: &Bytes) {
+        let bounded = |value: Option<sonic_rs::LazyValue<'_>>, max_len| {
+            value.and_then(|value| {
+                let value = value.as_str()?;
+                (!value.is_empty() && value.len() <= max_len).then(|| value.to_owned())
+            })
+        };
+        let lane = bounded(sonic_rs::get_from_slice(frame, &["stream_id"]).ok(), 256);
+        let response_id = bounded(
+            sonic_rs::get_from_slice(frame, &["response", "id"]).ok(),
+            512,
+        )
+        .or_else(|| bounded(sonic_rs::get_from_slice(frame, &["response_id"]).ok(), 512));
+        let parent_response_id = bounded(
+            sonic_rs::get_from_slice(frame, &["response", "previous_response_id"]).ok(),
+            512,
+        )
+        .or_else(|| {
+            bounded(
+                sonic_rs::get_from_slice(frame, &["steer", "previous_response_id"]).ok(),
+                512,
+            )
+        });
+        let is_error = sonic_rs::get_from_slice(frame, &["type"])
+            .is_ok_and(|value| value.as_str() == Some("error"));
+        let Some(turn_id) = self.resolve_provider_turn_id(
+            connection_id,
+            response_id.as_deref(),
+            parent_response_id.as_deref(),
+            lane.as_deref(),
+            is_error,
+        ) else {
+            return;
+        };
+        if let Some(turn) = self.turns.get_mut(&turn_id)
+            && turn.connection_id == Some(connection_id)
+            && turn.sent
+        {
+            turn.metrics.observe(frame);
+        }
+    }
+
     pub async fn provider_message(
         &mut self,
         connection_id: u64,
         frame: &Bytes,
     ) -> Result<WebSocketEventResult, WebSocketError> {
+        self.observe_provider_metrics(connection_id, frame);
         let transformed = self.transform_provider_frame(connection_id, frame);
         let mut result = self
             .observe_provider_message(connection_id, frame, transformed.as_ref().err())
@@ -1226,35 +1396,16 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane));
         }
-        let mut turn_id = response_id
-            .and_then(|id| self.owners.get(id))
-            .map(|owner| owner.turn_id);
-        if turn_id.is_none() && !matches!(kind, "error") {
-            let active = self.lanes.get(&lane).and_then(|lane| lane.active);
-            let parent = response
-                .and_then(|response| response.get("previous_response_id"))
-                .and_then(Value::as_str);
-            turn_id = parent
-                .and_then(|parent| self.successor_for_parent(parent))
-                .or_else(|| {
-                    active
-                        .and_then(|active| self.turns.get(&active))
-                        .and_then(|active| active.response_id.as_deref())
-                        .and_then(|parent| self.successor_for_parent(parent))
-                })
-                .or(active);
-        }
-        if kind == "error" && turn_id.is_none() {
-            turn_id = self
-                .lanes
-                .get(&lane)
-                .and_then(|lane| lane.active)
-                .filter(|id| {
-                    self.turns
-                        .get(id)
-                        .is_some_and(|turn| turn.connection_id == Some(connection_id) && turn.sent)
-                });
-        }
+        let parent_response_id = response
+            .and_then(|response| response.get("previous_response_id"))
+            .and_then(Value::as_str);
+        let turn_id = self.resolve_provider_turn_id(
+            connection_id,
+            response_id,
+            parent_response_id,
+            lane.as_deref(),
+            kind == "error",
+        );
         let Some(turn_id) = turn_id else {
             // Never open a second settlement from an unowned or replayed id.
             return Err(WebSocketError::new(
@@ -1566,6 +1717,50 @@ impl ResponsesWebSocketGateway {
             }
             lane.queued.retain(|id| *id != turn_id);
         }
+        let complete = error.is_none();
+        let (outcome, cause) = match error {
+            None => (
+                StreamTerminationOutcome::Completed,
+                StreamTerminationCause::None,
+            ),
+            Some(error) if error.code == "client_closed_request" => (
+                StreamTerminationOutcome::ClientCancelled,
+                StreamTerminationCause::None,
+            ),
+            Some(error)
+                if error.native_code.is_some() || error.code == "upstream_connection_closed" =>
+            {
+                (
+                    StreamTerminationOutcome::UpstreamError,
+                    StreamTerminationCause::ProviderError,
+                )
+            }
+            Some(_) => (
+                StreamTerminationOutcome::ProxyError,
+                StreamTerminationCause::TransportError,
+            ),
+        };
+        record_stream_termination_metric(
+            outcome,
+            cause,
+            turn.prepared
+                .candidates
+                .first()
+                .map(|candidate| candidate.upstream_name.as_str())
+                .unwrap_or("unknown"),
+            Some(&turn.prepared.model),
+        );
+        record_websocket_terminal_span(
+            &turn.prepared.span,
+            outcome,
+            cause,
+            error.map(|error| error.code),
+            error.map(|error| error.message.as_str()),
+        );
+        let latency = turn
+            .metrics
+            .latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        latency.record_on_span(&turn.prepared.span);
         if let (Some(context), Some(usage)) = (
             turn.prepared.prompt_cache_observation_context.take(),
             turn.usage.as_ref(),
@@ -1574,37 +1769,110 @@ impl ResponsesWebSocketGateway {
                 .publish_websocket_provider_cache_observation(&context, usage);
         }
         if let Some(observer) = turn.prepared.observer.as_ref() {
-            if let Some(usage) = turn.usage.take() {
-                observer.set_usage_counts(&usage, error.is_none() && turn.usage_complete);
+            let usage = turn.usage.take();
+            if let Some(usage) = usage.as_ref() {
+                observer.set_usage_counts(usage, complete && turn.usage_complete);
                 observer.emit_lifecycle(LifecycleEvent::UsageObserved {
                     event_id: observer.event_id().to_owned(),
-                    usage: usage_snapshot(usage),
+                    usage: usage_snapshot(usage.clone()),
                     source: UsageSource::NonStreamBody,
                 });
             }
+            observer.emit_lifecycle(LifecycleEvent::StreamCompleted {
+                event_id: observer.event_id().to_owned(),
+                result: if complete {
+                    Ok(cc_lb_lifecycle::StreamSuccess {
+                        usage: usage
+                            .as_ref()
+                            .map(|usage| usage_snapshot(usage.clone()))
+                            .unwrap_or_default(),
+                        usage_present: usage.is_some(),
+                        sse_event_count: 0,
+                        body_bytes: Some(latency.total_bytes),
+                        body_chunk_count: Some(latency.stream_event_count),
+                        first_body_chunk_ms: latency.stream_first_output_ms,
+                        stream_last_chunk_ms: latency.stream_last_output_ms,
+                        stream_total_ms: Some(latency.stream_total_ms),
+                        stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
+                        provider_session_id: latency.provider_session_id.clone(),
+                        provider_connection_id: latency.provider_connection_id.clone(),
+                        ..Default::default()
+                    })
+                } else {
+                    Err(cc_lb_lifecycle::StreamError {
+                        error_type: error
+                            .map(|error| {
+                                error
+                                    .native_code
+                                    .as_deref()
+                                    .unwrap_or(error.code)
+                                    .to_owned()
+                            })
+                            .unwrap_or_else(|| "responses_stream_incomplete".to_owned()),
+                        error_message: error.map(|error| error.message.clone()).unwrap_or_else(
+                            || "Responses WebSocket stream ended before completion".to_owned(),
+                        ),
+                        body_bytes: Some(latency.total_bytes),
+                        body_chunk_count: Some(latency.stream_event_count),
+                        first_body_chunk_ms: latency.stream_first_output_ms,
+                        stream_last_chunk_ms: latency.stream_last_chunk_ms,
+                        stream_total_ms: Some(latency.stream_total_ms),
+                        stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
+                        provider_session_id: latency.provider_session_id.clone(),
+                        provider_connection_id: latency.provider_connection_id.clone(),
+                        ..Default::default()
+                    })
+                },
+            });
             // The subscriber owns settlement from this point, including an
             // interrupted response with measured usage. Drop must not refund it.
             if let Some(reservation) = turn.prepared.reservation.take() {
                 reservation.handoff_after_response();
             }
-            if let Some(error) = error {
-                if let Some(native_code) = error.native_code.as_deref() {
-                    observer.emit_lifecycle(LifecycleEvent::StreamCompleted {
-                        event_id: observer.event_id().to_owned(),
-                        result: Err(cc_lb_lifecycle::StreamError {
-                            error_type: native_code.to_owned(),
-                            error_message: error.message.clone(),
-                        }),
-                    });
+            match (error, complete) {
+                (Some(error), _) if error.code == "client_closed_request" => {
+                    observer.set_client_closed(StatusCode::SWITCHING_PROTOCOLS);
+                }
+                (Some(error), _)
+                    if error.native_code.is_some()
+                        || error.code == "upstream_connection_closed" =>
+                {
                     observer.set_upstream_error(
-                        StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        StatusCode::SWITCHING_PROTOCOLS,
                         UpstreamErrorCode::StreamError,
                     );
                 }
-                terminate_error(observer, error);
-            } else {
-                observer.set_success_status(http::StatusCode::OK);
-                observer.finish();
+                (Some(_), _) => observer.set_failure(InternalFailure {
+                    status: StatusCode::SWITCHING_PROTOCOLS,
+                    error_code: UpstreamErrorCode::StreamError.as_str(),
+                    error: cc_lb_domain::InternalError {
+                        stage: cc_lb_domain::InternalErrorStage::Relay,
+                        kind: cc_lb_domain::InternalErrorKind::Unavailable,
+                        message: Some("Responses WebSocket relay failed".to_owned()),
+                    },
+                }),
+                (None, true) => observer.set_success_status(StatusCode::SWITCHING_PROTOCOLS),
+                (None, false) => observer.set_upstream_error(
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    UpstreamErrorCode::StreamError,
+                ),
+            }
+            observer.finish();
+            if let Some(dispatch) = tracing::enabled!(
+                target: "cc_lb_engine::lifecycle",
+                tracing::Level::INFO
+            )
+            .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()))
+            {
+                let _ = turn
+                    .prepared
+                    .completion_observer
+                    .enqueue(StreamCompletionLog::new(
+                        turn.prepared.request_id.clone(),
+                        &turn.prepared.span,
+                        latency,
+                        dispatch,
+                    ));
             }
         } else if let Some(reservation) = turn.prepared.reservation.take() {
             // No event bus exists for this embedded caller. Settle business
@@ -1632,7 +1900,6 @@ impl ResponsesWebSocketGateway {
                     cost.total_micros,
                 );
             }
-            // Otherwise the reservation's existing RAII owner refunds it.
         }
         self.collect_owner(turn.previous_response_id.as_deref());
         self.collect_owner(turn.response_id.as_deref());
@@ -2242,5 +2509,62 @@ mod tests {
             assert_eq!(lane.active, Some(12));
             assert!(lane_id.is_none() || lane_id.as_deref() == Some("main"));
         }
+    }
+
+    #[test]
+    fn responses_metrics_keep_provider_neutral_timing_and_identity() {
+        let mut metrics = ResponsesStreamMetrics::new();
+        metrics.observe(br#"{"response":{"id":"resp_123"}}"#);
+        metrics.observe(br#"{"type":"response.output_text.delta","delta":"ok"}"#);
+        let latency = metrics.latency(101);
+        assert_eq!(latency.stream_event_count, 2);
+        assert!(latency.stream_first_output_ms.is_some());
+        assert!(latency.stream_last_output_ms.is_some());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("resp_123"));
+        assert_eq!(latency.sse_event_count, 0);
+        assert_eq!(latency.content_delta_count, 0);
+    }
+
+    #[test]
+    fn responses_metrics_bound_provider_response_ids() {
+        let oversized = "x".repeat(513);
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(r#"{{"response":{{"id":"{oversized}"}},"response_id":"fallback"}}"#);
+        metrics.observe(frame.as_bytes());
+        assert_eq!(
+            metrics.provider_session_id.as_deref(),
+            Some("fallback"),
+            "an oversized primary ID must not block a bounded fallback ID",
+        );
+
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(r#"{{"response_id":"{oversized}"}}"#);
+        metrics.observe(frame.as_bytes());
+        assert_eq!(metrics.provider_session_id, None);
+
+        let accepted = "y".repeat(512);
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(r#"{{"response":{{"id":"{accepted}"}}}}"#);
+        metrics.observe(frame.as_bytes());
+        assert_eq!(
+            metrics.provider_session_id.as_deref(),
+            Some(accepted.as_str())
+        );
+    }
+
+    #[test]
+    fn responses_timing_tracks_output_events_without_anthropic_counters() {
+        let mut metrics = ResponsesStreamMetrics::new();
+        metrics.observe(br#"{"type":"response.created","response":{"id":"resp-native"}}"#);
+        metrics.observe(br#"{"type":"response.output_text.delta","delta":"a"}"#);
+        metrics.observe(br#"{"type":"response.completed","response":{"id":"resp-native"}}"#);
+        let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("resp-native"));
+        assert_eq!(latency.stream_event_count, 3);
+        assert!(latency.stream_first_output_ms.is_some());
+        assert!(latency.stream_last_output_ms.is_some());
+        assert_eq!(latency.sse_event_count, 0);
+        assert_eq!(latency.content_delta_count, 0);
+        assert_eq!(latency.ping_count, 0);
     }
 }

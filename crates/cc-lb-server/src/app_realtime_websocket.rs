@@ -19,6 +19,56 @@ fn upstream_close_frame(
         reason: frame.reason.to_string().into(),
     }
 }
+fn realtime_payload_kind(payload: &[u8], binary: bool) -> cc_lb_upstream::RealtimeFrameKind {
+    if binary {
+        cc_lb_upstream::RealtimeFrameKind::Binary
+    } else if sonic_rs::from_slice::<serde_json::Value>(payload).is_ok() {
+        cc_lb_upstream::RealtimeFrameKind::Json
+    } else {
+        cc_lb_upstream::RealtimeFrameKind::Text
+    }
+}
+
+fn realtime_data_frame(message: &UpstreamMessage) -> bool {
+    matches!(
+        message,
+        UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)
+    )
+}
+
+fn transform_realtime_message(
+    session: &RealtimeWebSocketSession,
+    direction: cc_lb_upstream::RealtimeFrameDirection,
+    message: UpstreamMessage,
+) -> Result<Option<UpstreamMessage>, ()> {
+    if !session.has_frame_transform() {
+        return Ok(Some(message));
+    }
+    let (kind, payload) = match &message {
+        UpstreamMessage::Text(frame) => (
+            realtime_payload_kind(frame.as_bytes(), false),
+            Bytes::from(frame.clone()),
+        ),
+        UpstreamMessage::Binary(frame) => (realtime_payload_kind(frame, true), frame.clone()),
+        _ => return Ok(Some(message)),
+    };
+    match session
+        .transform_frame(direction, kind, payload)
+        .map_err(|_| ())?
+    {
+        cc_lb_upstream::TransformRealtimeFrameResult::Unchanged => Ok(Some(message)),
+        cc_lb_upstream::TransformRealtimeFrameResult::Drop => Ok(None),
+        cc_lb_upstream::TransformRealtimeFrameResult::Replace { kind, payload } => {
+            Ok(Some(match kind {
+                cc_lb_upstream::RealtimeFrameKind::Binary => UpstreamMessage::Binary(payload),
+                cc_lb_upstream::RealtimeFrameKind::Json
+                | cc_lb_upstream::RealtimeFrameKind::Text => UpstreamMessage::Text(
+                    String::from_utf8(payload.to_vec()).map_err(|_| ())?.into(),
+                ),
+            }))
+        }
+    }
+}
 
 type RealtimeProvider = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -262,7 +312,10 @@ pub(super) async fn gemini_live_websocket_handler(
                 }
             };
             let Some(first) = first else {
-                observation.finish(StatusCode::SWITCHING_PROTOCOLS);
+                // Authentication and lifecycle admission have already
+                // completed, but no provider setup was received. Record this
+                // as a client cancellation rather than a successful upgrade.
+                observation.finish_client_closed();
                 let _ = downstream.send(Message::Close(None)).now_or_never();
                 return;
             };
@@ -308,12 +361,32 @@ pub(super) async fn gemini_live_websocket_handler(
                 }
             };
             session.connected();
+            let first = match transform_realtime_message(
+                &session,
+                cc_lb_upstream::RealtimeFrameDirection::Setup,
+                first,
+            ) {
+                Ok(Some(first)) => first,
+                Ok(None) | Err(()) => {
+                    session.finish(
+                        RealtimeUsage::default(),
+                        RealtimeStreamMetrics::new(),
+                        RealtimeWebSocketTermination::ProxyRelayError,
+                    );
+                    let _ = downstream.send(Message::Close(None)).now_or_never();
+                    return;
+                }
+            };
             let sent = tokio::select! {
                 sent = upstream.send(first) => sent.is_ok(),
                 _ = state.drain_controller.wait_for_draining() => false,
             };
             if !sent {
-                session.finish(RealtimeUsage::default(), StatusCode::BAD_GATEWAY);
+                session.finish(
+                    RealtimeUsage::default(),
+                    RealtimeStreamMetrics::new(),
+                    RealtimeWebSocketTermination::ProxyRelayError,
+                );
                 return;
             }
             relay_realtime_websocket(
@@ -339,6 +412,8 @@ async fn relay_realtime_websocket(
     // Usage frames are already marker-filtered, so an unbounded handoff keeps
     // accounting lossless without ever blocking the media relay task.
     let (usage_tx, usage_worker) = spawn_realtime_usage_worker(kind);
+    let mut metrics = RealtimeStreamMetrics::new();
+    let mut setup_pending = matches!(kind, RealtimeWebSocketKind::Openai);
     let relay = async {
         loop {
             tokio::select! {
@@ -352,51 +427,106 @@ async fn relay_realtime_websocket(
                             let frame = frame.map(downstream_close_frame);
                             let _ = upstream.send(UpstreamMessage::Close(frame)).await;
                             let _ = downstream.flush().await;
-                            return StatusCode::SWITCHING_PROTOCOLS;
+                            return RealtimeWebSocketTermination::DownstreamCancelled;
                         }
-                        Some(Err(_)) | None => return StatusCode::SWITCHING_PROTOCOLS,
+                        Some(Err(_)) | None => return RealtimeWebSocketTermination::DownstreamCancelled,
                     };
-                    if upstream.send(message).await.is_err() { return StatusCode::BAD_GATEWAY; }
+                    let is_data = realtime_data_frame(&message);
+                    let direction = if setup_pending {
+                        cc_lb_upstream::RealtimeFrameDirection::Setup
+                    } else {
+                        cc_lb_upstream::RealtimeFrameDirection::ClientToProvider
+                    };
+                    let message = match transform_realtime_message(
+                        &session,
+                        direction,
+                        message,
+                    ) {
+                        Ok(Some(message)) => message,
+                        Ok(None) => continue,
+                        Err(()) => return RealtimeWebSocketTermination::ProxyRelayError,
+                    };
+                    if upstream.send(message).await.is_err() {
+                        return RealtimeWebSocketTermination::ProxyRelayError;
+                    }
+                    // Ping/Pong control frames are relayed but do not
+                    // consume OpenAI's first-data-frame setup state.
+                    if is_data {
+                        setup_pending = false;
+                    }
                 }
                 message = upstream.next() => {
                     let message = match message {
-                        Some(Ok(UpstreamMessage::Text(frame))) => {
-                            if kind.may_report_usage(frame.as_bytes()) {
-                                let _ = usage_tx.send(Bytes::from(frame.clone()));
+                        Some(Ok(message @ UpstreamMessage::Text(_))) => {
+                            if let UpstreamMessage::Text(frame) = &message {
+                                metrics.observe_frame(frame.as_bytes());
+                                metrics.observe_turn_boundary(kind, frame.as_bytes());
+                                metrics.observe_provider_metadata(kind, frame.as_bytes());
+                                if kind.may_report_usage(frame.as_bytes()) {
+                                    let _ = usage_tx.send(Bytes::from(frame.clone()));
+                                }
                             }
-                            Message::Text(Bytes::from(frame).try_into().expect("valid provider text"))
+                            message
                         }
-                        Some(Ok(UpstreamMessage::Binary(frame))) => {
-                            if kind.may_report_usage(&frame) {
-                                let _ = usage_tx.send(frame.clone());
+                        Some(Ok(message @ UpstreamMessage::Binary(_))) => {
+                            if let UpstreamMessage::Binary(frame) = &message {
+                                metrics.observe_frame(frame);
+                                metrics.observe_turn_boundary(kind, frame);
+                                metrics.observe_provider_metadata(kind, frame);
+                                if kind.may_report_usage(frame) {
+                                    let _ = usage_tx.send(frame.clone());
+                                }
                             }
-                            Message::Binary(frame)
+                            message
                         }
-                        Some(Ok(UpstreamMessage::Ping(frame))) => Message::Ping(frame),
-                        Some(Ok(UpstreamMessage::Pong(frame))) => Message::Pong(frame),
+                        Some(Ok(message @ UpstreamMessage::Ping(_))) => {
+                            metrics.observe_ping();
+                            message
+                        }
+                        Some(Ok(message @ UpstreamMessage::Pong(_))) => message,
                         Some(Ok(UpstreamMessage::Close(frame))) => {
                             let frame = frame.map(upstream_close_frame);
                             let _ = downstream.send(Message::Close(frame)).await;
                             let _ = upstream.flush().await;
-                            return StatusCode::SWITCHING_PROTOCOLS;
+                            return RealtimeWebSocketTermination::ProviderClosed;
                         }
                         Some(Ok(UpstreamMessage::Frame(_))) => continue,
-                        Some(Err(_)) | None => return StatusCode::BAD_GATEWAY,
+                        Some(Err(_)) | None => return RealtimeWebSocketTermination::ProxyRelayError,
                     };
-                    if downstream.send(message).await.is_err() { return StatusCode::SWITCHING_PROTOCOLS; }
+                    let message = match transform_realtime_message(
+                        &session,
+                        cc_lb_upstream::RealtimeFrameDirection::ProviderToClient,
+                        message,
+                    ) {
+                        Ok(Some(message)) => message,
+                        Ok(None) => continue,
+                        Err(()) => return RealtimeWebSocketTermination::ProxyRelayError,
+                    };
+                    let message = match message {
+                        UpstreamMessage::Text(frame) => {
+                            Message::Text(Bytes::from(frame).try_into().expect("valid provider text"))
+                        }
+                        UpstreamMessage::Binary(frame) => Message::Binary(frame),
+                        UpstreamMessage::Ping(frame) => Message::Ping(frame),
+                        UpstreamMessage::Pong(frame) => Message::Pong(frame),
+                        UpstreamMessage::Close(_) | UpstreamMessage::Frame(_) => continue,
+                    };
+                    if downstream.send(message).await.is_err() {
+                        return RealtimeWebSocketTermination::DownstreamCancelled;
+                    }
                 }
             }
         }
     };
-    let status = tokio::select! {
-        status = relay => status,
-        _ = state.drain_controller.wait_for_draining() => StatusCode::SERVICE_UNAVAILABLE,
+    let termination = tokio::select! {
+        termination = relay => termination,
+        _ = state.drain_controller.wait_for_draining() => RealtimeWebSocketTermination::DownstreamCancelled,
     };
     let _ = upstream.send(UpstreamMessage::Close(None)).now_or_never();
     let _ = downstream.send(Message::Close(None)).now_or_never();
     drop(usage_tx);
     let usage = usage_worker.await.unwrap_or_default();
-    session.finish(usage, status);
+    session.finish(usage, metrics, termination);
 }
 
 #[cfg(test)]
@@ -416,5 +546,15 @@ mod tests {
         }
         drop(usage_tx);
         usage_worker.await.expect("usage worker must drain");
+    }
+
+    #[test]
+    fn realtime_control_frames_do_not_consume_openai_setup_state() {
+        assert!(!realtime_data_frame(&UpstreamMessage::Ping(Bytes::new())));
+        assert!(!realtime_data_frame(&UpstreamMessage::Pong(Bytes::new())));
+        assert!(realtime_data_frame(&UpstreamMessage::Text(
+            "response.create".to_owned().into()
+        )));
+        assert!(realtime_data_frame(&UpstreamMessage::Binary(Bytes::new())));
     }
 }

@@ -3273,6 +3273,7 @@ fn affinity_stream_error() -> cc_lb_lifecycle::StreamError {
     cc_lb_lifecycle::StreamError {
         error_type: UPSTREAM_AFFINITY_ERROR_TYPE.to_owned(),
         error_message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned(),
+        ..Default::default()
     }
 }
 
@@ -4200,9 +4201,41 @@ impl Lifecycle {
             http.request.method = "GET",
             url.path = "/v1/responses",
         );
+        let stream_span = tracing::info_span!(
+            "proxy.response_stream",
+            cc_lb.request.id = request_id,
+            cc_lb.event.id = observer.as_ref().map(|observer| observer.event_id()),
+            cc_lb.responses.stream_id = tracing::field::Empty,
+            cc_lb.responses.connection_id = tracing::field::Empty,
+            cc_lb.upstream.id = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
+            gen_ai.request.stream = true,
+            transport = "websocket",
+            otel.status_code = tracing::field::Empty,
+            http.response.status_code = tracing::field::Empty,
+            cc_lb.request.outcome = tracing::field::Empty,
+            cc_lb.request.duration_ms = tracing::field::Empty,
+            cc_lb.request.finalize_ms = tracing::field::Empty,
+            cc_lb.request.unaccounted_ms = tracing::field::Empty,
+            stream.outcome = tracing::field::Empty,
+            error.cause = tracing::field::Empty,
+            error.chain = tracing::field::Empty,
+            error.io.kind = tracing::field::Empty,
+            error.io.os_error = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            stream_first_output_ms = tracing::field::Empty,
+            stream_last_output_ms = tracing::field::Empty,
+            stream_event_count = tracing::field::Empty,
+            stream_total_ms = tracing::field::Empty,
+            stream_inter_output_avg_ms = tracing::field::Empty,
+            provider_session_id = tracing::field::Empty,
+            provider_connection_id = tracing::field::Empty,
+            total_bytes = tracing::field::Empty,
+        );
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
             observer.set_request_span(span.clone());
+            observer.set_response_stream_span(stream_span.clone());
             observer.emit_request_started(true);
         }
         let result = async {
@@ -4435,6 +4468,7 @@ impl Lifecycle {
                 candidates,
                 route_info,
                 observer: observer.clone(),
+                completion_observer: Arc::clone(&self.completion_observer),
                 prompt_cache_observation_context,
                 reservation: active_limit
                     .as_mut()
@@ -4444,7 +4478,7 @@ impl Lifecycle {
                 key_id: auth.key_id().to_owned(),
                 model,
                 store: body.get("store").and_then(Value::as_bool).unwrap_or(true),
-                span: span.clone(),
+                span: stream_span.clone(),
                 request_id: request_id.to_owned(),
             })
         }
@@ -6572,6 +6606,7 @@ impl Lifecycle {
                 Err(cc_lb_lifecycle::StreamError {
                     error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
                     error_message: UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE.to_owned(),
+                    ..Default::default()
                 })
             } else if affinity_bind_failed {
                 Err(affinity_stream_error())
@@ -6579,6 +6614,7 @@ impl Lifecycle {
                 Err(cc_lb_lifecycle::StreamError {
                     error_type: "response_transform_error".to_owned(),
                     error_message: error.to_string(),
+                    ..Default::default()
                 })
             } else if non_error_status_response_failed {
                 Err(cc_lb_lifecycle::StreamError {
@@ -6588,6 +6624,7 @@ impl Lifecycle {
                     error_message: upstream_error_message
                         .clone()
                         .unwrap_or_else(|| "The provider response failed".to_owned()),
+                    ..Default::default()
                 })
             } else {
                 Ok(cc_lb_lifecycle::StreamSuccess {
@@ -7372,6 +7409,7 @@ impl Lifecycle {
                                 stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                                     error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
                                     error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                    ..Default::default()
                                 });
                                 let frame = make_stream_error_frame(
                                     response_affinity_context.capability,
@@ -7480,6 +7518,7 @@ impl Lifecycle {
                                                 error_message:
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
+                                                ..Default::default()
                                             });
                                         let frame = make_stream_error_frame(
                                             response_affinity_context.capability,
@@ -7515,6 +7554,7 @@ impl Lifecycle {
                                                 error_type:
                                                     UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
                                                 error_message: error_message.clone(),
+                                                ..Default::default()
                                             });
                                         if transformed_output_started
                                             || !downstream_stream_is_identity
@@ -7618,6 +7658,7 @@ impl Lifecycle {
                                                 .error_message
                                                 .clone()
                                                 .unwrap_or_default(),
+                                            ..Default::default()
                                         };
                                         o.emit_lifecycle(
                                             cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
@@ -7666,6 +7707,7 @@ impl Lifecycle {
                                                     error_message:
                                                         UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                             .to_owned(),
+                                                    ..Default::default()
                                                 });
                                             parse_sse_events_active = false;
                                             buffer.clear();
@@ -8076,6 +8118,7 @@ impl Lifecycle {
                                                 error_message:
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
+                                                ..Default::default()
                                             });
                                         let frame = make_stream_error_frame(
                                             response_affinity_context.capability,
@@ -8177,6 +8220,7 @@ impl Lifecycle {
                                                 UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
                                             error_message:
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                            ..Default::default()
                                         });
                                     let frame = make_stream_error_frame(
                                         response_affinity_context.capability,
@@ -8335,6 +8379,7 @@ impl Lifecycle {
                             stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                                 error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
                                 error_message: classification.redacted_message.clone(),
+                                ..Default::default()
                             });
                             downstream_drop_guard.mark_upstream_error(
                                 classification.cause,
@@ -8419,6 +8464,7 @@ impl Lifecycle {
                                                 error_message:
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
+                                                ..Default::default()
                                             });
                                         downstream_drop_guard.mark_upstream_error(
                                             StreamTerminationCause::FramingError,
@@ -8536,6 +8582,7 @@ impl Lifecycle {
                                             .error_message
                                             .clone()
                                             .unwrap_or_default(),
+                                        ..Default::default()
                                     };
                                     o.emit_lifecycle(
                                         cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
@@ -8601,6 +8648,7 @@ impl Lifecycle {
                                                 error_message:
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
+                                                ..Default::default()
                                             });
                                         downstream_drop_guard.mark_upstream_error(
                                             StreamTerminationCause::FramingError,
@@ -8698,6 +8746,7 @@ impl Lifecycle {
                                             UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
                                         error_message:
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                        ..Default::default()
                                     });
                                 downstream_drop_guard.mark_upstream_error(
                                     StreamTerminationCause::FramingError,
@@ -8816,6 +8865,7 @@ impl Lifecycle {
                         stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                             error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
                             error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                            ..Default::default()
                         });
                         downstream_drop_guard.mark_upstream_error(
                             StreamTerminationCause::DecodeError,
@@ -8841,6 +8891,7 @@ impl Lifecycle {
                                 error_message: format!(
                                     "upstream response decoding failed: {error}"
                                 ),
+                                ..Default::default()
                             });
                         }
                         if decode_error_is_primary {
@@ -8924,6 +8975,7 @@ impl Lifecycle {
                 stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                     error_type: UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
                     error_message: error_message.clone(),
+                    ..Default::default()
                 });
                 downstream_drop_guard.mark_upstream_error(
                     StreamTerminationCause::FramingError,
@@ -8980,6 +9032,7 @@ impl Lifecycle {
                     error_type: UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE.to_owned(),
                     error_message:
                         "upstream SSE response ended before message_stop".to_owned(),
+                    ..Default::default()
                 });
                 downstream_drop_guard.mark_upstream_error(
                     StreamTerminationCause::Unknown,
@@ -9110,6 +9163,7 @@ impl Lifecycle {
                         result: Err(cc_lb_lifecycle::StreamError {
                             error_type: "response_transform_error".to_owned(),
                             error_message: error.to_string(),
+                            ..Default::default()
                         }),
                     });
                 } else {
@@ -9131,6 +9185,9 @@ impl Lifecycle {
                             stream_total_ms: Some(stream_total_ms),
                             content_delta_count: Some(content_delta_count),
                             ping_count: Some(ping_count),
+                            stream_inter_output_avg_ms: None,
+                            provider_session_id: None,
+                            provider_connection_id: None,
                             inter_token_avg_ms,
                         }),
                     });
@@ -9211,6 +9268,12 @@ impl Lifecycle {
                 stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
                 stream_message_stop_ms: elapsed_ms(message_stop_at),
                 stream_last_chunk_ms: elapsed_ms(last_chunk_at),
+                stream_first_output_ms: None,
+                stream_last_output_ms: None,
+                stream_event_count: 0,
+                stream_inter_output_avg_ms: None,
+                provider_session_id: None,
+                provider_connection_id: None,
                 stream_total_ms,
                 sse_event_count,
                 content_delta_count,

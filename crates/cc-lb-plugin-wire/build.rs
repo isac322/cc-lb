@@ -300,6 +300,21 @@ fn main() {
         },
         SchemaEntry {
             impl_generics: "",
+            ty: "v2::TransformRealtimeFrameRequest",
+            descriptor: "TransformRealtimeFrameRequest{canonical_model_id:Box<str>,direction:Box<str>,kind:Box<str>,payload:Box<[u8]>,principal:Principal,request_id:Box<str>,request_method:Box<str>,request_path:Box<str>,upstream:Upstream,upstream_identity:UpstreamIdentity}",
+        },
+        SchemaEntry {
+            impl_generics: "<'a>",
+            ty: "v2::TransformRealtimeFrameRequestRef<'a>",
+            descriptor: "TransformRealtimeFrameRequestRef{canonical_model_id:&str,direction:&str,kind:&str,payload:&[u8],principal:PrincipalRef,request_id:&str,request_method:&str,request_path:&str,upstream:UpstreamRef,upstream_identity:UpstreamIdentityRef}",
+        },
+        SchemaEntry {
+            impl_generics: "",
+            ty: "v2::TransformRealtimeFrameResult",
+            descriptor: "TransformRealtimeFrameResult[Unchanged,Replace{kind:Box<str>,payload:Box<[u8]>},Drop]",
+        },
+        SchemaEntry {
+            impl_generics: "",
             ty: "v2::ShapeEnvelopeGeminiRequest",
             descriptor: "ShapeEnvelopeGeminiRequest{envelope_body:Box<[u8]>,headers:Box<[Header]>,upstream:UpstreamIdentity,url:Box<str>}",
         },

@@ -130,6 +130,9 @@ pub(super) fn publish_renewal_lifecycle(
             stream_total_ms: None,
             content_delta_count: None,
             ping_count: None,
+            stream_inter_output_avg_ms: None,
+            provider_session_id: None,
+            provider_connection_id: None,
             inter_token_avg_ms: None,
         }),
     });

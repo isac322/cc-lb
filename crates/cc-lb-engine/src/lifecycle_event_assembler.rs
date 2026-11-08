@@ -224,13 +224,16 @@ struct Partial {
     stream_first_content_delta_ms: Option<u64>,
     stream_last_content_delta_ms: Option<u64>,
     stream_message_stop_ms: Option<u64>,
+    stream_first_output_ms: Option<u64>,
     stream_last_chunk_ms: Option<u64>,
     stream_total_ms: Option<u64>,
     stream_content_delta_count: Option<u64>,
     stream_ping_count: Option<u64>,
+    stream_inter_output_avg_ms: Option<u64>,
+    provider_session_id: Option<String>,
+    provider_connection_id: Option<String>,
     stream_inter_token_avg_ms: Option<u64>,
 }
-
 struct TerminationInfo {
     reason: TerminationReason,
     client_status: u16,
@@ -1387,15 +1390,40 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_first_content_delta_ms = success.stream_first_content_delta_ms;
                 partial.stream_last_content_delta_ms = success.stream_last_content_delta_ms;
                 partial.stream_message_stop_ms = success.stream_message_stop_ms;
+                partial.stream_first_output_ms = success.first_body_chunk_ms;
                 partial.stream_last_chunk_ms = success.stream_last_chunk_ms;
                 partial.stream_total_ms = success.stream_total_ms;
                 partial.stream_content_delta_count = success.content_delta_count;
                 partial.stream_ping_count = success.ping_count;
+                partial.stream_inter_output_avg_ms = success.stream_inter_output_avg_ms;
+                partial.provider_session_id = success.provider_session_id;
+                partial.provider_connection_id = success.provider_connection_id;
                 partial.stream_inter_token_avg_ms = success.inter_token_avg_ms;
             }
             Err(error) => {
                 partial.stream_error_type = Some(error.error_type);
                 partial.stream_error_message = Some(error.error_message);
+                // Preserve provider-neutral fields collected before an
+                // abnormal termination. Do not replace an earlier value with
+                // an empty error payload.
+                partial.stream_body_bytes = partial.stream_body_bytes.or(error.body_bytes);
+                partial.stream_body_chunk_count =
+                    partial.stream_body_chunk_count.or(error.body_chunk_count);
+                partial.stream_first_output_ms =
+                    partial.stream_first_output_ms.or(error.first_body_chunk_ms);
+                partial.stream_last_chunk_ms =
+                    partial.stream_last_chunk_ms.or(error.stream_last_chunk_ms);
+                partial.stream_total_ms = partial.stream_total_ms.or(error.stream_total_ms);
+                partial.stream_ping_count = partial.stream_ping_count.or(error.ping_count);
+                partial.stream_inter_output_avg_ms = partial
+                    .stream_inter_output_avg_ms
+                    .or(error.stream_inter_output_avg_ms);
+                if let Some(value) = error.provider_session_id {
+                    partial.provider_session_id.get_or_insert(value);
+                }
+                if let Some(value) = error.provider_connection_id {
+                    partial.provider_connection_id.get_or_insert(value);
+                }
             }
         },
         LifecycleEvent::RequestLogUpstreamErrorObserved {
@@ -1674,10 +1702,14 @@ fn finalize_base(
         stream_message_stop_ms: partial
             .stream_message_stop_ms
             .or_else(|| diagnostics.and_then(|d| d.message_stop_ms)),
+        stream_first_output_ms: partial.stream_first_output_ms,
         stream_last_chunk_ms: partial.stream_last_chunk_ms,
         stream_total_ms: partial.stream_total_ms,
         content_delta_count: partial.stream_content_delta_count,
         ping_count: partial.stream_ping_count,
+        stream_inter_output_avg_ms: partial.stream_inter_output_avg_ms,
+        provider_session_id: partial.provider_session_id.clone(),
+        provider_connection_id: partial.provider_connection_id.clone(),
         inter_token_avg_ms: partial.stream_inter_token_avg_ms,
         routing_trace,
         internal_errors: partial.internal_errors.clone(),
@@ -2046,6 +2078,15 @@ mod tests {
                 result: Err(StreamError {
                     error_type: "client_closed_request".to_owned(),
                     error_message: "downstream disconnected".to_owned(),
+                    body_bytes: Some(123),
+                    body_chunk_count: Some(7),
+                    first_body_chunk_ms: Some(12),
+                    stream_last_chunk_ms: Some(34),
+                    stream_total_ms: Some(56),
+                    ping_count: Some(2),
+                    stream_inter_output_avg_ms: Some(11),
+                    provider_session_id: Some("session-before-cancel".to_owned()),
+                    provider_connection_id: Some("connection-before-cancel".to_owned()),
                 }),
             },
         );
@@ -2070,7 +2111,7 @@ mod tests {
         assert_eq!(event.request_body_bytes, Some(917_567));
         assert_eq!(event.upstream_body_ms, Some(41));
         assert_eq!(event.finalize_ms, Some(4));
-        assert_eq!(event.stream_total_ms, None);
+        assert_eq!(event.stream_total_ms, Some(56));
         assert_eq!(event.request_body_first_chunk_ms, Some(0.0));
         assert_eq!(event.request_body_receive_ms, Some(2.25));
         assert_eq!(event.request_body_wait_ms, Some(7.5));
@@ -2080,6 +2121,21 @@ mod tests {
         assert_eq!(event.response_body_process_ms, Some(0.625));
         assert_eq!(event.response_body_downstream_poll_gap_ms, Some(12.75));
         assert_eq!(event.retry_overhead_ms, None);
+        assert_eq!(event.body_bytes, Some(123));
+        assert_eq!(event.body_chunk_count, Some(7));
+        assert_eq!(event.stream_first_output_ms, Some(12));
+        assert_eq!(event.stream_last_chunk_ms, Some(34));
+        assert_eq!(event.stream_total_ms, Some(56));
+        assert_eq!(event.ping_count, Some(2));
+        assert_eq!(event.stream_inter_output_avg_ms, Some(11));
+        assert_eq!(
+            event.provider_session_id.as_deref(),
+            Some("session-before-cancel")
+        );
+        assert_eq!(
+            event.provider_connection_id.as_deref(),
+            Some("connection-before-cancel")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2740,6 +2796,7 @@ mod tests {
             result: Err(StreamError {
                 error_type: "overloaded_error".into(),
                 error_message: "please retry".into(),
+                ..Default::default()
             }),
         })
         .await
@@ -2912,6 +2969,7 @@ mod tests {
             result: Err(StreamError {
                 error_type: "upstream_response_body_error".into(),
                 error_message: "upstream response body failed".into(),
+                ..Default::default()
             }),
         })
         .await
@@ -3063,6 +3121,62 @@ mod tests {
         assert_eq!(row.upstream_body_bytes, None);
         assert_eq!(row.upstream_http_version, None);
         assert_eq!(row.upstream_stream_warning_type, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn websocket_neutral_timing_and_provider_identity_persist_in_request_row() {
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("websocket-neutral-fields");
+
+        tx.send(diagnostics_started(
+            event_id.clone(),
+            "req-websocket-neutral",
+        ))
+        .await
+        .expect("request starts");
+        tx.send(LifecycleEvent::StreamCompleted {
+            event_id: event_id.clone(),
+            result: Ok(StreamSuccess {
+                body_bytes: Some(12),
+                body_chunk_count: Some(3),
+                first_body_chunk_ms: Some(4),
+                stream_last_chunk_ms: Some(9),
+                stream_total_ms: Some(11),
+                stream_inter_output_avg_ms: Some(2),
+                provider_session_id: Some("provider-session".to_owned()),
+                provider_connection_id: Some("provider-connection".to_owned()),
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect("stream completion arrives");
+        tx.send(diagnostics_terminated(
+            event_id,
+            TerminationReason::Success,
+            101,
+        ))
+        .await
+        .expect("request terminates");
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.status, 101);
+        assert_eq!(row.body_bytes, Some(12));
+        assert_eq!(row.body_chunk_count, Some(3));
+        assert_eq!(row.stream_first_output_ms, Some(4));
+        assert_eq!(row.stream_last_chunk_ms, Some(9));
+        assert_eq!(row.stream_total_ms, Some(11));
+        assert_eq!(row.stream_inter_output_avg_ms, Some(2));
+        assert_eq!(row.provider_session_id.as_deref(), Some("provider-session"));
+        assert_eq!(
+            row.provider_connection_id.as_deref(),
+            Some("provider-connection")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

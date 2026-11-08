@@ -11,9 +11,11 @@ use cc_lb_plugin_wire::{
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntimeError};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, GeminiEnvelopeHook, GeminiEnvelopeRequest,
-    GeminiEnvelopeResult, ResponseTransformError, ResponseTransformHook, ShapedRequest,
-    ShapedRequestBuilder, SseEventTransformHook, TransformResponseRequest, TransformResponseResult,
-    TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
+    GeminiEnvelopeResult, RealtimeFrameDirection, RealtimeFrameKind, RealtimeFrameTransformHook,
+    ResponseTransformError, ResponseTransformHook, ShapedRequest, ShapedRequestBuilder,
+    SseEventTransformHook, TransformRealtimeFrameRequest, TransformRealtimeFrameResult,
+    TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+    TransformSseEventResult, UpstreamDialect,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -28,6 +30,7 @@ pub struct WasmtimeUpstreamDialect {
     dispatch: Arc<WasmPluginWireDispatch>,
     response_transform: Option<WasmtimeResponseTransformHook>,
     sse_event_transform: Option<WasmtimeSseEventTransformHook>,
+    realtime_frame_transform: Option<WasmtimeRealtimeFrameTransformHook>,
     native_request: Option<Arc<dyn UpstreamDialect>>,
     upstream_identity: Option<UpstreamIdentity>,
 }
@@ -52,10 +55,20 @@ impl WasmtimeUpstreamDialect {
         } else {
             None
         };
+        let realtime_frame_transform = if dispatch.has_realtime_frame_transform() {
+            Some(WasmtimeRealtimeFrameTransformHook {
+                dispatch: Arc::clone(&dispatch),
+                wire_version: dispatch.realtime_frame_wire_version(),
+                identity: None,
+            })
+        } else {
+            None
+        };
         Self {
             dispatch,
             response_transform,
             sse_event_transform,
+            realtime_frame_transform,
             native_request: None,
             upstream_identity: None,
         }
@@ -72,6 +85,9 @@ impl WasmtimeUpstreamDialect {
             hook.identity = Some(identity.clone());
         }
         if let Some(hook) = self.sse_event_transform.as_mut() {
+            hook.identity = Some(identity.clone());
+        }
+        if let Some(hook) = self.realtime_frame_transform.as_mut() {
             hook.identity = Some(identity);
         }
         self
@@ -189,6 +205,11 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
         self.sse_event_transform
             .as_ref()
             .map(|h| h as &dyn SseEventTransformHook)
+    }
+    fn realtime_frame_transform_hook(&self) -> Option<&dyn RealtimeFrameTransformHook> {
+        self.realtime_frame_transform
+            .as_ref()
+            .map(|h| h as &dyn RealtimeFrameTransformHook)
     }
 }
 
@@ -397,6 +418,40 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
             self.dispatch.wire_bounds().output_body_bytes,
         )?;
         wire_to_host_transform_sse_event(&out_bytes)
+    }
+}
+struct WasmtimeRealtimeFrameTransformHook {
+    dispatch: Arc<WasmPluginWireDispatch>,
+    wire_version: Option<WireVersion>,
+    identity: Option<UpstreamIdentity>,
+}
+
+impl RealtimeFrameTransformHook for WasmtimeRealtimeFrameTransformHook {
+    fn transform_realtime_frame(
+        &self,
+        request: TransformRealtimeFrameRequest,
+    ) -> Result<TransformRealtimeFrameResult, ResponseTransformError> {
+        let identity = self.identity.as_ref().ok_or_else(|| {
+            response_runtime_error(
+                "V2 realtime frame transform missing upstream identity".to_owned(),
+            )
+        })?;
+        if self.wire_version != Some(WireVersion::V2) {
+            return Err(response_runtime_error(
+                "realtime frame transform requires wire version 2".to_owned(),
+            ));
+        }
+        let input = host_to_wire_transform_realtime_frame_v2(&request, identity)
+            .map_err(|e| response_runtime_error(format!("rkyv encode realtime frame: {e}")))?;
+        let output = self
+            .dispatch
+            .call_transform_realtime_frame(input.as_slice())
+            .map_err(runtime_error_to_response_transform)?;
+        reject_oversized_output(
+            output.as_slice(),
+            self.dispatch.wire_bounds().output_body_bytes,
+        )?;
+        wire_to_host_transform_realtime_frame(&output)
     }
 }
 
@@ -846,6 +901,67 @@ fn host_to_wire_transform_sse_event_v2(
     };
     rkyv::to_bytes::<RkyvError>(&wire)
 }
+fn host_to_wire_transform_realtime_frame_v2(
+    request: &TransformRealtimeFrameRequest,
+    identity: &UpstreamIdentity,
+) -> Result<AlignedVec<16>, RkyvError> {
+    let wire = v2::TransformRealtimeFrameRequestRef {
+        request_id: request.request_id.as_str(),
+        principal: v2::PrincipalRef {
+            id: request.principal.id.as_str(),
+            kind: principal_kind_to_wire(&request.principal),
+            claims: &[],
+        },
+        upstream: v2_upstream_ref(&request.upstream),
+        upstream_identity: v2_identity_ref(identity),
+        request_method: request.request_method.as_str(),
+        request_path: request.request_path.as_str(),
+        canonical_model_id: request.canonical_model_id.as_str(),
+        direction: match request.direction {
+            RealtimeFrameDirection::Setup => "setup",
+            RealtimeFrameDirection::ClientToProvider => "client_to_provider",
+            RealtimeFrameDirection::ProviderToClient => "provider_to_client",
+        },
+        kind: match request.kind {
+            RealtimeFrameKind::Json => "json",
+            RealtimeFrameKind::Text => "text",
+            RealtimeFrameKind::Binary => "binary",
+        },
+        payload: request.payload.as_ref(),
+    };
+    rkyv::to_bytes::<RkyvError>(&wire)
+}
+
+fn wire_to_host_transform_realtime_frame(
+    bytes: &AlignedVec<16>,
+) -> Result<TransformRealtimeFrameResult, ResponseTransformError> {
+    let archived = rkyv::access::<v2::ArchivedTransformRealtimeFrameResult, RkyvError>(bytes)
+        .map_err(|e| response_runtime_error(format!("rkyv access realtime frame result: {e}")))?;
+    let result: v2::TransformRealtimeFrameResult =
+        rkyv::deserialize::<v2::TransformRealtimeFrameResult, RkyvError>(archived).map_err(
+            |e| response_runtime_error(format!("rkyv deserialize realtime frame result: {e}")),
+        )?;
+    match result {
+        v2::TransformRealtimeFrameResult::Unchanged => Ok(TransformRealtimeFrameResult::Unchanged),
+        v2::TransformRealtimeFrameResult::Drop => Ok(TransformRealtimeFrameResult::Drop),
+        v2::TransformRealtimeFrameResult::Replace { kind, payload } => {
+            let kind = match kind.as_ref() {
+                "json" => RealtimeFrameKind::Json,
+                "text" => RealtimeFrameKind::Text,
+                "binary" => RealtimeFrameKind::Binary,
+                other => {
+                    return Err(response_runtime_error(format!(
+                        "unknown realtime frame kind `{other}`"
+                    )));
+                }
+            };
+            Ok(TransformRealtimeFrameResult::Replace {
+                kind,
+                payload: bytes::Bytes::from(payload),
+            })
+        }
+    }
+}
 
 fn wire_to_host_transform_response(
     bytes: &AlignedVec<16>,
@@ -985,7 +1101,7 @@ fn response_runtime_error(reason: String) -> ResponseTransformError {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use cc_lb_domain::{PrincipalKind, Upstream};
+    use cc_lb_domain::{PrincipalKind, Provider, Upstream, UpstreamIdentity};
     use cc_lb_plugin_wire::{ArchivedShapeRequest, ArchivedShapeResponse, ShapeResponse};
     use cc_lb_upstream::{DialectShapeContext, UpstreamDialect, shape_request};
     use http::{HeaderMap, HeaderValue, Method};
@@ -1127,5 +1243,118 @@ mod tests {
         )
         .expect("shape request");
         assert_eq!(shaped.url().query(), Some("keep=1"));
+    }
+
+    #[test]
+    fn realtime_frame_wire_contract_preserves_host_owned_identity_and_transport_shape() {
+        let identity = UpstreamIdentity {
+            provider: Provider::Gemini,
+            credential_kind: "gemini_api_key".to_owned(),
+            upstream_id: "upstream-42".to_owned(),
+            name: "live-primary".to_owned(),
+            base_url: Some("https://provider.example/".to_owned()),
+            gemini_oauth_profile: None,
+            code_assist_project_id: None,
+        };
+        for (direction, expected_direction) in [
+            (RealtimeFrameDirection::Setup, "setup"),
+            (
+                RealtimeFrameDirection::ClientToProvider,
+                "client_to_provider",
+            ),
+            (
+                RealtimeFrameDirection::ProviderToClient,
+                "provider_to_client",
+            ),
+        ] {
+            for (kind, expected_kind, payload) in [
+                (
+                    RealtimeFrameKind::Json,
+                    "json",
+                    Bytes::from_static(br#"{}"#),
+                ),
+                (
+                    RealtimeFrameKind::Text,
+                    "text",
+                    Bytes::from_static(b"voice"),
+                ),
+                (
+                    RealtimeFrameKind::Binary,
+                    "binary",
+                    Bytes::from_static(&[0, 1, 255]),
+                ),
+            ] {
+                let bytes = host_to_wire_transform_realtime_frame_v2(
+                    &TransformRealtimeFrameRequest {
+                        request_id: "request-1".to_owned(),
+                        principal: principal(),
+                        upstream: Upstream::GeminiDirect { base_url: None },
+                        request_method: Method::GET,
+                        request_path: "/ws/live".to_owned(),
+                        canonical_model_id: "gemini-live".to_owned(),
+                        direction,
+                        kind,
+                        payload: payload.clone(),
+                    },
+                    &identity,
+                )
+                .expect("realtime frame request serializes");
+                let archived =
+                    rkyv::access::<v2::ArchivedTransformRealtimeFrameRequest, RkyvError>(&bytes)
+                        .expect("realtime frame request archives");
+                let method: &str = &archived.request_method;
+                let path: &str = &archived.request_path;
+                let direction: &str = &archived.direction;
+                let kind: &str = &archived.kind;
+                let upstream_id: &str = &archived.upstream_identity.upstream_id;
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/ws/live");
+                assert_eq!(direction, expected_direction);
+                assert_eq!(kind, expected_kind);
+                assert_eq!(upstream_id, "upstream-42");
+                assert_eq!(archived.payload.as_ref(), payload.as_ref());
+            }
+        }
+    }
+
+    #[test]
+    fn realtime_frame_wire_results_cover_unchanged_replace_and_drop() {
+        let cases = [
+            (
+                v2::TransformRealtimeFrameResult::Unchanged,
+                TransformRealtimeFrameResult::Unchanged,
+            ),
+            (
+                v2::TransformRealtimeFrameResult::Replace {
+                    kind: "binary".into(),
+                    payload: vec![0, 1, 255].into_boxed_slice(),
+                },
+                TransformRealtimeFrameResult::Replace {
+                    kind: RealtimeFrameKind::Binary,
+                    payload: Bytes::from_static(&[0, 1, 255]),
+                },
+            ),
+            (
+                v2::TransformRealtimeFrameResult::Drop,
+                TransformRealtimeFrameResult::Drop,
+            ),
+        ];
+        for (wire, expected) in cases {
+            let bytes = rkyv::to_bytes::<RkyvError>(&wire).expect("realtime result serializes");
+            assert_eq!(
+                wire_to_host_transform_realtime_frame(&bytes).expect("realtime result decodes"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn realtime_frame_plugin_output_is_rejected_at_the_wire_bound() {
+        let error = reject_oversized_output(b"0123456789", 9).expect_err("bound is enforced");
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds wire_bounds.output_body_bytes")
+        );
     }
 }
