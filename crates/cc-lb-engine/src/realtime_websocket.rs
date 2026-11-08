@@ -1,15 +1,11 @@
 //! Connection-pinned OpenAI Realtime and Gemini Live admission/accounting.
 use crate::completion_observer::{CompletionObserver, StreamCompletionLog, StreamLatency};
 use crate::responses_websocket::WebSocketCandidate;
-use crate::terminal_observer::{
-    InternalFailure, LifecycleContext, UpstreamErrorCode,
-};
+use crate::terminal_observer::{InternalFailure, LifecycleContext, UpstreamErrorCode};
 use crate::usage_parser::{UsageCounts, merge_usage_value, merge_usage_value_for_shape};
-use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, Provider};
 use cc_lb_control::api_keys::limit_engine::{LimitEngine, Reservation};
-use cc_lb_lifecycle::{
-    LifecycleEvent, StreamError, StreamSuccess, UsageSnapshot, UsageSource,
-};
+use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, Provider};
+use cc_lb_lifecycle::{LifecycleEvent, StreamError, StreamSuccess, UsageSnapshot, UsageSource};
 use cc_lb_upstream::{
     RealtimeFrameDirection, RealtimeFrameKind, TransformRealtimeFrameRequest,
     TransformRealtimeFrameResult,
@@ -576,9 +572,10 @@ mod tests {
         assert!(usage.complete);
         let counts = usage.counts.unwrap();
         assert_eq!((counts.input_tokens, counts.output_tokens), (20, 9));
-        assert!(RealtimeWebSocketKind::Gemini.may_report_usage(
-            br#"{"serverContent":{"turnComplete":true}}"#
-        ));
+        assert!(
+            RealtimeWebSocketKind::Gemini
+                .may_report_usage(br#"{"serverContent":{"turnComplete":true}}"#)
+        );
         assert!(
             !RealtimeWebSocketKind::Gemini
                 .may_report_usage(br#"{"serverContent":{"audio":"abc"}}"#)

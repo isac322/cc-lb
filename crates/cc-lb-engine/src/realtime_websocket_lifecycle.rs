@@ -67,11 +67,13 @@ impl Lifecycle {
                     cache_prefix_hash: None,
                     thread_id: session_id.clone(),
                     observed_session_id: session_id.clone(),
-                    request_kind: Some(match kind {
-                        RealtimeWebSocketKind::Openai => "realtime",
-                        RealtimeWebSocketKind::Gemini => "live",
-                    }
-                    .to_owned()),
+                    request_kind: Some(
+                        match kind {
+                            RealtimeWebSocketKind::Openai => "realtime",
+                            RealtimeWebSocketKind::Gemini => "live",
+                        }
+                        .to_owned(),
+                    ),
                     claude_agent_id: None,
                     claude_parent_agent_id: None,
                     parent_session_id: None,
