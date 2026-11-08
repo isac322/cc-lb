@@ -406,9 +406,12 @@ impl<'a> ConformanceSuite<'a> {
                 if session.dispatch.has_response_transform() {
                     match session.dispatch.response_wire_version() {
                         Some(WireVersion::V1) => {
-                            let _ = session.call_transform_response(
-                                fixtures::sample_transform_response_request_for(self.provider),
-                            );
+                            let request = if self.provider_selected {
+                                fixtures::sample_transform_response_request_for(self.provider)
+                            } else {
+                                fixtures::sample_transform_response_request()
+                            };
+                            let _ = session.call_transform_response(request);
                         }
                         Some(WireVersion::V2) => {
                             let _ = session.call_transform_response(
@@ -421,9 +424,12 @@ impl<'a> ConformanceSuite<'a> {
                 if session.dispatch.has_sse_event_transform() {
                     match session.dispatch.sse_wire_version() {
                         Some(WireVersion::V1) => {
-                            let _ = session.call_transform_sse_event(
-                                fixtures::sample_transform_sse_event_request_for(self.provider),
-                            );
+                            let request = if self.provider_selected {
+                                fixtures::sample_transform_sse_event_request_for(self.provider)
+                            } else {
+                                fixtures::sample_transform_sse_event_request()
+                            };
+                            let _ = session.call_transform_sse_event(request);
                         }
                         Some(WireVersion::V2) => {
                             let _ = session.call_transform_sse_event(
