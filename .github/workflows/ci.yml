@@ -380,20 +380,21 @@ jobs:
       - name: Install and run promtool
         run: |
           set -euo pipefail
-          image=prom/prometheus:v3.15.0
-          docker pull "$image"
-          cat > "$RUNNER_TEMP/promtool" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          exec docker run --rm \
-            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
-            -v "$RUNNER_TEMP:$RUNNER_TEMP" \
-            -w "$GITHUB_WORKSPACE" \
-            prom/prometheus:v3.15.0 promtool "$@"
-          EOF
-          chmod 0755 "$RUNNER_TEMP/promtool"
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-          export PATH="$RUNNER_TEMP:$PATH"
+          case "$RUNNER_ARCH" in
+            X64) asset=linux-amd64 ;;
+            ARM64) asset=linux-arm64 ;;
+            *) echo "unsupported architecture $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          archive="prometheus-3.15.0.${asset}.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/prometheus/prometheus/releases/download/v3.15.0/${archive}" \
+            --output "$RUNNER_TEMP/prometheus.tar.gz"
+          tar -xzf "$RUNNER_TEMP/prometheus.tar.gz" -C "$RUNNER_TEMP"
+          promtool="$RUNNER_TEMP/prometheus-3.15.0.${asset}/promtool"
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$promtool" "$RUNNER_TEMP/bin/promtool"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
           promtool --version
       - name: Check alert rule syntax
         run: promtool check rules deploy/alerts/*.yml
