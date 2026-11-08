@@ -1,7 +1,7 @@
 use cc_lb_quota::parse_openai_codex_quota_headers;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
-use crate::headers;
+use super::headers;
 
 #[test]
 fn parses_team_codex_windows_by_duration() {
