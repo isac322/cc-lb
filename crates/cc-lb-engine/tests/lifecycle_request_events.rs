@@ -364,10 +364,12 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
                 gateway.connection_closed(1131, "provider closed");
             }
             "proxy_error" => {
-                gateway.fail_dispatch(
-                    dispatch.turn_id,
-                    &WebSocketError::new(502, "proxy_relay_error", "relay failed"),
-                );
+                gateway
+                    .fail_dispatch(
+                        dispatch.turn_id,
+                        &WebSocketError::new(502, "proxy_relay_error", "relay failed"),
+                    )
+                    .await;
             }
             "downstream_closed" => gateway.close(),
             _ => unreachable!("matrix covers all terminal paths"),
