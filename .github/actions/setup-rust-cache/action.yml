@@ -60,7 +60,6 @@ runs:
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ strategy.job-index }}-${{ steps.sccache-key.outputs.rustc_hash }}-${{ steps.sccache-key.outputs.sccache_ver }}-
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ strategy.job-index }}-${{ steps.sccache-key.outputs.rustc_hash }}-
           sccache-${{ runner.os }}-${{ runner.arch }}-
-        save-always: true
 
     - name: Validate sccache compiler wrapper
       id: sccache-health
