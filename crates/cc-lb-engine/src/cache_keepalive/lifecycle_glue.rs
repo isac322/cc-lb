@@ -125,6 +125,12 @@ pub(crate) struct LifecycleKeepalive {
     session_shards: Arc<[tokio::sync::Mutex<HashMap<SessionKey, u64>>; SESSION_SHARD_COUNT]>,
 }
 
+fn allows_sibling_backstop(cache_metadata: &RequestCacheMetadata) -> bool {
+    cache_metadata.claude_agent_id.is_none()
+        && !cache_metadata.explicit_auxiliary
+        && cache_metadata.explicit_request_class.is_none()
+}
+
 impl LifecycleKeepalive {
     pub(crate) fn new(
         enqueuer: Option<Arc<dyn CacheKeepaliveEnqueuer>>,
@@ -280,7 +286,7 @@ impl LifecycleKeepalive {
             CancelReason::NewRequest,
             expected_generation,
             Duration::ZERO,
-            true,
+            allows_sibling_backstop(cache_metadata),
         )
         .await;
     }
@@ -394,8 +400,7 @@ impl LifecycleKeepalive {
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
             return;
         };
-        let allow_sibling_backstop =
-            !cache_metadata.explicit_auxiliary && cache_metadata.explicit_request_class.is_none();
+        let allow_sibling_backstop = allows_sibling_backstop(cache_metadata);
         let compaction_boundary = HeuristicClassifier::is_compaction_boundary(response_body_json);
         if compaction_boundary
             && cache_metadata.cache_breakpoints.is_empty()
@@ -1390,6 +1395,42 @@ mod tests {
             ]
         );
     }
+    #[tokio::test]
+    async fn claude_main_agent_id_does_not_cancel_subagent_sibling() {
+        let state = Arc::new(BackstopState::default());
+        let principal_id = cache_keepalive_principal_uuid("principal-test");
+        let primary = SessionKey::from_thread_id(principal_id, "thread-claude-main");
+        let sibling =
+            SessionKey::from_thread_and_agent(principal_id, "thread-claude-main", "subagent");
+        state
+            .generations
+            .lock()
+            .expect("generation state")
+            .insert(sibling.to_string(), Some(7));
+        let keepalive = backstop_keepalive(Arc::clone(&state));
+        let metadata = RequestCacheMetadata {
+            claude_agent_id: Some("main".to_owned()),
+            ..RequestCacheMetadata::default()
+        };
+        keepalive
+            .cancel_session(
+                &primary,
+                &Principal {
+                    id: "principal-test".to_owned(),
+                    kind: cc_lb_domain::PrincipalKind::InternalKey,
+                },
+                CancelReason::NewRequest,
+                Some(4),
+                Duration::ZERO,
+                allows_sibling_backstop(&metadata),
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellation state"),
+            vec![(primary.to_string(), Some(4))]
+        );
+    }
+
 
     impl LifecycleKeepalive {
         // Called from lifecycle's metadata tests so the auxiliary identity is built
