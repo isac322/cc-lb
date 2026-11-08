@@ -106,8 +106,9 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
         _not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<ProviderPromptCacheObservationRecord>> {
         Err(StorageError::Unavailable {
-            message: "PromptCacheObservationStore::list_active_provider_observations is not implemented"
-                .to_owned(),
+            message:
+                "PromptCacheObservationStore::list_active_provider_observations is not implemented"
+                    .to_owned(),
         })
     }
     async fn purge_expired_before(&self, _ts_unix_secs: u64) -> StorageResult<u64> {

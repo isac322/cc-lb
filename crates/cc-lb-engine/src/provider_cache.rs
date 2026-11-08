@@ -150,7 +150,10 @@ fn analyze_gemini(body: &Value, model: &str) -> RequestNativeCacheObservation {
         boundary: if explicit_resource.is_some() {
             None
         } else {
-            Some(format!("minimum_input_tokens={}", gemini_minimum_tokens(model)))
+            Some(format!(
+                "minimum_input_tokens={}",
+                gemini_minimum_tokens(model)
+            ))
         },
         evidence_source: Some(if explicit_resource.is_some() {
             "request.cachedContent".to_owned()
@@ -218,10 +221,7 @@ fn implicit_boundary(body: &Value) -> Option<String> {
 }
 
 fn openai_retention_secs(body: &Value, modern: bool) -> Option<Option<u64>> {
-    let retention = match body
-        .get("prompt_cache_retention")
-        .and_then(Value::as_str)
-    {
+    let retention = match body.get("prompt_cache_retention").and_then(Value::as_str) {
         None => None,
         Some("in_memory") => Some(0),
         Some("24h") if !modern => Some(24 * 60 * 60),
@@ -239,7 +239,9 @@ fn openai_retention_secs(body: &Value, modern: bool) -> Option<Option<u64>> {
 
 fn parse_ttl_secs(value: &Value) -> Option<u64> {
     if let Some(seconds) = value.as_u64() {
-        return (1..=OPENAI_LONG_RETENTION_SECS).contains(&seconds).then_some(seconds);
+        return (1..=OPENAI_LONG_RETENTION_SECS)
+            .contains(&seconds)
+            .then_some(seconds);
     }
     let text = value.as_str()?;
     let (number, suffix) = text.split_at(text.len().saturating_sub(1));
@@ -346,10 +348,7 @@ fn truncate(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
     }
-    value
-        .get(..max_bytes)
-        .unwrap_or_default()
-        .to_owned()
+    value.get(..max_bytes).unwrap_or_default().to_owned()
 }
 
 #[cfg(test)]
@@ -372,7 +371,13 @@ mod tests {
                 ]}
             ]
         });
-        let observed = analyze(ProviderCapability::OpenaiResponses, &body, "gpt-5.6", &HeaderMap::new()).unwrap();
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &body,
+            "gpt-5.6",
+            &HeaderMap::new(),
+        )
+        .unwrap();
         assert_eq!(observed.mode, "explicit");
         assert_eq!(observed.retention_secs, Some(12 * 60 * 60));
         assert_eq!(
@@ -421,7 +426,13 @@ mod tests {
             {"prompt_cache_breakpoint":{}},{"prompt_cache_breakpoint":{}},
             {"prompt_cache_breakpoint":{}}
         ]});
-        let observed = analyze(ProviderCapability::OpenaiResponses, &body, "gpt-5.6", &HeaderMap::new()).unwrap();
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &body,
+            "gpt-5.6",
+            &HeaderMap::new(),
+        )
+        .unwrap();
         assert_eq!(observed.mode, "unknown");
         assert_eq!(observed.boundary.as_deref(), Some("explicit_write_limit"));
     }
@@ -429,17 +440,39 @@ mod tests {
     #[test]
     fn older_openai_key_is_hashed_and_retention_is_preserved() {
         let body = json!({"model":"gpt-4.1","prompt_cache_key":"secret-key","prompt_cache_retention":"24h"});
-        let observed = analyze(ProviderCapability::OpenaiResponses, &body, "gpt-4.1", &HeaderMap::new()).unwrap();
+        let observed = analyze(
+            ProviderCapability::OpenaiResponses,
+            &body,
+            "gpt-4.1",
+            &HeaderMap::new(),
+        )
+        .unwrap();
         assert_eq!(observed.mode, "implicit");
         assert_eq!(observed.retention_secs, Some(24 * 60 * 60));
-        assert!(observed.identity_hash.as_deref().unwrap().starts_with("sha256:"));
-        assert!(!serde_json::to_string(&observed).unwrap().contains("secret-key"));
+        assert!(
+            observed
+                .identity_hash
+                .as_deref()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(
+            !serde_json::to_string(&observed)
+                .unwrap()
+                .contains("secret-key")
+        );
     }
 
     #[test]
     fn gemini_explicit_resource_is_scoped_and_opaque() {
         let body = json!({"cachedContent":"projects/p1/locations/us/models/gemini-2.5/cache/abc"});
-        let observed = analyze(ProviderCapability::GeminiGenerateContent, &body, "gemini-2.5-pro", &HeaderMap::new()).unwrap();
+        let observed = analyze(
+            ProviderCapability::GeminiGenerateContent,
+            &body,
+            "gemini-2.5-pro",
+            &HeaderMap::new(),
+        )
+        .unwrap();
         assert_eq!(observed.mode, "explicit");
         assert_eq!(observed.scope.as_deref(), Some("p1"));
         assert_eq!(observed.retention_secs, Some(3600));

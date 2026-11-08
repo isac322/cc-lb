@@ -139,11 +139,14 @@ impl PromptCacheObservationStore for SqliteStorage {
             .map(|row| {
                 Ok(ProviderPromptCacheObservationRecord {
                     upstream_id: uuid_from_db(
-                        &row.try_get::<String, _>("upstream_id").map_err(map_sqlx_error)?,
+                        &row.try_get::<String, _>("upstream_id")
+                            .map_err(map_sqlx_error)?,
                         "native upstream_id",
                     )?,
                     provider: row.try_get("provider").map_err(map_sqlx_error)?,
-                    canonical_model_id: row.try_get("canonical_model_id").map_err(map_sqlx_error)?,
+                    canonical_model_id: row
+                        .try_get("canonical_model_id")
+                        .map_err(map_sqlx_error)?,
                     mode: row.try_get("mode").map_err(map_sqlx_error)?,
                     isolation_scope: row.try_get("isolation_scope").map_err(map_sqlx_error)?,
                     identity_hash: row.try_get("identity_hash").map_err(map_sqlx_error)?,

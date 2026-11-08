@@ -194,10 +194,7 @@ fn apply_native_usage(
 
 fn derive_cache_state(partial: &Partial) -> RequestCacheState {
     if let Some(native) = partial.native_cache.as_ref() {
-        return match (
-            native.evidence,
-            native.write_tokens.unwrap_or_default() > 0,
-        ) {
+        return match (native.evidence, native.write_tokens.unwrap_or_default() > 0) {
             (cc_lb_request_log::RequestCacheEvidence::Positive, true) => RequestCacheState::Refresh,
             (cc_lb_request_log::RequestCacheEvidence::Positive, false) => RequestCacheState::Hit,
             (cc_lb_request_log::RequestCacheEvidence::Zero, true) => RequestCacheState::Write,

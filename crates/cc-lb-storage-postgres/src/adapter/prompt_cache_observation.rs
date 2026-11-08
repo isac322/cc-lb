@@ -130,7 +130,9 @@ impl PromptCacheObservationStore for PostgresStorage {
                 Ok(ProviderPromptCacheObservationRecord {
                     upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
                     provider: row.try_get("provider").map_err(map_sqlx_error)?,
-                    canonical_model_id: row.try_get("canonical_model_id").map_err(map_sqlx_error)?,
+                    canonical_model_id: row
+                        .try_get("canonical_model_id")
+                        .map_err(map_sqlx_error)?,
                     mode: row.try_get("mode").map_err(map_sqlx_error)?,
                     isolation_scope: row.try_get("isolation_scope").map_err(map_sqlx_error)?,
                     identity_hash: row.try_get("identity_hash").map_err(map_sqlx_error)?,

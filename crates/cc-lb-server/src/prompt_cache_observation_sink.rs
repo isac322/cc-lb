@@ -9,8 +9,7 @@ use cc_lb_observability::{
     inc_cache_observation_write_failed,
 };
 use cc_lb_storage_api::{
-    PromptCacheObservationRecord, PromptCacheObservationStore,
-    ProviderPromptCacheObservationRecord,
+    PromptCacheObservationRecord, PromptCacheObservationStore, ProviderPromptCacheObservationRecord,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Sender, error::TrySendError};

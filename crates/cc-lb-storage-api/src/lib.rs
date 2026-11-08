@@ -50,8 +50,7 @@ pub use plugin_slot_kind::*;
 pub use pool_quota_history::*;
 pub use principal::*;
 pub use prompt_cache_observation::{
-    PromptCacheObservationRecord, PromptCacheObservationStore,
-    ProviderPromptCacheObservationRecord,
+    PromptCacheObservationRecord, PromptCacheObservationStore, ProviderPromptCacheObservationRecord,
 };
 pub use request_event_list::*;
 pub use request_event_projections::*;

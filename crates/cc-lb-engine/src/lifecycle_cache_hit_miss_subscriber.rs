@@ -223,10 +223,7 @@ fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: 
         return;
     }
     if let Some(native) = partial.native_cache.as_ref() {
-        let outcome = match (
-            native.evidence,
-            native.write_tokens.unwrap_or_default() > 0,
-        ) {
+        let outcome = match (native.evidence, native.write_tokens.unwrap_or_default() > 0) {
             (cc_lb_request_log::RequestCacheEvidence::Positive, true) => "refresh",
             (cc_lb_request_log::RequestCacheEvidence::Positive, false) => "hit",
             (cc_lb_request_log::RequestCacheEvidence::Zero, true) => "write",
