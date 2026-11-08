@@ -233,9 +233,9 @@ impl ResponsesStreamMetrics {
         self.event_count = self.event_count.saturating_add(1);
         self.total_bytes = self.total_bytes.saturating_add(frame.len() as u64);
         if self.provider_session_id.is_none() {
-            let bounded = |value: Option<&Value>| {
-                let value = value.and_then(Value::as_str)?;
-                (!value.is_empty() && value.len() <= 512).then(|| value.to_owned())
+            let bounded = |value| {
+                let value = value.and_then(|value| value.as_str().map(str::to_owned))?;
+                (!value.is_empty() && value.len() <= 512).then_some(value)
             };
             let response_id = sonic_rs::get_from_slice(frame, &["response", "id"]).ok();
             let fallback_id = sonic_rs::get_from_slice(frame, &["response_id"]).ok();
@@ -739,6 +739,7 @@ impl ResponsesWebSocketGateway {
                 usage: None,
                 usage_complete: false,
                 plugin_request: None,
+                metrics: ResponsesStreamMetrics::new(),
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();

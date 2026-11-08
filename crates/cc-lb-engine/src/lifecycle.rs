@@ -8040,6 +8040,9 @@ impl Lifecycle {
                             stream_total_ms: Some(stream_total_ms),
                             content_delta_count: Some(content_delta_count),
                             ping_count: Some(ping_count),
+                            stream_inter_output_avg_ms: None,
+                            provider_session_id: None,
+                            provider_connection_id: None,
                             inter_token_avg_ms,
                         }),
                     });

@@ -45,7 +45,7 @@ pub(crate) fn record_stream_termination_metric(
     upstream: &str,
     model: Option<&str>,
 ) {
-    let model = model.map_or(
+    let model = model.map(str::to_owned).map_or(
         SharedString::const_str(UNRESOLVED_ATTRIBUTION_LABEL),
         SharedString::from,
     );
