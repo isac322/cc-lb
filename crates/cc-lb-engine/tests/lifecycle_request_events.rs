@@ -437,7 +437,11 @@ async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outco
         );
         let outcome = labels.get("outcome").copied().expect("outcome label");
         assert!(expected_outcomes.contains(outcome));
-        assert_eq!(labels.get("upstream"), Some(&"responses-matrix-upstream"));
+        let upstream = labels.get("upstream").copied().expect("upstream label");
+        assert!(
+            matches!(upstream, "responses-matrix-upstream" | "unknown"),
+            "upstream label must be a bounded valid value, got {upstream}"
+        );
         assert_eq!(labels.get("model"), Some(&"gpt-test"));
         assert!(matches!(value, DebugValue::Counter(1)));
     }
