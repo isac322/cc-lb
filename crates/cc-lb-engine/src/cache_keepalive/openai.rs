@@ -16,7 +16,6 @@ pub enum Lifetime {
 
 #[cfg(test)]
 impl Lifetime {
-
     pub const fn seconds(self) -> u64 {
         match self {
             Self::ThirtyMinutes => 1_800,
