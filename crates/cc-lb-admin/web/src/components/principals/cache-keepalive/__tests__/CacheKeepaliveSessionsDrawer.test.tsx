@@ -378,7 +378,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(screen.getByTestId('status-filter-reset')).toBeDefined();
   });
 
-  it('drains older pages so matching sessions and chip counts across pages are not omitted', () => {
+  it('keeps pagination user-driven without auto-draining older pages on open', () => {
     const fetchNextPage = vi.fn();
     vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
       data: {
@@ -432,7 +432,11 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(screen.getByTestId('toggle-not-tracked').textContent).toContain(
       '+ Show not tracked (1)',
     );
-    expect(fetchNextPage).toHaveBeenCalled();
+    expect(fetchNextPage).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Loading older sessions...' }),
+    );
+    expect(fetchNextPage).toHaveBeenCalledTimes(1);
   });
 
   it('expands and collapses selected row details inline at full width', () => {

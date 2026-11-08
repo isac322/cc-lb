@@ -290,7 +290,7 @@ function SessionListRow({
               : 'border-subtle hover:bg-overlay-2',
         )}
       >
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 leading-tight sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 leading-tight sm:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
           <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-2">
             {isError && (
               <AlertCircle
@@ -577,56 +577,8 @@ export function CacheKeepaliveSessionsDrawer({
 
   useFlipReorder(listElement, visibleRows);
 
-  const clientSideFiltered =
-    enabled &&
-    selectedQueryStatus === undefined &&
-    (!showNotTracked || selectedStatuses.size < TRACKED_STATUS_OPTIONS.length);
-
-  useEffect(() => {
-    if (
-      open &&
-      clientSideFiltered &&
-      !query.isLoading &&
-      !query.isError &&
-      !query.isFetchNextPageError &&
-      !query.isFetchingNextPage &&
-      query.hasNextPage
-    ) {
-      query.fetchNextPage();
-    }
-  }, [
-    clientSideFiltered,
-    open,
-    query.fetchNextPage,
-    query.hasNextPage,
-    query.isError,
-    query.isFetchNextPageError,
-    query.isFetchingNextPage,
-    query.isLoading,
-  ]);
-
-  useEffect(() => {
-    if (
-      open &&
-      enabled &&
-      !unfilteredQuery.isLoading &&
-      !unfilteredQuery.isError &&
-      !unfilteredQuery.isFetchNextPageError &&
-      !unfilteredQuery.isFetchingNextPage &&
-      unfilteredQuery.hasNextPage
-    ) {
-      unfilteredQuery.fetchNextPage();
-    }
-  }, [
-    enabled,
-    open,
-    unfilteredQuery.fetchNextPage,
-    unfilteredQuery.hasNextPage,
-    unfilteredQuery.isError,
-    unfilteredQuery.isFetchNextPageError,
-    unfilteredQuery.isFetchingNextPage,
-    unfilteredQuery.isLoading,
-  ]);
+  // Pagination remains strictly user-driven via the "Loading older sessions..."
+  // control so opening the drawer never auto-drains multi-page retention history.
 
   const liveCounts = useMemo(() => {
     const computed: Record<TrackedStatus | 'not_tracked', number> = {
