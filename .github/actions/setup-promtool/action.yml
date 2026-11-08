@@ -10,6 +10,12 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Restore latest promtool fallback cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.tool_cache }}/promtool
+        key: promtool-latest-${{ runner.os }}-${{ runner.arch }}
+
     - name: Resolve promtool version
       id: resolve
       shell: bash
@@ -20,12 +26,19 @@ runs:
 
         case "$REQUESTED_VERSION" in
           latest)
-            release_url="$(curl --fail --silent --show-error --location \
+            if release_url="$(curl --fail --silent --show-error --location \
               --connect-timeout 10 --max-time 60 \
               --output /dev/null --write-out '%{url_effective}' \
-              https://github.com/prometheus/prometheus/releases/latest)"
-            version="${release_url##*/}"
-            version="${version#v}"
+              https://github.com/prometheus/prometheus/releases/latest)"; then
+              version="${release_url##*/}"
+              version="${version#v}"
+            elif [ -s "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE is not set}/promtool/latest" ]; then
+              version="$(cat "$RUNNER_TOOL_CACHE/promtool/latest")"
+              echo "::warning::Prometheus latest metadata was unavailable; using cached version $version"
+            else
+              echo "::error::Prometheus latest metadata was unavailable and no cached version exists"
+              exit 1
+            fi
             ;;
           *)
             version="${REQUESTED_VERSION#v}"
@@ -53,24 +66,14 @@ runs:
         esac
 
         archive="prometheus-${version}.linux-${archive_arch}.tar.gz"
-        checksum="$(
-          curl --fail --silent --show-error --location \
-            --connect-timeout 10 --max-time 60 \
-            "https://github.com/prometheus/prometheus/releases/download/v${version}/sha256sums.txt" \
-            | awk -v archive="$archive" '$2 == archive { print $1; exit }'
-        )"
-        if [[ ! "$checksum" =~ ^[[:xdigit:]]{64}$ ]]; then
-          echo "::error::checksum for $archive was not found"
-          exit 1
-        fi
 
         {
           echo "version=$version"
           echo "archive=$archive"
           echo "archive_arch=$archive_arch"
           echo "tool_arch=$tool_arch"
-          echo "checksum=$checksum"
         } >> "$GITHUB_OUTPUT"
+
 
     - name: Restore promtool tool cache
       uses: actions/cache@v6
@@ -85,7 +88,7 @@ runs:
         PROMTOOL_ARCHIVE: ${{ steps.resolve.outputs.archive }}
         PROMTOOL_ARCHIVE_ARCH: ${{ steps.resolve.outputs.archive_arch }}
         PROMTOOL_TOOL_ARCH: ${{ steps.resolve.outputs.tool_arch }}
-        PROMTOOL_CHECKSUM: ${{ steps.resolve.outputs.checksum }}
+
       run: |
         set -euo pipefail
 
@@ -103,6 +106,17 @@ runs:
           "$binary" --version
           exit 0
         fi
+        PROMTOOL_CHECKSUM="$(
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 60 \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/sha256sums.txt" \
+            | awk -v archive="$PROMTOOL_ARCHIVE" '$2 == archive { print $1; exit }'
+        )"
+        if [[ ! "$PROMTOOL_CHECKSUM" =~ ^[[:xdigit:]]{64}$ ]]; then
+          echo "::error::checksum for $PROMTOOL_ARCHIVE was not found"
+          exit 1
+        fi
+
 
         archive_path="$RUNNER_TEMP/$PROMTOOL_ARCHIVE"
         extract_root="$RUNNER_TEMP/prometheus-${PROMTOOL_VERSION}.linux-${PROMTOOL_ARCHIVE_ARCH}"
@@ -119,3 +133,4 @@ runs:
         echo "$tool_root" >> "$GITHUB_PATH"
         "$binary" --version
         : > "$complete"
+        printf '%s\n' "$PROMTOOL_VERSION" > "$RUNNER_TOOL_CACHE/promtool/latest"

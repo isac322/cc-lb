@@ -379,6 +379,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install promtool
         uses: ./.github/actions/setup-promtool
+        with:
+          version: 3.15.0
       - name: Check alert rule syntax
         run: promtool check rules deploy/alerts/*.yml
       - name: Validate Grafana dashboards
