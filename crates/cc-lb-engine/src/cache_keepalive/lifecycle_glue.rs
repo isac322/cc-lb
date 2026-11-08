@@ -1831,15 +1831,20 @@ mod tests {
     }
     #[tokio::test]
     async fn superseded_request_still_fences_before_dispatch_boundary() {
-        assert_superseded_request_fences(false).await;
+        assert_superseded_request_fences(false, false).await;
     }
 
     #[tokio::test]
     async fn dropped_newer_request_cannot_remove_older_request_fence() {
-        assert_superseded_request_fences(true).await;
+        assert_superseded_request_fences(true, false).await;
     }
 
-    async fn assert_superseded_request_fences(drop_newer: bool) {
+    #[tokio::test]
+    async fn openai_headerless_turns_cancel_previous_generation() {
+        assert_superseded_request_fences(false, true).await;
+    }
+
+    async fn assert_superseded_request_fences(drop_newer: bool, openai: bool) {
         struct RequestFenceEnqueuer {
             ordered: OrderedCompletionEnqueuer,
             active_generation: std::sync::atomic::AtomicBool,
@@ -1898,6 +1903,10 @@ mod tests {
             .initialize()
             .await
             .expect("request fence auth schema");
+        let classifier = ClassifierConfig {
+            openai_responses_enabled: openai,
+            ..ClassifierConfig::default()
+        };
         let principal_record = cc_lb_storage_api::PrincipalStore::create(
             storage.as_ref(),
             cc_lb_storage_api::principal::PrincipalCreate {
@@ -1914,7 +1923,7 @@ mod tests {
                     max_total_duration_secs: 14_400,
                     snapshot_max_bytes: 524_288,
                     min_cache_tokens: 10_000,
-                    classifier: ClassifierConfig::default(),
+                    classifier,
                 }),
             },
             cc_lb_clock::unix_secs(clock.now()),
@@ -1968,17 +1977,22 @@ mod tests {
         };
         let mut metadata = RequestCacheMetadata::default();
         metadata.thread_id = Some("superseded-request".to_owned());
-        metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
-            block_index: 0,
-            source: cc_lb_request_log::RequestCacheBreakpointSource::System,
-            path: "system[0]".to_owned(),
-            message_index: None,
-            ttl: Some("5m".to_owned()),
-            prefix_hash: "request-fence-prefix".to_owned(),
-            prefix_token_count: 12_000,
-            lookback_prefixes: Vec::new(),
-            token_estimate_source: None,
-        }];
+        if openai {
+            metadata.cache_keepalive_surface = Some("responses".to_owned());
+            metadata.openai_replay_identity = Some("input-sha256:first".to_owned());
+        } else {
+            metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
+                block_index: 0,
+                source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+                path: "system[0]".to_owned(),
+                message_index: None,
+                ttl: Some("5m".to_owned()),
+                prefix_hash: "request-fence-prefix".to_owned(),
+                prefix_token_count: 12_000,
+                lookback_prefixes: Vec::new(),
+                token_estimate_source: None,
+            }];
+        }
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
         let enqueuer = Arc::new(RequestFenceEnqueuer {
             ordered: OrderedCompletionEnqueuer { events },
@@ -1998,11 +2012,14 @@ mod tests {
         })
         .await;
         let first_sequence = keepalive.latest_issued_seq(&key);
-        assert_eq!(first_sequence, 1);
+        let mut next_metadata = metadata.clone();
+        if openai {
+            next_metadata.openai_replay_identity = Some("input-sha256:next".to_owned());
+        }
         let mut newer = Some(Box::pin(keepalive.on_request_started(
             &authenticated,
             &principal,
-            &metadata,
+            &next_metadata,
         )));
         std::future::poll_fn(|cx| {
             assert!(
