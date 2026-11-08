@@ -1,0 +1,68 @@
+name: Setup promtool
+description: Install a pinned promtool binary in the hosted runner tool cache.
+
+runs:
+  using: composite
+  steps:
+    - name: Restore promtool tool cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.tool_cache }}/promtool
+        key: promtool-${{ runner.os }}-${{ runner.arch }}-3.15.0
+
+    - name: Install promtool
+      shell: bash
+      env:
+        PROMTOOL_VERSION: "3.15.0"
+        PROMTOOL_SHA256_X64: 2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0
+        PROMTOOL_SHA256_ARM64: f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbde02d067823
+      run: |
+        set -euo pipefail
+
+        if [ "${RUNNER_OS:-}" != "Linux" ]; then
+          echo "::error::promtool setup supports only Linux runners"
+          exit 1
+        fi
+
+        case "${RUNNER_ARCH:-}" in
+          X64)
+            archive_arch=amd64
+            tool_arch=x64
+            checksum="$PROMTOOL_SHA256_X64"
+            ;;
+          ARM64)
+            archive_arch=arm64
+            tool_arch=arm64
+            checksum="$PROMTOOL_SHA256_ARM64"
+            ;;
+          *)
+            echo "::error::unsupported runner architecture '${RUNNER_ARCH:-}'"
+            exit 1
+            ;;
+        esac
+
+        tool_root="${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE is not set}/promtool/${PROMTOOL_VERSION}/${tool_arch}"
+        binary="$tool_root/promtool"
+        complete="${RUNNER_TOOL_CACHE}/promtool/${PROMTOOL_VERSION}/${tool_arch}.complete"
+        if [ -x "$binary" ] && [ -f "$complete" ]; then
+          echo "Using cached promtool at $binary"
+          echo "$tool_root" >> "$GITHUB_PATH"
+          "$binary" --version
+          exit 0
+        fi
+
+        archive="prometheus-${PROMTOOL_VERSION}.linux-${archive_arch}.tar.gz"
+        archive_path="$RUNNER_TEMP/$archive"
+        extract_root="$RUNNER_TEMP/prometheus-${PROMTOOL_VERSION}.linux-${archive_arch}"
+        rm -rf "$extract_root" "$archive_path" "$tool_root" "$complete"
+        mkdir -p "$extract_root" "$tool_root"
+        curl --fail --silent --show-error --location \
+          "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/${archive}" \
+          --output "$archive_path"
+        printf '%s  %s\n' "$checksum" "$archive_path" | sha256sum --check -
+        tar -xzf "$archive_path" -C "$RUNNER_TEMP"
+        install -m 0755 "$extract_root/promtool" "$binary"
+
+        echo "$tool_root" >> "$GITHUB_PATH"
+        "$binary" --version
+        : > "$complete"
