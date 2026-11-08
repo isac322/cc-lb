@@ -95,6 +95,7 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_active_provider_observations(
         &self,
         _upstream_id: Uuid,
