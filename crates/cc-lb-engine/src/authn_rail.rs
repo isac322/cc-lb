@@ -228,8 +228,7 @@ mod tests {
                     BuiltinAuthError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
                     _ => unreachable!("fixture covers only status mapping"),
                 };
-                let response =
-                    reject_unauthenticated_for_provider(&error, Some(provider), None);
+                let response = reject_unauthenticated_for_provider(&error, Some(provider), None);
                 assert_eq!(response.status(), expected_status);
                 assert_eq!(
                     response.headers().get(http::header::CONTENT_TYPE),
@@ -250,8 +249,7 @@ mod tests {
                     .await
                     .expect("auth response body collects")
                     .to_bytes();
-                let value: Value =
-                    serde_json::from_slice(&body).expect("auth response is JSON");
+                let value: Value = serde_json::from_slice(&body).expect("auth response is JSON");
                 match provider {
                     cc_lb_domain::Provider::Anthropic => {
                         assert!(value.get("error").and_then(Value::as_object).is_some());

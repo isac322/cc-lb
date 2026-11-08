@@ -100,7 +100,11 @@ async fn preview_route_matches_dispatch_capability_and_gemini_path_model() {
             .await
             .expect("provider preview succeeds");
 
-        assert_eq!(outcome.winner_upstream_id, Some(upstream.id), "{provider:?}");
+        assert_eq!(
+            outcome.winner_upstream_id,
+            Some(upstream.id),
+            "{provider:?}"
+        );
         assert_eq!(
             outcome.trace.stages[0].stage_name, filter_name,
             "{provider:?} filter pipeline selected"
@@ -129,7 +133,6 @@ async fn preview_route_rejects_unclassified_operation_instead_of_anthropic_fallb
             if method == "POST" && path == "/v1/files"
     ));
 }
-
 
 #[tokio::test]
 async fn preview_route_uses_path_model_as_canonical_gemini_model() {
@@ -777,12 +780,15 @@ impl FilterPlugin for ContextRecordingFilter {
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        self.calls.lock().unwrap().push((
-            ctx.path.clone(),
-            ctx.canonical_model_id.clone(),
-        ));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((ctx.path.clone(), ctx.canonical_model_id.clone()));
         Ok(FilterOutput {
-            kept_upstream_ids: candidates.iter().map(|candidate| candidate.upstream_id).collect(),
+            kept_upstream_ids: candidates
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect(),
             reason: "recorded".to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,

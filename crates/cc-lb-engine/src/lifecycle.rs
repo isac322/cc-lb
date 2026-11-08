@@ -629,10 +629,7 @@ pub enum PreviewRouteError {
     #[error("router pipeline instantiation error: {0}")]
     PipelineInstantiationError(String),
     #[error("operation not supported for preview: {method} {path}")]
-    UnsupportedOperation {
-        method: String,
-        path: String,
-    },
+    UnsupportedOperation { method: String, path: String },
 }
 
 #[derive(Clone, Debug)]
