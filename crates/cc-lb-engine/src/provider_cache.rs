@@ -330,7 +330,14 @@ fn hash_identity(value: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"cc-lb-provider-cache-identity-v1\0");
     digest.update(value.as_bytes());
-    format!("sha256:{:x}", digest.finalize())
+    let digest = digest.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    format!("sha256:{encoded}")
 }
 
 fn truncate(value: &str, max_bytes: usize) -> String {

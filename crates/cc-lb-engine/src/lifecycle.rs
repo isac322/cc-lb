@@ -76,6 +76,7 @@ use crate::error_format::{
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::limit_input_estimate::estimate_anthropic_input;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
+use crate::provider_cache;
 #[cfg(test)]
 use crate::prompt_cache_simulator::cacheable_breakpoint_prefix_keys;
 use crate::prompt_cache_simulator::{
