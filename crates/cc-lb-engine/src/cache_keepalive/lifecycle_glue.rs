@@ -280,6 +280,7 @@ impl LifecycleKeepalive {
             CancelReason::NewRequest,
             expected_generation,
             Duration::ZERO,
+            true,
         )
         .await;
     }
@@ -393,6 +394,8 @@ impl LifecycleKeepalive {
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
             return;
         };
+        let allow_sibling_backstop =
+            !cache_metadata.explicit_auxiliary && cache_metadata.explicit_request_class.is_none();
         let compaction_boundary = HeuristicClassifier::is_compaction_boundary(response_body_json);
         if compaction_boundary
             && cache_metadata.cache_breakpoints.is_empty()
@@ -424,6 +427,7 @@ impl LifecycleKeepalive {
                     CancelReason::UserTurnDetected,
                     expected_generation,
                     cache_anchor_age,
+                    allow_sibling_backstop,
                 )
                 .await;
                 super::record_cancelled(&principal_name, CancelReason::UserTurnDetected);
@@ -489,6 +493,7 @@ impl LifecycleKeepalive {
                     CancelReason::ZeroTokenRenewalUnsupported,
                     expected_generation,
                     cache_anchor_age,
+                    allow_sibling_backstop,
                 )
                 .await;
                 super::record_cancelled(&principal_name, CancelReason::ZeroTokenRenewalUnsupported);
@@ -550,6 +555,7 @@ impl LifecycleKeepalive {
                         CancelReason::SnapshotTooLarge,
                         expected_generation,
                         cache_anchor_age,
+                        allow_sibling_backstop,
                     )
                     .await;
                     super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
@@ -602,6 +608,7 @@ impl LifecycleKeepalive {
                             CancelReason::CachedPrefixTooSmall,
                             expected_generation,
                             cache_anchor_age,
+                            allow_sibling_backstop,
                         )
                         .await;
                         super::record_cancelled(
@@ -699,6 +706,7 @@ impl LifecycleKeepalive {
                         CancelReason::UserTurnDetected,
                         expected_generation,
                         cache_anchor_age,
+                        allow_sibling_backstop,
                     )
                     .await;
                 }
@@ -720,6 +728,7 @@ impl LifecycleKeepalive {
                         CancelReason::UserTurnDetected,
                         expected_generation,
                         cache_anchor_age,
+                        allow_sibling_backstop,
                     )
                     .await;
                 }
@@ -734,6 +743,7 @@ impl LifecycleKeepalive {
         reason: CancelReason,
         expected_generation: Option<u64>,
         cache_anchor_age: Duration,
+        allow_sibling_backstop: bool,
     ) {
         let Some(enqueuer) = self.enqueuer.as_ref() else {
             return;
@@ -754,6 +764,9 @@ impl LifecycleKeepalive {
                 %error,
                 "durable cache keep-alive cancellation failed"
             );
+        }
+        if !allow_sibling_backstop {
+            return;
         }
         let SessionKey {
             principal_id,
@@ -1292,6 +1305,7 @@ mod tests {
                 CancelReason::UserTurnDetected,
                 Some(3),
                 Duration::ZERO,
+                true,
             )
             .await;
         assert_eq!(
@@ -1320,6 +1334,7 @@ mod tests {
                 CancelReason::NewRequest,
                 None,
                 Duration::ZERO,
+                true,
             )
             .await;
         assert_eq!(
@@ -1343,6 +1358,7 @@ mod tests {
                 CancelReason::NewRequest,
                 Some(4),
                 Duration::ZERO,
+                true,
             )
             .await;
         assert_eq!(
@@ -1361,6 +1377,7 @@ mod tests {
                 CancelReason::NewRequest,
                 Some(5),
                 Duration::ZERO,
+                true,
             )
             .await;
         assert_eq!(
