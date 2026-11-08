@@ -2758,7 +2758,12 @@ fn readiness(state: &ProxyState) -> Readiness {
     }
     let oauth_credentials_broken = view.upstreams_snapshot().iter().any(|upstream| {
         upstream_live(upstream)
-            && upstream.kind == UpstreamKind::AnthropicOauth
+            && matches!(
+                upstream.kind,
+                UpstreamKind::AnthropicOauth
+                    | UpstreamKind::OpenaiOauth
+                    | UpstreamKind::GeminiOauth
+            )
             && !oauth_credentials_decryptable(aead, upstream)
     });
 
@@ -4843,6 +4848,116 @@ mod tests {
         assert_admin_state(router.clone(), "starting").await;
         state.transition_to_ready();
         assert_admin_state(router, "ready").await;
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_undecryptable_openai_and_gemini_oauth_as_degraded_when_api_key_is_ready()
+     {
+        for kind in [
+            cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth,
+            cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth,
+        ] {
+            let api_key = websocket_upstream(
+                401,
+                "ready-api-key",
+                Url::parse("http://api-key.example").expect("api-key URL"),
+            );
+            let mut oauth = websocket_upstream(
+                402,
+                "broken-oauth",
+                Url::parse("http://oauth.example").expect("oauth URL"),
+            );
+            oauth.kind = kind;
+            let statuses = cc_lb_control::UpstreamStatusSnapshot {
+                entries: HashMap::from([
+                    (
+                        api_key.name.clone(),
+                        cc_lb_control::UpstreamStatusEntry {
+                            status: cc_lb_control::ApplyStatus::Active,
+                            last_apply_error: None,
+                            last_apply_at_unix_secs: 0,
+                        },
+                    ),
+                    (
+                        oauth.name.clone(),
+                        cc_lb_control::UpstreamStatusEntry {
+                            status: cc_lb_control::ApplyStatus::Active,
+                            last_apply_error: None,
+                            last_apply_at_unix_secs: 0,
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            };
+            let state = websocket_test_state(
+                vec![api_key, oauth],
+                TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(WebSocketTestSignerFactory),
+                Arc::new(FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+            state.server_state.transition_to_ready();
+            let view = state.dynamic_view.load();
+            state.dynamic_view.store(
+                cc_lb_control::DynamicViewBuilder::from_view(&view)
+                    .upstream_status_snapshot(Arc::new(statuses))
+                    .build(),
+            );
+            assert!(matches!(
+                readiness(&state),
+                Readiness::Ready {
+                    degraded: Some("oauth_credentials_not_decryptable")
+                }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_blocks_when_only_openai_or_gemini_oauth_is_undecryptable() {
+        for kind in [
+            cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth,
+            cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth,
+        ] {
+            let mut oauth = websocket_upstream(
+                403,
+                "only-broken-oauth",
+                Url::parse("http://oauth.example").expect("oauth URL"),
+            );
+            oauth.kind = kind;
+            let statuses = cc_lb_control::UpstreamStatusSnapshot {
+                entries: HashMap::from([(
+                    oauth.name.clone(),
+                    cc_lb_control::UpstreamStatusEntry {
+                        status: cc_lb_control::ApplyStatus::Active,
+                        last_apply_error: None,
+                        last_apply_at_unix_secs: 0,
+                    },
+                )]),
+                ..Default::default()
+            };
+            let state = websocket_test_state(
+                vec![oauth],
+                TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(WebSocketTestSignerFactory),
+                Arc::new(FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+            state.server_state.transition_to_ready();
+            let view = state.dynamic_view.load();
+            state.dynamic_view.store(
+                cc_lb_control::DynamicViewBuilder::from_view(&view)
+                    .upstream_status_snapshot(Arc::new(statuses))
+                    .build(),
+            );
+            assert!(matches!(
+                readiness(&state),
+                Readiness::NotReady("no_ready_upstream")
+            ));
+        }
     }
 
     #[test]
