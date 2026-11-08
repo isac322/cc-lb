@@ -239,6 +239,7 @@ jobs:
 
       - name: Generate workspace lcov report
         run: |
+          tar --use-compress-program=unzstd -xf nextest-archive.tar.zst -C target/llvm-cov-target
           cargo llvm-cov report \
             --nextest-archive-file nextest-archive.tar.zst \
             --lcov \

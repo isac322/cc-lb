@@ -10,32 +10,10 @@ use crate::{SqliteStorage, map_sqlx_error};
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 static FAST_INIT_SQL: OnceLock<String> = OnceLock::new();
 
-fn migrations_fingerprint() -> String {
-    let mut hash: u64 = 0xcbf29ce4_84222325;
-    for m in MIGRATOR.iter() {
-        for &b in m.checksum.as_ref() {
-            hash ^= u64::from(b);
-            hash = hash.wrapping_mul(0x00000100_000001b3);
-        }
-    }
-    format!("{hash:016x}")
-}
-
 async fn get_or_build_fast_init_sql() -> Result<&'static String, StorageError> {
     if let Some(sql) = FAST_INIT_SQL.get() {
         return Ok(sql);
     }
-    let fp = migrations_fingerprint();
-    let cache_path = std::env::temp_dir().join(format!("cc-lb-sqlite-fast-init-{fp}.sql"));
-    if let Ok(cached) = std::fs::read_to_string(&cache_path)
-        && cached.ends_with("-- END FAST INIT\n")
-    {
-        let _ = FAST_INIT_SQL.set(cached);
-        if let Some(sql) = FAST_INIT_SQL.get() {
-            return Ok(sql);
-        }
-    }
-
     let mem_pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -57,7 +35,7 @@ async fn get_or_build_fast_init_sql() -> Result<&'static String, StorageError> {
     .await
     .map_err(map_sqlx_error)?;
 
-    let mut script = String::from("BEGIN IMMEDIATE;\n");
+    let mut script = String::new();
 
     let tables: Vec<(String, String)> = sqlx::query_as(
         "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid",
@@ -113,17 +91,7 @@ async fn get_or_build_fast_init_sql() -> Result<&'static String, StorageError> {
         script.push_str(";\n");
     }
 
-    script.push_str("COMMIT;\n-- END FAST INIT\n");
     mem_pool.close().await;
-
-    let tmp_path = std::env::temp_dir().join(format!(
-        "cc-lb-sqlite-fast-init-{fp}-{}.tmp",
-        std::process::id()
-    ));
-    if std::fs::write(&tmp_path, &script).is_ok() {
-        let _ = std::fs::rename(&tmp_path, &cache_path);
-    }
-
     let _ = FAST_INIT_SQL.set(script);
     Ok(FAST_INIT_SQL.get().expect("FAST_INIT_SQL initialized"))
 }
@@ -131,23 +99,45 @@ async fn get_or_build_fast_init_sql() -> Result<&'static String, StorageError> {
 #[async_trait]
 impl MetaStore for SqliteStorage {
     async fn initialize(&self) -> StorageResult<()> {
-        let existing_objects: (i64,) = sqlx::query_as(
+        let fast_sql = get_or_build_fast_init_sql().await?;
+        let mut conn = self.pool().acquire().await.map_err(map_sqlx_error)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        let existing_objects: Result<(i64,), _> = sqlx::query_as(
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
         )
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
+        .fetch_one(&mut *conn)
+        .await;
 
-        if existing_objects.0 == 0 {
-            let fast_sql = get_or_build_fast_init_sql().await?;
-            sqlx::raw_sql(sqlx::AssertSqlSafe(fast_sql.as_str()))
-                .execute(self.pool())
-                .await
-                .map_err(|error| StorageError::Fatal {
-                    message: error.to_string(),
-                })?;
-            return Ok(());
+        match existing_objects {
+            Ok((0,)) => {
+                if let Err(error) = sqlx::raw_sql(sqlx::AssertSqlSafe(fast_sql.as_str()))
+                    .execute(&mut *conn)
+                    .await
+                {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    return Err(StorageError::Fatal {
+                        message: error.to_string(),
+                    });
+                }
+                sqlx::query("COMMIT")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(map_sqlx_error)?;
+                return Ok(());
+            }
+            Ok(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(map_sqlx_error(error));
+            }
         }
+        drop(conn);
 
         MIGRATOR
             .run(self.pool())
