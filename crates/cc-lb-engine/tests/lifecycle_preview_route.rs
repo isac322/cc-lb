@@ -356,6 +356,8 @@ fn input(principal_id: &str, request_id: Option<&str>) -> PreviewRouteInput {
         request_id: request_id.map(str::to_owned),
         headers: HeaderMap::new(),
         body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+        provider: Some(cc_lb_domain::Provider::Anthropic),
+        path: "/v1/messages".to_owned(),
     }
 }
 
@@ -446,6 +448,8 @@ fn preview_input(body_bytes: Bytes, request_id: &str) -> PreviewRouteInput {
         request_id: Some(request_id.to_owned()),
         headers: HeaderMap::new(),
         body_bytes,
+        provider: Some(cc_lb_domain::Provider::Anthropic),
+        path: "/v1/messages".to_owned(),
     }
 }
 

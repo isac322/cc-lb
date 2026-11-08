@@ -3581,7 +3581,15 @@ async fn lifecycle_handler(
     let auth = match state.lifecycle.authenticate(&parts.headers).await {
         Ok(auth) => auth,
         Err(error) => {
-            return cc_lb_engine::reject_unauthenticated(&error, observer.as_ref());
+            let provider = parts
+                .extensions
+                .get::<ProviderScope>()
+                .map(|scope| scope.0);
+            return cc_lb_engine::reject_unauthenticated_for_provider(
+                &error,
+                provider,
+                observer.as_ref(),
+            );
         }
     };
     // Record the authenticated principal before the body is read: requests

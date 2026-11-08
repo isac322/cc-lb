@@ -27,10 +27,78 @@ use axum::body::Body;
 use axum::response::Response;
 use cc_lb_control::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_domain::Provider;
 use http::StatusCode;
 
-use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
+use crate::error_format::{provider_error_response, provider_error_response_with_retry_after};
+use crate::provider_capability::ProviderCapability;
 use crate::terminal_observer::{LifecycleContext, error_codes};
+
+fn auth_capability(provider: Option<Provider>) -> ProviderCapability {
+    match provider {
+        Some(Provider::Openai) => ProviderCapability::OpenaiResponses,
+        Some(Provider::Gemini) => ProviderCapability::GeminiGenerateContent,
+        Some(Provider::Anthropic) | None => ProviderCapability::AnthropicMessages,
+    }
+}
+
+pub fn reject_unauthenticated_for_provider(
+    error: &BuiltinAuthError,
+    provider: Option<Provider>,
+    observer: Option<&LifecycleContext>,
+) -> Response<Body> {
+    let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
+    let capability = auth_capability(provider);
+    let response = match error {
+        BuiltinAuthError::Unavailable => provider_error_response_with_retry_after(
+            capability,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authentication_error",
+            &error.to_string(),
+            None,
+            1,
+        ),
+        _ => provider_error_response(
+            capability,
+            status,
+            "authentication_error",
+            &error.to_string(),
+            None,
+        ),
+    };
+    if let Some(o) = observer {
+        o.emit_request_started(false);
+        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+            event_id: o.event_id().to_owned(),
+            result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
+                http_status: status.as_u16(),
+                reason: Some(key_auth_failure_reason(error).to_owned()),
+            }),
+        });
+        o.terminate_failure(crate::terminal_observer::InternalFailure {
+            status,
+            error_code: error_codes::AUTHENTICATION_FAILED,
+            error: cc_lb_domain::InternalError {
+                stage: cc_lb_domain::InternalErrorStage::Authn,
+                kind: if matches!(error, BuiltinAuthError::Unavailable) {
+                    cc_lb_domain::InternalErrorKind::Unavailable
+                } else {
+                    cc_lb_domain::InternalErrorKind::InvalidInput
+                },
+                message: Some(error.to_string()),
+            },
+        });
+    }
+    response
+}
+
+/// Build an Anthropic-shaped rejection for unscoped legacy callers.
+pub fn reject_unauthenticated(
+    error: &BuiltinAuthError,
+    observer: Option<&LifecycleContext>,
+) -> Response<Body> {
+    reject_unauthenticated_for_provider(error, None, observer)
+}
 
 /// Proof that the request carrying it has been authenticated.
 ///
@@ -81,51 +149,6 @@ pub async fn authenticate_first(
     Ok(Authenticated { success, auth_ms })
 }
 
-/// Build the client response for a failed authentication, and record the
-/// terminal outcome on the lifecycle context.
-///
-/// Authentication *failure* is still an authenticated-request attempt: it
-/// reaches the credential check and is rejected, so it produces exactly one
-/// request-log row. Only requests that never reach the check are silent.
-pub fn reject_unauthenticated(
-    error: &BuiltinAuthError,
-    observer: Option<&LifecycleContext>,
-) -> Response<Body> {
-    let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-    let response = match error {
-        BuiltinAuthError::Unavailable => anthropic_error_response_with_retry_after(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "authentication_error",
-            &error.to_string(),
-            1,
-        ),
-        _ => anthropic_error_response(status, "authentication_error", &error.to_string()),
-    };
-    if let Some(o) = observer {
-        o.emit_request_started(false);
-        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
-            event_id: o.event_id().to_owned(),
-            result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
-                http_status: status.as_u16(),
-                reason: Some(key_auth_failure_reason(error).to_owned()),
-            }),
-        });
-        o.terminate_failure(crate::terminal_observer::InternalFailure {
-            status,
-            error_code: error_codes::AUTHENTICATION_FAILED,
-            error: cc_lb_domain::InternalError {
-                stage: cc_lb_domain::InternalErrorStage::Authn,
-                kind: if matches!(error, BuiltinAuthError::Unavailable) {
-                    cc_lb_domain::InternalErrorKind::Unavailable
-                } else {
-                    cc_lb_domain::InternalErrorKind::InvalidInput
-                },
-                message: Some(error.to_string()),
-            },
-        });
-    }
-    response
-}
 
 /// Coarse reason label consumed by the api-key metrics subscriber to tag
 /// `cclb_key_auth_failures_total`. The buckets are deliberately coarse: a

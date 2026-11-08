@@ -91,7 +91,9 @@ mod usage_parser;
 #[cfg(not(loom))]
 pub mod warmup_attempts;
 #[cfg(not(loom))]
-pub use authn_rail::{Authenticated, authenticate_first, reject_unauthenticated};
+pub use authn_rail::{
+    Authenticated, authenticate_first, reject_unauthenticated, reject_unauthenticated_for_provider,
+};
 #[cfg(not(loom))]
 pub use bulkhead::{
     Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,
