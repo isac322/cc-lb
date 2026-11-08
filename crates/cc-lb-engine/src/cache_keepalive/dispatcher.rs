@@ -428,6 +428,7 @@ fn publish_keepalive_observation(
         &plan.cache_breakpoints,
         &plan.cacheable_breakpoint_prefix_keys,
         None,
+        None,
     ) else {
         return;
     };
