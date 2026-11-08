@@ -1024,48 +1024,19 @@ async fn insert_filtered_keepalive_evidence_in_tx(
         .iter()
         .map(|row| row.upstream_id.to_string())
         .collect::<std::collections::BTreeSet<_>>();
+    let min_request_start_ms = candidates
+        .iter()
+        .map(|row| row.request_start_ms)
+        .min()
+        .unwrap_or(0);
+    let min_renewal_start_ms = min_request_start_ms.saturating_sub(3_600_000);
     let max_request_start_ms = candidates
         .iter()
         .map(|row| row.request_start_ms)
         .max()
         .unwrap_or(0);
-    // Load every renewal and follow-up for the candidate principal/upstream
-    // pairs up to the latest candidate. Cycle-wide deduplication must see
-    // sibling renewals and their follow-ups even when their prefix hashes
-    // differ from the candidate. Precise TTL and cycle qualification remain
-    // in-memory below.
-    let sql = format!(
-        "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
-                prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
-                model, ttl, cache_read_input_tokens
-         FROM cache_keepalive_evidence
-         WHERE evidence_kind IN ('renewal', 'follow_up')
-           AND principal_id IN ({})
-           AND upstream_id IN ({})
-           AND request_start_ms <= ?",
-        std::iter::repeat_n("?", principals.len())
-            .collect::<Vec<_>>()
-            .join(", "),
-        std::iter::repeat_n("?", upstreams.len())
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    let mut query = sqlx::query(AssertSqlSafe(sql));
-    for value in &principals {
-        query = query.bind(value);
-    }
-    for value in &upstreams {
-        query = query.bind(value);
-    }
-    let existing = query
-        .bind(u64_to_i64(
-            max_request_start_ms,
-            "cache keepalive evidence request_start_ms",
-        )?)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?;
-
+    let principal_values = principals.iter().cloned().collect::<Vec<_>>();
+    let upstream_values = upstreams.iter().cloned().collect::<Vec<_>>();
     let running_sql = format!(
         "SELECT DISTINCT principal_id, upstream_id
          FROM cache_keepalive_sessions
@@ -1079,10 +1050,10 @@ async fn insert_filtered_keepalive_evidence_in_tx(
             .join(", "),
     );
     let mut running_query = sqlx::query(AssertSqlSafe(running_sql));
-    for value in &principals {
+    for value in &principal_values {
         running_query = running_query.bind(value);
     }
-    for value in &upstreams {
+    for value in &upstream_values {
         running_query = running_query.bind(value);
     }
     let running_pairs = running_query
@@ -1099,6 +1070,123 @@ async fn insert_filtered_keepalive_evidence_in_tx(
             ))
         })
         .collect::<StorageResult<std::collections::HashSet<_>>>()?;
+    let recent_sql = format!(
+        "SELECT DISTINCT cycle_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_kind = 'renewal'
+           AND cycle_id IS NOT NULL
+           AND prefix_policy_version IS NOT NULL
+           AND prefix_schema_version IS NOT NULL
+           AND principal_id IN ({})
+           AND upstream_id IN ({})
+           AND request_start_ms >= ?
+           AND request_start_ms <= ?",
+        std::iter::repeat_n("?", principals.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+        std::iter::repeat_n("?", upstreams.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    let mut recent_query = sqlx::query(AssertSqlSafe(recent_sql));
+    for value in &principal_values {
+        recent_query = recent_query.bind(value);
+    }
+    for value in &upstream_values {
+        recent_query = recent_query.bind(value);
+    }
+    let recent_renewals = recent_query
+        .bind(u64_to_i64(
+            min_renewal_start_ms,
+            "cache keepalive evidence request_start_ms",
+        )?)
+        .bind(u64_to_i64(
+            max_request_start_ms,
+            "cache keepalive evidence request_start_ms",
+        )?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    let cycle_ids = recent_renewals
+        .into_iter()
+        .map(|row| {
+            row.try_get::<Option<String>, _>("cycle_id")
+                .map_err(map_sqlx_error)
+        })
+        .collect::<StorageResult<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if running_pairs.is_empty() && cycle_ids.is_empty() {
+        return Ok(());
+    }
+    let mut existing = Vec::new();
+    if !cycle_ids.is_empty() {
+        let renewal_sql = format!(
+            "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
+                    prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
+                    model, ttl, cache_read_input_tokens
+             FROM cache_keepalive_evidence
+             WHERE evidence_kind = 'renewal'
+               AND cycle_id IN ({})
+               AND request_start_ms <= ?",
+            std::iter::repeat_n("?", cycle_ids.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let mut renewal_query = sqlx::query(AssertSqlSafe(renewal_sql));
+        for value in &cycle_ids {
+            renewal_query = renewal_query.bind(value);
+        }
+        let renewal_rows = renewal_query
+            .bind(u64_to_i64(
+                max_request_start_ms,
+                "cache keepalive evidence request_start_ms",
+            )?)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let min_cycle_renewal_start_ms = renewal_rows
+            .iter()
+            .filter_map(|row| row.try_get::<i64, _>("request_start_ms").ok())
+            .min()
+            .unwrap_or(0);
+        existing.extend(renewal_rows);
+        let follow_up_sql = format!(
+            "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
+                    prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
+                    model, ttl, cache_read_input_tokens
+             FROM cache_keepalive_evidence
+             WHERE evidence_kind = 'follow_up'
+               AND principal_id IN ({})
+               AND upstream_id IN ({})
+               AND request_start_ms >= ?
+               AND request_start_ms <= ?",
+            std::iter::repeat_n("?", principals.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+            std::iter::repeat_n("?", upstreams.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let mut follow_up_query = sqlx::query(AssertSqlSafe(follow_up_sql));
+        for value in &principal_values {
+            follow_up_query = follow_up_query.bind(value);
+        }
+        for value in &upstream_values {
+            follow_up_query = follow_up_query.bind(value);
+        }
+        let follow_up_rows = follow_up_query
+            .bind(min_cycle_renewal_start_ms)
+            .bind(u64_to_i64(
+                max_request_start_ms,
+                "cache keepalive evidence request_start_ms",
+            )?)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        existing.extend(follow_up_rows);
+    }
 
     let mut accepted_cycles = std::collections::HashSet::new();
     for candidate in candidates {
