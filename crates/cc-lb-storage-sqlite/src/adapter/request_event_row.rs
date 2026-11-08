@@ -172,7 +172,9 @@ pub(super) fn row_to_request_event(row: &SqliteRow) -> StorageResult<RequestEven
         provider_connection_id: row
             .try_get("provider_connection_id")
             .map_err(map_sqlx_error)?,
+        inter_token_avg_ms: optional_u64(row, "list_inter_token_avg_ms")?,
         error_code: row.try_get("error_code").map_err(map_sqlx_error)?,
+        event_id: row.try_get("event_id").map_err(map_sqlx_error)?,
         thinking_tokens: optional_u64(row, "thinking_tokens")?,
         tool_use_prompt_tokens: optional_u64(row, "tool_use_prompt_tokens")?,
         service_tier: row.try_get("service_tier").map_err(map_sqlx_error)?,

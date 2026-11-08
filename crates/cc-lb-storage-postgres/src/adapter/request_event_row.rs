@@ -306,6 +306,11 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
         provider_connection_id: row
             .try_get("provider_connection_id")
             .map_err(map_sqlx_error)?,
+        inter_token_avg_ms: row
+            .try_get::<Option<i64>, _>("inter_token_avg_ms")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "request event inter_token_avg_ms"))
+            .transpose()?,
         error_code: row.try_get("error_code").map_err(map_sqlx_error)?,
         event_id: row.try_get("event_id").map_err(map_sqlx_error)?,
         thinking_tokens: row
