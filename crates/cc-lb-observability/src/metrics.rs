@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 28] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 29] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -74,6 +74,12 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 28] = [
         kind: MetricKind::Counter,
         description: "Total request-level prompt-cache prediction outcomes by outcome.",
         labels: &["outcome"],
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_native_outcome_total",
+        kind: MetricKind::Counter,
+        description: "Provider-native cache outcomes by provider, mode, and bounded outcome.",
+        labels: &["provider", "mode", "outcome"],
     },
     MetricDefinition {
         name: "cc_lb_cache_observation_dropped_total",
@@ -235,6 +241,11 @@ pub(crate) fn register_prometheus14_metrics() {
         "Total request-level prompt-cache prediction outcomes by outcome."
     );
     metrics::describe_counter!(
+        "cc_lb_cache_native_outcome_total",
+        Unit::Count,
+        "Provider-native cache outcomes by provider, mode, and bounded outcome."
+    );
+    metrics::describe_counter!(
         "cc_lb_cache_observation_dropped_total",
         Unit::Count,
         "Total prompt-cache observations dropped by fixed reason."
@@ -372,6 +383,13 @@ pub fn touch_prometheus14_metrics() {
     metrics::counter!(
         "cc_lb_cache_prediction_total",
         "outcome" => "predicted_hit_actual_hit"
+    )
+    .increment(1);
+    metrics::counter!(
+        "cc_lb_cache_native_outcome_total",
+        "provider" => "openai",
+        "mode" => "implicit",
+        "outcome" => "hit"
     )
     .increment(1);
     metrics::counter!(

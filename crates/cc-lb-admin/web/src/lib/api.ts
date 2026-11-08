@@ -562,6 +562,21 @@ export type FinalRequestEventUpdate = z.infer<
   typeof FinalRequestEventUpdateSchema
 >;
 export type RequestEventUpdate = z.infer<typeof RequestEventUpdateSchema>;
+export interface RequestNativeCacheObservation {
+  provider: string;
+  mode: string;
+  scope?: string;
+  identity_hash?: string;
+  boundary?: string;
+  evidence_source?: string;
+  cached_tokens?: number;
+  write_tokens?: number;
+  evidence: "unreported" | "zero" | "positive" | "invalid";
+  retention_secs?: number;
+  expires_at_unix_secs?: number;
+  analysis_ms?: number;
+}
+
 
 export interface RequestEvent {
   ts: number | null;
@@ -598,6 +613,7 @@ export interface RequestEvent {
   cache_creation_input_tokens_1h?: number;
   tool_use_prompt_tokens?: number | null;
   cache_read_input_tokens?: number;
+  native_cache?: RequestNativeCacheObservation | null;
   cost_usd_micros?: number;
   cost_input_micros?: number;
   cost_output_micros?: number;

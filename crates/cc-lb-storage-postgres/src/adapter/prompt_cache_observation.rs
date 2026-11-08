@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
-    PromptCacheObservationRecord, PromptCacheObservationStore, StorageError, StorageResult,
+    PromptCacheObservationRecord, PromptCacheObservationStore,
+    ProviderPromptCacheObservationRecord, StorageError, StorageResult,
 };
 use sqlx::{Row, postgres::PgRow};
 
@@ -51,6 +52,75 @@ impl PromptCacheObservationStore for PostgresStorage {
         .await
         .map_err(map_sqlx_error)?;
         Ok(())
+    }
+    async fn upsert_provider_observation(
+        &self,
+        record: &ProviderPromptCacheObservationRecord,
+    ) -> StorageResult<()> {
+        sqlx::query(
+            "INSERT INTO provider_native_cache_observations (upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary) DO UPDATE SET evidence_source = EXCLUDED.evidence_source, observed_cached_tokens = EXCLUDED.observed_cached_tokens, observed_write_tokens = EXCLUDED.observed_write_tokens, retention_secs = EXCLUDED.retention_secs, expires_at = EXCLUDED.expires_at, last_observed_at = EXCLUDED.last_observed_at WHERE EXCLUDED.last_observed_at > provider_native_cache_observations.last_observed_at",
+        )
+        .bind(record.upstream_id)
+        .bind(&record.provider)
+        .bind(&record.canonical_model_id)
+        .bind(&record.mode)
+        .bind(&record.isolation_scope)
+        .bind(&record.identity_hash)
+        .bind(&record.boundary)
+        .bind(&record.evidence_source)
+        .bind(record.observed_cached_tokens.map(|value| u64_to_i64(value, "native cached tokens")).transpose()?)
+        .bind(record.observed_write_tokens.map(|value| u64_to_i64(value, "native write tokens")).transpose()?)
+        .bind(record.retention_secs.map(|value| u64_to_i64(value, "native retention")).transpose()?)
+        .bind(record.expires_at_unix_secs.map(|value| u64_to_i64(value, "native expiry")).transpose()?)
+        .bind(u64_to_i64(record.last_observed_at_unix_secs, "native observed_at")?)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn list_active_provider_observations(
+        &self,
+        upstream_id: uuid::Uuid,
+        provider: &str,
+        canonical_model_id: &str,
+        mode: &str,
+        isolation_scope: &str,
+        identity_hash: &str,
+        not_expired_at_unix_secs: u64,
+    ) -> StorageResult<Vec<ProviderPromptCacheObservationRecord>> {
+        let rows = sqlx::query(
+            "SELECT upstream_id, provider, canonical_model_id, mode, isolation_scope, identity_hash, boundary, evidence_source, observed_cached_tokens, observed_write_tokens, retention_secs, expires_at, last_observed_at FROM provider_native_cache_observations WHERE upstream_id = $1 AND provider = $2 AND canonical_model_id = $3 AND mode = $4 AND isolation_scope = $5 AND identity_hash = $6 AND (expires_at IS NULL OR expires_at > $7) ORDER BY boundary",
+        )
+        .bind(upstream_id)
+        .bind(provider)
+        .bind(canonical_model_id)
+        .bind(mode)
+        .bind(isolation_scope)
+        .bind(identity_hash)
+        .bind(u64_to_i64(not_expired_at_unix_secs, "native lookup cutoff")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProviderPromptCacheObservationRecord {
+                    upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
+                    provider: row.try_get("provider").map_err(map_sqlx_error)?,
+                    canonical_model_id: row.try_get("canonical_model_id").map_err(map_sqlx_error)?,
+                    mode: row.try_get("mode").map_err(map_sqlx_error)?,
+                    isolation_scope: row.try_get("isolation_scope").map_err(map_sqlx_error)?,
+                    identity_hash: row.try_get("identity_hash").map_err(map_sqlx_error)?,
+                    boundary: row.try_get("boundary").map_err(map_sqlx_error)?,
+                    evidence_source: row.try_get("evidence_source").map_err(map_sqlx_error)?,
+                    observed_cached_tokens: row.try_get::<Option<i64>, _>("observed_cached_tokens").map_err(map_sqlx_error)?.map(|value| i64_to_u64(value, "native cached tokens")).transpose()?,
+                    observed_write_tokens: row.try_get::<Option<i64>, _>("observed_write_tokens").map_err(map_sqlx_error)?.map(|value| i64_to_u64(value, "native write tokens")).transpose()?,
+                    retention_secs: row.try_get::<Option<i64>, _>("retention_secs").map_err(map_sqlx_error)?.map(|value| i64_to_u64(value, "native retention")).transpose()?,
+                    expires_at_unix_secs: row.try_get::<Option<i64>, _>("expires_at").map_err(map_sqlx_error)?.map(|value| i64_to_u64(value, "native expiry")).transpose()?,
+                    last_observed_at_unix_secs: i64_to_u64(row.try_get("last_observed_at").map_err(map_sqlx_error)?, "native observed_at")?,
+                })
+            })
+            .collect()
     }
 
     async fn list_active_for_candidates(

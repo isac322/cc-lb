@@ -1,9 +1,10 @@
 //! Per-request diagnostic fields shipped as structured stdout NDJSON.
 //!
-//! The five diagnostic fields of [`RequestEvent`] (`cache_breakpoints`,
-//! `cache_control_message_indices`, `routing_trace`, `iterations`,
-//! `internal_errors`) are emitted as one `cc_lb.request_diagnostics.v1` line
-//! per persisted row, together with session correlation and request outcomes.
+//! The six diagnostic fields of [`RequestEvent`] (`cache_breakpoints`,
+//! `cache_control_message_indices`, `native_cache`, `routing_trace`,
+//! `iterations`, `internal_errors`) are emitted as one
+//! `cc_lb.request_diagnostics.v1` line per persisted row, together with session
+//! correlation and request outcomes.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -30,6 +31,7 @@ pub struct RequestDiagnostics {
     pub predicted_cache_read_tokens: Option<u64>,
     pub predicted_cache_creation_tokens_5m: Option<u64>,
     pub predicted_cache_creation_tokens_1h: Option<u64>,
+    pub native_cache: Option<crate::RequestNativeCacheObservation>,
 }
 
 impl RequestDiagnostics {
@@ -46,6 +48,7 @@ impl RequestDiagnostics {
             routing_trace: event.routing_trace.take(),
             iterations: event.iterations.take(),
             internal_errors: std::mem::take(&mut event.internal_errors),
+            native_cache: event.native_cache.clone(),
             ..Self::default()
         }
     }
@@ -62,6 +65,7 @@ impl RequestDiagnostics {
             routing_trace: event.routing_trace.clone(),
             iterations: event.iterations.clone(),
             internal_errors: event.internal_errors.clone(),
+            native_cache: event.native_cache.clone(),
             ..Self::default()
         }
     }
@@ -76,7 +80,6 @@ pub enum RequestDiagnosticsSource {
 }
 
 /// One `cc_lb.request_diagnostics.v1` line.
-///
 /// Field declaration order is the wire key order. Every key is always
 /// serialized (no `skip_serializing_if`), so consumers can rely on the full
 /// key set being present.
@@ -120,6 +123,8 @@ pub struct RequestDiagnosticsRecord {
     pub predicted_cache_creation_tokens_5m: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicted_cache_creation_tokens_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_cache: Option<crate::RequestNativeCacheObservation>,
     pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub cache_control_message_indices: Vec<u64>,
     pub routing_trace: Option<cc_lb_domain::RoutingTrace>,
@@ -175,6 +180,7 @@ impl RequestDiagnosticsRecord {
             predicted_cache_read_tokens: diagnostics.predicted_cache_read_tokens,
             predicted_cache_creation_tokens_5m: diagnostics.predicted_cache_creation_tokens_5m,
             predicted_cache_creation_tokens_1h: diagnostics.predicted_cache_creation_tokens_1h,
+            native_cache: diagnostics.native_cache,
             cache_breakpoints: diagnostics.cache_breakpoints,
             cache_control_message_indices: diagnostics.cache_control_message_indices,
             routing_trace: diagnostics.routing_trace,

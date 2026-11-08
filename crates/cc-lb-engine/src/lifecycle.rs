@@ -3296,6 +3296,12 @@ impl Lifecycle {
                         message_index: None,
                         message_count: None,
                         cache_control_message_indices: Vec::new(),
+                        native_cache: provider_cache::analyze(
+                            ProviderCapability::OpenaiResponses,
+                            body.as_ref(),
+                            body.get("model").and_then(Value::as_str).unwrap_or_default(),
+                            ingress.headers,
+                        ),
                     }),
                 });
             }
@@ -4227,6 +4233,7 @@ impl Lifecycle {
                     cache_control_message_indices: cache_metadata
                         .cache_control_message_indices
                         .clone(),
+                    native_cache: cache_metadata.native_cache.clone(),
                 }),
             });
         }
@@ -9661,6 +9668,7 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub(crate) cache_prefix_hash: Option<String>,
     pub(crate) bundles: PromptCacheBundles,
+    pub(crate) native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
     canonical_model_id: String,
 }
 
@@ -10042,6 +10050,9 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         .map(canonical_model_id)
         .unwrap_or_default()
         .to_owned();
+    let native_cache = capability.and_then(|capability| {
+        provider_cache::analyze(capability, value, &canonical_model_id, headers)
+    });
     let requested_service_tier = value
         .get("service_tier")
         .and_then(Value::as_str)
@@ -10132,6 +10143,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             official: official_bundle,
             literal: literal_bundle,
         },
+        native_cache,
         canonical_model_id,
     }
 }
@@ -11054,6 +11066,30 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_creation_input_tokens_5m: u.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: u.cache_creation_input_tokens_1h,
+        cache_read_evidence: match u.cache_read_evidence {
+            usage_parser::CacheTokenEvidence::Unreported => None,
+            usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
+        cache_creation_evidence: match u.cache_creation_evidence {
+            usage_parser::CacheTokenEvidence::Unreported => None,
+            usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
         cache_read_input_tokens: u.cache_read_input_tokens,
         thinking_tokens: u.thinking_tokens,
         web_search_requests: u.web_search_requests,

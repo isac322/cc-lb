@@ -55,6 +55,8 @@ pub mod model_resolution;
 pub mod pg_notify_fanout;
 #[cfg(not(loom))]
 pub mod prompt_cache_simulator;
+#[cfg(not(loom))]
+mod provider_cache;
 pub(crate) mod provider_capability;
 #[cfg(not(loom))]
 mod request_classification;

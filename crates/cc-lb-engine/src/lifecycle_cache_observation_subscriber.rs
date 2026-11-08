@@ -50,6 +50,7 @@ struct Partial {
     cache_control_block_count: Option<u64>,
     usage: UsageSnapshot,
     usage_seen: bool,
+    native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
 }
 
 impl Partial {
@@ -144,8 +145,10 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(info), ..
         } => {
             partial.cache_control_block_count = info.cache_control_block_count;
+            partial.native_cache = info.native_cache;
         }
         LifecycleEvent::UsageObserved { usage, .. } => {
+            apply_native_usage(&mut partial.native_cache, &usage);
             partial.usage = usage;
             partial.usage_seen = true;
         }
@@ -156,14 +159,55 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             if !success.usage_present {
                 return;
             }
+            apply_native_usage(&mut partial.native_cache, &success.usage);
             partial.usage = success.usage;
             partial.usage_seen = true;
         }
         _ => {}
     }
 }
+fn apply_native_usage(
+    native: &mut Option<cc_lb_request_log::RequestNativeCacheObservation>,
+    usage: &UsageSnapshot,
+) {
+    let Some(native) = native.as_mut() else {
+        return;
+    };
+    native.evidence = usage
+        .cache_read_evidence
+        .unwrap_or(cc_lb_request_log::RequestCacheEvidence::Unreported);
+    native.cached_tokens = match native.evidence {
+        cc_lb_request_log::RequestCacheEvidence::Zero
+        | cc_lb_request_log::RequestCacheEvidence::Positive => Some(usage.cache_read_input_tokens),
+        cc_lb_request_log::RequestCacheEvidence::Unreported
+        | cc_lb_request_log::RequestCacheEvidence::Invalid => None,
+    };
+    native.write_tokens = match usage.cache_creation_evidence {
+        Some(
+            cc_lb_request_log::RequestCacheEvidence::Zero
+            | cc_lb_request_log::RequestCacheEvidence::Positive,
+        ) => Some(usage.cache_creation_input_tokens),
+        _ => None,
+    };
+}
+
 
 fn derive_cache_state(partial: &Partial) -> RequestCacheState {
+    if let Some(native) = partial.native_cache.as_ref() {
+        return match (
+            native.evidence,
+            native.write_tokens.unwrap_or_default() > 0,
+        ) {
+            (cc_lb_request_log::RequestCacheEvidence::Positive, true) => RequestCacheState::Refresh,
+            (cc_lb_request_log::RequestCacheEvidence::Positive, false) => RequestCacheState::Hit,
+            (cc_lb_request_log::RequestCacheEvidence::Zero, true) => RequestCacheState::Write,
+            (cc_lb_request_log::RequestCacheEvidence::Zero, false) => RequestCacheState::Miss,
+            (cc_lb_request_log::RequestCacheEvidence::Invalid, _)
+            | (cc_lb_request_log::RequestCacheEvidence::Unreported, _) => {
+                RequestCacheState::Unknown
+            }
+        };
+    }
     let cache_read = partial.usage.cache_read_input_tokens > 0;
     let cache_write = partial.usage.cache_creation_input_tokens > 0;
     let has_breakpoints = partial.cache_control_block_count.unwrap_or(0) > 0;

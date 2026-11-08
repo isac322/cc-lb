@@ -72,6 +72,7 @@ struct Partial {
     cache_read_input_tokens: u64,
     usage_seen: bool,
     predicted_cache_read_tokens: Option<u32>,
+    native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
 }
 
 impl Partial {
@@ -157,6 +158,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.model = info.model;
             }
             partial.has_cache_breakpoints = !info.cache_breakpoints.is_empty();
+            partial.native_cache = info.native_cache;
         }
         LifecycleEvent::RouteCompleted {
             result: Ok(info), ..
@@ -172,6 +174,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         LifecycleEvent::UsageObserved { usage, .. } => {
             partial.cache_read_input_tokens = usage.cache_read_input_tokens;
+            apply_native_usage(&mut partial.native_cache, &usage);
             partial.usage_seen = true;
         }
         LifecycleEvent::StreamCompleted {
@@ -182,15 +185,56 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 return;
             }
             partial.cache_read_input_tokens = success.usage.cache_read_input_tokens;
+            apply_native_usage(&mut partial.native_cache, &success.usage);
             partial.usage_seen = true;
         }
         _ => {}
     }
 }
+fn apply_native_usage(
+    native: &mut Option<cc_lb_request_log::RequestNativeCacheObservation>,
+    usage: &cc_lb_lifecycle::UsageSnapshot,
+) {
+    let Some(native) = native.as_mut() else {
+        return;
+    };
+    let evidence = usage
+        .cache_read_evidence
+        .unwrap_or(cc_lb_request_log::RequestCacheEvidence::Unreported);
+    native.evidence = evidence;
+    native.cached_tokens = match evidence {
+        cc_lb_request_log::RequestCacheEvidence::Zero
+        | cc_lb_request_log::RequestCacheEvidence::Positive => Some(usage.cache_read_input_tokens),
+        cc_lb_request_log::RequestCacheEvidence::Unreported
+        | cc_lb_request_log::RequestCacheEvidence::Invalid => None,
+    };
+    native.write_tokens = match usage.cache_creation_evidence {
+        Some(
+            cc_lb_request_log::RequestCacheEvidence::Zero
+            | cc_lb_request_log::RequestCacheEvidence::Positive,
+        ) => Some(usage.cache_creation_input_tokens),
+        _ => None,
+    };
+}
+
 
 fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: u16) {
     if status != 200 {
         return;
+    }
+    if let Some(native) = partial.native_cache.as_ref() {
+        let outcome = match (
+            native.evidence,
+            native.write_tokens.unwrap_or_default() > 0,
+        ) {
+            (cc_lb_request_log::RequestCacheEvidence::Positive, true) => "refresh",
+            (cc_lb_request_log::RequestCacheEvidence::Positive, false) => "hit",
+            (cc_lb_request_log::RequestCacheEvidence::Zero, true) => "write",
+            (cc_lb_request_log::RequestCacheEvidence::Zero, false) => "zero",
+            (cc_lb_request_log::RequestCacheEvidence::Invalid, _)
+            | (cc_lb_request_log::RequestCacheEvidence::Unreported, _) => "unknown",
+        };
+        metrics_hook.record_native_cache_outcome(&native.provider, &native.mode, outcome);
     }
     if !partial.has_cache_breakpoints {
         return;

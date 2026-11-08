@@ -729,14 +729,14 @@ pub(crate) fn merge_usage_value_for_shape(
         } else {
             CacheTokenEvidence::Positive
         });
-    } else if let Some(cached_tokens) = reported
-        .get("cachedContentTokenCount")
-        .and_then(Value::as_u64)
-    {
-        if usage.gross_input_tokens.is_some() {
-            usage.input_includes_cached = true;
+    } else if let Some(cached_tokens) = reported.get("cachedContentTokenCount") {
+        usage.cache_read_evidence.merge(CacheTokenEvidence::from_value(cached_tokens));
+        if let Some(cached_tokens) = cached_tokens.as_u64() {
+            if usage.gross_input_tokens.is_some() {
+                usage.input_includes_cached = true;
+            }
+            usage.cache_read_input_tokens = cached_tokens;
         }
-        usage.cache_read_input_tokens = cached_tokens;
     }
     let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(reported);
     if cc_total > 0
@@ -1205,6 +1205,28 @@ mod tests {
     fn detect_raw_mid_stream_error(raw: &[u8]) -> Option<UpstreamStreamError> {
         let event = parse_sse_event(raw);
         detect_mid_stream_error_with(&event, None)
+    }
+
+    #[test]
+    fn gemini_cached_content_evidence_distinguishes_positive_zero_and_absent() {
+        for (payload, expected) in [
+            (serde_json::json!({}), CacheTokenEvidence::Unreported),
+            (
+                serde_json::json!({"cachedContentTokenCount": 0}),
+                CacheTokenEvidence::Zero,
+            ),
+            (
+                serde_json::json!({"cachedContentTokenCount": 17}),
+                CacheTokenEvidence::Positive,
+            ),
+        ] {
+            let usage = observe_non_stream_json_value_for_shape(
+                &serde_json::json!({"usageMetadata": payload}),
+                UsageShape::GeminiGenerateContent,
+            )
+            .usage;
+            assert_eq!(usage.cache_read_evidence, expected);
+        }
     }
 
     #[test]
