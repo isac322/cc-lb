@@ -84,9 +84,10 @@ impl ConformanceBackend for PostgresConformanceBackend {
 
     async fn create_fixture(&self) -> anyhow::Result<Self::Fixture> {
         let mut reused = self.reused.lock().await;
-        if let Some(existing) = reused.as_ref() {
-            if !self.schema_tainted.swap(false, Ordering::SeqCst) {
-                sqlx::raw_sql(
+        if let Some(existing) = reused.as_ref()
+            && !self.schema_tainted.swap(false, Ordering::SeqCst)
+        {
+            sqlx::raw_sql(
                 "TRUNCATE TABLE \
                  api_key_concurrency_holds_v1, audit_log_v1, cache_keepalive_decisions, \
                  anthropic_compatibility_kv_v1, cache_keepalive_evidence, cache_keepalive_sessions, \
@@ -117,11 +118,10 @@ impl ConformanceBackend for PostgresConformanceBackend {
                  UPDATE api_key_usage_writers_v1 \
                  SET writer_epoch = '00000000-0000-0000-0000-000000000000', \
                      lease_until_unix_secs = 9223372036854775807, last_flush_id = NULL;",
-                )
-                .execute(&existing.pool)
-                .await?;
-                return Ok(existing.clone());
-            }
+            )
+            .execute(&existing.pool)
+            .await?;
+            return Ok(existing.clone());
         }
         if let Some(existing) = reused.take() {
             existing.pool.close().await;
