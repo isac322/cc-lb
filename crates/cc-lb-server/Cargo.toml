@@ -115,7 +115,10 @@ cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 nix = { version = "0.31.3", features = ["resource"] }
+opentelemetry.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 sqlx.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 wat.workspace = true

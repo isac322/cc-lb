@@ -91,6 +91,8 @@ gemini_model = "gemini-2.5-flash-lite"
 
 Cache keepalive is configured per principal. The principal object controls whether the feature is enabled, its lead times, maximum refresh count, maximum duration, snapshot size, and classifier options.
 
+For GPT-5.6+ Responses, enable both `cache_keepalive.enabled` and `cache_keepalive.classifier.openai_responses_enabled`. The documented `prompt_cache_options.ttl` is `"30m"` by default or `"12h"`; a supported input breakpoint may override that lifetime. Only eligible 30-minute prefixes with sufficient native cached-token evidence and refresh budget schedule renewals. A selected 12-hour prefix records a not-tracked decision because reads do not restart its clock. Legacy `prompt_cache_retention` is a separate policy. See the [keep-alive operator guide](https://github.com/isac322/cc-lb/blob/master/docs/cache-keepalive-operator.md) for limits and renewal costs.
+
 ## Scheduler storage
 
 Use SQLite for local or bounded single-node operation. Use Postgres when multiple replicas must share durable job claims, idempotency keys, and cache-keepalive fences.

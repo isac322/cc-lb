@@ -13,17 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::provider_capability::ProviderCapability;
 use cc_lb_request_log::{RequestCacheEvidence, RequestNativeCacheObservation};
 
-const MAX_EXPLICIT_WRITES: usize = 4;
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OpenaiCacheMode {
-    Explicit,
-    Implicit,
-}
-const MAX_LOOKBACK_BOUNDARIES: usize = 20;
 const MAX_BOUNDARY_BYTES: usize = 512;
 const MAX_SCOPE_BYTES: usize = 256;
-const OPENAI_LONG_RETENTION_SECS: u64 = 12 * 60 * 60;
-const OPENAI_MODERN_DEFAULT_RETENTION_SECS: u64 = 30 * 60;
 
 /// Analyze only the supported provider-native request paths.
 ///
@@ -35,9 +26,21 @@ pub(crate) fn analyze(
     model: &str,
     headers: &http::HeaderMap,
 ) -> Option<RequestNativeCacheObservation> {
+    analyze_with_openai_interpretation(capability, body, model, headers, None)
+}
+
+pub(crate) fn analyze_with_openai_interpretation(
+    capability: ProviderCapability,
+    body: &Value,
+    model: &str,
+    headers: &http::HeaderMap,
+    modern_interpretation: Option<Option<&crate::cache_keepalive::openai::Interpretation>>,
+) -> Option<RequestNativeCacheObservation> {
     let started = Instant::now();
     let mut observation = match capability {
-        ProviderCapability::OpenaiResponses => analyze_openai(body, model, headers)?,
+        ProviderCapability::OpenaiResponses => {
+            analyze_openai(body, model, headers, modern_interpretation)?
+        }
         ProviderCapability::GeminiGenerateContent => analyze_gemini(body, model),
         _ => return None,
     };
@@ -73,66 +76,93 @@ fn analyze_openai(
     body: &Value,
     model: &str,
     headers: &http::HeaderMap,
+    modern_interpretation: Option<Option<&crate::cache_keepalive::openai::Interpretation>>,
 ) -> Option<RequestNativeCacheObservation> {
     if model.is_empty() {
         return None;
     }
-    let scope = openai_scope(headers);
-    let options = body.get("prompt_cache_options");
-    if options.is_some_and(|value| !value.is_object()) {
-        return None;
-    }
-    let requested_mode = match options.and_then(|value| value.get("mode")) {
+    let options = match body.get("prompt_cache_options") {
         None => None,
-        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("explicit") => {
-            Some(OpenaiCacheMode::Explicit)
-        }
-        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("implicit") => {
-            Some(OpenaiCacheMode::Implicit)
-        }
+        Some(Value::Object(options)) => Some(options),
         Some(_) => return None,
     };
+    let requested_mode = match options.and_then(|options| options.get("mode")) {
+        None => false,
+        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("implicit") => false,
+        Some(Value::String(mode)) if mode.eq_ignore_ascii_case("explicit") => true,
+        Some(_) => return None,
+    };
+    let scope = openai_scope(headers);
     let modern = supports_modern_openai_cache(model);
     if !modern && !supports_older_openai_cache(model) {
         return None;
     }
-    let breakpoints = find_openai_breakpoints(body);
-    if breakpoints.len() > MAX_EXPLICIT_WRITES {
-        return Some(unknown_openai(scope, "explicit_write_limit"));
+    if modern {
+        let parsed = if modern_interpretation.is_none() {
+            Some(crate::cache_keepalive::openai::interpret_modern(body)?)
+        } else {
+            None
+        };
+        let interpretation = match modern_interpretation {
+            Some(Some(interpretation)) => interpretation,
+            Some(None) => return None,
+            None => parsed.as_ref()?,
+        };
+        if interpretation.explicit_count > 4 {
+            return Some(unknown_openai(scope, "explicit_write_limit"));
+        }
+        let mode = match interpretation.mode {
+            crate::cache_keepalive::openai::Mode::Explicit => "explicit",
+            crate::cache_keepalive::openai::Mode::Implicit => "implicit",
+        };
+        let retention_secs = interpretation.lifetime.map(|lifetime| match lifetime {
+            crate::cache_keepalive::openai::Lifetime::ThirtyMinutes => 30 * 60,
+            crate::cache_keepalive::openai::Lifetime::TwelveHours => 12 * 60 * 60,
+        });
+        let boundary = interpretation
+            .selected_boundary
+            .as_deref()
+            .map(|path| boundary_label(mode, interpretation.explicit_count, path, retention_secs));
+        let identity_hash = body
+            .get("prompt_cache_key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .map(hash_identity);
+        return Some(RequestNativeCacheObservation {
+            provider: "openai".to_owned(),
+            mode: mode.to_owned(),
+            scope,
+            identity_hash,
+            boundary,
+            evidence_source: Some(if interpretation.explicit_count > 0 {
+                "request.prompt_cache_breakpoint".to_owned()
+            } else {
+                "provider_managed_implicit_boundary".to_owned()
+            }),
+            cached_tokens: None,
+            write_tokens: None,
+            evidence: RequestCacheEvidence::Unreported,
+            retention_secs,
+            expires_at_unix_secs: None,
+            analysis_ms: None,
+        });
     }
-    if !modern && (requested_mode == Some(OpenaiCacheMode::Explicit) || !breakpoints.is_empty()) {
+    let count = crate::cache_keepalive::openai::explicit_breakpoint_count(body)?;
+    if requested_mode || count > 0 {
         return Some(unknown_openai(scope, "unsupported_older_explicit"));
     }
-    let retention_secs = openai_retention_secs(body, modern, &breakpoints)?;
-    let identity_hash = body
-        .get("prompt_cache_key")
-        .and_then(Value::as_str)
-        .filter(|key| !key.is_empty())
-        .map(hash_identity);
-    let mode = if requested_mode == Some(OpenaiCacheMode::Explicit) || !breakpoints.is_empty() {
-        "explicit"
-    } else {
-        "implicit"
-    };
-    let boundary = if !breakpoints.is_empty() {
-        Some(boundary_label("explicit", breakpoints.len()))
-    } else if modern || requested_mode == Some(OpenaiCacheMode::Implicit) {
-        implicit_boundary(body)
-    } else {
-        Some("opaque_provider_boundary".to_owned())
-    };
-    let evidence_source = if !breakpoints.is_empty() {
-        Some("request.prompt_cache_breakpoint".to_owned())
-    } else {
-        Some("provider_managed_implicit_boundary".to_owned())
-    };
+    let retention_secs = crate::cache_keepalive::openai::legacy_retention_secs(body)?;
     Some(RequestNativeCacheObservation {
         provider: "openai".to_owned(),
-        mode: mode.to_owned(),
+        mode: "implicit".to_owned(),
         scope,
-        identity_hash,
-        boundary,
-        evidence_source,
+        identity_hash: body
+            .get("prompt_cache_key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .map(hash_identity),
+        boundary: Some("opaque_provider_boundary".to_owned()),
+        evidence_source: Some("provider_managed_implicit_boundary".to_owned()),
         cached_tokens: None,
         write_tokens: None,
         evidence: RequestCacheEvidence::Unreported,
@@ -200,136 +230,8 @@ fn analyze_gemini(body: &Value, model: &str) -> RequestNativeCacheObservation {
     }
 }
 
-fn find_openai_breakpoints(body: &Value) -> Vec<&Value> {
-    let mut found = Vec::new();
-    if let Some(input) = body.get("input") {
-        collect_breakpoints(input, &mut found);
-    }
-    found
-}
-
-fn collect_breakpoints<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
-    match value {
-        Value::Object(map) => {
-            if map.contains_key("prompt_cache_breakpoint") {
-                found.push(value);
-            }
-            for child in map.values() {
-                collect_breakpoints(child, found);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                collect_breakpoints(child, found);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn implicit_boundary(body: &Value) -> Option<String> {
-    let messages = body.get("input").and_then(Value::as_array)?;
-    let eligible = messages
-        .iter()
-        .filter(|message| {
-            message
-                .get("role")
-                .and_then(Value::as_str)
-                .is_some_and(|role| matches!(role, "developer" | "system" | "user" | "assistant"))
-        })
-        .collect::<Vec<_>>();
-    if eligible.is_empty() {
-        return None;
-    }
-    let start = eligible
-        .iter()
-        .take_while(|message| message.get("role").and_then(Value::as_str) == Some("developer"))
-        .count();
-    let latest = eligible.len().saturating_sub(1);
-    let lookback_start = eligible.len().saturating_sub(MAX_LOOKBACK_BOUNDARIES);
-    Some(format!(
-        "initial_developer={start};latest_message={latest};earlier_messages={}",
-        eligible.len().saturating_sub(lookback_start)
-    ))
-}
-
-fn openai_retention_secs(
-    body: &Value,
-    modern: bool,
-    breakpoints: &[&Value],
-) -> Option<Option<u64>> {
-    let retention = match body.get("prompt_cache_retention") {
-        None => None,
-        Some(Value::String(value)) if value == "in_memory" => Some(0),
-        Some(Value::String(value)) if value == "24h" && !modern => Some(24 * 60 * 60),
-        Some(_) => return None,
-    };
-    let options_ttl = match body
-        .get("prompt_cache_options")
-        .and_then(|options| options.get("ttl"))
-    {
-        None => None,
-        Some(value) => Some(parse_ttl_secs(value)?),
-    };
-    let mut breakpoint_ttl = None;
-    for breakpoint in breakpoints {
-        let marker = breakpoint
-            .get("prompt_cache_breakpoint")
-            .and_then(Value::as_object)?;
-        let Some(value) = marker.get("ttl") else {
-            continue;
-        };
-        let parsed = parse_ttl_secs(value)?;
-        if breakpoint_ttl.is_some_and(|previous| previous != parsed) {
-            return None;
-        }
-        breakpoint_ttl = Some(parsed);
-    }
-    let configured = breakpoint_ttl.or(retention).or(options_ttl);
-    let metadata_only_breakpoint = body
-        .get("metadata")
-        .and_then(|metadata| metadata.get("prompt_cache_breakpoint"))
-        .is_some();
-    let supported_request_form = body
-        .get("input")
-        .is_some_and(|input| input.is_array() || input.is_string());
-    Some(configured.or_else(|| {
-        (modern && supported_request_form && !metadata_only_breakpoint)
-            .then_some(OPENAI_MODERN_DEFAULT_RETENTION_SECS)
-    }))
-}
-
-fn parse_ttl_secs(value: &Value) -> Option<u64> {
-    if let Some(seconds) = value.as_u64() {
-        return (1..=OPENAI_LONG_RETENTION_SECS)
-            .contains(&seconds)
-            .then_some(seconds);
-    }
-    let text = value.as_str()?;
-    let (number, suffix) = text.split_at(text.len().saturating_sub(1));
-    let number = number.parse::<u64>().ok()?;
-    match suffix {
-        "m" => number.checked_mul(60),
-        "h" => number.checked_mul(60 * 60),
-        _ => None,
-    }
-    .filter(|seconds| (1..=OPENAI_LONG_RETENTION_SECS).contains(seconds))
-}
-
 pub(crate) fn supports_modern_openai_cache(model: &str) -> bool {
-    let lower = model.to_ascii_lowercase();
-    let Some(version) = lower.strip_prefix("gpt-").and_then(|value| {
-        let version = value
-            .split(|ch: char| !ch.is_ascii_digit() && ch != '.')
-            .next()?;
-        let mut parts = version.split('.');
-        let major = parts.next()?.parse::<u64>().ok()?;
-        let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;
-        Some((major, minor))
-    }) else {
-        return false;
-    };
-    version >= (5, 6)
+    crate::cache_keepalive::openai::is_gpt56_or_newer(model)
 }
 
 fn supports_gemini_cache(model: &str) -> bool {
@@ -394,9 +296,12 @@ fn unknown_openai(scope: Option<String>, boundary: &str) -> RequestNativeCacheOb
     }
 }
 
-fn boundary_label(kind: &str, count: usize) -> String {
+fn boundary_label(kind: &str, count: usize, path: &str, retention_secs: Option<u64>) -> String {
     truncate(
-        &format!("{kind}_writes={count};lookup=first_two_latest_50"),
+        &format!(
+            "{kind}_writes={count};selected={path};ttl={}",
+            retention_secs.map_or_else(|| "unknown".to_owned(), |seconds| seconds.to_string())
+        ),
         MAX_BOUNDARY_BYTES,
     )
 }
@@ -453,7 +358,7 @@ mod tests {
         assert_eq!(observed.retention_secs, Some(12 * 60 * 60));
         assert_eq!(
             observed.boundary.as_deref(),
-            Some("explicit_writes=4;lookup=first_two_latest_50")
+            Some("explicit_writes=4;selected=input[0].content[3];ttl=43200")
         );
     }
     #[test]
@@ -470,45 +375,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observed.mode, "implicit");
-        assert_eq!(
-            observed.retention_secs,
-            Some(OPENAI_MODERN_DEFAULT_RETENTION_SECS)
-        );
+        assert_eq!(observed.retention_secs, Some(30 * 60));
         assert_eq!(
             observed.boundary.as_deref(),
-            Some("initial_developer=0;latest_message=0;earlier_messages=1")
+            Some("implicit_writes=0;selected=input[0];ttl=1800")
         );
     }
 
     #[test]
-    fn modern_openai_explicit_mode_uses_implicit_thirty_minute_retention() {
+    fn modern_openai_explicit_mode_without_marker_is_ineligible() {
         let observed = analyze(
             ProviderCapability::OpenaiResponses,
             &json!({
                 "prompt_cache_options":{"mode":"explicit"},
-                "input":[{"prompt_cache_breakpoint":{}}]
+                "input":[{"role":"user","content":"hello"}]
             }),
             "gpt-5.6",
             &HeaderMap::new(),
         )
         .unwrap();
         assert_eq!(observed.mode, "explicit");
-        assert_eq!(
-            observed.retention_secs,
-            Some(OPENAI_MODERN_DEFAULT_RETENTION_SECS)
-        );
+        assert_eq!(observed.retention_secs, None);
     }
 
     #[test]
-    fn modern_openai_unknown_request_form_has_no_implicit_retention() {
-        let observed = analyze(
-            ProviderCapability::OpenaiResponses,
-            &json!({"prompt_cache_options":{"mode":"implicit"}}),
-            "gpt-5.6",
-            &HeaderMap::new(),
-        )
-        .unwrap();
-        assert_eq!(observed.retention_secs, None);
+    fn modern_openai_unknown_request_form_is_not_observed() {
+        assert!(
+            analyze(
+                ProviderCapability::OpenaiResponses,
+                &json!({"prompt_cache_options":{"mode":"implicit"}}),
+                "gpt-5.6",
+                &HeaderMap::new(),
+            )
+            .is_none()
+        );
     }
     #[test]
     fn unsupported_openai_mode_is_unknown() {
@@ -542,11 +442,13 @@ mod tests {
 
     #[test]
     fn unsupported_openai_write_count_is_unknown() {
-        let body = json!({"model":"gpt-5.6","input":[
-            {"prompt_cache_breakpoint":{}},{"prompt_cache_breakpoint":{}},
-            {"prompt_cache_breakpoint":{}},{"prompt_cache_breakpoint":{}},
-            {"prompt_cache_breakpoint":{}}
-        ]});
+        let body = json!({"model":"gpt-5.6","input":[{"role":"user","content":[
+            {"type":"input_text","prompt_cache_breakpoint":{}},
+            {"type":"input_text","prompt_cache_breakpoint":{}},
+            {"type":"input_text","prompt_cache_breakpoint":{}},
+            {"type":"input_text","prompt_cache_breakpoint":{}},
+            {"type":"input_text","prompt_cache_breakpoint":{}}
+        ]}]});
         let observed = analyze(
             ProviderCapability::OpenaiResponses,
             &body,
@@ -570,8 +472,7 @@ mod tests {
             &HeaderMap::new(),
         )
         .unwrap();
-        assert_eq!(observed.mode, "implicit");
-        assert_eq!(observed.retention_secs, None);
+        assert_eq!(observed.retention_secs, Some(30 * 60));
     }
 
     #[test]
@@ -594,7 +495,9 @@ mod tests {
             ProviderCapability::OpenaiResponses,
             &json!({
                 "prompt_cache_options":{"mode":"explicit"},
-                "input":[{"prompt_cache_breakpoint":{}}]
+                "input":[{"role":"user","content":[
+                    {"type":"input_text","prompt_cache_breakpoint":{}}
+                ]}]
             }),
             "o3",
             &HeaderMap::new(),
@@ -608,20 +511,21 @@ mod tests {
     }
 
     #[test]
-    fn modern_breakpoint_ttl_overrides_request_ttl() {
-        let observed = analyze(
-            ProviderCapability::OpenaiResponses,
-            &json!({
-                "prompt_cache_options":{"ttl":"30m"},
-                "input":[{"content":[
-                    {"prompt_cache_breakpoint":{"ttl":"2h"}}
-                ]}]
-            }),
-            "gpt-5.9-preview",
-            &HeaderMap::new(),
-        )
-        .unwrap();
-        assert_eq!(observed.retention_secs, Some(2 * 60 * 60));
+    fn unsupported_modern_breakpoint_ttl_fails_closed() {
+        assert!(
+            analyze(
+                ProviderCapability::OpenaiResponses,
+                &json!({
+                    "prompt_cache_options":{"ttl":"30m"},
+                    "input":[{"role":"user","content":[
+                        {"type":"input_text","prompt_cache_breakpoint":{"ttl":"2h"}}
+                    ]}]
+                }),
+                "gpt-5.9-preview",
+                &HeaderMap::new(),
+            )
+            .is_none()
+        );
     }
 
     #[test]

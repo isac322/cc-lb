@@ -2546,13 +2546,31 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             "/openai",
             Router::new()
                 .route("/v1/responses", get(responses_websocket_handler))
-                .route("/v1/realtime", get(openai_realtime_websocket_handler))
+                .route(
+                    "/v1/realtime",
+                    get(openai_realtime_websocket_handler).layer(
+                        cc_lb_observability::trace_layer().make_span_with(
+                            cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                proxy_route_template,
+                            ),
+                        ),
+                    ),
+                )
                 .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
         )
         .nest(
             "/gemini",
             Router::new()
-                .route("/ws/{*path}", get(gemini_live_websocket_handler))
+                .route(
+                    "/ws/{*path}",
+                    get(gemini_live_websocket_handler).layer(
+                        cc_lb_observability::trace_layer().make_span_with(
+                            cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                proxy_route_template,
+                            ),
+                        ),
+                    ),
+                )
                 .layer(Extension(ProviderScope(cc_lb_domain::Provider::Gemini))),
         )
         .with_state(state.clone());
@@ -2948,6 +2966,7 @@ async fn connect_provider_websocket(
 ) -> Result<
     (
         WebSocketStream<MaybeTlsStream<TcpStream>>,
+        HeaderMap,
         cc_lb_engine::OwnedBulkheadGuard,
     ),
     WebSocketError,
@@ -2974,9 +2993,10 @@ async fn connect_provider_websocket(
     )
     .await;
     match result {
-        Ok(Ok((stream, _response))) => {
+        Ok(Ok((stream, response))) => {
+            let (response_parts, _) = response.into_parts();
             permit.record_success();
-            Ok((stream, bulkhead_guard))
+            Ok((stream, response_parts.headers, bulkhead_guard))
         }
         Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
             let error = provider_websocket_error_from_http(*response);
@@ -3037,7 +3057,7 @@ async fn start_responses_provider(
         bulkhead_guard,
         events,
     } = params;
-    let (upstream, bulkhead_guard) =
+    let (upstream, _response_headers, bulkhead_guard) =
         connect_provider_websocket(state, upstream_id, request, bulkhead_guard).await?;
     let (sink, mut stream) = upstream.split();
     let task = tokio::spawn(async move {
