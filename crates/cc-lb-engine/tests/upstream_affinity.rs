@@ -1805,6 +1805,10 @@ async fn gemini_cached_contents_create_binds_routed_owner_epoch_before_return() 
 
 #[tokio::test]
 async fn gemini_cached_contents_body_collection_failure_returns_native_error_without_binding() {
+    use cc_lb_control::RequestEventBus as _;
+
+    let test_bus = crate::common::TestLifecycleBus::new();
+    let mut events = test_bus.bus.subscribe_lifecycle();
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
     let store = Arc::new(MemoryAffinityStore::default());
     let dispatch =
@@ -1815,7 +1819,8 @@ async fn gemini_cached_contents_body_collection_failure_returns_native_error_wit
         vec![gemini_upstream_record(upstream, "gemini", true)],
         dispatch.clone(),
         Some(store.clone()),
-    );
+    )
+    .with_event_bus(test_bus.bus.clone());
 
     let (status, _, body) = collect_body(
         handle_authenticated(
@@ -1833,6 +1838,15 @@ async fn gemini_cached_contents_body_collection_failure_returns_native_error_wit
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(dispatch.call_count(), 1);
     assert_eq!(store.len(), 0);
+    let terminal_statuses = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            cc_lb_lifecycle::LifecycleEvent::RequestTerminated { client_status, .. } => {
+                Some(client_status)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_statuses, vec![status.as_u16()]);
     let error_body: Value = serde_json::from_slice(&body).expect("Gemini error body JSON");
     assert_eq!(error_body["error"]["code"], 503);
     assert_eq!(error_body["error"]["status"], "UNAVAILABLE");

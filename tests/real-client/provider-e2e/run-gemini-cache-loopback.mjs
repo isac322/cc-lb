@@ -518,6 +518,16 @@ async function newCases(ids) {
     check(!plan, 'Fake create fixture was not consumed');
     return '200; exact response bytes/values; journal=A';
   });
+  await test('client stream flag cannot bypass durable create binding', async () => {
+    const streamedName = 'cachedContents/client-stream-flag';
+    const body = { ...createBody(), stream: true };
+    const before = journal.length;
+    prepareResponse(createdResponse(streamedName));
+    status(await proxy('POST', CREATE, body), 200, 'Create with client stream flag');
+    assert.deepEqual(exactly(before, 'A', 'POST', CREATE, 'Stream-flag create').body, body);
+    await ownerReuse(streamedName, 'Stream-flag resource');
+    return 'create200; body unchanged; generate/count200 on durable owner';
+  });
   await test('another principal cannot reuse a known owner cache', async () => {
     const beforeProvisioning = journal.length;
     const other = await admin('POST', '/admin/v1/principals', {
@@ -578,6 +588,7 @@ async function newCases(ids) {
     ['invalid expireTime', (object) => { object.expireTime = 'not-an-rfc3339-time'; }],
     ['expired expireTime', (object) => { object.expireTime = '2000-01-01T00:00:00Z'; }],
     ['non-JSON response', null],
+    ['SSE response', null],
   ];
   for (const [index, [label, mutate]] of malformed.entries()) {
     await test(`${label} is not advertised or bound`, async () => {
@@ -586,7 +597,10 @@ async function newCases(ids) {
       mutate?.(object);
       const reference = typeof object.name === 'string' && object.name ? object.name : candidate;
       const before = journal.length;
-      prepareResponse(object, mutate ? {} : { raw: '<not-json>', contentType: 'text/plain' });
+      const responseOptions = label === 'SSE response'
+        ? { raw: `data: ${JSON.stringify(object)}\n\n`, contentType: 'text/event-stream' }
+        : mutate ? {} : { raw: '<not-json>', contentType: 'text/plain' };
+      prepareResponse(object, responseOptions);
       status(await proxy('POST', CREATE, createBody()), 503, label);
       exactly(before, 'B', 'POST', CREATE, label);
       await unavailable(reference, `${label} must not bind`);
