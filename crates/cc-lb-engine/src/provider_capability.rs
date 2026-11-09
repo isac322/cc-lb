@@ -257,6 +257,18 @@ mod canonical_model_tests {
     }
 
     #[test]
+    fn tuned_marker_only_matches_as_leading_resource_segment() {
+        assert_eq!(
+            canonical_gemini_model_id("models/gemini/tunedModels/custom"),
+            "gemini/tunedModels/custom"
+        );
+        assert_eq!(
+            canonical_gemini_model_id("models/tunedModels/custom/versions/1"),
+            "models/tunedModels/custom/versions/1"
+        );
+    }
+
+    #[test]
     fn preserves_non_resource_gemini_identities() {
         for model in [
             "gemini-2.5-flash",
