@@ -505,6 +505,7 @@ export const RequestEventPartialSchema = z.looseObject({
   cache_write_input_tokens_12h: z.number().nullable().optional(),
   thinking_tokens: z.number().nullable().optional(),
   thinking_budget_tokens: z.number().nullable().optional(),
+  thinking_level: z.string().nullable().optional(),
   reasoning_effort: z.string().nullable().optional(),
   service_tier: z.string().nullable().optional(),
   cost_usd_micros: z.number().nullable().optional(),
@@ -554,6 +555,7 @@ export const FinalRequestEventUpdateSchema = z.object({
       ...requestSetupTimingFields,
       ...requestLifecycleTimingFields,
       ...requestIoTimingFields,
+      thinking_level: z.string().nullable().optional(),
     })
     .transform((event) => event as unknown as RequestEvent),
   cursor: z.number(),
@@ -616,6 +618,7 @@ export interface RequestEvent {
   upstream_error_message?: string;
   thinking_tokens?: number;
   thinking_budget_tokens?: number;
+  thinking_level?: string | null;
   reasoning_effort?: string;
   service_tier?: string;
   input_tokens?: number;

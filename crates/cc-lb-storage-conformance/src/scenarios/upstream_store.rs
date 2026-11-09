@@ -1241,11 +1241,35 @@ mod tests {
 
         use super::*;
 
-        struct PostgresBackend;
+        struct PostgresBackend {
+            reused: tokio::sync::Mutex<Option<PostgresFixture>>,
+        }
+        #[derive(Clone)]
         struct PostgresFixture {
             url: String,
             schema: String,
             pool: PgPool,
+        }
+
+        impl PostgresBackend {
+            async fn cleanup(&self) -> Result<()> {
+                let Some(fixture) = self.reused.lock().await.take() else {
+                    return Ok(());
+                };
+                fixture.pool.close().await;
+                let admin_pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&fixture.url)
+                    .await?;
+                sqlx::query(AssertSqlSafe(format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    fixture.schema
+                )))
+                .execute(&admin_pool)
+                .await?;
+                admin_pool.close().await;
+                Ok(())
+            }
         }
 
         #[async_trait]
@@ -1254,6 +1278,13 @@ mod tests {
             type Fixture = PostgresFixture;
 
             async fn create_fixture(&self) -> Result<Self::Fixture> {
+                let mut reused = self.reused.lock().await;
+                if let Some(existing) = reused.as_ref() {
+                    sqlx::query("TRUNCATE TABLE upstream_spec_v1 RESTART IDENTITY CASCADE")
+                        .execute(&existing.pool)
+                        .await?;
+                    return Ok(existing.clone());
+                }
                 let Some(url) = std::env::var("CI_POSTGRES_URL")
                     .ok()
                     .or_else(|| std::env::var("DATABASE_URL").ok())
@@ -1281,7 +1312,9 @@ mod tests {
                     std::sync::Arc::new(cc_lb_clock::SystemClock),
                 );
                 MetaStore::initialize(&storage).await?;
-                Ok(PostgresFixture { url, schema, pool })
+                let fixture = PostgresFixture { url, schema, pool };
+                *reused = Some(fixture.clone());
+                Ok(fixture)
             }
 
             async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Store> {
@@ -1291,31 +1324,27 @@ mod tests {
                 ))
             }
 
-            async fn teardown(&self, fixture: Self::Fixture) -> Result<()> {
-                fixture.pool.close().await;
-                let admin_pool = PgPoolOptions::new()
-                    .max_connections(1)
-                    .connect(&fixture.url)
-                    .await?;
-                sqlx::query(AssertSqlSafe(format!(
-                    "DROP SCHEMA IF EXISTS {} CASCADE",
-                    fixture.schema
-                )))
-                .execute(&admin_pool)
-                .await?;
-                admin_pool.close().await;
+            async fn teardown(&self, _fixture: Self::Fixture) -> Result<()> {
                 Ok(())
             }
         }
 
         #[tokio::test]
         async fn upstream_store_postgres() -> Result<()> {
-            match run_all(Arc::new(PostgresBackend)).await {
+            let backend = Arc::new(PostgresBackend {
+                reused: tokio::sync::Mutex::new(None),
+            });
+            let result = run_all(Arc::clone(&backend)).await;
+            let cleanup = backend.cleanup().await;
+            match result {
                 Err(error) if error.to_string().contains("skip:") => {
                     eprintln!("{error}");
                     Ok(())
                 }
-                result => result,
+                result => {
+                    result?;
+                    cleanup
+                }
             }
         }
     }

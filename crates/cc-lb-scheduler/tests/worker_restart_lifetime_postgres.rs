@@ -87,7 +87,7 @@ async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval()
                     }
                 }
             }
-            sleep(Duration::from_millis(350)).await;
+            sleep(Duration::from_millis(100)).await;
             drop(held);
         });
         timeout(QA_TIMEOUT, pre_held_rx)
@@ -109,7 +109,7 @@ async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval()
         timeout(QA_TIMEOUT, grabber)
             .await
             .context("timed out waiting for worker_pool grabber")??;
-        sleep(Duration::from_millis(300)).await;
+        sleep(Duration::from_millis(100)).await;
         let upstream_id = Uuid::new_v4();
         let now_secs = unix_secs(SystemClock.now());
         let expires_at_unix_secs = now_secs + 6;
@@ -119,7 +119,7 @@ async fn postgres_idle_worker_claims_future_keepalive_job_within_poll_interval()
             .push_keepalive_task(SchedulerPushTask {
                 args: AdaptiveJob::CacheKeepalive(job),
                 idempotency_key: Some(idempotency_key.clone()),
-                run_at_unix_secs: Some(now_secs + 2),
+                run_at_unix_secs: Some(now_secs + 1),
                 max_attempts: Some(1),
             })
             .await?;
@@ -199,7 +199,7 @@ async fn postgres_all_worker_queues_claim_future_run_at_after_idle() -> Result<(
         wait_for_worker_count(&pool, ADAPTIVE_QUEUE, 1).await?;
         wait_for_worker_count(&pool, CACHE_KEEPALIVE_QUEUE, 1).await?;
         wait_for_worker_count(&pool, CRON_QUEUE, 1).await?;
-        sleep(Duration::from_millis(2_200)).await;
+        sleep(Duration::from_millis(1_100)).await;
 
         let now_secs = unix_secs(SystemClock.now());
         let adaptive_id = Uuid::new_v4();
@@ -207,7 +207,7 @@ async fn postgres_all_worker_queues_claim_future_run_at_after_idle() -> Result<(
         let adaptive_key = format!("qa03:adaptive:{adaptive_id}");
         let keepalive_key = format!("qa03:keepalive:{keepalive_id}");
         let cron_key = format!("qa03:cron:{keepalive_id}");
-        let run_at = now_secs + 2;
+        let run_at = now_secs + 1;
         backend
             .push_adaptive_task(SchedulerPushTask {
                 args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(adaptive_id)),
@@ -355,7 +355,7 @@ async fn postgres_cancel_leaves_unstarted_future_job_pending_for_next_worker() -
             .push_adaptive_task(SchedulerPushTask {
                 args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
                 idempotency_key: Some(idempotency_key.clone()),
-                run_at_unix_secs: Some(now_secs + 3),
+                run_at_unix_secs: Some(now_secs + 2),
                 max_attempts: Some(1),
             })
             .await?;
