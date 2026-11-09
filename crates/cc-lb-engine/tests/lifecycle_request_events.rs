@@ -17,8 +17,10 @@ use cc_lb_engine::realtime_websocket::{
 use cc_lb_engine::responses_websocket::{ResponsesWebSocketGateway, WebSocketError};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
-use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
+use cc_lb_storage_api::upstream::{
+    UpstreamCreate, UpstreamKind as StorageUpstreamKind, UpstreamRecord,
+};
+use cc_lb_storage_api::{MetaStore, Storage as StorageTrait, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -126,18 +128,24 @@ async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
     let mut update_rx = test_bus.bus.subscribe();
     let authn = TestAuthn::new(TestState::default());
     let upstream_id = uuid::Uuid::from_u128(1_204_001);
-    let view = DynamicViewBuilder::new(0)
-        .signer_factory(Arc::new(authn.clone()))
-        .principal_view(authn.principal_view.clone())
-        .upstream_records(vec![UpstreamRecord {
+    let upstream = storage
+        .create(UpstreamCreate {
             id: upstream_id,
             name: "gemini-identity-events".to_owned(),
             kind: StorageUpstreamKind::GeminiApiKey,
             base_url: Some("https://generativelanguage.googleapis.com/".parse()?),
-            enabled: true,
             api_key_ciphertext: Some(Vec::new()),
-            ..UpstreamRecord::default()
-        }])
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        })
+        .await?;
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![upstream])
         .build();
     let dispatcher = GeminiCapturingDispatch::default();
     let lifecycle = Lifecycle::new_with_dynamic_view(
@@ -147,18 +155,31 @@ async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
         LifecycleConfig::default(),
         Arc::new(cc_lb_clock::SystemClock),
     )
-    .with_event_bus(test_bus.bus_arc());
+    .with_event_bus(test_bus.bus_arc())
+    .with_upstream_affinity_store(storage.clone());
 
-    let bodies = [
-        Bytes::from_static(
-            br#"{"model":"models/gemini-2.5-flash","cachedContent":"cachedContents/example","contents":[]}"#,
+    let requests = [
+        (
+            "/v1beta/models/gemini-2.5-flash:generateContent",
+            Bytes::from_static(
+                br#"{"model":"models/gemini-2.5-flash","cachedContent":"cachedContents/example","contents":[]}"#,
+            ),
         ),
-        Bytes::from_static(br#"{"contents":[]}"#),
+        (
+            "/v1beta/models/gemini-2.5-flash:generateContent",
+            Bytes::from_static(br#"{"contents":[]}"#),
+        ),
+        (
+            "/v1beta/cachedContents",
+            Bytes::from_static(
+                br#"{"model":"models/gemini-2.5-flash","contents":[]}"#,
+            ),
+        ),
     ];
-    for body in &bodies {
+    for (path, body) in &requests {
         let mut request = http::Request::builder()
             .method("POST")
-            .uri("/v1beta/models/gemini-2.5-flash:generateContent")
+            .uri(*path)
             .header("x-api-key", managed_api_key())
             .body(body.clone())?;
         request
@@ -169,7 +190,7 @@ async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
             .await
             .expect("Gemini request authenticates");
         let response = lifecycle.handle(request, &auth).await?;
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK, "{path} response");
         response.into_body().collect().await?;
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -191,10 +212,14 @@ async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
             .lock()
             .expect("captured bodies lock")
             .as_slice(),
-        &bodies
+        requests
+            .iter()
+            .map(|(_, body)| body.clone())
+            .collect::<Vec<_>>()
+            .as_slice()
     );
     let events = crate::common::stored_request_events(storage.as_ref()).await?;
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert!(
         events
             .iter()
@@ -1169,9 +1194,16 @@ impl UpstreamDispatch for GeminiCapturingDispatch {
             .lock()
             .expect("captured Gemini bodies lock")
             .push(request.body().clone());
-        let mut response = Response::new(Body::from(Bytes::from_static(
-            br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}"#,
-        )));
+        let response_body = if request.url().path() == "/v1beta/cachedContents" {
+            Bytes::from_static(
+                br#"{"name":"cachedContents/example","expireTime":"2100-01-01T00:00:00Z"}"#,
+            )
+        } else {
+            Bytes::from_static(
+                br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}"#,
+            )
+        };
+        let mut response = Response::new(Body::from(response_body));
         *response.status_mut() = StatusCode::OK;
         response.headers_mut().insert(
             http::header::CONTENT_TYPE,

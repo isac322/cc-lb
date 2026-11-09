@@ -465,30 +465,45 @@ async fn canonicalize_gemini_model_identity_migration_rebuilds_historical_rollup
     .expect("execute canonicalization migration");
 
     assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM usage_rollup_reconciliations_v1 \
+             WHERE id = 'canonicalize_gemini_model_identity'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .expect("read pending reconciliation"),
+        "pending"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_rollups_v2")
+            .fetch_one(storage.pool())
+            .await
+            .expect("count retained rollups"),
+        4
+    );
+
+    let first_reconciliation_run = storage
+        .rollup_usage_once()
+        .await
+        .expect("start historical reconciliation");
+    assert_eq!(first_reconciliation_run.processed_events, 0);
+    assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_rollups_v2")
             .fetch_one(storage.pool())
             .await
             .expect("count cleared rollups"),
         0
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM overview_excluded_error_rollups_v1")
-            .fetch_one(storage.pool())
-            .await
-            .expect("count cleared excluded errors"),
-        0
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM usage_rollup_checkpoints_v1 \
-             WHERE id IN ('high_water', 'cost_components_backfill_upper', \
-                          'cost_components_backfill_cursor')",
-        )
-        .fetch_one(storage.pool())
+    let second_reconciliation_run = storage
+        .rollup_usage_once()
         .await
-        .expect("count cleared checkpoints"),
-        0
-    );
+        .expect("rewrite one reconciliation batch");
+    assert_eq!(second_reconciliation_run.processed_events, 0);
+    let third_reconciliation_run = storage
+        .rollup_usage_once()
+        .await
+        .expect("finish historical reconciliation");
+    assert_eq!(third_reconciliation_run.processed_events, 0);
 
     for (event_id, expected_model) in [
         ("canonicalize-gemini-prefixed", Some("gemini-2.5-flash")),

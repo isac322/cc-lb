@@ -5407,8 +5407,7 @@ impl Lifecycle {
             });
         }
         ctx.cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
-        ctx.canonical_model_id = if request_capability
-            .is_some_and(|capability| capability.provider() == cc_lb_domain::Provider::Gemini)
+        ctx.canonical_model_id = if request_capability.provider() == cc_lb_domain::Provider::Gemini
         {
             std::mem::take(&mut cache_metadata.canonical_model_id)
         } else {

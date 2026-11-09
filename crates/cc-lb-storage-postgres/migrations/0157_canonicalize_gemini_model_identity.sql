@@ -1,55 +1,14 @@
--- Reconcile historical Gemini model identities after the provider started
--- storing the wire `models/` prefix separately from the internal model key.
--- The upstream kind join is intentionally required: a model string alone does
--- not prove provider ownership, and unknown/unrelated rows must remain intact.
-CREATE TEMP TABLE _canonicalize_gemini_model_identity_needed (
-    needed BOOLEAN NOT NULL CHECK (needed)
-) ON COMMIT DROP;
-
-INSERT INTO _canonicalize_gemini_model_identity_needed (needed)
-SELECT TRUE
-WHERE EXISTS (
-    SELECT 1
-    FROM request_events_v1 AS events
-    JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id
-    WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth')
-      AND events.model LIKE 'models/%'
+-- Defer historical Gemini model identity reconciliation to the off-request
+-- rollup worker. Startup must only install durable, resumable state.
+CREATE TABLE IF NOT EXISTS usage_rollup_reconciliations_v1 (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'rewriting', 'complete')),
+    cursor BIGINT NOT NULL DEFAULT 0 CHECK (cursor >= 0),
+    cursor_xid xid8 NOT NULL DEFAULT '0'::xid8,
+    upper_bound BIGINT NOT NULL DEFAULT 0 CHECK (upper_bound >= 0),
+    upper_bound_xid xid8 NOT NULL DEFAULT '0'::xid8
 );
 
-UPDATE request_events_v1 AS events
-SET model = substring(events.model FROM 8)
-FROM upstream_spec_v1 AS upstream
-WHERE upstream.id = events.upstream_id
-  AND upstream.kind IN ('gemini_api_key', 'gemini_oauth')
-  AND events.model IS NOT NULL
-  AND events.model LIKE 'models/%'
-  AND EXISTS (
-      SELECT 1
-      FROM _canonicalize_gemini_model_identity_needed
-  );
-
--- Rollups are additive. Replaying the rewritten event history on top of the
--- existing aggregates would double-count it, so clear every derived rollup
--- and every cursor used by the rollup worker in the same migration transaction.
-DELETE FROM usage_rollups_v2
-WHERE EXISTS (
-    SELECT 1
-    FROM _canonicalize_gemini_model_identity_needed
-);
-DELETE FROM overview_excluded_error_rollups_v1
-WHERE EXISTS (
-    SELECT 1
-    FROM _canonicalize_gemini_model_identity_needed
-);
-DELETE FROM usage_rollup_checkpoints_v1
-WHERE id IN (
-    'high_water',
-    'cost_components_backfill_upper',
-    'cost_components_backfill_cursor'
-)
-  AND EXISTS (
-      SELECT 1
-      FROM _canonicalize_gemini_model_identity_needed
-  );
-
-DROP TABLE _canonicalize_gemini_model_identity_needed;
+INSERT INTO usage_rollup_reconciliations_v1 (id, status, cursor, upper_bound)
+VALUES ('canonicalize_gemini_model_identity', 'pending', 0, 0)
+ON CONFLICT (id) DO NOTHING;

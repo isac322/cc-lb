@@ -14,6 +14,7 @@ use crate::{SqliteStorage, map_sqlx_error};
 const CHECKPOINT_ID: &str = "high_water";
 const COST_BACKFILL_UPPER_ID: &str = "cost_components_backfill_upper";
 const COST_BACKFILL_CURSOR_ID: &str = "cost_components_backfill_cursor";
+const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
@@ -369,8 +370,155 @@ impl UsageTokenIntervalStore for SqliteStorage {
         Ok(sums)
     }
 }
+async fn reconcile_gemini_model_identity(
+    storage: &SqliteStorage,
+) -> StorageResult<Option<UsageRollupRun>> {
+    let state = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT status, cursor, upper_bound \
+         FROM usage_rollup_reconciliations_v1 WHERE id = ?",
+    )
+    .bind(GEMINI_RECONCILIATION_ID)
+    .fetch_optional(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+    let Some((status, _, _)) = state else {
+        return Ok(None);
+    };
+
+    if status == "complete" {
+        return Ok(None);
+    }
+
+    let mut tx = storage.begin_immediate().await?;
+    let state = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT status, cursor, upper_bound \
+         FROM usage_rollup_reconciliations_v1 WHERE id = ?",
+    )
+    .bind(GEMINI_RECONCILIATION_ID)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if state.0 == "complete" {
+        tx.rollback().await.map_err(map_sqlx_error)?;
+        return Ok(None);
+    }
+
+    if state.0 == "pending" {
+        let has_work = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND events.model LIKE 'models/%')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if has_work == 0 {
+            sqlx::query(
+                "UPDATE usage_rollup_reconciliations_v1 SET status = 'complete' \
+                 WHERE id = ?",
+            )
+            .bind(GEMINI_RECONCILIATION_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        } else {
+            let upper_bound =
+                sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(id), 0) FROM request_events_v1")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            sqlx::query("DELETE FROM usage_rollups_v2")
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            sqlx::query("DELETE FROM overview_excluded_error_rollups_v1")
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            sqlx::query(
+                "DELETE FROM usage_rollup_checkpoints_v1 WHERE id IN \
+                 ('high_water', 'cost_components_backfill_upper', \
+                  'cost_components_backfill_cursor')",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            sqlx::query(
+                "UPDATE usage_rollup_reconciliations_v1 \
+                 SET status = 'rewriting', cursor = 0, upper_bound = ? \
+                 WHERE id = ?",
+            )
+            .bind(upper_bound)
+            .bind(GEMINI_RECONCILIATION_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        return Ok(Some(UsageRollupRun {
+            processed_events: 0,
+            updated_rollups: 0,
+            checkpoint: None,
+        }));
+    }
+
+    let ids = sqlx::query_scalar::<_, i64>(
+        "SELECT events.id FROM request_events_v1 AS events \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+         WHERE events.id > ? AND events.id <= ? \
+           AND upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND events.model LIKE 'models/%' \
+         ORDER BY events.id ASC LIMIT ?",
+    )
+    .bind(state.1)
+    .bind(state.2)
+    .bind(ROLLUP_BATCH_LIMIT)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    if ids.is_empty() {
+        sqlx::query(
+            "UPDATE usage_rollup_reconciliations_v1 SET status = 'complete' \
+             WHERE id = ?",
+        )
+        .bind(GEMINI_RECONCILIATION_ID)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    } else {
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE request_events_v1 SET model = substr(model, 8) \
+             WHERE id IN ({placeholders})"
+        );
+        let mut query = sqlx::query(AssertSqlSafe(sql));
+        for id in &ids {
+            query = query.bind(id);
+        }
+        query.execute(&mut *tx).await.map_err(map_sqlx_error)?;
+        sqlx::query("UPDATE usage_rollup_reconciliations_v1 SET cursor = ? WHERE id = ?")
+            .bind(*ids.last().expect("non-empty reconciliation batch"))
+            .bind(GEMINI_RECONCILIATION_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    }
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(Some(UsageRollupRun {
+        processed_events: 0,
+        updated_rollups: 0,
+        checkpoint: None,
+    }))
+}
 
 async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<UsageRollupRun> {
+    if let Some(run) = reconcile_gemini_model_identity(storage).await? {
+        return Ok(run);
+    }
     let pool = storage.pool();
     let previous_checkpoint = read_checkpoint(pool).await?.unwrap_or(0);
     let backfill_upper = read_named_checkpoint(pool, COST_BACKFILL_UPPER_ID).await?;
