@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{CacheKeepaliveConfigSnapshot, CacheTtl};
 
 use crate::lifecycle::RequestCacheMetadata;
@@ -517,7 +518,13 @@ impl LifecycleKeepalive {
                 RequestSnapshot::capture_openai(
                     url,
                     http::Method::POST,
-                    keepalive_forward_headers(downstream_headers),
+                    keepalive_forward_headers(
+                        downstream_headers,
+                        view.upstreams_snapshot()
+                            .iter()
+                            .find(|upstream| upstream.id == upstream_id)
+                            .map(|upstream| upstream.kind),
+                    ),
                     shaped_body,
                     upstream_id,
                     ttl,
@@ -527,7 +534,7 @@ impl LifecycleKeepalive {
                 RequestSnapshot::capture(
                     url,
                     http::Method::POST,
-                    keepalive_forward_headers(downstream_headers),
+                    keepalive_forward_headers(downstream_headers, None),
                     shaped_body,
                     upstream_id,
                     ttl,
@@ -983,10 +990,25 @@ impl StreamingKeepaliveResponse {
 }
 
 const KEEPALIVE_FORWARD_HEADERS: &[&str] = &["anthropic-version", "anthropic-beta"];
+const OPENAI_API_KEY_KEEPALIVE_FORWARD_HEADERS: &[&str] = &[
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-organization",
+    "openai-project",
+    "openai-processing-region",
+];
 
-fn keepalive_forward_headers(headers: &HeaderMap) -> HeaderMap {
+fn keepalive_forward_headers(
+    headers: &HeaderMap,
+    responses_upstream_kind: Option<UpstreamKind>,
+) -> HeaderMap {
+    let names = if responses_upstream_kind == Some(UpstreamKind::OpenaiApiKey) {
+        OPENAI_API_KEY_KEEPALIVE_FORWARD_HEADERS
+    } else {
+        KEEPALIVE_FORWARD_HEADERS
+    };
     let mut out = HeaderMap::new();
-    for name in KEEPALIVE_FORWARD_HEADERS {
+    for name in names {
         if let Some(value) = headers.get(*name)
             && let Ok(name) = http::HeaderName::from_bytes(name.as_bytes())
         {
@@ -1737,7 +1759,7 @@ mod tests {
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         headers.insert("anthropic-beta", HeaderValue::from_static("prompt-caching"));
 
-        let forwarded = keepalive_forward_headers(&headers);
+        let forwarded = keepalive_forward_headers(&headers, None);
 
         assert!(forwarded.get("x-api-key").is_none());
         assert!(forwarded.get("authorization").is_none());
@@ -1749,6 +1771,58 @@ mod tests {
             forwarded.get("anthropic-beta"),
             Some(&HeaderValue::from_static("prompt-caching"))
         );
+    }
+
+    #[test]
+    fn keepalive_scope_headers_are_api_key_responses_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "openai-organization",
+            HeaderValue::from_static("org-client"),
+        );
+        headers.insert("openai-project", HeaderValue::from_static("proj-client"));
+        headers.insert("openai-processing-region", HeaderValue::from_static("us"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer client-secret"),
+        );
+        headers.insert("x-api-key", HeaderValue::from_static("client-key"));
+        headers.insert(
+            "x-goog-api-key",
+            HeaderValue::from_static("client-google-key"),
+        );
+        headers.insert("api-key", HeaderValue::from_static("client-api-key"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        for kind in [
+            None,
+            Some(UpstreamKind::OpenaiApiKey),
+            Some(UpstreamKind::OpenaiOauth),
+            Some(UpstreamKind::AnthropicApiKey),
+            Some(UpstreamKind::AnthropicOauth),
+            Some(UpstreamKind::GeminiApiKey),
+            Some(UpstreamKind::GeminiOauth),
+        ] {
+            let forwarded = keepalive_forward_headers(&headers, kind);
+            for name in [
+                "openai-organization",
+                "openai-project",
+                "openai-processing-region",
+            ] {
+                assert_eq!(
+                    forwarded.get(name),
+                    (kind == Some(UpstreamKind::OpenaiApiKey)).then(|| headers.get(name).unwrap()),
+                    "scope selector {name} for {kind:?}",
+                );
+            }
+            for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+                assert!(
+                    !forwarded.contains_key(name),
+                    "credential {name} for {kind:?}"
+                );
+            }
+            assert_eq!(forwarded["anthropic-version"], headers["anthropic-version"]);
+        }
     }
 
     #[test]

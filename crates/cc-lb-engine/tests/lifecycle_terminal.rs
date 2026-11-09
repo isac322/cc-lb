@@ -306,6 +306,119 @@ async fn eof_tail_error_yield_preserves_terminal_timings_on_drop()
     Ok(())
 }
 
+#[tokio::test]
+async fn responses_semantic_sse_eof_native_failure_yield_preserves_upstream_error_on_drop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "responses-eof-yield-drop.sqlite").await?);
+    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut rx = lifecycle_receiver(&bus);
+    let exhausted = Arc::new(AtomicBool::new(false));
+    let prefix = Bytes::from_static(
+        b"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_eof_yield\",\"status\":\"in_progress\",\"usage\":null}}\n\n\
+event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"partial\"}\n\n",
+    );
+    let mut record = upstream_record(upstream_id(3), "responses");
+    record.kind = StorageUpstreamKind::OpenaiOauth;
+    record.base_url = Some(Url::parse("https://chatgpt.com/backend-api/")?);
+    let lifecycle = lifecycle_with_terminal_and_upstream_dispatch(
+        TerminalStrategy::FirstPick,
+        Vec::new(),
+        vec![record],
+        Arc::new(Mutex::new(Vec::new())),
+        false,
+        TestState::default(),
+        Arc::new(TailFrameDispatch {
+            body: prefix.clone(),
+            exhausted: Arc::clone(&exhausted),
+        }),
+    )
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
+    ))
+    .with_event_bus(bus.bus_arc());
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(
+            br#"{"model":"gpt-test","input":"hello","stream":true}"#,
+        ))?;
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut received = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())
+            .await?
+            .expect("native EOF failure frame arrives")
+            .expect("downstream frame succeeds")
+            .into_data()
+            .expect("downstream frame contains data");
+        received.extend_from_slice(&frame);
+        if received
+            .windows(b"event: response.failed".len())
+            .any(|window| window == b"event: response.failed")
+        {
+            break;
+        }
+    }
+    assert!(exhausted.load(Ordering::SeqCst));
+    assert!(received.starts_with(&prefix));
+    let tail = std::str::from_utf8(&received[prefix.len()..])?;
+    let data = tail
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .collect::<Vec<_>>();
+    assert_eq!(data.len(), 1);
+    let failure: serde_json::Value = serde_json::from_str(data[0])?;
+    assert_eq!(failure["type"], "response.failed");
+    assert_eq!(failure["sequence_number"], 8);
+    assert_eq!(failure["response"]["id"], "resp_eof_yield");
+    assert_eq!(failure["response"]["error"]["code"], "api_error");
+    drop(body);
+
+    let (terminal, stream_completed) = wait_for_terminal(&mut rx).await;
+    assert!(
+        !stream_completed,
+        "drop happens while native failure is yielded"
+    );
+    let LifecycleEvent::RequestTerminated {
+        reason,
+        client_status,
+        upstream_body_ms,
+        finalize_ms,
+        ..
+    } = terminal
+    else {
+        unreachable!("wait_for_terminal returns RequestTerminated")
+    };
+    assert_eq!(
+        client_status, 200,
+        "do not turn observed upstream EOF into 499"
+    );
+    assert_eq!(
+        reason,
+        TerminationReason::ErrorCode("upstream_stream_error".to_owned())
+    );
+    assert!(upstream_body_ms.is_some());
+    assert!(finalize_ms.is_some());
+    let rows = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(rows.len(), 1, "one durable request outcome");
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        (
+            rows[0].input_tokens,
+            rows[0].output_tokens,
+            rows[0].cost_usd_micros
+        ),
+        (None, None, None)
+    );
+    Ok(())
+}
+
 fn assert_tail_error_frame(frame: &Bytes) {
     let text = std::str::from_utf8(frame).expect("tail error frame is UTF-8");
     let event = text.lines().find_map(|line| line.strip_prefix("event:"));

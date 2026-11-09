@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline #1165 integration proof; use installed SDKs and an existing cc-lb binary."""
+"""Offline #1165/#1180 integration proof using installed SDKs and a cc-lb binary."""
 import argparse
 import contextlib
 import datetime
@@ -9,6 +9,7 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import socket
 import sqlite3
@@ -20,10 +21,12 @@ import urllib.parse
 
 STREAM_MESSAGE = "upstream SSE response could not be safely processed"
 BODY_MESSAGE = "upstream response body could not be read"
+CLEAN_EOF_MESSAGE = "upstream SSE response ended before a terminal Responses event"
 RESPONSE_ID = "resp_loopback_1165"
 PROVIDER_MESSAGE = "loopback provider rejected the request"
 PROVIDER_RATE_LIMIT_MESSAGE = "loopback provider rate limit exceeded"
 CONTENT_LENGTH_FAILURE_MODE = "provider-failed-content-length-malformed"
+CLEAN_EOF_MODE = "clean-eof"
 SYNTHETIC_KEY = "loopback-no-provider-secret"
 MALFORMED_COMPLETE_SUFFIX = b"event: response.completed\ndata: {invalid-json}\n\n"
 ADMIN_TOKEN = "loopback-admin-only"
@@ -102,9 +105,9 @@ class Upstream(http.server.BaseHTTPRequestHandler):
                 self.server.last_body = data
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
-                if mode == CONTENT_LENGTH_FAILURE_MODE:
-                    # One complete upstream body, with an exact length including
-                    # the malformed suffix: only proxy suppression changes it.
+                if mode in (CONTENT_LENGTH_FAILURE_MODE, CLEAN_EOF_MODE):
+                    # Exact framing distinguishes semantic EOF from the broken
+                    # chunked-transfer fault. No terminal is added for clean EOF.
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
@@ -185,11 +188,13 @@ class Ledger:
 
 
 class Run:
-    def __init__(self, root, binary, expect, httpx, openai, genai, types):
+    def __init__(self, root, binary, expect, expect_clean_eof, httpx, openai, genai, types, js_module=None, js_runtime="node"):
         self.root, self.binary, self.expect = root, binary, expect
+        self.expect_clean_eof = expect_clean_eof
+        self.js_module, self.js_runtime = js_module, js_runtime
         self.httpx, self.openai, self.genai, self.types = httpx, openai, genai, types
         self.ledger = Ledger(root)
-        self.report = {"expected_contract": expect, "sdk_versions": {name: importlib.metadata.version(name) for name in ("openai", "google-genai", "httpx2")}, "cases": [], "contract_failures": []}
+        self.report = {"expected_contract": expect, "expected_clean_eof": expect_clean_eof, "sdk_versions": {name: importlib.metadata.version(name) for name in ("openai", "google-genai", "httpx2")}, "cases": [], "contract_failures": []}
         self.secrets = [SYNTHETIC_KEY, ADMIN_TOKEN]
         self.upstreams = {}
         self.captures = []
@@ -360,6 +365,98 @@ token_env = "CC_LB_ADMIN_TOKEN"
         require(len(self.captures) == before + 1, "SDK retried or did not issue exactly one request")
         return result, self.captures[-1]
 
+    def js_sdk_request(self):
+        # The caller provisions the exact SDK outside the repository. Execute
+        # source from stdin/-e; no temporary script or repository dependency.
+        script = r"""
+import { pathToFileURL } from "node:url";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const config = JSON.parse(input);
+const { default: OpenAI } = await import(pathToFileURL(config.module).href);
+const captures = [];
+const bodies = [];
+const client = new OpenAI({
+  apiKey: config.key, organization: "", project: "", baseURL: config.baseURL,
+  maxRetries: 0, timeout: 20000,
+  fetch: async (url, init) => {
+    const target = new URL(typeof url === "string" || url instanceof URL ? url : url.url);
+    if (target.origin !== config.origin) throw new Error("SDK attempted a non-loopback request");
+    const response = await fetch(url, { ...init, redirect: "error" });
+    const capture = { status: response.status, headers: Object.fromEntries(response.headers),
+      content_type: response.headers.get("content-type") ?? "", body_complete: false, transport_error: null };
+    captures.push(capture);
+    bodies.push(response.clone().arrayBuffer().then(body => {
+      capture.body_hex = Buffer.from(body).toString("hex");
+      capture.body_complete = true;
+    }));
+    return response;
+  },
+});
+const sdk = { events: [], message: null, exception: null, native_error: null };
+try {
+  const stream = await client.responses.create({ model: "gpt-5.2", input: [{
+    role: "user", content: [{ type: "input_text", text: "Say partial" }]
+  }], store: false, stream: true });
+  for await (const event of stream) {
+    sdk.events.push(event.type);
+    if (event.type === "response.failed") {
+      sdk.native_error = event.response.error;
+      sdk.message = event.response.error.message;
+    }
+  }
+} catch (error) {
+  sdk.exception = error.constructor.name;
+  sdk.message = error.message;
+}
+await Promise.all(bodies);
+if (captures.length !== 1) throw new Error("SDK retried or did not issue exactly one request");
+console.log(JSON.stringify({ sdk, capture: captures[0] }));
+"""
+        config = {"module": str(self.js_module), "key": self.key, "baseURL": self.base_url + "/openai/v1", "origin": self.base_url}
+        env = {key: value for key, value in os.environ.items() if not key.startswith(("OPENAI_", "GEMINI_", "GOOGLE_", "OTEL_", "CC_LB_", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NODE_OPTIONS"))}
+        proc = subprocess.Popen([self.js_runtime, "--input-type=module", "-e", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, cwd=self.root)
+        self.ledger.add("process", str(proc.pid), f"kill -TERM {proc.pid} # verify command and ownership first")
+        try:
+            stdout, _stderr = proc.communicate(json.dumps(config), timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise AssertionError("JavaScript SDK request exceeded its 30-second deadline") from None
+        finally:
+            if proc.poll() is not None:
+                self.ledger.stopped(str(proc.pid))
+        self.report["javascript_process"] = {"returncode": proc.returncode, "stderr": _stderr}
+        require(proc.returncode == 0, "JavaScript SDK request failed; inspect report.json diagnostics")
+        value = json.loads(stdout)
+        capture = value["capture"]
+        capture["body"] = bytearray.fromhex(capture.pop("body_hex"))
+        headers = capture["headers"]
+        capture["request_id_headers"] = {name: headers.get(name) for name in ("request-id", "x-request-id")}
+        capture["request_id_source"] = next((name for name, identifier in capture["request_id_headers"].items() if identifier), None)
+        capture["request_id"] = headers.get(capture["request_id_source"])
+        return value["sdk"], capture
+
+    def completion_counts(self, expected_count):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            status, body = http_request(self.metrics_port, "/metrics")
+            require(status == 200, "metrics scrape failed")
+            counts = {}
+            for line in body.decode().splitlines():
+                if not line.startswith("cc_lb_requests_completed_total{"):
+                    continue
+                series, value = line.rsplit(" ", 1)
+                labels = {key: json.loads(value) for key, value in re.findall(r'(\w+)=("(?:\\.|[^"\\])*")', series)}
+                if labels.get("source_kind") == "proxy" and labels.get("principal") == self.principal:
+                    outcome = labels["terminal_outcome"]
+                    counts[outcome] = counts.get(outcome, 0) + float(value)
+            if sum(counts.values()) == expected_count:
+                return counts
+            require(sum(counts.values()) <= expected_count, "completion metric counted duplicate requests")
+            time.sleep(0.05)
+        raise AssertionError("completion metric did not reach the expected request count")
+
     def durable_event(self, request_id, provider, baseline):
         deadline = time.monotonic() + 20
         rows = []
@@ -413,13 +510,14 @@ token_env = "CC_LB_ADMIN_TOKEN"
         if not valid:
             self.report["contract_failures"].append(label)
 
-    def case(self, provider, streaming, mode):
-        name = f"{provider}-{'stream' if streaming else 'buffered'}-{mode}"
+    def case(self, provider, streaming, mode, client="python"):
+        name = f"{provider}-{'stream' if streaming else 'buffered'}-{mode}" + ("-js" if client == "javascript" else "")
         self.server.mode = mode
+        metric_before = self.completion_counts(len(self.report["cases"])) if mode == CLEAN_EOF_MODE else None
         before = len(self.server.calls)
         with sqlite3.connect(f"file:{self.db}?mode=ro", uri=True) as db:
             baseline = db.execute("SELECT COALESCE(MAX(id), 0) FROM request_events_v1").fetchone()[0]
-        sdk, capture = self.sdk_request(provider, streaming, observe_transport_error=mode == CONTENT_LENGTH_FAILURE_MODE)
+        sdk, capture = self.js_sdk_request() if client == "javascript" else self.sdk_request(provider, streaming, observe_transport_error=mode == CONTENT_LENGTH_FAILURE_MODE)
         require(self.server.failure is None, self.server.failure or "upstream failed")
         require(len(self.server.calls) == before + 1, name + ": expected exactly one upstream request")
         body = bytes(capture.pop("body"))
@@ -434,6 +532,9 @@ token_env = "CC_LB_ADMIN_TOKEN"
         self.report["cases"].append(evidence)
         if streaming:
             require("text/event-stream" in capture["content_type"], name + ": wrong SSE content type")
+        if mode == CLEAN_EOF_MODE:
+            self.clean_eof_contract(name, body, sdk, capture, event, evidence, metric_before)
+            return
         if mode == CONTENT_LENGTH_FAILURE_MODE:
             expected_body = self.server.last_body[:-len(MALFORMED_COMPLETE_SUFFIX)]
             call = self.server.calls[-1]
@@ -513,6 +614,63 @@ token_env = "CC_LB_ADMIN_TOKEN"
             if self.expect == "old":
                 require(value.get("type") == "error" and error.get("type") == "api_error" and "code" not in error, "old mode no longer reproduces the Anthropic-wrapper defect")
 
+    def clean_eof_contract(self, name, body, sdk, capture, event, evidence, metric_before):
+        upstream = self.server.last_body
+        call = self.server.calls[-1]
+        require(call["content_length"] == call["body_bytes"] == len(upstream) and call["body_writes"] == 1, name + ": upstream framing was not complete")
+        require(b'"usage":null' in upstream and b"response.completed" not in upstream and b"response.failed" not in upstream, name + ": fixture is not the issue's usage-null nonterminal prefix")
+        (self.root / (name + ".upstream.sse")).write_bytes(upstream)
+        fixture = "responses-clean-eof-js.sse" if name.endswith("-js") else "responses-clean-eof.sse"
+        (self.root / fixture).write_bytes(body)
+        require(capture["status"] == event["status"] == 200, name + ": HTTP status changed")
+        require(capture["body_complete"] and capture["transport_error"] is None and sdk["exception"] is None, name + ": semantic EOF became a transport error")
+        content_length = capture["headers"].get("content-length")
+        require(content_length is None or content_length == str(len(body)), name + ": stale downstream Content-Length")
+        require(body.startswith(upstream), name + ": normal prefix changed")
+        suffix = body[len(upstream):]
+        frames = []
+        for block in filter(None, suffix.decode().split("\n\n")):
+            lines = block.splitlines()
+            data = [line[6:] for line in lines if line.startswith("data: ")]
+            require(len(data) == 1, name + ": malformed local SSE frame")
+            frames.append((next((line[7:] for line in lines if line.startswith("event: ")), None), json.loads(data[0])))
+        require("response.completed" not in sdk["events"] and "error" not in sdk["events"], name + ": false completion or non-native error")
+        native = False
+        if len(frames) == 1:
+            kind, value = frames[0]
+            response = value.get("response", {})
+            native = (kind == value.get("type") == "response.failed"
+                      and type(value.get("sequence_number")) is int and value["sequence_number"] == 4
+                      and response.get("id") == RESPONSE_ID and response.get("status") == "failed"
+                      and response.get("usage") is None
+                      and response.get("error", {}).get("code") == "api_error"
+                      and response.get("error", {}).get("message") == CLEAN_EOF_MESSAGE
+                      and sdk["message"] == CLEAN_EOF_MESSAGE
+                      and sdk["events"].count("response.failed") == 1)
+        with sqlite3.connect(f"file:{self.db}?mode=ro", uri=True) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute("SELECT input_tokens, output_tokens, thinking_tokens, cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_read_micros, list_cost_cache_write_micros, upstream_error_type, upstream_error_message FROM request_events_v1 WHERE request_id = ? AND upstream_id = ?", (event["request_id"], event["upstream_id"])).fetchall()
+        require(len(rows) == 1, name + ": expected exactly one durable request row")
+        accounting = dict(rows[0])
+        usage_and_cost = {key: value for key, value in accounting.items() if key not in ("upstream_error_type", "upstream_error_message")}
+        require(all(value is None for value in usage_and_cost.values()), name + ": usage-null fixture invented tokens or costs")
+        require(all(event["admin_event"].get(key) is None for key in ("input_tokens", "output_tokens", "thinking_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "cache_write_input_tokens", "cost_usd_micros")), name + ": admin projection invented usage or cost")
+        metric_after = self.completion_counts(len(self.report["cases"]))
+        metric_delta = {key: metric_after.get(key, 0) - metric_before.get(key, 0) for key in metric_after.keys() | metric_before.keys()}
+        metric_delta = {key: value for key, value in metric_delta.items() if value}
+        durable_failure = (event["error_code"] == "upstream_stream_error"
+                           and accounting["upstream_error_type"] == "upstream_response_incomplete"
+                           and accounting["upstream_error_message"] == CLEAN_EOF_MESSAGE
+                           and event["admin_event"].get("upstream_error_type") == "upstream_response_incomplete"
+                           and event["admin_event"].get("upstream_error_message") == CLEAN_EOF_MESSAGE)
+        checks = {"one_native_failure": native, "durable_incomplete_error": durable_failure, "one_error_completion": metric_delta == {"error": 1}}
+        evidence.update(upstream=call, accounting=accounting, completion_metric_before=metric_before, completion_metric_after=metric_after, completion_metric_delta=metric_delta, wire_contract_checks=checks)
+        self.contract(name, all(checks.values()))
+        if self.expect_clean_eof == "old":
+            require(body == upstream and not sdk["message"] and sdk["events"].count("response.failed") == 0, name + ": baseline no longer silently ends")
+            require(not event["error_code"] and accounting["upstream_error_type"] is None and accounting["upstream_error_message"] is None, name + ": baseline no longer records false success")
+            require(metric_delta == {"success": 1}, name + ": baseline no longer increments success once")
+
     def execute(self):
         self.report["binary_version"] = subprocess.check_output([self.binary, "--version"], text=True).strip()
         self.start()
@@ -521,15 +679,23 @@ token_env = "CC_LB_ADMIN_TOKEN"
             self.case("openai", False, mode)
             self.case("gemini", False, mode)
         self.case("openai", True, CONTENT_LENGTH_FAILURE_MODE)
+        self.case("openai", True, CLEAN_EOF_MODE)
+        if self.js_module:
+            self.case("openai", True, CLEAN_EOF_MODE, client="javascript")
         # Re-read all durable rows after every request, catching delayed duplicates.
         with sqlite3.connect(f"file:{self.db}?mode=ro", uri=True) as db:
             counts = db.execute("SELECT request_id, upstream_id, COUNT(*) FROM request_events_v1 GROUP BY request_id, upstream_id").fetchall()
-        require(len(counts) == 10 and all(count == 1 for _, _, count in counts), "durable accounting is not exactly once across all ten request/upstream identities")
+        expected_count = 11 + int(self.js_module is not None)
+        require(len(counts) == expected_count and all(count == 1 for _, _, count in counts), "durable accounting is not exactly once across all request/upstream identities")
         expected_failures = ["openai-stream-fault", "openai-buffered-fault", "gemini-buffered-fault"] if self.expect == "old" else []
         if self.expect == "old":
             expected_failures.append("openai-stream-" + CONTENT_LENGTH_FAILURE_MODE)
+        if self.expect_clean_eof == "old":
+            expected_failures.append("openai-stream-" + CLEAN_EOF_MODE)
+            if self.js_module:
+                expected_failures.append("openai-stream-" + CLEAN_EOF_MODE + "-js")
         require(self.report["contract_failures"] == expected_failures, "native contracts differ from --expect; inspect report.json")
-        self.report["result"] = "PASS" if self.expect == "new" else "OLD_DEFECTS_REPRODUCED"
+        self.report["result"] = "OLD_DEFECTS_REPRODUCED" if self.expect == "old" else "CLEAN_EOF_FALSE_SUCCESS_REPRODUCED" if self.expect_clean_eof == "old" else "PASS"
 
     def close(self):
         if self.proc is not None:
@@ -555,7 +721,10 @@ token_env = "CC_LB_ADMIN_TOKEN"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expect", choices=("old", "new"), default="new", help="new is the regression gate; old proves the three original defects and the Content-Length framing defect")
+    parser.add_argument("--expect", choices=("old", "new"), default="new", help="expectation for the original local-error and Content-Length framing contracts")
+    parser.add_argument("--expect-clean-eof", choices=("old", "new"), help="independent #1180 expectation; defaults to --expect; old requires silent EOF and false-success accounting")
+    parser.add_argument("--openai-js-module", type=Path, help="optional absolute path to scratch-installed openai@7.53.0/index.mjs")
+    parser.add_argument("--js-runtime", default="node", help="Node-compatible executable for the optional real JavaScript SDK request")
     parser.add_argument("--output-parent", type=Path, default=Path(tempfile.gettempdir()), help="existing scratch parent outside the repository; a fresh run directory is always created")
     args = parser.parse_args()
     binary = os.environ.get("CC_LB_BIN")
@@ -570,8 +739,15 @@ def main():
     parent = args.output_parent.resolve()
     repo = Path(__file__).resolve().parents[3]
     require(not parent.is_relative_to(repo), "--output-parent must be outside the repository")
+    js_module = args.openai_js_module.resolve(strict=True) if args.openai_js_module else None
+    if js_module:
+        require(not js_module.is_relative_to(repo), "install the optional JavaScript SDK outside the repository")
+        package = json.loads((js_module.parent / "package.json").read_text())
+        require(package.get("name") == "openai" and package.get("version") == "7.53.0", "JavaScript SDK must be exactly openai@7.53.0")
     root = Path(tempfile.mkdtemp(prefix="cc-lb-1165-", dir=parent))
-    run = Run(root, binary, args.expect, httpx, openai, genai, types)
+    run = Run(root, binary, args.expect, args.expect_clean_eof or args.expect, httpx, openai, genai, types, js_module, args.js_runtime)
+    if js_module:
+        run.report["sdk_versions"]["openai-js"] = "7.53.0"
     print("Evidence:", root)
     print("Cleanup ledger:", run.ledger.path)
     try:
@@ -580,6 +756,7 @@ def main():
         run.close()
     print(run.report["result"], f"{len(run.report['cases'])} loopback requests; no provider calls")
     print("Replay fixture:", root / "responses-fault.sse")
+    print("Clean EOF replay fixture:", root / "responses-clean-eof.sse")
 
 
 if __name__ == "__main__":

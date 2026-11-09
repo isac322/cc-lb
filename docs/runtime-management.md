@@ -115,6 +115,8 @@ Multipart audio transcription/translation and image edit/variation requests use 
 
 Before a streaming `POST /v1/responses` response starts, a proxy-generated failure returns the route's provider-shaped JSON error envelope with the matching error status (500, 502, or 503). After streaming has begun, the HTTP status remains `200`, and a proxy-generated failure is sent as a `response.failed` SSE event. Its payload includes `sequence_number` and a failed `response` with safe `error.code` and `error.message`, plus the observed response id when one is known.
 
+If an OpenAI Responses SSE body ends cleanly before `response.completed`, `response.incomplete`, `response.failed`, or another terminal event, cc-lb records `upstream_response_incomplete` and appends one `response.failed` event. Provider-reported usage remains authoritative, and existing provider errors retain precedence.
+
 An emitted provider failure keeps precedence over later upstream faults. Response transforms determine which terminal the client actually receives. SSE responses use streaming HTTP framing instead of forwarding an upstream `Content-Length`, so local failures or suppressed malformed suffixes cannot leave an incomplete fixed-length body. Passthrough payload bytes and their content encoding remain unchanged.
 
 ### Request events API
@@ -505,6 +507,14 @@ provider-gating rules are documented in
 [docs/cache-keepalive-operator.md](./cache-keepalive-operator.md).
 `cache_keepalive.classifier.llm_judge` is reserved for a future release;
 create/update requests that set it return `unsupported_cache_keepalive_llm_judge`.
+
+For OpenAI Responses keep-alive with a selected `openai_api_key` upstream,
+snapshots preserve client-supplied `OpenAI-Organization`, `OpenAI-Project`, and
+`OpenAI-Processing-Region` selectors for renewals; absent selectors remain
+absent. Credentials remain signer-owned and are never captured in snapshots.
+OAuth behavior is unchanged. Historical snapshots lacking selector values need a
+fresh eligible real request to capture them; an upgrade cannot recover values
+that were not stored.
 
 #### PrincipalResponse
 

@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 const SAFE_MESSAGE: &str = "upstream SSE response could not be safely processed";
+const CLEAN_EOF_MESSAGE: &str = "upstream SSE response ended before a terminal Responses event";
 const GENERIC_EOF: &str = "stream closed before response.completed";
 
 async fn replay(body: Vec<u8>) -> Vec<String> {
@@ -41,13 +42,25 @@ async fn replay(body: Vec<u8>) -> Vec<String> {
 
 #[tokio::test]
 async fn local_error_contract_replay() {
-    let path = std::env::var("CC_LB_REPLAY_SSE").expect("set CC_LB_REPLAY_SSE to responses-fault.sse");
-    let emitted = std::fs::read(path).expect("read emitted proxy SSE bytes");
+    let path = std::env::var("CC_LB_REPLAY_SSE")
+        .expect("set CC_LB_REPLAY_SSE to responses-fault.sse or responses-clean-eof.sse");
+    let fixture = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("fixture path must have a UTF-8 filename");
+    let (scenario, safe_message) = match fixture {
+        "responses-fault.sse" => ("broken-chunk", SAFE_MESSAGE),
+        "responses-clean-eof.sse" | "responses-clean-eof-js.sse" => {
+            ("clean-eof", CLEAN_EOF_MESSAGE)
+        }
+        other => panic!("unsupported replay fixture: {other}"),
+    };
+    let emitted = std::fs::read(&path).expect("read emitted proxy SSE bytes");
     assert!(emitted.windows(b"response.output_text.delta".len()).any(|bytes| bytes == b"response.output_text.delta"));
     let actual = replay(emitted).await;
     let expected_mode = std::env::var("CC_LB_REPLAY_EXPECT").unwrap_or_else(|_| "new".into());
     match expected_mode.as_str() {
-        "new" => assert_eq!(actual, vec![SAFE_MESSAGE.to_owned()]),
+        "new" => assert_eq!(actual, vec![safe_message.to_owned()]),
         "old" => assert_eq!(actual, vec![GENERIC_EOF.to_owned()]),
         other => panic!("invalid CC_LB_REPLAY_EXPECT: {other}"),
     }
@@ -57,11 +70,11 @@ async fn local_error_contract_replay() {
     let prefix = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_negative_control\"}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
     let old_envelope = format!(
         "event: error\ndata: {}\n\n",
-        json!({"error": {"code": "api_error", "type": "api_error", "param": null, "message": SAFE_MESSAGE}})
+        json!({"error": {"code": "api_error", "type": "api_error", "param": null, "message": safe_message}})
     );
     let type_only = format!(
         "event: error\ndata: {}\n\n",
-        json!({"type": "error", "error": {"code": "api_error", "type": "api_error", "param": null, "message": SAFE_MESSAGE}})
+        json!({"type": "error", "error": {"code": "api_error", "type": "api_error", "param": null, "message": safe_message}})
     );
     let mut controls = Vec::new();
     for (name, suffix) in [("old-http-envelope", old_envelope), ("generic-type-error", type_only)] {
@@ -74,6 +87,9 @@ async fn local_error_contract_replay() {
         "codex_revision": "4e4767ffa763ec0d0a19e04cf8ff0163a987297b",
         "parser": "codex-api::sse::responses::process_sse",
         "expect": expected_mode,
+        "scenario": scenario,
+        "fixture": fixture,
+        "expected_safe_message": safe_message,
         "emitted_stream_errors": actual,
         "negative_controls": controls,
     });
