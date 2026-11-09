@@ -149,6 +149,38 @@ describe('RequestEventPartialSchema', () => {
     const result = RequestEventPartialSchema.safeParse(baseFixture);
     expect(result.success).toBe(true);
   });
+
+  it.each(['high', null, undefined])(
+    'parses optional nullable thinking_level %s on partial events',
+    (thinkingLevel) => {
+      const result = RequestEventPartialSchema.safeParse({
+        ...baseFixture,
+        thinking_level: thinkingLevel,
+        thinking_budget_tokens: 18000,
+        reasoning_effort: 'medium',
+        thinking_tokens: 8200,
+        service_tier: 'priority',
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.thinking_level).toBe(thinkingLevel);
+        expect(result.data.thinking_budget_tokens).toBe(18000);
+        expect(result.data.reasoning_effort).toBe('medium');
+        expect(result.data.thinking_tokens).toBe(8200);
+        expect(result.data.service_tier).toBe('priority');
+      }
+    },
+  );
+
+  it('rejects a non-string partial thinking_level', () => {
+    expect(
+      RequestEventPartialSchema.safeParse({
+        ...baseFixture,
+        thinking_level: 3,
+      }).success,
+    ).toBe(false);
+  });
+
   it('parses tool_use_prompt_tokens as a number', () => {
     const result = RequestEventPartialSchema.safeParse({
       ...baseFixture,
@@ -306,6 +338,42 @@ describe('UpstreamSchema', () => {
 });
 
 describe('FinalRequestEventUpdateSchema', () => {
+  it.each(['high', null, undefined])(
+    'preserves optional nullable thinking_level %s independently of reasoning and tier',
+    (thinkingLevel) => {
+      const result = FinalRequestEventUpdateSchema.safeParse({
+        event: {
+          request_id: 'r',
+          status: 200,
+          duration_ms: 10,
+          thinking_level: thinkingLevel,
+          thinking_budget_tokens: 18000,
+          reasoning_effort: 'medium',
+          thinking_tokens: 8200,
+          service_tier: 'priority',
+        },
+        cursor: 1,
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.event.thinking_level).toBe(thinkingLevel);
+        expect(result.data.event.thinking_budget_tokens).toBe(18000);
+        expect(result.data.event.reasoning_effort).toBe('medium');
+        expect(result.data.event.thinking_tokens).toBe(8200);
+        expect(result.data.event.service_tier).toBe('priority');
+      }
+    },
+  );
+
+  it('rejects a non-string final thinking_level', () => {
+    expect(
+      FinalRequestEventUpdateSchema.safeParse({
+        event: { thinking_level: 3 },
+        cursor: 1,
+      }).success,
+    ).toBe(false);
+  });
+
   it('validates request timings on final SSE rows', () => {
     const result = FinalRequestEventUpdateSchema.safeParse({
       event: {

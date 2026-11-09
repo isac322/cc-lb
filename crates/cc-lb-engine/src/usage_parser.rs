@@ -1851,6 +1851,60 @@ mod tests {
     }
 
     #[test]
+    fn gemini_observed_tiers_survive_buffered_streaming_and_wrapped_usage() {
+        for alias in ["serviceTier", "service_tier"] {
+            for tier in ["flex", "priority"] {
+                for wrapped in [false, true] {
+                    let reported = serde_json::json!({
+                        "promptTokenCount": 100,
+                        "cachedContentTokenCount": 20,
+                        "candidatesTokenCount": 6,
+                        "thoughtsTokenCount": 4,
+                        (alias): tier
+                    });
+                    let payload = if wrapped {
+                        serde_json::json!({"response": {"usageMetadata": reported}})
+                    } else {
+                        serde_json::json!({"usageMetadata": reported})
+                    };
+                    let buffered = observe_non_stream_json_value_for_shape(
+                        &payload,
+                        UsageShape::GeminiGenerateContent,
+                    )
+                    .usage;
+                    assert_eq!(buffered.service_tier.as_deref(), Some(tier));
+                    assert_eq!(buffered.input_tokens, 80);
+                    assert_eq!(buffered.output_tokens, 10);
+                    assert_eq!(buffered.thinking_tokens, 4);
+
+                    let raw = format!("data: {payload}\n\n");
+                    let event = parse_sse_event(raw.as_bytes());
+                    let mut streamed = UsageCounts::default();
+                    accumulate_sse_usage_for_shape(
+                        &event,
+                        &mut streamed,
+                        UsageShape::GeminiGenerateContent,
+                    );
+                    assert_eq!(streamed.service_tier.as_deref(), Some(tier));
+                    for invalid in [serde_json::json!(null), serde_json::json!(7)] {
+                        let payload = serde_json::json!({
+                            "usageMetadata": {"promptTokenCount": 100, (alias): invalid}
+                        });
+                        let raw = format!("data: {payload}\n\n");
+                        let event = parse_sse_event(raw.as_bytes());
+                        accumulate_sse_usage_for_shape(
+                            &event,
+                            &mut streamed,
+                            UsageShape::GeminiGenerateContent,
+                        );
+                        assert_eq!(streamed.service_tier.as_deref(), Some(tier));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn gemini_cache_creation_tokens_are_not_synthesized_as_writes() {
         let mut usage = UsageCounts::default();
         merge_usage_value_for_shape(

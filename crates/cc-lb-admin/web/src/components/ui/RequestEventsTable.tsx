@@ -284,6 +284,7 @@ const RequestEventRow = memo(function RequestEventRow({
   );
   const tone = requestOutcomeTone(outcome);
   const tierBadge = serviceTierBadgeText(event.service_tier);
+  const thinkingLevel = event.thinking_level?.trim() || null;
   const at = eventTime(event);
 
   return (
@@ -432,6 +433,11 @@ const RequestEventRow = memo(function RequestEventRow({
             </span>
           ) : (
             <span className="font-mono text-data">{DASH}</span>
+          )}
+          {thinkingLevel != null && (
+            <Badge tone="neutral" className="shrink-0">
+              {thinkingLevel}
+            </Badge>
           )}
           {tierBadge != null && (
             <Badge tone="neutral" className="shrink-0">

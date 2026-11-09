@@ -153,6 +153,7 @@ export function RequestEventIdentity({
     event._phase === 'final' ? event.error_code : undefined,
     event._phase === 'final' ? event.upstream_error_type : undefined,
   );
+  const thinkingLevel = event.thinking_level?.trim() || null;
   const reasoningText = reasoningBadgeText(
     event.reasoning_effort,
     event.thinking_budget_tokens,
@@ -366,6 +367,12 @@ export function RequestEventIdentity({
             </span>
           }
         />
+        {thinkingLevel != null && (
+          <KvRow
+            label="Thinking level"
+            value={<Badge tone="neutral">{thinkingLevel}</Badge>}
+          />
+        )}
         {reasoningText != null && (
           <KvRow
             label="Reasoning"
