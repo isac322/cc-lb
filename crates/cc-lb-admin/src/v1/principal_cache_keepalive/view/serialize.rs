@@ -33,6 +33,7 @@ pub(super) fn raw_record(
             status: item
                 .decision
                 .clone()
+                .or_else(|| item.status.map(|status| status.as_str().to_owned()))
                 .unwrap_or_else(|| "not_tracked".to_owned()),
             enqueue_state: item.enqueue_state.map(|state| state.as_str().to_owned()),
         },

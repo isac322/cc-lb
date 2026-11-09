@@ -515,7 +515,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
              encrypted_payload = X'',
-             expires_at = CASE WHEN refresh_count > 0 THEN MAX(expires_at, ?) ELSE expires_at END,
+             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN MAX(expires_at, ?) ELSE expires_at END,
              updated_at = ?,
              first_scheduled_at = CASE WHEN ? THEN ? ELSE first_scheduled_at END
              WHERE session_key_hash = ? AND status = 'active'
@@ -554,7 +554,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
              encrypted_payload = X'',
-             expires_at = CASE WHEN refresh_count > 0 THEN MAX(expires_at, ?) ELSE expires_at END,
+             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN MAX(expires_at, ?) ELSE expires_at END,
              updated_at = ?
              WHERE session_key_hash = ? AND status = 'active'",
         )
