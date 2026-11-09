@@ -67,6 +67,8 @@ mod multi_instance_truncated_partial;
 mod multi_route_dispatch;
 #[path = "native_cached_input_pricing.rs"]
 mod native_cached_input_pricing;
+#[path = "native_image_admission.rs"]
+mod native_image_admission;
 #[path = "notify_listener.rs"]
 mod notify_listener;
 #[path = "oauth_refresh.rs"]

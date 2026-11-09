@@ -93,6 +93,7 @@ use crate::provider_cache;
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
+use crate::provider_input_estimate::estimate_provider_input;
 use crate::request_classification::{
     classify_client_request_kind_with_class, is_thread_sticky_subagent_seed,
 };
@@ -10432,6 +10433,9 @@ impl LimitRequest {
                         .saturating_add(input.cache_prefix_5m_tokens)
                         .saturating_add(input.cache_prefix_1h_tokens);
                     i64::try_from(whole).unwrap_or(i64::MAX)
+                })
+                .or_else(|| {
+                    value.and_then(|value| estimate_provider_input(value, model, capability))
                 })
                 .or_else(|| value.map(estimate_input_tokens))
                 .unwrap_or(if model_optional {
