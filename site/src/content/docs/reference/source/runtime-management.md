@@ -36,7 +36,7 @@ Provider-owned state referenced inside a supported HTTP generation request is fo
 - OpenAI HTTP Responses: response ids and stateless reasoning `encrypted_content` items observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
 - Gemini generateContent / countTokens: `cachedContent` references (including nested `generateContentRequest.cachedContent`). `thoughtSignature` is forwarded but is not treated as affinity state.
 
-A request whose durable state resolves to an upstream that is disabled, unhealthy, or removed by routing filters fails with `503 upstream_affinity_unavailable` instead of falling back to another upstream; cross-upstream failover is disabled for pinned requests. Prompt-cache analysis and cache-aware routing apply only to Anthropic Messages; OpenAI and Gemini requests carry neutral cache metadata.
+- Prompt-cache analysis and cache-aware routing apply to Anthropic breakpoints and scoped older-model OpenAI Responses observations. Native pricing is exposed when catalog data exists. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` remains hard affinity.
 
 Admin preflight is separate from client proxy routing: `GET /v1/models` and `POST /v1/messages/count_tokens` (Anthropic), `GET /v1/models` (OpenAI), and `GET /v1beta/models` (Gemini) run as direct upstream probes during key verification.
 
@@ -185,6 +185,27 @@ Thinking level does not affect routing or token accounting.
 The existing cache-input subtraction is unchanged: reported cache-read tokens
 are counted separately from uncached input. OpenAI and Anthropic output already
 includes reasoning or thinking tokens, so their output counts are unchanged.
+
+Completed request costs price uncached input, cached reads, and output as
+disjoint token sets. OpenAI and Gemini cached-read rates come from their native
+catalog entries, including published service-tier and context-threshold rates;
+they do not fall back to Anthropic cache rates. Positive cached usage without
+an applicable rate leaves actual request costs unknown. A published zero rate
+remains a known zero, and a request with no cached usage does not require a
+cached-read rate.
+
+When a completed request's actual cost is unknown, managed-key limit accounting
+finalizes its original admitted estimate as CostUsd liability. Request and token
+usage still settle once, and concurrency is released. The request's actual-cost
+fields remain empty. If no estimate was available and no CostUsd limit applied,
+only measured request/token usage is added; the monetary accumulator is unchanged.
+No unavailable cost is reported as a known zero, and finalized rows are not
+re-priced later.
+
+Keep-alive renewals retain their token usage, hit identity, and history when
+actual cost is unavailable; their monetary PNL stays unknown. An automatic
+storage upgrade records price availability separately from signed cost values
+and preserves existing renewal costs as known.
 
 Before dispatch, Anthropic Messages limit admission estimates text and metadata
 string bytes at one token per four bytes, plus 4,784 tokens per recognized native

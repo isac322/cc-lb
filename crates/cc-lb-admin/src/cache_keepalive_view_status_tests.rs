@@ -31,6 +31,7 @@ fn item(
         terminal_reason,
         decision: None,
         reason: "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s".to_owned(),
+        display_reason: None,
         error: None,
         config_snapshot: None,
     }
@@ -69,6 +70,18 @@ fn cache_keepalive_status_keeps_error_orthogonal_and_uses_frozen_display_contrac
         Some(1),
         Some(CacheKeepaliveTerminalReason::DispatchError),
     );
+    let cancelled_without_refresh = item(
+        CacheKeepaliveSessionEntrySource::Session,
+        Some(CacheKeepaliveSessionStatus::Terminal),
+        Some(0),
+        Some(CacheKeepaliveTerminalReason::Cancelled),
+    );
+    let cancelled_after_refresh = item(
+        CacheKeepaliveSessionEntrySource::Session,
+        Some(CacheKeepaliveSessionStatus::Terminal),
+        Some(2),
+        Some(CacheKeepaliveTerminalReason::Cancelled),
+    );
     let not_tracked = item(CacheKeepaliveSessionEntrySource::Decision, None, None, None);
 
     // When: the server derives presentation state, reason, action, and renewal timing.
@@ -100,6 +113,14 @@ fn cache_keepalive_status_keeps_error_orthogonal_and_uses_frozen_display_contrac
     );
     assert_eq!(
         state_from_item(&renewed_with_error),
+        CacheKeepaliveViewState::Capped
+    );
+    assert_eq!(
+        state_from_item(&cancelled_without_refresh),
+        CacheKeepaliveViewState::NotTracked
+    );
+    assert_eq!(
+        state_from_item(&cancelled_after_refresh),
         CacheKeepaliveViewState::Capped
     );
     assert_eq!(

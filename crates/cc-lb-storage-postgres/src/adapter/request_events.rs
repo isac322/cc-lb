@@ -887,8 +887,8 @@ async fn insert_keepalive_turn_in_tx(
 ) -> StorageResult<()> {
     sqlx::query(
         "INSERT INTO cache_keepalive_turns \
-         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) \
          ON CONFLICT(source_ref_id) DO NOTHING",
     )
     .bind(&row.source_ref_id)
@@ -904,7 +904,8 @@ async fn insert_keepalive_turn_in_tx(
     .bind(u64_to_i64(row.cache_creation_input_tokens_5m, "cache keepalive cache_creation_input_tokens_5m")?)
     .bind(u64_to_i64(row.cache_creation_input_tokens_1h, "cache keepalive cache_creation_input_tokens_1h")?)
     .bind(u64_to_i64(row.cache_read_input_tokens, "cache keepalive cache_read_input_tokens")?)
-    .bind(row.cost_micros)
+    .bind(row.cost_micros.unwrap_or(0))
+    .bind(row.cost_micros.is_some())
     .bind(&row.hit_miss)
     .bind(u64_to_i64(row.ts, "cache keepalive ts")?)
     .execute(&mut **tx)

@@ -34,6 +34,7 @@ fn item(source: CacheKeepaliveSessionEntrySource) -> CacheKeepaliveSessionListIt
         terminal_reason: None,
         decision: Some("not_tracked".to_owned()),
         reason: "user turn (stop_reason=end_turn)".to_owned(),
+        display_reason: None,
         error: None,
         config_snapshot: None,
     }
@@ -54,7 +55,7 @@ fn turn(source_ref_id: &str, ts: u64) -> CacheKeepaliveTurnRecord {
         cache_creation_input_tokens_5m: 0,
         cache_creation_input_tokens_1h: 0,
         cache_read_input_tokens: 20_000,
-        cost_micros: 0,
+        cost_micros: Some(0),
         hit_miss: "hit".to_owned(),
         ts,
     }
@@ -463,12 +464,12 @@ fn active_same_cycle_miss_followup_resolves_pending_without_miss_credit() {
 
     let mut hit = turn("same-cycle-hit", 200);
     hit.cycle_id = Some(cycle_id);
-    hit.cost_micros = 6_000;
+    hit.cost_micros = Some(6_000);
 
     let mut miss = turn("same-cycle-miss", 201);
     miss.cycle_id = Some(cycle_id);
     miss.hit_miss = "miss".to_owned();
-    miss.cost_micros = 15_000;
+    miss.cost_micros = Some(15_000);
 
     let mut miss_follow_up = follow_up_evidence(202_000, CacheTtl::Ttl5m, "shared-prefix");
     miss_follow_up.evidence_id = "same-cycle-miss-follow-up".to_owned();
@@ -530,9 +531,9 @@ fn terminal_complete_negative_evidence_is_observed_without_follow_up() {
     item.refresh_count = Some(12);
 
     let mut hit = turn("terminal-hit", 200);
-    hit.cost_micros = 6_000;
+    hit.cost_micros = Some(6_000);
     let mut miss = turn("terminal-miss", 100);
-    miss.cost_micros = 15_000;
+    miss.cost_micros = Some(15_000);
     miss.hit_miss = "miss".to_owned();
     let cycle_id = Uuid::from_u128(10);
     let evidence = [
@@ -589,7 +590,7 @@ fn terminal_complete_hit_only_evidence_is_observed_without_avoided_credit() {
     item.refresh_count = Some(12);
 
     let mut hit = turn("terminal-hit-only", 200);
-    hit.cost_micros = 6_000;
+    hit.cost_micros = Some(6_000);
     let evidence = [renewal_evidence(
         "terminal-hit-only",
         Uuid::from_u128(11),
@@ -667,7 +668,7 @@ fn replacing_c1_with_empty_c2_retains_history_without_inheriting_pending() {
     let active_session = session();
 
     let mut c1_turn = turn("c1-turn", 200);
-    c1_turn.cost_micros = 21_000;
+    c1_turn.cost_micros = Some(21_000);
     c1_turn.cycle_id = Some(c1);
     let evidence = [
         renewal_evidence("c1-turn", c1, 200_000, CacheTtl::Ttl5m, "hit", "c1"),
@@ -700,7 +701,7 @@ fn replacing_c1_with_empty_c2_retains_history_without_inheriting_pending() {
 fn persisted_zero_cost_is_real_zero_spend() {
     let item = item(CacheKeepaliveSessionEntrySource::Session);
     let mut turn = turn("zero-cost-hit", 200);
-    turn.cost_micros = 0;
+    turn.cost_micros = Some(0);
     let cycle_id = Uuid::from_u128(13);
     let evidence = [
         renewal_evidence(
@@ -733,13 +734,49 @@ fn persisted_zero_cost_is_real_zero_spend() {
 }
 
 #[test]
+fn unknown_cost_keeps_hit_history_without_claiming_zero_pnl() {
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let mut renewal = turn("unknown-cost-hit", 200);
+    renewal.cost_micros = None;
+    let evidence = [
+        renewal_evidence(
+            "unknown-cost-hit",
+            Uuid::from_u128(19),
+            200_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "unknown-cost",
+        ),
+        follow_up_evidence(201_000, CacheTtl::Ttl5m, "unknown-cost"),
+    ];
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[renewal],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    assert_eq!(activity.total_renewals, 1);
+    assert_eq!(activity.turns[0].source_ref_id, "unknown-cost-hit");
+    assert_eq!(activity.turns[0].renewal_tokens, 20_000);
+    assert!(activity.turns[0].followed_up);
+    assert_eq!(activity.turns[0].pnl, None);
+    assert_eq!(activity.pnl, None);
+    assert_eq!(activity.total_spent_micros, 0);
+}
+
+#[test]
 fn hit_miss_counts_include_hits_but_not_misses() {
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
     item.status = Some(CacheKeepaliveSessionStatus::Terminal);
     let mut hit = turn("count-hit", 200);
-    hit.cost_micros = 6_000;
+    hit.cost_micros = Some(6_000);
     let mut miss = turn("count-miss", 100);
-    miss.cost_micros = 15_000;
+    miss.cost_micros = Some(15_000);
     miss.hit_miss = "miss".to_owned();
     let cycle_id = Uuid::from_u128(14);
     let evidence = [
@@ -864,7 +901,7 @@ fn historical_turn_uses_its_persisted_ttl_for_avoided_cost() {
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
     item.ttl = CacheTtl::Ttl1h;
     let mut historical_turn = turn("historical-5m", 200);
-    historical_turn.cost_micros = 21_000;
+    historical_turn.cost_micros = Some(21_000);
     let cycle_id = Uuid::from_u128(17);
     let evidence = [
         renewal_evidence(
@@ -902,7 +939,7 @@ fn valid_follow_up_after_cap_is_attributed_once_within_historical_ttl() {
     item.terminal_reason = Some(CacheKeepaliveTerminalReason::MaxRefreshes);
     item.refresh_count = Some(12);
     let mut turn = turn("capped-turn", 200);
-    turn.cost_micros = 21_000;
+    turn.cost_micros = Some(21_000);
     let cycle_id = Uuid::from_u128(18);
     let evidence = [
         renewal_evidence(

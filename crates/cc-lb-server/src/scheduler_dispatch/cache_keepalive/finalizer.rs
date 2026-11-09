@@ -51,6 +51,8 @@ impl SchedulerDispatch {
             )
             .unwrap_or_else(ComputedCostBreakdown::unknown)
         };
+        let actual_cost_micros = (cost.pricing_status == cc_lb_pricing::PricingStatus::Known)
+            .then_some(cost.total_micros);
         let ts = unix_secs(self.clock.now());
         let duration_ms = duration_ms(finalization.duration);
         let thread_id = SessionKey::extract_thread_id(&record.session_key_hash);
@@ -72,7 +74,7 @@ impl SchedulerDispatch {
             record,
             model,
             usage: &finalization.usage,
-            cost_micros: cost.total_micros,
+            cost_micros: actual_cost_micros,
             hit_miss,
             authorized_after_dispatch,
             generation: job.generation,
@@ -94,7 +96,7 @@ impl SchedulerDispatch {
                 ttl: record.ttl,
                 hit_miss: Some(hit_miss.to_owned()),
                 cache_read_input_tokens: Some(finalization.usage.cache_read_input_tokens),
-                cost_micros: Some(cost.total_micros),
+                cost_micros: actual_cost_micros,
                 request_ref: Some(event_id.clone()),
                 event_ref: Some(source_ref_id.to_owned()),
             });
@@ -116,7 +118,7 @@ impl SchedulerDispatch {
                 reservation_id,
                 finalization.usage.input_tokens,
                 finalization.usage.output_tokens,
-                cost.total_micros,
+                actual_cost_micros,
             );
             if !reconciled {
                 return Err(cc_lb_scheduler::error::SchedulerError::Job(format!(
@@ -164,7 +166,7 @@ struct RenewalProjectionInput<'a> {
     record: &'a CacheKeepaliveSessionRecord,
     model: &'a str,
     usage: &'a RenewalUsage,
-    cost_micros: i64,
+    cost_micros: Option<i64>,
     hit_miss: &'a str,
     authorized_after_dispatch: bool,
     generation: u64,
@@ -180,6 +182,7 @@ fn duration_ms(duration: std::time::Duration) -> u64 {
 }
 
 fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
+    let known = input.cost.pricing_status == cc_lb_pricing::PricingStatus::Known;
     RequestEvent {
         ts: input.ts,
         ts_ms: Some(input.ts.saturating_mul(1_000)),
@@ -201,12 +204,12 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
         cache_creation_input_tokens_5m: Some(input.usage.cache_creation_input_tokens_5m),
         cache_creation_input_tokens_1h: Some(input.usage.cache_creation_input_tokens_1h),
         cache_read_input_tokens: Some(input.usage.cache_read_input_tokens),
-        cost_usd_micros: Some(input.cost.total_micros),
-        cost_input_micros: Some(input.cost.input_micros),
-        cost_output_micros: Some(input.cost.output_micros),
-        cost_cache_creation_5m_micros: Some(input.cost.cache_creation_5m_micros),
-        cost_cache_creation_1h_micros: Some(input.cost.cache_creation_1h_micros),
-        cost_cache_read_micros: Some(input.cost.cache_read_micros),
+        cost_usd_micros: known.then_some(input.cost.total_micros),
+        cost_input_micros: known.then_some(input.cost.input_micros),
+        cost_output_micros: known.then_some(input.cost.output_micros),
+        cost_cache_creation_5m_micros: known.then_some(input.cost.cache_creation_5m_micros),
+        cost_cache_creation_1h_micros: known.then_some(input.cost.cache_creation_1h_micros),
+        cost_cache_read_micros: known.then_some(input.cost.cache_read_micros),
         request_body_first_chunk_ms: None,
         request_body_receive_ms: None,
         request_body_wait_ms: None,
@@ -281,7 +284,63 @@ fn cache_keepalive_renewal_reason(hit_miss: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_keepalive_renewal_reason;
+
+    use super::{RenewalProjectionInput, cache_keepalive_renewal_reason, renewal_projections};
+    use cc_lb_engine::cache_keepalive::RenewalUsage;
+    use cc_lb_storage_api::{
+        CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
+        CacheTtl,
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn unknown_pricing_keeps_turn_projection_with_hit_identity() {
+        let record = CacheKeepaliveSessionRecord {
+            session_key_hash: "session".to_owned(),
+            principal_id: "principal".to_owned(),
+            accounting_key_id: None,
+            upstream_id: Uuid::nil(),
+            cycle_id: None,
+            generation: 1,
+            refresh_count: 0,
+            first_scheduled_at_unix_secs: 1,
+            cache_anchor_at_unix_secs: 1,
+            run_at_unix_secs: 2,
+            ttl: CacheTtl::Ttl5m,
+            status: CacheKeepaliveSessionStatus::Active,
+            enqueue_state: CacheKeepaliveEnqueueState::Enqueued,
+            running_since_unix_secs: None,
+            current_job_key: "job".to_owned(),
+            encrypted_payload: Vec::new(),
+            display_reason: "cache hit".to_owned(),
+            error: None,
+            config_snapshot: None,
+            terminal_reason: None,
+            expires_at_unix_secs: 3,
+            created_at_unix_secs: 1,
+            updated_at_unix_secs: 1,
+        };
+        let projections = renewal_projections(RenewalProjectionInput {
+            source_ref_id: "session:1",
+            record: &record,
+            model: "gpt-5",
+            usage: &RenewalUsage {
+                cache_read_input_tokens: 42,
+                provider_cost_unknown: true,
+                ..RenewalUsage::default()
+            },
+            cost_micros: None,
+            hit_miss: "hit",
+            authorized_after_dispatch: true,
+            generation: 1,
+            ts: 2,
+        });
+
+        let turn = projections.turn.expect("unknown-priced turn is retained");
+        assert_eq!(turn.hit_miss, "hit");
+        assert_eq!(turn.cost_micros, None);
+        assert_eq!(projections.decision.decision, "reschedule");
+    }
 
     #[test]
     fn cache_hit_reason_is_human_readable() {

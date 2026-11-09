@@ -62,6 +62,7 @@ pub(crate) fn list_item_from_row(row: PgRow) -> StorageResult<CacheKeepaliveSess
             .transpose()?,
         decision: row.try_get("decision").map_err(map_sqlx_error)?,
         reason: row.try_get("reason").map_err(map_sqlx_error)?,
+        display_reason: row.try_get("display_reason").map_err(map_sqlx_error)?,
         error: row.try_get("error").map_err(map_sqlx_error)?,
         config_snapshot: config_snapshot_from_db(
             row.try_get("config_snapshot").map_err(map_sqlx_error)?,
@@ -106,7 +107,14 @@ pub(crate) fn turn_from_row(row: PgRow) -> StorageResult<CacheKeepaliveTurnRecor
                 .map_err(map_sqlx_error)?,
             "cache keepalive cache read input tokens",
         )?,
-        cost_micros: row.try_get("cost_micros").map_err(map_sqlx_error)?,
+        cost_micros: if row
+            .try_get::<bool, _>("cost_known")
+            .map_err(map_sqlx_error)?
+        {
+            Some(row.try_get("cost_micros").map_err(map_sqlx_error)?)
+        } else {
+            None
+        },
         hit_miss: row.try_get("hit_miss").map_err(map_sqlx_error)?,
         ts: i64_to_u64(
             row.try_get("ts").map_err(map_sqlx_error)?,

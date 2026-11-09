@@ -200,10 +200,12 @@ pub(crate) fn summary_for_items(
         cost_saved: economics_known
             .then(|| dollars_from_micros(cost_saved_micros))
             .transpose()?,
+        resolved_cost_saved: None,
         total_spent: dollars_from_micros(total_spent_micros)?,
         total_avoided: economics_known
             .then(|| dollars_from_micros(total_avoided_micros))
             .transpose()?,
+        resolved_total_avoided: None,
         evidence_status: evidence_status.to_owned(),
         unknown_cycles,
         retained_from_ms,
@@ -319,6 +321,7 @@ pub(crate) fn row_from_activity(
             .as_ref()
             .map_or(max_attempts, |config| config.max_refreshes_per_session),
         reason: item.reason.clone(),
+        display_reason: item.display_reason.clone(),
         generation: item.generation,
         upstream,
         error: item.error.clone(),
