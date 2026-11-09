@@ -298,6 +298,136 @@ impl UsageRollupStore for PostgresStorage {
             .transpose()
     }
 }
+async fn merge_stale_gemini_rollups(tx: &mut Transaction<'_, Postgres>) -> StorageResult<()> {
+    let source_rows = sqlx::query(
+        "SELECT rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
+         rollup.upstream_id, rollup.model \
+         FROM usage_rollups_v2 AS rollup \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+         ORDER BY rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
+                  rollup.upstream_id, rollup.model",
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    for source in source_rows {
+        let resolution: String = source.try_get("resolution").map_err(map_sqlx_error)?;
+        let bucket_start: i64 = source
+            .try_get("bucket_start_unix_secs")
+            .map_err(map_sqlx_error)?;
+        let principal: String = source.try_get("principal_id").map_err(map_sqlx_error)?;
+        let upstream_id: Uuid = source.try_get("upstream_id").map_err(map_sqlx_error)?;
+        let model: String = source.try_get("model").map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            "INSERT INTO usage_rollups_v2 \
+             (resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
+              request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
+              cache_read_input_tokens, cache_write_input_tokens, cache_write_input_tokens_30m, \
+              cache_write_input_tokens_12h, error_count, latency_count, latency_ms_sum, \
+              latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
+              shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
+              upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
+              upstream_body_ms_sum, virtual_cost_micros, cost_input_micros, cost_output_micros, \
+              cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
+              cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
+              cost_components_event_count, updated_at) \
+             SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, \
+                    substring(model FROM 8), request_count, input_tokens, output_tokens, \
+                    cache_creation_input_tokens, cache_read_input_tokens, cache_write_input_tokens, \
+                    cache_write_input_tokens_30m, cache_write_input_tokens_12h, error_count, \
+                    latency_count, latency_ms_sum, latency_ms_min, latency_ms_max, \
+                    proxy_setup_ms_count, proxy_setup_ms_sum, shape_ms_count, shape_ms_sum, \
+                    sign_ms_count, sign_ms_sum, upstream_ttfb_ms_count, upstream_ttfb_ms_sum, \
+                    upstream_body_ms_count, upstream_body_ms_sum, virtual_cost_micros, \
+                    cost_input_micros, cost_output_micros, cost_cache_creation_5m_micros, \
+                    cost_cache_creation_1h_micros, cost_cache_read_micros, \
+                    cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
+                    cost_components_event_count, updated_at \
+             FROM usage_rollups_v2 \
+             WHERE resolution = $1 AND bucket_start_unix_secs = $2 AND principal_id = $3 \
+               AND upstream_id = $4 AND model = $5 \
+             ON CONFLICT (resolution, bucket_start_unix_secs, principal_id, upstream_id, model) \
+             DO UPDATE SET \
+                 upstream_name = EXCLUDED.upstream_name, \
+                 request_count = usage_rollups_v2.request_count + EXCLUDED.request_count, \
+                 input_tokens = usage_rollups_v2.input_tokens + EXCLUDED.input_tokens, \
+                 output_tokens = usage_rollups_v2.output_tokens + EXCLUDED.output_tokens, \
+                 cache_creation_input_tokens = usage_rollups_v2.cache_creation_input_tokens + EXCLUDED.cache_creation_input_tokens, \
+                 cache_read_input_tokens = usage_rollups_v2.cache_read_input_tokens + EXCLUDED.cache_read_input_tokens, \
+                 cache_write_input_tokens = CASE \
+                     WHEN usage_rollups_v2.cache_write_input_tokens IS NULL THEN EXCLUDED.cache_write_input_tokens \
+                     WHEN EXCLUDED.cache_write_input_tokens IS NULL THEN usage_rollups_v2.cache_write_input_tokens \
+                     ELSE usage_rollups_v2.cache_write_input_tokens + EXCLUDED.cache_write_input_tokens END, \
+                 cache_write_input_tokens_30m = CASE \
+                     WHEN usage_rollups_v2.cache_write_input_tokens_30m IS NULL THEN EXCLUDED.cache_write_input_tokens_30m \
+                     WHEN EXCLUDED.cache_write_input_tokens_30m IS NULL THEN usage_rollups_v2.cache_write_input_tokens_30m \
+                     ELSE usage_rollups_v2.cache_write_input_tokens_30m + EXCLUDED.cache_write_input_tokens_30m END, \
+                 cache_write_input_tokens_12h = CASE \
+                     WHEN usage_rollups_v2.cache_write_input_tokens_12h IS NULL THEN EXCLUDED.cache_write_input_tokens_12h \
+                     WHEN EXCLUDED.cache_write_input_tokens_12h IS NULL THEN usage_rollups_v2.cache_write_input_tokens_12h \
+                     ELSE usage_rollups_v2.cache_write_input_tokens_12h + EXCLUDED.cache_write_input_tokens_12h END, \
+                 error_count = usage_rollups_v2.error_count + EXCLUDED.error_count, \
+                 latency_count = usage_rollups_v2.latency_count + EXCLUDED.latency_count, \
+                 latency_ms_sum = usage_rollups_v2.latency_ms_sum + EXCLUDED.latency_ms_sum, \
+                 latency_ms_min = CASE \
+                     WHEN usage_rollups_v2.latency_ms_min IS NULL THEN EXCLUDED.latency_ms_min \
+                     WHEN EXCLUDED.latency_ms_min IS NULL THEN usage_rollups_v2.latency_ms_min \
+                     ELSE LEAST(usage_rollups_v2.latency_ms_min, EXCLUDED.latency_ms_min) END, \
+                 latency_ms_max = CASE \
+                     WHEN usage_rollups_v2.latency_ms_max IS NULL THEN EXCLUDED.latency_ms_max \
+                     WHEN EXCLUDED.latency_ms_max IS NULL THEN usage_rollups_v2.latency_ms_max \
+                     ELSE GREATEST(usage_rollups_v2.latency_ms_max, EXCLUDED.latency_ms_max) END, \
+                 proxy_setup_ms_count = usage_rollups_v2.proxy_setup_ms_count + EXCLUDED.proxy_setup_ms_count, \
+                 proxy_setup_ms_sum = usage_rollups_v2.proxy_setup_ms_sum + EXCLUDED.proxy_setup_ms_sum, \
+                 shape_ms_count = usage_rollups_v2.shape_ms_count + EXCLUDED.shape_ms_count, \
+                 shape_ms_sum = usage_rollups_v2.shape_ms_sum + EXCLUDED.shape_ms_sum, \
+                 sign_ms_count = usage_rollups_v2.sign_ms_count + EXCLUDED.sign_ms_count, \
+                 sign_ms_sum = usage_rollups_v2.sign_ms_sum + EXCLUDED.sign_ms_sum, \
+                 upstream_ttfb_ms_count = usage_rollups_v2.upstream_ttfb_ms_count + EXCLUDED.upstream_ttfb_ms_count, \
+                 upstream_ttfb_ms_sum = usage_rollups_v2.upstream_ttfb_ms_sum + EXCLUDED.upstream_ttfb_ms_sum, \
+                 upstream_body_ms_count = usage_rollups_v2.upstream_body_ms_count + EXCLUDED.upstream_body_ms_count, \
+                 upstream_body_ms_sum = usage_rollups_v2.upstream_body_ms_sum + EXCLUDED.upstream_body_ms_sum, \
+                 virtual_cost_micros = usage_rollups_v2.virtual_cost_micros + EXCLUDED.virtual_cost_micros, \
+                 cost_input_micros = usage_rollups_v2.cost_input_micros + EXCLUDED.cost_input_micros, \
+                 cost_output_micros = usage_rollups_v2.cost_output_micros + EXCLUDED.cost_output_micros, \
+                 cost_cache_creation_5m_micros = usage_rollups_v2.cost_cache_creation_5m_micros + EXCLUDED.cost_cache_creation_5m_micros, \
+                 cost_cache_creation_1h_micros = usage_rollups_v2.cost_cache_creation_1h_micros + EXCLUDED.cost_cache_creation_1h_micros, \
+                 cost_cache_read_micros = usage_rollups_v2.cost_cache_read_micros + EXCLUDED.cost_cache_read_micros, \
+                 cost_cache_write_30m_micros = usage_rollups_v2.cost_cache_write_30m_micros + EXCLUDED.cost_cache_write_30m_micros, \
+                 cost_cache_write_12h_micros = usage_rollups_v2.cost_cache_write_12h_micros + EXCLUDED.cost_cache_write_12h_micros, \
+                 cost_components_event_count = usage_rollups_v2.cost_components_event_count + EXCLUDED.cost_components_event_count, \
+                 updated_at = GREATEST(usage_rollups_v2.updated_at, EXCLUDED.updated_at)",
+        )
+        .bind(&resolution)
+        .bind(bucket_start)
+        .bind(&principal)
+        .bind(upstream_id)
+        .bind(&model)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            "DELETE FROM usage_rollups_v2 \
+             WHERE resolution = $1 AND bucket_start_unix_secs = $2 AND principal_id = $3 \
+               AND upstream_id = $4 AND model = $5",
+        )
+        .bind(&resolution)
+        .bind(bucket_start)
+        .bind(&principal)
+        .bind(upstream_id)
+        .bind(&model)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    Ok(())
+}
+
 async fn reconcile_gemini_model_identity(
     storage: &PostgresStorage,
 ) -> StorageResult<Option<UsageRollupRun>> {
@@ -352,6 +482,7 @@ async fn reconcile_gemini_model_identity(
         .await
         .map_err(map_sqlx_error)?;
         if !has_work {
+            merge_stale_gemini_rollups(&mut tx).await?;
             sqlx::query(
                 "UPDATE usage_rollup_reconciliations_v1 SET status = 'complete' \
                  WHERE id = $1",

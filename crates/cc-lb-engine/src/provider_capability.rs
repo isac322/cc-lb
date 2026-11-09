@@ -227,6 +227,9 @@ pub(crate) fn body_is_consistency_safe(capability: ProviderCapability, body: &Va
 /// The wire body and URL remain unchanged; this helper is only for provider
 /// identity values used by routing, limits, pricing, and observability.
 pub(crate) fn canonical_gemini_model_id(model: &str) -> &str {
+    if model.starts_with("tunedModels/") || model.starts_with("models/tunedModels/") {
+        return model;
+    }
     model.strip_prefix("models/").unwrap_or(model)
 }
 
@@ -244,6 +247,13 @@ mod canonical_model_tests {
             canonical_gemini_model_id("models/models/gemini-2.5-flash"),
             "models/gemini-2.5-flash"
         );
+    }
+
+    #[test]
+    fn preserves_tuned_model_identities() {
+        for model in ["tunedModels/custom", "models/tunedModels/custom"] {
+            assert_eq!(canonical_gemini_model_id(model), model);
+        }
     }
 
     #[test]

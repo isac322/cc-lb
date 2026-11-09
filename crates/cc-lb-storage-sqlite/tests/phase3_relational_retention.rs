@@ -572,6 +572,180 @@ async fn canonicalize_gemini_model_identity_migration_rebuilds_historical_rollup
 }
 
 #[tokio::test]
+async fn canonicalize_gemini_rollup_only_history_merges_prefixed_rows() {
+    let (_dir, storage) = storage("canonicalize-rollup-only.sqlite").await;
+    let upstream_id = Uuid::from_u128(1_204_013);
+    sqlx::query(
+        "INSERT INTO upstream_spec_v1 (
+            id, name, kind, base_url, enabled, warmup_enabled,
+            warmup_dialect_plugin, spec_revision, created_at, updated_at,
+            deleted_at, workspace_id
+        ) VALUES (?, ?, 'gemini_api_key', NULL, 1, 0, NULL, 1, 0, 0, NULL, NULL)",
+    )
+    .bind(upstream_id.to_string())
+    .bind("rollup-only-gemini")
+    .execute(storage.pool())
+    .await
+    .expect("seed Gemini upstream");
+
+    for (
+        model,
+        request_count,
+        input_tokens,
+        output_tokens,
+        cache_write,
+        error_count,
+        latency_sum,
+        latency_min,
+        latency_max,
+        virtual_cost,
+        cost_input,
+    ) in [
+        (
+            "gemini-2.5-flash",
+            2,
+            10,
+            4,
+            None,
+            1,
+            20,
+            Some(8),
+            Some(12),
+            100,
+            30,
+        ),
+        (
+            "models_gemini-2.5-flash",
+            3,
+            7,
+            5,
+            Some(9),
+            2,
+            15,
+            Some(3),
+            Some(9),
+            70,
+            20,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO usage_rollups_v2 (
+                resolution, bucket_start_unix_secs, principal_id, upstream_id,
+                upstream_name, model, request_count, input_tokens, output_tokens,
+                cache_write_input_tokens, error_count, latency_count, latency_ms_sum,
+                latency_ms_min, latency_ms_max, virtual_cost_micros, cost_input_micros,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("minute")
+        .bind(1_800_000_000_i64)
+        .bind("rollup-only-principal")
+        .bind(upstream_id.to_string())
+        .bind("rollup-only-gemini")
+        .bind(model)
+        .bind(request_count)
+        .bind(input_tokens)
+        .bind(output_tokens)
+        .bind(cache_write)
+        .bind(error_count)
+        .bind(request_count)
+        .bind(latency_sum)
+        .bind(latency_min)
+        .bind(latency_max)
+        .bind(virtual_cost)
+        .bind(cost_input)
+        .bind(0_i64)
+        .execute(storage.pool())
+        .await
+        .expect("seed rollup");
+    }
+    sqlx::query(
+        "UPDATE usage_rollup_reconciliations_v1
+         SET status = 'pending', cursor = 0, upper_bound = 0
+         WHERE id = 'canonicalize_gemini_model_identity'",
+    )
+    .execute(storage.pool())
+    .await
+    .expect("reset reconciliation");
+
+    storage
+        .rollup_usage_once()
+        .await
+        .expect("merge stale rollup-only history");
+
+    let merged = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            i64,
+            Option<i64>,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ),
+    >(
+        "SELECT request_count, input_tokens, output_tokens, cache_write_input_tokens,
+                error_count, latency_count, latency_ms_sum, latency_ms_min, latency_ms_max,
+                virtual_cost_micros, cost_input_micros
+         FROM usage_rollups_v2
+         WHERE resolution = 'minute' AND bucket_start_unix_secs = ?
+           AND principal_id = ? AND upstream_id = ? AND model = ?",
+    )
+    .bind(1_800_000_000_i64)
+    .bind("rollup-only-principal")
+    .bind(upstream_id.to_string())
+    .bind("gemini-2.5-flash")
+    .fetch_one(storage.pool())
+    .await
+    .expect("read merged rollup");
+    assert_eq!(merged, (5, 17, 9, Some(9), 3, 5, 35, 3, 12, 170, 50));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM usage_rollups_v2 WHERE model = 'models_gemini-2.5-flash'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .expect("count removed source rollups"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM usage_rollup_reconciliations_v1
+             WHERE id = 'canonicalize_gemini_model_identity'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .expect("read reconciliation status"),
+        "complete"
+    );
+
+    storage
+        .rollup_usage_once()
+        .await
+        .expect("run idempotent rollup-only reconciliation");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT request_count FROM usage_rollups_v2
+             WHERE resolution = 'minute' AND bucket_start_unix_secs = ?
+               AND principal_id = ? AND upstream_id = ? AND model = ?",
+        )
+        .bind(1_800_000_000_i64)
+        .bind("rollup-only-principal")
+        .bind(upstream_id.to_string())
+        .bind("gemini-2.5-flash")
+        .fetch_one(storage.pool())
+        .await
+        .expect("read idempotent merged rollup"),
+        5
+    );
+}
+
+#[tokio::test]
 async fn usage_rollup_conflict_accumulates_nullable_provider_cache_writes() {
     let (_dir, storage) = storage("usage-rollup-cache-writes.sqlite").await;
     let upstream_id = Uuid::from_u128(7);
