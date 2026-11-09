@@ -873,6 +873,18 @@ impl RealtimeUsage {
                 cache_creation_input_tokens_1h: counts.cache_creation_input_tokens_1h,
                 cache_read_input_tokens: counts.cache_read_input_tokens,
                 cache_write_input_tokens: counts.cache_write_input_tokens,
+                cache_write_evidence: match counts.cache_write_evidence {
+                    crate::usage_parser::CacheTokenEvidence::Unreported => None,
+                    crate::usage_parser::CacheTokenEvidence::Zero => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Positive => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Invalid => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+                    }
+                },
                 cache_write_input_tokens_30m: counts.cache_write_input_tokens_30m,
                 cache_write_input_tokens_12h: counts.cache_write_input_tokens_12h,
                 cache_read_evidence: match counts.cache_read_evidence {
