@@ -425,12 +425,14 @@ const OPENAI_DATED_SNAPSHOTS: &[(&str, &str)] = &[
     ("gpt-4.1-mini-2025-04-14", "gpt-4.1-mini"),
     ("gpt-4.1-nano-2025-04-14", "gpt-4.1-nano"),
     ("gpt-4o-2024-08-06", "gpt-4o"),
+    ("gpt-4o-2024-11-20", "gpt-4o"),
     ("gpt-4.1-2025-04-14", "gpt-4.1"),
     ("gpt-4o-mini-2024-07-18", "gpt-4o-mini"),
     ("gpt-5-2025-04-16", "gpt-5"),
     ("gpt-5-mini-2025-08-07", "gpt-5-mini"),
     ("gpt-5-nano-2025-04-14", "gpt-5-nano"),
     ("o4-mini-2025-04-16", "o4-mini"),
+    ("o3-2025-04-16", "o3"),
 ];
 
 fn openai_dated_policy(model: &str) -> Option<OpenAiPolicy> {
@@ -568,6 +570,10 @@ mod tests {
             1_536
         );
         assert_eq!(
+            openai_image_tokens("gpt-4o-2024-11-20", None, Some((2048, 2048))),
+            765
+        );
+        assert_eq!(
             openai_image_tokens("gpt-4o-2024-08-06", None, Some((2048, 2048))),
             765
         );
@@ -590,6 +596,10 @@ mod tests {
         assert_eq!(
             openai_image_tokens("gpt-5-mini-2025-08-07", None, Some((1024, 1024))),
             1_229
+        );
+        assert_eq!(
+            openai_image_tokens("o3-2025-04-16", None, Some((1024, 1024))),
+            675
         );
         assert_eq!(
             openai_image_tokens("o4-mini-2025-04-16", None, Some((1024, 1024))),
