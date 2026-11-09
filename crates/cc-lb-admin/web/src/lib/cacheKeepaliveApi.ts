@@ -96,6 +96,7 @@ export const CacheKeepaliveRowSchema = z.object({
   total_avoided: z.number().nullable(),
   evidence_status: CacheKeepaliveEvidenceStatusSchema,
   session_key_hash: z.string(),
+  retained_renewals: z.number().optional(),
 });
 export type CacheKeepaliveRow = z.infer<typeof CacheKeepaliveRowSchema>;
 
@@ -145,6 +146,36 @@ export type CacheKeepaliveRawRecord = z.infer<
   typeof CacheKeepaliveRawRecordSchema
 >;
 
+export const CacheKeepalivePulseSchema = z.object({
+  pulse_number: z.number(),
+  time_ms: z.number(),
+  offset_sec: z.number(),
+  since_prev_renewal_sec: z.number().nullable(),
+  spent_usd: z.number().nullable(),
+  hit: z.boolean(),
+});
+export type CacheKeepalivePulse = z.infer<typeof CacheKeepalivePulseSchema>;
+
+export const CacheKeepaliveGapSchema = z.object({
+  cycle_id: z.string().nullable(),
+  pause_at_ms: z.number(),
+  cached_tokens: z.number(),
+  pulses: z.array(CacheKeepalivePulseSchema),
+  ending_kind: z.enum([
+    'followup_hit',
+    'scheduled_waiting',
+    'capped_no_followup',
+    'ttl_expired_no_followup',
+  ]),
+  ending_at_ms: z.number(),
+  total_duration_sec: z.number(),
+  since_last_renewal_sec: z.number().nullable(),
+  spent_usd: z.number(),
+  avoided_usd: z.number().nullable(),
+  net_pnl_usd: z.number().nullable(),
+});
+export type CacheKeepaliveGap = z.infer<typeof CacheKeepaliveGapSchema>;
+
 export const CacheKeepaliveDetailSchema = CacheKeepaliveRowSchema.extend({
   renewal_tokens: z.number(),
   total_renewals_current_cycle: z.number(),
@@ -152,6 +183,7 @@ export const CacheKeepaliveDetailSchema = CacheKeepaliveRowSchema.extend({
   turns: z.array(CacheKeepaliveTurnSchema),
   config_snapshot: CacheKeepaliveConfigSnapshotSchema.nullable(),
   raw_record: CacheKeepaliveRawRecordSchema,
+  gaps: z.array(CacheKeepaliveGapSchema).optional(),
 });
 export type CacheKeepaliveDetail = z.infer<typeof CacheKeepaliveDetailSchema>;
 

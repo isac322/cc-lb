@@ -912,4 +912,58 @@ describe('SessionDetailPane', () => {
       ],
     ).toBeDefined();
   });
+  it('renders English tooltips for D3 time-rail points', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: {
+        ...cacheKeepaliveRenewedDetailFixture,
+        gaps: [
+          {
+            cycle_id: 'cycle-1',
+            pause_at_ms: 1_700_000_000_000,
+            cached_tokens: 20_000,
+            pulses: [
+              {
+                pulse_number: 1,
+                time_ms: 1_700_000_240_000,
+                offset_sec: 240,
+                since_prev_renewal_sec: null,
+                spent_usd: 0.05,
+                hit: true,
+              },
+            ],
+            ending_kind: 'followup_hit',
+            ending_at_ms: 1_700_000_600_000,
+            total_duration_sec: 600,
+            since_last_renewal_sec: 360,
+            spent_usd: 0.05,
+            avoided_usd: 0.15,
+            net_pnl_usd: 0.1,
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="a1f39c2b7e04"
+        onClose={() => {}}
+      />,
+    );
+
+    const rail = screen.getByTestId('session-detail-time-rail');
+    for (const pointId of ['start', 'pulse-1', 'end']) {
+      fireEvent.focus(rail.querySelector(`[data-rail-point="${pointId}"]`)!);
+      expect(screen.getByRole('tooltip').textContent).toContain('Timestamp');
+      expect(screen.getByRole('tooltip').textContent).toContain(
+        'Since last request',
+      );
+      expect(screen.getByRole('tooltip').textContent).toContain(
+        'Since last renewal',
+      );
+      fireEvent.blur(rail.querySelector(`[data-rail-point="${pointId}"]`)!);
+    }
+  });
 });

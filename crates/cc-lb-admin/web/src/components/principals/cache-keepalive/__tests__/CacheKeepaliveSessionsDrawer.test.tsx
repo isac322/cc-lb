@@ -660,56 +660,40 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       ),
     ).toBe(true);
   });
-  it('classifies terminal and guardrail trigger reasons into dedicated groups', () => {
+  it('groups terminal tracked reasons under Agent in-turn', () => {
     const triggerRows = [
       {
         ...cacheKeepaliveApiRows[2]!,
         id: 'terminal-max-renewals',
+        state: 'capped' as const,
         reason: 'max renewals reached',
-        display_reason:
-          'agent-in-turn (tool_use: `StructuredOutput`) — first renewal in 4m 7s',
-      },
-      {
-        ...cacheKeepaliveApiRows[0]!,
-        id: 'unsupported-tool-choice',
-        reason: 'zero-token renewal unsupported: forced tool_choice',
-        display_reason: 'zero-token renewal unsupported: forced tool_choice',
-      },
-      {
-        ...cacheKeepaliveApiRows[0]!,
-        id: 'small-prefix',
-        reason: 'cached prefix too small (1200 tokens < minimum 10000)',
         display_reason: null,
       },
       {
-        ...cacheKeepaliveApiRows[0]!,
-        id: 'large-snapshot',
-        reason: 'snapshot too large',
+        ...cacheKeepaliveApiRows[2]!,
+        id: 'terminal-ttl-expired',
+        state: 'expired' as const,
+        reason: 'TTL expired before follow-up',
         display_reason: null,
       },
       {
-        ...cacheKeepaliveApiRows[0]!,
-        id: 'ambiguous-turn',
-        reason: 'ambiguous turn',
+        ...cacheKeepaliveApiRows[2]!,
+        id: 'terminal-duration',
+        state: 'expired' as const,
+        reason: 'max duration reached',
         display_reason: null,
       },
       {
-        ...cacheKeepaliveApiRows[0]!,
-        id: 'custom-dotted-tool',
-        reason: 'max renewals reached',
-        display_reason:
-          'agent-in-turn (tool_use: `mcp.server/search docs`) — first renewal in 4m 7s',
+        ...cacheKeepaliveApiRows[2]!,
+        id: 'terminal-dispatch',
+        state: 'expired' as const,
+        reason: 'renewal dispatch unavailable',
+        display_reason: null,
       },
     ];
     vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
       data: {
-        pages: [
-          {
-            summary: summaryBase,
-            rows: triggerRows,
-            next_cursor: null,
-          },
-        ],
+        pages: [{ summary: summaryBase, rows: triggerRows, next_cursor: null }],
       },
       isLoading: false,
       hasNextPage: false,
@@ -730,32 +714,36 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         .getByTestId('cache-keepalive-session-list-region')
         .querySelectorAll('li:not([data-key])'),
     ).map((header) => header.textContent ?? '');
-    expect(groupHeaders.some((text) => text.includes('StructuredOutput'))).toBe(
-      true,
-    );
     expect(
-      groupHeaders.some((text) =>
-        text.includes('Unsupported: forced tool_choice'),
-      ),
-    ).toBe(true);
-    expect(
-      groupHeaders.filter((text) =>
-        text.includes('Unsupported: forced tool_choice'),
-      ),
+      groupHeaders.filter((text) => text.includes('Agent in-turn')),
     ).toHaveLength(1);
-    expect(
-      groupHeaders.some((text) => text.includes('Prefix < min tokens')),
-    ).toBe(true);
-    expect(
-      groupHeaders.some((text) => text.includes('Snapshot too large')),
-    ).toBe(true);
-    expect(groupHeaders.some((text) => text.includes('Ambiguous turn'))).toBe(
-      true,
+    expect(groupHeaders.some((text) => text.includes('TTL expired'))).toBe(
+      false,
     );
     expect(
-      groupHeaders.some((text) => text.includes('mcp.server/search docs')),
+      groupHeaders.some((text) => text.includes('Max renewals reached')),
+    ).toBe(false);
+  });
+
+  it('aligns group and item decimal points without trailing zero padding', () => {
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+    expect(
+      screen
+        .getAllByRole('button')
+        .some((button) => button.querySelector('[data-decimal-dot="group"]')),
     ).toBe(true);
-    expect(groupHeaders.some((text) => text.includes('Other'))).toBe(false);
+    expect(
+      screen
+        .getAllByRole('button')
+        .some((button) => button.querySelector('[data-decimal-dot="item"]')),
+    ).toBe(true);
+    expect(screen.getAllByText('+$0.102').length).toBeGreaterThanOrEqual(2);
   });
 
   it('renders Saving and Losing verdicts in the P&L equation well', () => {

@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 use cc_lb_pricing::PriceCatalog;
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion};
 use cc_lb_storage_api::{
-    CacheKeepaliveEnqueueState, CacheKeepaliveEvidenceRecord, CacheKeepaliveSessionEntrySource,
-    CacheKeepaliveSessionListItem, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
-    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveEnqueueState, CacheKeepaliveEvidenceRecord,
+    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem, CacheKeepaliveSessionRecord,
+    CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl,
 };
 use uuid::Uuid;
 
@@ -695,6 +695,18 @@ fn replacing_c1_with_empty_c2_retains_history_without_inheriting_pending() {
     assert!(activity.turns.is_empty());
     assert_eq!(activity.total_renewals, 0);
     assert!(!activity.is_last_pending);
+    assert_eq!(activity.retained_renewals, 1);
+    assert_eq!(activity.gaps.len(), 2);
+    assert_eq!(activity.gaps[0].cycle_id, Some(c1));
+    assert_eq!(activity.gaps[0].ending_kind, "followup_hit");
+    let waiting = &activity.gaps[1];
+    assert_eq!(waiting.cycle_id, Some(c2));
+    assert_eq!(waiting.ending_kind, "scheduled_waiting");
+    assert!(waiting.pulses.is_empty());
+    assert_eq!(waiting.pause_at_ms, 1_730_000_000_000);
+    assert_eq!(waiting.ending_at_ms, 1_730_000_200_000);
+    assert_eq!(waiting.total_duration_sec, 200);
+    assert_eq!(waiting.since_last_renewal_sec, None);
 }
 
 #[test]
@@ -968,4 +980,238 @@ fn valid_follow_up_after_cap_is_attributed_once_within_historical_ttl() {
     assert_eq!(activity.total_renewals, 1);
     assert!(activity.turns[0].followed_up);
     assert!(!activity.turns[0].pending);
+    assert_eq!(activity.gaps[0].ending_kind, "followup_hit");
+    assert_eq!(activity.gaps[0].ending_at_ms, 399_999);
+}
+
+#[test]
+fn idle_gaps_retain_all_cycles_chronologically_without_changing_current_turns_or_pnl() {
+    let c1 = Uuid::from_u128(31);
+    let c2 = Uuid::from_u128(32);
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
+    item.cycle_id = Some(c1);
+    let mut active_session = session();
+    active_session.cycle_id = Some(c2);
+    active_session.run_at_unix_secs = 5_100;
+
+    let mut old_first = turn("c1-a", 1_000);
+    old_first.cycle_id = Some(c1);
+    old_first.cost_micros = Some(2_000);
+    old_first.hit_miss = "HIT".to_owned();
+    let mut old_last = turn("c1-b", 1_000);
+    old_last.cycle_id = Some(c1);
+    old_last.cost_micros = Some(3_000);
+    old_last.cache_read_input_tokens = 30_000;
+    let mut current = turn("c2", 5_000);
+    current.cycle_id = Some(c2);
+    current.cost_micros = Some(4_000);
+    current.hit_miss = "miss".to_owned();
+    let turns = [current, old_last, old_first];
+    let evidence = [
+        renewal_evidence("c2", c2, 5_000_000, CacheTtl::Ttl1h, "miss", "c2"),
+        renewal_evidence("c1-b", c1, 1_005_000, CacheTtl::Ttl5m, "hit", "c1"),
+        renewal_evidence("c1-a", c1, 1_000_000, CacheTtl::Ttl5m, "hit", "c1"),
+        follow_up_evidence(1_007_000, CacheTtl::Ttl5m, "c1"),
+        follow_up_evidence(1_006_000, CacheTtl::Ttl5m, "c1"),
+        follow_up_evidence(5_001_000, CacheTtl::Ttl1h, "wrong-prefix"),
+    ];
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: Some(&active_session),
+            turns: &turns,
+            evidence: &evidence,
+            now_ms: 5_000_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    assert_eq!(activity.retained_renewals, 2);
+    assert_eq!(activity.total_renewals, 0);
+    assert_eq!(activity.turns.len(), 1);
+    assert_eq!(activity.turns[0].source_ref_id, "c2");
+    assert!(activity.is_last_pending);
+    let pnl = activity.pnl.expect("retained cycle pnl");
+    assert_eq!(pnl.spent_micros, 9_000);
+    assert_eq!(pnl.avoided_micros, 112_500);
+    assert_eq!(pnl.net_micros, 103_500);
+    let row = row_from_activity(12, &item, &activity, None).expect("row");
+    assert_eq!(row.retained_renewals, 2);
+
+    assert_eq!(activity.gaps.len(), 2);
+    let previous = &activity.gaps[0];
+    assert_eq!(previous.cycle_id, Some(c1));
+    assert_eq!(previous.pause_at_ms, 730_000);
+    assert_eq!(previous.cached_tokens, 30_000);
+    assert_eq!(previous.ending_kind, "followup_hit");
+    assert_eq!(previous.ending_at_ms, 1_006_000);
+    assert_eq!(previous.total_duration_sec, 276);
+    assert_eq!(previous.since_last_renewal_sec, Some(1));
+    assert_eq!(previous.spent_micros, 5_000);
+    assert_eq!(previous.avoided_micros, Some(112_500));
+    assert_eq!(previous.net_pnl_micros, Some(107_500));
+    assert_eq!(previous.pulses.len(), 2);
+    assert_eq!(previous.pulses[0].pulse_number, 1);
+    assert_eq!(previous.pulses[0].time_ms, 1_000_000);
+    assert_eq!(previous.pulses[0].offset_sec, 270);
+    assert_eq!(previous.pulses[0].since_prev_renewal_sec, None);
+    assert_eq!(previous.pulses[0].spent_micros, Some(2_000));
+    assert!(previous.pulses[0].hit);
+    assert_eq!(previous.pulses[1].pulse_number, 2);
+    assert_eq!(previous.pulses[1].time_ms, 1_005_000);
+    assert_eq!(previous.pulses[1].offset_sec, 275);
+    assert_eq!(previous.pulses[1].since_prev_renewal_sec, Some(5));
+    let current = &activity.gaps[1];
+    assert_eq!(current.cycle_id, Some(c2));
+    assert_eq!(current.pause_at_ms, 1_700_000);
+    assert_eq!(current.ending_kind, "scheduled_waiting");
+    assert_eq!(current.ending_at_ms, 5_100_000);
+    assert_eq!(current.total_duration_sec, 3_400);
+    assert_eq!(current.since_last_renewal_sec, Some(100));
+    assert!(!current.pulses[0].hit);
+}
+
+#[test]
+fn idle_gap_terminal_endings_and_fallback_timing_preserve_unknown_cost() {
+    for (terminal_reason, max_attempts, expected) in [
+        (None, 12, "ttl_expired_no_followup"),
+        (None, 1, "capped_no_followup"),
+        (
+            Some(CacheKeepaliveTerminalReason::MaxRefreshes),
+            12,
+            "capped_no_followup",
+        ),
+        (
+            Some(CacheKeepaliveTerminalReason::MaxDuration),
+            12,
+            "capped_no_followup",
+        ),
+    ] {
+        let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+        item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+        item.terminal_reason = terminal_reason;
+        item.config_snapshot = Some(CacheKeepaliveConfigSnapshot {
+            refresh_lead_time_5m_secs: 60,
+            refresh_lead_time_1h_secs: 600,
+            max_refreshes_per_session: max_attempts,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 8_388_608,
+        });
+        let mut historical = turn("unknown", 1_000);
+        historical.cost_micros = None;
+        let activity = derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item: &item,
+                session: None,
+                turns: &[historical],
+                evidence: &[],
+                now_ms: 2_000_000,
+            },
+            priced_catalog().as_ref(),
+        );
+        let gap = &activity.gaps[0];
+        assert_eq!(gap.cycle_id, None);
+        assert_eq!(gap.pause_at_ms, 760_000);
+        assert_eq!(gap.ending_kind, expected);
+        assert_eq!(gap.ending_at_ms, 1_000_000);
+        assert_eq!(gap.total_duration_sec, 240);
+        assert_eq!(gap.since_last_renewal_sec, Some(0));
+        assert_eq!(gap.pulses[0].time_ms, 1_000_000);
+        assert_eq!(gap.pulses[0].spent_micros, None);
+        assert_eq!(gap.avoided_micros, None);
+        assert_eq!(gap.net_pnl_micros, None);
+    }
+}
+
+#[test]
+fn empty_active_gap_uses_snapshot_leads_without_fabricating_renewals() {
+    for (ttl, expected_duration) in [(CacheTtl::Ttl5m, 240), (CacheTtl::Ttl1h, 3_000)] {
+        let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+        item.status = Some(CacheKeepaliveSessionStatus::Active);
+        item.ttl = ttl;
+        item.config_snapshot = Some(CacheKeepaliveConfigSnapshot {
+            refresh_lead_time_5m_secs: 60,
+            refresh_lead_time_1h_secs: 600,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 8_388_608,
+        });
+        let activity = derive_activity_view(
+            CacheKeepaliveActivitySource {
+                item: &item,
+                session: None,
+                turns: &[],
+                evidence: &[],
+                now_ms: item.last_message_at_ms,
+            },
+            PriceCatalog::new_empty().as_ref(),
+        );
+        assert_eq!(activity.retained_renewals, 0);
+        assert_eq!(activity.total_renewals, 0);
+        assert!(activity.turns.is_empty());
+        let gap = &activity.gaps[0];
+        assert_eq!(gap.pause_at_ms, item.last_message_at_ms);
+        assert_eq!(gap.ending_kind, "scheduled_waiting");
+        assert_eq!(gap.total_duration_sec, expected_duration);
+        assert_eq!(
+            gap.ending_at_ms,
+            item.last_message_at_ms + expected_duration * 1_000
+        );
+        assert!(gap.pulses.is_empty());
+        assert_eq!(gap.since_last_renewal_sec, None);
+        assert_eq!(gap.spent_micros, 0);
+        assert_eq!(gap.avoided_micros, None);
+        assert_eq!(gap.net_pnl_micros, None);
+    }
+}
+
+#[test]
+fn idle_gaps_order_same_second_pulses_by_millisecond_evidence_timestamp() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+    let cycle_id = Uuid::from_u128(99);
+    item.cycle_id = Some(cycle_id);
+
+    let mut later_lex_first = turn("a-later-ms", 1_000);
+    later_lex_first.cycle_id = Some(cycle_id);
+    let mut earlier_lex_second = turn("z-earlier-ms", 1_000);
+    earlier_lex_second.cycle_id = Some(cycle_id);
+
+    let evidence = [
+        renewal_evidence(
+            "a-later-ms",
+            cycle_id,
+            1_000_800,
+            CacheTtl::Ttl5m,
+            "hit",
+            "same-sec",
+        ),
+        renewal_evidence(
+            "z-earlier-ms",
+            cycle_id,
+            1_000_100,
+            CacheTtl::Ttl5m,
+            "hit",
+            "same-sec",
+        ),
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[later_lex_first, earlier_lex_second],
+            evidence: &evidence,
+            now_ms: 1_005_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    let pulses = &activity.gaps[0].pulses;
+    assert_eq!(pulses.len(), 2);
+    assert_eq!(pulses[0].pulse_number, 1);
+    assert_eq!(pulses[0].time_ms, 1_000_100);
+    assert_eq!(pulses[1].pulse_number, 2);
+    assert_eq!(pulses[1].time_ms, 1_000_800);
 }

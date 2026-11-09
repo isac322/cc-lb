@@ -15,11 +15,11 @@ use cc_lb_storage_api::{
 use uuid::Uuid;
 
 use serialize::{config_snapshot, dollars_from_micros, raw_record, ttl_name};
-use wire::CacheKeepaliveTurnResponse;
 pub(crate) use wire::{
     CacheKeepaliveDetailResponse, CacheKeepaliveListResponse, CacheKeepaliveRowResponse,
     CacheKeepaliveSummaryResponse,
 };
+use wire::{CacheKeepaliveGapResponse, CacheKeepalivePulseResponse, CacheKeepaliveTurnResponse};
 
 pub(super) const FIVE_MINUTES_MS: u64 = 5 * 60 * 1_000;
 
@@ -293,6 +293,40 @@ pub(super) async fn detail_for_item(
             })
         })
         .collect::<StorageResult<Vec<_>>>()?;
+    let gaps = loaded
+        .activity
+        .gaps
+        .into_iter()
+        .map(|gap| {
+            let pulses = gap
+                .pulses
+                .into_iter()
+                .map(|pulse| {
+                    Ok(CacheKeepalivePulseResponse {
+                        pulse_number: pulse.pulse_number,
+                        time_ms: pulse.time_ms,
+                        offset_sec: pulse.offset_sec,
+                        since_prev_renewal_sec: pulse.since_prev_renewal_sec,
+                        spent_usd: pulse.spent_micros.map(dollars_from_micros).transpose()?,
+                        hit: pulse.hit,
+                    })
+                })
+                .collect::<StorageResult<Vec<_>>>()?;
+            Ok(CacheKeepaliveGapResponse {
+                cycle_id: gap.cycle_id.map(|cycle_id| cycle_id.to_string()),
+                pause_at_ms: gap.pause_at_ms,
+                cached_tokens: gap.cached_tokens,
+                pulses,
+                ending_kind: gap.ending_kind,
+                ending_at_ms: gap.ending_at_ms,
+                total_duration_sec: gap.total_duration_sec,
+                since_last_renewal_sec: gap.since_last_renewal_sec,
+                spent_usd: dollars_from_micros(gap.spent_micros)?,
+                avoided_usd: gap.avoided_micros.map(dollars_from_micros).transpose()?,
+                net_pnl_usd: gap.net_pnl_micros.map(dollars_from_micros).transpose()?,
+            })
+        })
+        .collect::<StorageResult<Vec<_>>>()?;
     Ok(CacheKeepaliveDetailResponse {
         renewal_tokens,
         total_renewals_current_cycle: loaded.activity.total_renewals,
@@ -301,6 +335,7 @@ pub(super) async fn detail_for_item(
         raw_record: raw_record(item, loaded.session.as_ref()),
         row,
         turns,
+        gaps,
     })
 }
 
@@ -326,6 +361,7 @@ pub(crate) fn row_from_activity(
         upstream,
         error: item.error.clone(),
         is_active: activity.is_active,
+        retained_renewals: activity.retained_renewals,
         net_pnl: activity
             .pnl
             .filter(|_| activity.evidence_status == "observed")

@@ -156,34 +156,7 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
               AND d.config_snapshot IS NOT NULL
             LIMIT 1
         ), 12) THEN 'max_refreshes' ELSE 'expired' END AS terminal_reason,
-        CASE WHEN (
-            SELECT COUNT(*)
-            FROM cache_keepalive_turns tc
-            WHERE tc.principal_id = t.principal_id
-              AND tc.session_key_hash = t.session_key_hash
-              AND tc.cycle_id IS (
-                  SELECT t2.cycle_id
-                  FROM cache_keepalive_turns t2
-                  WHERE t2.principal_id = t.principal_id
-                    AND t2.session_key_hash = t.session_key_hash
-                  ORDER BY t2.ts DESC, t2.source_ref_id ASC
-                  LIMIT 1
-              )
-        ) >= COALESCE((
-            SELECT CAST(json_extract(d.config_snapshot, '$.max_refreshes_per_session') AS INTEGER)
-            FROM cache_keepalive_decisions d
-            WHERE d.principal_id = t.principal_id
-              AND d.source_ref_id = (
-                  SELECT t2.source_ref_id
-                  FROM cache_keepalive_turns t2
-                  WHERE t2.principal_id = t.principal_id
-                    AND t2.session_key_hash = t.session_key_hash
-                  ORDER BY t2.ts DESC, t2.source_ref_id ASC
-                  LIMIT 1
-              )
-              AND d.config_snapshot IS NOT NULL
-            LIMIT 1
-        ), 12) THEN 'max renewals reached' ELSE 'TTL expired before follow-up' END AS display_reason,
+        'agent-in-turn' AS display_reason,
         NULL AS error,
         (
             SELECT d.config_snapshot
