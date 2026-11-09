@@ -59,6 +59,10 @@ pub mod prompt_cache_simulator;
 mod provider_cache;
 pub(crate) mod provider_capability;
 #[cfg(not(loom))]
+mod provider_image_tokens;
+#[cfg(not(loom))]
+mod provider_input_estimate;
+#[cfg(not(loom))]
 mod request_classification;
 pub mod request_context;
 #[cfg(not(loom))]

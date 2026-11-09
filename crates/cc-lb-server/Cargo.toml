@@ -114,6 +114,7 @@ base64.workspace = true
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
+flate2.workspace = true
 nix = { version = "0.31.3", features = ["resource"] }
 opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

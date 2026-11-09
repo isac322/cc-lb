@@ -246,11 +246,78 @@ The existing opaque-cache worst-case allowance applies only when no local
 breakpoint resolves, including the existing fallback for unresolved markers.
 Resolved local breakpoints keep precedence even when an opaque marker is present.
 
-The image allowance is an admission estimate, not a guarantee that it bounds all
-provider-billed tokens. It can over-reserve smaller images, and provider-specific
-overhead can exceed the estimate. Provider-reported usage reconciliation and
-actual accounting are unchanged. Documents and non-Anthropic requests retain
-their existing estimates; routing and forwarded request bodies are unchanged.
+Native OpenAI Responses `input_image`, Chat Completions `image_url`, and Gemini
+image `inlineData`/`fileData` parts use provider-specific image quantities
+independent of payload or reference length. Gemini OpenAI-compatible Chat uses
+Gemini quantities. Recognition follows native content positions; arbitrary
+tool arguments and non-image MIME parts keep their existing estimates. Only the
+recognized image's payload/reference strings are excluded; sibling metadata
+still counts.
+
+For inline Base64 images, cc-lb uses bounded 4,096-byte header inspection to
+read positive PNG, JPEG, GIF, or WebP dimensions. It does not decode pixels,
+fetch URLs or files, or make a provider call. Unsupported formats, malformed or
+truncated headers, and remote/file references use the unavailable-dimensions
+policy below. An image remains an image even when its dimensions are unavailable.
+
+OpenAI quantities follow the model-specific rules in
+[Images and vision](https://developers.openai.com/api/docs/guides/images-vision#calculating-costs):
+
+- Tile-based models use their own base and per-tile coefficients. `low` uses
+  only the base; `high` and `auto` resize within 2048 pixels, then reduce a
+  shortest side above 768 pixels before counting 512-pixel tiles. For `gpt-4.1`,
+  `low` contributes 85 tokens and a 1024x1024 image at `high` contributes 765.
+- Patch-based models use 32-pixel patches, the selected model/detail's
+  dimension and patch budgets, and its multiplier, rounded up. `low`, `high`,
+  `original`, and `auto` are model-specific; `low` need not be the cheapest,
+  and `auto` can select `original` sizing.
+- Only explicit known model and snapshot entries select these rules. Omitted
+  `detail` means `auto`. A known model with unsupported or malformed `detail`
+  uses the largest quantity among its supported details, or the largest
+  supported-detail ceiling when dimensions are unavailable. With a supported
+  detail but unavailable dimensions, its model/detail ceiling applies.
+  Unknown OpenAI models receive 73,800 admission tokens per image.
+
+Known Gemini 1.x and 2.x models use the rough crop rule from the
+[image token guide](https://ai.google.dev/gemini-api/docs/image-understanding#token-calculation).
+Images with both dimensions at most 384 pixels use 258 tokens. Otherwise, with
+positive width `w` and height `h`, the crop unit is `floor(min(w, h) * 2 / 3)`;
+the estimate is `ceil(w / crop) * ceil(h / crop) * 258`. A zero crop unit
+counts as unavailable dimensions. Unknown Gemini models and known pre-3 models
+without usable dimensions receive 65,536 admission tokens per image. This
+allowance does not cap quantities calculated from known dimensions.
+
+Known Gemini 3 and 4 models use the
+[media-resolution table](https://ai.google.dev/gemini-api/docs/media-resolution#token-counts)
+regardless of image dimensions:
+
+| Image resolution | Admission tokens per image |
+|---|---:|
+| Omitted or `unspecified` | 1,120 |
+| `low` | 280 |
+| `medium` | 560 |
+| `high` | 1,120 |
+| `ultra_high` | 2,240 |
+| Present but malformed or unsupported | 2,240 |
+
+A per-part resolution overrides the request's generation configuration.
+Resolution accepts a string or an object with `level`, using short names or
+`MEDIA_RESOLUTION_*` values.
+
+These are approximate pre-dispatch admission policies. The 73,800 and 65,536
+fallbacks are explicit local allowances, not exact billing quantities or global
+provider maxima. Image estimates can over-reserve, and provider-specific
+overhead can exceed an allowance. A single 4,000-token floor applies to the
+combined text, metadata, and image input for input-token and total-token
+admission; it is not applied per image. Reservations that cannot fit still
+reject before dispatch.
+
+Anthropic's 4,784-token allowance and cache-region accounting above are
+unchanged. Text, tools, documents, and other non-image content retain their
+existing estimates. Provider-reported usage remains authoritative for
+reconciliation and actual accounting. The existing conservative generic/image
+rate maximum for image-rate CostUsd admission is unchanged, as are actual
+image-rate pricing, routing, and forwarded request bytes.
 
 See [Overview](#overview) for local HTTP limit rejection and retry behavior.
 

@@ -102,6 +102,37 @@ Otherwise, retain the evidence until explicit cleanup.
 Responses WebSocket is not covered by this SDK harness. The server's native
 cached-input pricing tests cover that transport separately.
 
+### Offline image admission regression
+
+`image-admission-sdk.mjs` exercises installed OpenAI Node Responses/Chat and
+Google GenAI generation/streaming builders through a real SQLite-backed binary.
+It uses a compressed 1024x768 RGB image with more than three million Base64
+characters, fresh managed keys with a 100,000-input-token hourly cap, and a
+loopback provider. It checks unchanged request bytes and durable provider usage
+of 1,500 input tokens and one output token. Those synthetic usage values are not
+image-tokenizer measurements.
+
+Install the current stable `openai`, `@google/genai`, and, for CLI checks,
+`@google/gemini-cli` packages in a disposable directory outside the repository.
+Use Node 22.13+ with `node:sqlite`, or Bun:
+
+```sh
+CC_LB_BIN="$PWD/target/debug/cc-lb" \
+SDK_NODE_MODULES="$SDK_ENV/node_modules" \
+GEMINI_CLI="$SDK_ENV/node_modules/.bin/gemini" \
+node tests/real-client/provider-e2e/image-admission-sdk.mjs \
+  --ledger "$SDK_ENV/image-resources.jsonl" --cli
+```
+
+The optional CLI checks run actual Codex and Gemini image-attachment builders
+with private home directories and synthetic credentials. macOS uses
+`sandbox-exec` to permit only loopback networking; Linux requires a network
+namespace with only loopback interfaces. Unavailable isolation or binaries are
+reported as `NOT_RUN`. CLI capture ends with a controlled error, then replays
+the captured native request bytes through cc-lb; capture alone does not claim a
+completed CLI generation. The harness closes its processes and listeners and
+retains evidence directories recorded in the external ledger for later cleanup.
+
 ### 2. Preflight Check (Zero Provider Calls / Zero Cost)
 
 Verifies `target/debug/cc-lb`, installed CLI binaries (`omp`, `codex`, `agy`), free local port offsets, and credential variable presence (without printing secret values):

@@ -1164,6 +1164,7 @@ dependencies = [
  "chrono",
  "clap",
  "fake-anthropic",
+ "flate2",
  "futures-util",
  "hex",
  "http",
