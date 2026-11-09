@@ -90,6 +90,31 @@ impl UpstreamDispatch for AgentTurnDispatch {
     }
 }
 
+pub(crate) struct OpenaiResponsesDispatch;
+
+#[async_trait]
+impl UpstreamDispatch for OpenaiResponsesDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        Ok(json_response(json!({
+            "id": "resp_cached_turn",
+            "object": "response",
+            "model": "gpt-5.6",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}]
+            }],
+            "usage": {
+                "input_tokens": 12_010,
+                "input_tokens_details": {"cached_tokens": 12_000},
+                "output_tokens": 2,
+                "total_tokens": 12_012
+            }
+        })))
+    }
+}
+
 pub(crate) fn principal_with_keepalive() -> PrincipalRecord {
     PrincipalRecord {
         id: Uuid::new_v4(),

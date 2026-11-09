@@ -85,9 +85,9 @@ impl UpstreamBodyEnd {
     }
 }
 
-/// Upstream transport/body attribution captured for streaming responses whose
-/// body ended abnormally. Emitted at most once per request, before
-/// `StreamCompleted`, via `LifecycleEvent::UpstreamStreamDiagnosticsObserved`.
+/// Provider transport/body attribution for a stream, including native WebSocket
+/// close diagnostics. Emitted at most once per request, before `StreamCompleted`,
+/// via `LifecycleEvent::UpstreamStreamDiagnosticsObserved`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UpstreamStreamDiagnostics {
     pub http_version: Option<String>,
@@ -101,8 +101,9 @@ pub struct UpstreamStreamDiagnostics {
     pub body_error_io_kind: Option<String>,
     pub body_error_h2_reason: Option<String>,
     pub message_stop_ms: Option<u64>,
-    /// Set only when the stream was accepted after upstream `message_stop`
-    /// despite a trailing body/decode failure.
+    /// Optional warning or close diagnostic retained after a stream ended.
+    /// This may describe a trailing body/decode failure or another
+    /// provider-neutral transport condition.
     pub warning_type: Option<String>,
     pub warning_message: Option<String>,
 }

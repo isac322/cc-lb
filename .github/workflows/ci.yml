@@ -413,6 +413,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.9.0
       - name: Export cargo-installed tools
         run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
 
@@ -436,12 +439,18 @@ jobs:
             -E 'test(authn_rail_typestate_contracts)' \
             --test-threads=2 \
             --no-report
+      - name: Package coverage runtime
+        run: bash scripts/coverage-runtime.sh pack coverage-runtime.tar.gz
+
+      - name: Smoke test coverage runtime offline
+        run: bash scripts/test-coverage-runtime.sh coverage-runtime.tar.gz
 
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-nextest-archive
           path: |
             nextest-archive.tar.zst
+            coverage-runtime.tar.gz
             crates/cc-lb-admin/web/dist/**
             target/wasm32-unknown-unknown/release/*.wasm
           if-no-files-found: error
@@ -501,19 +510,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: 1.99.1
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov,cargo-nextest
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli@0.9.0
-      - name: Export cargo-installed tools
-        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+          name: coverage-nextest-archive
+      - name: Restore coverage runtime
+        run: bash scripts/coverage-runtime.sh restore coverage-runtime.tar.gz "$RUNNER_TEMP/coverage-runtime"
       - name: Verify test tools
         run: command -v cargo-llvm-cov cargo-nextest sqlx
 
@@ -531,10 +532,6 @@ jobs:
             exit 1
           fi
           psql --version
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: coverage-nextest-archive
 
       - name: Run Postgres migrations
         run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
@@ -571,18 +568,11 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.99.1
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
-
       - uses: actions/download-artifact@v8
         with:
           name: coverage-nextest-archive
+      - name: Restore coverage runtime
+        run: bash scripts/coverage-runtime.sh restore coverage-runtime.tar.gz "$RUNNER_TEMP/coverage-runtime"
 
       - name: Collect every shard's raw profiles
         uses: actions/download-artifact@v8
