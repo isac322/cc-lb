@@ -1,9 +1,13 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    OverviewExcludedErrorBucket, RequestEvent, StorageError, StorageResult, UsageRollup,
-    UsageRollupResolution, UsageRollupRun, UsageRollupStore, normalize_usage_rollup_dimension,
+    OverviewExcludedErrorBucket, RequestEvent, RequestEventStore, StorageError, StorageResult,
+    UsageRollup, UsageRollupResolution, UsageRollupRun, UsageRollupStore,
+    normalize_usage_rollup_dimension,
 };
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -515,6 +519,16 @@ async fn reconcile_gemini_model_identity(
     if status == "complete" {
         return Ok(None);
     }
+    let stable_event_upper_bound = if status == "pending" {
+        u64_to_i64(
+            storage
+                .request_event_stable_seq_ceiling(Duration::from_secs(30))
+                .await?,
+            "Gemini reconciliation event upper bound",
+        )?
+    } else {
+        0
+    };
 
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     let locked = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
@@ -577,11 +591,7 @@ async fn reconcile_gemini_model_identity(
         .await
         .map_err(map_sqlx_error)?;
 
-        let event_upper_bound =
-            sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq), 0) FROM request_events_v1")
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
+        let event_upper_bound = stable_event_upper_bound;
         let rollup_upper_bound = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(FLOOR(EXTRACT(EPOCH FROM MAX(updated_at)) * 1000)::BIGINT, 0) \
              FROM usage_rollups_v2",
