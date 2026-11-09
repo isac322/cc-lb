@@ -50,7 +50,7 @@ const RESERVED_ROW_REM = 2.5;
  *   `table-fixed` table sized by its `<colgroup>`, so no column width depends
  *   on row content. Each column starts at its compact `rem` minimum (43.75rem
  *   with both entities so a 768px portrait tablet fits without horizontal
- *   scroll, 39.5rem with one); the container width above the table's minimum
+ *   scroll, 39.6875rem with one); the container width above the table's minimum
  *   (`100cqw` of the wrapper) is split by `grow` among the columns, and
  *   Session, which has no width of its own, takes its share plus any rounding
  *   remainder. Between 42rem and 59rem cell horizontal padding tightens so all
@@ -84,22 +84,22 @@ interface Column {
 }
 
 /** Session never shrinks below this in the compact tablet table. */
-const SESSION_FLOOR_REM = 4.25;
+const SESSION_FLOOR_REM = 4.125;
 
 // The 43.75rem ten-column minimum (700px) fits inside a 768px portrait tablet
 // card (`PageContainer` 2×32px gutter + 2×2px card border = 700px clientWidth);
-// the 39.5rem nine-column minimum (632px) fits single-entity detail tables.
+// the 39.6875rem nine-column minimum (635px) fits single-entity detail tables.
 // Below 42rem (672px) rows stack into three-line mobile cards.
 const COLUMNS = {
   time: {
     label: 'Timestamp',
-    rem: 4.75,
+    rem: 4.625,
     grow: 0.4,
     card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-1',
   },
   principal: {
     label: 'Principal',
-    rem: 4.25,
+    rem: 4.0625,
     grow: 1.4,
     card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-3',
     cardBoth:
@@ -107,7 +107,7 @@ const COLUMNS = {
   },
   upstream: {
     label: 'Upstream',
-    rem: 4.25,
+    rem: 4.0625,
     grow: 1.4,
     card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-3',
     // Reads "principal → upstream" when both cells are shown.
@@ -122,7 +122,7 @@ const COLUMNS = {
   },
   kind: {
     label: 'Kind',
-    rem: 2.875,
+    rem: 3.25,
     grow: 0.5,
     card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-2 @max-[42rem]/events:justify-self-start @max-[42rem]/events:max-w-full',
   },
@@ -147,7 +147,7 @@ const COLUMNS = {
   },
   tokens: {
     label: 'Tokens',
-    rem: 7.75,
+    rem: 8,
     grow: 5.2,
     numeric: true,
     card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-2 @max-[42rem]/events:col-span-3 @max-[42rem]/events:justify-self-start @max-[42rem]/events:text-left',
@@ -184,6 +184,12 @@ const CARD_CELL = '@max-[42rem]/events:p-0! @max-[42rem]/events:min-w-0';
 // status dot / spinner.
 const COMPACT_CELL =
   '@min-[42rem]/events:@max-[59rem]/events:px-1.5! @min-[42rem]/events:@max-[59rem]/events:first:pl-4! @min-[42rem]/events:@max-[59rem]/events:last:pr-2.5!';
+// `MetricCell` puts its horizontal padding and `min-w-18` (72px) on the inner
+// `<button>` / `<span>` while keeping `p-0` on the `<td>`. Target the child in
+// the 42rem–59rem tablet band and keep `p-0!` on the `<td>` so `Table`'s
+// `[&_td:last-child]:pr-4` does not double-pad the Cost column.
+const COMPACT_METRIC =
+  '@min-[42rem]/events:@max-[59rem]/events:p-0! @min-[42rem]/events:@max-[59rem]/events:*:min-w-0 @min-[42rem]/events:@max-[59rem]/events:*:px-1.5 @min-[42rem]/events:@max-[59rem]/events:last:*:pr-2.5';
 /*
  * A card's metric button is only its figure and bar; `*:min-w-0` drops the
  * button's 72px floor, and padding pulled back by a negative margin makes the
@@ -496,16 +502,16 @@ const RequestEventRow = memo(function RequestEventRow({
       <RequestStatusCell outcome={outcome} />
       <LatencyCell
         event={event}
-        className={cx(CARD_METRIC, COMPACT_CELL, COLUMNS.latency.card)}
+        className={cx(CARD_METRIC, COMPACT_METRIC, COLUMNS.latency.card)}
       />
       <TokenCell
         event={event}
-        className={cx(CARD_METRIC, COMPACT_CELL, COLUMNS.tokens.card)}
+        className={cx(CARD_METRIC, COMPACT_METRIC, COLUMNS.tokens.card)}
       />
       <CostCell
         event={event}
         isPartial={isPartial}
-        className={cx(CARD_METRIC, COMPACT_CELL, COLUMNS.cost.card)}
+        className={cx(CARD_METRIC, COMPACT_METRIC, COLUMNS.cost.card)}
       />
     </TableRow>
   );
@@ -540,7 +546,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
   );
   const colCount = visible.length;
   // The table never narrows below its compact columns plus Session's floor;
-  // with both entities that is 43.75rem (700px) and with one 39.5rem (632px).
+  // with both entities that is 43.75rem (700px) and with one 39.6875rem (635px).
   const minWidthRem = visible.reduce(
     (sum, k) => sum + (COLUMNS[k].rem ?? 0),
     SESSION_FLOOR_REM,
