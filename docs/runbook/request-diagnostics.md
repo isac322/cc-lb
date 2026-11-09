@@ -23,13 +23,13 @@ It also carries these self-contained outcome and session-correlation fields:
 - `output_tokens`
 - `cache_read_input_tokens`
 - `cache_creation_input_tokens`
-- `cache_write_input_tokens`, `cache_write_input_tokens_30m`, and `cache_write_input_tokens_12h` (when reported)
+- `cache_write_input_tokens`, `cache_write_input_tokens_30m`, and `cache_write_input_tokens_12h` (when validly reported)
 - `duration_ms`
 - `upstream_ttfb_ms`
 
 When routing selects an actual prompt-cache match, the line includes the match-only fields `matched_v3_cache_key`, `breakpoint_content_block_index`, `matched_content_block_index`, and `lookback_distance`. These fields are omitted on a routed miss and when no route is selected. The request's own prefix hashes remain in `cache_breakpoints[].prefix_hash`. Separately, routing prediction fields are `predicted_cache_read_tokens`, `predicted_cache_creation_tokens_5m`, and `predicted_cache_creation_tokens_1h`; they may be present for a cold prediction, including `predicted_cache_read_tokens: 0` and cache-creation estimates. The line includes the event identifiers and routing context needed to correlate it with the relational row. Live lines use the `cc_lb.request_diagnostics.v1` schema and are compact JSON followed by a newline.
 
-Provider-native write counters remain separate from Anthropic `cache_creation_input_tokens`. OpenAI's write total is authoritative; its 30-minute and 12-hour buckets are components of that total, not additional tokens. An omitted counter stays absent, an explicit zero stays zero, and malformed write usage makes the native observation invalid. Unsupported native model/API combinations remain unreported rather than establishing a cache hit or miss. Gemini native analysis uses the model resolved from the request URL, including when the JSON body has no model.
+Provider-native write counters remain separate from Anthropic `cache_creation_input_tokens`. OpenAI's write total is authoritative; its 30-minute and 12-hour buckets are components of that total, not additional tokens. An omitted counter stays absent, and a valid explicit zero stays zero. Malformed write usage, including invalid lifetime types or contradictory bucket totals, makes the native observation invalid and omits all three numeric write counters. Unsupported native model/API combinations remain unreported rather than establishing a cache hit or miss. Gemini native analysis uses the model resolved from the request URL, including when the JSON body has no model.
 
 ## Before enabling the log
 

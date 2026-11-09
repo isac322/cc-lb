@@ -13545,6 +13545,7 @@ mod tests {
             (Value::Null, None),
         ] {
             let mut usage = UsageCounts::default();
+            let zero = write.as_u64() == Some(0);
             usage_parser::merge_usage_value_for_shape(
                 &mut usage,
                 &json!({
@@ -13553,7 +13554,8 @@ mod tests {
                         "cached_tokens": 0,
                         "cache_write_tokens": write,
                         "cache_write_tokens_details": {
-                            "ttl_30m_tokens": 200, "ttl_12h_tokens": 100
+                            "ttl_30m_tokens": if zero { 0 } else { 200 },
+                            "ttl_12h_tokens": if zero { 0 } else { 100 }
                         }
                     }
                 }),

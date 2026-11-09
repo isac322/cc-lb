@@ -648,6 +648,108 @@ pub(crate) fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
     merge_usage_value_for_shape(usage, reported, None);
 }
 
+fn invalidate_native_cache_write(usage: &mut UsageCounts) {
+    usage.cache_write_input_tokens = None;
+    usage.cache_write_input_tokens_30m = None;
+    usage.cache_write_input_tokens_12h = None;
+    usage.cache_write_evidence = CacheTokenEvidence::Invalid;
+}
+
+fn merge_openai_responses_cache_write(
+    usage: &mut UsageCounts,
+    details: &serde_json::Map<String, Value>,
+) {
+    let aggregate = match details.get("cache_write_tokens") {
+        None => None,
+        Some(value) if value.is_null() => None,
+        Some(value) => match value.as_u64() {
+            Some(value) => Some(value),
+            None => {
+                invalidate_native_cache_write(usage);
+                return;
+            }
+        },
+    };
+    let ttl_details = match details.get("cache_write_tokens_details") {
+        None => None,
+        Some(value) if value.is_null() => None,
+        Some(value) => match value.as_object() {
+            Some(value) => Some(value),
+            None => {
+                invalidate_native_cache_write(usage);
+                return;
+            }
+        },
+    };
+    let parse_bucket = |key: &str| -> Result<Option<u64>, ()> {
+        match ttl_details.and_then(|details| details.get(key)) {
+            None => Ok(None),
+            Some(value) if value.is_null() => Ok(None),
+            Some(value) => value.as_u64().map(Some).ok_or(()),
+        }
+    };
+    let ttl_30m = match parse_bucket("ttl_30m_tokens") {
+        Ok(value) => value,
+        Err(()) => {
+            invalidate_native_cache_write(usage);
+            return;
+        }
+    };
+    let ttl_12h = match parse_bucket("ttl_12h_tokens") {
+        Ok(value) => value,
+        Err(()) => {
+            invalidate_native_cache_write(usage);
+            return;
+        }
+    };
+    if aggregate.is_none() && ttl_30m.is_none() && ttl_12h.is_none() {
+        return;
+    }
+
+    let candidate_aggregate = aggregate.or(usage.cache_write_input_tokens);
+    let candidate_30m = ttl_30m.or(usage.cache_write_input_tokens_30m);
+    let candidate_12h = ttl_12h.or(usage.cache_write_input_tokens_12h);
+    if let Some(aggregate) = candidate_aggregate {
+        let known_sum = match (candidate_30m, candidate_12h) {
+            (Some(value), Some(other)) => match value.checked_add(other) {
+                Some(sum) => Some(sum),
+                None => {
+                    invalidate_native_cache_write(usage);
+                    return;
+                }
+            },
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        };
+        let fresh_pair = ttl_30m.is_some() && ttl_12h.is_some();
+        let valid = match known_sum {
+            Some(sum) if fresh_pair => sum == aggregate,
+            Some(sum) => sum <= aggregate,
+            None => true,
+        };
+        if !valid {
+            invalidate_native_cache_write(usage);
+            return;
+        }
+        usage.cache_write_input_tokens = Some(aggregate);
+        usage.cache_write_input_tokens_30m = candidate_30m;
+        usage.cache_write_input_tokens_12h = candidate_12h;
+        usage.cache_write_evidence = if aggregate == 0 {
+            CacheTokenEvidence::Zero
+        } else {
+            CacheTokenEvidence::Positive
+        };
+        usage.input_includes_cached = true;
+        usage.present = true;
+    } else if usage.cache_write_evidence != CacheTokenEvidence::Invalid {
+        // Bucket-only observations remain useful, but cannot manufacture an
+        // aggregate or affirmative write evidence.
+        usage.cache_write_input_tokens_30m = candidate_30m;
+        usage.cache_write_input_tokens_12h = candidate_12h;
+        usage.cache_write_evidence = CacheTokenEvidence::Unreported;
+    }
+}
+
 pub(crate) fn merge_usage_value_for_shape(
     usage: &mut UsageCounts,
     reported: &Value,
@@ -761,41 +863,32 @@ pub(crate) fn merge_usage_value_for_shape(
         usage.cache_creation_input_tokens_5m = cc_5m;
         usage.cache_creation_input_tokens_1h = cc_1h;
     }
-    if matches!(
-        shape,
-        Some(UsageShape::OpenaiResponses | UsageShape::OpenaiChatCompletions)
-    ) {
+    if matches!(shape, Some(UsageShape::OpenaiResponses)) {
         let details = reported
             .get("input_tokens_details")
             .or_else(|| reported.get("input_token_details"))
             .or_else(|| reported.get("prompt_tokens_details"));
         if let Some(details) = details {
-            // Missing/null cumulative updates preserve the last observation;
-            // malformed values clear stale numeric data until a valid update.
-            if let Some(value) = details
-                .get("cache_write_tokens")
-                .filter(|value| !value.is_null())
-            {
-                usage.cache_write_evidence = CacheTokenEvidence::from_value(value);
-                usage.cache_write_input_tokens = value.as_u64();
-                if usage.cache_write_evidence != CacheTokenEvidence::Invalid {
-                    usage.input_includes_cached = true;
-                    usage.present = true;
-                }
+            match details {
+                Value::Null => {}
+                Value::Object(details) => merge_openai_responses_cache_write(usage, details),
+                _ => invalidate_native_cache_write(usage),
             }
-            if matches!(shape, Some(UsageShape::OpenaiResponses)) {
-                let ttl_details = details.get("cache_write_tokens_details");
-                for (key, slot) in [
-                    ("ttl_30m_tokens", &mut usage.cache_write_input_tokens_30m),
-                    ("ttl_12h_tokens", &mut usage.cache_write_input_tokens_12h),
-                ] {
-                    if let Some(value) = ttl_details
-                        .and_then(|ttl| ttl.get(key))
-                        .filter(|value| !value.is_null())
-                    {
-                        *slot = value.as_u64();
-                    }
-                }
+        }
+    } else if matches!(shape, Some(UsageShape::OpenaiChatCompletions)) {
+        let details = reported
+            .get("input_tokens_details")
+            .or_else(|| reported.get("input_token_details"))
+            .or_else(|| reported.get("prompt_tokens_details"));
+        if let Some(value) = details
+            .and_then(|details| details.get("cache_write_tokens"))
+            .filter(|value| !value.is_null())
+        {
+            usage.cache_write_evidence = CacheTokenEvidence::from_value(value);
+            usage.cache_write_input_tokens = value.as_u64();
+            if usage.cache_write_evidence != CacheTokenEvidence::Invalid {
+                usage.input_includes_cached = true;
+                usage.present = true;
             }
         }
     }
@@ -1981,6 +2074,354 @@ mod tests {
                 CacheTokenEvidence::Unreported
             );
         }
+    }
+    #[test]
+    fn native_cache_write_invalid_ttl_shapes_fail_closed() {
+        for (name, ttl_details) in [
+            (
+                "string bucket",
+                serde_json::json!({"ttl_30m_tokens": "bad", "ttl_12h_tokens": 0}),
+            ),
+            (
+                "negative bucket",
+                serde_json::json!({"ttl_30m_tokens": -1, "ttl_12h_tokens": 0}),
+            ),
+            (
+                "fractional bucket",
+                serde_json::json!({"ttl_30m_tokens": 1.5, "ttl_12h_tokens": 0}),
+            ),
+            ("non-object details", serde_json::json!("bad")),
+            (
+                "fresh bucket sum differs from aggregate",
+                serde_json::json!({"ttl_30m_tokens": 200, "ttl_12h_tokens": 50}),
+            ),
+            (
+                "bucket exceeds aggregate",
+                serde_json::json!({"ttl_30m_tokens": 301, "ttl_12h_tokens": 0}),
+            ),
+            (
+                "bucket sum overflows",
+                serde_json::json!({
+                    "ttl_30m_tokens": u64::MAX,
+                    "ttl_12h_tokens": 1
+                }),
+            ),
+        ] {
+            let mut usage = UsageCounts::default();
+            merge_usage_value_for_shape(
+                &mut usage,
+                &serde_json::json!({
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 7,
+                    "input_tokens_details": {
+                        "cache_write_tokens": 300,
+                        "cache_write_tokens_details": ttl_details
+                    }
+                }),
+                Some(UsageShape::OpenaiResponses),
+            );
+
+            assert_eq!(
+                usage.cache_write_input_tokens, None,
+                "{name}: aggregate must be unknown"
+            );
+            assert_eq!(
+                usage.cache_write_input_tokens_30m, None,
+                "{name}: 30m bucket must be unknown"
+            );
+            assert_eq!(
+                usage.cache_write_input_tokens_12h, None,
+                "{name}: 12h bucket must be unknown"
+            );
+            assert_eq!(
+                usage.cache_write_evidence,
+                CacheTokenEvidence::Invalid,
+                "{name}: malformed native write must be fail-closed"
+            );
+            assert_eq!(
+                usage.cache_creation_input_tokens, 7,
+                "{name}: Anthropic creation must remain independent"
+            );
+            assert_eq!(
+                usage.cache_creation_evidence,
+                CacheTokenEvidence::Positive,
+                "{name}: Anthropic creation evidence must remain independent"
+            );
+        }
+    }
+
+    #[test]
+    fn native_cache_write_healthy_optional_shapes_preserve_unknowns_and_subtract_once() {
+        for (
+            name,
+            reported,
+            expected_write,
+            expected_30m,
+            expected_12h,
+            expected_input,
+            expected_evidence,
+        ) in [
+            (
+                "zero buckets",
+                serde_json::json!({
+                    "input_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 20,
+                        "cache_write_tokens": 0,
+                        "cache_write_tokens_details": {
+                            "ttl_30m_tokens": 0,
+                            "ttl_12h_tokens": 0
+                        }
+                    }
+                }),
+                Some(0),
+                Some(0),
+                Some(0),
+                80,
+                CacheTokenEvidence::Zero,
+            ),
+            (
+                "aggregate only",
+                serde_json::json!({
+                    "input_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 20,
+                        "cache_write_tokens": 30
+                    }
+                }),
+                Some(30),
+                None,
+                None,
+                50,
+                CacheTokenEvidence::Positive,
+            ),
+            (
+                "one partial bucket",
+                serde_json::json!({
+                    "input_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 20,
+                        "cache_write_tokens": 30,
+                        "cache_write_tokens_details": {
+                            "ttl_30m_tokens": 10
+                        }
+                    }
+                }),
+                Some(30),
+                Some(10),
+                None,
+                50,
+                CacheTokenEvidence::Positive,
+            ),
+            (
+                "null buckets",
+                serde_json::json!({
+                    "input_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 20,
+                        "cache_write_tokens": 30,
+                        "cache_write_tokens_details": {
+                            "ttl_30m_tokens": null,
+                            "ttl_12h_tokens": null
+                        }
+                    }
+                }),
+                Some(30),
+                None,
+                None,
+                50,
+                CacheTokenEvidence::Positive,
+            ),
+            (
+                "null detail container",
+                serde_json::json!({
+                    "input_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 20,
+                        "cache_write_tokens": 30,
+                        "cache_write_tokens_details": null
+                    }
+                }),
+                Some(30),
+                None,
+                None,
+                50,
+                CacheTokenEvidence::Positive,
+            ),
+            (
+                "bucket-only does not infer aggregate",
+                serde_json::json!({
+                    "input_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 20,
+                        "cache_write_tokens_details": {
+                            "ttl_30m_tokens": 10,
+                            "ttl_12h_tokens": 20
+                        }
+                    }
+                }),
+                None,
+                Some(10),
+                Some(20),
+                80,
+                CacheTokenEvidence::Unreported,
+            ),
+        ] {
+            let mut usage = UsageCounts::default();
+            merge_usage_value_for_shape(&mut usage, &reported, Some(UsageShape::OpenaiResponses));
+            assert_eq!(usage.cache_write_input_tokens, expected_write, "{name}");
+            assert_eq!(usage.cache_write_input_tokens_30m, expected_30m, "{name}");
+            assert_eq!(usage.cache_write_input_tokens_12h, expected_12h, "{name}");
+            assert_eq!(usage.cache_write_evidence, expected_evidence, "{name}");
+            assert_eq!(
+                usage.input_tokens, expected_input,
+                "{name}: valid aggregate is deducted exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn native_cache_write_cumulative_partial_invalid_recovery_contract() {
+        let mut usage = UsageCounts::default();
+        let assert_state =
+            |usage: &UsageCounts, expected_write, expected_30m, expected_12h, expected_evidence| {
+                assert_eq!(usage.cache_write_input_tokens, expected_write);
+                assert_eq!(usage.cache_write_input_tokens_30m, expected_30m);
+                assert_eq!(usage.cache_write_input_tokens_12h, expected_12h);
+                assert_eq!(usage.cache_write_evidence, expected_evidence);
+            };
+
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens_details": {
+                    "cache_write_tokens": 300,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": 200,
+                        "ttl_12h_tokens": 100
+                    }
+                }
+            }),
+            Some(UsageShape::OpenaiResponses),
+        );
+        assert_state(
+            &usage,
+            Some(300),
+            Some(200),
+            Some(100),
+            CacheTokenEvidence::Positive,
+        );
+
+        // A sparse cumulative update retains the missing bucket. Its known
+        // sum only needs to stay within the newer aggregate.
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens_details": {
+                    "cache_write_tokens": 500
+                }
+            }),
+            Some(UsageShape::OpenaiResponses),
+        );
+        assert_state(
+            &usage,
+            Some(500),
+            Some(200),
+            Some(100),
+            CacheTokenEvidence::Positive,
+        );
+
+        // The retained pair now exceeds the aggregate, so all native write
+        // facts become unknown instead of leaving a mixed stale snapshot.
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens_details": {
+                    "cache_write_tokens": 250
+                }
+            }),
+            Some(UsageShape::OpenaiResponses),
+        );
+        assert_state(&usage, None, None, None, CacheTokenEvidence::Invalid);
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens_details": {
+                    "cache_write_tokens": 300,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": 200,
+                        "ttl_12h_tokens": 100
+                    }
+                }
+            }),
+            Some(UsageShape::OpenaiResponses),
+        );
+        assert_state(
+            &usage,
+            Some(300),
+            Some(200),
+            Some(100),
+            CacheTokenEvidence::Positive,
+        );
+
+        // A malformed TTL update invalidates the whole native write snapshot.
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens_details": {
+                    "cache_write_tokens": 300,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": "bad"
+                    }
+                }
+            }),
+            Some(UsageShape::OpenaiResponses),
+        );
+        assert_state(&usage, None, None, None, CacheTokenEvidence::Invalid);
+
+        for reported in [
+            serde_json::json!({
+                "input_tokens_details": {
+                    "cache_write_tokens": null,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": null
+                    }
+                }
+            }),
+            serde_json::json!({"input_tokens_details": {}}),
+            serde_json::json!({
+                "input_tokens_details": {
+                    "cache_write_tokens_details": {"ttl_30m_tokens": 10}
+                }
+            }),
+        ] {
+            merge_usage_value_for_shape(&mut usage, &reported, Some(UsageShape::OpenaiResponses));
+            assert_state(&usage, None, None, None, CacheTokenEvidence::Invalid);
+        }
+
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens": 100,
+                "input_tokens_details": {
+                    "cached_tokens": 20,
+                    "cache_write_tokens": 30,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": 10,
+                        "ttl_12h_tokens": 20
+                    }
+                }
+            }),
+            Some(UsageShape::OpenaiResponses),
+        );
+        assert_state(
+            &usage,
+            Some(30),
+            Some(10),
+            Some(20),
+            CacheTokenEvidence::Positive,
+        );
+        assert_eq!(usage.input_tokens, 50);
     }
 
     #[test]

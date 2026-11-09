@@ -50,9 +50,9 @@ It also carries these self-contained outcome and session-correlation fields:
 | `cache_creation_input_tokens` | integer or null | Cache-creation input token count. |
 | `duration_ms` | integer | Event duration in milliseconds. |
 | `upstream_ttfb_ms` | integer or null | Upstream time to first byte in milliseconds. |
-| `cache_write_input_tokens` | integer, optional | Cache-write input token count. Omitted when not reported; a reported `0` is kept. |
-| `cache_write_input_tokens_30m` | integer, optional | Cache-write input token count for the 30-minute TTL. Omitted when not reported; a reported `0` is kept. |
-| `cache_write_input_tokens_12h` | integer, optional | Cache-write input token count for the 12-hour TTL. Omitted when not reported; a reported `0` is kept. |
+| `cache_write_input_tokens` | integer, optional | Cache-write input token count. Omitted when unreported or when the write component is invalid; a valid reported `0` is retained. |
+| `cache_write_input_tokens_30m` | integer, optional | Cache-write input token count for the 30-minute TTL. Omitted when unreported or when the write component is invalid; a valid reported `0` is retained. |
+| `cache_write_input_tokens_12h` | integer, optional | Cache-write input token count for the 12-hour TTL. Omitted when unreported or when the write component is invalid; a valid reported `0` is retained. |
 
 When routing selects an actual prompt-cache match, the match-only fields `matched_v3_cache_key`, `breakpoint_content_block_index`, `matched_content_block_index`, and `lookback_distance` describe that selected match. They are omitted on a routed miss and when no route is selected. The request's own prefix hashes remain in `cache_breakpoints[].prefix_hash`. The prediction fields `predicted_cache_read_tokens`, `predicted_cache_creation_tokens_5m`, and `predicted_cache_creation_tokens_1h` are separate and may be present for cold predictions, including `predicted_cache_read_tokens: 0` and cache-creation estimates. Each line starts with `{"schema":"cc_lb.request_diagnostics.v1",` and includes event identifiers and routing context needed to correlate it with the relational row. Cache-keepalive renewal rows whose lifecycle events were dropped or finalized after the assembler stopped may have a stored row without a line.
 
