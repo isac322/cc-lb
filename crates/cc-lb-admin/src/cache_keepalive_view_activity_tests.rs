@@ -1165,3 +1165,53 @@ fn empty_active_gap_uses_snapshot_leads_without_fabricating_renewals() {
         assert_eq!(gap.net_pnl_micros, None);
     }
 }
+
+#[test]
+fn idle_gaps_order_same_second_pulses_by_millisecond_evidence_timestamp() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+    let cycle_id = Uuid::from_u128(99);
+    item.cycle_id = Some(cycle_id);
+
+    let mut later_lex_first = turn("a-later-ms", 1_000);
+    later_lex_first.cycle_id = Some(cycle_id);
+    let mut earlier_lex_second = turn("z-earlier-ms", 1_000);
+    earlier_lex_second.cycle_id = Some(cycle_id);
+
+    let evidence = [
+        renewal_evidence(
+            "a-later-ms",
+            cycle_id,
+            1_000_800,
+            CacheTtl::Ttl5m,
+            "hit",
+            "same-sec",
+        ),
+        renewal_evidence(
+            "z-earlier-ms",
+            cycle_id,
+            1_000_100,
+            CacheTtl::Ttl5m,
+            "hit",
+            "same-sec",
+        ),
+    ];
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[later_lex_first, earlier_lex_second],
+            evidence: &evidence,
+            now_ms: 1_005_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    let pulses = &activity.gaps[0].pulses;
+    assert_eq!(pulses.len(), 2);
+    assert_eq!(pulses[0].pulse_number, 1);
+    assert_eq!(pulses[0].time_ms, 1_000_100);
+    assert_eq!(pulses[1].pulse_number, 2);
+    assert_eq!(pulses[1].time_ms, 1_000_800);
+}

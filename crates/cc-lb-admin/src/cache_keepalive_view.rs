@@ -283,6 +283,16 @@ fn lead_window_ms(ttl: CacheTtl, config: Option<&CacheKeepaliveConfigSnapshot>) 
         .saturating_mul(1_000)
 }
 
+fn pulse_time_ms(
+    turn: &CacheKeepaliveTurnRecord,
+    evidence: &[CacheKeepaliveEvidenceRecord],
+) -> u64 {
+    renewal_evidence_for_turn(turn, evidence).map_or_else(
+        || turn.ts.saturating_mul(1_000),
+        |renewal| renewal.request_start_ms,
+    )
+}
+
 fn idle_gaps(
     source: &CacheKeepaliveActivitySource<'_>,
     retained_turns: &[CacheKeepaliveActivityTurn],
@@ -291,8 +301,9 @@ fn idle_gaps(
 ) -> Vec<CacheKeepaliveIdleGap> {
     let mut ordered_turns = source.turns.iter().enumerate().collect::<Vec<_>>();
     ordered_turns.sort_by(|(_, left), (_, right)| {
-        left.ts
-            .cmp(&right.ts)
+        pulse_time_ms(left, source.evidence)
+            .cmp(&pulse_time_ms(right, source.evidence))
+            .then_with(|| left.ts.cmp(&right.ts))
             .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
     });
     let mut cycle_indices = HashMap::new();
