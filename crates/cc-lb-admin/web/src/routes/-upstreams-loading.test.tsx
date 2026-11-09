@@ -1444,8 +1444,9 @@ describe('/upstreams refresh retention', () => {
     expect(requestEventsFeed.useRequestEventsFeed).toHaveBeenLastCalledWith({
       filters: {
         upstream_id: secondOauthUpstream.id,
-        event_kind: 'messages',
+        event_kind_set: ['messages', 'completions'],
       },
+      providers: ['anthropic'],
       mode: 'infinite',
       initialHistoryLimit: 500,
       pageSize: 50,

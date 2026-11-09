@@ -75,7 +75,12 @@ import {
 import { useDesign } from '../designs/registry';
 import { formatCount } from '../lib/format';
 import { useProviderScope } from '../lib/previewControls';
-import { capabilitiesOf, providerOf } from '../lib/providers';
+import {
+  capabilitiesOf,
+  PROVIDER_FAMILIES,
+  providerOf,
+  requestEventKindsForProvider,
+} from '../lib/providers';
 import {
   type ChainSlot,
   type LimitKind,
@@ -120,6 +125,13 @@ const PRINCIPAL_FILTERS = [
   'human',
   'machine',
   'admin',
+] as const;
+const PRINCIPAL_GENERATION_EVENT_KINDS = [
+  ...new Set(
+    PROVIDER_FAMILIES.flatMap((provider) =>
+      requestEventKindsForProvider(provider),
+    ).filter((kind) => !kind.endsWith('count_tokens')),
+  ),
 ] as const;
 type PrincipalFilter = (typeof PRINCIPAL_FILTERS)[number];
 // Principal carries no update timestamp, so there is no "Recently updated".
@@ -744,10 +756,25 @@ function PrincipalDetail({
 
 export function RecentRequestsCard({ principal }: { principal: Principal }) {
   const principalNameMap = usePrincipalNameMap();
+  const { providers: scopedProviders } = useProviderScope();
+  const inventory = useUpstreams();
+  const inventoryRows = inventory.data?.upstreams;
+  const providerByUpstream = useMemo(
+    () =>
+      new Map(
+        (inventoryRows ?? []).map((upstream) => [
+          upstream.id,
+          providerOf(upstream.kind),
+        ]),
+      ),
+    [inventoryRows],
+  );
+  const providerScope =
+    scopedProviders?.length === 1 ? scopedProviders[0] : undefined;
   const feed = useRequestEventsFeed({
     filters: {
       principal_id: principal.id,
-      event_kind: 'generation',
+      event_kind_set: PRINCIPAL_GENERATION_EVENT_KINDS,
     },
     mode: 'infinite',
     initialHistoryLimit: 500,
@@ -765,6 +792,8 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
       <RequestEventsFeed
         feed={feed}
         principalNameMap={principalNameMap}
+        providerByUpstream={providerByUpstream}
+        providerScope={providerScope}
         columns={{ principal: false }}
         tableContainerClassName={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}
         emptyTitle="No recent requests for this principal"

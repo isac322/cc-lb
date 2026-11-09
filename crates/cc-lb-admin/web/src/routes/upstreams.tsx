@@ -143,6 +143,7 @@ import {
   PROVIDER_LABELS,
   type ProviderFamily,
   providerOf,
+  requestEventKindsForProvider,
   upstreamAttentionReason,
   upstreamKindLabel,
   upstreamTypeLabel,
@@ -1295,16 +1296,16 @@ export function DetailView({
     [seriesSinceUnixSecs, seriesUntilUnixSecs],
   );
 
+  const upstreamProvider = providerOf(upstream.kind);
+  const generationKinds = requestEventKindsForProvider(upstreamProvider).filter(
+    (kind) => !kind.endsWith('count_tokens'),
+  );
   const feed = useRequestEventsFeed({
     filters: {
       upstream_id: upstream.id,
-      event_kind:
-        providerOf(upstream.kind) === 'openai'
-          ? 'openai_responses'
-          : providerOf(upstream.kind) === 'gemini'
-            ? 'gemini_generate_content'
-            : 'messages',
+      event_kind_set: generationKinds,
     },
+    providers: [upstreamProvider],
     mode: 'infinite',
     initialHistoryLimit: 500,
     pageSize: 50,
@@ -2059,6 +2060,7 @@ export function DetailView({
             <RequestEventsFeed
               feed={feed}
               principalNameMap={principalNameMap}
+              providerScope={upstreamProvider}
               columns={{ upstream: false }}
               tableContainerClassName="glass min-h-48 h-96 max-h-[60vh] overflow-auto rounded-md"
               emptyTitle="No recent requests for this upstream"
