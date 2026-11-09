@@ -36,7 +36,7 @@ Provider-owned state referenced inside a supported HTTP generation request is fo
 - OpenAI HTTP Responses: response ids and stateless reasoning `encrypted_content` items observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
 - Gemini generateContent / countTokens: `cachedContent` references (including nested `generateContentRequest.cachedContent`). `thoughtSignature` is forwarded but is not treated as affinity state.
 
-- Prompt-cache analysis and cache-aware routing apply to Anthropic breakpoints and scoped older-model OpenAI Responses observations. Native pricing is exposed when catalog data exists. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` remains hard affinity.
+A request whose durable state resolves to an upstream that is disabled, unhealthy, or removed by routing filters fails with `503 upstream_affinity_unavailable` instead of falling back to another upstream; cross-upstream failover is disabled for pinned requests. Prompt-cache analysis and cache-aware routing apply only to Anthropic Messages; OpenAI and Gemini requests carry neutral cache metadata.
 
 Admin preflight is separate from client proxy routing: `GET /v1/models` and `POST /v1/messages/count_tokens` (Anthropic), `GET /v1/models` (OpenAI), and `GET /v1beta/models` (Gemini) run as direct upstream probes during key verification.
 
