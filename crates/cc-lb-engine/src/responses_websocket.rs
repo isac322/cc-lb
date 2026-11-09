@@ -1897,7 +1897,8 @@ impl ResponsesWebSocketGateway {
                     reservation,
                     usage.input_tokens,
                     usage.output_tokens,
-                    cost.total_micros,
+                    (cost.pricing_status == cc_lb_pricing::PricingStatus::Known)
+                        .then_some(cost.total_micros),
                 );
             }
         }
@@ -2322,8 +2323,348 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+    use cc_lb_control::api_keys::limit_engine::{ApiKeyUsageHandle, RejectReason};
+    use cc_lb_control::api_keys::principal_view::PrincipalView;
+    use cc_lb_storage_api::principal::{Limit, LimitKind};
+    use cc_lb_storage_api::{ApiKeyUsageBucketQuery, MetaStore, Storage, StoredApiKeyRecord};
+
+    pub(crate) static DIRECT_PRICING_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+    pub(crate) const DIRECT_PRINCIPAL: &str = "observerless-ws-principal";
+
+    pub(crate) fn install_direct_pricing() {
+        use cc_lb_pricing::{
+            CatalogSnapshot, CatalogStatus, NativePricingProvider, NativePricingRate, Pricing,
+            ProviderNativePricing, UsdPerMillion,
+        };
+
+        let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = CatalogStatus::Ok;
+        for (model, provider, read_rate) in [
+            (
+                "ws-openai-known",
+                NativePricingProvider::OpenAi,
+                Some(100_000),
+            ),
+            ("ws-openai-unknown", NativePricingProvider::OpenAi, None),
+            (
+                "ws-gemini-known",
+                NativePricingProvider::Gemini,
+                Some(100_000),
+            ),
+            ("ws-gemini-unknown", NativePricingProvider::Gemini, None),
+        ] {
+            let mut native = ProviderNativePricing::unknown(provider);
+            native.ordinary_input = NativePricingRate::known(UsdPerMillion::from_whole_usd(2));
+            native.cached_input_read = read_rate.map_or_else(NativePricingRate::unknown, |rate| {
+                NativePricingRate::known(UsdPerMillion::from_micros_usd(rate))
+            });
+            snapshot.models.insert(
+                model.to_owned(),
+                Pricing {
+                    model: model.to_owned(),
+                    input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                    output_per_million_usd: UsdPerMillion::from_whole_usd(10),
+                    input_image_per_million_usd: None,
+                    output_image_per_million_usd: None,
+                    by_tier: Default::default(),
+                    native: Some(native),
+                },
+            );
+        }
+        cc_lb_pricing::global_catalog().install_snapshot(snapshot);
+    }
+
+    struct UnusedSignerFactory;
+
+    impl cc_lb_upstream::ApiKeyAwareSignerFactory for UnusedSignerFactory {
+        fn with_router_choice(&self, _name: String) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+            unreachable!("settling an admitted turn does not sign requests")
+        }
+    }
+
+    pub(crate) struct DirectAccountingFixture {
+        pub(crate) engine: Arc<LimitEngine>,
+        pub(crate) view: Arc<PrincipalView>,
+        pub(crate) record: StoredApiKeyRecord,
+        pub(crate) concurrency: Arc<KeyConcurrencyManager>,
+        pub(crate) lifecycle: Arc<Lifecycle>,
+        pub(crate) auth: Authenticated,
+        storage: Arc<dyn Storage>,
+        usage_handle: ApiKeyUsageHandle,
+    }
+
+    impl DirectAccountingFixture {
+        pub(crate) async fn new() -> Self {
+            use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+            use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+            use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+            let storage = Arc::new(
+                cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                    .await
+                    .expect("open in-memory websocket accounting database"),
+            );
+            storage
+                .initialize()
+                .await
+                .expect("migrate accounting database");
+            let keys = Arc::new(KeyStore::new(storage.clone()));
+            let (record, secret) = keys
+                .create(
+                    DIRECT_PRINCIPAL,
+                    CreateParams {
+                        label: "observerless-websocket".to_owned(),
+                        description: None,
+                        expires_at_unix_secs: None,
+                        limit_overrides: Vec::new(),
+                    },
+                )
+                .await
+                .expect("issue websocket fixture key");
+            let view = Arc::new(PrincipalView::for_tests(
+                DIRECT_PRINCIPAL,
+                true,
+                vec!["*".to_owned()],
+                vec![
+                    Limit {
+                        kind: LimitKind::CostUsd,
+                        window_secs: 60,
+                        cap_micros: 100_000,
+                    },
+                    Limit {
+                        kind: LimitKind::TotalTokens,
+                        window_secs: 60,
+                        cap_micros: 100_000,
+                    },
+                    Limit {
+                        kind: LimitKind::Concurrent,
+                        window_secs: 0,
+                        cap_micros: 1,
+                    },
+                ],
+                HashMap::new(),
+            ));
+            let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                secret.expose().parse().expect("fixture key header"),
+            );
+            let auth = crate::authenticate_first(&authn, &headers, &view)
+                .await
+                .expect("authenticate embedded websocket caller");
+            let dynamic = DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(UnusedSignerFactory))
+                .principal_view(view.clone())
+                .build();
+            let lifecycle = Arc::new(Lifecycle::new_with_dynamic_view(
+                authn,
+                Arc::new(DynamicViewHolder::new(dynamic)),
+                Arc::new(crate::HyperDispatcher::new()),
+                crate::LifecycleConfig::default(),
+                clock.clone(),
+            ));
+            let concurrency = Arc::new(KeyConcurrencyManager::new());
+            let engine = LimitEngine::new(concurrency.clone(), clock);
+            let usage_handle = engine
+                .start_durable_usage_sync(storage.clone())
+                .await
+                .expect("start durable embedded accounting");
+            Self {
+                engine,
+                view,
+                record,
+                concurrency,
+                lifecycle,
+                auth,
+                storage,
+                usage_handle,
+            }
+        }
+
+        pub(crate) fn reserve(&self, model: &str) -> Reservation {
+            let reservation = self
+                .engine
+                .reserve(
+                    &self.view,
+                    &self.record,
+                    DIRECT_PRINCIPAL,
+                    model,
+                    Some(1_000),
+                    1_000,
+                    Some(8_010),
+                )
+                .expect("admit original estimated websocket liability");
+            assert_eq!(self.concurrency.current(&self.record.key_hash_b64), 1);
+            reservation
+        }
+
+        pub(crate) async fn assert_settled(
+            self,
+            reservation_id: &str,
+            model: &str,
+            cost: i64,
+            input: u64,
+            output: u64,
+        ) {
+            assert_eq!(self.concurrency.current(&self.record.key_hash_b64), 0);
+            assert!(
+                !self.engine.refund_by_id(reservation_id),
+                "finish consumed the reservation"
+            );
+            assert!(!self.engine.reconcile_by_id(reservation_id, 0, 0, Some(0)));
+            // These current-thread tests do not yield between starting durable
+            // sync and this oracle, so admission still uses its documented 10%
+            // cold allowance. Settlement must preserve the exact balance there.
+            let remaining = 10_000 - cost;
+            assert!(
+                matches!(
+                    self.engine.reserve(
+                        &self.view,
+                        &self.record,
+                        DIRECT_PRINCIPAL,
+                        model,
+                        Some(0),
+                        0,
+                        Some(remaining + 1)
+                    ),
+                    Err(RejectReason::CostRateLimit)
+                ),
+                "one micro above the remaining monetary budget must be rejected"
+            );
+            let probe = self
+                .engine
+                .reserve(
+                    &self.view,
+                    &self.record,
+                    DIRECT_PRINCIPAL,
+                    model,
+                    Some(0),
+                    0,
+                    Some(remaining),
+                )
+                .expect("exact remaining budget must be admissible after concurrency release");
+            drop(probe);
+            let tokens = self
+                .engine
+                .headers_for(&self.record.key_hash_b64, DIRECT_PRINCIPAL)
+                .into_iter()
+                .find(|(name, _)| name == "anthropic-ratelimit-tokens-remaining")
+                .expect("measured token budget header");
+            assert_eq!(tokens.1, (100_000 - input - output).to_string());
+            self.usage_handle.shutdown().await;
+            let buckets = self
+                .storage
+                .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+                    key_ids: vec![self.record.key_hash_b64.clone()],
+                    since_unix_secs: 1_800_000_000,
+                    until_unix_secs: 1_800_000_001,
+                    exclude_writer_epoch: Uuid::nil(),
+                })
+                .await
+                .expect("read durably settled usage");
+            assert_eq!(buckets.len(), 1);
+            assert_eq!(buckets[0].usage.requests, 1, "finish settles exactly once");
+            assert_eq!(buckets[0].usage.input_tokens, input as i64);
+            assert_eq!(buckets[0].usage.output_tokens, output as i64);
+            assert_eq!(buckets[0].usage.cost_usd_micros, cost);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn observerless_finish_settles_native_cache_unknown_and_zero_cost() {
+        let _guard = DIRECT_PRICING_LOCK.lock().await;
+        install_direct_pricing();
+        for (model, zero, expected) in [
+            ("ws-openai-known", false, 4_010),
+            ("ws-openai-unknown", false, 8_010),
+            ("ws-openai-known", true, 0),
+        ] {
+            let fixture = DirectAccountingFixture::new().await;
+            let reservation = fixture.reserve(model);
+            let reservation_id = reservation.id().to_owned();
+            let response = serde_json::json!({
+                "usage": {
+                    "input_tokens": if zero { 0 } else { 21_000 },
+                    "output_tokens": if zero { 0 } else { 1 },
+                    "input_tokens_details": { "cached_tokens": if zero { 0 } else { 20_000 } }
+                }
+            });
+            let (usage, usage_complete) = observed_response_usage(&response).unwrap();
+            assert_eq!(usage.cache_read_input_tokens, if zero { 0 } else { 20_000 });
+            assert_eq!(usage.input_tokens, if zero { 0 } else { 1_000 });
+            let mut gateway = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                1_024,
+                1,
+            );
+            gateway.turns.insert(
+                1,
+                Turn {
+                    auth: fixture.auth.clone(),
+                    prepared: PreparedWebSocketTurn {
+                        candidates: Vec::new(),
+                        observer: None,
+                        completion_observer: Arc::new(
+                            crate::completion_observer::CompletionObserver::new(),
+                        ),
+                        prompt_cache_observation_context: None,
+                        reservation: Some(reservation),
+                        limit_engine: Some(fixture.engine.clone()),
+                        principal_id: DIRECT_PRINCIPAL.to_owned(),
+                        key_id: fixture.record.key_hash_b64.clone(),
+                        model: model.to_owned(),
+                        store: false,
+                        span: Span::none(),
+                        route_info: serde_json::from_value(serde_json::json!({
+                            "upstream_id": Uuid::nil(), "upstream_name": "embedded", "model": model
+                        }))
+                        .expect("fixture route info"),
+                        request_id: "embedded-turn".to_owned(),
+                    },
+                    body: Arc::new(serde_json::json!({})),
+                    frame: Bytes::new(),
+                    lane: None,
+                    connection_id: None,
+                    upstream_id: None,
+                    pinned: None,
+                    response_id: None,
+                    previous_response_id: None,
+                    steer_parent: None,
+                    steer_submissions: 0,
+                    accepted_steers: HashSet::new(),
+                    controls: VecDeque::new(),
+                    sent: true,
+                    attempted: true,
+                    charged_bytes: 0,
+                    usage: Some(usage),
+                    usage_complete,
+                    plugin_request: None,
+                    metrics: ResponsesStreamMetrics::new(),
+                },
+            );
+            gateway.finish_turn(1, None);
+            gateway.finish_turn(1, None);
+            assert!(gateway.turns.is_empty());
+            drop(gateway);
+            fixture
+                .assert_settled(
+                    &reservation_id,
+                    model,
+                    expected,
+                    if zero { 0 } else { 1_000 },
+                    if zero { 0 } else { 1 },
+                )
+                .await;
+        }
+    }
 
     #[test]
     fn native_cache_write_response_usage_preserves_provider_fields() {

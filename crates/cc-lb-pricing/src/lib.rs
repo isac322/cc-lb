@@ -139,6 +139,12 @@ pub struct ProviderNativePricing {
     pub provider: NativePricingProvider,
     pub ordinary_input: NativePricingRate,
     pub cached_input_read: NativePricingRate,
+    /// Provider-native cache-read rates keyed by canonical service tier.
+    #[serde(default)]
+    pub cached_input_read_by_tier: BTreeMap<String, NativePricingRate>,
+    /// Provider-native cache-read rates for strict gross-input thresholds.
+    #[serde(default)]
+    pub cached_input_read_above_tokens: BTreeMap<u64, ThresholdBand>,
     #[serde(default)]
     pub total_write: BTreeMap<NativePricingLifetime, NativePricingRate>,
     #[serde(default)]
@@ -151,6 +157,8 @@ impl ProviderNativePricing {
             provider,
             ordinary_input: NativePricingRate::unknown(),
             cached_input_read: NativePricingRate::unknown(),
+            cached_input_read_by_tier: BTreeMap::new(),
+            cached_input_read_above_tokens: BTreeMap::new(),
             total_write: BTreeMap::new(),
             explicit_resource: NativeResourcePricing::default(),
         }

@@ -34,7 +34,7 @@ All notable changes to this project will be documented in this file.
 - Provider-native prompt-cache routing now gives older OpenAI Responses requests a scoped soft preference when `prompt_cache_key` evidence and native pricing are available. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` keeps hard owner affinity. (#1127)
 
 ### Fixed
-- Native cache observations now preserve OpenAI write totals and lifetime counters through diagnostics, state, metrics, and storage. Request-log prompt totals add the native write aggregate once; lifetime buckets are not added again. Gemini analysis uses the URL model, and malformed usage or unsupported model/API combinations remain unknown. ([#1164](https://github.com/isac322/cc-lb/issues/1164))
+- Cached generation input now uses provider-owned catalog rates, including service-tier and context-threshold overrides, instead of being recorded as known zero. Missing rates keep actual costs unknown, and managed-key CostUsd accounting retains the admitted estimate as liability rather than refunding it as free usage. Keep-alive history and hit counts remain available when a renewal's actual cost is unknown. ([#1163](https://github.com/isac322/cc-lb/issues/1163))
 - Gemini requests now preserve both `service_tier` and `serviceTier` for tier-aware routing and cost reservations without rewriting forwarded bytes. Request history retains the requested thinking level separately from reasoning effort and continues to use observed response tiers for completed-request pricing. ([#1166](https://github.com/isac322/cc-lb/issues/1166))
 - Overview `Pool quota usage` now carries the latest fresh reading forward to the end of the visible time range and clamps pre-range anchors to the range start when quota utilization is unchanged between hourly heartbeat snapshots, while keeping the snapshot count caption limited to recorded snapshots.
 - Keep-alive classification now treats a `StructuredOutput`-only terminal `tool_use` as a user-turn boundary, while mixed regular tool use and an uninvoked `end_turn` completion tool remain agent-in-turn. ([#1155](https://github.com/isac322/cc-lb/issues/1155))
@@ -74,6 +74,7 @@ All notable changes to this project will be documented in this file.
 - OpenAI `gpt-image-1` image responses and token-billed audio transcription responses now retain documented input and output token usage in request events; duration-based audio usage, binary speech responses, and image models without documented token usage remain unchanged. ([#1093](https://github.com/isac322/cc-lb/issues/1093))
 
 - Gemini tool-use prompt token usage is now preserved as a separate optional request-event component, while ordinary input/output and billing semantics remain unchanged. ([#1090](https://github.com/isac322/cc-lb/issues/1090))
+- Native cache observations now preserve OpenAI write totals and lifetime counters through diagnostics, state, metrics, and storage. Request-log prompt totals add the native write aggregate once; lifetime buckets are not added again. Gemini analysis uses the URL model, and malformed usage or unsupported model/API combinations remain unknown. ([#1164](https://github.com/isac322/cc-lb/issues/1164))
 
 ### Security
 

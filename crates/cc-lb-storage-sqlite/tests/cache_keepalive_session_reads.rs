@@ -119,7 +119,7 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
             cache_creation_input_tokens_5m: 0,
             cache_creation_input_tokens_1h: 0,
             cache_read_input_tokens: 100,
-            cost_micros: 123,
+            cost_micros: Some(123),
             hit_miss: "hit".to_owned(),
             ts,
         }),
@@ -162,7 +162,7 @@ fn batched_turn_projection(
             cache_creation_input_tokens_5m: 29,
             cache_creation_input_tokens_1h: 18,
             cache_read_input_tokens: 89,
-            cost_micros: 12_345,
+            cost_micros: Some(12_345),
             hit_miss: "miss".to_owned(),
             ts,
         }),
@@ -788,7 +788,7 @@ async fn batches_turn_reads_with_deduplication_principal_isolation_and_canonical
             cache_creation_input_tokens_5m: 29,
             cache_creation_input_tokens_1h: 18,
             cache_read_input_tokens: 89,
-            cost_micros: 12_345,
+            cost_micros: Some(12_345),
             hit_miss: "miss".to_owned(),
             ts: 10,
         }
@@ -1371,7 +1371,7 @@ fn economics_projection(
     let turn = projection.turn.as_mut().expect("renewal turn");
     turn.cycle_id = cycle_id;
     turn.hit_miss = hit_miss.to_owned();
-    turn.cost_micros = cost_micros;
+    turn.cost_micros = Some(cost_micros);
     turn.cache_read_input_tokens = if hit_miss.eq_ignore_ascii_case("hit") {
         20_000
     } else {

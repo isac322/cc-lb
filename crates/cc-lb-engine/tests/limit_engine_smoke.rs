@@ -129,7 +129,7 @@ fn reconcile_refund_leaves_actual_output_usage() {
     let reservation = engine
         .reserve(&view, &record, "principal-1", "claude", Some(100), 0, None)
         .expect("reservation succeeds");
-    engine.reconcile(reservation, 0, 50, 0);
+    engine.reconcile(reservation, 0, 50, Some(0));
 
     let headers = engine.headers_for("key-1", "principal-1");
     let remaining = headers
