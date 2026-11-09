@@ -425,15 +425,28 @@ function TimeRailGap({
   );
 }
 
+function leadWindowSec(session: CacheKeepaliveDetail): number {
+  const ttlSec =
+    session.ttl === '12h'
+      ? 12 * 3600
+      : session.ttl === '1h'
+        ? 3600
+        : session.ttl === '30m'
+          ? 30 * 60
+          : 300;
+  const leadSec =
+    session.ttl === '1h' || session.ttl === '12h'
+      ? (session.config_snapshot?.lead_1h ?? 300)
+      : (session.config_snapshot?.lead_5m ?? 30);
+  return Math.max(0, ttlSec - leadSec);
+}
+
 function synthesizeGapsFromTurns(
   session: CacheKeepaliveDetail,
 ): CacheKeepaliveGap[] {
+  const leadSec = leadWindowSec(session);
   if (session.turns.length === 0) {
     if (session.state === 'scheduled') {
-      const leadSec =
-        session.ttl === '1h'
-          ? 3600 - (session.config_snapshot?.lead_1h ?? 300)
-          : 300 - (session.config_snapshot?.lead_5m ?? 30);
       return [
         {
           cycle_id: null,
@@ -455,7 +468,7 @@ function synthesizeGapsFromTurns(
 
   const ordered = [...session.turns].sort((a, b) => a.time_ms - b.time_ms);
   const firstPulseMs = ordered[0].time_ms;
-  const pauseAtMs = Math.max(0, firstPulseMs - 270_000);
+  const pauseAtMs = Math.max(0, firstPulseMs - leadSec * 1000);
   const pulses = ordered.map((turn, idx) => {
     const prev = idx > 0 ? ordered[idx - 1] : null;
     const offsetSec = Math.max(

@@ -51,9 +51,12 @@ const TRIGGER_ORDER = [
 
 function normalizeToolTrigger(raw: string): string {
   const trimmed = raw.trim();
-  const match = TRIGGER_ORDER.find(
-    (known) => known.toLowerCase() === trimmed.toLowerCase(),
-  );
+  const lower = trimmed.toLowerCase();
+  if (lower === 'bash') return 'Bash';
+  if (lower === 'write' || lower === 'write_file') return 'Write';
+  if (lower === 'edit' || lower === 'edit_file') return 'Edit';
+  if (lower === 'read' || lower === 'read_file') return 'Read';
+  const match = TRIGGER_ORDER.find((known) => known.toLowerCase() === lower);
   return match ?? trimmed;
 }
 
