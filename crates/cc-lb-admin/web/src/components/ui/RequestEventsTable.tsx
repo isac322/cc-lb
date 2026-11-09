@@ -433,9 +433,11 @@ const RequestEventRow = memo(function RequestEventRow({
             // Name first, whole badges only. The name keeps 11 characters (or
             // its whole text when shorter); its shrink weight of 100 makes it
             // absorb nearly all overflow until it freezes at that floor. The
-            // badge group then shrinks, and a badge that no longer fits wraps
-            // onto the group's clipped second line instead of being squeezed
-            // into an empty pill. The drawer always shows thinking level and
+            // badge group then shrinks. A flex line always places its first
+            // item even when it overflows, so a zero-width spacer leads the
+            // visible line: a badge that doesn't fit beside it wraps onto the
+            // clipped second line whole, never a partial pill. `-ml-2` cancels
+            // the spacer's gap. The drawer always shows thinking level and
             // tier.
             <span
               className="shrink-[100] truncate font-mono text-data"
@@ -449,7 +451,8 @@ const RequestEventRow = memo(function RequestEventRow({
             <EmptyValue label="No model" />
           )}
           {(thinkingLevel != null || tierBadge != null) && (
-            <span className="flex h-5 min-w-0 flex-wrap gap-x-2 overflow-hidden">
+            <span className="-ml-2 flex h-5 min-w-0 flex-wrap gap-x-2 overflow-hidden">
+              <span aria-hidden="true" className="h-5 w-0" />
               {thinkingLevel != null && (
                 <Badge tone="neutral" className="shrink-0">
                   {thinkingLevel}
