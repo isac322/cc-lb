@@ -72,12 +72,12 @@ interface Column {
   cardBoth?: string;
 }
 
-/** Session never shrinks below this in the table (the chip's head, ellipsis and tail). */
-const SESSION_FLOOR_REM = 5;
+/** Session never shrinks below this in the table (about 11 id characters in the chip). */
+const SESSION_FLOOR_REM = 7;
 
 // The literal 59rem in every `@max-/@min-[59rem]/events:` class is the
 // one-entity need: Σ rem without principal or upstream + SESSION_FLOOR_REM
-// (5.75 + 6.5 + 4.75 + 9 + 4 + 5.75 + 12 + 6.25 − 6.5 + 5 = 59). Change a
+// (5.75 + 6.5 + 4.75 + 7 + 4 + 5.75 + 12 + 6.25 − 6.5 + 7 = 59). Change a
 // width here and that literal together.
 const COLUMNS = {
   time: {
@@ -112,7 +112,7 @@ const COLUMNS = {
   },
   model: {
     label: 'Model',
-    rem: 9,
+    rem: 7,
     card: '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-4 @max-[59rem]/events:col-span-2 @max-[59rem]/events:text-right',
   },
   status: {
@@ -313,6 +313,8 @@ const RequestEventRow = memo(function RequestEventRow({
       className={cx(
         'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         flash && 'flash-in',
+        // Pulse the cells, not the row: `flash-in` owns the row's `animation`.
+        isPartial && 'motion-safe:*:animate-pulse',
         CARD_ROW,
       )}
       onClick={() => selectEvent(eventKey)}
@@ -342,10 +344,10 @@ const RequestEventRow = memo(function RequestEventRow({
         {tone !== 'ok' && (
           <span
             aria-hidden="true"
-            className="absolute top-1/2 left-0.5 flex size-3 -translate-y-1/2 items-center justify-center @max-[59rem]/events:-left-3.5"
+            className="absolute top-1/2 left-px flex size-3.5 -translate-y-1/2 items-center justify-center @max-[59rem]/events:-left-3.5"
           >
             {outcome.type === 'partial' ? (
-              <Spinner className="size-3 text-text-muted motion-reduce:animate-none" />
+              <Spinner className="size-3.5 text-text motion-reduce:animate-none" />
             ) : (
               <span className={cx('status-dot', tone)} />
             )}
@@ -456,7 +458,6 @@ const RequestEventRow = memo(function RequestEventRow({
       />
       <TokenCell
         event={event}
-        isPartial={isPartial}
         className={cx(CARD_METRIC, COLUMNS.tokens.card)}
       />
       <CostCell
