@@ -63,8 +63,12 @@ impl ResponsesSseErrorContext {
                         match value.get("type").and_then(serde_json::Value::as_str) {
                             Some("response.failed") => value
                                 .get("response")
-                                .and_then(|response| response.get("error"))
-                                .is_some_and(native_error),
+                                .filter(|response| response.is_object())
+                                .is_some_and(|response| {
+                                    response
+                                        .get("error")
+                                        .is_none_or(|error| error.is_null() || native_error(error))
+                                }),
                             Some("error") => {
                                 value
                                     .get("message")
@@ -265,7 +269,8 @@ mod tests {
                 b"event: response.failed\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"text\"}\n\n".as_slice(),
                 b"event: response.failed\ndata: {\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"test\"}}}\n\n".as_slice(),
                 b"event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n".as_slice(),
-                b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n".as_slice(),
+                b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":42}\n\n".as_slice(),
+                b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":42}}\n\n".as_slice(),
                 b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"test\"}}}\n\n".as_slice(),
                 b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":42,\"message\":\"wrong code type\"}}}\n\n".as_slice(),
                 b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"test\",\"message\":42}}}\n\n".as_slice(),
@@ -282,6 +287,8 @@ mod tests {
             }
             for bytes in [
                 b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"test\",\"message\":\"native failure\"}}}\n\n".as_slice(),
+                b"event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":9,\"response\":{\"id\":\"resp-null-error\",\"object\":\"response\",\"status\":\"failed\",\"error\":null}}\n\n".as_slice(),
+                b"event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":9,\"response\":{\"id\":\"resp-omitted-error\",\"object\":\"response\",\"status\":\"failed\"}}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"error\",\"code\":\"arbitrary_provider_code\",\"message\":\"native error\"}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"error\",\"code\":null,\"message\":\"native error without code\",\"param\":null,\"sequence_number\":9}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"error\",\"message\":\"native error with omitted code\",\"param\":null,\"sequence_number\":9}\n\n".as_slice(),
