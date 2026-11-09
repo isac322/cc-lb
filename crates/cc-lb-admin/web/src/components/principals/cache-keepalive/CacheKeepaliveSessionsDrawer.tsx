@@ -49,15 +49,23 @@ const TRIGGER_ORDER = [
   'Agent in-turn',
 ] as const;
 
+function normalizeToolTrigger(raw: string): string {
+  const trimmed = raw.trim();
+  const match = TRIGGER_ORDER.find(
+    (known) => known.toLowerCase() === trimmed.toLowerCase(),
+  );
+  return match ?? trimmed;
+}
+
 export function extractTriggerLabel(row: CacheKeepaliveRow): string {
   const sourceText =
     row.display_reason && row.display_reason !== row.reason
       ? `${row.display_reason} · ${row.reason}`
       : (row.display_reason ?? row.reason);
   const backtickToolMatch = sourceText.match(/tool_use:\s*`([^`]+)`/i);
-  if (backtickToolMatch?.[1]) return backtickToolMatch[1];
+  if (backtickToolMatch?.[1]) return normalizeToolTrigger(backtickToolMatch[1]);
   const toolMatch = sourceText.match(/tool_use:\s*([A-Za-z0-9_.:/-]+)/i);
-  if (toolMatch?.[1]) return toolMatch[1];
+  if (toolMatch?.[1]) return normalizeToolTrigger(toolMatch[1]);
   const stopMatch = sourceText.match(/stop_reason=([A-Za-z0-9_:-]+)/i);
   if (stopMatch?.[1]) return `stop_reason=${stopMatch[1]}`;
   const unsupportedMatch = sourceText.match(
@@ -269,6 +277,12 @@ function SheetSummaryHeader({
               (Saved {fmtUsdPlain(effectiveTotalAvoided)} − Spent{' '}
               {fmtUsdPlain(summary.total_spent)})
             </span>
+            {effectiveCostSaved === null ||
+            summary.evidence_status !== 'observed' ? (
+              <span className="text-caption text-text-faint">
+                · Evidence {summary.evidence_status}
+              </span>
+            ) : null}
           </>
         ) : (
           <span className="text-caption text-text-faint">
@@ -359,7 +373,10 @@ export function CacheKeepaliveSessionsDrawer({
     const orderedTriggers = [
       ...TRIGGER_ORDER,
       ...Array.from(grouped.keys()).filter(
-        (t) => !TRIGGER_ORDER.includes(t as (typeof TRIGGER_ORDER)[number]),
+        (t) =>
+          !TRIGGER_ORDER.some(
+            (known) => known.toLowerCase() === t.toLowerCase(),
+          ),
       ),
     ];
     return orderedTriggers

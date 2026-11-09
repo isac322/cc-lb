@@ -5,6 +5,7 @@ import type {
   CacheKeepaliveDetail,
   CacheKeepaliveGap,
 } from '../../../lib/cacheKeepaliveApi';
+import { useTimezone } from '../../../lib/locale';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
 import { Button, cx, Skeleton } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
@@ -28,7 +29,7 @@ export function fmtUsdSigned(val: number | null): string {
 export function fmtUsdPlain(val: number | null): string {
   if (val === null) return '—';
   const abs = Math.abs(val);
-  if (abs < 0.00005) return '$0.00';
+  if (abs < 0.00005) return '$0';
   const precision = abs >= 0.1 ? 2 : 4;
   const fixed = abs.toFixed(precision).replace(/0+$/, '').replace(/\.$/, '');
   return `$${fixed}`;
@@ -65,11 +66,19 @@ function plusDeltaLabel(seconds: number): string {
   return `+${deltaLabel(seconds)}`;
 }
 
-function railTime(ms: number): string {
-  const d = new Date(ms);
-  const hh = String(d.getUTCHours()).padStart(2, '0');
-  const mm = String(d.getUTCMinutes()).padStart(2, '0');
-  const ss = String(d.getUTCSeconds()).padStart(2, '0');
+function railTime(ms: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(ms));
+  const map: Record<string, string> = {};
+  for (const part of parts) map[part.type] = part.value;
+  const hh = map.hour === '24' ? '00' : (map.hour ?? '00');
+  const mm = map.minute ?? '00';
+  const ss = map.second ?? '00';
   return `${hh}:${mm}:${ss}`;
 }
 
@@ -95,6 +104,7 @@ interface RailPoint {
 function buildRailPoints(
   gap: CacheKeepaliveGap,
   maxAttempts: number,
+  timeZone: string,
 ): RailPoint[] {
   const maxSec = Math.max(gap.total_duration_sec, 300);
   const points: RailPoint[] = [
@@ -105,7 +115,7 @@ function buildRailPoints(
       title: 'Message paused',
       badgeText: `${compactTokens(gap.cached_tokens)} cached`,
       badgeTone: 'neutral',
-      absTime: railTime(gap.pause_at_ms),
+      absTime: railTime(gap.pause_at_ms, timeZone),
       sinceUserReq: '0s (paused)',
       sinceLastRenewal: '— (before renewal)',
     },
@@ -125,7 +135,7 @@ function buildRailPoints(
       badgeText:
         pulse.spent_usd === null ? '—' : `−${fmtUsdPlain(pulse.spent_usd)}`,
       badgeTone: 'accent',
-      absTime: railTime(pulse.time_ms),
+      absTime: railTime(pulse.time_ms, timeZone),
       sinceUserReq: plusDeltaLabel(pulse.offset_sec),
       sinceLastRenewal:
         prevPulse && sincePrevSec !== null
@@ -162,7 +172,7 @@ function buildRailPoints(
           : gap.net_pnl_usd !== null && gap.net_pnl_usd < 0
             ? 'warn'
             : 'neutral',
-      absTime: railTime(gap.ending_at_ms),
+      absTime: railTime(gap.ending_at_ms, timeZone),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -174,7 +184,7 @@ function buildRailPoints(
       title: 'Waiting for next message',
       badgeText: deltaLabel(gap.total_duration_sec),
       badgeTone: 'accent',
-      absTime: railTime(gap.ending_at_ms),
+      absTime: railTime(gap.ending_at_ms, timeZone),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -197,7 +207,7 @@ function buildRailPoints(
           : gap.net_pnl_usd !== null && gap.net_pnl_usd > 0
             ? 'ok'
             : 'neutral',
-      absTime: railTime(gap.ending_at_ms),
+      absTime: railTime(gap.ending_at_ms, timeZone),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
     });
@@ -273,14 +283,16 @@ function TimeRailGap({
   gap,
   maxAttempts,
   placeTooltipBelow,
+  timeZone,
 }: {
   gap: CacheKeepaliveGap;
   maxAttempts: number;
   placeTooltipBelow: boolean;
+  timeZone: string;
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const count = gap.pulses.length;
-  const points = buildRailPoints(gap, maxAttempts);
+  const points = buildRailPoints(gap, maxAttempts, timeZone);
   const activePoint = points.find((pt) => pt.id === hoveredId) ?? null;
   const netText = fmtUsdSigned(gap.net_pnl_usd);
   const netTone = pnlTone(gap.net_pnl_usd);
@@ -295,7 +307,7 @@ function TimeRailGap({
       <div className="flex flex-wrap items-baseline justify-between gap-2 text-body-sm">
         <div className="flex items-center gap-1.5">
           <span className="font-mono text-data text-text-muted">
-            {railTime(gap.pause_at_ms)}
+            {railTime(gap.pause_at_ms, timeZone)}
           </span>
           <span className="font-medium text-text">Paused</span>
           {gap.cached_tokens > 0 ? (
@@ -310,7 +322,9 @@ function TimeRailGap({
             <>
               <span className="text-caption text-text-muted">
                 Next msg{' '}
-                <span className="font-mono">{railTime(gap.ending_at_ms)}</span>{' '}
+                <span className="font-mono">
+                  {railTime(gap.ending_at_ms, timeZone)}
+                </span>{' '}
                 ({afterRenewalLabel})
               </span>
               <span className={cx('font-mono text-data font-medium', netTone)}>
@@ -324,7 +338,7 @@ function TimeRailGap({
           ) : (
             <>
               <span className="text-caption text-text-faint">
-                No follow-up ({railTime(gap.ending_at_ms)})
+                No follow-up ({railTime(gap.ending_at_ms, timeZone)})
               </span>
               <span className={cx('font-mono text-data font-medium', netTone)}>
                 {netText}
@@ -400,10 +414,10 @@ function TimeRailGap({
         <span>0s (pause)</span>
         <span>
           {count === 0
-            ? 'Next renewal at +4m 30s'
+            ? `Next renewal at ${plusDeltaLabel(gap.total_duration_sec)}`
             : count === 1
               ? `↻ 1 renewal at ${plusDeltaLabel(gap.pulses[0].offset_sec)} (−${fmtUsdPlain(gap.spent_usd)})`
-              : `↻ ${count} renewals every 4m 30s (−${fmtUsdPlain(gap.spent_usd)})`}
+              : `↻ ${count} renewals (${plusDeltaLabel(gap.pulses[0].offset_sec)} → ${plusDeltaLabel(gap.pulses[count - 1].offset_sec)}) · −${fmtUsdPlain(gap.spent_usd)}`}
         </span>
         <span>{deltaLabel(gap.total_duration_sec)}</span>
       </div>
@@ -500,6 +514,7 @@ function synthesizeGapsFromTurns(
 
 export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const query = useCacheKeepaliveSessionDetail(principalId, sessionId);
+  const { effective: timeZone } = useTimezone();
 
   if (query.isLoading) {
     return (
@@ -513,6 +528,14 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
         <span className="sr-only" role="status">
           Loading session detail
         </span>
+        <button
+          type="button"
+          aria-label="Back to sessions"
+          className="m-3 mb-0 min-h-9 rounded-sm px-2 text-body-sm text-text-muted hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent md:hidden"
+          onClick={onClose}
+        >
+          ← Back to sessions
+        </button>
         <div className="flex items-center justify-between border-b border-row px-4 py-2.5">
           <Skeleton className="h-4 w-48" />
           <Skeleton className="h-4 w-36" />
@@ -625,6 +648,12 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
               Spent {fmtUsdPlain(session.total_spent)} (no follow-up) =
             </span>
           ) : null}
+          {session.net_pnl === null ||
+          session.evidence_status !== 'observed' ? (
+            <span className="text-text-faint">
+              Evidence {session.evidence_status} ·
+            </span>
+          ) : null}
           <span
             className={cx(
               'font-mono text-data font-medium',
@@ -664,6 +693,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
                 gap={gap}
                 maxAttempts={session.max_attempts}
                 placeTooltipBelow={index === 0}
+                timeZone={timeZone}
               />
             ))}
           </div>
