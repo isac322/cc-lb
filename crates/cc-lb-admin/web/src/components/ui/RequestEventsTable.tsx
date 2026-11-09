@@ -42,15 +42,19 @@ const RESERVED_ROW_REM = 2.5;
  * Layout follows the table's own wrapper (`@container/events`), not the
  * viewport, so every callsite gets the same rule:
  *
- * - Below 59rem each row is a three-line card on fixed tracks
- *   (4rem / 3.25rem / 1fr / 1fr / 4rem): time, kind, session and status;
- *   the principal and/or upstream and model; latency, tokens and cost.
- *   Cells keep their DOM order and are only placed on the grid.
- * - From 59rem it is a `table-fixed` table sized by its `<colgroup>`, so no
- *   column width depends on row content. Each column starts at its `rem`
- *   minimum; the container width above the table's minimum (`100cqw` of the
- *   wrapper) is split by `grow` among the text columns, and Session, which has
- *   no width of its own, takes its share plus any rounding remainder.
+ * - Below 42rem (phones and narrow split panes) each row is a three-line card
+ *   on fixed tracks (4rem / 3.25rem / 1fr / 1fr / 4rem): time, kind, session
+ *   and status; the principal and/or upstream and model; latency, tokens and
+ *   cost. Cells keep their DOM order and are only placed on the grid.
+ * - From 42rem (tablets in portrait or landscape, and desktops) it is a
+ *   `table-fixed` table sized by its `<colgroup>`, so no column width depends
+ *   on row content. Each column starts at its compact `rem` minimum (43.75rem
+ *   with both entities so a 768px portrait tablet fits without horizontal
+ *   scroll, 39.5rem with one); the container width above the table's minimum
+ *   (`100cqw` of the wrapper) is split by `grow` among the columns, and
+ *   Session, which has no width of its own, takes its share plus any rounding
+ *   remainder. Between 42rem and 59rem cell horizontal padding tightens so all
+ *   ten columns fit comfortably.
  */
 type ColumnKey =
   | 'time'
@@ -69,88 +73,91 @@ interface Column {
   /** Table-arrangement minimum width in rem; null = Session, which takes the remainder. */
   rem: number | null;
   /**
-   * Share of the width above the table's minimum. Only variable-length text
-   * grows; numbers and the timestamp keep their minimum.
+   * Share of the width above the table's compact minimum.
    */
   grow?: number;
   numeric?: boolean;
-  /** Card placement, every class prefixed `@max-[59rem]/events:`. */
+  /** Card placement, every class prefixed `@max-[42rem]/events:`. */
   card: string;
   /** Card placement when both principal and upstream are shown. */
   cardBoth?: string;
 }
 
-/** Session never shrinks below this in the table (about 11 id characters in the chip). */
-const SESSION_FLOOR_REM = 7;
+/** Session never shrinks below this in the compact tablet table. */
+const SESSION_FLOOR_REM = 4.25;
 
-// The literal 59rem in every `@max-/@min-[59rem]/events:` class is the
-// one-entity need: Σ rem without principal or upstream + SESSION_FLOOR_REM
-// (5.75 + 6.5 + 4.75 + 7 + 4 + 5.75 + 12 + 6.25 − 6.5 + 7 = 59). Change a
-// width here and that literal together.
+// The 43.75rem ten-column minimum (700px) fits inside a 768px portrait tablet
+// card (`PageContainer` 2×32px gutter + 2×2px card border = 700px clientWidth);
+// the 39.5rem nine-column minimum (632px) fits single-entity detail tables.
+// Below 42rem (672px) rows stack into three-line mobile cards.
 const COLUMNS = {
   time: {
     label: 'Timestamp',
-    rem: 5.75,
-    card: '@max-[59rem]/events:row-start-1 @max-[59rem]/events:col-start-1',
+    rem: 4.75,
+    grow: 0.4,
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-1',
   },
   principal: {
     label: 'Principal',
-    rem: 6.5,
-    grow: 1,
-    card: '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-1 @max-[59rem]/events:col-span-3',
+    rem: 4.25,
+    grow: 1.4,
+    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-3',
     cardBoth:
-      '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-1 @max-[59rem]/events:col-span-2',
+      '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-2',
   },
   upstream: {
     label: 'Upstream',
-    rem: 6.5,
-    grow: 1,
-    card: '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-1 @max-[59rem]/events:col-span-3',
+    rem: 4.25,
+    grow: 1.4,
+    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-3',
     // Reads "principal → upstream" when both cells are shown.
     cardBoth:
-      '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-3 @max-[59rem]/events:before:content-["→_"] @max-[59rem]/events:before:text-text-faint',
+      '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-3 @max-[42rem]/events:before:content-["→_"] @max-[42rem]/events:before:text-text-faint',
   },
   session: {
     label: 'Session',
     rem: null,
-    grow: 4,
-    card: '@max-[59rem]/events:row-start-1 @max-[59rem]/events:col-start-3 @max-[59rem]/events:col-span-2 @max-[59rem]/events:w-full',
+    grow: 1.4,
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-3 @max-[42rem]/events:col-span-2 @max-[42rem]/events:w-full',
   },
   kind: {
     label: 'Kind',
-    rem: 4.75,
-    grow: 1,
-    card: '@max-[59rem]/events:row-start-1 @max-[59rem]/events:col-start-2 @max-[59rem]/events:justify-self-start @max-[59rem]/events:max-w-full',
+    rem: 2.875,
+    grow: 0.5,
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-2 @max-[42rem]/events:justify-self-start @max-[42rem]/events:max-w-full',
   },
   model: {
     label: 'Model',
-    rem: 7,
-    grow: 1,
-    card: '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-4 @max-[59rem]/events:col-span-2 @max-[59rem]/events:text-right',
+    rem: 4.625,
+    grow: 1.7,
+    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-4 @max-[42rem]/events:col-span-2 @max-[42rem]/events:text-right',
   },
   status: {
     label: 'Status',
-    rem: 4,
+    rem: 2.75,
     numeric: true,
-    card: '@max-[59rem]/events:row-start-1 @max-[59rem]/events:col-start-5 @max-[59rem]/events:justify-self-end',
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-5 @max-[42rem]/events:justify-self-end',
   },
   latency: {
     label: 'Latency',
-    rem: 5.75,
+    rem: 4.125,
+    grow: 0.8,
     numeric: true,
-    card: '@max-[59rem]/events:row-start-3 @max-[59rem]/events:col-start-1 @max-[59rem]/events:text-left',
+    card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-1 @max-[42rem]/events:text-left',
   },
   tokens: {
     label: 'Tokens',
-    rem: 12,
+    rem: 7.75,
+    grow: 5.2,
     numeric: true,
-    card: '@max-[59rem]/events:row-start-3 @max-[59rem]/events:col-start-2 @max-[59rem]/events:col-span-3 @max-[59rem]/events:justify-self-start @max-[59rem]/events:text-left',
+    card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-2 @max-[42rem]/events:col-span-3 @max-[42rem]/events:justify-self-start @max-[42rem]/events:text-left',
   },
   cost: {
     label: 'Cost',
-    rem: 6.25,
+    rem: 4.125,
+    grow: 0.8,
     numeric: true,
-    card: '@max-[59rem]/events:row-start-3 @max-[59rem]/events:col-start-5',
+    card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-5',
   },
 } satisfies Record<ColumnKey, Column>;
 
@@ -168,18 +175,22 @@ const COLUMN_ORDER: readonly ColumnKey[] = [
 ];
 
 const CARD_ROW =
-  '@max-[59rem]/events:grid @max-[59rem]/events:h-auto @max-[59rem]/events:grid-cols-[4rem_3.25rem_minmax(0,1fr)_minmax(0,1fr)_4rem] @max-[59rem]/events:items-center @max-[59rem]/events:gap-x-2 @max-[59rem]/events:gap-y-1 @max-[59rem]/events:px-4 @max-[59rem]/events:py-2.5';
+  '@max-[42rem]/events:grid @max-[42rem]/events:h-auto @max-[42rem]/events:grid-cols-[4rem_3.25rem_minmax(0,1fr)_minmax(0,1fr)_4rem] @max-[42rem]/events:items-center @max-[42rem]/events:gap-x-2 @max-[42rem]/events:gap-y-1 @max-[42rem]/events:px-4 @max-[42rem]/events:py-2.5';
 // `p-0!` must beat `Table`'s `[&_td:first-child]:pl-4` / `last-child:pr-4`,
 // descendant selectors with higher specificity than a plain utility.
-const CARD_CELL = '@max-[59rem]/events:p-0! @max-[59rem]/events:min-w-0';
+const CARD_CELL = '@max-[42rem]/events:p-0! @max-[42rem]/events:min-w-0';
+// Between 42rem and 59rem (tablet portrait and landscape) tighten horizontal
+// cell padding while keeping the first cell's 16px leading inset for the
+// status dot / spinner.
+const COMPACT_CELL =
+  '@min-[42rem]/events:@max-[59rem]/events:px-1.5! @min-[42rem]/events:@max-[59rem]/events:first:pl-4! @min-[42rem]/events:@max-[59rem]/events:last:pr-2.5!';
 /*
  * A card's metric button is only its figure and bar; `*:min-w-0` drops the
  * button's 72px floor, and padding pulled back by a negative margin makes the
  * touch target 43px without moving the card's lines.
  */
 const CARD_METRIC =
-  '@max-[59rem]/events:*:p-0 @max-[59rem]/events:*:min-w-0 @max-[59rem]/events:*:-my-2 @max-[59rem]/events:*:py-2';
-
+  '@max-[42rem]/events:*:p-0 @max-[42rem]/events:*:min-w-0 @max-[42rem]/events:*:-my-2 @max-[42rem]/events:*:py-2';
 const CLAUDE_PREFIX_RE = /^claude-/;
 
 /** Radii offered by the per-row time anchor, as [label, seconds either side]. */
@@ -219,7 +230,7 @@ interface RequestEventsTableProps {
  * timestamp's spinner marks them.
  */
 function RequestStatusCell({ outcome }: { outcome: RequestOutcome }) {
-  const base = cx(CARD_CELL, COLUMNS.status.card);
+  const base = cx(CARD_CELL, COMPACT_CELL, COLUMNS.status.card);
   if (outcome.type === 'partial') {
     return (
       <TableCell numeric className={base}>
@@ -314,8 +325,9 @@ const RequestEventRow = memo(function RequestEventRow({
   const tierBadge = serviceTierBadgeText(event.service_tier);
   const thinkingLevel = event.thinking_level?.trim() || null;
   const modelName = event.model?.replace(CLAUDE_PREFIX_RE, '') ?? null;
-  // 11ch of the mono font keeps "sonnet-4-5…", "3-5-sonnet…" or "gemini-2.5…".
-  const modelFloorCh = modelName == null ? 0 : Math.min(modelName.length, 11);
+  // 9ch of the mono font keeps "opus-5-5", "haiku-5-5", "sonnet-4…" in compact
+  // tablet columns while yielding space before thinking/tier badges.
+  const modelFloorCh = modelName == null ? 0 : Math.min(modelName.length, 9);
   const at = eventTime(event);
   const bothEntities = showPrincipal && showUpstream;
 
@@ -348,6 +360,7 @@ const RequestEventRow = memo(function RequestEventRow({
         className={cx(
           'group/ts relative text-text-muted tabular-nums',
           CARD_CELL,
+          COMPACT_CELL,
           COLUMNS.time.card,
         )}
       >
@@ -357,7 +370,7 @@ const RequestEventRow = memo(function RequestEventRow({
         {tone !== 'ok' && (
           <span
             aria-hidden="true"
-            className="absolute top-1/2 left-px flex size-3.5 -translate-y-1/2 items-center justify-center @max-[59rem]/events:-left-3.5"
+            className="absolute top-1/2 left-px flex size-3.5 -translate-y-1/2 items-center justify-center @max-[42rem]/events:-left-3.5"
           >
             {outcome.type === 'partial' ? (
               <Spinner className="size-3.5 text-text motion-reduce:animate-none" />
@@ -392,6 +405,7 @@ const RequestEventRow = memo(function RequestEventRow({
           className={cx(
             'truncate',
             CARD_CELL,
+            COMPACT_CELL,
             bothEntities ? COLUMNS.principal.cardBoth : COLUMNS.principal.card,
           )}
           title={principalName ?? undefined}
@@ -404,6 +418,7 @@ const RequestEventRow = memo(function RequestEventRow({
           className={cx(
             'truncate',
             CARD_CELL,
+            COMPACT_CELL,
             bothEntities ? COLUMNS.upstream.cardBoth : COLUMNS.upstream.card,
           )}
           title={upstreamName ?? undefined}
@@ -412,12 +427,22 @@ const RequestEventRow = memo(function RequestEventRow({
         </TableCell>
       )}
       <TableCell
-        className={cx('overflow-hidden', CARD_CELL, COLUMNS.session.card)}
+        className={cx(
+          'overflow-hidden',
+          CARD_CELL,
+          COMPACT_CELL,
+          COLUMNS.session.card,
+        )}
       >
         <SessionChip sessionId={event.thread_id ?? null} />
       </TableCell>
       <TableCell
-        className={cx('overflow-hidden', CARD_CELL, COLUMNS.kind.card)}
+        className={cx(
+          'overflow-hidden',
+          CARD_CELL,
+          COMPACT_CELL,
+          COLUMNS.kind.card,
+        )}
       >
         <RequestKindBadge requestKind={event.request_kind} />
       </TableCell>
@@ -425,10 +450,11 @@ const RequestEventRow = memo(function RequestEventRow({
         className={cx(
           'overflow-hidden text-text-muted',
           CARD_CELL,
+          COMPACT_CELL,
           COLUMNS.model.card,
         )}
       >
-        <span className="flex min-w-0 items-center gap-2 @max-[59rem]/events:justify-end">
+        <span className="flex min-w-0 items-center gap-2 @max-[42rem]/events:justify-end">
           {event.model != null && modelName != null ? (
             // Name first, whole badges only. The name keeps 11 characters (or
             // its whole text when shorter); its shrink weight of 100 makes it
@@ -470,16 +496,16 @@ const RequestEventRow = memo(function RequestEventRow({
       <RequestStatusCell outcome={outcome} />
       <LatencyCell
         event={event}
-        className={cx(CARD_METRIC, COLUMNS.latency.card)}
+        className={cx(CARD_METRIC, COMPACT_CELL, COLUMNS.latency.card)}
       />
       <TokenCell
         event={event}
-        className={cx(CARD_METRIC, COLUMNS.tokens.card)}
+        className={cx(CARD_METRIC, COMPACT_CELL, COLUMNS.tokens.card)}
       />
       <CostCell
         event={event}
         isPartial={isPartial}
-        className={cx(CARD_METRIC, COLUMNS.cost.card)}
+        className={cx(CARD_METRIC, COMPACT_CELL, COLUMNS.cost.card)}
       />
     </TableRow>
   );
@@ -513,8 +539,8 @@ export const RequestEventsTable = memo(function RequestEventsTable({
       (k !== 'upstream' || showUpstream),
   );
   const colCount = visible.length;
-  // The table never narrows below its fixed columns plus Session's floor; with
-  // both entities that is 65.5rem and the caller's slot scrolls below it.
+  // The table never narrows below its compact columns plus Session's floor;
+  // with both entities that is 43.75rem (700px) and with one 39.5rem (632px).
   const minWidthRem = visible.reduce(
     (sum, k) => sum + (COLUMNS[k].rem ?? 0),
     SESSION_FLOOR_REM,
@@ -532,12 +558,12 @@ export const RequestEventsTable = memo(function RequestEventsTable({
     <>
       <div className="@container/events">
         <Table
-          className="table-fixed @min-[59rem]/events:min-w-(--events-min-w) @max-[59rem]/events:block"
+          className="table-fixed @min-[42rem]/events:min-w-(--events-min-w) @max-[42rem]/events:block"
           style={
             { '--events-min-w': `${minWidthRem}rem` } as React.CSSProperties
           }
         >
-          <colgroup className="@max-[59rem]/events:hidden">
+          <colgroup className="@max-[42rem]/events:hidden">
             {visible.map((k) => {
               const { rem, grow }: Column = COLUMNS[k];
               if (rem == null) return <col key={k} />;
@@ -549,12 +575,16 @@ export const RequestEventsTable = memo(function RequestEventsTable({
               return <col key={k} style={{ width }} />;
             })}
           </colgroup>
-          <TableHead className="@max-[59rem]/events:hidden">
+          <TableHead className="@max-[42rem]/events:hidden">
             <tr>
               {visible.map((k) => {
                 const column: Column = COLUMNS[k];
                 return (
-                  <TableHeadCell key={k} numeric={column.numeric}>
+                  <TableHeadCell
+                    key={k}
+                    numeric={column.numeric}
+                    className={COMPACT_CELL}
+                  >
                     {column.label}
                   </TableHeadCell>
                 );
@@ -563,7 +593,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
           </TableHead>
           <tbody
             style={reservedBodyStyle}
-            className="@max-[59rem]/events:block"
+            className="@max-[42rem]/events:block"
           >
             {loading ? (
               Array.from({ length: reservedRowCount }).map((_, i) => (
@@ -572,11 +602,11 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                   cols={colCount}
                   // In the card arrangement the placeholder is one line of the
                   // first three cells.
-                  className="h-10 @max-[59rem]/events:flex @max-[59rem]/events:items-center @max-[59rem]/events:px-1"
+                  className="h-10 @max-[42rem]/events:flex @max-[42rem]/events:items-center @max-[42rem]/events:px-1"
                   cellClassNames={visible.map((_, index) =>
                     index < 3
-                      ? '@max-[59rem]/events:flex-1'
-                      : '@max-[59rem]/events:hidden',
+                      ? '@max-[42rem]/events:flex-1'
+                      : '@max-[42rem]/events:hidden',
                   )}
                   skeletonClassNames={visible.map((k) => {
                     const column: Column = COLUMNS[k];
