@@ -674,7 +674,9 @@ describe('RequestEventsTable', () => {
         />,
       );
       const table = container.querySelector('table');
-      expect(table?.style.getPropertyValue('--events-min-w')).toBe('39.5rem');
+      expect(table?.style.getPropertyValue('--events-min-w')).toBe(
+        '39.6875rem',
+      );
       expect(table?.className).toContain(
         '@min-[42rem]/events:min-w-(--events-min-w)',
       );

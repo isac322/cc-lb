@@ -50,7 +50,7 @@ function TokenFigure({
       className={cx('inline-flex w-[5.5ch] shrink-0 justify-end', className)}
     >
       <span className="text-text">{value}</span>
-      <span className="w-[1.5ch] shrink-0 text-left text-text-muted">
+      <span className="w-[1.5ch] shrink-0 text-left text-text-muted @min-[42rem]/events:@max-[59rem]/events:w-[1ch]">
         {unit}
       </span>
     </span>
@@ -112,7 +112,7 @@ export function TokenCell({
         <TokenFigure
           tokens={prompt}
           slot="in"
-          className="@min-[42rem]/events:@max-[59rem]/events:w-[4.5ch]"
+          className="@min-[42rem]/events:@max-[59rem]/events:w-[4.75ch]"
         />
         <span
           aria-hidden="true"
@@ -123,12 +123,12 @@ export function TokenCell({
         <TokenFigure
           tokens={b.output}
           slot="out"
-          className="@min-[42rem]/events:@max-[59rem]/events:w-[3.5ch]"
+          className="@min-[42rem]/events:@max-[59rem]/events:w-[4.25ch]"
         />
         <span
           data-slot="hit"
           className={cx(
-            'ml-2 w-[4.5ch] shrink-0 text-right @min-[42rem]/events:@max-[59rem]/events:ml-1 @min-[42rem]/events:@max-[59rem]/events:w-[3.75ch]',
+            'ml-2 w-[4.5ch] shrink-0 text-right @min-[42rem]/events:@max-[59rem]/events:ml-1 @min-[42rem]/events:@max-[59rem]/events:w-[3.5ch]',
             hit == null ? 'text-text-faint' : 'text-text',
           )}
         >
