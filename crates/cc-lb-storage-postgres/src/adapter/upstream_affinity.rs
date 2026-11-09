@@ -27,7 +27,7 @@ const BIND_UPSTREAM_AFFINITIES_SQL: &str = "\
       $1::text[], $2::text[], $3::text[], $4::bytea[], $5::uuid[], $6::bigint[], $7::bigint[], $8::bigint[] \
     ) AS input(principal_id, provider, kind, value_sha256, upstream_id, owner_epoch, observed_at_unix_secs, expires_at_unix_secs) \
     JOIN upstream_spec_v1 spec ON spec.id = input.upstream_id \
-      AND (input.kind <> 'gemini_cached_content' OR (spec.deleted_at IS NULL AND spec.owner_epoch = input.owner_epoch)) \
+      AND (input.kind <> 'gemini_cached_content' OR (spec.kind = 'gemini_api_key' AND spec.deleted_at IS NULL AND spec.owner_epoch = input.owner_epoch)) \
     ON CONFLICT(principal_id, provider, kind, value_sha256) DO UPDATE SET \
       upstream_id = CASE WHEN \
         (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $9) \
@@ -189,7 +189,7 @@ impl UpstreamAffinityStore for PostgresStorage {
                     {
                         let current_epoch: Option<i64> = sqlx::query_scalar(
                             "SELECT owner_epoch FROM upstream_spec_v1 \
-                             WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+                             WHERE id = $1 AND kind = 'gemini_api_key' AND deleted_at IS NULL FOR UPDATE",
                         )
                         .bind(binding.upstream_id)
                         .fetch_optional(&mut *tx)

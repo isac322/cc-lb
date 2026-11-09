@@ -880,6 +880,45 @@ async fn wait_for_access_writer_lock_barrier(
     Err("timed out waiting for both access writers to block".into())
 }
 
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn gemini_cached_content_binding_rejects_non_api_key_owners() -> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let storage = fixture.store();
+    storage.initialize().await?;
+    for kind in [
+        UpstreamKind::AnthropicApiKey,
+        UpstreamKind::OpenaiApiKey,
+        UpstreamKind::GeminiOauth,
+    ] {
+        let secret = (kind.credential_kind() == cc_lb_storage_api::CredentialKind::ApiKey)
+            .then(|| vec![1, 2, 3]);
+        let owner = create_upstream_kind(&storage, kind.as_str(), kind, secret).await?;
+        let key = affinity_key_with_kind(
+            "principal-kind-guard",
+            digest(kind.as_str()),
+            "gemini",
+            UpstreamAffinityKind::GeminiCachedContent,
+        );
+        let result = storage
+            .bind_upstream_affinities(&[binding(key.clone(), owner, 10, None)], 10, TTL_SECS)
+            .await;
+        assert!(
+            matches!(result, Err(StorageError::Conflict { .. })),
+            "{kind:?}: {result:?}"
+        );
+        assert!(
+            storage
+                .resolve_upstream_affinities(&[key], 10, TTL_SECS)
+                .await?
+                .is_empty()
+        );
+    }
+    fixture.drop_schema().await
+}
+
 async fn create_upstream(storage: &PostgresStorage, name: &str) -> TestResult<Uuid> {
     create_upstream_kind(storage, name, UpstreamKind::AnthropicOauth, None).await
 }
