@@ -106,6 +106,7 @@ fn summary_item(
         decision: matches!(source, CacheKeepaliveSessionEntrySource::Decision)
             .then(|| "not_tracked".to_owned()),
         reason: "fixture".to_owned(),
+        display_reason: None,
         error: None,
         config_snapshot: None,
     }

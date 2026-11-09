@@ -1,5 +1,6 @@
 [package]
 name = "cc-lb-storage-sqlite"
+build = "build.rs"
 autotests = false
 version.workspace = true
 edition.workspace = true
