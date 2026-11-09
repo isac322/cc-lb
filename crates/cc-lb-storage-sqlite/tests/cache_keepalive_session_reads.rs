@@ -2079,3 +2079,44 @@ async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle() {
         assert_eq!(value.get("cycle_id"), Some(&expected), "{}", row.id);
     }
 }
+
+#[tokio::test]
+async fn reconstructed_purged_session_scopes_refresh_count_and_reason_to_selected_cycle() {
+    let (_temp_dir, storage) = storage().await;
+    let old_cycle = Uuid::from_u128(2_001);
+    let new_cycle = Uuid::from_u128(2_002);
+
+    for index in 0..12_u64 {
+        let source_ref = format!("purged-old-{index}");
+        let mut proj =
+            economics_projection(&source_ref, Some(old_cycle), 1_000 + index, "hit", 6_000);
+        proj.turn.as_mut().expect("turn").session_key_hash = "purged-multi-cycle".to_owned();
+        proj.decision.session_key_hash = Some("purged-multi-cycle".to_owned());
+        storage
+            .append_request_event_with_projections(&event(&source_ref, 1_000 + index), &proj)
+            .await
+            .expect("append old cycle turn");
+    }
+
+    let mut newest_proj =
+        economics_projection("purged-new-0", Some(new_cycle), 2_000, "hit", 6_000);
+    newest_proj.turn.as_mut().expect("turn").session_key_hash = "purged-multi-cycle".to_owned();
+    newest_proj.decision.session_key_hash = Some("purged-multi-cycle".to_owned());
+    storage
+        .append_request_event_with_projections(&event("purged-new-0", 2_000), &newest_proj)
+        .await
+        .expect("append new cycle turn");
+
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "purged-multi-cycle")
+        .await
+        .expect("lookup reconstructed session")
+        .expect("reconstructed session exists");
+    assert_eq!(item.cycle_id, Some(new_cycle));
+    assert_eq!(item.refresh_count, Some(1));
+    assert_eq!(
+        item.terminal_reason,
+        Some(cc_lb_storage_api::CacheKeepaliveTerminalReason::Expired)
+    );
+    assert_eq!(item.reason, "TTL expired before follow-up");
+}
