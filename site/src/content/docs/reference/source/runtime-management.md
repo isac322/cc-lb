@@ -346,7 +346,7 @@ Any upstream `base_url` must use `http` or `https` and must not contain userinfo
 }
 ```
 
-`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `warmup_enabled` defaults to `true` for `anthropic_oauth` upstreams and `false` for other kinds; see [docs/upstream-warmup.md](https://github.com/isac322/cc-lb/blob/master/docs/upstream-warmup.md).
+`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `warmup_enabled` defaults to `true` for `anthropic_oauth`, `openai_oauth`, and `gemini_oauth` upstreams created through `POST /admin/v1/upstreams` or the OAuth sign-in flow. For API-key upstreams, omitted or `false` remains disabled and explicit `true` is rejected; see [docs/upstream-warmup.md](https://github.com/isac322/cc-lb/blob/master/docs/upstream-warmup.md).
 
 `key_hint` and `api_key_access` appear only on `anthropic_api_key` upstreams that have been checked. `key_hint` is the key's `sk-ant-<family>-` prefix, plus `...` and the last four characters when the key is at least 20 characters long. `api_key_access` is the last stored capability snapshot. `verified` is `false` until a probe succeeds. `key_class` is `workspace_bound`, `org_scoped`, or `unknown`. `workspace.mode` is `bound` when a check found the key works without a workspace header (`id` is set when Anthropic named the workspace), `selected` when cc-lb sends a chosen workspace `id`, and `required` with no `id` otherwise: the key was never checked, was rejected locally or by the endpoint, was unreachable, or still needs a workspace. `workspace_list` and `usage_report` are `ok`, `denied`, `error`, or `not_applicable`. `key_type` is `personal`, `service_account`, `workspace`, or `null` when Anthropic did not say.
 
@@ -441,6 +441,14 @@ provider-gating rules are documented in
 [docs/cache-keepalive-operator.md](https://github.com/isac322/cc-lb/blob/master/docs/cache-keepalive-operator.md).
 `cache_keepalive.classifier.llm_judge` is reserved for a future release;
 create/update requests that set it return `unsupported_cache_keepalive_llm_judge`.
+
+For OpenAI Responses keep-alive with a selected `openai_api_key` upstream,
+snapshots preserve client-supplied `OpenAI-Organization`, `OpenAI-Project`, and
+`OpenAI-Processing-Region` selectors for renewals; absent selectors remain
+absent. Credentials remain signer-owned and are never captured in snapshots.
+OAuth behavior is unchanged. Historical snapshots lacking selector values need a
+fresh eligible real request to capture them; an upgrade cannot recover values
+that were not stored.
 
 #### PrincipalResponse
 
