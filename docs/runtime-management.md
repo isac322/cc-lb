@@ -87,6 +87,14 @@ Realtime and Live WebSocket admission uses an upstream-scoped circuit breaker ke
 
 Gemini Live rejects the handshake with HTTP `503` when the principal has no eligible Gemini API-key upstream, before receiving a setup frame. With an eligible key, model-specific routing still runs after the setup frame supplies the model.
 
+Realtime and Live routing filters receive the parsed, bounded header session identity as `RequestContext.thread_id`, using the existing header precedence. No setup-frame metadata fallback or Claude ancestry fields are added. Principal-limit denials publish one rejected limit decision through the shared audit and metrics path before returning the existing protocol-appropriate error; rejected sessions do not contact the provider.
+
+Successful provider upgrades publish a provider-neutral response-started milestone. Active sessions publish cumulative usage snapshots from the provider usage frames, and final settlement uses the terminal cumulative usage without adding earlier snapshots again. These observations do not reinterpret WebSocket frames as Anthropic SSE events or buffer the full media session.
+
+Terminal observations retain bounded, redacted native close code/reason and available relay I/O details, along with the provider handshake request ID from `x-request-id`, `request-id`, or `x-goog-request-id`. Close frames still reach the peer unchanged. Upgraded connections retain status `101`, including downstream cancellations; native diagnostics do not synthesize HTTP/2 fields or a new HTTP response. The connection emits one terminal completion.
+
+With OpenTelemetry tracing enabled, Realtime and Live provider handshakes receive the current proxy child span's W3C trace context after signing, without replacing host-owned credentials or destination details.
+
 OpenAI's `OpenAI-Beta` header is passed through. Gemini client-supplied `key=` query credentials are removed before the configured upstream key is applied. Usage accounting observes only provider usage frames: OpenAI `response.done` and Gemini frames containing `usageMetadata`.
 
 New tunnel handshakes during server drain receive HTTP `503` without upgrading. Existing tunnels stop relaying and send best-effort close frames, without an explicit close code or reason, to both peers. Idle Gemini connections waiting for a setup frame also close on drain. After an upgrade, drain cannot produce a new HTTP response.

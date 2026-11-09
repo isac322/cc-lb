@@ -36,7 +36,7 @@ Provider-owned state referenced inside a supported HTTP generation request is fo
 - OpenAI HTTP Responses: response ids and stateless reasoning `encrypted_content` items observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
 - Gemini generateContent / countTokens: `cachedContent` references (including nested `generateContentRequest.cachedContent`). `thoughtSignature` is forwarded but is not treated as affinity state.
 
-A request whose durable state resolves to an upstream that is disabled, unhealthy, or removed by routing filters fails with `503 upstream_affinity_unavailable` instead of falling back to another upstream; cross-upstream failover is disabled for pinned requests. Prompt-cache analysis and cache-aware routing apply only to Anthropic Messages; OpenAI and Gemini requests carry neutral cache metadata.
+- Prompt-cache analysis and cache-aware routing apply to Anthropic breakpoints and scoped older-model OpenAI Responses observations. Native pricing is exposed when catalog data exists. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` remains hard affinity.
 
 Admin preflight is separate from client proxy routing: `GET /v1/models` and `POST /v1/messages/count_tokens` (Anthropic), `GET /v1/models` (OpenAI), and `GET /v1beta/models` (Gemini) run as direct upstream probes during key verification.
 
@@ -87,6 +87,14 @@ Realtime and Live WebSockets authenticate the proxy client before upgrade and se
 Realtime and Live WebSocket admission uses an upstream-scoped circuit breaker keyed by the stable upstream UUID, independent of HTTP's host-keyed breaker. Provider `5xx` responses, transport failures, and timeouts count toward that WebSocket breaker; `4xx` and other non-`5xx` handshake responses do not. Handshake errors use a generic `upstream_unavailable` error code while preserving the provider HTTP status. Before upgrade, that status and safe allowlisted `Retry-After`, `x-ratelimit-*`, `anthropic-ratelimit-*`, and `ratelimit-*` headers are returned as HTTP response status and headers; after upgrade, the status is preserved in the WebSocket error, with any non-empty allowlisted headers under a top-level JSON `headers` object. An open local breaker returns a generic `502 upstream_unavailable` error. Once a provider connection owns a WebSocket, failures close it without reconnecting or failing over.
 
 Gemini Live rejects the handshake with HTTP `503` when the principal has no eligible Gemini API-key upstream, before receiving a setup frame. With an eligible key, model-specific routing still runs after the setup frame supplies the model.
+
+Realtime and Live routing filters receive the parsed, bounded header session identity as `RequestContext.thread_id`, using the existing header precedence. No setup-frame metadata fallback or Claude ancestry fields are added. Principal-limit denials publish one rejected limit decision through the shared audit and metrics path before returning the existing protocol-appropriate error; rejected sessions do not contact the provider.
+
+Successful provider upgrades publish a provider-neutral response-started milestone. Active sessions publish cumulative usage snapshots from the provider usage frames, and final settlement uses the terminal cumulative usage without adding earlier snapshots again. These observations do not reinterpret WebSocket frames as Anthropic SSE events or buffer the full media session.
+
+Terminal observations retain bounded, redacted native close code/reason and available relay I/O details, along with the provider handshake request ID from `x-request-id`, `request-id`, or `x-goog-request-id`. Close frames still reach the peer unchanged. Upgraded connections retain status `101`, including downstream cancellations; native diagnostics do not synthesize HTTP/2 fields or a new HTTP response. The connection emits one terminal completion.
+
+With OpenTelemetry tracing enabled, Realtime and Live provider handshakes receive the current proxy child span's W3C trace context after signing, without replacing host-owned credentials or destination details.
 
 OpenAI's `OpenAI-Beta` header is passed through. Gemini client-supplied `key=` query credentials are removed before the configured upstream key is applied. Usage accounting observes only provider usage frames: OpenAI `response.done` and Gemini frames containing `usageMetadata`.
 

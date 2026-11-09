@@ -221,7 +221,8 @@ pub struct RequestEvent {
     /// whose upstream body ended abnormally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_http_version: Option<String>,
-    /// Anthropic `request-id` upstream response header.
+    /// Provider response request identifier, such as `x-request-id`,
+    /// `request-id`, or `x-goog-request-id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -241,8 +242,9 @@ pub struct RequestEvent {
     pub upstream_body_error_io_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_body_error_h2_reason: Option<String>,
-    /// Set when a stream was accepted after upstream `message_stop` despite a
-    /// trailing body/decode failure. Never mirrored into
+    /// Optional warning or close diagnostic retained after a stream ended.
+    /// This may describe a trailing body/decode failure or another
+    /// provider-neutral transport condition and is not mirrored into
     /// `upstream_error_type`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_stream_warning_type: Option<String>,

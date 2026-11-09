@@ -6,14 +6,17 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
-use cc_lb_engine::realtime_websocket::{RealtimeWebSocketKind, RealtimeWebSocketTarget};
+use cc_lb_engine::realtime_websocket::{
+    RealtimeStreamMetrics, RealtimeUsage, RealtimeWebSocketDiagnostics, RealtimeWebSocketKind,
+    RealtimeWebSocketTarget, RealtimeWebSocketTermination,
+};
 use cc_lb_engine::responses_websocket::{ResponsesWebSocketGateway, WebSocketError};
-use cc_lb_engine::{BreakerRegistry, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
+use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
-use http::{HeaderValue, Response, StatusCode};
+use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use http_body_util::BodyExt;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
@@ -122,9 +125,131 @@ async fn openai_image_and_transcription_usage_persist_in_request_events()
     Ok(())
 }
 
-#[test]
-fn lifecycle_request_events_current_registry_smoke() {
-    let _registry = BreakerRegistry::new();
+#[tokio::test]
+async fn concurrent_limit_denial_emits_one_rejected_decision_without_reserved_or_dispatch() {
+    use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+    use cc_lb_control::api_keys::limit_engine::LimitEngine;
+    use cc_lb_control::api_keys::principal_view::PrincipalView;
+    use cc_lb_storage_api::principal::{Limit, LimitKind};
+    use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
+
+    let state = TestState::default();
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        vec![Limit {
+            kind: LimitKind::Concurrent,
+            window_secs: 0,
+            cap_micros: 1,
+        }],
+        std::collections::HashMap::new(),
+    ));
+    let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(64);
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(principal_view)
+        .upstream_records(vec![UpstreamRecord {
+            id: uuid::Uuid::from_u128(1_167),
+            name: "concurrent-limit-upstream".to_owned(),
+            kind: StorageUpstreamKind::AnthropicApiKey,
+            base_url: Some("http://upstream.local/".parse().expect("test URL")),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let held = concurrency
+        .try_acquire("key-test", 1)
+        .expect("fixture occupies the only concurrent slot");
+    let limit_engine = LimitEngine::new(concurrency, Arc::new(cc_lb_clock::SystemClock));
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(CapturingDispatch::default()),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_static_limit_subject(
+        limit_engine,
+        "principal-test".to_owned(),
+        "key-test".to_owned(),
+        StoredApiKeyRecord {
+            key_hash_b64: "key-test".to_owned(),
+            status: KeyStatus::Active,
+            ..StoredApiKeyRecord::default()
+        },
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":1,"messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("limit rejection returns HTTP response");
+    let (status, headers, body) = crate::common::collect_body(response).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        headers
+            .get("x-should-retry")
+            .and_then(|value| value.to_str().ok()),
+        Some("true")
+    );
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("limit error JSON");
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(body["error"]["limit_kind"], "concurrent");
+    assert_eq!(body["error"]["retry_after_seconds"], 1);
+    assert_eq!(
+        state
+            .upstream_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    let mut rejected = 0;
+    let mut reserved = 0;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(1), lifecycle_events.recv())
+        .await
+        .expect("lifecycle event arrives")
+    {
+        match event {
+            cc_lb_lifecycle::LifecycleEvent::LimitDecision { decision, .. } => match decision {
+                cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                    reason,
+                    subject,
+                    request_summary,
+                    route_summary,
+                    limit_violation,
+                    ..
+                } => {
+                    rejected += 1;
+                    assert_eq!(reason, "limit_rejected");
+                    assert_eq!(subject.principal_id, "principal-test");
+                    assert_eq!(subject.key_id, "key-test");
+                    assert_eq!(request_summary.model, "claude-test");
+                    assert_eq!(request_summary.path, "/v1/messages");
+                    assert_eq!(request_summary.method, "POST");
+                    assert_eq!(route_summary.upstream_name, "concurrent-limit-upstream");
+                    assert_eq!(limit_violation.as_deref(), Some("Concurrent"));
+                }
+                cc_lb_lifecycle::LimitDecisionKind::Reserved { .. } => reserved += 1,
+                unexpected => panic!("unexpected limit decision: {unexpected:?}"),
+            },
+            cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(rejected, 1);
+    assert_eq!(reserved, 0);
+    drop(held);
 }
 
 #[tokio::test]
@@ -302,6 +427,111 @@ async fn realtime_setup_identity_is_authenticated_and_persisted_before_routing()
         assert_eq!(parse.claude_agent_id, None);
         assert_eq!(parse.parent_session_id, None);
     }
+}
+
+#[tokio::test]
+async fn realtime_relay_finish_publishes_typed_io_diagnostics_and_single_terminal() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.attach_lifecycle_assembler(128);
+    let authn = TestAuthn::new(TestState::default());
+    let upstream = UpstreamRecord {
+        id: uuid::Uuid::from_u128(1_132),
+        name: "realtime-diagnostics-upstream".to_owned(),
+        kind: StorageUpstreamKind::OpenaiApiKey,
+        base_url: Some("http://upstream.local/".parse().expect("test URL")),
+        enabled: true,
+        api_key_ciphertext: Some(Vec::new()),
+        ..UpstreamRecord::default()
+    };
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![upstream])
+        .build();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(CapturingDispatch::default()),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let request = messages_request(Bytes::new());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("realtime request authenticates");
+    let observation = lifecycle.begin_realtime_websocket(&auth, "/v1/realtime");
+    let mut session = lifecycle
+        .prepare_realtime_websocket(
+            &auth,
+            observation,
+            RealtimeWebSocketKind::Openai,
+            request.headers(),
+            RealtimeWebSocketTarget {
+                path: "/v1/realtime",
+                query: None,
+                model: Some("gpt-realtime"),
+            },
+            Bytes::from_static(br#"{"setup":{"type":"realtime"}}"#),
+        )
+        .await
+        .expect("realtime session prepares");
+    session.connected(&HeaderMap::from_iter([(
+        http::header::HeaderName::from_static("x-request-id"),
+        HeaderValue::from_static("provider-request-1132"),
+    )]));
+    session.finish(
+        RealtimeUsage::default(),
+        RealtimeStreamMetrics::default(),
+        RealtimeWebSocketTermination::ProxyRelayError,
+        RealtimeWebSocketDiagnostics::default().with_relay_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        )),
+    );
+
+    let mut response_started = 0;
+    let mut diagnostics = 0;
+    let mut terminated = 0;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(1), lifecycle_events.recv())
+            .await
+            .expect("relay terminal lifecycle event arrives")
+            .expect("lifecycle event stream remains open");
+        match event {
+            cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted { status, .. } => {
+                response_started += 1;
+                assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+            }
+            cc_lb_lifecycle::LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+                diagnostics: observed,
+                ..
+            } => {
+                diagnostics += 1;
+                assert_eq!(observed.http_version, None);
+                assert_eq!(
+                    observed.request_id.as_deref(),
+                    Some("provider-request-1132")
+                );
+                assert_eq!(observed.body_error_cause.as_deref(), Some("io_reset"));
+                assert_eq!(
+                    observed.body_error_io_kind.as_deref(),
+                    Some("ConnectionReset")
+                );
+                assert_eq!(observed.body_error_h2_reason, None);
+            }
+            cc_lb_lifecycle::LifecycleEvent::RequestTerminated { client_status, .. } => {
+                terminated += 1;
+                assert_eq!(client_status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(response_started, 1);
+    assert_eq!(diagnostics, 1);
+    assert_eq!(terminated, 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
