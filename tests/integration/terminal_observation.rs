@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 use url::Url;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -1207,21 +1207,32 @@ async fn terminal_bulkhead_full() -> Result<(), Box<dyn std::error::Error>> {
 
     // One upstream slot + a slow upstream: the second request overflows the
     // bulkhead queue and is rejected with 503 overloaded_error.
-    let upstream = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(happy_response())
-                .set_delay(Duration::from_secs(5)),
-        )
-        .mount(&upstream)
-        .await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_wait = Arc::clone(&entered);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let release_srv = Arc::clone(&release);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream_uri = format!("http://{}", listener.local_addr()?);
+    let upstream_task = tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await
+            && drain_http_request(&mut socket).await.is_ok()
+        {
+            entered.notify_one();
+            release_srv.notified().await;
+            let body = serde_json::to_vec(&happy_response()).unwrap_or_default();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+            let _ = socket.shutdown().await;
+        }
+    });
     let litellm = start_price_mock().await;
 
     let sqlite_path = dir.path().join("term-obs.sqlite");
-    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
-
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream_uri, "u1").await?;
     let mut config = base_config(sqlite_path.clone(), litellm.uri());
     config.config.bulkhead.semaphore_per_upstream = 1;
     let server = StartedServer::start(config).await?;
@@ -1240,8 +1251,8 @@ async fn terminal_bulkhead_full() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
     });
-    // Give the first request a head start so it holds the only permit.
-    sleep(Duration::from_millis(300)).await;
+    // Wait until the first request has reached the upstream and holds the only permit.
+    timeout(Duration::from_secs(5), entered_wait.notified()).await?;
     let second = send_messages(&server, &plaintext_key, false).await?;
     assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
 
@@ -1249,7 +1260,9 @@ async fn terminal_bulkhead_full() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
     assert!(row.internal_errors.is_empty());
 
+    release.notify_one();
     let _ = first.await;
+    let _ = upstream_task.await;
     server.shutdown().await;
     Ok(())
 }

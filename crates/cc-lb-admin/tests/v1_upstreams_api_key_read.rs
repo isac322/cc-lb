@@ -422,7 +422,6 @@ async fn append_and_roll_up(h: &ApiKeyHarness, events: &[RequestEvent]) {
 // ---------------------------------------------------------------------------
 // RCK: Re-check
 
-#[tokio::test]
 async fn rck_01_recheck_probes_the_stored_key() {
     let h = spawn_api_key_harness().await;
     h.set_policy(BND, bound_policy());
@@ -448,7 +447,6 @@ async fn rck_01_recheck_probes_the_stored_key() {
     assert_eq!(h.requests(ORG_PREFIX).len(), 0);
 }
 
-#[tokio::test]
 async fn rck_02_recheck_persists_the_snapshot_for_a_legacy_row() {
     let h = spawn_api_key_harness().await;
     h.set_policy(BND, bound_policy());
@@ -522,7 +520,6 @@ async fn send(
 }
 
 // RCK-03 + ACC-05: Re-check writes the details table only.
-#[tokio::test]
 async fn rck_03_acc_05_recheck_never_bumps_the_spec_or_rebuilds_the_view() {
     let h = spawn_api_key_harness().await;
     h.set_policy(BND, bound_policy());
@@ -571,7 +568,6 @@ async fn rck_03_acc_05_recheck_never_bumps_the_spec_or_rebuilds_the_view() {
     assert!(rebinder.0.load(Ordering::SeqCst) > 0);
 }
 
-#[tokio::test]
 async fn rck_04_revoked_key_reads_denied_without_key_material() {
     let h = spawn_api_key_harness().await;
     h.set_policy(BAD_KEY, bound_policy());
@@ -616,7 +612,6 @@ async fn rck_04_revoked_key_reads_denied_without_key_material() {
     assert_no_key_material(&detail.body.to_string(), BAD_KEY);
 }
 
-#[tokio::test]
 async fn rck_05_recheck_sends_the_stored_workspace_and_persists_not_found() {
     let h = spawn_api_key_harness().await;
     h.set_policy(ORG, org_policy(ORG));
@@ -665,7 +660,6 @@ async fn rck_05_recheck_sends_the_stored_workspace_and_persists_not_found() {
     );
 }
 
-#[tokio::test]
 async fn rck_07_recheck_restores_usage_reports_after_demotion() {
     let h = spawn_api_key_harness().await;
     h.set_policy(ORG, org_policy(ORG));
@@ -710,7 +704,6 @@ async fn rck_07_recheck_restores_usage_reports_after_demotion() {
     assert_eq!(candidates.len(), 1, "the poller picks it up again");
 }
 
-#[tokio::test]
 async fn rck_08_wrong_kind_missing_and_deleted_upstreams_make_no_calls() {
     let h = spawn_api_key_harness().await;
     let oauth = create_oauth_upstream(&h, "oauth").await;
@@ -754,7 +747,6 @@ async fn rck_08_wrong_kind_missing_and_deleted_upstreams_make_no_calls() {
     assert_eq!(h.outbound_count(), 0);
 }
 
-#[tokio::test]
 async fn rck_10_bound_key_stored_with_a_foreign_workspace_is_caught() {
     let h = spawn_api_key_harness().await;
     h.set_policy(BND, bound_policy());
@@ -794,7 +786,6 @@ async fn rck_10_bound_key_stored_with_a_foreign_workspace_is_caught() {
 // ---------------------------------------------------------------------------
 // WSL: workspace list
 
-#[tokio::test]
 async fn wsl_01_lists_workspaces_with_the_stored_key() {
     let h = spawn_api_key_harness().await;
     h.set_policy(ORG, org_policy(ORG));
@@ -821,7 +812,6 @@ async fn wsl_01_lists_workspaces_with_the_stored_key() {
 }
 
 // WSL-02 + WSL-06: refusal is the nested body with an operator message.
-#[tokio::test]
 async fn wsl_02_06_denied_list_is_nested_workspace_list_denied() {
     let h = spawn_api_key_harness().await;
     h.set_policy(
@@ -839,7 +829,6 @@ async fn wsl_02_06_denied_list_is_nested_workspace_list_denied() {
     assert_no_key_material(&response.body.to_string(), ORG);
 }
 
-#[tokio::test]
 async fn wsl_03_custom_host_is_refused_with_zero_outbound() {
     let h = spawn_api_key_harness().await;
     h.set_policy(ORG, org_policy(ORG));
@@ -860,7 +849,6 @@ async fn wsl_03_custom_host_is_refused_with_zero_outbound() {
 }
 
 // WSL-05 + WSL-06: provider failures are nested `probe_unreachable`.
-#[tokio::test]
 async fn wsl_05_06_upstream_error_is_nested_probe_unreachable() {
     let h = spawn_api_key_harness().await;
     h.set_policy(
@@ -881,7 +869,6 @@ async fn wsl_05_06_upstream_error_is_nested_probe_unreachable() {
 // ---------------------------------------------------------------------------
 // ACC: `api_key_access` on list and detail
 
-#[tokio::test]
 async fn acc_01_access_is_present_only_on_api_key_upstreams() {
     let h = spawn_api_key_harness().await;
     let api_key = seeded_org(&h, "org", Some("apikey_01"), ApiKeyOrgCapability::Ok).await;
@@ -909,7 +896,6 @@ async fn acc_01_access_is_present_only_on_api_key_upstreams() {
     }
 }
 
-#[tokio::test]
 async fn acc_02_legacy_row_has_no_access() {
     let h = spawn_api_key_harness().await;
     let legacy = h.seed_legacy_api_key_upstream("legacy", ORG).await;
@@ -922,7 +908,6 @@ async fn acc_02_legacy_row_has_no_access() {
     assert_eq!(h.outbound_count(), 0);
 }
 
-#[tokio::test]
 async fn acc_04_legacy_usage_reads_never_checked() {
     let h = spawn_api_key_harness().await;
     let legacy = h.seed_legacy_api_key_upstream("legacy", ORG).await;
@@ -936,7 +921,6 @@ async fn acc_04_legacy_usage_reads_never_checked() {
     assert_eq!(body["group_by"], "model");
 }
 
-#[tokio::test]
 async fn usg_provider_api_keys_use_local_estimated_request_events() {
     let h = spawn_api_key_harness().await;
     for (index, kind) in [UpstreamKind::OpenaiApiKey, UpstreamKind::GeminiApiKey]
@@ -988,7 +972,6 @@ async fn usg_provider_api_keys_use_local_estimated_request_events() {
     }
 }
 
-#[tokio::test]
 async fn usg_all_oauth_kinds_remain_not_api_key_upstream() {
     let h = spawn_api_key_harness().await;
     for (index, kind) in [
@@ -1033,7 +1016,6 @@ async fn usg_all_oauth_kinds_remain_not_api_key_upstream() {
 // ---------------------------------------------------------------------------
 // USG: `GET /usage`
 
-#[tokio::test]
 async fn usg_01_reported_usage_for_the_resolved_key() {
     let h = spawn_api_key_harness().await;
     let id = reported_org(
@@ -1067,7 +1049,6 @@ async fn usg_01_reported_usage_for_the_resolved_key() {
     assert_eq!(series_input_tokens(&body), 105);
 }
 
-#[tokio::test]
 async fn usg_01_minute_step_answers_hour_buckets() {
     let h = spawn_api_key_harness().await;
     let id = reported_org(
@@ -1085,7 +1066,6 @@ async fn usg_01_minute_step_answers_hour_buckets() {
     assert_eq!(series_input_tokens(&body), 10);
 }
 
-#[tokio::test]
 async fn usg_02_unresolved_key_reads_workspace_usage() {
     let h = spawn_api_key_harness().await;
     let id = reported_org(
@@ -1127,7 +1107,6 @@ async fn usg_02_unresolved_key_reads_workspace_usage() {
 
 // USG-17: the last report time is the stored poll success, whatever the
 // range, never a bucket edge or the window start.
-#[tokio::test]
 async fn usg_17_last_reported_is_the_stored_poll_success_for_every_range() {
     let h = spawn_api_key_harness().await;
     // The only bucket is three days old: outside the 1h and 24h windows.
@@ -1158,7 +1137,6 @@ async fn usg_17_last_reported_is_the_stored_poll_success_for_every_range() {
     assert!(body["last_reported_unix_secs"].is_null());
 }
 
-#[tokio::test]
 async fn usg_03_bound_key_is_estimated_from_its_own_rollups() {
     let h = spawn_api_key_harness().await;
     let record = h.seed_legacy_api_key_upstream("bound", BND).await;
@@ -1177,7 +1155,6 @@ async fn usg_03_bound_key_is_estimated_from_its_own_rollups() {
     assert_eq!(body["month"]["tokens"], 70);
 }
 
-#[tokio::test]
 async fn usg_04_denied_before_any_report_needs_a_role() {
     let h = spawn_api_key_harness().await;
     let id = seeded_org(&h, "org", Some("apikey_01"), ApiKeyOrgCapability::Denied).await;
@@ -1189,7 +1166,6 @@ async fn usg_04_denied_before_any_report_needs_a_role() {
     assert_eq!(body["fix"], json!({"code": "role_insufficient"}));
 }
 
-#[tokio::test]
 async fn usg_06_custom_host_is_estimated_even_when_ok() {
     let h = spawn_api_key_harness().await;
     let created = h
@@ -1218,7 +1194,6 @@ async fn usg_06_custom_host_is_estimated_even_when_ok() {
     assert_eq!(body["fix"], json!({"code": "non_anthropic_base_url"}));
 }
 
-#[tokio::test]
 async fn usg_07_demoted_after_reports_serves_the_stale_snapshot() {
     let h = spawn_api_key_harness().await;
     let id = reported_org(
@@ -1249,7 +1224,6 @@ async fn usg_07_demoted_after_reports_serves_the_stale_snapshot() {
 }
 
 // R2-2: a transient outage is stale without a fix code.
-#[tokio::test]
 async fn usg_07_transient_failures_are_stale_without_a_fix() {
     let h = spawn_api_key_harness().await;
     let id = reported_org(
@@ -1274,7 +1248,6 @@ async fn usg_07_transient_failures_are_stale_without_a_fix() {
     assert!(two["fix"].is_null());
 }
 
-#[tokio::test]
 async fn usg_08_estimated_series_excludes_other_upstreams() {
     let h = spawn_api_key_harness().await;
     let target = h.seed_legacy_api_key_upstream("target", ORG).await;
@@ -1297,7 +1270,6 @@ async fn usg_08_estimated_series_excludes_other_upstreams() {
     assert_eq!(body["month"]["tokens"], 11);
 }
 
-#[tokio::test]
 async fn usg_09_month_block_is_the_calendar_month_for_any_range() {
     let h = spawn_api_key_harness().await;
     let legacy = h.seed_legacy_api_key_upstream("legacy", ORG).await;
@@ -1316,7 +1288,6 @@ async fn usg_09_month_block_is_the_calendar_month_for_any_range() {
     }
 }
 
-#[tokio::test]
 async fn usg_10_month_boundaries_follow_utc() {
     let h = spawn_api_key_harness().await;
     let id = reported_org(
@@ -1343,7 +1314,6 @@ async fn usg_10_month_boundaries_follow_utc() {
     assert_eq!(january["month"]["tokens"], 1);
 }
 
-#[tokio::test]
 async fn usg_11_month_tokens_sum_the_current_key_only() {
     let h = spawn_api_key_harness().await;
     let id = reported_org(
@@ -1392,7 +1362,6 @@ async fn usg_11_month_tokens_sum_the_current_key_only() {
     assert_eq!(workspace["month"]["tokens"], 50);
 }
 
-#[tokio::test]
 async fn usg_12_estimated_month_starts_at_the_retention_cut() {
     let h = spawn_api_key_harness().await;
     let legacy = h.seed_legacy_api_key_upstream("legacy", ORG).await;
@@ -1427,7 +1396,6 @@ async fn usg_12_estimated_month_starts_at_the_retention_cut() {
     assert_eq!(body["month"]["tokens"], 5);
 }
 
-#[tokio::test]
 async fn usg_14_invalid_parameters_are_flat_400s() {
     let h = spawn_api_key_harness().await;
     let legacy = h.seed_legacy_api_key_upstream("legacy", ORG).await;
@@ -1449,7 +1417,6 @@ async fn usg_14_invalid_parameters_are_flat_400s() {
     assert_eq!(h.outbound_count(), 0);
 }
 
-#[tokio::test]
 async fn usg_16_usage_is_storage_only() {
     let h = spawn_api_key_harness().await;
     h.set_policy(ORG, org_policy(ORG));
@@ -1502,7 +1469,6 @@ const CREDIT_BALANCE: &str = "Your credit balance is too low to access the Anthr
 const TIER_CAP: &str =
     "You have reached your API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.";
 
-#[tokio::test]
 async fn bil_01_credit_balance_400_is_credits_exhausted() {
     let stop = billing_stop_after(&[(
         NOW - 120,
@@ -1517,7 +1483,6 @@ async fn bil_01_credit_balance_400_is_credits_exhausted() {
     );
 }
 
-#[tokio::test]
 async fn bil_02_tier_cap_429_is_tier_spend_cap() {
     let stop =
         billing_stop_after(&[(NOW - 60, 429, Some("rate_limit_error"), Some(TIER_CAP))]).await;
@@ -1527,7 +1492,6 @@ async fn bil_02_tier_cap_429_is_tier_spend_cap() {
     );
 }
 
-#[tokio::test]
 async fn bil_03_self_set_limits_are_spend_limit() {
     for message in [
         "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.",
@@ -1540,7 +1504,6 @@ async fn bil_03_self_set_limits_are_spend_limit() {
     }
 }
 
-#[tokio::test]
 async fn bil_04_402_is_billing_error() {
     let stop = billing_stop_after(&[(
         NOW - 60,
@@ -1552,7 +1515,6 @@ async fn bil_04_402_is_billing_error() {
     assert_eq!(stop["kind"], "billing_error");
 }
 
-#[tokio::test]
 async fn bil_05_ordinary_failures_are_not_billing_stops() {
     for (status, error_type, message) in [
         (400, "invalid_request_error", "max_tokens: field required"),
@@ -1570,7 +1532,6 @@ async fn bil_05_ordinary_failures_are_not_billing_stops() {
     }
 }
 
-#[tokio::test]
 async fn bil_06_a_later_success_clears_the_stop() {
     let stop = billing_stop_after(&[
         (
@@ -1585,7 +1546,6 @@ async fn bil_06_a_later_success_clears_the_stop() {
     assert!(stop.is_null(), "{stop}");
 }
 
-#[tokio::test]
 async fn bil_07_last_months_stop_is_out_of_scope() {
     let stop = billing_stop_after(&[(
         OCT_1 - HOUR,
@@ -1597,7 +1557,6 @@ async fn bil_07_last_months_stop_is_out_of_scope() {
     assert!(stop.is_null(), "{stop}");
 }
 
-#[tokio::test]
 async fn bil_08_stops_are_per_upstream() {
     let h = spawn_api_key_harness().await;
     let a = h.seed_legacy_api_key_upstream("a", ORG).await;
@@ -1625,7 +1584,6 @@ async fn bil_08_stops_are_per_upstream() {
     assert!(on_b["month"]["billing_stop"].is_null());
 }
 
-#[tokio::test]
 async fn bil_10_relayed_tier_cap_with_a_bounded_message_is_observable() {
     // The request log keeps a bounded copy of the provider message.
     let bounded = format!("{TIER_CAP} {}", "x".repeat(400));
@@ -1732,7 +1690,6 @@ where
     .expect("re-check race finishes")
 }
 
-#[tokio::test]
 async fn conc_02_recheck_racing_a_key_replace_is_discarded() {
     let h = spawn_api_key_harness().await;
     let (gate, endpoint) = spawn_gated_endpoint().await;
@@ -1773,7 +1730,6 @@ async fn conc_02_recheck_racing_a_key_replace_is_discarded() {
     assert_ne!(access["verified"], true, "{access}");
 }
 
-#[tokio::test]
 async fn conc_03_recheck_racing_a_workspace_change_is_discarded() {
     let h = spawn_api_key_harness().await;
     let (gate, endpoint) = spawn_gated_endpoint().await;
@@ -1812,4 +1768,64 @@ async fn conc_03_recheck_racing_a_workspace_change_is_discarded() {
     assert_eq!(access["workspace"]["id"], "wrkspc_B", "{access}");
     assert_eq!(access["workspace_list"], "not_applicable");
     assert_eq!(access["usage_report"], "not_applicable");
+}
+
+#[tokio::test]
+async fn v1_upstreams_api_key_read_suite_part_1() {
+    rck_01_recheck_probes_the_stored_key().await;
+    rck_02_recheck_persists_the_snapshot_for_a_legacy_row().await;
+    rck_03_acc_05_recheck_never_bumps_the_spec_or_rebuilds_the_view().await;
+    rck_04_revoked_key_reads_denied_without_key_material().await;
+    rck_05_recheck_sends_the_stored_workspace_and_persists_not_found().await;
+    rck_07_recheck_restores_usage_reports_after_demotion().await;
+    rck_08_wrong_kind_missing_and_deleted_upstreams_make_no_calls().await;
+    rck_10_bound_key_stored_with_a_foreign_workspace_is_caught().await;
+    wsl_01_lists_workspaces_with_the_stored_key().await;
+    wsl_02_06_denied_list_is_nested_workspace_list_denied().await;
+    wsl_03_custom_host_is_refused_with_zero_outbound().await;
+}
+
+#[tokio::test]
+async fn v1_upstreams_api_key_read_suite_part_2() {
+    wsl_05_06_upstream_error_is_nested_probe_unreachable().await;
+    acc_01_access_is_present_only_on_api_key_upstreams().await;
+    acc_02_legacy_row_has_no_access().await;
+    acc_04_legacy_usage_reads_never_checked().await;
+    usg_provider_api_keys_use_local_estimated_request_events().await;
+    usg_all_oauth_kinds_remain_not_api_key_upstream().await;
+    usg_01_reported_usage_for_the_resolved_key().await;
+    usg_01_minute_step_answers_hour_buckets().await;
+    usg_02_unresolved_key_reads_workspace_usage().await;
+    usg_17_last_reported_is_the_stored_poll_success_for_every_range().await;
+    usg_03_bound_key_is_estimated_from_its_own_rollups().await;
+}
+
+#[tokio::test]
+async fn v1_upstreams_api_key_read_suite_part_3() {
+    usg_04_denied_before_any_report_needs_a_role().await;
+    usg_06_custom_host_is_estimated_even_when_ok().await;
+    usg_07_demoted_after_reports_serves_the_stale_snapshot().await;
+    usg_07_transient_failures_are_stale_without_a_fix().await;
+    usg_08_estimated_series_excludes_other_upstreams().await;
+    usg_09_month_block_is_the_calendar_month_for_any_range().await;
+    usg_10_month_boundaries_follow_utc().await;
+    usg_11_month_tokens_sum_the_current_key_only().await;
+    usg_12_estimated_month_starts_at_the_retention_cut().await;
+    usg_14_invalid_parameters_are_flat_400s().await;
+    usg_16_usage_is_storage_only().await;
+}
+
+#[tokio::test]
+async fn v1_upstreams_api_key_read_suite_part_4() {
+    bil_01_credit_balance_400_is_credits_exhausted().await;
+    bil_02_tier_cap_429_is_tier_spend_cap().await;
+    bil_03_self_set_limits_are_spend_limit().await;
+    bil_04_402_is_billing_error().await;
+    bil_05_ordinary_failures_are_not_billing_stops().await;
+    bil_06_a_later_success_clears_the_stop().await;
+    bil_07_last_months_stop_is_out_of_scope().await;
+    bil_08_stops_are_per_upstream().await;
+    bil_10_relayed_tier_cap_with_a_bounded_message_is_observable().await;
+    conc_02_recheck_racing_a_key_replace_is_discarded().await;
+    conc_03_recheck_racing_a_workspace_change_is_discarded().await;
 }

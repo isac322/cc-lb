@@ -287,7 +287,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       expect(screen.queryByText('sess_123')).toBeNull();
     });
 
-    it('shows the service-tier badge only after the final update provides service_tier', async () => {
+    it('keeps requested Gemini thinking level when the final update adds observed service tier', async () => {
       cleanup();
       const partialEvent = {
         event_id: 'evt_badges',
@@ -296,8 +296,9 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         ts_ms: 1718553120000,
         status: 0,
         duration_ms: 0,
-        model: 'claude-3-5-sonnet',
+        model: 'gemini-2.5-pro',
         thinking_budget_tokens: 18000,
+        thinking_level: 'low',
         _phase: 'partial',
       } satisfies RequestEventWithPhase;
 
@@ -310,6 +311,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
 
       // No service_tier yet → no tier badge
       expect(screen.queryByText('priority')).toBeNull();
+      expect(screen.getByText('low')).toBeDefined();
 
       // Rerender with final event that includes service_tier
       const finalEvent = {
@@ -330,6 +332,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
 
       // Tier badge appears; reasoning is never shown in the table
       expect(screen.getByText('priority')).toBeDefined();
+      expect(screen.getByText('low')).toBeDefined();
       expect(screen.queryByText('high · 8.2k')).toBeNull();
     });
   });

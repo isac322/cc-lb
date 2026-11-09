@@ -113,147 +113,114 @@ fn request_event_filter_indexes_match_p1_2_gate_outcome() {
         .expect("postgres request-event filter index P1-2 gate");
 }
 
-#[test]
-fn request_event_renewal_conjunctive_plan_avoids_bitmap_and_sort() {
-    let Some(url) = postgres_url() else {
-        eprintln!("skip: CI_POSTGRES_URL or PG_URL not set");
-        return;
+async fn run_renewal_conjunctive_checks(pool: &PgPool, storage: &PostgresStorage) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO request_events_v1 \
+         (ts, event_id, list_ts_ms, list_event_key, list_status, model, source_kind, event_kind, principal_id) \
+         VALUES (to_timestamp($1 / 1000.0), 'control-renewal', $1, 'control-renewal', 200, \
+                 'claude-control', 'proxy', 'renewal', 'control-principal')",
+    )
+    .bind(i64::try_from(BASE_MS + SPAN_DAYS * DAY_MS - 1)?)
+    .execute(pool)
+    .await?;
+    sqlx::query("ANALYZE request_events_v1")
+        .execute(pool)
+        .await?;
+
+    let query = RequestEventListQuery {
+        since_unix_secs: BASE_MS / 1_000,
+        until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
+        limit: 50,
+        filters: RequestEventStreamFilters {
+            event_kinds: Some(vec![RequestEventKind::Renewal]),
+            ..Default::default()
+        },
+        source_kind: Some("renewal".to_owned()),
+        ..Default::default()
     };
-
-    tokio::runtime::Runtime::new()
-        .expect("tokio runtime")
-        .block_on(async move {
-            let fixture = Fixture::create(&url).await?;
-            let result = async {
-            let storage = PostgresStorage::new(
-                fixture.pool.clone(),
-                Arc::new(cc_lb_clock::SystemClock),
-            );
-            storage.initialize().await?;
-            for batch_start in (1..=ROWS).step_by(usize::try_from(SEED_BATCH_ROWS)?) {
-                let batch_end = (batch_start + SEED_BATCH_ROWS - 1).min(ROWS);
-                sqlx::query(SEED_SQL)
-                    .bind(ROWS)
-                    .bind(i64::try_from(BASE_MS)?)
-                    .bind(i64::try_from(SPAN_DAYS * DAY_MS)?)
-                    .bind(batch_start)
-                    .bind(batch_end)
-                    .execute(&fixture.pool)
-                    .await?;
-            }
-            sqlx::query(
-                "INSERT INTO request_events_v1 \
-                 (ts, event_id, list_ts_ms, list_event_key, list_status, model, source_kind, event_kind, principal_id) \
-                 VALUES (to_timestamp($1 / 1000.0), 'control-renewal', $1, 'control-renewal', 200, \
-                         'claude-control', 'proxy', 'renewal', 'control-principal')",
-            )
-            .bind(i64::try_from(BASE_MS + SPAN_DAYS * DAY_MS - 1)?)
-            .execute(&fixture.pool)
-            .await?;
-            sqlx::query("ANALYZE request_events_v1")
-                .execute(&fixture.pool)
-                .await?;
-
-            let query = RequestEventListQuery {
+    let plan = explain_request_event_list(storage, &query)
+        .await?
+        .context("renewal conjunctive list produced no plan")?;
+    let summary = summarize(&plan);
+    ensure!(
+        !summary.has_sort && !summary.has_bitmap_and,
+        "renewal+renewal list must use an ordered single-index plan: {plan}"
+    );
+    ensure!(
+        summary
+            .indexes
+            .contains("request_events_v1_source_kind_list_order_idx"),
+        "renewal+renewal list must use source-kind ordering index: {plan}"
+    );
+    let single_shape_cases = [
+        ("messages-kind", Some(RequestEventKind::Messages), None),
+        ("renewal-kind", Some(RequestEventKind::Renewal), None),
+        ("source-all", None, Some("all")),
+        ("source-renewal", None, Some("renewal")),
+    ];
+    for (name, event_kind, source_kind) in single_shape_cases {
+        let plan = explain_request_event_list(
+            storage,
+            &RequestEventListQuery {
                 since_unix_secs: BASE_MS / 1_000,
                 until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
                 limit: 50,
                 filters: RequestEventStreamFilters {
-                    event_kinds: Some(vec![RequestEventKind::Renewal]),
+                    event_kinds: event_kind.map(|kind| vec![kind]),
                     ..Default::default()
                 },
-                source_kind: Some("renewal".to_owned()),
+                source_kind: source_kind.map(str::to_owned),
                 ..Default::default()
-            };
-            let plan = explain_request_event_list(&storage, &query)
-                .await?
-                .context("renewal conjunctive list produced no plan")?;
-            let summary = summarize(&plan);
-            ensure!(
-                !summary.has_sort && !summary.has_bitmap_and,
-                "renewal+renewal list must use an ordered single-index plan: {plan}"
-            );
-            ensure!(
-                summary
-                    .indexes
-                    .contains("request_events_v1_source_kind_list_order_idx"),
-                "renewal+renewal list must use source-kind ordering index: {plan}"
-            );
-            let single_shape_cases = [
-                ("messages-kind", Some(RequestEventKind::Messages), None),
-                ("renewal-kind", Some(RequestEventKind::Renewal), None),
-                ("source-all", None, Some("all")),
-                ("source-renewal", None, Some("renewal")),
-            ];
-            for (name, event_kind, source_kind) in single_shape_cases {
-                let plan = explain_request_event_list(
-                    &storage,
-                    &RequestEventListQuery {
-                        since_unix_secs: BASE_MS / 1_000,
-                        until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
-                        limit: 50,
-                        filters: RequestEventStreamFilters {
-                            event_kinds: event_kind.map(|kind| vec![kind]),
-                            ..Default::default()
-                        },
-                        source_kind: source_kind.map(str::to_owned),
-                        ..Default::default()
-                    },
-                )
-                .await?
-                .with_context(|| format!("{name} list produced no plan"))?;
-                let summary = summarize(&plan);
-                ensure!(
-                    !summary.has_sort && !summary.has_bitmap_and,
-                    "{name} list must avoid Sort/BitmapAnd: {plan}"
-                );
-            }
+            },
+        )
+        .await?
+        .with_context(|| format!("{name} list produced no plan"))?;
+        let summary = summarize(&plan);
+        ensure!(
+            !summary.has_sort && !summary.has_bitmap_and,
+            "{name} list must avoid Sort/BitmapAnd: {plan}"
+        );
+    }
 
-            let contradictory = storage
-                .list_request_events(&RequestEventListQuery {
-                    since_unix_secs: BASE_MS / 1_000,
-                    until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
-                    limit: 50,
-                    filters: RequestEventStreamFilters {
-                        event_kinds: Some(vec![RequestEventKind::Messages]),
-                        ..Default::default()
-                    },
-                    source_kind: Some("renewal".to_owned()),
-                    ..Default::default()
-                })
-                .await?;
-            ensure!(
-                contradictory.is_empty(),
-                "renewal source + messages kind must be empty"
-            );
-
-            let stored_renewal = storage
-                .list_request_events(&RequestEventListQuery {
-                    since_unix_secs: BASE_MS / 1_000,
-                    until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
-                    limit: 50,
-                    filters: RequestEventStreamFilters {
-                        event_kinds: Some(vec![RequestEventKind::Renewal]),
-                        ..Default::default()
-                    },
-                    source_kind: Some("all".to_owned()),
-                    ..Default::default()
-                })
-                .await?;
-            ensure!(
-                stored_renewal
-                    .iter()
-                    .any(|event| event.event_id.as_deref() == Some("control-renewal")),
-                "non-renewal source with stored renewal kind must remain visible"
-            );
-
-            Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            fixture.drop_schema().await?;
-            result
+    let contradictory = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: BASE_MS / 1_000,
+            until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
+            limit: 50,
+            filters: RequestEventStreamFilters {
+                event_kinds: Some(vec![RequestEventKind::Messages]),
+                ..Default::default()
+            },
+            source_kind: Some("renewal".to_owned()),
+            ..Default::default()
         })
-        .expect("renewal conjunctive request-event plan");
+        .await?;
+    ensure!(
+        contradictory.is_empty(),
+        "renewal source + messages kind must be empty"
+    );
+
+    let stored_renewal = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: BASE_MS / 1_000,
+            until_unix_secs: (BASE_MS + SPAN_DAYS * DAY_MS) / 1_000,
+            limit: 50,
+            filters: RequestEventStreamFilters {
+                event_kinds: Some(vec![RequestEventKind::Renewal]),
+                ..Default::default()
+            },
+            source_kind: Some("all".to_owned()),
+            ..Default::default()
+        })
+        .await?;
+    ensure!(
+        stored_renewal
+            .iter()
+            .any(|event| event.event_id.as_deref() == Some("control-renewal")),
+        "non-renewal source with stored renewal kind must remain visible"
+    );
+
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -544,6 +511,7 @@ async fn run_gate(pool: &PgPool) -> Result<()> {
         "time-selective request-log plans fell back to a sequential scan after the drop: \
          {regressions:?}\n{after_report}"
     );
+    run_renewal_conjunctive_checks(pool, &storage).await?;
     Ok(())
 }
 

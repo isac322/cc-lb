@@ -35,7 +35,6 @@ fn pool_history_record(snapshot_at_unix_secs: i64, utilization: f64) -> PoolQuot
     }
 }
 
-#[tokio::test]
 async fn subscription_quota_latest_lists_registered_upstreams() {
     let server = admin_test_common::spawn_admin_server().await;
     let (status, _, body) = server
@@ -57,7 +56,6 @@ async fn subscription_quota_latest_lists_registered_upstreams() {
     assert_eq!(body["upstreams"][0]["upstream_name"], "quota-upstream");
 }
 
-#[tokio::test]
 async fn subscription_quota_series_defaults_missing_upstream_ids_to_all() {
     let server = admin_test_common::spawn_admin_server().await;
     let (status, _, _) = server
@@ -80,7 +78,6 @@ async fn subscription_quota_series_defaults_missing_upstream_ids_to_all() {
     assert!(body["series"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
 async fn subscription_quota_series_defaults_exclude_stored_fable_window() {
     // Given: only a Fable-scoped weekly checkpoint is stored.
     let server = admin_test_common::spawn_admin_server().await;
@@ -114,7 +111,6 @@ async fn subscription_quota_series_defaults_exclude_stored_fable_window() {
     assert!(series.is_empty());
 }
 
-#[tokio::test]
 async fn subscription_quota_series_explicit_fable_window_includes_stored_series() {
     // Given: only a Fable-scoped weekly checkpoint is stored.
     let server = admin_test_common::spawn_admin_server().await;
@@ -150,7 +146,6 @@ async fn subscription_quota_series_explicit_fable_window_includes_stored_series(
     assert_eq!(series[0]["buckets"][1]["utilization_last"], 0.28);
 }
 
-#[tokio::test]
 async fn subscription_quota_pool_history_accepts_explicit_fable_window() {
     let server = admin_test_common::spawn_admin_server().await;
     server
@@ -206,7 +201,6 @@ async fn subscription_quota_pool_history_accepts_explicit_fable_window() {
     assert_close(compact_point["utilization_percent"].as_f64(), 28.0);
 }
 
-#[tokio::test]
 async fn subscription_quota_pool_history_caps_chart_points_and_preserves_peak() {
     let server = admin_test_common::spawn_admin_server().await;
     server
@@ -252,7 +246,6 @@ async fn subscription_quota_pool_history_caps_chart_points_and_preserves_peak() 
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
 async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_checkpoint_deadbanded()
 {
     let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
@@ -384,7 +377,6 @@ async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_che
     }
 }
 
-#[tokio::test]
 async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes() {
     let server = admin_test_common::spawn_admin_server().await;
     let upstream_id = create_oauth_upstream(&server, "checkpoint-series").await;
@@ -471,7 +463,6 @@ async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_l
     );
 }
 
-#[tokio::test]
 async fn subscription_quota_checkpoint_aggregate_carries_unaligned_checkpoints_to_evaluation_time()
 {
     let clock = test_clock();
@@ -548,7 +539,6 @@ async fn subscription_quota_checkpoint_aggregate_carries_unaligned_checkpoints_t
     assert_eq!(body["windows"][0]["contributing_upstreams"], 2);
 }
 
-#[tokio::test]
 async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows_and_boundaries() {
     // Given: two upstreams with 5h/7d observations and usage exactly on the
     // provider-start and cc-lb-start interval boundaries.
@@ -691,7 +681,6 @@ impl cc_lb_control::SubscriptionQuotaCacheLike for AllWindowsCache {
     }
 }
 
-#[tokio::test]
 async fn provider_quotas_list_all_oauth_kinds_and_scope_series() {
     use cc_lb_storage_api::{UpstreamCreate, UpstreamStore, upstream::UpstreamKind};
 
@@ -825,7 +814,6 @@ async fn provider_quotas_list_all_oauth_kinds_and_scope_series() {
     }
 }
 
-#[tokio::test]
 async fn subscription_quota_anthropic_absent_five_hour_is_excluded_from_pool_aggregate() {
     let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
     let absent_upstream = create_oauth_upstream(&server, "anthropic-ultra").await;
@@ -906,7 +894,6 @@ async fn subscription_quota_anthropic_absent_five_hour_is_excluded_from_pool_agg
     assert_eq!(snapshot.utilization, Some(0.40));
 }
 
-#[tokio::test]
 async fn subscription_quota_anthropic_all_absent_five_hour_drops_from_pool_outputs() {
     let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
     let first = create_oauth_upstream(&server, "anthropic-ultra-a").await;
@@ -987,7 +974,6 @@ async fn subscription_quota_anthropic_all_absent_five_hour_drops_from_pool_outpu
     );
 }
 
-#[tokio::test]
 async fn subscription_quota_five_hour_absence_honors_requested_source() {
     struct CachedQuota(Uuid, cc_lb_domain::SubscriptionQuotaCandidateSnapshot);
     impl cc_lb_control::SubscriptionQuotaCacheLike for CachedQuota {
@@ -1124,7 +1110,6 @@ async fn subscription_quota_five_hour_absence_honors_requested_source() {
     }
 }
 
-#[tokio::test]
 async fn subscription_quota_openai_pool_uses_equal_mean_and_provider_isolation() {
     let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
     let openai_a = create_kind_oauth_upstream(&server, "openai-a", "openai_oauth").await;
@@ -1240,7 +1225,6 @@ async fn subscription_quota_openai_pool_uses_equal_mean_and_provider_isolation()
     );
 }
 
-#[tokio::test]
 async fn subscription_quota_gemini_pool_uses_equal_mean() {
     let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
     let gemini_a = create_kind_oauth_upstream(&server, "gemini-a", "gemini_oauth").await;
@@ -1341,7 +1325,6 @@ async fn subscription_quota_gemini_pool_uses_equal_mean() {
     }
 }
 
-#[tokio::test]
 async fn subscription_quota_pool_rejects_unknown_and_cross_provider_windows() {
     let server = admin_test_common::spawn_admin_server().await;
     for path in [
@@ -1593,7 +1576,6 @@ fn assert_close(actual: Option<f64>, expected: f64) {
     );
 }
 
-#[tokio::test]
 async fn subscription_quota_anthropic_five_hour_absence_is_not_unknown_and_is_reversible() {
     let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
     let upstream = create_oauth_upstream(&server, "anthropic-changing-window").await;
@@ -1639,4 +1621,32 @@ async fn subscription_quota_anthropic_five_hour_absence_is_not_unknown_and_is_re
     assert_eq!(restored["windows"][0]["eligible_upstreams"], 1);
     assert_close(restored["windows"][0]["utilization"].as_f64(), 0.0);
     assert_eq!(restored["windows"][0]["stale_upstreams"], 1);
+}
+
+#[tokio::test]
+async fn subscription_quotas_suite_part_1() {
+    subscription_quota_latest_lists_registered_upstreams().await;
+    subscription_quota_series_defaults_missing_upstream_ids_to_all().await;
+    subscription_quota_series_defaults_exclude_stored_fable_window().await;
+    subscription_quota_series_explicit_fable_window_includes_stored_series().await;
+    subscription_quota_pool_history_accepts_explicit_fable_window().await;
+    subscription_quota_pool_history_caps_chart_points_and_preserves_peak().await;
+    subscription_quota_aggregate_refreshes_observed_at_from_latest_when_checkpoint_deadbanded()
+        .await;
+    subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes().await;
+    subscription_quota_checkpoint_aggregate_carries_unaligned_checkpoints_to_evaluation_time()
+        .await;
+}
+
+#[tokio::test]
+async fn subscription_quotas_suite_part_2() {
+    subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows_and_boundaries().await;
+    provider_quotas_list_all_oauth_kinds_and_scope_series().await;
+    subscription_quota_anthropic_absent_five_hour_is_excluded_from_pool_aggregate().await;
+    subscription_quota_anthropic_all_absent_five_hour_drops_from_pool_outputs().await;
+    subscription_quota_five_hour_absence_honors_requested_source().await;
+    subscription_quota_openai_pool_uses_equal_mean_and_provider_isolation().await;
+    subscription_quota_gemini_pool_uses_equal_mean().await;
+    subscription_quota_pool_rejects_unknown_and_cross_provider_windows().await;
+    subscription_quota_anthropic_five_hour_absence_is_not_unknown_and_is_reversible().await;
 }

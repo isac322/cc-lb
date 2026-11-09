@@ -184,6 +184,7 @@ struct Partial {
     cache_state: Option<RequestCacheState>,
     thinking_budget_tokens: Option<u64>,
     reasoning_effort: Option<String>,
+    thinking_level: Option<String>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     termination: Option<TerminationInfo>,
 
@@ -388,6 +389,7 @@ impl Partial {
             cost_cache_write_12h_micros: cost.cache_write_12h,
             thinking_budget_tokens: self.thinking_budget_tokens,
             reasoning_effort: self.reasoning_effort.clone(),
+            thinking_level: self.thinking_level.clone(),
             request_body_read_ms: self.request_body_read_ms,
             request_body_bytes: self.request_body_bytes,
             request_body_first_chunk_ms: self.io_timings.request_body_first_chunk_ms,
@@ -1287,6 +1289,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             }
             partial.thinking_budget_tokens = info.thinking_budget_tokens;
             partial.reasoning_effort = info.reasoning_effort.clone();
+            partial.thinking_level = info.thinking_level.clone();
             partial.cache_breakpoints = info.cache_breakpoints.clone();
             partial.parse = Some(info);
         }
@@ -1617,6 +1620,7 @@ fn finalize_base(
         cache_write_input_tokens_12h: partial.usage.cache_write_input_tokens_12h,
         thinking_budget_tokens: partial.thinking_budget_tokens,
         reasoning_effort: partial.reasoning_effort.clone(),
+        thinking_level: partial.thinking_level.clone(),
         cache_breakpoints: partial.cache_breakpoints.clone(),
         native_cache: native_cache_with_usage(partial),
         token_estimate_source,
@@ -3890,12 +3894,21 @@ mod tests {
                 r#"{"model":"claude-sonnet-4-5-20250929","messages":[],"thinking":{"type":"enabled","budget_tokens":18000},"output_config":{"effort":"max"}}"#,
                 Some(18_000),
                 Some("max"),
+                None,
             ),
             (
                 "thinking-budget-absent",
                 r#"{"model":"claude-sonnet-4-5-20250929","messages":[]}"#,
                 None,
                 None,
+                None,
+            ),
+            (
+                "gemini-thinking-level",
+                r#"{"model":"gemini-test","generationConfig":{"thinkingConfig":{"thinkingLevel":"LOW","thinkingBudget":1024,"includeThoughts":true}}}"#,
+                Some(1024),
+                None,
+                Some("LOW"),
             ),
         ];
         let (tx, rx) = mpsc::channel(16);
@@ -3910,7 +3923,7 @@ mod tests {
         );
 
         // When each fixture is parsed, assembled, and terminated.
-        for (event_id, body, _, _) in cases {
+        for (event_id, body, _, _, _) in cases {
             let value: serde_json::Value = sonic_rs::from_str(body).expect("valid request fixture");
             let thinking_budget_tokens = value
                 .get("thinking")
@@ -3918,10 +3931,19 @@ mod tests {
                     thinking.get("type").and_then(serde_json::Value::as_str) == Some("enabled")
                 })
                 .and_then(|thinking| thinking.get("budget_tokens"))
-                .and_then(serde_json::Value::as_u64);
+                .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    value
+                        .pointer("/generationConfig/thinkingConfig/thinkingBudget")
+                        .and_then(serde_json::Value::as_u64)
+                });
             let reasoning_effort = value
                 .get("output_config")
                 .and_then(|output_config| output_config.get("effort"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let thinking_level = value
+                .pointer("/generationConfig/thinkingConfig/thinkingLevel")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
             let event_id = eid(event_id);
@@ -3949,6 +3971,7 @@ mod tests {
                     body_bytes: u64::try_from(body.len()).expect("fixture body length fits u64"),
                     thinking_budget_tokens,
                     reasoning_effort,
+                    thinking_level,
                     ..ParseInfo::default()
                 }),
             })
@@ -3985,7 +4008,7 @@ mod tests {
         while let Ok(update) = broadcast_rx.try_recv() {
             updates.push(update);
         }
-        for (event_id, _, expected_budget, expected_effort) in cases {
+        for (event_id, _, expected_budget, expected_effort, expected_level) in cases {
             let parse_partial = updates
                 .iter()
                 .filter_map(|update| match update {
@@ -4012,6 +4035,8 @@ mod tests {
             assert_eq!(final_event.thinking_budget_tokens, expected_budget);
             assert_eq!(parse_partial.reasoning_effort.as_deref(), expected_effort);
             assert_eq!(final_event.reasoning_effort.as_deref(), expected_effort);
+            assert_eq!(parse_partial.thinking_level.as_deref(), expected_level);
+            assert_eq!(final_event.thinking_level.as_deref(), expected_level);
         }
     }
 
