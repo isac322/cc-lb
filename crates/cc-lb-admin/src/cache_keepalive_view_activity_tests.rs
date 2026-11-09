@@ -34,6 +34,7 @@ fn item(source: CacheKeepaliveSessionEntrySource) -> CacheKeepaliveSessionListIt
         terminal_reason: None,
         decision: Some("not_tracked".to_owned()),
         reason: "user turn (stop_reason=end_turn)".to_owned(),
+        display_reason: None,
         error: None,
         config_snapshot: None,
     }

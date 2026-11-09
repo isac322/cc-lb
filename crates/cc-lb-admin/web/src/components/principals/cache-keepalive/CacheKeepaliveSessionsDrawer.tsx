@@ -40,6 +40,8 @@ interface Props {
 }
 
 const HORIZON_OPTIONS: SegmentedOption<CacheKeepaliveHorizon>[] = [
+  { value: '1h', label: '1h' },
+  { value: '6h', label: '6h' },
   { value: '24h', label: '24h' },
   { value: '7d', label: '7d' },
   { value: 'all', label: 'All' },
@@ -61,11 +63,20 @@ const TRACKED_STATUS_KEYS = new Set<TrackedStatus>(
 );
 
 function extractTriggerLabel(row: CacheKeepaliveRow): string {
-  const text = `${row.id} ${row.reason}`;
-  const toolUse = text.match(/tool_use:\s*`([^`]+)`/i);
-  if (toolUse?.[1]) return toolUse[1];
-  const stopReason = text.match(/stop_reason\s*=\s*([^\s,)]+)/i);
-  if (stopReason?.[1]) return `stop_reason=${stopReason[1]}`;
+  const sourceText = `${row.display_reason ?? ''} ${row.reason}`;
+  const toolMatch = sourceText.match(/tool_use:\s*`?([A-Za-z0-9_:-]+)`?/i);
+  if (toolMatch?.[1]) return toolMatch[1];
+  const stopMatch = sourceText.match(/stop_reason=([A-Za-z0-9_:-]+)/i);
+  if (stopMatch?.[1]) return `stop_reason=${stopMatch[1]}`;
+  const unsupportedMatch = sourceText.match(
+    /zero-token renewal unsupported:\s*([^—·\n]+)/i,
+  );
+  if (unsupportedMatch?.[1])
+    return `Unsupported: ${unsupportedMatch[1].trim()}`;
+  if (/cached prefix too small/i.test(sourceText)) return 'Prefix < min tokens';
+  if (/snapshot too large/i.test(sourceText)) return 'Snapshot too large';
+  if (/ambiguous turn/i.test(sourceText)) return 'Ambiguous turn';
+  if (/agent-in-turn/i.test(sourceText)) return 'Agent in-turn';
   return 'Other';
 }
 
@@ -128,9 +139,16 @@ function OverviewStrip({
   onHorizonChange: (h: CacheKeepaliveHorizon) => void;
   showHorizon: boolean;
 }) {
+  const effectiveCostSaved =
+    summary?.cost_saved ?? summary?.resolved_cost_saved ?? null;
+  const effectiveTotalAvoided =
+    summary?.total_avoided ?? summary?.resolved_total_avoided ?? null;
   const avoidedKnown =
-    summary?.total_avoided != null && summary?.evidence_status === 'observed';
-  const avoided = summary?.total_avoided ?? 0;
+    effectiveTotalAvoided != null &&
+    (summary?.evidence_status === 'observed' ||
+      (summary?.evidence_status === 'pending' &&
+        summary?.resolved_total_avoided != null));
+  const avoided = effectiveTotalAvoided ?? 0;
   const spent = summary?.total_spent ?? 0;
   const total = avoidedKnown ? avoided + spent : 0;
   const avoidedPercent = total > 0 ? (avoided / total) * 100 : 0;
@@ -141,16 +159,16 @@ function OverviewStrip({
   let netClassName = 'text-text-muted';
   if (
     summary &&
-    summary.cost_saved !== null &&
+    effectiveCostSaved !== null &&
     summary.evidence_status === 'observed'
   ) {
-    if (summary.cost_saved > 0) {
+    if (effectiveCostSaved > 0) {
       verdict = <Badge tone="ok">Saving</Badge>;
-      netReadout = formatSignedMoney(summary.cost_saved);
+      netReadout = formatSignedMoney(effectiveCostSaved);
       netClassName = 'text-success-text';
-    } else if (summary.cost_saved < 0) {
+    } else if (effectiveCostSaved < 0) {
       verdict = <Badge tone="danger">Losing</Badge>;
-      netReadout = formatMoney(summary.cost_saved);
+      netReadout = formatMoney(effectiveCostSaved);
       netClassName = 'text-danger-text';
     } else {
       verdict = <Badge tone="neutral">Break-even</Badge>;
@@ -231,14 +249,14 @@ function OverviewStrip({
             </div>
             <p className="mt-2 text-caption text-text-muted tabular-nums">
               Avoided{' '}
-              {summary.total_avoided === null
+              {effectiveTotalAvoided === null
                 ? '—'
-                : formatMoney(summary.total_avoided)}
+                : formatMoney(effectiveTotalAvoided)}
               {' − '}Spent {formatMoney(summary.total_spent)}
               {' = '}Net{' '}
-              {summary.cost_saved === null
+              {effectiveCostSaved === null
                 ? '—'
-                : formatSignedMoney(summary.cost_saved)}
+                : formatSignedMoney(effectiveCostSaved)}
             </p>
           </div>
         </div>
@@ -510,7 +528,7 @@ export function CacheKeepaliveSessionsDrawer({
     () => new Set(TRACKED_STATUS_KEYS),
   );
   const [showNotTracked, setShowNotTracked] = useState(false);
-  const [groupMode, setGroupMode] = useState<GroupMode>('flat');
+  const [groupMode, setGroupMode] = useState<GroupMode>('trigger');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     () => new Set(),
   );
@@ -523,7 +541,7 @@ export function CacheKeepaliveSessionsDrawer({
     setSelected(null);
     setSelectedStatuses(new Set(TRACKED_STATUS_KEYS));
     setShowNotTracked(false);
-    setGroupMode('flat');
+    setGroupMode('trigger');
     setCollapsedGroups(new Set());
     setHorizon('24h');
   }, [principal.id]);

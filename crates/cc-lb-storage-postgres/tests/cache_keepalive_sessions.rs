@@ -1014,6 +1014,16 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
     assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Pending);
 
     let removed = storage.purge_cache_keepalive_expired(351).await?;
+    assert_eq!(removed, 0);
+    assert!(
+        storage
+            .get_cache_keepalive_session("terminal-session")
+            .await?
+            .is_some()
+    );
+    let removed = storage
+        .purge_cache_keepalive_expired(102 + 7 * 24 * 60 * 60 + 1)
+        .await?;
     assert_eq!(removed, 1);
     assert!(
         storage

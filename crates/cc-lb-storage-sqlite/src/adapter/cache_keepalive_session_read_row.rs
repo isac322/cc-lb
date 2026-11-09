@@ -75,6 +75,7 @@ pub(crate) fn list_item_from_row(row: SqliteRow) -> StorageResult<CacheKeepalive
             .transpose()?,
         decision: row.try_get("decision").map_err(map_sqlx_error)?,
         reason: row.try_get("reason").map_err(map_sqlx_error)?,
+        display_reason: row.try_get("display_reason").map_err(map_sqlx_error)?,
         error: row.try_get("error").map_err(map_sqlx_error)?,
         config_snapshot: config_snapshot_from_db(
             row.try_get("config_snapshot").map_err(map_sqlx_error)?,

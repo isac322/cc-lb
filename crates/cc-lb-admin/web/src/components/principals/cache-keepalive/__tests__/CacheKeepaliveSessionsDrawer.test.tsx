@@ -497,7 +497,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(within(row).queryByTestId('session-detail-error')).toBeNull();
   });
 
-  it('renders drawer title, principal name, and time range with 24h default', () => {
+  it('renders drawer title, principal name, and time range with 24h default', async () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -515,13 +515,38 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       screen.getByRole('radiogroup', { name: 'Time range' }),
     );
     expect(
+      range.getByRole('radio', { name: '1h' }).getAttribute('aria-checked'),
+    ).toBe('false');
+    expect(
+      range.getByRole('radio', { name: '6h' }).getAttribute('aria-checked'),
+    ).toBe('false');
+    expect(
       range.getByRole('radio', { name: '24h' }).getAttribute('aria-checked'),
     ).toBe('true');
     expect(
       range.getByRole('radio', { name: '7d' }).getAttribute('aria-checked'),
     ).toBe('false');
     expect(range.getByRole('radio', { name: 'All' })).toBeDefined();
+    const grouping = screen.getByRole('radiogroup', { name: 'List grouping' });
+    expect(
+      within(grouping)
+        .getByRole('radio', { name: 'Group by trigger' })
+        .getAttribute('aria-checked'),
+    ).toBe('true');
 
+    const user = userEvent.setup();
+    await user.click(range.getByRole('radio', { name: '1h' }));
+    expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenCalledWith(
+      'p-123',
+      { horizon: '1h', status: undefined, error: undefined },
+      true,
+    );
+    await user.click(range.getByRole('radio', { name: '6h' }));
+    expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenCalledWith(
+      'p-123',
+      { horizon: '6h', status: undefined, error: undefined },
+      true,
+    );
     expect(screen.getByText('Retained history:')).toBeDefined();
     expect(screen.getByText('17 renewals fired')).toBeDefined();
   });
@@ -635,6 +660,88 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       ),
     ).toBe(true);
   });
+  it('classifies terminal and guardrail trigger reasons into dedicated groups', () => {
+    const triggerRows = [
+      {
+        ...cacheKeepaliveApiRows[2]!,
+        id: 'terminal-max-renewals',
+        reason: 'max renewals reached',
+        display_reason:
+          'agent-in-turn (tool_use: `StructuredOutput`) — first renewal in 4m 7s',
+      },
+      {
+        ...cacheKeepaliveApiRows[0]!,
+        id: 'unsupported-tool-choice',
+        reason: 'zero-token renewal unsupported: forced tool_choice',
+        display_reason: null,
+      },
+      {
+        ...cacheKeepaliveApiRows[0]!,
+        id: 'small-prefix',
+        reason: 'cached prefix too small (1200 tokens < minimum 10000)',
+        display_reason: null,
+      },
+      {
+        ...cacheKeepaliveApiRows[0]!,
+        id: 'large-snapshot',
+        reason: 'snapshot too large',
+        display_reason: null,
+      },
+      {
+        ...cacheKeepaliveApiRows[0]!,
+        id: 'ambiguous-turn',
+        reason: 'ambiguous turn',
+        display_reason: null,
+      },
+    ];
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+      data: {
+        pages: [
+          {
+            summary: summaryBase,
+            rows: triggerRows,
+            next_cursor: null,
+          },
+        ],
+      },
+      isLoading: false,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const groupHeaders = Array.from(
+      screen
+        .getByTestId('cache-keepalive-session-list-region')
+        .querySelectorAll('li:not([data-key])'),
+    ).map((header) => header.textContent ?? '');
+    expect(groupHeaders.some((text) => text.includes('StructuredOutput'))).toBe(
+      true,
+    );
+    expect(
+      groupHeaders.some((text) =>
+        text.includes('Unsupported: forced tool_choice'),
+      ),
+    ).toBe(true);
+    expect(
+      groupHeaders.some((text) => text.includes('Prefix < min tokens')),
+    ).toBe(true);
+    expect(
+      groupHeaders.some((text) => text.includes('Snapshot too large')),
+    ).toBe(true);
+    expect(groupHeaders.some((text) => text.includes('Ambiguous turn'))).toBe(
+      true,
+    );
+    expect(groupHeaders.some((text) => text.includes('Other'))).toBe(false);
+  });
 
   it('renders Saving and Losing verdicts in the P&L equation well', () => {
     const { rerender } = renderWithProviders(
@@ -706,7 +813,9 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(
       within(renewedRow as HTMLElement).getByText('Renewed'),
     ).toBeDefined();
-    expect(screen.getByText('+$0.102')).toBeDefined();
+    expect(
+      within(renewedRow as HTMLElement).getByText('+$0.102'),
+    ).toBeDefined();
     expect(screen.getByText('agent-in-turn (tool_use: `bash`)')).toBeDefined();
 
     // Check error row
@@ -714,7 +823,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     const errorRow = screen.getByText('error-overlaps-reason').closest('li');
     expect(errorRow).not.toBeNull();
     expect(within(errorRow as HTMLElement).getByText('Error')).toBeDefined();
-    expect(screen.getByText('−$0.006')).toBeDefined();
+    expect(within(errorRow as HTMLElement).getByText('−$0.006')).toBeDefined();
   });
 
   it('renders retry tick segments correctly based on state', () => {

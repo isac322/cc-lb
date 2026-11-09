@@ -112,6 +112,8 @@ pub struct CacheKeepaliveSessionListItem {
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,
     pub decision: Option<String>,
     pub reason: String,
+    #[serde(default)]
+    pub display_reason: Option<String>,
     pub error: Option<String>,
     pub config_snapshot: Option<CacheKeepaliveConfigSnapshot>,
 }

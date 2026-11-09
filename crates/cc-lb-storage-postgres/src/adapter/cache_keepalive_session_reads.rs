@@ -38,6 +38,7 @@ SELECT \
         WHEN 'dispatch_error' THEN 'renewal dispatch unavailable' \
         ELSE display_reason \
     END AS reason, \
+    display_reason, \
     error, \
     config_snapshot";
 
@@ -58,6 +59,7 @@ SELECT \
     NULL::TEXT AS terminal_reason, \
     decision, \
     reason, \
+    reason AS display_reason, \
     error, \
     config_snapshot";
 
@@ -106,8 +108,8 @@ fn query_u64_to_i64(value: u64, field: &str, reason: &str) -> StorageResult<i64>
     })
 }
 
-fn filter_includes_sessions(filter: CacheKeepaliveSessionFilter) -> bool {
-    !matches!(filter, CacheKeepaliveSessionFilter::NotTracked)
+fn filter_includes_sessions(_filter: CacheKeepaliveSessionFilter) -> bool {
+    true
 }
 
 fn filter_includes_decisions(filter: CacheKeepaliveSessionFilter) -> bool {
@@ -130,13 +132,19 @@ fn push_session_filter(builder: &mut QueryBuilder<Postgres>, filter: CacheKeepal
         }
         CacheKeepaliveSessionFilter::Capped => {
             builder.push(
-                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss')",
+                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss') \
+                  AND NOT (terminal_reason = 'cancelled' AND refresh_count = 0 AND error IS NULL)",
             );
         }
         CacheKeepaliveSessionFilter::Expired => {
             builder.push(" AND terminal_reason IN ('expired', 'cache_miss')");
         }
-        CacheKeepaliveSessionFilter::NotTracked => unreachable!("session branch is omitted"),
+        CacheKeepaliveSessionFilter::NotTracked => {
+            builder.push(
+                " AND status = 'terminal' AND terminal_reason = 'cancelled' \
+                  AND refresh_count = 0 AND error IS NULL",
+            );
+        }
     }
     if matches!(filter, CacheKeepaliveSessionFilter::Error) {
         builder.push(" AND error IS NOT NULL");
