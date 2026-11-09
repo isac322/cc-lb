@@ -115,6 +115,8 @@ Multipart audio transcription/translation and image edit/variation requests use 
 
 Before a streaming `POST /v1/responses` response starts, a proxy-generated failure returns the route's provider-shaped JSON error envelope with the matching error status (500, 502, or 503). After streaming has begun, the HTTP status remains `200`, and a proxy-generated failure is sent as a `response.failed` SSE event. Its payload includes `sequence_number` and a failed `response` with safe `error.code` and `error.message`, plus the observed response id when one is known.
 
+If an OpenAI Responses SSE body ends cleanly before `response.completed`, `response.incomplete`, `response.failed`, or another terminal event, cc-lb records `upstream_response_incomplete` and appends one `response.failed` event. Provider-reported usage remains authoritative, and existing provider errors retain precedence.
+
 An emitted provider failure keeps precedence over later upstream faults. Response transforms determine which terminal the client actually receives. SSE responses use streaming HTTP framing instead of forwarding an upstream `Content-Length`, so local failures or suppressed malformed suffixes cannot leave an incomplete fixed-length body. Passthrough payload bytes and their content encoding remain unchanged.
 
 ### Request events API

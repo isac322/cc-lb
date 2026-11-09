@@ -135,7 +135,7 @@ Stages an isolated working directory, starts the OTLP collector, runs the select
 - `CC_LB_BIN`: Path to `cc-lb` binary (defaults to `target/debug/cc-lb`)
 - `AGY_BIN`: Path to `agy` binary if not on `PATH`
 
-### 4. Offline provider-native local errors (#1165)
+### 4. Offline provider-native local errors and clean EOF (#1165, #1180)
 
 `local-error-contract.py` starts an existing `CC_LB_BIN` with fresh SQLite state,
 synthetic credentials, and a loopback-only upstream. It uses the real
@@ -153,22 +153,46 @@ Dependencies: Python 3.12+, current stable `openai`, `google-genai`, and
 Google's injection field remains named `HttpOptions.httpx_client`.
 The harness installs nothing and records actual SDK versions in `report.json`.
 It waits for health and provider-specific routing previews, rather than
-assuming a fixed startup or cache-settling delay.
+assuming a fixed startup or cache-settling delay. Optional JavaScript coverage
+uses `openai@7.53.0` and Node.js with native `fetch`; provision both SDK environments
+outside the repository and record that scratch directory in your cleanup ledger:
 
 ```bash
-# Regression gate: must fail against the old binary and pass against the fix.
+SDK_ENV=/absolute/path/to/task-owned-scratch/sdk
+python3 -m venv "$SDK_ENV/venv"
+"$SDK_ENV/venv/bin/python" -m pip install \
+  openai==3.46.0 google-genai==3.0.0 httpx2==2.16.0
+npm install --prefix "$SDK_ENV/js" --ignore-scripts --no-audit --no-fund \
+  --save-exact openai@7.53.0
+```
+
+Use `"$SDK_ENV/venv/bin/python"` instead of `python3` in the commands below.
+Pass `--openai-js-module "$SDK_ENV/js/node_modules/openai/index.mjs"` to add an
+actual JavaScript SDK clean-EOF request. The harness checks the package's exact
+name/version before creating resources. Use `--js-runtime /path/to/node` if
+needed. Omit that option for Python-only coverage; the report and request count
+distinguish the two runs. JavaScript retries are disabled, custom fetch rejects
+non-loopback URLs and redirects, and the child receives no provider credentials.
+
+```bash
+# #1180 regression gate: must fail against its baseline and pass against the fix.
 CC_LB_BIN=/absolute/path/to/old/cc-lb \
   python3 tests/real-client/provider-e2e/local-error-contract.py --expect new
 CC_LB_BIN=/absolute/path/to/new/cc-lb \
   python3 tests/real-client/provider-e2e/local-error-contract.py --expect new
 
-# Optional baseline proof: requires all three original defects and the new
-# framing defect, while retaining the original controls.
-CC_LB_BIN=/absolute/path/to/old/cc-lb \
+# #1180 baseline proof on a binary with the earlier #1165 fixes:
+CC_LB_BIN=/absolute/path/to/pre-1180/cc-lb \
+  python3 tests/real-client/provider-e2e/local-error-contract.py \
+  --expect new --expect-clean-eof old
+
+# Historical baseline proof requiring all earlier defects as well:
+CC_LB_BIN=/absolute/path/to/pre-1165/cc-lb \
   python3 tests/real-client/provider-e2e/local-error-contract.py --expect old
 ```
 
-Each run makes ten requests. The original nine cover healthy, injected-fault,
+Each Python-only run makes eleven requests (twelve with JavaScript enabled).
+The original nine cover healthy, injected-fault,
 and provider-failed responses for Responses SSE, buffered Responses, and
 buffered Gemini. Streaming faults close chunked transfer after
 `response.created` and a normal output delta, without the terminating chunk.
@@ -197,13 +221,37 @@ with no provider message. The durable row still recorded HTTP 200,
 baseline justifies the framing-defect oracle; its exact exceptions are evidence,
 not hard-coded expectations.
 
+The clean-EOF request is separate from the broken-chunk fault. The upstream
+writes the complete `response.created`/item/content/output-delta prefix once,
+declares its exact `Content-Length`, and finishes that body normally. Every
+response usage is null; no `response.completed`, `response.incomplete`, or
+`response.failed` event exists upstream. This distinguishes a missing semantic
+terminal from a transport failure. `responses-clean-eof.sse` retains the actual
+Python SDK wire bytes; the optional JavaScript request separately retains
+`responses-clean-eof-js.sse`.
+
+The fixed contract preserves HTTP 200 and every prefix byte, then appends exactly
+one native `response.failed` with sequence number 4, the observed response ID,
+`status: "failed"`, `api_error`, and the safe message
+`upstream SSE response ended before a terminal Responses event`. Both real SDK
+iterators must observe that failure once and finish without an HTTP framing
+exception. One durable row and its admin projection must record
+`upstream_stream_error` / `upstream_response_incomplete`; provider-unknown tokens
+and costs must remain null. The per-request difference in the isolated principal's
+`cc_lb_requests_completed_total` must be one `terminal_outcome="error"`, not a
+success. Metric visibility is polled to a deadline, not inferred from persistence.
+`--expect-clean-eof old` instead requires the unmodified prefix, silent SDK EOF,
+no durable error, and exactly one success completion. It proves the old false
+success; it is not a fixed-build pass. This flag defaults to `--expect` so the
+historical combined baseline command remains usable.
+
 For every request, the proxy's canonical response `request-id`
 (or `x-request-id` if supplied instead) joins the selected upstream to both
 `/admin/v1/events/delta` and a read-only SQLite query. If neither header exists,
 the isolated, sequential harness requires exactly one new SQLite row since
 its pre-request cursor and joins that actual ID to admin evidence. The report
 records both observed headers and the correlation source; it never invents an
-ID. A final table-wide count checks that all ten requests have one durable row.
+ID. A final table-wide count checks that every request has one durable row.
 SQLite evidence reads the current relational `request_id`, `upstream_id`,
 `error_code`, and `list_status` columns. Full event details come from the admin
 delta API; the harness does not depend on the legacy SQLite `payload` column.
@@ -220,11 +268,10 @@ native `api_error`. Correlation and the final row count are scoped by upstream:
 provider routers can generate the same `request-id` for different upstreams.
 
 
-
-
 Evidence stays in a fresh `cc-lb-1165-*` directory outside the repository:
-`report.json`, raw response bodies, `responses-fault.sse`, server logs, SQLite,
-and `cleanup-ledger.json`. Paths are printed, keys are not. The harness stops
+`report.json`, raw response bodies, `responses-fault.sse`,
+`responses-clean-eof.sse`, server logs, SQLite, and `cleanup-ledger.json`.
+Paths are printed, keys are not. The harness stops
 its server and upstream in `finally`; it retains evidence for inspection.
 Check ownership before following ledger cleanup commands. To choose a scratch
 parent, pass `--output-parent /existing/scratch/directory`.
@@ -256,6 +303,12 @@ python3 tests/real-client/provider-e2e/codex-error-replay/prepare.py \
   --codex-source /path/to/official/codex \
   --sse /path/to/cc-lb-1165-run/responses-fault.sse \
   --expect new
+
+# Prepare the same official parser for the separate semantic-EOF capture:
+python3 tests/real-client/provider-e2e/codex-error-replay/prepare.py \
+  --codex-source /path/to/official/codex \
+  --sse /path/to/cc-lb-1165-run/responses-clean-eof.sse \
+  --expect new
 ```
 
 Preparation prints the scratch workspace, its cleanup ledger, and the exact
@@ -270,21 +323,29 @@ reduced dependency graph. Original workspace/lock files, selected members,
 removed patches, and before/after hashes are recorded beside the replay evidence.
 The test command fails closed if its remaining offline dependencies are missing.
 For an old-mode capture, prepare with `--expect old`; the same parser must
-produce `stream closed before response.completed`, not the safe local message.
+produce `stream closed before response.completed`, not a safe local message.
+The replay selects its contract from the captured filename:
+`responses-fault.sse` expects the safe processing-error message;
+`responses-clean-eof.sse` (or `responses-clean-eof-js.sse`) expects the safe
+incomplete-Responses message. Keep those fixture names when retaining evidence.
+The preparer's `--expect` is the selected fixture's expectation, independent of
+the Python harness's earlier-error controls.
 
 The replay feeds the captured bytes in seven-byte fragments and requires the
-new failure to surface the exact local message once. Two always-on negative
-controls retain normal output first, then send either the old HTTP envelope
-or a generic `type: "error"`/`api_error` event. Both must produce generic EOF
-rather than the local message. `source-manifest.json` records the revision and
-input hashes; `replay-report.json` records the observed messages. Neither
+selected new failure to surface its exact local message once. Two always-on
+negative controls retain normal output first, then send either the old HTTP
+envelope or a generic `type: "error"`/`api_error` event with that same message.
+Both must produce generic EOF rather than the local message.
+`source-manifest.json` records the revision and input hashes;
+`replay-report.json` records the scenario and observed messages. Neither
 preparing the workspace nor passing the Python harness proves parser replay:
-the printed Cargo command must also pass.
+the printed Cargo command must also pass for each capture.
 
-Limits: this harness covers transport-body failure and malformed post-terminal
-Responses SSE under explicit `Content-Length`, not private principal
-disappearance, affinity-store failures, decode/transform fault injection, or
-Anthropic/Gemini SSE. Those remain engine integration-test gates.
+Limits: this harness covers transport-body failure, clean nonterminal Responses
+SSE, and malformed post-terminal Responses SSE under explicit `Content-Length`.
+It does not cover private principal disappearance, affinity-store failures,
+decode/transform fault injection, or Anthropic/Gemini SSE. Those remain engine
+integration-test gates.
 It proves SDK HTTP handling and the official Codex SSE parser, not the Codex
 CLI's rendering, retry loop, or live-provider behavior. All documentation here
 describes runnable checks, not an assertion that they have already passed.
