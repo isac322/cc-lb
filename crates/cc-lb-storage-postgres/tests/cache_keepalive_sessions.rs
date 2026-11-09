@@ -1006,6 +1006,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
         .await?
         .expect("terminal row exists");
     assert!(terminal.encrypted_payload.is_empty());
+    assert_eq!(terminal.expires_at_unix_secs, 102 + 7 * 24 * 60 * 60);
     let check = storage
         .check_cache_keepalive_generation("terminal-session")
         .await?
@@ -1021,9 +1022,12 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
             .await?
             .is_some()
     );
-    let removed = storage
-        .purge_cache_keepalive_expired(102 + 7 * 24 * 60 * 60 + 1)
-        .await?;
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET expires_at = 350 WHERE session_key_hash = 'terminal-session'",
+    )
+    .execute(storage.pool())
+    .await?;
+    let removed = storage.purge_cache_keepalive_expired(351).await?;
     assert_eq!(removed, 1);
     assert!(
         storage
