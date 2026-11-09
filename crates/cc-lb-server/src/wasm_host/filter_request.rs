@@ -135,9 +135,7 @@ impl FilterWireRequest<'_> {
                     .requested_service_tier
                     .as_deref()
                     .map(|value| v2::OptionalStrRef { value });
-                let query = self
-                    .ctx
-                    .query
+                let query = scrubbed_query
                     .as_deref()
                     .map(|value| v2::OptionalStrRef { value });
                 let principal = v2::PrincipalRef {
@@ -268,9 +266,7 @@ impl FilterWireRequest<'_> {
                     .requested_service_tier
                     .as_deref()
                     .map(|value| v3::OptionalStrRef { value });
-                let query = self
-                    .ctx
-                    .query
+                let query = scrubbed_query
                     .as_deref()
                     .map(|value| v3::OptionalStrRef { value });
                 let principal = v3::PrincipalRef {
@@ -558,29 +554,160 @@ mod security_tests {
             kind: PrincipalKind::ApiKey,
         };
 
-        FilterWireRequest {
-            wire_version: WireVersion::V1,
-            ctx: &context,
-            principal: &principal,
-            candidates: &[],
-            cookie_redaction: false,
+        for wire_version in [WireVersion::V1, WireVersion::V2, WireVersion::V3] {
+            FilterWireRequest {
+                wire_version,
+                ctx: &context,
+                principal: &principal,
+                candidates: &[],
+                cookie_redaction: false,
+            }
+            .encode(|bytes| {
+                for secret in [
+                    b"raw-secret".as_slice(),
+                    b"other".as_slice(),
+                    b"gemini-secret".as_slice(),
+                    b"provider-secret".as_slice(),
+                ] {
+                    assert!(
+                        !bytes.windows(secret.len()).any(|window| window == secret),
+                        "secret bytes found in {wire_version:?} request"
+                    );
+                }
+
+                match wire_version {
+                    WireVersion::V1 => {
+                        let archived = rkyv::access::<
+                            cc_lb_plugin_wire::v1::ArchivedFilterRequest,
+                            RkyvError,
+                        >(bytes)
+                        .expect("filter request");
+                        let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
+                        assert_eq!(query, Some("foo=bar"));
+                        let header_names: Vec<&str> = archived
+                            .headers
+                            .iter()
+                            .map(|header| {
+                                let name: &str = &header.name;
+                                name
+                            })
+                            .collect();
+                        assert_eq!(header_names, vec!["x-request-id"]);
+                    }
+                    WireVersion::V2 => {
+                        let archived = rkyv::access::<
+                            cc_lb_plugin_wire::v2::ArchivedFilterRequest,
+                            RkyvError,
+                        >(bytes)
+                        .expect("filter request");
+                        let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
+                        assert_eq!(query, Some("foo=bar"));
+                        let header_names: Vec<&str> = archived
+                            .headers
+                            .iter()
+                            .map(|header| {
+                                let name: &str = &header.name;
+                                name
+                            })
+                            .collect();
+                        assert_eq!(header_names, vec!["x-request-id"]);
+                    }
+                    WireVersion::V3 => {
+                        let archived = rkyv::access::<
+                            cc_lb_plugin_wire::v3::ArchivedFilterRequest,
+                            RkyvError,
+                        >(bytes)
+                        .expect("filter request");
+                        let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
+                        assert_eq!(query, Some("foo=bar"));
+                        let header_names: Vec<&str> = archived
+                            .headers
+                            .iter()
+                            .map(|header| {
+                                let name: &str = &header.name;
+                                name
+                            })
+                            .collect();
+                        assert_eq!(header_names, vec!["x-request-id"]);
+                    }
+                }
+            })
+            .expect("encode filter request");
         }
-        .encode(|bytes| {
-            let archived =
-                rkyv::access::<cc_lb_plugin_wire::v1::ArchivedFilterRequest, RkyvError>(bytes)
-                    .expect("filter request");
-            let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
-            assert_eq!(query, Some("foo=bar"));
-            let header_names: Vec<&str> = archived
-                .headers
-                .iter()
-                .map(|header| {
-                    let name: &str = &header.name;
-                    name
+    }
+
+    #[test]
+    fn filter_wire_preserves_query_shapes_across_versions() {
+        let principal = Principal {
+            id: "principal-filter".to_owned(),
+            kind: PrincipalKind::ApiKey,
+        };
+
+        for (input, expected) in [
+            (None, None),
+            (Some("key=secret&KEY=other"), Some("")),
+            (
+                Some("foo=bar&keyring=1&token=keep"),
+                Some("foo=bar&keyring=1&token=keep"),
+            ),
+        ] {
+            let context = RoutingContext {
+                request_id: "req-filter-query-shape".to_owned(),
+                thread_id: None,
+                requested_service_tier: None,
+                downstream_headers: http::HeaderMap::new(),
+                method: http::Method::POST,
+                path: "/v1/responses".to_owned(),
+                query: input.map(str::to_owned),
+                body_bytes: bytes::Bytes::from_static(b"{}"),
+                canonical_model_id: "gpt-5".to_owned(),
+                cache_pricing: cc_lb_domain::CachePricingSummary::default(),
+            };
+
+            for wire_version in [WireVersion::V1, WireVersion::V2, WireVersion::V3] {
+                FilterWireRequest {
+                    wire_version,
+                    ctx: &context,
+                    principal: &principal,
+                    candidates: &[],
+                    cookie_redaction: false,
+                }
+                .encode(|bytes| {
+                    let archived_query = match wire_version {
+                        WireVersion::V1 => {
+                            let archived = rkyv::access::<
+                                cc_lb_plugin_wire::v1::ArchivedFilterRequest,
+                                RkyvError,
+                            >(bytes)
+                            .expect("filter request");
+                            archived.query.as_ref().map(|value| (**value).to_owned())
+                        }
+                        WireVersion::V2 => {
+                            let archived = rkyv::access::<
+                                cc_lb_plugin_wire::v2::ArchivedFilterRequest,
+                                RkyvError,
+                            >(bytes)
+                            .expect("filter request");
+                            archived.query.as_ref().map(|value| (**value).to_owned())
+                        }
+                        WireVersion::V3 => {
+                            let archived = rkyv::access::<
+                                cc_lb_plugin_wire::v3::ArchivedFilterRequest,
+                                RkyvError,
+                            >(bytes)
+                            .expect("filter request");
+                            archived.query.as_ref().map(|value| (**value).to_owned())
+                        }
+                    };
+
+                    assert_eq!(
+                        archived_query.as_deref(),
+                        expected,
+                        "query shape for {wire_version:?}"
+                    );
                 })
-                .collect();
-            assert_eq!(header_names, vec!["x-request-id"]);
-        })
-        .expect("encode filter request");
+                .expect("encode filter request");
+            }
+        }
     }
 }
