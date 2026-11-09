@@ -135,7 +135,6 @@ export const Route = createFileRoute('/')({
 type Range = TimePreset;
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
 const RANGE_SECONDS = TIME_PRESET_SECONDS;
-const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
 // The overview shows real user requests only: renewals and non-messages
 // endpoints are excluded server-side, and the shared feed re-checks the same
 // effective-kind rule so retained data cannot leak other categories.
@@ -1975,8 +1974,6 @@ function OverviewPage() {
             <RequestEventsFeed
               feed={feed}
               principalNameMap={principalNameMap}
-              columns={OVERVIEW_TABLE_COLUMNS}
-              minWidthClass="min-w-[1080px]"
               emptyTitle="No recent requests"
               tableContainerClassName="relative min-w-0 max-md:-mx-4 md:glass md:rounded-md min-h-48 h-96 max-h-[60vh] overflow-auto"
             />

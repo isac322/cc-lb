@@ -37,7 +37,8 @@ describe('RequestEventsTable - Live & Outcomes', () => {
   const principalNameMap = new Map<string, string>();
 
   describe('RequestOutcome', () => {
-    it('renders Client disconnected for 499 + client_closed_request', () => {
+    it('shows Client disconnected in the status icon popover for 499 + client_closed_request', async () => {
+      const user = userEvent.setup();
       const events: RequestEventWithPhase[] = [
         {
           event_id: 'evt_499',
@@ -58,8 +59,20 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         />,
       );
 
-      expect(screen.getByText('Client disconnected')).toBeDefined();
+      const icon = screen.getByRole('button', {
+        name: 'Client disconnected (HTTP 499)',
+      });
+      expect(screen.queryByText('Client disconnected')).toBeNull();
       expect(screen.queryByText('499')).toBeNull();
+
+      await user.hover(icon);
+
+      expect(
+        await screen.findByText('Client disconnected', {}, { timeout: 1000 }),
+      ).toBeDefined();
+      expect(
+        screen.getByText('HTTP 499 · client_closed_request'),
+      ).toBeDefined();
     });
 
     it('renders numeric status for 499 with other error code', () => {
@@ -156,7 +169,22 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       />,
     );
 
-    expect(screen.getByText('In progress')).toBeDefined();
+    const headers = Array.from(
+      container.querySelectorAll('thead th'),
+      (th) => th.textContent,
+    );
+    const row = screen.getByLabelText('View request evt_stream_error');
+    const cells = row.querySelectorAll('td');
+    const statusCell = cells[headers.indexOf('Status')];
+    const timeCell = cells[headers.indexOf('Timestamp')];
+    // In flight: the status is visually empty and only screen readers hear it;
+    // the spinner before the time marks the row instead of a dot.
+    expect(statusCell.textContent).toBe('In progress');
+    expect(statusCell.querySelector('.sr-only')?.textContent).toBe(
+      'In progress',
+    );
+    expect(timeCell.querySelector('svg')).not.toBeNull();
+    expect(timeCell.querySelector('.status-dot')).toBeNull();
 
     const finalEvent = {
       ...partialEvent,
@@ -176,7 +204,9 @@ describe('RequestEventsTable - Live & Outcomes', () => {
     );
 
     expect(screen.queryByText('In progress')).toBeNull();
-    expect(screen.getByText('overloaded_error')).toBeDefined();
+    expect(
+      screen.getByRole('button', { name: 'overloaded_error (HTTP 200)' }),
+    ).toBeDefined();
     expect(container.querySelector('.status-dot')?.classList).toContain(
       'danger',
     );

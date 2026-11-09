@@ -22,7 +22,7 @@ import {
 } from '../../lib/requestErrorCodes';
 import { requestKindBadgeText } from '../../lib/requestKind';
 import { useCopyButton } from '../../lib/useCopyButton';
-import { Badge, cx, Hint, Skeleton } from './primitives';
+import { Badge, cx, Hint, Skeleton, Spinner } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestKindBadge } from './RequestKindBadge';
 import { SessionChip } from './SessionChip';
@@ -59,7 +59,9 @@ export function RequestOutcomeBadge({ outcome }: { outcome: RequestOutcome }) {
   if (outcome.type === 'partial') {
     return (
       <span className="inline-flex items-center gap-1.5 text-text-faint min-w-0 whitespace-normal text-right break-words">
-        <span className="w-3 h-3 border-2 border-text-faint border-t-transparent rounded-full animate-spin shrink-0" />
+        <span aria-hidden="true" className="flex shrink-0">
+          <Spinner className="size-3 text-text-faint motion-reduce:animate-none" />
+        </span>
         <span className="min-w-0 break-words">In progress</span>
       </span>
     );
@@ -107,32 +109,6 @@ function AbsoluteTime({ ts }: { ts: Date | null }) {
       <RelativeTime ts={ts} className="text-caption text-text-faint" />
     </span>
   );
-}
-
-export function RequestOutcomeTableCell({
-  outcome,
-}: {
-  outcome: RequestOutcome;
-}) {
-  if (outcome.type === 'partial') {
-    return (
-      <span className="inline-flex items-center gap-1.5">
-        <span className="w-3 h-3 border-2 border-text-faint border-t-transparent rounded-full animate-spin" />
-        In progress
-      </span>
-    );
-  }
-  if (outcome.type === 'client_disconnected') {
-    return (
-      <span className="inline-flex items-center gap-1.5">
-        Client disconnected
-      </span>
-    );
-  }
-  if (outcome.type === 'semantic_error') {
-    return <>{outcome.label}</>;
-  }
-  return <>{outcome.status}</>;
 }
 
 export function RequestEventIdentity({

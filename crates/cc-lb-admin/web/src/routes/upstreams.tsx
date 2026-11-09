@@ -1848,11 +1848,7 @@ export function DetailView({
             <RequestEventsFeed
               feed={feed}
               principalNameMap={principalNameMap}
-              columns={{
-                upstream: false,
-                cost: true,
-                tokens: true,
-              }}
+              columns={{ upstream: false }}
               tableContainerClassName="glass min-h-48 h-96 max-h-[60vh] overflow-auto rounded-md"
               emptyTitle="No recent requests for this upstream"
             />
