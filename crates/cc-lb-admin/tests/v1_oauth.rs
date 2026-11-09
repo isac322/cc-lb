@@ -959,76 +959,106 @@ async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
 
 #[cfg(feature = "sqlite")]
 async fn gemini_oauth_import_seeds_refresh_task_and_persists_project_id() {
-    let (fixture, scheduler) = Fixture::new_with_scheduler().await;
-    let expires_at = TEST_NOW_UNIX_SECS + 3_600;
-    let (status, body) = fixture
-        .create_import(json!({
-            "name": "gemini-import",
-            "kind": "gemini_oauth",
-            "project_id": "gemini-project",
-            "oauth_tokens": {
-                "access_token": "ya29.imported-access",
-                "refresh_token": "1//imported-refresh",
-                "expires_at_unix_secs": expires_at,
-                "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
-                "never_refresh": false
-            }
-        }))
-        .await;
-
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    let upstream_id: Uuid = body["id"]
-        .as_str()
-        .expect("created upstream id")
-        .parse()
-        .expect("upstream id parses");
-    let bundle = fixture.decrypt_bundle(upstream_id).await;
-    assert_eq!(bundle.project_id.as_deref(), Some("gemini-project"));
-    assert!(!bundle.never_refresh);
-    assert_eq!(
-        scheduler
-            .next_run_for_upstream(upstream_id, "oauth_refresh")
-            .await
-            .expect("next run query succeeds"),
-        Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
-        "imported refreshable credentials must seed an immediate bootstrap refresh task"
-    );
+    oauth_import_bootstrap_matrix(UpstreamKind::GeminiOauth).await;
 }
 
 #[cfg(feature = "sqlite")]
 async fn openai_oauth_import_derives_account_id_from_jwt_and_seeds_refresh_task() {
-    let (fixture, scheduler) = Fixture::new_with_scheduler().await;
-    let access_token = test_openai_access_token("acct_imported");
-    let (status, body) = fixture
-        .create_import(json!({
-            "name": "openai-import",
-            "kind": "openai_oauth",
+    oauth_import_bootstrap_matrix(UpstreamKind::OpenaiOauth).await;
+}
+
+#[cfg(feature = "sqlite")]
+async fn oauth_import_bootstrap_matrix(kind: UpstreamKind) {
+    let access_token = match kind {
+        UpstreamKind::OpenaiOauth => test_openai_access_token("acct_imported"),
+        UpstreamKind::GeminiOauth => "ya29.imported-access".to_owned(),
+        _ => unreachable!("only OpenAI and Gemini support direct OAuth imports"),
+    };
+    for (never_refresh, warmup_enabled) in
+        [(false, true), (false, false), (true, true), (true, false)]
+    {
+        // Each case has an empty, workerless scheduler so usage-poll presence
+        // cannot be satisfied by another import's bootstrap.
+        let (fixture, scheduler) = Fixture::new_with_scheduler().await;
+        let mut request = json!({
+            "name": format!("{}-import-{never_refresh}-{warmup_enabled}", kind.as_str()),
+            "kind": kind.as_str(),
             "oauth_tokens": {
                 "access_token": access_token,
-                "refresh_token": "rt-imported",
+                "refresh_token": if never_refresh { "" } else { "imported-refresh" },
                 "expires_at_unix_secs": TEST_NOW_UNIX_SECS + 3_600,
                 "scopes": ["openid"],
-                "never_refresh": false
+                "never_refresh": never_refresh
             }
-        }))
-        .await;
+        });
+        if kind == UpstreamKind::GeminiOauth {
+            request["project_id"] = json!("gemini-project");
+            request["oauth_tokens"]["scopes"] =
+                json!(["https://www.googleapis.com/auth/cloud-platform"]);
+        }
+        if !warmup_enabled {
+            request["warmup_enabled"] = json!(false);
+        }
+        let (status, body) = fixture.create_import(request).await;
 
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    let upstream_id: Uuid = body["id"]
-        .as_str()
-        .expect("created upstream id")
-        .parse()
-        .expect("upstream id parses");
-    let bundle = fixture.decrypt_bundle(upstream_id).await;
-    assert_eq!(bundle.account_id.as_deref(), Some("acct_imported"));
-    assert_eq!(
-        scheduler
-            .next_run_for_upstream(upstream_id, "oauth_refresh")
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["warmup_enabled"], warmup_enabled);
+        let upstream_id: Uuid = body["id"]
+            .as_str()
+            .expect("created upstream id")
+            .parse()
+            .expect("upstream id parses");
+        let (status, fetched) = fixture
+            .get_json(&format!("/admin/v1/upstreams/{upstream_id}"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{fetched}");
+        assert_eq!(fetched["warmup_enabled"], warmup_enabled);
+        let bundle = fixture.decrypt_bundle(upstream_id).await;
+        match kind {
+            UpstreamKind::OpenaiOauth => {
+                assert_eq!(bundle.account_id.as_deref(), Some("acct_imported"));
+            }
+            UpstreamKind::GeminiOauth => {
+                assert_eq!(bundle.project_id.as_deref(), Some("gemini-project"));
+            }
+            _ => unreachable!("only OpenAI and Gemini support direct OAuth imports"),
+        }
+        assert_eq!(bundle.never_refresh, never_refresh);
+        assert_eq!(bundle.refresh_token.is_empty(), never_refresh);
+        assert_eq!(bundle.expires_at_unix_secs, TEST_NOW_UNIX_SECS + 3_600);
+        assert_eq!(bundle.refresh_token_expires_at_unix_secs, None);
+        let bootstrap_at = i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits");
+        assert_eq!(
+            scheduler
+                .next_run_for_upstream(upstream_id, "oauth_refresh")
+                .await
+                .expect("next run query succeeds"),
+            (!never_refresh).then_some(bootstrap_at),
+            "only refreshable credentials must seed an immediate bootstrap refresh task"
+        );
+        assert_eq!(
+            scheduler
+                .next_run_for_upstream(upstream_id, "warmup")
+                .await
+                .expect("next run query succeeds"),
+            warmup_enabled.then_some(bootstrap_at),
+            "omitted warmup must seed its bootstrap task, but explicit false must not"
+        );
+        let scheduler_status = scheduler
+            .status(&cc_lb_config::SchedulerConfig::default())
             .await
-            .expect("next run query succeeds"),
-        Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
-        "imported refreshable credentials must seed an immediate bootstrap refresh task"
-    );
+            .expect("scheduler status query succeeds");
+        let usage_poll = scheduler_status
+            .recurring_jobs
+            .iter()
+            .find(|job| job.name == "oauth_usage_poll")
+            .expect("OAuth usage poll is configured");
+        assert_eq!(
+            usage_poll.next_run_at,
+            Some(TEST_NOW_UNIX_SECS),
+            "refreshable and access-only imports must both seed an immediate usage poll"
+        );
+    }
 }
 
 async fn oauth_bundle_import_rejects_anthropic_and_api_key_kinds() {
