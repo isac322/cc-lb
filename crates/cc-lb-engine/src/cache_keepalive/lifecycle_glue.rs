@@ -995,6 +995,7 @@ const OPENAI_API_KEY_KEEPALIVE_FORWARD_HEADERS: &[&str] = &[
     "anthropic-beta",
     "openai-organization",
     "openai-project",
+    "openai-processing-region",
 ];
 
 fn keepalive_forward_headers(
@@ -1780,6 +1781,7 @@ mod tests {
             HeaderValue::from_static("org-client"),
         );
         headers.insert("openai-project", HeaderValue::from_static("proj-client"));
+        headers.insert("openai-processing-region", HeaderValue::from_static("us"));
         headers.insert(
             "authorization",
             HeaderValue::from_static("Bearer client-secret"),
@@ -1802,7 +1804,11 @@ mod tests {
             Some(UpstreamKind::GeminiOauth),
         ] {
             let forwarded = keepalive_forward_headers(&headers, kind);
-            for name in ["openai-organization", "openai-project"] {
+            for name in [
+                "openai-organization",
+                "openai-project",
+                "openai-processing-region",
+            ] {
                 assert_eq!(
                     forwarded.get(name),
                     (kind == Some(UpstreamKind::OpenaiApiKey)).then(|| headers.get(name).unwrap()),

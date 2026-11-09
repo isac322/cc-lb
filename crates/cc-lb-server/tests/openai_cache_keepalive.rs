@@ -498,6 +498,7 @@ async fn run_openai_scope_case(
     case: &str,
     organization: Option<&str>,
     project: Option<&str>,
+    processing_region: Option<&str>,
     mixed_case: bool,
 ) {
     let fixture = OpenAiFixture::start().await;
@@ -536,6 +537,16 @@ async fn run_openai_scope_case(
             project,
         ));
     }
+    if let Some(processing_region) = processing_region {
+        headers.push((
+            if mixed_case {
+                "OpenAI-Processing-Region"
+            } else {
+                "openai-processing-region"
+            },
+            processing_region,
+        ));
+    }
 
     let response = fixture
         .post_with_headers(&session, body.clone(), &headers)
@@ -571,6 +582,11 @@ async fn run_openai_scope_case(
         persisted_header(&snapshot, "openai-project"),
         project.map(str::to_owned),
         "{case} durable project selector"
+    );
+    assert_eq!(
+        persisted_header(&snapshot, "openai-processing-region"),
+        processing_region.map(str::to_owned),
+        "{case} durable processing-region selector"
     );
     for name in [
         "authorization",
@@ -644,6 +660,14 @@ async fn run_openai_scope_case(
             project,
             "{case} project selector"
         );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-processing-region")
+                .and_then(|v| v.to_str().ok()),
+            processing_region,
+            "{case} processing-region selector"
+        );
     }
     for name in [
         "x-api-key",
@@ -683,11 +707,19 @@ async fn openai_scope_selectors_survive_one_scheduled_renewal_without_credential
     .into_iter()
     .enumerate()
     {
-        run_openai_scope_case(index, case, organization, project, case == "both").await;
+        run_openai_scope_case(
+            index,
+            case,
+            organization,
+            project,
+            (case == "both").then_some("us"),
+            case == "both",
+        )
+        .await;
     }
 }
 
 #[tokio::test]
 async fn openai_scope_selector_free_renewal_is_healthy() {
-    run_openai_scope_case(900, "neither", None, None, false).await;
+    run_openai_scope_case(900, "neither", None, None, None, false).await;
 }

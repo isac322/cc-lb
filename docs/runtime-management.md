@@ -440,11 +440,12 @@ provider-gating rules are documented in
 create/update requests that set it return `unsupported_cache_keepalive_llm_judge`.
 
 For OpenAI Responses keep-alive with a selected `openai_api_key` upstream,
-snapshots preserve client-supplied `OpenAI-Organization` and `OpenAI-Project`
-selectors for renewals; absent selectors remain absent. Credentials remain
-signer-owned and are never captured in snapshots. OAuth behavior is unchanged.
-Historical snapshots lacking selector values need a fresh eligible real request
-to capture them; an upgrade cannot recover values that were not stored.
+snapshots preserve client-supplied `OpenAI-Organization`, `OpenAI-Project`, and
+`OpenAI-Processing-Region` selectors for renewals; absent selectors remain
+absent. Credentials remain signer-owned and are never captured in snapshots.
+OAuth behavior is unchanged. Historical snapshots lacking selector values need a
+fresh eligible real request to capture them; an upgrade cannot recover values
+that were not stored.
 
 #### PrincipalResponse
 
