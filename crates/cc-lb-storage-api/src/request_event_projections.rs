@@ -2,12 +2,6 @@ use uuid::Uuid;
 
 use crate::{CacheKeepaliveConfigSnapshot, CacheTtl};
 
-/// Storage encoding for a cache keepalive turn whose provider cost is unknown.
-///
-/// The database column remains `NOT NULL` for compatibility with existing
-/// installations; adapters translate this sentinel to and from `None`.
-pub const CACHE_KEEPALIVE_UNKNOWN_COST_MICROS: i64 = -1;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheKeepaliveEvidenceRow {
     pub evidence_id: String,
@@ -44,6 +38,7 @@ pub struct CacheKeepaliveTurnRow {
     pub cache_creation_input_tokens_5m: u64,
     pub cache_creation_input_tokens_1h: u64,
     pub cache_read_input_tokens: u64,
+    /// Actual cost when available; known signed values and zero remain distinct from `None`.
     pub cost_micros: Option<i64>,
     pub hit_miss: String,
     pub ts: u64,

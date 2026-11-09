@@ -22,7 +22,7 @@ where
             .await?;
         ensure!(empty.is_empty(), "empty session hash input must return no turns");
 
-        let fixtures = [
+        let mut fixtures = vec![
             turn_fixture(TurnSeed {
                 source_ref_id: "session-a:2",
                 session_key_hash: "session-a",
@@ -126,6 +126,27 @@ where
                 ts: 1_800_100_004,
             }),
         ];
+
+        // Cost availability is independent of its signed numeric value.
+        // Keep both per-session and batched reads honest for unknown and zero.
+        for (label, cost) in [
+            ("known-negative-one", Some(-1)),
+            ("known-zero", Some(0)),
+            ("unknown-cost", None),
+        ] {
+            let (mut event, mut projections, mut record) = fixtures[0].clone();
+            let source_ref_id = format!("session-a:{label}");
+            event.request_id = format!("keepalive-batch-event-{source_ref_id}");
+            event.event_id = Some(format!("keepalive-batch-event-id-{source_ref_id}"));
+            event.source_ref_id = Some(source_ref_id.clone());
+            let turn = projections.turn.as_mut().expect("turn fixture");
+            turn.source_ref_id = source_ref_id.clone();
+            turn.cost_micros = cost;
+            projections.decision.source_ref_id = format!("decision-{source_ref_id}");
+            record.source_ref_id = source_ref_id;
+            record.cost_micros = cost;
+            fixtures.push((event, projections, record));
+        }
 
         for (event, projections, _) in &fixtures {
             storage

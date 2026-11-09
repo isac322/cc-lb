@@ -201,6 +201,11 @@ only measured request/token usage is added; the monetary accumulator is unchange
 No unavailable cost is reported as a known zero, and finalized rows are not
 re-priced later.
 
+Keep-alive renewals retain their token usage, hit identity, and history when
+actual cost is unavailable; their monetary PNL stays unknown. An automatic
+storage upgrade records price availability separately from signed cost values
+and preserves existing renewal costs as known.
+
 Before dispatch, Anthropic Messages limit admission estimates text and metadata
 string bytes at one token per four bytes, plus 4,784 tokens per recognized native
 `image` block in message content, including images inside `tool_result.content`.

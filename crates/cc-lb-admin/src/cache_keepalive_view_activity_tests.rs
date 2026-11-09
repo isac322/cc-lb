@@ -733,6 +733,42 @@ fn persisted_zero_cost_is_real_zero_spend() {
 }
 
 #[test]
+fn unknown_cost_keeps_hit_history_without_claiming_zero_pnl() {
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let mut renewal = turn("unknown-cost-hit", 200);
+    renewal.cost_micros = None;
+    let evidence = [
+        renewal_evidence(
+            "unknown-cost-hit",
+            Uuid::from_u128(19),
+            200_000,
+            CacheTtl::Ttl5m,
+            "hit",
+            "unknown-cost",
+        ),
+        follow_up_evidence(201_000, CacheTtl::Ttl5m, "unknown-cost"),
+    ];
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[renewal],
+            evidence: &evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    assert_eq!(activity.total_renewals, 1);
+    assert_eq!(activity.turns[0].source_ref_id, "unknown-cost-hit");
+    assert_eq!(activity.turns[0].renewal_tokens, 20_000);
+    assert!(activity.turns[0].followed_up);
+    assert_eq!(activity.turns[0].pnl, None);
+    assert_eq!(activity.pnl, None);
+    assert_eq!(activity.total_spent_micros, 0);
+}
+
+#[test]
 fn hit_miss_counts_include_hits_but_not_misses() {
     let mut item = item(CacheKeepaliveSessionEntrySource::Session);
     item.status = Some(CacheKeepaliveSessionStatus::Terminal);

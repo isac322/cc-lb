@@ -1,11 +1,10 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CACHE_KEEPALIVE_UNKNOWN_COST_MICROS, CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow,
-    CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent, RequestEventExportPage,
-    RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
-    RequestEventKeyLastUsedQuery, RequestEventListItem, RequestEventListQuery,
-    RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
-    StorageResult, model_filter_like_patterns,
+    CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow, CacheKeepaliveProjectionStore,
+    CacheKeepaliveTurnRow, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
+    RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
+    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
+    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
 };
 use sqlx::{AssertSqlSafe, Row};
 use std::time::Instant;
@@ -928,8 +927,8 @@ async fn insert_keepalive_turn_in_tx(
 ) -> StorageResult<()> {
     sqlx::query(
         "INSERT INTO cache_keepalive_turns \
-         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(source_ref_id) DO NOTHING",
     )
     .bind(&row.source_ref_id)
@@ -957,10 +956,8 @@ async fn insert_keepalive_turn_in_tx(
         row.cache_read_input_tokens,
         "cache keepalive cache_read_input_tokens",
     )?)
-    .bind(
-        row.cost_micros
-            .unwrap_or(CACHE_KEEPALIVE_UNKNOWN_COST_MICROS),
-    )
+    .bind(row.cost_micros.unwrap_or(0))
+    .bind(row.cost_micros.is_some())
     .bind(&row.hit_miss)
     .bind(u64_to_i64(row.ts, "cache keepalive ts")?)
     .execute(&mut **tx)
