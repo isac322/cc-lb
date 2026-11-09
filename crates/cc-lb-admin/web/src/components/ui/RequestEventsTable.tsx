@@ -167,6 +167,8 @@ const CARD_CELL = '@max-[59rem]/events:p-0! @max-[59rem]/events:min-w-0';
 const CARD_METRIC =
   '@max-[59rem]/events:*:p-0 @max-[59rem]/events:*:min-w-0 @max-[59rem]/events:*:-my-2 @max-[59rem]/events:*:py-2';
 
+const CLAUDE_PREFIX_RE = /^claude-/;
+
 /** Radii offered by the per-row time anchor, as [label, seconds either side]. */
 const ANCHOR_RADII_SECS: ReadonlyArray<readonly [string, number]> = [
   ['±1m', 60],
@@ -250,7 +252,7 @@ function RequestStatusCell({ outcome }: { outcome: RequestOutcome }) {
         button would race `IconButton`'s own `text-text-muted`. */}
         <IconButton
           label={`${title} (HTTP ${outcome.status})`}
-          className="-my-1.5 -mr-2 max-md:-my-3 max-md:-mr-3.5"
+          className="-my-1.5 -mr-2 align-middle max-md:-my-3 max-md:-mr-3.5"
         >
           <Icon
             strokeWidth={1.75}
@@ -298,6 +300,9 @@ const RequestEventRow = memo(function RequestEventRow({
   const tone = requestOutcomeTone(outcome);
   const tierBadge = serviceTierBadgeText(event.service_tier);
   const thinkingLevel = event.thinking_level?.trim() || null;
+  const modelName = event.model?.replace(CLAUDE_PREFIX_RE, '') ?? null;
+  // 11ch of the mono font keeps "sonnet-4-5…", "3-5-sonnet…" or "gemini-2.5…".
+  const modelFloorCh = modelName == null ? 0 : Math.min(modelName.length, 11);
   const at = eventTime(event);
   const bothEntities = showPrincipal && showUpstream;
 
@@ -409,26 +414,38 @@ const RequestEventRow = memo(function RequestEventRow({
         )}
       >
         <span className="flex min-w-0 items-center gap-2 @max-[59rem]/events:justify-end">
-          {event.model != null ? (
+          {event.model != null && modelName != null ? (
+            // Name first, whole badges only. The name keeps 11 characters (or
+            // its whole text when shorter); its shrink weight of 100 makes it
+            // absorb nearly all overflow until it freezes at that floor. The
+            // badge group then shrinks, and a badge that no longer fits wraps
+            // onto the group's clipped second line instead of being squeezed
+            // into an empty pill. The drawer always shows thinking level and
+            // tier.
             <span
-              className="truncate font-mono text-data"
+              className="shrink-[100] truncate font-mono text-data"
+              style={{ minWidth: `${modelFloorCh}ch` }}
               title={event.model}
               aria-label={event.model}
             >
-              {event.model.replace(/^claude-/, '')}
+              {modelName}
             </span>
           ) : (
             <EmptyValue label="No model" />
           )}
-          {thinkingLevel != null && (
-            <Badge tone="neutral" className="shrink-0">
-              {thinkingLevel}
-            </Badge>
-          )}
-          {tierBadge != null && (
-            <Badge tone="neutral" className="shrink-0">
-              {tierBadge}
-            </Badge>
+          {(thinkingLevel != null || tierBadge != null) && (
+            <span className="flex h-5 min-w-0 flex-wrap gap-x-2 overflow-hidden">
+              {thinkingLevel != null && (
+                <Badge tone="neutral" className="shrink-0">
+                  {thinkingLevel}
+                </Badge>
+              )}
+              {tierBadge != null && (
+                <Badge tone="neutral" className="shrink-0">
+                  {tierBadge}
+                </Badge>
+              )}
+            </span>
           )}
         </span>
       </TableCell>
