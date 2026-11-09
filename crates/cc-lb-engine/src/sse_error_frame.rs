@@ -65,7 +65,15 @@ impl ResponsesSseErrorContext {
                                 .get("response")
                                 .and_then(|response| response.get("error"))
                                 .is_some_and(native_error),
-                            Some("error") => native_error(value),
+                            Some("error") => {
+                                value
+                                    .get("message")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some()
+                                    && value
+                                        .get("code")
+                                        .is_none_or(|code| code.is_null() || code.is_string())
+                            }
                             _ => false,
                         }
                     } else {
@@ -265,7 +273,6 @@ mod tests {
                 b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"test\",\"message\":\"nested\"}}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"error\"}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"error\",\"code\":\"test\"}\n\n".as_slice(),
-                b"event: error\ndata: {\"type\":\"error\",\"message\":\"missing code\"}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"error\",\"code\":42,\"message\":\"wrong code type\"}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"error\",\"code\":\"test\",\"message\":42}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"response.output_text.delta\",\"code\":\"test\",\"message\":\"not terminal\"}\n\n".as_slice(),
@@ -276,6 +283,8 @@ mod tests {
             for bytes in [
                 b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"test\",\"message\":\"native failure\"}}}\n\n".as_slice(),
                 b"event: error\ndata: {\"type\":\"error\",\"code\":\"arbitrary_provider_code\",\"message\":\"native error\"}\n\n".as_slice(),
+                b"event: error\ndata: {\"type\":\"error\",\"code\":null,\"message\":\"native error without code\",\"param\":null,\"sequence_number\":9}\n\n".as_slice(),
+                b"event: error\ndata: {\"type\":\"error\",\"message\":\"native error with omitted code\",\"param\":null,\"sequence_number\":9}\n\n".as_slice(),
             ] {
                 let mut context = ResponsesSseErrorContext::default();
                 assert!(context.observe_transformed_output(bytes, capability).emitted_error);
