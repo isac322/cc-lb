@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use cc_lb_aead::AeadService;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
@@ -425,4 +426,268 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
             "duration cap must prevent generation-two scheduling"
         );
     }
+}
+
+fn decode_snapshot_headers(
+    fixture: &OpenAiFixture,
+    session_hash: &str,
+    row: &sqlx::sqlite::SqliteRow,
+) -> Value {
+    let payload: Vec<u8> = row.get("encrypted_payload");
+    assert!(!payload.is_empty(), "snapshot payload must be encrypted");
+    assert_eq!(&payload[..8], b"CCLBCKA2", "snapshot payload framing");
+    let codec = payload[8];
+    let payload_generation = u64::try_from(row.get::<i64, _>("generation"))
+        .expect("snapshot generation")
+        .checked_sub(
+            u64::try_from(row.get::<i64, _>("refresh_count")).expect("snapshot refresh count"),
+        )
+        .expect("base payload generation");
+    let encoded_len = u64::from_be_bytes(payload[17..25].try_into().expect("encoded length"));
+    let upstream_id: uuid::Uuid = fixture.upstream_id.parse().expect("upstream UUID");
+    let aad = format!(
+        "cache_keepalive_snapshot:v2:{}:{session_hash}:{upstream_id}:{payload_generation}:{codec}:{encoded_len}",
+        fixture.principal_id
+    );
+    let plaintext = AeadService::from_master_key([0; 32])
+        .decrypt(&payload[25..], aad.as_bytes())
+        .expect("decrypt durable OpenAI snapshot");
+    let encoded = match codec {
+        0 | 2 => plaintext,
+        1 | 3 => zstd::bulk::decompress(&plaintext, encoded_len as usize)
+            .expect("decompress durable OpenAI snapshot"),
+        other => panic!("unexpected snapshot codec {other}"),
+    };
+    if codec <= 1 {
+        return serde_json::from_slice(&encoded).expect("decode durable OpenAI snapshot JSON");
+    }
+    assert_eq!(&encoded[..8], b"CCLBPS01", "snapshot frame");
+    let metadata_len =
+        u64::from_be_bytes(encoded[8..16].try_into().expect("metadata length")) as usize;
+    let body_len = u64::from_be_bytes(encoded[16..24].try_into().expect("body length")) as usize;
+    let metadata_end = 24 + metadata_len;
+    assert_eq!(
+        metadata_end + body_len,
+        encoded.len(),
+        "snapshot frame lengths"
+    );
+    serde_json::from_slice(&encoded[24..metadata_end]).expect("decode snapshot metadata")
+}
+
+fn persisted_header(headers: &Value, name: &str) -> Option<String> {
+    headers["headers"]
+        .as_array()?
+        .iter()
+        .find(|header| {
+            header["name"]
+                .as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(name))
+        })
+        .and_then(|header| header["value"].as_array())
+        .map(|bytes| {
+            bytes
+                .iter()
+                .map(|byte| byte.as_u64().expect("snapshot header byte") as u8)
+                .collect::<Vec<_>>()
+        })
+        .map(|bytes| String::from_utf8(bytes).expect("snapshot header UTF-8"))
+}
+
+async fn run_openai_scope_case(
+    index: usize,
+    case: &str,
+    organization: Option<&str>,
+    project: Option<&str>,
+    mixed_case: bool,
+) {
+    let fixture = OpenAiFixture::start().await;
+    fixture
+        .configure_keepalive_with_duration(true, true, 1799, 1)
+        .await;
+    let pool = pool(&fixture).await;
+    let session = format!("00000000-0000-7000-8000-{index:012}");
+    let input = large_input(None);
+    let mut body = request_body(Some(json!({"ttl": "30m"})), input.clone(), true);
+    body["store"] = json!(false);
+    let mut headers = vec![
+        ("authorization", "Bearer client-secret"),
+        ("x-goog-api-key", "client-google-secret"),
+        ("api-key", "client-api-secret"),
+        ("cookie", "client-cookie=secret"),
+        ("ChatGPT-Account-ID", "client-account"),
+    ];
+    if let Some(organization) = organization {
+        headers.push((
+            if mixed_case {
+                "OpenAI-Organization"
+            } else {
+                "openai-organization"
+            },
+            organization,
+        ));
+    }
+    if let Some(project) = project {
+        headers.push((
+            if mixed_case {
+                "oPeNaI-pRoJeCt"
+            } else {
+                "openai-project"
+            },
+            project,
+        ));
+    }
+
+    let response = fixture
+        .post_with_headers(&session, body.clone(), &headers)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK, "{case} initial response");
+    response.bytes().await.expect("initial Responses body");
+    let hash = fixture.session_hash(&session);
+    let snapshot_row = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(row) = sqlx::query(
+                "SELECT * FROM cache_keepalive_sessions \
+                     WHERE session_key_hash = ? AND length(encrypted_payload) > 0",
+            )
+            .bind(&hash)
+            .fetch_optional(&pool)
+            .await
+            .expect("read persisted OpenAI snapshot")
+            {
+                break row;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("OpenAI request must persist a renewal snapshot");
+    let snapshot = decode_snapshot_headers(&fixture, &hash, &snapshot_row);
+    assert_eq!(
+        persisted_header(&snapshot, "openai-organization"),
+        organization.map(str::to_owned),
+        "{case} durable organization selector"
+    );
+    assert_eq!(
+        persisted_header(&snapshot, "openai-project"),
+        project.map(str::to_owned),
+        "{case} durable project selector"
+    );
+    for name in [
+        "authorization",
+        "x-api-key",
+        "x-goog-api-key",
+        "api-key",
+        "cookie",
+        "chatgpt-account-id",
+    ] {
+        assert!(
+            persisted_header(&snapshot, name).is_none(),
+            "{case} durable snapshot must exclude credential header {name}"
+        );
+    }
+
+    fixture.mock.wait_for_requests(2).await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let row = sqlx::query(
+                "SELECT status, terminal_reason FROM cache_keepalive_sessions \
+                 WHERE session_key_hash = ?",
+            )
+            .bind(&hash)
+            .fetch_one(&pool)
+            .await
+            .expect("post-renewal session state");
+            if row.get::<String, _>("status") == "terminal" {
+                assert_eq!(
+                    row.get::<String, _>("terminal_reason"),
+                    "max_duration",
+                    "{case} renewal must honor duration cap"
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("one OpenAI renewal must complete durably");
+
+    let requests = fixture.mock.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "{case} must have exactly one initial request and one renewal"
+    );
+    let initial = &requests[0];
+    let renewal = &requests[1];
+    for request in [initial, renewal] {
+        assert_eq!(
+            request
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer sk-openai-cache-test"),
+            "{case} provider credential"
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-organization")
+                .and_then(|v| v.to_str().ok()),
+            organization,
+            "{case} organization selector"
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-project")
+                .and_then(|v| v.to_str().ok()),
+            project,
+            "{case} project selector"
+        );
+    }
+    for name in [
+        "x-api-key",
+        "x-goog-api-key",
+        "api-key",
+        "cookie",
+        "chatgpt-account-id",
+    ] {
+        assert!(
+            renewal.headers.get(name).is_none(),
+            "{case} renewal must not replay credential header {name}"
+        );
+    }
+    assert_eq!(initial.body["input"], body["input"], "{case} input");
+    assert_eq!(
+        initial.body["prompt_cache_options"], body["prompt_cache_options"],
+        "{case} initial cache options"
+    );
+    assert_eq!(initial.body["store"], false, "{case} initial store");
+    assert_eq!(renewal.body["input"], body["input"], "{case} renewal input");
+    assert_eq!(
+        renewal.body["prompt_cache_options"], body["prompt_cache_options"],
+        "{case} renewal cache options"
+    );
+    assert_eq!(renewal.body["store"], false, "{case} renewal store");
+    assert_eq!(renewal.body["max_output_tokens"], 16, "{case} renewal cap");
+    assert_eq!(renewal.body["stream"], false, "{case} renewal buffering");
+}
+
+#[tokio::test]
+async fn openai_scope_selectors_survive_one_scheduled_renewal_without_credentials() {
+    for (index, (case, organization, project)) in [
+        ("both", Some("org-client"), Some("proj-client")),
+        ("organization-only", Some("org-client"), None),
+        ("project-only", None, Some("proj-client")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        run_openai_scope_case(index, case, organization, project, case == "both").await;
+    }
+}
+
+#[tokio::test]
+async fn openai_scope_selector_free_renewal_is_healthy() {
+    run_openai_scope_case(900, "neither", None, None, false).await;
 }
