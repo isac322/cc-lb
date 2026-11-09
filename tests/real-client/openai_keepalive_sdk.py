@@ -48,6 +48,21 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def tool_input(ttl: str | None) -> list[dict]:
+    marker = {"mode": "explicit"}
+    if ttl is not None:
+        marker["ttl"] = ttl
+    return [
+        INPUT[0],
+        {"type": "function_call", "call_id": "call_owned_1", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_owned_1", "output": [
+            {"type": "input_text", "text": "stable tool result", "prompt_cache_breakpoint": marker},
+            {"type": "input_text", "text": "uncached suffix"},
+        ]},
+        INPUT[1],
+    ]
+
+
 class Mock(BaseHTTPRequestHandler):
     lock = threading.Lock()
     wires: list[dict] = []
@@ -60,13 +75,18 @@ class Mock(BaseHTTPRequestHandler):
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             body = json.loads(raw)
             assert body["model"] == "gpt-5.6"
-            assert body["input"] == INPUT
+            assert body["input"] in (INPUT, tool_input("30m"), tool_input("12h"), tool_input(None))
             assert type(body["stream"]) is bool
             assert body["max_output_tokens"] == 16
             assert body["store"] is False
             assert "prompt_cache_retention" not in body
             if "prompt_cache_options" in body:
-                assert body["prompt_cache_options"] == {"ttl": "30m"}
+                assert body["prompt_cache_options"] in (
+                    {"ttl": "30m"},
+                    {"mode": "explicit", "ttl": "12h"},
+                    {"mode": "implicit", "ttl": "30m"},
+                    {"mode": "explicit", "ttl": "30m"},
+                )
             with self.lock:
                 self.wires.append(body)
             response = {
@@ -186,12 +206,22 @@ token_env = "CC_LB_ADMIN_TOKEN"
         client = OpenAI(api_key=key["plaintext_key"], base_url=f"http://127.0.0.1:{proxy}/v1",
                         max_retries=0, timeout=15)
         with sqlite3.connect(db) as connection:
-            for index, ttl, stream in [(0, None, False), (1, "30m", False), (2, None, True), (3, "30m", True)]:
+            cases = [
+                (INPUT, None, False, "30m"),
+                (INPUT, {"ttl": "30m"}, False, "30m"),
+                (INPUT, None, True, "30m"),
+                (INPUT, {"ttl": "30m"}, True, "30m"),
+                (tool_input("30m"), {"mode": "explicit", "ttl": "12h"}, False, "30m"),
+                (tool_input("12h"), {"mode": "implicit", "ttl": "30m"}, False, "12h"),
+                (tool_input(None), {"mode": "explicit", "ttl": "12h"}, True, "12h"),
+                (tool_input(None), {"mode": "explicit", "ttl": "30m"}, True, "30m"),
+            ]
+            for index, (input_value, options, stream, expected_ttl) in enumerate(cases):
                 session = f"00000000-0000-7000-8000-{index + 400:012}"
-                expected = {"model": "gpt-5.6", "input": INPUT, "stream": stream,
+                expected = {"model": "gpt-5.6", "input": input_value, "stream": stream,
                             "max_output_tokens": 16, "store": False}
-                if ttl:
-                    expected["prompt_cache_options"] = {"ttl": ttl}
+                if options is not None:
+                    expected["prompt_cache_options"] = options
                 response = client.responses.create(**expected, extra_headers={"x-session-id": session})
                 if stream:
                     completed = [event.response for event in response if event.type == "response.completed"]
@@ -202,6 +232,31 @@ token_env = "CC_LB_ADMIN_TOKEN"
                 assert result.output_text == "sdk-ok"
                 assert result.usage.input_tokens_details.cached_tokens == 2048
                 assert Mock.wires[index] == expected, (Mock.wires[index], expected)
+                if expected_ttl == "12h":
+                    def decision_row():
+                        rows = connection.execute(
+                            "SELECT session_key_hash, ttl FROM cache_keepalive_decisions "
+                            "WHERE principal_id = ? AND decision = 'not_tracked'",
+                            (principal_id,),
+                        ).fetchall()
+                        return next((row for row in rows if session in row[0]), None)
+                    decision = eventually(decision_row, f"SDK case {index} 12h not-tracked decision")
+                    assert decision[1] == "12h", decision
+                    active = connection.execute(
+                        "SELECT COUNT(*) FROM cache_keepalive_sessions "
+                        "WHERE session_key_hash = ? AND status = 'active'", (decision[0],)
+                    ).fetchone()[0]
+                    assert active == 0, "12h tool-output boundary must not schedule renewal"
+                    with sqlite3.connect(db.with_suffix(".scheduler.sqlite")) as scheduler:
+                        jobs = scheduler.execute(
+                            "SELECT COUNT(*) FROM Jobs WHERE job_type = 'cache_keepalive' "
+                            "AND idempotency_key LIKE ?", (f"%{decision[0]}%",)
+                        ).fetchone()[0]
+                        assert jobs == 0, "12h tool-output boundary must not enqueue renewal jobs"
+                    rows = admin(admin_port, "GET", f"/admin/v1/principals/{principal_id}/cache-keepalive")["rows"]
+                    assert any(item["session_key_hash"] == decision[0]
+                               and item["state"] == "not_tracked" and item["ttl"] == "12h" for item in rows)
+                    continue
                 # SessionKey uses principal UUID plus normalized thread id; query this
                 # case by its unique durable session suffix, never a prior case's row.
                 def session_row():
@@ -223,10 +278,10 @@ token_env = "CC_LB_ADMIN_TOKEN"
                                  and item["state"] == "scheduled" and item["ttl"] == "30m"), None)
                 eventually(scheduled_row, f"SDK case {index} admin scheduled row")
         assert not Mock.errors, Mock.errors
-        assert len(Mock.wires) == 4
-        (root / "provider-wire.json").write_text(json.dumps(Mock.wires, indent=2))
-        print("PASS OpenAI 3.46.0 default/30m buffered+SSE listener-to-SQLite/admin", flush=True)
+        assert len(Mock.wires) == len(cases)
+        print("PASS OpenAI 3.46.0 default/30m and tool-output TTL buffered+SSE listener-to-SQLite/admin", flush=True)
     finally:
+        (root / "provider-wire.json").write_text(json.dumps(Mock.wires, indent=2))
         if client:
             client.close()
         if process and process.poll() is None:

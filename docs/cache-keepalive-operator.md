@@ -22,9 +22,11 @@ OpenAI Responses uses the documented `prompt_cache_options.ttl` field. It
 accepts `"30m"` and `"12h"`; when the field is omitted, a supported request
 defaults to `"30m"`. A `prompt_cache_breakpoint.ttl` overrides that default
 for the selected breakpoint, while a breakpoint without `ttl` inherits the
-request lifetime. Explicit mode without a real input breakpoint is not
-eligible. Fields with similar names inside metadata, tool schemas, or tool
-results do not declare a lifetime.
+request lifetime. Supported explicit blocks include `input_text`, `input_image`,
+and `input_file` in `function_call_output.output` and
+`custom_tool_call_output.output` arrays, as well as message content. Explicit
+mode without a real input breakpoint is not eligible. Keys embedded in metadata,
+tool schemas, or JSON text inside tool results do not declare a lifetime.
 Keep-alive selects the last supported explicit content breakpoint, or the latest
 eligible implicit message ending when no explicit breakpoint exists. It retains
 that boundary's lifetime and provenance and replays the full captured input.

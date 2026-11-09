@@ -81,11 +81,11 @@ pub(crate) fn interpret_modern(value: &Value) -> Option<Interpretation> {
             explicit_count: 0,
         });
     }
-    if let Some((message_index, block_index, marker_ttl)) = explicit.last {
+    if let Some((item_index, field, block_index, marker_ttl)) = explicit.last {
         return Some(Interpretation {
             lifetime: Some(marker_ttl.unwrap_or(request_lifetime)),
             mode: Mode::Explicit,
-            selected_boundary: Some(format!("input[{message_index}].content[{block_index}]")),
+            selected_boundary: Some(format!("input[{item_index}].{field}[{block_index}]")),
             explicit_count: explicit.count,
         });
     }
@@ -134,7 +134,7 @@ fn parse_lifetime_value(raw: &str) -> Option<Lifetime> {
 #[derive(Clone, Copy)]
 struct ExplicitScan {
     count: usize,
-    last: Option<(usize, usize, Option<Lifetime>)>,
+    last: Option<(usize, &'static str, usize, Option<Lifetime>)>,
     too_many: bool,
 }
 
@@ -148,17 +148,26 @@ fn explicit_breakpoints(input: &Value) -> Option<ExplicitScan> {
         Value::String(_) => {}
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                let Some(role) = item.get("role").and_then(Value::as_str) else {
-                    continue;
+                let tool_output = matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("function_call_output" | "custom_tool_call_output")
+                );
+                let field = if tool_output {
+                    "output"
+                } else {
+                    let Some(role) = item.get("role").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if !matches!(role, "developer" | "system" | "user" | "assistant" | "tool") {
+                        continue;
+                    }
+                    "content"
                 };
-                if !matches!(role, "developer" | "system" | "user" | "assistant" | "tool") {
-                    continue;
-                }
-                let Some(Value::Array(blocks)) = item.get("content") else {
+                let Some(Value::Array(blocks)) = item.get(field) else {
                     continue;
                 };
                 for (block_index, block) in blocks.iter().enumerate() {
-                    if !is_supported_content_block(block)
+                    if !is_supported_content_block(block, tool_output)
                         || block.get("prompt_cache_breakpoint").is_none()
                     {
                         continue;
@@ -169,7 +178,7 @@ fn explicit_breakpoints(input: &Value) -> Option<ExplicitScan> {
                         return Some(scan);
                     }
                     let lifetime = parse_content_breakpoint(block)?;
-                    scan.last = Some((index, block_index, lifetime));
+                    scan.last = Some((index, field, block_index, lifetime));
                 }
             }
         }
@@ -178,16 +187,12 @@ fn explicit_breakpoints(input: &Value) -> Option<ExplicitScan> {
     Some(scan)
 }
 
-fn is_supported_content_block(value: &Value) -> bool {
-    value
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(|kind| {
-            matches!(
-                kind,
-                "input_text" | "input_image" | "input_file" | "input_audio" | "computer_screenshot"
-            )
-        })
+fn is_supported_content_block(value: &Value, tool_output: bool) -> bool {
+    match value.get("type").and_then(Value::as_str) {
+        Some("input_text" | "input_image" | "input_file") => true,
+        Some("input_audio" | "computer_screenshot") => !tool_output,
+        _ => false,
+    }
 }
 
 fn parse_content_breakpoint(block: &Value) -> Option<Option<Lifetime>> {
@@ -355,6 +360,152 @@ pub fn cache_write_tokens(value: &Value) -> Option<(u64, u64)> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_output_marker_selects_its_lifetime_and_output_path() {
+        for (mode, request_ttl, marker_ttl, expected_lifetime) in [
+            ("implicit", "30m", Some("12h"), Lifetime::TwelveHours),
+            ("explicit", "12h", Some("30m"), Lifetime::ThirtyMinutes),
+            ("explicit", "12h", None, Lifetime::TwelveHours),
+            ("explicit", "30m", None, Lifetime::ThirtyMinutes),
+        ] {
+            let mut marker = json!({"mode": "explicit"});
+            if let Some(ttl) = marker_ttl {
+                marker["ttl"] = json!(ttl);
+            }
+            let body = json!({
+                "prompt_cache_options": {"mode": mode, "ttl": request_ttl},
+                "input": [
+                    {"role": "user", "content": "stable prefix"},
+                    {"type": "function_call", "call_id": "call_owned", "name": "lookup", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_owned", "output": [
+                        {"type": "input_text", "text": "stable result", "prompt_cache_breakpoint": marker},
+                        {"type": "input_text", "text": "uncached suffix"}
+                    ]},
+                    {"role": "user", "content": "next question"}
+                ]
+            });
+            assert_eq!(
+                interpret_modern(&body),
+                Some(Interpretation {
+                    lifetime: Some(expected_lifetime),
+                    mode: Mode::Explicit,
+                    selected_boundary: Some("input[2].output[0]".to_owned()),
+                    explicit_count: 1,
+                }),
+                "{mode}, request={request_ttl}, marker={marker_ttl:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_tool_output_image_and_file_markers_preserve_order_and_default() {
+        let mut body = json!({
+            "prompt_cache_options": {"mode": "explicit"},
+            "input": [{
+                "type": "custom_tool_call_output", "call_id": "call_custom", "output": [
+                    {"type": "input_image", "image_url": "https://example.invalid/image.png", "prompt_cache_breakpoint": {}},
+                    {"type": "input_file", "file_data": "data:text/plain;base64,eA=="}
+                ]
+            }]
+        });
+        let inherited = interpret_modern(&body).expect("custom image marker");
+        assert_eq!(inherited.lifetime, Some(Lifetime::ThirtyMinutes));
+        assert_eq!(
+            inherited.selected_boundary.as_deref(),
+            Some("input[0].output[0]")
+        );
+        body["input"][0]["output"][1]["prompt_cache_breakpoint"] = json!({"ttl": "12h"});
+        let selected = interpret_modern(&body).expect("custom file marker");
+        assert_eq!(selected.lifetime, Some(Lifetime::TwelveHours));
+        assert_eq!(selected.explicit_count, 2);
+        assert_eq!(
+            selected.selected_boundary.as_deref(),
+            Some("input[0].output[1]")
+        );
+    }
+
+    #[test]
+    fn message_and_tool_output_markers_share_write_limit_and_order() {
+        let mut body = json!({
+            "prompt_cache_options": {"mode": "explicit"},
+            "input": [
+                {"role": "developer", "content": [
+                    {"type": "input_text", "text": "one", "prompt_cache_breakpoint": {}},
+                    {"type": "input_text", "text": "two", "prompt_cache_breakpoint": {}},
+                    {"type": "input_text", "text": "three", "prompt_cache_breakpoint": {}}
+                ]},
+                {"type": "function_call_output", "call_id": "call_function", "output": [
+                    {"type": "input_text", "text": "four", "prompt_cache_breakpoint": {"ttl": "12h"}}
+                ]}
+            ]
+        });
+        let four = interpret_modern(&body).expect("four writes");
+        assert_eq!(four.explicit_count, 4);
+        assert_eq!(four.lifetime, Some(Lifetime::TwelveHours));
+        assert_eq!(
+            four.selected_boundary.as_deref(),
+            Some("input[1].output[0]")
+        );
+        body["input"].as_array_mut().unwrap().push(json!({
+            "role": "user", "content": [{
+                "type": "input_text", "text": "five", "prompt_cache_breakpoint": {"ttl": "30m"}
+            }]
+        }));
+        let five = interpret_modern(&body).expect("over-limit decision");
+        assert_eq!(five.explicit_count, 5);
+        assert_eq!(five.lifetime, None);
+        assert_eq!(five.selected_boundary, None);
+        body["input"][0]["content"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        let later_message = interpret_modern(&body).expect("last message write");
+        assert_eq!(later_message.explicit_count, 3);
+        assert_eq!(later_message.lifetime, Some(Lifetime::ThirtyMinutes));
+        assert_eq!(
+            later_message.selected_boundary.as_deref(),
+            Some("input[2].content[0]")
+        );
+    }
+
+    #[test]
+    fn tool_output_marker_rejects_unknown_and_non_string_lifetimes() {
+        for ttl in [json!("forever"), json!(1800)] {
+            let body = json!({
+                "input": [
+                    {"role": "user", "content": [
+                        {"type": "input_text", "text": "prefix", "prompt_cache_breakpoint": {}}
+                    ]},
+                    {"type": "function_call_output", "call_id": "call_bad", "output": [
+                        {"type": "input_text", "text": "result", "prompt_cache_breakpoint": {"ttl": ttl}}
+                    ]}
+                ]
+            });
+            assert_eq!(interpret_modern(&body), None);
+        }
+    }
+
+    #[test]
+    fn tool_output_lookalikes_do_not_declare_explicit_writes() {
+        for item in [
+            json!({"type": "function_call_output", "call_id": "call_string", "output": "{\"prompt_cache_breakpoint\":{\"ttl\":\"forever\"}}"}),
+            json!({"type": "function_call", "call_id": "call_function", "output": [{"type": "input_text", "prompt_cache_breakpoint": {"ttl": "forever"}}]}),
+            json!({"type": "computer_call_output", "output": [{"type": "input_text", "prompt_cache_breakpoint": {"ttl": "forever"}}]}),
+            json!({"type": "additional_tools", "output": [{"type": "input_text", "prompt_cache_breakpoint": {"ttl": "forever"}}]}),
+            json!({"type": "function_call_output", "call_id": "call_audio", "output": [{"type": "input_audio", "prompt_cache_breakpoint": {"ttl": "forever"}}]}),
+            json!({"type": "custom_tool_call_output", "call_id": "call_computer", "output": [{"type": "computer_screenshot", "prompt_cache_breakpoint": {"ttl": "forever"}}]}),
+            json!({"type": "function_call_output", "call_id": "call_output_text", "output": [{"type": "output_text", "prompt_cache_breakpoint": {"ttl": "forever"}}]}),
+        ] {
+            let body = json!({
+                "prompt_cache_options": {"mode": "explicit"},
+                "input": [{"role": "user", "content": "stable prefix"}, item]
+            });
+            let interpreted = interpret_modern(&body).expect("lookalike is not a real marker");
+            assert_eq!(interpreted.explicit_count, 0);
+            assert_eq!(interpreted.lifetime, None);
+        }
+    }
 
     #[test]
     fn openai_gpt56_cache_lifetime_parsing_uses_documented_responses_fields() {

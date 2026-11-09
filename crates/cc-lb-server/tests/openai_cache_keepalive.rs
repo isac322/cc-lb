@@ -311,24 +311,47 @@ async fn native_evidence_and_both_opt_ins_remain_required() {
 
 #[tokio::test]
 async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps() {
-    let fixture = OpenAiFixture::start().await;
-    fixture
-        .configure_keepalive_with_duration(true, true, 1799, 1)
-        .await;
-    let pool = pool(&fixture).await;
-    let session = "00000000-0000-7000-8000-000000000300";
-    let hash = fixture.session_hash(session);
-    let input = large_input(Some("30m"));
-    let response = fixture
-        .post(
-            session,
-            request_body(Some(json!({"ttl":"12h"})), input.clone(), true),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    response.bytes().await.expect("stream completed");
-    fixture.mock.wait_for_requests(2).await;
-    tokio::time::timeout(Duration::from_secs(20), async {
+    let mut tool_input = large_input(None);
+    let items = tool_input.as_array_mut().expect("input array");
+    items.insert(
+        1,
+        json!({
+            "type": "function_call", "call_id": "call_renewal", "name": "lookup", "arguments": "{}"
+        }),
+    );
+    items.insert(
+        2,
+        json!({
+            "type": "function_call_output", "call_id": "call_renewal", "output": [{
+                "type": "input_text", "text": "stable tool result",
+                "prompt_cache_breakpoint": {"mode": "explicit", "ttl": "30m"}
+            }]
+        }),
+    );
+    for (input, marker_pointer) in [
+        (
+            large_input(Some("30m")),
+            "/input/0/content/0/prompt_cache_breakpoint/ttl",
+        ),
+        (tool_input, "/input/2/output/0/prompt_cache_breakpoint/ttl"),
+    ] {
+        let fixture = OpenAiFixture::start().await;
+        fixture
+            .configure_keepalive_with_duration(true, true, 1799, 1)
+            .await;
+        let pool = pool(&fixture).await;
+        let session = "00000000-0000-7000-8000-000000000300";
+        let hash = fixture.session_hash(session);
+        let response = fixture
+            .post(
+                session,
+                request_body(Some(json!({"ttl":"12h"})), input.clone(), true),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.bytes().await.expect("stream completed");
+        fixture.mock.wait_for_requests(2).await;
+        tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let row = sqlx::query("SELECT hit_miss, cache_read_input_tokens FROM cache_keepalive_turns WHERE session_key_hash = ? LIMIT 1")
                 .bind(&hash).fetch_optional(&pool).await.expect("durable native renewal");
@@ -340,20 +363,22 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
             tokio::task::yield_now().await;
         }
     }).await.expect("scheduler native outcome must be durable");
-    let requests = fixture.mock.requests();
-    let renewal = &requests[1].body;
-    assert_eq!(renewal["input"], input, "renewal preserves selected prefix");
-    assert_eq!(
-        renewal["prompt_cache_options"]["ttl"], "12h",
-        "full replay retains request TTL while selected breakpoint overrides it"
-    );
-    assert_eq!(
-        renewal["input"][0]["content"][0]["prompt_cache_breakpoint"]["ttl"],
-        "30m"
-    );
-    assert_eq!(renewal["max_output_tokens"], 16);
-    assert_eq!(renewal["stream"], false);
-    tokio::time::timeout(Duration::from_secs(20), async {
+        let requests = fixture.mock.requests();
+        let renewal = &requests[1].body;
+        assert_eq!(renewal["input"], input, "renewal preserves selected prefix");
+        assert_eq!(
+            renewal["prompt_cache_options"]["ttl"], "12h",
+            "full replay retains request TTL while selected breakpoint overrides it"
+        );
+        assert_eq!(
+            renewal
+                .pointer(marker_pointer)
+                .expect("selected marker TTL"),
+            "30m"
+        );
+        assert_eq!(renewal["max_output_tokens"], 16);
+        assert_eq!(renewal["stream"], false);
+        tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let row = sqlx::query(
                 "SELECT status, terminal_reason, refresh_count FROM cache_keepalive_sessions WHERE session_key_hash = ?",
@@ -372,31 +397,32 @@ async fn scheduler_dispatches_openai_renewal_and_persists_native_hit_with_caps()
     })
     .await
     .expect("first renewal must terminalize at the one-second duration cap");
-    assert_eq!(
-        fixture.mock.requests().len(),
-        2,
-        "one ordinary request plus exactly one renewal"
-    );
-    let scheduler = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect(&format!(
-            "sqlite://{}",
-            fixture
-                .server
-                .sqlite_path
-                .with_extension("scheduler.sqlite")
-                .display()
-        ))
-        .await
-        .expect("duration-cap scheduler SQLite");
-    let next_job = cc_lb_storage_api::cache_keepalive_job_key(&hash, 2);
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ?")
-        .bind(next_job)
-        .fetch_one(&scheduler)
-        .await
-        .expect("generation-two job count");
-    assert_eq!(
-        count, 0,
-        "duration cap must prevent generation-two scheduling"
-    );
+        assert_eq!(
+            fixture.mock.requests().len(),
+            2,
+            "one ordinary request plus exactly one renewal"
+        );
+        let scheduler = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!(
+                "sqlite://{}",
+                fixture
+                    .server
+                    .sqlite_path
+                    .with_extension("scheduler.sqlite")
+                    .display()
+            ))
+            .await
+            .expect("duration-cap scheduler SQLite");
+        let next_job = cc_lb_storage_api::cache_keepalive_job_key(&hash, 2);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ?")
+            .bind(next_job)
+            .fetch_one(&scheduler)
+            .await
+            .expect("generation-two job count");
+        assert_eq!(
+            count, 0,
+            "duration cap must prevent generation-two scheduling"
+        );
+    }
 }
