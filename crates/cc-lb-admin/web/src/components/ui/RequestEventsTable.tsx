@@ -47,7 +47,10 @@ const RESERVED_ROW_REM = 2.5;
  *   the principal and/or upstream and model; latency, tokens and cost.
  *   Cells keep their DOM order and are only placed on the grid.
  * - From 59rem it is a `table-fixed` table sized by its `<colgroup>`, so no
- *   column width depends on row content. Session is the one flexible column.
+ *   column width depends on row content. Each column starts at its `rem`
+ *   minimum; the container width above the table's minimum (`100cqw` of the
+ *   wrapper) is split by `grow` among the text columns, and Session, which has
+ *   no width of its own, takes its share plus any rounding remainder.
  */
 type ColumnKey =
   | 'time'
@@ -63,8 +66,13 @@ type ColumnKey =
 
 interface Column {
   label: string;
-  /** Table-arrangement width in rem; null = the flexible column (Session). */
+  /** Table-arrangement minimum width in rem; null = Session, which takes the remainder. */
   rem: number | null;
+  /**
+   * Share of the width above the table's minimum. Only variable-length text
+   * grows; numbers and the timestamp keep their minimum.
+   */
+  grow?: number;
   numeric?: boolean;
   /** Card placement, every class prefixed `@max-[59rem]/events:`. */
   card: string;
@@ -88,6 +96,7 @@ const COLUMNS = {
   principal: {
     label: 'Principal',
     rem: 6.5,
+    grow: 1,
     card: '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-1 @max-[59rem]/events:col-span-3',
     cardBoth:
       '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-1 @max-[59rem]/events:col-span-2',
@@ -95,6 +104,7 @@ const COLUMNS = {
   upstream: {
     label: 'Upstream',
     rem: 6.5,
+    grow: 1,
     card: '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-1 @max-[59rem]/events:col-span-3',
     // Reads "principal → upstream" when both cells are shown.
     cardBoth:
@@ -103,16 +113,19 @@ const COLUMNS = {
   session: {
     label: 'Session',
     rem: null,
+    grow: 4,
     card: '@max-[59rem]/events:row-start-1 @max-[59rem]/events:col-start-3 @max-[59rem]/events:col-span-2 @max-[59rem]/events:w-full',
   },
   kind: {
     label: 'Kind',
     rem: 4.75,
+    grow: 1,
     card: '@max-[59rem]/events:row-start-1 @max-[59rem]/events:col-start-2 @max-[59rem]/events:justify-self-start @max-[59rem]/events:max-w-full',
   },
   model: {
     label: 'Model',
     rem: 7,
+    grow: 1,
     card: '@max-[59rem]/events:row-start-2 @max-[59rem]/events:col-start-4 @max-[59rem]/events:col-span-2 @max-[59rem]/events:text-right',
   },
   status: {
@@ -503,6 +516,10 @@ export const RequestEventsTable = memo(function RequestEventsTable({
     (sum, k) => sum + (COLUMNS[k].rem ?? 0),
     SESSION_FLOOR_REM,
   );
+  const totalGrow = visible.reduce(
+    (sum, k) => sum + ((COLUMNS[k] as Column).grow ?? 0),
+    0,
+  );
   const reservedBodyStyle =
     loading || events.length === 0
       ? { height: `${reservedRowCount * RESERVED_ROW_REM}rem` }
@@ -519,13 +536,14 @@ export const RequestEventsTable = memo(function RequestEventsTable({
         >
           <colgroup className="@max-[59rem]/events:hidden">
             {visible.map((k) => {
-              const rem = COLUMNS[k].rem;
-              return (
-                <col
-                  key={k}
-                  style={rem == null ? undefined : { width: `${rem}rem` }}
-                />
-              );
+              const { rem, grow }: Column = COLUMNS[k];
+              if (rem == null) return <col key={k} />;
+              const share = (grow ?? 0) / totalGrow;
+              const width =
+                share > 0
+                  ? `calc(${rem}rem + max(0rem, 100cqw - var(--events-min-w)) * ${share})`
+                  : `${rem}rem`;
+              return <col key={k} style={{ width }} />;
             })}
           </colgroup>
           <TableHead className="@max-[59rem]/events:hidden">

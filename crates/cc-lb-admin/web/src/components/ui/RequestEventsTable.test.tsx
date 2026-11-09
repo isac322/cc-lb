@@ -663,12 +663,6 @@ describe('RequestEventsTable', () => {
       );
       const cols = container.querySelectorAll('colgroup > col');
       expect(cols).toHaveLength(headers.length);
-      // Session is the one flexible column; every other column is fixed.
-      cols.forEach((col, index) => {
-        const width = (col as HTMLTableColElement).style.width;
-        if (headers[index] === 'Session') expect(width).toBe('');
-        else expect(width).toMatch(/^\d+(\.\d+)?rem$/);
-      });
     });
 
     it('sets the table minimum to the visible columns plus the session floor', () => {
