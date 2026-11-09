@@ -712,6 +712,40 @@ async fn gemini_camel_case_tier_reaches_limit_estimator_without_rewriting_body()
 }
 
 #[tokio::test]
+async fn review_1166_gemini_blank_tier_is_omitted_from_limit_reservation() {
+    for raw_tier in ["", " \t "] {
+        let state = TestState::default();
+        let estimator = Arc::new(RecordingLimitCostEstimator::default());
+        let lifecycle =
+            limited_lifecycle(StorageUpstreamKind::GeminiApiKey, Vec::new(), &state, None)
+                .with_limit_cost_estimator(estimator.clone());
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "serviceTier": raw_tier,
+                "contents": [],
+                "generationConfig": {"maxOutputTokens": 16}
+            }))
+            .expect("Gemini request JSON"),
+        );
+        let response = handle(
+            &lifecycle,
+            provider_post_request(
+                &format!("/v1beta/models/{PRICED_GEMINI_MODEL}:generateContent"),
+                body,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.expect("response body");
+        assert_eq!(
+            *estimator.service_tiers.lock().expect("recorded tiers"),
+            vec![None],
+            "blank Gemini tier must not reach pricing reservation"
+        );
+    }
+}
+
+#[tokio::test]
 async fn gemini_tier_aliases_use_matching_pre_dispatch_prices_and_preserve_wire_bytes() {
     let catalog = priced_catalog();
     let mut snapshot = (*catalog.current()).clone();
@@ -923,6 +957,65 @@ async fn gemini_observed_tiers_and_requested_thinking_reach_durable_history()
             }
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_1166_gemini_native_snake_thinking_reaches_durable_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage_for_lifecycle_happy(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let state = TestState::default();
+    let lifecycle = limited_lifecycle(
+        StorageUpstreamKind::GeminiApiKey,
+        Vec::new(),
+        &state,
+        Some(Arc::new(GeminiMetadataDispatch {
+            payload: Bytes::from_static(
+                br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"thoughtsTokenCount":2}}"#,
+            ),
+            streaming: false,
+        })),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let body = Bytes::from_static(
+        br#"{"contents":[],"generationConfig":{"thinkingConfig":{"thinking_level":"LOW","thinking_budget":1024}}}"#,
+    );
+    let response = handle(
+        &lifecycle,
+        provider_post_request(
+            &format!("/v1beta/models/{PRICED_GEMINI_MODEL}:generateContent"),
+            body,
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await?;
+
+    let event = timeout(Duration::from_secs(3), async {
+        loop {
+            if let cc_lb_request_log::RequestEventUpdate::Final(update) =
+                updates.recv().await.expect("event bus")
+            {
+                break update.event;
+            }
+        }
+    })
+    .await
+    .expect("final persisted event");
+    assert_eq!(event.thinking_level.as_deref(), Some("LOW"));
+    assert_eq!(event.thinking_budget_tokens, Some(1024));
+    assert_eq!(event.thinking_tokens, Some(2));
+    let persisted = cc_lb_storage_api::RequestEventStore::get_request_event(
+        storage.as_ref(),
+        event.event_id.as_deref().expect("event id"),
+    )
+    .await?
+    .expect("history row");
+    assert_eq!(persisted.thinking_level.as_deref(), Some("LOW"));
+    assert_eq!(persisted.thinking_budget_tokens, Some(1024));
     Ok(())
 }
 

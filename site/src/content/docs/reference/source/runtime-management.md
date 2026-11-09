@@ -168,15 +168,19 @@ snapshots replace the previous counts instead of accumulating them. Missing or
 
 Native Gemini generation requests accept both `service_tier` and `serviceTier`
 for routing and cost reservations; `service_tier` takes precedence when both
-appear. The original request bytes are forwarded unchanged. Completed-request
+appear. A blank selected tier is absent from Gemini metadata; a non-blank
+tier keeps its original bytes. The original request bytes are forwarded unchanged. Completed-request
 costs use the observed `usageMetadata.serviceTier` or `service_tier`, including
 wrapped `response.usageMetadata`; the requested tier never substitutes for a
 missing response tier.
 
-Request history records `generationConfig.thinkingConfig.thinkingLevel` as
-optional `thinking_level` metadata, separately from `reasoning_effort` and
-`thinking_budget_tokens`. Non-empty levels up to 64 bytes retain their original
-casing. Thinking level does not affect routing or token accounting.
+Request history recognizes both `generationConfig.thinkingConfig.thinkingLevel`
+and the native SDK spelling `generationConfig.thinkingConfig.thinking_level` as
+optional `thinking_level` metadata. It likewise recognizes `thinkingBudget` and
+`thinking_budget` as optional `thinking_budget_tokens` metadata. CamelCase takes
+precedence when both leaf aliases are present, including when that value is
+malformed. Non-empty levels up to 64 bytes retain their original casing.
+Thinking level does not affect routing or token accounting.
 
 The existing cache-input subtraction is unchanged: reported cache-read tokens
 are counted separately from uncached input. OpenAI and Anthropic output already

@@ -257,7 +257,19 @@ export function summarizeRequest(req, rawBody) {
     // Record both names exactly as sent, including explicit null and conflicting aliases.
     summary.service_tier_aliases = Object.fromEntries(["service_tier", "serviceTier"].filter((key) => Object.hasOwn(body, key)).map((key) => [key, body[key]]));
     summary.max_output_tokens = gen.maxOutputTokens ?? null;
-    summary.thinking_config = thinking ? { keys: Object.keys(thinking).sort(), thinkingLevel: thinking.thinkingLevel ?? null, thinkingBudget: thinking.thinkingBudget ?? null, includeThoughts: thinking.includeThoughts ?? null } : null;
+    if (thinking && typeof thinking === "object") {
+      const leaf = (camel, snake, valid) => {
+        // Match runtime extraction: a present camelCase field wins, even when malformed.
+        const key = Object.hasOwn(thinking, camel) ? camel : Object.hasOwn(thinking, snake) ? snake : null;
+        return key === null || !valid(thinking[key]) ? null : thinking[key];
+      };
+      const thinkingLevel = leaf("thinkingLevel", "thinking_level", (value) => typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= 64);
+      const thinkingBudget = leaf("thinkingBudget", "thinking_budget", (value) => Number.isSafeInteger(value) && value >= 0);
+      const includeThoughts = leaf("includeThoughts", "include_thoughts", (value) => typeof value === "boolean");
+      summary.thinking_config = { keys: Object.keys(thinking).sort(), thinkingLevel, thinkingBudget, includeThoughts };
+    } else {
+      summary.thinking_config = null;
+    }
     summary.tool_kinds = (Array.isArray(body.tools) ? body.tools : []).map((tool) => Object.keys(tool ?? {}).sort().join("+"));
     summary.function_declaration_names = declarations.map((decl) => decl?.name ?? null).sort();
     summary.tool_config_keys = body.toolConfig ? Object.keys(body.toolConfig).sort() : null;
