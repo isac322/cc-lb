@@ -337,7 +337,7 @@ async fn merge_stale_gemini_rollups(
                AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
                AND marker.principal_id = rollup.principal_id \
                AND marker.upstream_id = rollup.upstream_id \
-               AND marker.marker_model = substring(rollup.model FROM 8) \
+               AND marker.marker_model = rollup.model \
            ) \
          ORDER BY rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
                   rollup.upstream_id, rollup.model \
@@ -551,7 +551,7 @@ async fn reconcile_gemini_model_identity(
                    AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
                    AND marker.principal_id = rollup.principal_id \
                    AND marker.upstream_id = rollup.upstream_id \
-                   AND marker.marker_model = substring(rollup.model FROM 8) \
+                   AND marker.marker_model = rollup.model \
                )",
         )
         .fetch_one(&mut *tx)
@@ -590,7 +590,7 @@ async fn reconcile_gemini_model_identity(
                        AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
                        AND marker.principal_id = rollup.principal_id \
                        AND marker.upstream_id = rollup.upstream_id \
-                       AND marker.marker_model = substring(rollup.model FROM 8) \
+                       AND marker.marker_model = rollup.model \
                    )",
             )
             .bind(event_upper_bound)
@@ -637,7 +637,7 @@ async fn reconcile_gemini_model_identity(
                        AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
                        AND marker.principal_id = rollup.principal_id \
                        AND marker.upstream_id = rollup.upstream_id \
-                       AND marker.marker_model = substring(rollup.model FROM 8) \
+                       AND marker.marker_model = rollup.model \
                    )",
             )
             .bind(rollup_upper_bound)
@@ -734,7 +734,7 @@ async fn reconcile_gemini_model_identity(
                    AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
                    AND marker.principal_id = rollup.principal_id \
                    AND marker.upstream_id = rollup.upstream_id \
-                   AND marker.marker_model = substring(rollup.model FROM 8) \
+                   AND marker.marker_model = rollup.model \
                )",
         )
         .bind(nested_event_cursor)
@@ -831,7 +831,7 @@ async fn reconcile_gemini_model_identity(
                AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
                AND marker.principal_id = rollup.principal_id \
                AND marker.upstream_id = rollup.upstream_id \
-               AND marker.marker_model = substring(rollup.model FROM 8) \
+               AND marker.marker_model = rollup.model \
            )",
     )
     .bind(rollup_upper_bound)
