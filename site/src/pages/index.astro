@@ -319,7 +319,7 @@ cargo build --release -p cc-lb-server
         <div class="proof-grid">
           <article class="proof-item">
             <h3>Pool API-key and OAuth upstreams</h3>
-            <p>Route Messages API traffic through the two supported upstream kinds.</p>
+            <p>Route native Anthropic, OpenAI, and Gemini traffic through six supported upstream kinds.</p>
             <a class="text-link" href="/docs/concepts/upstreams/">Read upstreams</a>
           </article>
           <article class="proof-item">
@@ -372,14 +372,23 @@ cargo build --release -p cc-lb-server
           <p class="section-label">Scope and trust</p>
           <h2 id="scope-title">Open source with explicit limits.</h2>
           <p>
-            cc-lb is built for self-hosting teams operating Anthropic-compatible traffic. The current
-            public upstream contract is intentionally bounded; read the trust notes before deploying.
+            cc-lb is built for self-hosting teams operating six upstream kinds across bounded native
+            provider routes. The public contract is intentionally narrow; read the trust notes before
+            deploying.
           </p>
         </div>
         <div class="scope-list">
           <div>
             <span>Supported</span>
-            <strong>Anthropic API-key and OAuth upstreams</strong>
+            <strong><code>anthropic_api_key</code>, <code>anthropic_oauth</code>, <code>openai_api_key</code>, <code>openai_oauth</code>, <code>gemini_api_key</code>, and <code>gemini_oauth</code></strong>
+          </div>
+          <div>
+            <span>Native routes</span>
+            <strong>Anthropic POST /v1/messages and /v1/messages/count_tokens; OpenAI POST /v1/responses and GET /v1/responses WebSocket; Gemini POST /v1beta/models/&#123;model&#125;:generateContent, :streamGenerateContent, and :countTokens</strong>
+          </div>
+          <div>
+            <span>Excluded</span>
+            <strong>Bedrock, Vertex, SigV4/ADC credential paths, cross-provider translation, and account-bound provider management</strong>
           </div>
           <div>
             <span>Runtime</span>

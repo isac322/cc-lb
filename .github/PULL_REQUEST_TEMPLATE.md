@@ -10,5 +10,5 @@
 
 - [ ] Code, repository docs, documentation site, and registry or repository listings describe the same behavior.
 - [ ] Docs, site, and CI checks relevant to this change pass, and the commands are listed above.
-- [ ] Public claims match `positioning.yml` and the supported Anthropic API-key and OAuth upstream scope.
+- [ ] Public claims match `positioning.yml` and the supported Anthropic, OpenAI, and Gemini API-key and OAuth scope, including native operation and credential limits.
 - [ ] No credentials, tokens, proxy keys, production data, or private hostnames appear in the diff, logs, or screenshots.
