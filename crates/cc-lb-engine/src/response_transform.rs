@@ -37,6 +37,7 @@ pub(crate) struct BufferedTransformParts {
 
 pub(crate) enum SseTransformOutcome {
     Emit(Bytes),
+    EmitTransformed(Bytes),
     Drop,
     FailOpen,
     Error(ResponseTransformError),
@@ -310,7 +311,7 @@ pub(crate) fn transform_sse_event_bytes(
     }) {
         Ok(TransformSseEventResult::Unchanged) => SseTransformOutcome::Emit(raw),
         Ok(TransformSseEventResult::Replace { events }) => match format_sse_events(&events) {
-            Ok(bytes) => SseTransformOutcome::Emit(bytes),
+            Ok(bytes) => SseTransformOutcome::EmitTransformed(bytes),
             Err(error) => SseTransformOutcome::Error(error),
         },
         Ok(TransformSseEventResult::Drop) => SseTransformOutcome::Drop,

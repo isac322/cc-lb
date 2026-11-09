@@ -8041,7 +8041,25 @@ impl Lifecycle {
                                             response_headers,
                                             raw.clone(),
                                         ) {
-                                            SseTransformOutcome::Emit(bytes) => {
+                                            outcome @ (SseTransformOutcome::Emit(_)
+                                            | SseTransformOutcome::EmitTransformed(_)) => {
+                                                let transformed =
+                                                    matches!(&outcome, SseTransformOutcome::EmitTransformed(_));
+                                                let bytes = match outcome {
+                                                    SseTransformOutcome::Emit(bytes)
+                                                    | SseTransformOutcome::EmitTransformed(bytes) => bytes,
+                                                    _ => unreachable!("matched emit outcome"),
+                                                };
+                                                if transformed
+                                                    && matches!(
+                                                        response_affinity_context.capability,
+                                                        ProviderCapability::OpenaiResponses
+                                                            | ProviderCapability::OpenaiResponsesCompact
+                                                    )
+                                                {
+                                                    responses_error_context
+                                                        .observe_transformed_output(&bytes);
+                                                }
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
                                                 if downstream_drop_guard.has_keepalive_completion() {
@@ -8744,7 +8762,25 @@ impl Lifecycle {
                                         response_headers,
                                         raw.clone(),
                                     ) {
-                                        SseTransformOutcome::Emit(bytes) => {
+                                        outcome @ (SseTransformOutcome::Emit(_)
+                                        | SseTransformOutcome::EmitTransformed(_)) => {
+                                            let transformed =
+                                                matches!(&outcome, SseTransformOutcome::EmitTransformed(_));
+                                            let bytes = match outcome {
+                                                SseTransformOutcome::Emit(bytes)
+                                                | SseTransformOutcome::EmitTransformed(bytes) => bytes,
+                                                _ => unreachable!("matched emit outcome"),
+                                            };
+                                            if transformed
+                                                && matches!(
+                                                    response_affinity_context.capability,
+                                                    ProviderCapability::OpenaiResponses
+                                                        | ProviderCapability::OpenaiResponsesCompact
+                                                )
+                                            {
+                                                responses_error_context
+                                                    .observe_transformed_output(&bytes);
+                                            }
                                             if downstream_drop_guard.has_keepalive_completion() {
                                                 downstream_drop_guard
                                                     .observe_keepalive_emitted(
@@ -8933,6 +8969,7 @@ impl Lifecycle {
                             truncate_reason(&format!("upstream response decoding failed: {error}")),
                         );
                     } else if success_sse_affinity_gate
+                        && !stream_provider_error_seen
                         && stream_transform_error.is_none()
                         && stream_affinity_error.is_none()
                         && stream_upstream_error.is_none()

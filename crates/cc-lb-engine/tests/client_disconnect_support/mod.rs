@@ -27,8 +27,8 @@ use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, Princi
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, SseEventTransformHook, TransformSseEventRequest, TransformSseEventResult,
-    UpstreamDialect,
+    SignedRequest, SseEvent, SseEventTransformHook, TransformSseEventRequest,
+    TransformSseEventResult, UpstreamDialect,
 };
 use http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use http::{HeaderValue, Response, StatusCode};
@@ -96,8 +96,34 @@ pub fn transform_lifecycle_with_kind(
     test_bus: &TestLifecycleBus,
     upstream_kind: StorageUpstreamKind,
 ) -> Lifecycle {
+    transform_lifecycle_with_dialect(
+        dispatcher,
+        test_bus,
+        upstream_kind,
+        Arc::new(FailAfterFirstDialect::default()),
+    )
+}
+
+pub fn responses_replace_lifecycle_with_kind(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+    upstream_kind: StorageUpstreamKind,
+) -> Lifecycle {
+    transform_lifecycle_with_dialect(
+        dispatcher,
+        test_bus,
+        upstream_kind,
+        Arc::new(ResponsesSplitDialect),
+    )
+}
+
+fn transform_lifecycle_with_dialect(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+    upstream_kind: StorageUpstreamKind,
+    dialect: Arc<dyn UpstreamDialect>,
+) -> Lifecycle {
     let state = TestState::default();
-    let dialect = Arc::new(FailAfterFirstDialect::default());
     let upstream_id = uuid::Uuid::from_u128(1);
     let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
     chains.insert(
@@ -357,6 +383,83 @@ impl SseEventTransformHook for FailAfterFirstDialect {
         Err(ResponseTransformError::Runtime {
             reason: "forced post-output failure".to_owned(),
         })
+    }
+}
+
+struct ResponsesSplitDialect;
+
+impl UpstreamDialect for ResponsesSplitDialect {
+    fn shape(
+        &self,
+        ctx: &DialectShapeContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        let mut url = Url::parse("http://upstream.local/").expect("test URL parses");
+        url.set_path(ctx.path.trim_start_matches('/'));
+        Ok(builder.shaped_request(
+            url,
+            ctx.method.clone(),
+            ctx.downstream_headers.clone(),
+            ctx.body_bytes.clone(),
+        ))
+    }
+
+    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
+        Some(self)
+    }
+}
+
+impl SseEventTransformHook for ResponsesSplitDialect {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        const DOWNSTREAM_ID: &str = "resp_downstream";
+        match request.event.event.as_str() {
+            "response.created" | "response.completed" => {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&request.event.data).expect("response JSON");
+                value["response"]["id"] = serde_json::Value::String(DOWNSTREAM_ID.to_owned());
+                Ok(TransformSseEventResult::Replace {
+                    events: vec![SseEvent {
+                        event: request.event.event,
+                        data: Bytes::from(
+                            serde_json::to_vec(&value).expect("response replacement JSON"),
+                        ),
+                    }],
+                })
+            }
+            "response.output_text.delta" => {
+                let mut first: serde_json::Value =
+                    serde_json::from_slice(&request.event.data).expect("delta JSON");
+                first["response_id"] = serde_json::Value::String(DOWNSTREAM_ID.to_owned());
+                let sequence = first["sequence_number"]
+                    .as_u64()
+                    .expect("delta sequence number");
+                let mut second = first.clone();
+                second["sequence_number"] = serde_json::json!(sequence.saturating_add(1));
+                second["delta"] = serde_json::Value::String("n+1".to_owned());
+                Ok(TransformSseEventResult::Replace {
+                    events: vec![
+                        SseEvent {
+                            event: request.event.event.clone(),
+                            data: Bytes::from(
+                                serde_json::to_vec(&first).expect("first delta JSON"),
+                            ),
+                        },
+                        SseEvent {
+                            event: request.event.event,
+                            data: Bytes::from(
+                                serde_json::to_vec(&second).expect("second delta JSON"),
+                            ),
+                        },
+                    ],
+                })
+            }
+            _ => Ok(TransformSseEventResult::Unchanged),
+        }
     }
 }
 

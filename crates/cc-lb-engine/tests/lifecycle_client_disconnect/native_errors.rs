@@ -1,6 +1,7 @@
 use super::*;
 use client_disconnect_support::{
-    assert_responses_failed, assert_stream_failure_once, sse_json_events,
+    assert_responses_failed, assert_stream_failure_once, responses_replace_lifecycle_with_kind,
+    sse_json_events,
 };
 use serde_json::{Value, json};
 use std::io::Write as _;
@@ -223,6 +224,225 @@ async fn responses_provider_failed_and_error_events_pass_through_byte_identicall
         assert_eq!(sse_json_events(&body).len(), 2);
         assert_error_terminal(&mut events, 200, "upstream_stream_error").await;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_provider_failed_before_truncated_gzip_trailer_is_single_native_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let provider_failure = br#"event: response.failed
+data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy_test","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"provider rate limit"}}}
+
+"#;
+    let mut plaintext = CREATED.to_vec();
+    plaintext.extend_from_slice(OUTPUT);
+    plaintext.extend_from_slice(provider_failure);
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&plaintext)?;
+    let compressed = encoder.finish()?;
+    let truncated = compressed[..compressed.len().saturating_sub(8)].to_vec();
+
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = bus.bus.subscribe();
+    let lifecycle = lifecycle_with_upstream_kind(
+        encoded_sse_dispatch(StatusCode::OK, Body::from(truncated), "gzip"),
+        &bus,
+        StorageUpstreamKind::OpenaiApiKey,
+    )
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
+    ));
+    let request = responses_request();
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+
+    assert_eq!(body.as_ref(), plaintext.as_slice());
+    let events_json = sse_json_events(&body);
+    assert_eq!(
+        events_json
+            .iter()
+            .filter(|(name, _)| name == "response.failed")
+            .count(),
+        1,
+        "provider failure is relayed exactly once: {events_json:?}",
+    );
+    assert!(
+        events_json
+            .iter()
+            .all(|(_, value)| value["error"]["type"] != "api_error"),
+        "truncated provider failure must not gain a synthetic api_error: {events_json:?}",
+    );
+    let provider_failure = events_json
+        .iter()
+        .find(|(name, _)| name == "response.failed")
+        .map(|(_, value)| value)
+        .expect("provider response.failed");
+    assert_eq!(
+        provider_failure["response"]["error"]["code"],
+        "rate_limit_exceeded"
+    );
+    assert_eq!(
+        provider_failure["response"]["error"]["message"],
+        "provider rate limit"
+    );
+
+    assert_one_final(&mut updates).await;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some("provider rate limit")
+    );
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("rate_limit_exceeded")
+    );
+    assert_eq!(
+        rows[0].upstream_body_end.as_deref(),
+        Some("decode_error_after_clean_end")
+    );
+    assert_eq!(
+        rows[0].upstream_body_error_cause.as_deref(),
+        Some("decode_error")
+    );
+    assert_eq!(rows[0].upstream_content_encoding.as_deref(), Some("gzip"));
+    assert_eq!(
+        rows[0].upstream_body_bytes,
+        Some(compressed.len() as u64 - 8)
+    );
+    assert!(rows[0].body_bytes.is_some());
+    assert!(rows[0].body_chunk_count.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_replace_sse_failure_uses_emitted_sequence_and_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let created = br#"event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_upstream","object":"response","status":"in_progress"}}
+
+"#;
+    let delta = br#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":7,"response_id":"resp_upstream","delta":"n"}
+
+"#;
+    let mut prefix = created.to_vec();
+    prefix.extend_from_slice(delta);
+
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut events = lifecycle_receiver(&bus);
+    let mut updates = bus.bus.subscribe();
+    let lifecycle = responses_replace_lifecycle_with_kind(
+        sse_dispatch(
+            StatusCode::OK,
+            upstream_frame_error_after(Bytes::from(prefix.clone())),
+        ),
+        &bus,
+        StorageUpstreamKind::OpenaiApiKey,
+    )
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
+    ));
+    let request = responses_request();
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+    let events_json = sse_json_events(&body);
+
+    let emitted_sequences = events_json
+        .iter()
+        .filter_map(|(_, value)| value["sequence_number"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(&emitted_sequences[..3], &[0, 7, 8]);
+    assert_eq!(
+        events_json
+            .iter()
+            .filter(|(name, _)| name == "response.failed")
+            .count(),
+        1,
+        "one synthetic failure after transformed output: {events_json:?}",
+    );
+    let failure = events_json
+        .iter()
+        .find(|(name, _)| name == "response.failed")
+        .map(|(_, value)| value)
+        .expect("synthetic response.failed");
+    assert_eq!(failure["sequence_number"].as_u64(), Some(9));
+    assert_eq!(failure["response"]["id"], "resp_downstream");
+    assert_eq!(failure["response"]["error"]["code"], "api_error");
+    assert_stream_failure_once(
+        &mut events,
+        "upstream_response_body_error",
+        200,
+        "upstream_stream_error",
+    )
+    .await;
+    assert_one_final(&mut updates).await;
+
+    let healthy_created = br#"event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_upstream","object":"response","status":"in_progress"}}
+
+"#;
+    let healthy_delta = br#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":7,"response_id":"resp_upstream","delta":"n"}
+
+"#;
+    let completed = br#"event: response.completed
+data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_upstream","object":"response","status":"completed"}}
+
+"#;
+    let mut healthy_body = healthy_created.to_vec();
+    healthy_body.extend_from_slice(healthy_delta);
+    healthy_body.extend_from_slice(completed);
+    let healthy_dir = tempfile::tempdir()?;
+    let healthy_storage = Arc::new(sqlite_storage(&healthy_dir).await?);
+    let healthy_bus =
+        TestLifecycleBus::new().with_assembler(healthy_storage as Arc<dyn StorageTrait>);
+    let mut healthy_events = lifecycle_receiver(&healthy_bus);
+    let mut healthy_updates = healthy_bus.bus.subscribe();
+    let healthy_lifecycle = responses_replace_lifecycle_with_kind(
+        sse_dispatch(StatusCode::OK, Body::from(healthy_body)),
+        &healthy_bus,
+        StorageUpstreamKind::OpenaiApiKey,
+    )
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
+    ));
+    let healthy_request = responses_request();
+    let healthy_auth = healthy_lifecycle
+        .authenticate(healthy_request.headers())
+        .await?;
+    let healthy_response = healthy_lifecycle
+        .handle(healthy_request, &healthy_auth)
+        .await?;
+    assert_eq!(healthy_response.status(), StatusCode::OK);
+    let healthy_output = healthy_response.into_body().collect().await?.to_bytes();
+    let healthy_json = sse_json_events(&healthy_output);
+    assert_eq!(
+        healthy_json
+            .iter()
+            .filter(|(name, _)| name == "response.failed")
+            .count(),
+        0,
+        "healthy replacement has no synthetic failure: {healthy_json:?}",
+    );
+    assert_eq!(
+        healthy_json
+            .iter()
+            .find(|(name, _)| name == "response.completed")
+            .map(|(_, value)| value["response"]["id"].as_str()),
+        Some(Some("resp_downstream")),
+    );
+    assert_success_terminal(&mut healthy_events, 200).await;
+    assert_one_final(&mut healthy_updates).await;
     Ok(())
 }
 

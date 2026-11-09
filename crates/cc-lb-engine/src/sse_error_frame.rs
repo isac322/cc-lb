@@ -6,16 +6,74 @@ use serde_json::json;
 const RESPONSES_ID_MAX_BYTES: usize = 512;
 
 #[derive(Clone, Debug, Default)]
+pub(crate) struct ResponsesSseErrorObservation {
+    response_id: Option<String>,
+    last_sequence_number: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ResponsesSseErrorContext {
     response_id: Option<String>,
     last_sequence_number: Option<u64>,
 }
 
 impl ResponsesSseErrorContext {
+    pub(crate) fn merge(&mut self, observation: ResponsesSseErrorObservation) {
+        if self.response_id.is_none() {
+            self.response_id = observation.response_id;
+        }
+        if let Some(sequence_number) = observation.last_sequence_number {
+            self.last_sequence_number = Some(
+                self.last_sequence_number
+                    .unwrap_or_default()
+                    .max(sequence_number),
+            );
+        }
+    }
+    fn merge_transformed(&mut self, observation: ResponsesSseErrorObservation) {
+        if observation.response_id.is_some() {
+            self.response_id = observation.response_id;
+        }
+        if let Some(sequence_number) = observation.last_sequence_number {
+            self.last_sequence_number = Some(
+                self.last_sequence_number
+                    .unwrap_or_default()
+                    .max(sequence_number),
+            );
+        }
+    }
+
     pub(crate) fn observe(&mut self, value: Option<&serde_json::Value>) {
         let Some(value) = value else {
             return;
         };
+        let mut observation = ResponsesSseErrorObservation::default();
+        observation.observe_value(value);
+        self.merge(observation);
+    }
+
+    pub(crate) fn observe_transformed_output(&mut self, bytes: &[u8]) {
+        let mut offset = 0;
+        while let Some(end) = crate::usage_parser::find_sse_event_end(&bytes[offset..]) {
+            let end = offset + end;
+            let parsed = crate::usage_parser::parse_sse_event(&bytes[offset..end]);
+            if let Some(value) = parsed.value().ok().flatten() {
+                let mut observation = ResponsesSseErrorObservation::default();
+                observation.observe_value(value);
+                self.merge_transformed(observation);
+            }
+            offset = end;
+        }
+    }
+
+    fn next_sequence_number(&self) -> u64 {
+        self.last_sequence_number
+            .map_or(0, |sequence| sequence.saturating_add(1))
+    }
+}
+
+impl ResponsesSseErrorObservation {
+    fn observe_value(&mut self, value: &serde_json::Value) {
         if self.response_id.is_none() {
             let candidate = value
                 .get("response")
@@ -39,11 +97,6 @@ impl ResponsesSseErrorContext {
                     .max(sequence_number),
             );
         }
-    }
-
-    fn next_sequence_number(&self) -> u64 {
-        self.last_sequence_number
-            .map_or(0, |sequence| sequence.saturating_add(1))
     }
 }
 
