@@ -2,7 +2,7 @@
 -- rollup worker. Startup must only install durable, resumable state.
 CREATE TABLE IF NOT EXISTS usage_rollup_reconciliations_v1 (
     id TEXT PRIMARY KEY,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'rewriting', 'complete')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'rewriting', 'rewriting_nested', 'complete')),
     cursor INTEGER NOT NULL DEFAULT 0 CHECK (cursor >= 0),
     upper_bound INTEGER NOT NULL DEFAULT 0 CHECK (upper_bound >= 0)
 );

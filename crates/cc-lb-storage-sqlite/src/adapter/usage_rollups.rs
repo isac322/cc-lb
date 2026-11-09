@@ -370,7 +370,10 @@ impl UsageTokenIntervalStore for SqliteStorage {
         Ok(sums)
     }
 }
-async fn merge_stale_gemini_rollups(tx: &mut Transaction<'_, Sqlite>) -> StorageResult<()> {
+async fn merge_stale_gemini_rollups(
+    tx: &mut Transaction<'_, Sqlite>,
+    nested: bool,
+) -> StorageResult<()> {
     let source_rows = sqlx::query(
         "SELECT rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
          rollup.upstream_id, rollup.model \
@@ -378,12 +381,22 @@ async fn merge_stale_gemini_rollups(tx: &mut Transaction<'_, Sqlite>) -> Storage
          JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
          WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
            AND length(rollup.model) > 7 \
-           AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
-           AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\' \
+           AND ( \
+             (? = 0 \
+              AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+              AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
+              AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\') \
+             OR \
+             (? = 1 \
+              AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
+              AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\') \
+           ) \
          ORDER BY rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
                   rollup.upstream_id, rollup.model \
          LIMIT ?",
     )
+    .bind(if nested { 1_i64 } else { 0_i64 })
+    .bind(if nested { 1_i64 } else { 0_i64 })
     .bind(ROLLUP_BATCH_LIMIT)
     .fetch_all(&mut **tx)
     .await
@@ -535,92 +548,127 @@ async fn reconcile_gemini_model_identity(
         return Ok(None);
     }
 
-    let event_work = sqlx::query_scalar::<_, i64>(
-        "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
-         JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
-         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
-           AND events.model LIKE 'models/%' \
-           AND events.model NOT LIKE 'models/tunedModels/%')",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    let rollup_work = sqlx::query_scalar::<_, i64>(
-        "SELECT EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
-         JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
-         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
-           AND length(rollup.model) > 7 \
-           AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
-           AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\')",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-
-    if status == "pending" && event_work != 0 {
-        sqlx::query(
-            "UPDATE usage_rollup_reconciliations_v1 SET status = 'rewriting' \
-             WHERE id = ?",
-        )
-        .bind(GEMINI_RECONCILIATION_ID)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    } else {
-        if event_work != 0 {
-            let ids = sqlx::query_scalar::<_, i64>(
-                "SELECT events.id FROM request_events_v1 AS events \
-                 JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
-                 WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
-                   AND events.model LIKE 'models/%' \
-                   AND events.model NOT LIKE 'models/tunedModels/%' \
-                 ORDER BY events.id ASC LIMIT ?",
-            )
-            .bind(ROLLUP_BATCH_LIMIT)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-            if !ids.is_empty() {
-                let placeholders = std::iter::repeat_n("?", ids.len())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let sql = format!(
-                    "UPDATE request_events_v1 SET model = substr(model, 8) \
-                     WHERE id IN ({placeholders})"
-                );
-                let mut query = sqlx::query(AssertSqlSafe(sql));
-                for id in &ids {
-                    query = query.bind(id);
-                }
-                query.execute(&mut *tx).await.map_err(map_sqlx_error)?;
-            }
-        }
-        if rollup_work != 0 {
-            merge_stale_gemini_rollups(&mut tx).await?;
-        }
-
-        let event_work = sqlx::query_scalar::<_, i64>(
+    if status == "pending" {
+        let has_event_work = sqlx::query_scalar::<_, i64>(
             "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
              JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
              WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
                AND events.model LIKE 'models/%' \
+               AND events.model NOT LIKE 'models/models/%' \
                AND events.model NOT LIKE 'models/tunedModels/%')",
         )
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
-        let rollup_work = sqlx::query_scalar::<_, i64>(
+        let has_rollup_work = sqlx::query_scalar::<_, i64>(
             "SELECT EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
              JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
              WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
                AND length(rollup.model) > 7 \
                AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+               AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
                AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\')",
         )
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
-        if event_work == 0 && rollup_work == 0 {
+
+        if has_event_work != 0 {
+            sqlx::query(
+                "UPDATE usage_rollup_reconciliations_v1 SET status = 'rewriting' \
+                 WHERE id = ?",
+            )
+            .bind(GEMINI_RECONCILIATION_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        } else if has_rollup_work != 0 {
+            merge_stale_gemini_rollups(&mut tx, false).await?;
+            let has_rollup_work = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+                 JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+                 WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+                   AND length(rollup.model) > 7 \
+                   AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+                   AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
+                   AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\')",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            if has_rollup_work == 0 {
+                sqlx::query(
+                    "UPDATE usage_rollup_reconciliations_v1 SET status = 'rewriting_nested' \
+                     WHERE id = ?",
+                )
+                .bind(GEMINI_RECONCILIATION_ID)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+        } else {
+            sqlx::query(
+                "UPDATE usage_rollup_reconciliations_v1 SET status = 'rewriting_nested' \
+                 WHERE id = ?",
+            )
+            .bind(GEMINI_RECONCILIATION_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        return Ok(Some(UsageRollupRun {
+            processed_events: 0,
+            updated_rollups: 0,
+            checkpoint: None,
+        }));
+    }
+
+    if status == "rewriting_nested" {
+        let ids = sqlx::query_scalar::<_, i64>(
+            "SELECT events.id \
+             FROM request_events_v1 AS events \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND events.model LIKE 'models/models/%' \
+               AND events.model NOT LIKE 'models/models/tunedModels/%' \
+             ORDER BY events.id ASC LIMIT ?",
+        )
+        .bind(ROLLUP_BATCH_LIMIT)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if !ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", ids.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "UPDATE request_events_v1 SET model = substr(model, 8) \
+                 WHERE id IN ({placeholders})"
+            );
+            let mut query = sqlx::query(AssertSqlSafe(sql));
+            for id in &ids {
+                query = query.bind(id);
+            }
+            query.execute(&mut *tx).await.map_err(map_sqlx_error)?;
+        }
+        merge_stale_gemini_rollups(&mut tx, true).await?;
+        let has_nested_work = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND events.model LIKE 'models/models/%' \
+               AND events.model NOT LIKE 'models/models/tunedModels/%') \
+             OR EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+             JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+             WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
+               AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if has_nested_work == 0 {
             sqlx::query(
                 "UPDATE usage_rollup_reconciliations_v1 SET status = 'complete' \
                  WHERE id = ?",
@@ -630,6 +678,77 @@ async fn reconcile_gemini_model_identity(
             .await
             .map_err(map_sqlx_error)?;
         }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        return Ok(Some(UsageRollupRun {
+            processed_events: 0,
+            updated_rollups: 0,
+            checkpoint: None,
+        }));
+    }
+
+    let ids = sqlx::query_scalar::<_, i64>(
+        "SELECT events.id \
+         FROM request_events_v1 AS events \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND events.model LIKE 'models/%' \
+           AND events.model NOT LIKE 'models/models/%' \
+           AND events.model NOT LIKE 'models/tunedModels/%' \
+         ORDER BY events.id ASC LIMIT ?",
+    )
+    .bind(ROLLUP_BATCH_LIMIT)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if ids.is_empty() {
+        merge_stale_gemini_rollups(&mut tx, false).await?;
+    } else {
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE request_events_v1 SET model = substr(model, 8) \
+             WHERE id IN ({placeholders})"
+        );
+        let mut query = sqlx::query(AssertSqlSafe(sql));
+        for id in &ids {
+            query = query.bind(id);
+        }
+        query.execute(&mut *tx).await.map_err(map_sqlx_error)?;
+        merge_stale_gemini_rollups(&mut tx, false).await?;
+    }
+    let has_event_work = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND events.model LIKE 'models/%' \
+           AND events.model NOT LIKE 'models/models/%' \
+           AND events.model NOT LIKE 'models/tunedModels/%')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let has_rollup_work = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+         JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+           AND length(rollup.model) > 7 \
+           AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
+           AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
+           AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if has_event_work == 0 && has_rollup_work == 0 {
+        sqlx::query(
+            "UPDATE usage_rollup_reconciliations_v1 SET status = 'rewriting_nested' \
+             WHERE id = ?",
+        )
+        .bind(GEMINI_RECONCILIATION_ID)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
     }
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(Some(UsageRollupRun {
