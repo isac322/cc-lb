@@ -478,14 +478,15 @@ async fn reconcile_gemini_model_identity(
             checkpoint: None,
         }));
     }
-    let (status, event_upper_bound, rollup_upper_bound) = sqlx::query_as::<_, (String, i64, i64)>(
-        "SELECT status, event_upper_bound, rollup_upper_bound \
+    let (status, event_cursor, event_upper_bound, rollup_upper_bound) =
+        sqlx::query_as::<_, (String, i64, i64, i64)>(
+            "SELECT status, cursor, event_upper_bound, rollup_upper_bound \
              FROM usage_rollup_reconciliations_v1 WHERE id = $1",
-    )
-    .bind(GEMINI_RECONCILIATION_ID)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
+        )
+        .bind(GEMINI_RECONCILIATION_ID)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
     if status == "complete" {
         tx.rollback().await.map_err(map_sqlx_error)?;
         return Ok(None);
@@ -554,7 +555,7 @@ async fn reconcile_gemini_model_identity(
         let no_reconciliation_work = !has_event_work && !has_rollup_work && !has_nested_work;
         sqlx::query(
             "UPDATE usage_rollup_reconciliations_v1 \
-             SET event_upper_bound = $1, rollup_upper_bound = $2, \
+             SET cursor = 0, event_upper_bound = $1, rollup_upper_bound = $2, \
                  status = CASE WHEN $3 THEN 'rewriting' \
                                WHEN $4 THEN 'rewriting' \
                                WHEN $5 THEN 'rewriting_nested' \
@@ -614,17 +615,20 @@ async fn reconcile_gemini_model_identity(
              FROM request_events_v1 AS events \
              JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
              WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
-               AND events.seq <= $2 \
+               AND events.seq > $2 \
+               AND events.seq <= $3 \
                AND events.model LIKE 'models/models/%' \
                AND events.model NOT LIKE 'models/models/tunedModels/%' \
              ORDER BY events.seq ASC LIMIT $1 \
              FOR UPDATE OF events",
         )
         .bind(ROLLUP_BATCH_LIMIT)
+        .bind(event_cursor)
         .bind(event_upper_bound)
         .fetch_all(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        let nested_event_cursor = seqs.last().copied().unwrap_or(event_cursor);
         if !seqs.is_empty() {
             sqlx::query(
                 "UPDATE request_events_v1 AS events \
@@ -639,22 +643,33 @@ async fn reconcile_gemini_model_identity(
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
+            sqlx::query(
+                "UPDATE usage_rollup_reconciliations_v1 SET cursor = $1 \
+                 WHERE id = $2",
+            )
+            .bind(nested_event_cursor)
+            .bind(GEMINI_RECONCILIATION_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
         }
         merge_stale_gemini_rollups(&mut tx, true, rollup_upper_bound).await?;
         let has_nested_work = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
              JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
              WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
-               AND events.seq <= $1 \
+               AND events.seq > $1 \
+               AND events.seq <= $2 \
                AND events.model LIKE 'models/models/%' \
                AND events.model NOT LIKE 'models/models/tunedModels/%') \
              OR EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
              JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
              WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
-               AND FLOOR(EXTRACT(EPOCH FROM rollup.updated_at) * 1000)::BIGINT <= $2 \
+               AND FLOOR(EXTRACT(EPOCH FROM rollup.updated_at) * 1000)::BIGINT <= $3 \
                AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
                AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\')",
         )
+        .bind(nested_event_cursor)
         .bind(event_upper_bound)
         .bind(rollup_upper_bound)
         .fetch_one(&mut *tx)
