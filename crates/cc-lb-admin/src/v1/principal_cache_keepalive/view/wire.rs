@@ -42,6 +42,7 @@ pub(crate) struct CacheKeepaliveRowResponse {
     pub(crate) upstream: Option<String>,
     pub(crate) error: Option<String>,
     pub(crate) is_active: bool,
+    pub(crate) retained_renewals: u32,
     pub(crate) net_pnl: Option<f64>,
     pub(crate) total_spent: f64,
     pub(crate) total_avoided: Option<f64>,
@@ -57,6 +58,7 @@ pub(crate) struct CacheKeepaliveDetailResponse {
     pub(crate) total_renewals_current_cycle: u32,
     pub(crate) is_last_pending: bool,
     pub(crate) turns: Vec<CacheKeepaliveTurnResponse>,
+    pub(crate) gaps: Vec<CacheKeepaliveGapResponse>,
     pub(crate) config_snapshot: Option<CacheKeepaliveConfigSnapshotResponse>,
     pub(crate) raw_record: CacheKeepaliveRawRecordResponse,
 }
@@ -71,6 +73,31 @@ pub(crate) struct CacheKeepaliveTurnResponse {
     pub(crate) time_ms: u64,
     pub(crate) pnl: Option<f64>,
     pub(crate) pending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct CacheKeepaliveGapResponse {
+    pub(crate) cycle_id: Option<String>,
+    pub(crate) pause_at_ms: u64,
+    pub(crate) cached_tokens: u64,
+    pub(crate) pulses: Vec<CacheKeepalivePulseResponse>,
+    pub(crate) ending_kind: &'static str,
+    pub(crate) ending_at_ms: u64,
+    pub(crate) total_duration_sec: u64,
+    pub(crate) since_last_renewal_sec: Option<u64>,
+    pub(crate) spent_usd: f64,
+    pub(crate) avoided_usd: Option<f64>,
+    pub(crate) net_pnl_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct CacheKeepalivePulseResponse {
+    pub(crate) pulse_number: u32,
+    pub(crate) time_ms: u64,
+    pub(crate) offset_sec: u64,
+    pub(crate) since_prev_renewal_sec: Option<u64>,
+    pub(crate) spent_usd: Option<f64>,
+    pub(crate) hit: bool,
 }
 
 #[derive(Serialize)]
