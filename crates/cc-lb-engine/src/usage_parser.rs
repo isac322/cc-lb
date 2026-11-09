@@ -709,18 +709,18 @@ fn merge_openai_responses_cache_write(
     let candidate_aggregate = aggregate.or(usage.cache_write_input_tokens);
     let candidate_30m = ttl_30m.or(usage.cache_write_input_tokens_30m);
     let candidate_12h = ttl_12h.or(usage.cache_write_input_tokens_12h);
+    let known_sum = match (candidate_30m, candidate_12h) {
+        (Some(value), Some(other)) => match value.checked_add(other) {
+            Some(sum) => Some(sum),
+            None => {
+                invalidate_native_cache_write(usage);
+                return;
+            }
+        },
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
     if let Some(aggregate) = candidate_aggregate {
-        let known_sum = match (candidate_30m, candidate_12h) {
-            (Some(value), Some(other)) => match value.checked_add(other) {
-                Some(sum) => Some(sum),
-                None => {
-                    invalidate_native_cache_write(usage);
-                    return;
-                }
-            },
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        };
         let fresh_pair = ttl_30m.is_some() && ttl_12h.is_some();
         let valid = match known_sum {
             Some(sum) if fresh_pair => sum == aggregate,
@@ -2047,6 +2047,31 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 64);
         assert_eq!(usage.cache_write_input_tokens, None);
         assert_eq!(usage.cache_write_evidence, CacheTokenEvidence::Invalid);
+    }
+
+    #[test]
+    fn native_cache_write_bucket_only_overflow_is_invalid() {
+        let mut usage = UsageCounts::default();
+        merge_usage_value_for_shape(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens": 100,
+                "input_tokens_details": {
+                    "cached_tokens": 0,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": u64::MAX,
+                        "ttl_12h_tokens": 1
+                    }
+                }
+            }),
+            Some(UsageShape::OpenaiResponses),
+        );
+        assert_eq!(usage.cache_write_input_tokens, None);
+        assert_eq!(usage.cache_write_input_tokens_30m, None);
+        assert_eq!(usage.cache_write_input_tokens_12h, None);
+        assert_eq!(usage.cache_write_evidence, CacheTokenEvidence::Invalid);
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
     }
 
     #[test]
