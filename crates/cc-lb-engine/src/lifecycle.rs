@@ -1601,6 +1601,7 @@ mod cache_score_tests {
                 Some(&request),
                 None,
                 Some(super::ProviderCapability::GeminiGenerateContent),
+                None,
             );
             let gemini_pricing = cache_pricing_summary_for_model(
                 &catalog,
@@ -15152,6 +15153,7 @@ mod tests {
                     Some(&request),
                     None,
                     Some(ProviderCapability::GeminiGenerateContent),
+                    None,
                 );
                 let limit = LimitRequest::from_value(
                     Some(&request),
@@ -15187,6 +15189,7 @@ mod tests {
                 Some(&request),
                 None,
                 capability,
+                None,
             );
             let limit =
                 LimitRequest::from_value(Some(&request), "gemini-test", capability, &[], false);
@@ -15209,6 +15212,7 @@ mod tests {
             Some(&request),
             None,
             Some(ProviderCapability::GeminiGenerateContent),
+            None,
         );
         assert_eq!(metadata.thinking_level.as_deref(), Some("LOW"));
         assert_eq!(metadata.thinking_budget_tokens, Some(1024));
@@ -15230,6 +15234,7 @@ mod tests {
             Some(&valid_snake),
             None,
             Some(ProviderCapability::GeminiGenerateContent),
+            None,
         );
         assert_eq!(metadata.thinking_level.as_deref(), Some("snake"));
         assert_eq!(metadata.thinking_budget_tokens, Some(2048));
@@ -15251,6 +15256,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(ProviderCapability::GeminiGenerateContent),
+                None,
             );
             assert_eq!(metadata.thinking_level.as_deref(), expected_level);
             assert_eq!(metadata.thinking_budget_tokens, Some(0));
@@ -15278,6 +15284,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(ProviderCapability::GeminiGenerateContent),
+                None,
             );
             assert_eq!(metadata.thinking_budget_tokens, expected_budget);
         }
@@ -15297,6 +15304,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(ProviderCapability::GeminiGenerateContent),
+                None,
             );
             let limit = LimitRequest::from_value(
                 Some(&request),
@@ -15316,6 +15324,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(ProviderCapability::GeminiGenerateContent),
+                None,
             );
             let limit = LimitRequest::from_value(
                 Some(&request),
@@ -15345,6 +15354,7 @@ mod tests {
             Some(&request),
             None,
             Some(ProviderCapability::OpenaiChatCompletions),
+            None,
         );
         assert_eq!(metadata.requested_service_tier.as_deref(), Some(""));
         assert_eq!(metadata.thinking_level, None);
@@ -15369,6 +15379,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(ProviderCapability::GeminiGenerateContent),
+                None,
             );
             assert_eq!(metadata.thinking_level, None);
             assert_eq!(metadata.thinking_budget_tokens, None);
@@ -15385,6 +15396,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(ProviderCapability::GeminiGenerateContent),
+                None,
             );
             assert_eq!(metadata.thinking_level.as_deref(), Some(level.as_str()));
             assert_eq!(metadata.reasoning_effort, None);
@@ -15404,6 +15416,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(capability),
+                None,
             );
             assert_eq!(metadata.thinking_level, None);
             assert_eq!(metadata.requested_service_tier, None);
