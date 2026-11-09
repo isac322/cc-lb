@@ -114,6 +114,14 @@ pub trait TransformSseWireRequest {
     fn decode(bytes: &[u8]) -> Self::Response;
 }
 
+/// A request that can be encoded for a selected realtime-frame wire version.
+pub trait TransformRealtimeFrameWireRequest {
+    type Response;
+    const VERSION: WireVersion;
+    fn encode(&self) -> AlignedVec<16>;
+    fn decode(bytes: &[u8]) -> Self::Response;
+}
+
 macro_rules! impl_wire_request {
     ($trait_name:ident, $request:path, $response:path, $archived:path, $version:expr) => {
         impl $trait_name for $request {
@@ -197,6 +205,13 @@ impl_wire_request!(
     v2::TransformSseEventRequest,
     v2::TransformSseEventResult,
     v2::ArchivedTransformSseEventResult,
+    WireVersion::V2
+);
+impl_wire_request!(
+    TransformRealtimeFrameWireRequest,
+    v2::TransformRealtimeFrameRequest,
+    v2::TransformRealtimeFrameResult,
+    v2::ArchivedTransformRealtimeFrameResult,
     WireVersion::V2
 );
 
@@ -415,6 +430,22 @@ impl<'a> ConformanceSuite<'a> {
                         WireVersion::V3 => unreachable!("shape V3 is not host-supported"),
                     }
                 }
+                if session.dispatch.has_realtime_frame_transform() {
+                    match session.dispatch.realtime_frame_wire_version() {
+                        Some(WireVersion::V2) => {
+                            let _ = session.call_transform_realtime_frame(
+                                fixtures::sample_transform_realtime_frame_request_v2(self.provider),
+                            );
+                        }
+                        Some(WireVersion::V1) => {
+                            unreachable!("realtime frame transform V1 is not host-supported")
+                        }
+                        Some(WireVersion::V3) => {
+                            unreachable!("realtime frame transform V3 is not host-supported")
+                        }
+                        None => unreachable!(),
+                    }
+                }
                 if session.dispatch.has_response_transform() {
                     match session.dispatch.response_wire_version() {
                         Some(WireVersion::V1) => {
@@ -468,7 +499,6 @@ impl<'a> ConformanceSuite<'a> {
         }
     }
 }
-
 /// A live plugin session — the runtime holds the compiled module and
 /// the slot is registered. Every `call_*` reuses this registration, so
 /// N-request tests pay one instantiate cost instead of N.
@@ -515,6 +545,11 @@ impl PluginSession {
     /// Whether an SSE transform is present and active.
     pub fn has_sse_event_transform(&self) -> bool {
         self.dispatch.has_sse_event_transform()
+    }
+
+    /// Whether an active realtime-frame transform is present.
+    pub fn has_realtime_frame_transform(&self) -> bool {
+        self.dispatch.has_realtime_frame_transform()
     }
 
     /// Round-trip a [`FilterRequest`] through the V1 guest boundary.
@@ -629,6 +664,27 @@ impl PluginSession {
         self.dispatch
             .call_transform_sse_event_scoped(&in_bytes, R::decode)
             .expect("guest SSE hook must complete without trap")
+    }
+    /// Round-trip a V2 realtime-frame request through the guest boundary.
+    pub fn call_transform_realtime_frame<R>(&self, request: R) -> R::Response
+    where
+        R: TransformRealtimeFrameWireRequest,
+    {
+        assert!(
+            matches!(self.kind, ConformanceKind::Shape),
+            "call_transform_realtime_frame requires a Shape-kind session"
+        );
+        assert_eq!(
+            self.dispatch.realtime_frame_wire_version(),
+            Some(R::VERSION),
+            "realtime frame fixture wire version does not match the plugin declaration"
+        );
+        let in_bytes = request.encode();
+        let out_bytes = self
+            .dispatch
+            .call_transform_realtime_frame(&in_bytes)
+            .expect("guest realtime frame hook must complete without trap");
+        R::decode(&out_bytes)
     }
 
     /// Round-trip the optional Gemini envelope hook.

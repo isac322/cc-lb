@@ -181,10 +181,14 @@ mod provider_request_shaper {
 ```
 
 The generated exports are `cc_lb_shape_anthropic` and `cc_lb_shape_openai`;
-the V2 metadata keys are `shape_anthropic` and `shape_openai`. Qualified
-handlers use the V2 request types, including upstream identity; legacy
-unqualified handlers retain the V1 wire layout. Filter, buffered-response,
-and SSE handlers use the same provider suffix convention.
+metadata keys use the matching hook/provider form, such as `shape_anthropic`
+and `shape_openai`. Provider selection and wire version are independent:
+provider-qualified handlers may declare V1 or V2. A selected V1 handler uses
+the unchanged V1 request and response layout; a selected V2 shape,
+buffered-response, or SSE handler receives the V2 upstream and upstream
+identity fields. V2 filter requests use the V2 filter schema and do not carry
+an upstream-identity field. Filter, buffered-response, and SSE handlers use
+the same provider suffix convention.
 For Gemini OAuth Code Assist requests, a provider-qualified shape plugin may
 also declare `shape_envelope_gemini` with `wire = 2`. The host invokes this
 optional export after native Code Assist wrapping and before credentials are
@@ -196,10 +200,11 @@ plugins must not infer claims from the principal id or credential headers.
 
 Each provider/hook combination is optional. Omit unsupported hooks instead of
 writing placeholder no-ops. Without a request hook, the host uses the selected
-upstream's native request dialect; independent buffered-response or SSE hooks
-can still run. Without a response hook, that response passes through without a
-guest call. OpenAI Responses WebSocket turns use the OpenAI shape hook for each
-`response.create` frame. The shaped body is sent upstream; the shaped URL and
+upstream's native request dialect; independent buffered-response, SSE, or
+Realtime/Live frame hooks can still run. Without a response hook, that response
+passes through without a guest call. OpenAI Responses WebSocket turns use the
+OpenAI shape hook for each `response.create` frame. The shaped body is sent
+upstream; the shaped URL and
 method are ignored because the host owns the WebSocket connection. Shaped
 headers are applied when the provider connection opens when possible. The
 OpenAI SSE-event hook also receives each upstream WebSocket frame as an SSE
@@ -208,14 +213,6 @@ event whose `data` is the frame JSON and whose event name is the frame's
 dropped WebSocket frames. Buffered-response transforms do not apply to frames.
 Shape failures fall back to the raw frame as they do for HTTP. SSE transform
 failures emit a WebSocket error event and terminate that turn.
-
-For Gemini OAuth, Code Assist wrapping is removed before a custom buffered
-response hook runs, including `streamGenerateContent` JSON-array responses.
-
-OpenAI audio endpoints also stream non-JSON output without a request `stream`
-flag. They relay chunks immediately when no buffered hook is installed; a
-buffered hook receives the complete body within the request path's body cap.
-JSON audio responses retain the ordinary buffered response behavior.
 
 ### Realtime and Live frame transforms
 
@@ -229,6 +226,19 @@ the hook can only transform or drop individual frames. Setup and every data
 frame are transformed independently, so the host never buffers a whole
 session. Invalid replacement encoding or a hook error terminates the relay
 with a proxy error.
+
+An active frame hook alone is sufficient for a provider-qualified Shape plugin.
+It is selected only for its declared provider; absent and `mode: noop` frame
+hooks do not install a transform. No request, buffered-response, or SSE handler
+is required.
+
+For Gemini OAuth, Code Assist wrapping is removed before a custom buffered
+response hook runs, including `streamGenerateContent` JSON-array responses.
+
+OpenAI audio endpoints also stream non-JSON output without a request `stream`
+flag. They relay chunks immediately when no buffered hook is installed; a
+buffered hook receives the complete body within the request path's body cap.
+JSON audio responses retain the ordinary buffered response behavior.
 
 ### Legacy compatibility and migration
 

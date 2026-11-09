@@ -219,10 +219,11 @@ plugins must not infer claims from the principal id or credential headers.
 
 Each provider/hook combination is optional. Omit unsupported hooks instead of
 writing placeholder no-ops. Without a request hook, the host uses the selected
-upstream's native request dialect; independent buffered-response or SSE hooks
-can still run. Without a response hook, that response passes through without a
-guest call. OpenAI Responses WebSocket turns use the OpenAI shape hook for each
-`response.create` frame. The shaped body is sent upstream; the shaped URL and
+upstream's native request dialect; independent buffered-response, SSE, or
+Realtime/Live frame hooks can still run. Without a response hook, that response
+passes through without a guest call. OpenAI Responses WebSocket turns use the
+OpenAI shape hook for each `response.create` frame. The shaped body is sent
+upstream; the shaped URL and
 method are ignored because the host owns the WebSocket connection. Shaped
 headers are applied when the provider connection opens when possible. The
 OpenAI SSE-event hook also receives each upstream WebSocket frame as an SSE
@@ -244,6 +245,11 @@ the hook can only transform or drop individual frames. Setup and every data
 frame are transformed independently, so the host never buffers a whole
 session. Invalid replacement encoding or a hook error terminates the relay
 with a proxy error.
+
+An active frame hook alone is sufficient for a provider-qualified Shape plugin.
+It is selected only for its declared provider; absent and `mode: noop` frame
+hooks do not install a transform. No request, buffered-response, or SSE handler
+is required.
 
 For Gemini OAuth, Code Assist wrapping is removed before a custom buffered
 response hook runs, including `streamGenerateContent` JSON-array responses.
@@ -661,6 +667,13 @@ OpenAI Responses and Chat Completions, Gemini `generateContent` and
 `streamGenerateContent`, and the V2 request/result types. The generic
 `sample_*_for` builders select the provider-specific V1 request, response, or
 SSE payload when a test needs to exercise a declared V1 hook directly.
+
+Frame-only Shape plugins use the same provider-selected constructor. The
+boundary smoke invokes active V2 frame hooks. For semantic tests, pass
+`sample_transform_realtime_frame_request_v2(provider)` to
+`session.call_transform_realtime_frame` and assert the decoded `Unchanged`,
+`Replace`, or `Drop` result. The fixture contains the provider's WebSocket path
+and synthetic upstream identity; its direction and payload can be changed.
 
 Provider selection does not choose the wire layout. The harness reads each
 selected hook's declared wire version and encodes and decodes the matching

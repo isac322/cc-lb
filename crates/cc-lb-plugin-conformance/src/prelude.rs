@@ -11,7 +11,7 @@
 
 pub use crate::{
     ConformanceSuite, FilterWireRequest, PluginSession, ShapeWireRequest,
-    TransformResponseWireRequest, TransformSseWireRequest,
+    TransformRealtimeFrameWireRequest, TransformResponseWireRequest, TransformSseWireRequest,
     fixtures::{
         hdr, sample_filter_request, sample_filter_request_v2, sample_filter_request_v3,
         sample_gemini_generate_content_transform_sse_event_request,
@@ -23,7 +23,8 @@ pub use crate::{
         sample_openai_chat_completions_transform_sse_event_request,
         sample_openai_responses_shape_request, sample_openai_responses_transform_response_request,
         sample_openai_responses_transform_sse_event_request, sample_shape_request,
-        sample_shape_request_for, sample_shape_request_v2, sample_transform_response_request,
+        sample_shape_request_for, sample_shape_request_v2,
+        sample_transform_realtime_frame_request_v2, sample_transform_response_request,
         sample_transform_response_request_for, sample_transform_response_request_v2,
         sample_transform_sse_event_request, sample_transform_sse_event_request_for,
         sample_transform_sse_event_request_v2, synth_principal,
@@ -37,6 +38,8 @@ pub use cc_lb_plugin_wire::{
         FilterRequest as FilterRequestV2, FilterResponse as FilterResponseV2, Header as HeaderV2,
         Principal as PrincipalV2, ShapeEnvelopeGeminiRequest, ShapeEnvelopeGeminiResponse,
         ShapeRequest as ShapeRequestV2, ShapeResponse as ShapeResponseV2, SseEvent as SseEventV2,
+        TransformRealtimeFrameRequest as TransformRealtimeFrameRequestV2,
+        TransformRealtimeFrameResult as TransformRealtimeFrameResultV2,
         TransformResponseRequest as TransformResponseRequestV2,
         TransformResponseResult as TransformResponseResultV2,
         TransformSseEventRequest as TransformSseEventRequestV2,

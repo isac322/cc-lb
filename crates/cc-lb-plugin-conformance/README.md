@@ -130,6 +130,16 @@ matching contract:
   `Upstream`, and matching `UpstreamIdentity`.
 - V2 filter requests use provider-appropriate candidates and do not include
   upstream identity, because the V2 filter schema has no such field.
+- V2 Realtime/Live frame requests include the provider's WebSocket path,
+  principal, upstream identity, direction, payload kind, and payload bytes.
+
+An active frame-only Shape plugin can use `for_shape_provider` without a
+request-shape, buffered-response, or SSE hook. `run()` exercises its frame
+boundary. For semantic assertions, call
+`session.call_transform_realtime_frame(sample_transform_realtime_frame_request_v2(provider))`
+and match the V2 `Unchanged`, `Replace`, or `Drop` result. The fixture is
+available from `fixtures` and the prelude; change its direction or payload to
+exercise each behavior your plugin implements.
 
 Provider fixtures are network-free and use synthetic identities:
 

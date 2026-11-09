@@ -961,6 +961,7 @@ dependencies = [
  "cc-lb-plugin-wire",
  "cc-lb-runtime-wasmtime",
  "rkyv",
+ "wat",
 ]
 
 [[package]]
