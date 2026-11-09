@@ -428,7 +428,7 @@ const OPENAI_DATED_SNAPSHOTS: &[(&str, &str)] = &[
     ("gpt-4o-2024-11-20", "gpt-4o"),
     ("gpt-4.1-2025-04-14", "gpt-4.1"),
     ("gpt-4o-mini-2024-07-18", "gpt-4o-mini"),
-    ("gpt-5-2025-04-16", "gpt-5"),
+    ("gpt-5-2025-08-07", "gpt-5"),
     ("gpt-5-mini-2025-08-07", "gpt-5-mini"),
     ("gpt-5-nano-2025-04-14", "gpt-5-nano"),
     ("o4-mini-2025-04-16", "o4-mini"),
@@ -586,11 +586,11 @@ mod tests {
             48_169
         );
         assert_eq!(
-            openai_image_tokens("gpt-5-2025-04-16", None, Some((2048, 2048))),
+            openai_image_tokens("gpt-5-2025-08-07", None, Some((2048, 2048))),
             630
         );
         assert_eq!(
-            openai_image_tokens("gpt-5-2025-08-07", None, Some((2048, 2048))),
+            openai_image_tokens("gpt-5-2025-04-16", None, Some((2048, 2048))),
             UNKNOWN_OPENAI_TOKENS
         );
         assert_eq!(
