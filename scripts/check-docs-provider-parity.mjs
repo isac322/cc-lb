@@ -222,6 +222,65 @@ const staleClaimPatterns = [
     /\b(?:cc-lb|the\s+(?:proxy|gateway))\s+(?:translates?|supports?|provides?)\b[^.\n]{0,120}\b(?:between\s+providers|cross[- ]provider\s+translation)\b/i,
   ],
 ];
+
+function markdownSections(text) {
+  const headings = [...text.matchAll(/^#{1,6}\s+(.+)$/gm)];
+  const sections = [];
+  if (headings.length && headings[0].index > 0) {
+    sections.push({ heading: '', text: text.slice(0, headings[0].index) });
+  }
+  for (let index = 0; index < headings.length; index += 1) {
+    const heading = headings[index];
+    const bodyStart = heading.index + heading[0].length;
+    const bodyEnd = headings[index + 1]?.index ?? text.length;
+    sections.push({ heading: heading[1].trim(), text: text.slice(bodyStart, bodyEnd) });
+  }
+  return sections.length ? sections : [{ heading: '', text }];
+}
+
+function sentenceFragments(text) {
+  return text
+    .split(/(?:\r?\n)+|(?<=[.!?])\s+/u)
+    .map((fragment) => fragment.trim())
+    .filter(Boolean);
+}
+
+function isAllowedAnthropicSpecificExample(sectionHeading, sentence, allowAnthropicExample) {
+  if (!allowAnthropicExample) return false;
+  const anthropicExampleHeading =
+    /\bAnthropic\b/i.test(sectionHeading) &&
+    /\b(?:example|request|upstream|api[- ]key|messages|oauth|setup|flow)\b/i.test(sectionHeading);
+  return (
+    anthropicExampleHeading &&
+    /\bAnthropic\b/i.test(sentence) &&
+    /\b(?:example|this request|this flow|this upstream|shown|specific)\b/i.test(sentence)
+  );
+}
+
+function isAllowedScopedAnthropicClaim(claim, sentence) {
+  return (
+    claim === 'Anthropic-only claim' &&
+    /\bAnthropic-only\s+`?workspace_id`?\b/i.test(sentence) &&
+    /\bnot used\b/i.test(sentence)
+  );
+}
+
+function scanStaleClaims(label, text, { allowAnthropicExample = false } = {}) {
+  for (const section of markdownSections(text)) {
+    for (const sentence of sentenceFragments(`${section.heading}\n${section.text}`)) {
+      for (const [claim, pattern] of staleClaimPatterns) {
+        if (
+          pattern.test(sentence) &&
+          !isAllowedScopedAnthropicClaim(claim, sentence) &&
+          !isAllowedAnthropicSpecificExample(section.heading, sentence, allowAnthropicExample)
+        ) {
+          fail(`${label}: rejects ${claim}`);
+        }
+      }
+    }
+  }
+}
+
 const htmlLegacyClaimPatterns = [
   ['aws_sigv4 credential marker', /\baws_sigv4\b/i],
   ['gcp_oauth credential marker', /\bgcp_oauth\b/i],
@@ -240,12 +299,10 @@ for (const relativePath of htmlFiles) {
     if (pattern.test(text)) fail(`${relativePath}: rejects ${label}`);
   }
 }
-for (const [label, relativePath] of overviewPages) {
-  const text = readText(relativePath);
-  for (const [claim, pattern] of staleClaimPatterns) {
-    if (pattern.test(text)) fail(`${label}: rejects ${claim}`);
-  }
+for (const [label, relativePath] of [...canonicalScopePages, ...overviewPages]) {
+  scanStaleClaims(label, readText(relativePath), { allowAnthropicExample: true });
 }
+scanStaleClaims('install page', installPage, { allowAnthropicExample: true });
 
 // The install path keeps a complete Anthropic example, then points operators
 // to provider-specific API-key and OAuth setup without requiring an Anthropic
