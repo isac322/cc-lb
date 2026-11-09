@@ -231,6 +231,7 @@ An active frame hook alone is sufficient for a provider-qualified Shape plugin.
 It is selected only for its declared provider; absent and `mode: noop` frame
 hooks do not install a transform. No request, buffered-response, or SSE handler
 is required.
+
 For Gemini OAuth, Code Assist wrapping is removed before a custom buffered
 response hook runs, including `streamGenerateContent` JSON-array responses.
 
