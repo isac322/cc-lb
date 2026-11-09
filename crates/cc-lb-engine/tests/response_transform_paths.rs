@@ -44,7 +44,6 @@ use common::{TestAuthn, TestLifecycleBus, TestState, collect_body, messages_requ
 #[path = "response_transform_paths/semantic_sse_eof.rs"]
 mod semantic_sse_eof;
 
-#[tokio::test]
 async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let lifecycle = lifecycle_with_transforms(Some(transform.clone()), None, buffered_dispatch());
@@ -80,7 +79,6 @@ async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
     );
     assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
 }
-#[tokio::test]
 async fn buffered_transform_preserves_only_original_upstream_unified_headers() {
     for (upstream_has_unified, upstream_status) in [
         (true, StatusCode::OK),
@@ -153,7 +151,6 @@ async fn buffered_transform_preserves_only_original_upstream_unified_headers() {
     }
 }
 
-#[tokio::test]
 async fn compressed_sse_affinity_preserves_original_upstream_unified_headers() {
     let plaintext = complete_message_sse_body();
     for (encoding, body) in [
@@ -192,7 +189,6 @@ async fn compressed_sse_affinity_preserves_original_upstream_unified_headers() {
     }
 }
 
-#[tokio::test]
 async fn sse_transform_preserves_upstream_unified_headers_without_exposing_them_to_plugin() {
     for compressed in [false, true] {
         for upstream_status in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
@@ -250,7 +246,6 @@ async fn sse_transform_preserves_upstream_unified_headers_without_exposing_them_
     }
 }
 
-#[tokio::test]
 async fn buffered_gemini_oauth_code_assist_response_is_unwrapped() {
     let wrapped = Bytes::from_static(
         br#"{"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48}},"traceId":"trace"}"#,
@@ -283,7 +278,6 @@ async fn buffered_gemini_oauth_code_assist_response_is_unwrapped() {
     assert_eq!(received, expected);
 }
 
-#[tokio::test]
 async fn gemini_oauth_sse_unwraps_before_custom_transform() {
     let transform = Arc::new(GeminiSseMarkerTransform::default());
     let body = Bytes::from_static(
@@ -313,7 +307,6 @@ async fn gemini_oauth_sse_unwraps_before_custom_transform() {
     assert_eq!(transform.seen_events(), vec!["response".to_owned()]);
 }
 
-#[tokio::test]
 async fn buffered_native_gemini_response_bytes_remain_unchanged() {
     let body = Bytes::from_static(
         br#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48}}"#,
@@ -340,7 +333,6 @@ async fn buffered_native_gemini_response_bytes_remain_unchanged() {
     assert_eq!(received, body);
 }
 
-#[tokio::test]
 async fn buffered_anthropic_response_bytes_remain_unchanged() {
     let body = buffered_upstream_body();
     let lifecycle = lifecycle_with_record(
@@ -364,7 +356,6 @@ async fn buffered_anthropic_response_bytes_remain_unchanged() {
     assert_eq!(received, body);
 }
 
-#[tokio::test]
 async fn buffered_transform_rewrites_upstream_error_response() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let lifecycle = lifecycle_with_transforms(
@@ -391,7 +382,6 @@ async fn buffered_transform_rewrites_upstream_error_response() {
     assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
 }
 
-#[tokio::test]
 async fn terminal_unauthorized_without_refresh_uses_buffered_transform() {
     for stream in [false, true] {
         let transform = Arc::new(BufferedToolNameTransform::default());
@@ -429,7 +419,6 @@ async fn terminal_unauthorized_without_refresh_uses_buffered_transform() {
     }
 }
 
-#[tokio::test]
 async fn terminal_unauthorized_generated_body_skips_transform_when_refresh_declined() {
     let transform = Arc::new(UnchangedBufferedTransform::default());
     let body = Bytes::from(vec![b'x'; 16 * 1024]);
@@ -459,7 +448,6 @@ async fn terminal_unauthorized_generated_body_skips_transform_when_refresh_decli
     assert!(transform.seen_bodies().is_empty());
     assert!(String::from_utf8_lossy(&body).contains("upstream response body could not be read"));
 }
-#[tokio::test]
 async fn stream_request_json_errors_use_buffered_transform() {
     for limited in [false, true] {
         for compressed in [false, true] {
@@ -520,7 +508,6 @@ async fn stream_request_json_errors_use_buffered_transform() {
     }
 }
 
-#[tokio::test]
 async fn oversized_unauthorized_stream_body_skips_transform_of_generated_error() {
     let transform = Arc::new(UnchangedBufferedTransform::default());
     let body = Bytes::from(vec![b'x'; 16 * 1024]);
@@ -548,7 +535,6 @@ async fn oversized_unauthorized_stream_body_skips_transform_of_generated_error()
     assert!(String::from_utf8_lossy(&body).contains("upstream response body could not be read"));
 }
 
-#[tokio::test]
 async fn non_sse_stream_transform_never_receives_a_capped_prefix() {
     for (body_len, limited) in [(128, false), (129, false), (128, true), (129, true)] {
         let transform = Arc::new(UnchangedBufferedTransform::default());
@@ -596,7 +582,6 @@ async fn non_sse_stream_transform_never_receives_a_capped_prefix() {
     }
 }
 
-#[tokio::test]
 async fn gemini_json_array_stream_is_transformed_once_as_a_whole() {
     for stream_in_body in [false, true] {
         let transform = Arc::new(BufferedToolNameTransform::default());
@@ -644,7 +629,6 @@ async fn gemini_json_array_stream_is_transformed_once_as_a_whole() {
     }
 }
 
-#[tokio::test]
 async fn gemini_oauth_non_sse_stream_unwraps_before_buffered_transform() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let wrapped = Bytes::from_static(
@@ -685,7 +669,6 @@ async fn gemini_oauth_non_sse_stream_unwraps_before_buffered_transform() {
     );
 }
 
-#[tokio::test]
 async fn ingress_cap_does_not_limit_existing_response_paths() {
     for (stream, transform_response) in [(false, false), (false, true), (true, false)] {
         let transform = Arc::new(UnchangedBufferedTransform::default());
@@ -726,7 +709,6 @@ async fn ingress_cap_does_not_limit_existing_response_paths() {
     }
 }
 
-#[tokio::test]
 async fn audio_json_response_preserves_the_ordinary_buffered_path() {
     for content_type in [
         "application/json",
@@ -760,7 +742,6 @@ async fn audio_json_response_preserves_the_ordinary_buffered_path() {
     }
 }
 
-#[tokio::test]
 async fn non_json_response_relays_first_chunk_before_upstream_eof() {
     for content_type in [
         Some("audio/mpeg"),
@@ -811,7 +792,6 @@ async fn non_json_response_relays_first_chunk_before_upstream_eof() {
     }
 }
 
-#[tokio::test]
 async fn non_json_buffered_transform_is_bounded_without_truncating_body() {
     for content_type in ["audio/mpeg", "application/octet-stream", "image/png"] {
         for (path, cap) in [("/v1/audio/speech", 128), ("/v1/audio/transcriptions", 192)] {
@@ -861,7 +841,6 @@ async fn non_json_buffered_transform_is_bounded_without_truncating_body() {
     }
 }
 
-#[tokio::test]
 async fn genuine_sse_uses_event_hook_without_waiting_for_body_eof() {
     let buffered = Arc::new(UnchangedBufferedTransform::default());
     let sse = Arc::new(UnchangedSseTransform::default());
@@ -899,7 +878,6 @@ async fn genuine_sse_uses_event_hook_without_waiting_for_body_eof() {
     assert!(buffered.seen_bodies().is_empty());
 }
 
-#[tokio::test]
 async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
     let compressed = gzip_bytes(&buffered_upstream_body());
     let transform = Arc::new(UnchangedBufferedTransform::default());
@@ -936,7 +914,6 @@ async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
     assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
 }
 
-#[tokio::test]
 async fn buffered_header_only_transform_preserves_compressed_upstream_bytes() {
     let compressed = gzip_bytes(&buffered_upstream_body());
     let transform = Arc::new(HeaderOnlyBufferedTransform::default());
@@ -978,7 +955,6 @@ async fn buffered_header_only_transform_preserves_compressed_upstream_bytes() {
     assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
 }
 
-#[tokio::test]
 async fn buffered_unsupported_encoding_skips_transform() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let mut headers = json_headers(buffered_upstream_body().len(), false);
@@ -1009,7 +985,6 @@ async fn buffered_unsupported_encoding_skips_transform() {
     assert!(transform.seen_bodies().is_empty());
 }
 
-#[tokio::test]
 async fn buffered_transform_failure_fails_open_to_original_response() {
     let transform = Arc::new(FailingBufferedTransform);
     let lifecycle = lifecycle_with_transforms(Some(transform), None, buffered_dispatch());
@@ -1034,7 +1009,6 @@ async fn buffered_transform_failure_fails_open_to_original_response() {
     assert!(headers.get(CONTENT_ENCODING).is_none());
 }
 
-#[tokio::test]
 async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn std::error::Error>>
 {
     let dir = tempfile::tempdir()?;
@@ -1064,7 +1038,6 @@ async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn
     Ok(())
 }
 
-#[tokio::test]
 async fn buffered_http_error_preserves_canonical_error_over_transform_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let body = Bytes::from_static(
@@ -1138,7 +1111,6 @@ async fn wait_for_events(
     }
 }
 
-#[tokio::test]
 async fn buffered_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "buffered-accounting.sqlite").await?);
@@ -1167,7 +1139,6 @@ async fn buffered_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn st
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_transform_rewrites_content_block_start_event() {
     let transform = Arc::new(SseToolNameTransform::default());
     let lifecycle = lifecycle_with_transforms(None, Some(transform.clone()), sse_dispatch(false));
@@ -1190,7 +1161,6 @@ async fn sse_transform_rewrites_content_block_start_event() {
     );
 }
 
-#[tokio::test]
 async fn sse_transform_receives_sanitized_response_headers() {
     let transform = Arc::new(HeaderCapturingSseTransform::default());
     let mut headers = sse_headers();
@@ -1229,7 +1199,6 @@ async fn sse_transform_receives_sanitized_response_headers() {
     );
 }
 
-#[tokio::test]
 async fn sse_unchanged_transform_preserves_raw_event_bytes() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let body =
@@ -1256,7 +1225,6 @@ async fn sse_unchanged_transform_preserves_raw_event_bytes() {
     assert_eq!(transform.seen_events(), vec!["ping".to_owned()]);
 }
 
-#[tokio::test]
 async fn sse_transform_decodes_gzip_and_emits_identity_sse() {
     let transform = Arc::new(SseToolNameTransform::default());
     let body = gzip_bytes(&sse_upstream_body(false));
@@ -1294,7 +1262,6 @@ async fn sse_transform_decodes_gzip_and_emits_identity_sse() {
     );
 }
 
-#[tokio::test]
 async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() {
     let plaintext = sse_upstream_body(false);
     let compressed = gzip_bytes(&plaintext);
@@ -1350,7 +1317,6 @@ async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() 
     assert_eq!(output, compressed);
     assert_client_rate_limit_headers(&headers, true);
 }
-#[tokio::test]
 async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_drop() {
     let plaintext = sse_upstream_body(false);
     let compressed = gzip_bytes(&plaintext);
@@ -1416,7 +1382,6 @@ async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_
 /// request-hinted affinity gate must finalize before its final bytes reach the
 /// client. A client that stops polling once the declared length is satisfied
 /// must not turn the completed response into a 499 client cancellation.
-#[tokio::test]
 async fn content_length_affinity_gated_sse_finalizes_success_before_final_bytes() {
     let body = complete_message_sse_body();
     let mut headers = sse_headers();
@@ -1494,7 +1459,6 @@ async fn content_length_affinity_gated_sse_finalizes_success_before_final_bytes(
 
 /// Control: dropping the downstream body before the upstream body ends is a
 /// real client cancellation on the same affinity-gated SSE path.
-#[tokio::test]
 async fn affinity_gated_sse_downstream_drop_before_end_records_client_closed() {
     let body = complete_message_sse_body();
     let split = body
@@ -1564,7 +1528,6 @@ async fn affinity_gated_sse_downstream_drop_before_end_records_client_closed() {
     }
 }
 
-#[tokio::test]
 async fn content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry() {
     let malformed =
         Bytes::from_static(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"");
@@ -1634,7 +1597,6 @@ async fn content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry(
     }
 }
 
-#[tokio::test]
 async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
@@ -1688,7 +1650,6 @@ async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_transform_decodes_brotli_and_emits_identity_sse() {
     let transform = Arc::new(SseToolNameTransform::default());
     let body = brotli_bytes(&sse_upstream_body(false));
@@ -1726,7 +1687,6 @@ async fn sse_transform_decodes_brotli_and_emits_identity_sse() {
     );
 }
 
-#[tokio::test]
 async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let transform = Arc::new(UnchangedSseTransform::default());
@@ -1821,7 +1781,6 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
 // parsed `message_stop` completes as success with a persisted warning when
 // cc-lb is the SSE emitter of record; every other failure keeps today's error.
 
-#[tokio::test]
 async fn sse_transform_gzip_trailer_missing_after_message_stop_is_accepted_with_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = complete_message_sse_body();
@@ -1873,7 +1832,6 @@ async fn sse_transform_gzip_trailer_missing_after_message_stop_is_accepted_with_
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_transform_gzip_crc_mismatch_after_message_stop_is_indistinguishable_from_missing_trailer()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = complete_message_sse_body();
@@ -1901,7 +1859,6 @@ async fn sse_transform_gzip_crc_mismatch_after_message_stop_is_indistinguishable
     Ok(())
 }
 
-#[tokio::test]
 async fn incomplete_trailing_event_after_message_stop_with_gzip_failure_stays_fatal()
 -> Result<(), Box<dyn std::error::Error>> {
     let complete = complete_message_sse_body();
@@ -1935,7 +1892,6 @@ async fn incomplete_trailing_event_after_message_stop_with_gzip_failure_stays_fa
     Ok(())
 }
 
-#[tokio::test]
 async fn gzip_trailer_failure_after_message_stop_with_trailing_line_terminators_is_accepted()
 -> Result<(), Box<dyn std::error::Error>> {
     let complete = complete_message_sse_body();
@@ -1959,7 +1915,6 @@ async fn gzip_trailer_failure_after_message_stop_with_trailing_line_terminators_
     Ok(())
 }
 
-#[tokio::test]
 async fn gzip_body_error_after_message_stop_then_finish_failure_is_single_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = complete_message_sse_body();
@@ -1997,7 +1952,6 @@ async fn gzip_body_error_after_message_stop_then_finish_failure_is_single_warnin
     Ok(())
 }
 
-#[tokio::test]
 async fn gzip_body_error_before_message_stop_stays_fatal_with_attribution()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = Bytes::from_static(
@@ -2035,7 +1989,6 @@ async fn gzip_body_error_before_message_stop_stays_fatal_with_attribution()
     Ok(())
 }
 
-#[tokio::test]
 async fn uncompressed_sse_body_error_after_message_stop_is_accepted_with_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = complete_message_sse_body();
@@ -2058,7 +2011,6 @@ async fn uncompressed_sse_body_error_after_message_stop_is_accepted_with_warning
     Ok(())
 }
 
-#[tokio::test]
 async fn uncompressed_sse_body_error_after_message_stop_with_partial_event_stays_fatal()
 -> Result<(), Box<dyn std::error::Error>> {
     let complete = complete_message_sse_body();
@@ -2089,7 +2041,6 @@ async fn uncompressed_sse_body_error_after_message_stop_with_partial_event_stays
     Ok(())
 }
 
-#[tokio::test]
 async fn compressed_passthrough_trailer_failure_after_message_stop_keeps_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = complete_message_sse_body();
@@ -2124,7 +2075,6 @@ async fn compressed_passthrough_trailer_failure_after_message_stop_keeps_error()
     Ok(())
 }
 
-#[tokio::test]
 async fn http_error_sse_with_gzip_trailer_failure_keeps_http_classification()
 -> Result<(), Box<dyn std::error::Error>> {
     let compressed = gzip_without_trailer(&complete_message_sse_body());
@@ -2146,7 +2096,6 @@ async fn http_error_sse_with_gzip_trailer_failure_keeps_http_classification()
     Ok(())
 }
 
-#[tokio::test]
 async fn provider_error_then_gzip_trailer_failure_is_not_accepted()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = Bytes::from_static(
@@ -2173,7 +2122,6 @@ async fn provider_error_then_gzip_trailer_failure_is_not_accepted()
 // The SSE `event:` name alone is not the semantic stop: only the usage parser's
 // `usage_update.message_stop` (JSON `type` match) enables accept-with-warning.
 
-#[tokio::test]
 async fn event_named_message_stop_with_delta_payload_and_gzip_failure_stays_fatal()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = Bytes::from_static(
@@ -2201,7 +2149,6 @@ async fn event_named_message_stop_with_delta_payload_and_gzip_failure_stays_fata
     Ok(())
 }
 
-#[tokio::test]
 async fn event_named_message_stop_with_malformed_payload_and_gzip_failure_stays_fatal()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = Bytes::from_static(
@@ -2229,7 +2176,6 @@ async fn event_named_message_stop_with_malformed_payload_and_gzip_failure_stays_
     Ok(())
 }
 
-#[tokio::test]
 async fn name_only_message_stop_without_json_type_and_gzip_failure_stays_fatal()
 -> Result<(), Box<dyn std::error::Error>> {
     for data in [b"data: {}".as_slice(), b"data: {\"type\":null}".as_slice()] {
@@ -2262,7 +2208,6 @@ async fn name_only_message_stop_without_json_type_and_gzip_failure_stays_fatal()
     Ok(())
 }
 
-#[tokio::test]
 async fn upstream_diagnostics_record_http2_version_request_id_and_content_length()
 -> Result<(), Box<dyn std::error::Error>> {
     let compressed = gzip_without_trailer(&complete_message_sse_body());
@@ -2295,7 +2240,6 @@ async fn upstream_diagnostics_record_http2_version_request_id_and_content_length
     Ok(())
 }
 
-#[tokio::test]
 async fn clean_gzip_sse_stream_records_no_upstream_diagnostics()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = complete_message_sse_body();
@@ -2373,7 +2317,6 @@ fn assert_accepted_with_warning(row: &cc_lb_storage_api::RequestEvent, warning_t
     assert!(row.stream_message_stop_ms.is_some());
 }
 
-#[tokio::test]
 async fn truncated_gzip_before_transformed_output_emits_decode_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let transform = Arc::new(UnchangedSseTransform::default());
@@ -2419,7 +2362,6 @@ async fn truncated_gzip_before_transformed_output_emits_decode_error()
     Ok(())
 }
 
-#[tokio::test]
 async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dyn std::error::Error>>
 {
     let transform = Arc::new(FailAfterFirstSseTransform::default());
@@ -2477,7 +2419,6 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
     Ok(())
 }
 
-#[tokio::test]
 async fn raw_deflate_passthrough_decode_failure_remains_success()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
@@ -2519,7 +2460,6 @@ async fn raw_deflate_passthrough_decode_failure_remains_success()
     Ok(())
 }
 
-#[tokio::test]
 async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn std::error::Error>>
 {
     let transform = Arc::new(UnchangedSseTransform::default());
@@ -2574,7 +2514,6 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_unsupported_encoding_skips_transform_and_raw_passes_through() {
     let transform = Arc::new(SseToolNameTransform::default());
     let body = sse_upstream_body(false);
@@ -2606,7 +2545,6 @@ async fn sse_unsupported_encoding_skips_transform_and_raw_passes_through() {
     assert!(transform.seen_events().is_empty());
 }
 
-#[tokio::test]
 async fn sse_transform_failure_before_output_fails_open_raw() {
     let transform = Arc::new(AlwaysFailingSseTransform);
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
@@ -2622,7 +2560,6 @@ async fn sse_transform_failure_before_output_fails_open_raw() {
     assert_eq!(body, sse_upstream_body(false));
 }
 
-#[tokio::test]
 async fn sse_transform_fail_open_preserves_keepalive_observation() {
     let body = Bytes::from_static(
         b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_failopen_keepalive\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"cache_read_input_tokens\":12000}}}\n\n\
@@ -2676,7 +2613,6 @@ async fn sse_transform_fail_open_preserves_keepalive_observation() {
     );
 }
 
-#[tokio::test]
 async fn sse_unterminated_final_event_is_upstream_framing_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let body = Bytes::from_static(b"event: message_stop\ndata: {}\n");
@@ -2706,7 +2642,6 @@ async fn sse_unterminated_final_event_is_upstream_framing_error() {
     assert!(transform.seen_events().is_empty());
 }
 
-#[tokio::test]
 async fn sse_unterminated_passthrough_is_upstream_framing_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let body = Bytes::from_static(b"event: message_stop\ndata: {}\n");
@@ -2752,7 +2687,6 @@ async fn sse_unterminated_passthrough_is_upstream_framing_error()
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn std::error::Error>> {
     let body =
         Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\r\n");
@@ -2787,7 +2721,6 @@ async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn st
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_body_failure_after_parser_budget_starts_separate_error_frame() {
     let mut body = Vec::from(&b"data: "[..]);
     body.extend(std::iter::repeat_n(b'x', 256));
@@ -2823,7 +2756,6 @@ async fn sse_body_failure_after_parser_budget_starts_separate_error_frame() {
     assert_eq!(text.matches("event: error\n").count(), 1);
 }
 
-#[tokio::test]
 async fn sse_gzip_unterminated_final_event_emits_upstream_framing_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let compressed = gzip_bytes(&Bytes::from_static(b"event: message_stop\ndata: {}\n"));
@@ -2856,7 +2788,6 @@ async fn sse_gzip_unterminated_final_event_emits_upstream_framing_error() {
     assert!(transform.seen_events().is_empty());
 }
 
-#[tokio::test]
 async fn sse_unterminated_http_error_preserves_upstream_status()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -2900,7 +2831,6 @@ async fn sse_unterminated_http_error_preserves_upstream_status()
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -2947,12 +2877,10 @@ async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_gzip_transform_failure_before_output_emits_error_frame() {
     assert_gzip_transform_failure_before_output(Arc::new(AlwaysFailingSseTransform)).await;
 }
 
-#[tokio::test]
 async fn sse_gzip_transform_failure_preserves_http_error_status()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -2995,7 +2923,6 @@ async fn sse_gzip_transform_failure_preserves_http_error_status()
     Ok(())
 }
 
-#[tokio::test]
 async fn sse_gzip_invalid_event_name_before_output_emits_error_frame() {
     assert_gzip_transform_failure_before_output(Arc::new(InvalidEventNameSseTransform)).await;
 }
@@ -3033,7 +2960,6 @@ async fn assert_gzip_transform_failure_before_output(transform: Arc<dyn SseEvent
     );
 }
 
-#[tokio::test]
 async fn sse_transform_invalid_event_name_fails_open_without_injection() {
     let transform = Arc::new(InvalidEventNameSseTransform);
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
@@ -3051,7 +2977,6 @@ async fn sse_transform_invalid_event_name_fails_open_without_injection() {
     assert!(!text.contains("event: injected"));
 }
 
-#[tokio::test]
 async fn sse_transform_failure_after_transformed_output_terminates_classified() {
     let transform = Arc::new(FailAfterFirstSseTransform::default());
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
@@ -3071,7 +2996,6 @@ async fn sse_transform_failure_after_transformed_output_terminates_classified() 
     assert!(!text.contains("message_stop"));
 }
 
-#[tokio::test]
 async fn sse_decompression_budget_before_output_emits_transform_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let plaintext = vec![b'x'; 1024];
@@ -3108,7 +3032,6 @@ async fn sse_decompression_budget_before_output_emits_transform_error() {
     assert!(text.contains("before transform output"));
 }
 
-#[tokio::test]
 async fn sse_gzip_incomplete_event_budget_before_output_emits_transform_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let mut plaintext = Vec::from(&b"data: "[..]);
@@ -3147,7 +3070,6 @@ async fn sse_gzip_incomplete_event_budget_before_output_emits_transform_error() 
     assert!(text.contains("before transform output"));
 }
 
-#[tokio::test]
 async fn sse_brotli_incomplete_event_budget_never_replays_compressed_bytes() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let mut plaintext = Vec::from(&b"data: "[..]);
@@ -3186,7 +3108,6 @@ async fn sse_brotli_incomplete_event_budget_never_replays_compressed_bytes() {
     assert!(text.contains("incomplete SSE event"));
 }
 
-#[tokio::test]
 async fn sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let mut body = Vec::from(&b"event: ping\ndata: {\"type\":\"ping\"}\n\n"[..]);
@@ -3222,7 +3143,6 @@ async fn sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
     assert!(!text.contains(&"x".repeat(256)));
 }
 
-#[tokio::test]
 async fn sse_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "sse-accounting.sqlite").await?);
@@ -3251,32 +3171,26 @@ async fn sse_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-#[tokio::test]
 async fn buffered_transformed_question_is_user_turn_without_keepalive_enqueue() {
     transformed_question_classification(false, QuestionTransformMode::Rename).await;
 }
 
-#[tokio::test]
 async fn sse_transformed_question_is_user_turn_without_keepalive_enqueue() {
     transformed_question_classification(true, QuestionTransformMode::Rename).await;
 }
 
-#[tokio::test]
 async fn sse_dropped_question_is_not_renewed() {
     transformed_question_classification(true, QuestionTransformMode::Drop).await;
 }
 
-#[tokio::test]
 async fn sse_explicitly_dropped_question_is_not_renewed() {
     transformed_question_classification(true, QuestionTransformMode::DropVariant).await;
 }
 
-#[tokio::test]
 async fn sse_multi_event_question_is_user_turn_without_keepalive_enqueue() {
     transformed_question_classification(true, QuestionTransformMode::Multiple).await;
 }
 
-#[tokio::test]
 async fn failed_open_question_transform_preserves_original_body_and_usage() {
     for streaming in [false, true] {
         let original = if streaming {
@@ -4690,4 +4604,166 @@ fn _principal_for_doc() -> Principal {
         id: "principal-test".to_owned(),
         kind: PrincipalKind::ApiKey,
     }
+}
+
+#[tokio::test]
+async fn response_transform_paths_suite_part_1() {
+    buffered_transform_rewrites_tool_name_and_sanitizes_headers().await;
+    buffered_transform_preserves_only_original_upstream_unified_headers().await;
+    compressed_sse_affinity_preserves_original_upstream_unified_headers().await;
+    sse_transform_preserves_upstream_unified_headers_without_exposing_them_to_plugin().await;
+    buffered_gemini_oauth_code_assist_response_is_unwrapped().await;
+    gemini_oauth_sse_unwraps_before_custom_transform().await;
+    buffered_native_gemini_response_bytes_remain_unchanged().await;
+    buffered_anthropic_response_bytes_remain_unchanged().await;
+    buffered_transform_rewrites_upstream_error_response().await;
+    terminal_unauthorized_without_refresh_uses_buffered_transform().await;
+    terminal_unauthorized_generated_body_skips_transform_when_refresh_declined().await;
+    stream_request_json_errors_use_buffered_transform().await;
+    oversized_unauthorized_stream_body_skips_transform_of_generated_error().await;
+    non_sse_stream_transform_never_receives_a_capped_prefix().await;
+    gemini_json_array_stream_is_transformed_once_as_a_whole().await;
+    gemini_oauth_non_sse_stream_unwraps_before_buffered_transform().await;
+    ingress_cap_does_not_limit_existing_response_paths().await;
+    audio_json_response_preserves_the_ordinary_buffered_path().await;
+    non_json_response_relays_first_chunk_before_upstream_eof().await;
+    non_json_buffered_transform_is_bounded_without_truncating_body().await;
+    genuine_sse_uses_event_hook_without_waiting_for_body_eof().await;
+    buffered_unchanged_preserves_compressed_upstream_bytes().await;
+}
+
+#[tokio::test]
+async fn response_transform_paths_suite_part_2() {
+    buffered_header_only_transform_preserves_compressed_upstream_bytes().await;
+    buffered_unsupported_encoding_skips_transform().await;
+    buffered_transform_failure_fails_open_to_original_response().await;
+    buffered_transform_failure_is_observed_as_error()
+        .await
+        .unwrap();
+    buffered_http_error_preserves_canonical_error_over_transform_failure()
+        .await
+        .unwrap();
+    buffered_accounting_uses_pre_transform_usage()
+        .await
+        .unwrap();
+    sse_transform_rewrites_content_block_start_event().await;
+    sse_transform_receives_sanitized_response_headers().await;
+    sse_unchanged_transform_preserves_raw_event_bytes().await;
+    sse_transform_decodes_gzip_and_emits_identity_sse().await;
+    gzip_content_length_passthrough_preserves_upstream_bytes_and_headers().await;
+    content_length_client_stops_after_declared_gzip_bytes_without_terminal_drop().await;
+    content_length_affinity_gated_sse_finalizes_success_before_final_bytes().await;
+    affinity_gated_sse_downstream_drop_before_end_records_client_closed().await;
+    content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry().await;
+    truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
+        .await
+        .unwrap();
+    sse_transform_decodes_brotli_and_emits_identity_sse().await;
+    truncated_gzip_after_transformed_output_is_upstream_decode_error()
+        .await
+        .unwrap();
+    sse_transform_gzip_trailer_missing_after_message_stop_is_accepted_with_warning()
+        .await
+        .unwrap();
+    sse_transform_gzip_crc_mismatch_after_message_stop_is_indistinguishable_from_missing_trailer()
+        .await
+        .unwrap();
+    incomplete_trailing_event_after_message_stop_with_gzip_failure_stays_fatal()
+        .await
+        .unwrap();
+    gzip_trailer_failure_after_message_stop_with_trailing_line_terminators_is_accepted()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn response_transform_paths_suite_part_3() {
+    gzip_body_error_after_message_stop_then_finish_failure_is_single_warning()
+        .await
+        .unwrap();
+    gzip_body_error_before_message_stop_stays_fatal_with_attribution()
+        .await
+        .unwrap();
+    uncompressed_sse_body_error_after_message_stop_is_accepted_with_warning()
+        .await
+        .unwrap();
+    uncompressed_sse_body_error_after_message_stop_with_partial_event_stays_fatal()
+        .await
+        .unwrap();
+    compressed_passthrough_trailer_failure_after_message_stop_keeps_error()
+        .await
+        .unwrap();
+    http_error_sse_with_gzip_trailer_failure_keeps_http_classification()
+        .await
+        .unwrap();
+    provider_error_then_gzip_trailer_failure_is_not_accepted()
+        .await
+        .unwrap();
+    event_named_message_stop_with_delta_payload_and_gzip_failure_stays_fatal()
+        .await
+        .unwrap();
+    event_named_message_stop_with_malformed_payload_and_gzip_failure_stays_fatal()
+        .await
+        .unwrap();
+    name_only_message_stop_without_json_type_and_gzip_failure_stays_fatal()
+        .await
+        .unwrap();
+    upstream_diagnostics_record_http2_version_request_id_and_content_length()
+        .await
+        .unwrap();
+    clean_gzip_sse_stream_records_no_upstream_diagnostics()
+        .await
+        .unwrap();
+    truncated_gzip_before_transformed_output_emits_decode_error()
+        .await
+        .unwrap();
+    gzip_transform_failure_preserves_transform_error()
+        .await
+        .unwrap();
+    raw_deflate_passthrough_decode_failure_remains_success()
+        .await
+        .unwrap();
+    non_sse_gzip_decode_failure_skips_sse_transform()
+        .await
+        .unwrap();
+    sse_unsupported_encoding_skips_transform_and_raw_passes_through().await;
+    sse_transform_failure_before_output_fails_open_raw().await;
+    sse_transform_fail_open_preserves_keepalive_observation().await;
+    sse_unterminated_final_event_is_upstream_framing_error().await;
+    sse_unterminated_passthrough_is_upstream_framing_error()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn response_transform_paths_suite_part_4() {
+    sse_trailing_line_terminators_remain_success()
+        .await
+        .unwrap();
+    sse_body_failure_after_parser_budget_starts_separate_error_frame().await;
+    sse_gzip_unterminated_final_event_emits_upstream_framing_error().await;
+    sse_unterminated_http_error_preserves_upstream_status()
+        .await
+        .unwrap();
+    sse_unterminated_http_error_passthrough_preserves_upstream_body()
+        .await
+        .unwrap();
+    sse_gzip_transform_failure_before_output_emits_error_frame().await;
+    sse_gzip_transform_failure_preserves_http_error_status()
+        .await
+        .unwrap();
+    sse_gzip_invalid_event_name_before_output_emits_error_frame().await;
+    sse_transform_invalid_event_name_fails_open_without_injection().await;
+    sse_transform_failure_after_transformed_output_terminates_classified().await;
+    sse_decompression_budget_before_output_emits_transform_error().await;
+    sse_gzip_incomplete_event_budget_before_output_emits_transform_error().await;
+    sse_brotli_incomplete_event_budget_never_replays_compressed_bytes().await;
+    sse_incomplete_event_budget_after_output_uses_existing_error_frame().await;
+    sse_accounting_uses_pre_transform_usage().await.unwrap();
+    buffered_transformed_question_is_user_turn_without_keepalive_enqueue().await;
+    sse_transformed_question_is_user_turn_without_keepalive_enqueue().await;
+    sse_dropped_question_is_not_renewed().await;
+    sse_explicitly_dropped_question_is_not_renewed().await;
+    sse_multi_event_question_is_user_turn_without_keepalive_enqueue().await;
+    failed_open_question_transform_preserves_original_body_and_usage().await;
 }

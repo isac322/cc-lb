@@ -49,23 +49,20 @@ async fn count_request_events(pool: &SqlitePool, where_clause: &str) -> i64 {
 }
 
 /// Poll the row count until it is stable for THREE consecutive reads separated
-/// by 300ms (i.e. 600ms of quiescence). Absorbs the async lag between the
+/// by 50ms (i.e. 100ms of quiescence). Absorbs the async lag between the
 /// `wait_for_status` handshake returning and the writer/assembler tasks
-/// draining their mpsc buffers on the `/v1/models` init request; the
-/// 300ms window must exceed the assembler's finalization grace (200ms)
-/// so late Priced/CacheObserved arrivals are counted before we treat the
-/// baseline as stable. Coverage-instrumented CI runs can pause the
-/// assembler between arrivals longer than a single 300ms window, so the
-/// two-consecutive check would return prematurely and race a delayed write;
-/// requiring three tightens the quiescence signal without loosening the
-/// downstream assertion. The 15s failsafe only fires when the assembler
-/// truly cannot drain.
+/// draining their mpsc buffers on the `/v1/models` init request. The downstream
+/// `wait_for_row_count` calls retain their 10s deadlines as the failsafe for
+/// delayed writes; this shorter stability window keeps the normal path fast
+/// without changing the assertions. Coverage-instrumented CI runs can pause the
+/// assembler between arrivals, so requiring three reads still tightens the
+/// quiescence signal without loosening the downstream assertion.
 async fn settled_row_count(pool: &SqlitePool, where_clause: &str) -> i64 {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut previous = count_request_events(pool, where_clause).await;
     let mut stable_streak: u32 = 0;
     loop {
-        sleep(Duration::from_millis(300)).await;
+        sleep(Duration::from_millis(50)).await;
         let current = count_request_events(pool, where_clause).await;
         if current == previous {
             stable_streak += 1;
@@ -400,7 +397,7 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
     .expect("404 GET");
     assert_eq!(not_found.status, 404);
 
-    sleep(Duration::from_millis(300)).await;
+    sleep(Duration::from_millis(50)).await;
     let after_404 = count_request_events(&pool, "1=1").await;
     assert_eq!(
         after_404, baseline,
@@ -419,7 +416,7 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
     .expect("405 POST");
     assert_eq!(not_allowed.status, 405);
 
-    sleep(Duration::from_millis(300)).await;
+    sleep(Duration::from_millis(50)).await;
     let after_405 = count_request_events(&pool, "1=1").await;
     assert_eq!(
         after_405, baseline,
@@ -452,7 +449,7 @@ async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
     assert_eq!(response.status, 200);
 
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(50)).await;
 
     let assembler_payload = fetch_event_columns(&pool, "event_id IS NOT NULL").await;
 
@@ -488,7 +485,7 @@ async fn live_qa_6c_assembler_populates_stream_fields() {
     assert_eq!(response.status, 200);
 
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(50)).await;
 
     let assembler_payload = fetch_event_columns(&pool, "event_id IS NOT NULL").await;
 

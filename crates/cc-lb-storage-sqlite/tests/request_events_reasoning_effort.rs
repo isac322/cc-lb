@@ -19,6 +19,12 @@ async fn migrated_schema_has_nullable_text_reasoning_effort() {
 
     assert_eq!(column.get::<String, _>("type"), "TEXT");
     assert_eq!(column.get::<i64, _>("notnull"), 0);
+    let thinking_level = columns
+        .iter()
+        .find(|row| row.get::<String, _>("name") == "thinking_level")
+        .expect("thinking_level column");
+    assert_eq!(thinking_level.get::<String, _>("type"), "TEXT");
+    assert_eq!(thinking_level.get::<i64, _>("notnull"), 0);
 }
 
 #[tokio::test]
@@ -59,6 +65,30 @@ async fn append_request_event_accepts_null_reasoning_effort() {
     .expect("read null reasoning effort");
 
     assert_eq!(stored, None);
+}
+
+#[tokio::test]
+async fn thinking_level_roundtrips_without_overloading_reasoning_effort() {
+    let (_temp_dir, storage) = test_storage("thinking-level.sqlite").await;
+    for (id, level) in [("level-present", Some("LOW")), ("level-absent", None)] {
+        let mut event = request_event(id, None);
+        event.thinking_level = level.map(str::to_owned);
+        event.thinking_budget_tokens = Some(1024);
+        event.service_tier = Some("flex".to_owned());
+        storage
+            .append_request_event(&event)
+            .await
+            .expect("append event");
+        let stored = storage
+            .get_request_event(id)
+            .await
+            .expect("read event")
+            .expect("event persisted");
+        assert_eq!(stored.thinking_level.as_deref(), level);
+        assert_eq!(stored.thinking_budget_tokens, Some(1024));
+        assert_eq!(stored.service_tier.as_deref(), Some("flex"));
+        assert_eq!(stored.reasoning_effort, None);
+    }
 }
 
 async fn test_storage(filename: &str) -> (tempfile::TempDir, SqliteStorage) {

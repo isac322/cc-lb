@@ -23,7 +23,13 @@ export type CacheKeepaliveState = z.infer<typeof CacheKeepaliveStateSchema>;
 export const CacheKeepaliveTtlSchema = z.enum(['5m', '1h', '30m', '12h']);
 export type CacheKeepaliveTtl = z.infer<typeof CacheKeepaliveTtlSchema>;
 
-export const CacheKeepaliveHorizonSchema = z.enum(['24h', '7d', 'all']);
+export const CacheKeepaliveHorizonSchema = z.enum([
+  '1h',
+  '6h',
+  '24h',
+  '7d',
+  'all',
+]);
 export type CacheKeepaliveHorizon = z.infer<typeof CacheKeepaliveHorizonSchema>;
 
 export const CACHE_KEEPALIVE_STATUS_FILTERS = [
@@ -56,8 +62,10 @@ export const CacheKeepaliveSummarySchema = z.object({
   renewals_fired: z.number(),
   retained_successful_hits: z.number(),
   cost_saved: z.number().nullable(),
+  resolved_cost_saved: z.number().nullable().optional(),
   total_spent: z.number(),
   total_avoided: z.number().nullable(),
+  resolved_total_avoided: z.number().nullable().optional(),
   evidence_status: CacheKeepaliveEvidenceStatusSchema,
   unknown_cycles: z.number(),
   retained_from_ms: z.number().nullable(),
@@ -74,6 +82,7 @@ export const CacheKeepaliveRowSchema = z.object({
   attempts: z.number().nullable(),
   max_attempts: z.number(),
   reason: z.string(),
+  display_reason: z.string().nullable().optional(),
   generation: z.number(),
   upstream: z.string().nullable(),
   error: z.string().nullable(),

@@ -79,6 +79,8 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
         assert_list_matches_details(storage.as_ref(), &default_page).await?;
         assert_current_io_timings(&default_page[0]);
         assert_legacy_io_timings(&default_page[1]);
+        assert_eq!(default_page[0].thinking_level.as_deref(), Some("LOW"));
+        assert_eq!(default_page[1].thinking_level, None);
 
         let first_page = storage
             .list_request_events(&list_query(filters.clone(), Some("all"), 2, None, None))
@@ -131,6 +133,23 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             .await?
             .expect("stored request event detail");
         assert_eq!(serde_json::to_vec(&detail)?, serde_json::to_vec(&matching)?);
+        let until_seq = storage
+            .request_event_stable_seq_ceiling(std::time::Duration::from_secs(5))
+            .await?;
+        let exported = storage
+            .export_request_events(&cc_lb_storage_api::RequestEventExportPage {
+                after_seq: 0,
+                until_seq,
+                from_ts_ms: None,
+                to_ts_ms: None,
+                limit: 100,
+            })
+            .await?;
+        let exported_matching = exported
+            .iter()
+            .find(|(_, event)| event.event_id == matching.event_id)
+            .expect("matching request is exported");
+        assert_eq!(exported_matching.1.thinking_level, matching.thinking_level);
 
         for index in 0..60 {
             let mut event = request_event(
@@ -992,6 +1011,7 @@ fn request_event(
         client_app: Some("cli-bg".to_owned()),
         session_id_source: Some("x-claude-code-session-id".to_owned()),
         reasoning_effort: Some("high".to_owned()),
+        thinking_level: Some("LOW".to_owned()),
         thinking_budget_tokens: Some(101),
         thinking_tokens: Some(102),
         service_tier: Some("standard".to_owned()),
@@ -1144,6 +1164,7 @@ fn list_projection(event: &RequestEvent) -> RequestEventListItem {
         session_id_source: event.session_id_source.clone(),
         model: event.model.clone(),
         reasoning_effort: event.reasoning_effort.clone(),
+        thinking_level: event.thinking_level.clone(),
         thinking_budget_tokens: event.thinking_budget_tokens,
         thinking_tokens: event.thinking_tokens,
         service_tier: event.service_tier.clone(),

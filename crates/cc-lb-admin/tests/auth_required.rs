@@ -104,14 +104,20 @@ async fn test_auth_required() {
         ("/admin/v1/plugins/registry", "POST"),
     ];
 
+    let mut set = tokio::task::JoinSet::new();
     for (path, method) in endpoints {
-        let req = Request::builder()
-            .method(method)
-            .uri(path)
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.clone().oneshot(req).await.unwrap();
+        let app = app.clone();
+        set.spawn(async move {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            (path, app.oneshot(req).await.unwrap())
+        });
+    }
+    while let Some(res) = set.join_next().await {
+        let (path, response) = res.unwrap();
         assert_eq!(
             response.status(),
             StatusCode::UNAUTHORIZED,

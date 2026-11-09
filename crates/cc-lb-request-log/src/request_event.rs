@@ -70,6 +70,9 @@ pub struct RequestEvent {
     pub thinking_budget_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Requested provider-native thinking level; metadata only, not a routing hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_control_message_indices: Vec<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

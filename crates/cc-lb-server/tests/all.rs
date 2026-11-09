@@ -65,6 +65,8 @@ mod multi_instance_storage_tail;
 mod multi_instance_truncated_partial;
 #[path = "multi_route_dispatch.rs"]
 mod multi_route_dispatch;
+#[path = "native_cached_input_pricing.rs"]
+mod native_cached_input_pricing;
 #[path = "notify_listener.rs"]
 mod notify_listener;
 #[path = "oauth_refresh.rs"]

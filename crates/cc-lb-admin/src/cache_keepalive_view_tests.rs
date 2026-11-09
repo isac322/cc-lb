@@ -106,6 +106,7 @@ fn summary_item(
         decision: matches!(source, CacheKeepaliveSessionEntrySource::Decision)
             .then(|| "not_tracked".to_owned()),
         reason: "fixture".to_owned(),
+        display_reason: None,
         error: None,
         config_snapshot: None,
     }
@@ -135,7 +136,7 @@ fn summary_turn_with(
         cache_creation_input_tokens_5m: 0,
         cache_creation_input_tokens_1h: 0,
         cache_read_input_tokens,
-        cost_micros: 0,
+        cost_micros: Some(0),
         hit_miss: "hit".to_owned(),
         ts,
     }
@@ -523,7 +524,7 @@ fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
     });
     let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);
     let mut overflow_turn = summary_turn_with("overflow", 100, "overflow-model", u64::MAX);
-    overflow_turn.cost_micros = i64::MAX;
+    overflow_turn.cost_micros = Some(i64::MAX);
     let batch = CacheKeepaliveActivityBatch::from_turns(vec![overflow_turn], Vec::new());
     let error = summary_for_items(catalog.as_ref(), NOW_MS, &[session], &batch)
         .err()
