@@ -665,7 +665,7 @@ describe('RequestEventsTable', () => {
       expect(cols).toHaveLength(headers.length);
     });
 
-    it('sets the table minimum to the visible columns plus the session floor', () => {
+    it('sets the table minimum to the visible columns plus the session floor and reserves card fallback below 42rem', () => {
       const { container, rerender } = render(
         <RequestEventsTable
           events={shortEvents}
@@ -674,12 +674,19 @@ describe('RequestEventsTable', () => {
         />,
       );
       const table = container.querySelector('table');
-      expect(table?.style.getPropertyValue('--events-min-w')).toBe('59rem');
+      expect(table?.style.getPropertyValue('--events-min-w')).toBe('39.5rem');
+      expect(table?.className).toContain(
+        '@min-[42rem]/events:min-w-(--events-min-w)',
+      );
+      expect(table?.className).toContain('@max-[42rem]/events:block');
+      expect(container.querySelector('thead')?.className).toContain(
+        '@max-[42rem]/events:hidden',
+      );
 
       rerender(
         <RequestEventsTable events={shortEvents} principalNameMap={names} />,
       );
-      expect(table?.style.getPropertyValue('--events-min-w')).toBe('65.5rem');
+      expect(table?.style.getPropertyValue('--events-min-w')).toBe('43.75rem');
     });
   });
 
