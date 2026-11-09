@@ -45,15 +45,24 @@ async fn cleanup_gemini_reconciliation_markers(
 ) -> StorageResult<()> {
     sqlx::query(
         "DELETE FROM usage_rollups_v2 \
-         WHERE model LIKE ? \
-           AND upstream_id IN ( \
-             SELECT id FROM upstream_spec_v1 \
-             WHERE kind IN ('gemini_api_key', 'gemini_oauth'))",
+         WHERE rowid IN ( \
+             SELECT rollup.rowid \
+             FROM usage_rollups_v2 AS rollup \
+             JOIN usage_rollup_reconciliation_markers_v1 AS marker \
+               ON marker.resolution = rollup.resolution \
+              AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+              AND marker.principal_id = rollup.principal_id \
+              AND marker.upstream_id = rollup.upstream_id \
+              AND marker.marker_model = rollup.model \
+         )",
     )
-    .bind(format!("{GEMINI_RECONCILIATION_MARKER_PREFIX}%"))
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
+    sqlx::query("DELETE FROM usage_rollup_reconciliation_markers_v1")
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
     Ok(())
 }
 
@@ -282,8 +291,16 @@ impl UsageRollupStore for SqliteStorage {
               cost_cache_creation_5m_micros, cost_cache_creation_1h_micros, \
               cost_cache_read_micros, cost_cache_write_30m_micros, cost_cache_write_12h_micros, \
               cost_components_event_count \
-              FROM usage_rollups_v2 \
-              WHERE resolution = ? AND bucket_start_unix_secs >= ? AND bucket_start_unix_secs < ? \
+              FROM usage_rollups_v2 AS rollup \
+              WHERE rollup.resolution = ? AND rollup.bucket_start_unix_secs >= ? AND rollup.bucket_start_unix_secs < ? \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                    WHERE marker.resolution = rollup.resolution \
+                      AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                      AND marker.principal_id = rollup.principal_id \
+                      AND marker.upstream_id = rollup.upstream_id \
+                      AND marker.marker_model = rollup.model \
+                ) \
               ORDER BY bucket_start_unix_secs ASC",
         )
         .bind(resolution.as_str())
@@ -558,6 +575,21 @@ async fn merge_stale_gemini_rollups(
         .bind(&principal)
         .bind(&upstream_id)
         .bind(&model)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            "INSERT INTO usage_rollup_reconciliation_markers_v1 \
+             (resolution, bucket_start_unix_secs, principal_id, upstream_id, marker_model) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&resolution)
+        .bind(bucket_start)
+        .bind(&principal)
+        .bind(&upstream_id)
+        .bind(&marker)
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
