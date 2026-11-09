@@ -21,7 +21,8 @@ use uuid::Uuid;
 
 use common::{TestAuthn, TestState, collect_body, managed_key_id, messages_request};
 use fixtures::{
-    AgentTurnDispatch, RecordingSignerFactory, principal_with_keepalive, settle, upstream_record,
+    AgentTurnDispatch, OpenaiResponsesDispatch, RecordingSignerFactory, principal_with_keepalive,
+    settle, upstream_record,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,6 +275,133 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
 
     let calls = signer_log.lock().expect("signer log lock");
     assert!(calls.iter().any(|call| call.upstream_name == "primary"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn responses_default_and_explicit_30m_enqueue_through_current_proxy_path() {
+    for options in [None, Some(serde_json::json!({"ttl": "30m"}))] {
+        let mut principal = principal_with_keepalive();
+        principal.id = Uuid::from_u128(0x1162);
+        let config = principal
+            .cache_keepalive
+            .as_mut()
+            .expect("keepalive config");
+        config.classifier.openai_responses_enabled = true;
+        config.max_refreshes_per_session = 13;
+        let principal_view = Arc::new(PrincipalView::from_db(
+            &[principal],
+            std::collections::HashMap::new(),
+        ));
+        let authn = TestAuthn::with_principal_view(TestState::default(), principal_view.clone());
+        let upstream_id = Uuid::from_u128(0x1163);
+        let mut upstream = upstream_record(upstream_id, "openai", "https://api.openai.com/");
+        upstream.kind = cc_lb_storage_api::upstream::UpstreamKind::OpenaiApiKey;
+        upstream.api_key_ciphertext = Some(Vec::new());
+        let enqueuer = Arc::new(RecordingEnqueuer::default());
+        let holder = Arc::new(DynamicViewHolder::new(
+            DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(RecordingSignerFactory {
+                    label: "openai",
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                }))
+                .principal_view(principal_view)
+                .upstream_records(vec![upstream])
+                .build(),
+        ));
+        let lifecycle = Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            holder,
+            Arc::new(OpenaiResponsesDispatch),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .with_upstream_affinity_store(Arc::new(
+            crate::upstream_affinity::MemoryAffinityStore::default(),
+        ))
+        .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
+
+        let mut request_body = serde_json::json!({
+            "model": "gpt-5.6",
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "stable cached context ".repeat(2_000)
+                }]
+            }],
+            "max_output_tokens": 64,
+            "stream": false
+        });
+        if let Some(options) = options {
+            request_body["prompt_cache_options"] = options;
+        }
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("content-type", "application/json")
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::from(
+                serde_json::to_vec(&request_body).expect("request JSON serializes"),
+            ))
+            .expect("Responses request builds");
+        request
+            .extensions_mut()
+            .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("Responses request succeeds");
+        let (status, _headers, body) = collect_body(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "response body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let response_body: Value = serde_json::from_slice(&body).expect("response body is JSON");
+        assert_eq!(
+            response_body["usage"]["input_tokens_details"]["cached_tokens"],
+            12_000
+        );
+        settle().await;
+
+        let enqueued = enqueuer.enqueued();
+        assert_eq!(enqueued.len(), 1);
+        let enqueue = &enqueued[0];
+        assert!(!enqueue.session_key_hash.is_empty());
+        assert_eq!(enqueue.accounting_key_id.as_deref(), Some(managed_key_id()));
+        let snapshot = &enqueue.snapshot;
+        assert_eq!(snapshot.ttl, CacheTtl::Ttl30m);
+        assert_eq!(snapshot.upstream_id, upstream_id);
+        assert_eq!(snapshot.url.as_str(), "https://api.openai.com/v1/responses");
+        assert_eq!(snapshot.method, http::Method::POST);
+        assert_eq!(snapshot.surface(), Some("responses"));
+        assert_eq!(snapshot.keepalive_model(), "gpt-5.6");
+        assert!(snapshot.headers.get("x-api-key").is_none());
+        assert!(snapshot.headers.get("authorization").is_none());
+        let snapshot_body: Value =
+            serde_json::from_slice(&snapshot.body).expect("snapshot body is JSON");
+        assert_eq!(snapshot_body, request_body);
+        let renewal_body: Value = serde_json::from_slice(
+            &snapshot
+                .build_keepalive_body()
+                .expect("renewal body builds"),
+        )
+        .expect("renewal body is JSON");
+        request_body["max_output_tokens"] = serde_json::json!(16);
+        assert_eq!(renewal_body, request_body);
+        assert_eq!(
+            enqueuer.operations().last(),
+            Some(&KeepaliveOperation::Enqueued(
+                enqueue.session_key_hash.clone()
+            )),
+            "the completed Responses request must leave keepalive active"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

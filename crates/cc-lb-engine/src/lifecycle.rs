@@ -10826,6 +10826,7 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) session_id_source: Option<String>,
     pub(crate) cache_keepalive_surface: Option<String>,
     pub(crate) cache_keepalive_ttl: Option<cc_lb_storage_api::CacheTtl>,
+    pub(crate) openai_selected_boundary: Option<String>,
     pub(crate) openai_replay_identity: Option<String>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
@@ -11192,13 +11193,50 @@ fn bounded_openai_replay_component(raw: &str) -> String {
             .collect::<String>()
     )
 }
+fn openai_input_digest_and_visible_tokens(value: &Value) -> (String, u64) {
+    let Some(input) = value.get("input") else {
+        return (String::new(), 0);
+    };
+    let Ok(input_bytes) = sonic_rs::to_vec(input) else {
+        return (String::new(), 0);
+    };
+    let visible_tokens = (input_bytes.len() as u64 / 4).min(10_000_000);
+    let digest = Sha256::digest(&input_bytes);
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    (digest, visible_tokens)
+}
 
+#[cfg(test)]
 pub(crate) fn openai_replay_identity(
     value: &Value,
     headers: &HeaderMap,
     model: &str,
     ttl: Option<cc_lb_storage_api::CacheTtl>,
     prefix_hash: Option<&str>,
+) -> Option<String> {
+    let (input_digest, _) = openai_input_digest_and_visible_tokens(value);
+    openai_replay_identity_with_boundary(
+        value,
+        headers,
+        model,
+        ttl,
+        prefix_hash,
+        None,
+        &input_digest,
+    )
+}
+
+fn openai_replay_identity_with_boundary(
+    value: &Value,
+    headers: &HeaderMap,
+    model: &str,
+    ttl: Option<cc_lb_storage_api::CacheTtl>,
+    prefix_hash: Option<&str>,
+    selected_boundary: Option<&str>,
+    input_digest: &str,
 ) -> Option<String> {
     let prompt_cache_key = value
         .get("prompt_cache_key")
@@ -11213,16 +11251,6 @@ pub(crate) fn openai_replay_identity(
             .unwrap_or_default(),
         _ => String::new(),
     };
-    let input_digest = value
-        .get("input")
-        .and_then(|input| sonic_rs::to_vec(input).ok())
-        .map(|input_bytes| {
-            Sha256::digest(&input_bytes)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        })
-        .unwrap_or_default();
     let organization = value
         .get("organization")
         .or_else(|| value.get("organization_id"))
@@ -11250,15 +11278,16 @@ pub(crate) fn openai_replay_identity(
         cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
     });
     let namespace = format!(
-        "openai-replay-v2|model={}|lifetime={}|prefix={}|organization={}|region={}|prompt_cache_key={}|conversation={}|input={}",
+        "openai-replay-v2|model={}|lifetime={}|prefix={}|boundary={}|organization={}|region={}|prompt_cache_key={}|conversation={}|input={}",
         bounded_openai_replay_component(model),
         bounded_openai_replay_component(lifetime.unwrap_or("unknown")),
         bounded_openai_replay_component(prefix_hash.unwrap_or("")),
+        bounded_openai_replay_component(selected_boundary.unwrap_or("unknown")),
         bounded_openai_replay_component(organization),
         bounded_openai_replay_component(processing_region),
         bounded_openai_replay_component(prompt_cache_key),
         bounded_openai_replay_component(&conversation_identity),
-        bounded_openai_replay_component(&input_digest),
+        bounded_openai_replay_component(input_digest),
     );
     let digest = Sha256::digest(namespace.as_bytes());
     Some(format!(
@@ -11309,8 +11338,21 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         .map(canonical_model_id)
         .unwrap_or_default()
         .to_owned();
+    let modern_openai_interpretation = if capability == Some(ProviderCapability::OpenaiResponses)
+        && crate::cache_keepalive::openai::is_gpt56_or_newer(&canonical_model_id)
+    {
+        Some(crate::cache_keepalive::openai::interpret_modern(value))
+    } else {
+        None
+    };
     let native_cache = capability.and_then(|capability| {
-        provider_cache::analyze(capability, value, &canonical_model_id, headers)
+        provider_cache::analyze_with_openai_interpretation(
+            capability,
+            value,
+            &canonical_model_id,
+            headers,
+            modern_openai_interpretation.as_ref().map(Option::as_ref),
+        )
     });
     let requested_service_tier = value
         .get("service_tier")
@@ -11375,13 +11417,20 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
-    let (cache_keepalive_surface, cache_keepalive_ttl) =
+    let (openai_input_digest, openai_visible_prefix_tokens) =
         if capability == Some(ProviderCapability::OpenaiResponses) {
-            let lifetime = crate::cache_keepalive::openai::parse_lifetime_conservative(value);
+            openai_input_digest_and_visible_tokens(value)
+        } else {
+            (String::new(), 0)
+        };
+    let (cache_keepalive_surface, cache_keepalive_ttl, openai_selected_boundary) =
+        if capability == Some(ProviderCapability::OpenaiResponses) {
+            let interpretation = modern_openai_interpretation.flatten();
+            let lifetime = interpretation.as_ref().and_then(|value| value.lifetime);
             let eligible = lifetime.is_some_and(|lifetime| {
                 crate::cache_keepalive::openai::eligible_prefix(
                     &canonical_model_id,
-                    crate::cache_keepalive::openai::visible_prefix_tokens(value),
+                    openai_visible_prefix_tokens,
                     Some(lifetime),
                 )
             });
@@ -11396,21 +11445,24 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
                             cc_lb_storage_api::CacheTtl::Ttl12h
                         }
                     }),
+                    interpretation.and_then(|value| value.selected_boundary),
                 )
             } else {
-                (None, None)
+                (None, None, None)
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
     let replay_identity = (capability == Some(ProviderCapability::OpenaiResponses))
         .then(|| {
-            openai_replay_identity(
+            openai_replay_identity_with_boundary(
                 value,
                 headers,
                 &canonical_model_id,
                 cache_keepalive_ttl,
                 cache_prefix_hash.as_deref(),
+                openai_selected_boundary.as_deref(),
+                &openai_input_digest,
             )
         })
         .flatten();
@@ -11428,6 +11480,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         session_id_source,
         cache_keepalive_surface,
         cache_keepalive_ttl,
+        openai_selected_boundary,
         openai_replay_identity: replay_identity,
         requested_service_tier,
         message_id,
@@ -12680,6 +12733,125 @@ mod tests {
                 Some("prefix-a"),
             )
         );
+    }
+
+    #[test]
+    fn request_cache_metadata_uses_openai_responses_ttl_contract_for_keepalive() {
+        use cc_lb_storage_api::CacheTtl;
+        let input = vec![serde_json::json!({
+            "role": "user",
+            "content": "x".repeat(5_000)
+        })];
+        let metadata = |mut body: serde_json::Value| {
+            body["model"] = serde_json::Value::String("gpt-5.6".to_owned());
+            request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&body),
+                None,
+                Some(ProviderCapability::OpenaiResponses),
+            )
+        };
+
+        for (name, options, expected) in [
+            ("omitted", serde_json::json!({}), CacheTtl::Ttl30m),
+            (
+                "empty options",
+                serde_json::json!({"prompt_cache_options": {}}),
+                CacheTtl::Ttl30m,
+            ),
+            (
+                "explicit 30m",
+                serde_json::json!({"prompt_cache_options": {"ttl": "30m"}}),
+                CacheTtl::Ttl30m,
+            ),
+            (
+                "explicit 12h",
+                serde_json::json!({"prompt_cache_options": {"ttl": "12h"}}),
+                CacheTtl::Ttl12h,
+            ),
+        ] {
+            let mut body = options;
+            body["input"] = serde_json::Value::Array(input.clone());
+            let result = metadata(body);
+            assert_eq!(
+                result.cache_keepalive_surface.as_deref(),
+                Some("responses"),
+                "{name} must enable Responses keep-alive"
+            );
+            assert_eq!(result.cache_keepalive_ttl, Some(expected), "{name}");
+        }
+
+        let mut breakpoint_override = serde_json::json!({
+            "prompt_cache_options": {"ttl": "30m"},
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "x".repeat(5_000),
+                    "prompt_cache_breakpoint": {"ttl": "12h"}
+                }]
+            }]
+        });
+        let result = metadata(std::mem::take(&mut breakpoint_override));
+        assert_eq!(result.cache_keepalive_ttl, Some(CacheTtl::Ttl12h));
+
+        let mut inherited_breakpoint = serde_json::json!({
+            "prompt_cache_options": {"ttl": "12h"},
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "x".repeat(5_000),
+                    "prompt_cache_breakpoint": {}
+                }]
+            }]
+        });
+        let result = metadata(std::mem::take(&mut inherited_breakpoint));
+        assert_eq!(result.cache_keepalive_ttl, Some(CacheTtl::Ttl12h));
+        let result = metadata(serde_json::json!({
+            "metadata": {"prompt_cache_breakpoint": {"ttl": "12h"}},
+            "tools": [{"input_schema": {"prompt_cache_breakpoint": {"ttl": "12h"}}}],
+            "input": input.clone()
+        }));
+        assert_eq!(result.cache_keepalive_surface.as_deref(), Some("responses"));
+        assert_eq!(result.cache_keepalive_ttl, Some(CacheTtl::Ttl30m));
+
+        for mut body in [
+            serde_json::json!({
+                "prompt_cache_options": {"mode": "explicit"},
+                "input": input.clone()
+            }),
+            serde_json::json!({
+                "prompt_cache_options": {"ttl": "forever"},
+                "input": input.clone()
+            }),
+            serde_json::json!({
+                "prompt_cache_options": {"ttl": "30m"},
+                "input": [{
+                    "prompt_cache_breakpoint": {"ttl": "forever"},
+                    "content": "x".repeat(5_000)
+                }]
+            }),
+            serde_json::json!({
+                "prompt_cache_retention": "30m",
+                "input": input.clone()
+            }),
+        ] {
+            let result = metadata(std::mem::take(&mut body));
+            assert_eq!(result.cache_keepalive_surface, None);
+            assert_eq!(result.cache_keepalive_ttl, None);
+        }
+
+        let mut unsupported = serde_json::json!({"input": input});
+        unsupported["model"] = serde_json::Value::String("gpt-5.5".to_owned());
+        let result = request_cache_metadata_from_value_with_analysis_for_capability(
+            &HeaderMap::new(),
+            Some(&unsupported),
+            None,
+            Some(ProviderCapability::OpenaiResponses),
+        );
+        assert_eq!(result.cache_keepalive_surface, None);
+        assert_eq!(result.cache_keepalive_ttl, None);
     }
 
     #[test]

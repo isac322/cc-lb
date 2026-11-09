@@ -73,6 +73,10 @@ mod oauth_refresh;
 mod oauth_usage_proxy;
 #[path = "observation_failure_isolation.rs"]
 mod observation_failure_isolation;
+#[path = "openai_cache_keepalive.rs"]
+mod openai_cache_keepalive;
+#[path = "openai_cache_keepalive_support.rs"]
+mod openai_cache_keepalive_support;
 #[path = "postgres_tls.rs"]
 mod postgres_tls;
 #[path = "preflight.rs"]

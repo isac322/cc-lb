@@ -1067,7 +1067,15 @@ fn cache_prefix_evidence(
     Option<String>,
 ) {
     if metadata.cache_breakpoints.is_empty() {
-        return (None, None, None, None);
+        let Some(boundary) = metadata.openai_selected_boundary.as_deref() else {
+            return (None, None, None, None);
+        };
+        return (
+            Some(openai_prefix_fingerprint(metadata, boundary)),
+            metadata.cache_prefix_hash.clone(),
+            Some(CACHE_PREFIX_POLICY_VERSION.to_owned()),
+            Some(CACHE_PREFIX_SCHEMA_VERSION.to_owned()),
+        );
     }
     let mut hasher = Sha256::new();
     hasher.update(CACHE_PREFIX_SCHEMA_VERSION.as_bytes());
@@ -1090,6 +1098,34 @@ fn cache_prefix_evidence(
         Some(CACHE_PREFIX_POLICY_VERSION.to_owned()),
         Some(CACHE_PREFIX_SCHEMA_VERSION.to_owned()),
     )
+}
+
+fn openai_prefix_fingerprint(metadata: &RequestCacheMetadata, boundary: &str) -> String {
+    let ttl = match metadata.cache_keepalive_ttl {
+        Some(cc_lb_storage_api::CacheTtl::Ttl30m) => "30m",
+        Some(cc_lb_storage_api::CacheTtl::Ttl12h) => "12h",
+        Some(cc_lb_storage_api::CacheTtl::Ttl5m) => "5m",
+        Some(cc_lb_storage_api::CacheTtl::Ttl1h) => "1h",
+        None => "unknown",
+    };
+    let identity = metadata
+        .openai_replay_identity
+        .as_deref()
+        .unwrap_or("unknown");
+    let provenance = format!(
+        "policy=openai-responses-prompt-cache-v1;schema={CACHE_PREFIX_SCHEMA_VERSION};selected={};ttl={ttl};identity={identity}",
+        truncate_evidence_component(boundary, 128),
+    );
+    let digest = Sha256::digest(provenance.as_bytes());
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{provenance};sha256={digest}")
+}
+
+fn truncate_evidence_component(value: &str, max_bytes: usize) -> &str {
+    value.get(..max_bytes).unwrap_or(value)
 }
 
 fn cache_keepalive_session_key(
