@@ -13,7 +13,7 @@ use config_admin_common::{app, authed_json, temp_storage, test_state};
 use events_request_log_contracts_support::{
     BROAD_REQUEST_ID, CANCELED_REQUEST_ID, DROPPED_REQUEST_ID, EVENT_ID, MODEL,
     STRUCTURED_REQUEST_ID, SUCCESSFUL_CLOSED_REQUEST_ID, THREAD_ID, UPSTREAM_ID, UPSTREAM_NAME,
-    publish_recent_contracts, publish_source_kind_contracts,
+    event_bus, publish_enriched, publish_recent_contracts, publish_source_kind_contracts,
     read_message_updates_through_final_window, stream_response, wait_for_initial_cursor,
 };
 

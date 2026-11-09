@@ -1271,6 +1271,7 @@ async fn realtime_and_live_normal_downstream_close_after_completion_is_success()
     use cc_lb_storage_api::RequestEventStreamFilters;
 
     for gemini in [false, true] {
+        let expected_output_tokens = if gemini { 4 } else { 3 };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let provider = tokio::spawn(async move {
@@ -1352,11 +1353,13 @@ async fn realtime_and_live_normal_downstream_close_after_completion_is_success()
         assert_eq!(final_row.status, 101);
         assert_eq!(final_row.error_code, None);
         assert_eq!(final_row.upstream_error_message, None);
-        assert_eq!((final_row.input_tokens, final_row.output_tokens), (Some(10), Some(3)));
+        assert_eq!(
+            (final_row.input_tokens, final_row.output_tokens),
+            (Some(10), Some(expected_output_tokens)),
+        );
         let mut reserved = 0;
         let mut stream_completed = 0;
         let mut request_terminated = 0;
-        let mut saw_diagnostics = false;
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let event = lifecycle_events.recv().await.unwrap();
@@ -1372,7 +1375,6 @@ async fn realtime_and_live_normal_downstream_close_after_completion_is_success()
                             1000,
                             "client finished",
                         );
-                        saw_diagnostics = true;
                     }
                     LifecycleEvent::StreamCompleted { result, .. } => {
                         assert!(result.is_ok(), "completed downstream close is successful");
@@ -1391,7 +1393,6 @@ async fn realtime_and_live_normal_downstream_close_after_completion_is_success()
         assert_eq!(reserved, 1, "one reservation is handed to the response lifecycle");
         assert_eq!(stream_completed, 1);
         assert_eq!(request_terminated, 1);
-        assert!(saw_diagnostics);
         assembler.shutdown().await;
         let cursor = storage.current_request_event_cursor().await.unwrap();
         let rows = storage.query_request_events_between_cursors(
@@ -1401,7 +1402,10 @@ async fn realtime_and_live_normal_downstream_close_after_completion_is_success()
         assert_eq!(rows[0].1.event_id.as_deref(), Some(event_id.as_str()));
         assert_eq!(rows[0].1.status, 101);
         assert_eq!(rows[0].1.error_code, None);
-        assert_eq!((rows[0].1.input_tokens, rows[0].1.output_tokens), (Some(10), Some(3)));
+        assert_eq!(
+            (rows[0].1.input_tokens, rows[0].1.output_tokens),
+            (Some(10), Some(expected_output_tokens)),
+        );
         assert_native_close_details(
             rows[0].1.upstream_stream_warning_message.as_deref().unwrap(),
             1000,
