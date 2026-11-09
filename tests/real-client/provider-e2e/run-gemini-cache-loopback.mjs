@@ -380,7 +380,7 @@ async function patchUpstream(id, patch, label) {
   return updated;
 }
 async function setup() {
-  const p = await admin('POST', '/admin/v1/principals', { name: 'gemini-loopback', kind: 'machine', allowed_models: ['*'], allowed_upstreams: [], default_limits: [] });
+  const p = await admin('POST', '/admin/v1/principals', { name: 'gemini-loopback', kind: 'machine', allowed_models: ['gemini-2.5-flash'], allowed_upstreams: [], default_limits: [] });
   status(p, 201, 'Create principal');
   const k = await admin('POST', `/admin/v1/principals/${p.json.id}/keys`, { label: 'loopback-only' });
   status(k, 201, 'Issue client key');

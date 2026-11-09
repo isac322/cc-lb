@@ -5270,6 +5270,11 @@ impl Lifecycle {
             prompt_cache_analysis,
             Some(request_capability),
         );
+        if request_capability == ProviderCapability::GeminiCachedContentsCreate
+            && let Some(model) = cache_metadata.canonical_model_id.strip_prefix("models/")
+        {
+            cache_metadata.canonical_model_id = model.to_owned();
+        }
         apply_thread_sticky_subagent_latch(
             &self.thread_sticky_subagent_latch,
             &principal.id,
@@ -5683,43 +5688,40 @@ impl Lifecycle {
                 emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
             }
             routed_owner_epoch = if affinity_owner_epoch_required {
-                match self.upstream_affinity_store.as_ref() {
+                let owner_epoch = match self.upstream_affinity_store.as_ref() {
                     None => None,
-                    Some(store) => match store
+                    Some(store) => store
                         .read_upstream_owner_epoch(routed.route.upstream_id, routed.record.revision)
                         .await
-                    {
-                        Ok(Some(epoch))
-                            if request_affinity
-                                .as_ref()
-                                .is_none_or(|affinity| affinity.owner_epoch == epoch) =>
-                        {
-                            Some(epoch)
-                        }
-                        Ok(Some(_)) | Ok(None) | Err(_) => {
-                            if let Some(o) = observer.as_ref() {
-                                o.terminate_failure(InternalFailure {
-                                    status: StatusCode::SERVICE_UNAVAILABLE,
-                                    error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
-                                    error: InternalError {
-                                        stage: InternalErrorStage::Storage,
-                                        kind: InternalErrorKind::Unavailable,
-                                        message: Some(
-                                            UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned(),
-                                        ),
-                                    },
-                                });
-                            }
-                            return Ok(provider_error_response(
-                                request_capability,
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
-                                UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
-                                None,
-                            ));
-                        }
-                    },
+                        .ok()
+                        .flatten(),
+                };
+                let owner_epoch = owner_epoch.filter(|epoch| {
+                    request_affinity
+                        .as_ref()
+                        .is_none_or(|affinity| affinity.owner_epoch == *epoch)
+                });
+                if owner_epoch.is_none() {
+                    if let Some(o) = observer.as_ref() {
+                        o.terminate_failure(InternalFailure {
+                            status: StatusCode::SERVICE_UNAVAILABLE,
+                            error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                            error: InternalError {
+                                stage: InternalErrorStage::Storage,
+                                kind: InternalErrorKind::Unavailable,
+                                message: Some(UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned()),
+                            },
+                        });
+                    }
+                    return Ok(provider_error_response(
+                        request_capability,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                        UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                        None,
+                    ));
                 }
+                owner_epoch
             } else {
                 Some(0)
             };
@@ -6522,7 +6524,19 @@ impl Lifecycle {
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/json; charset=utf-8"),
             );
-            anthropic_error_body("api_error", UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE)
+            if response_affinity_context.capability
+                == ProviderCapability::GeminiCachedContentsCreate
+            {
+                provider_error_body(
+                    response_affinity_context.capability,
+                    parts.status,
+                    "api_error",
+                    UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE,
+                    None,
+                )
+            } else {
+                anthropic_error_body("api_error", UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE)
+            }
         } else {
             body
         };
@@ -10078,7 +10092,7 @@ struct LimitRequest {
     service_tier: Option<String>,
 }
 impl LimitRequest {
-    /// Native Gemini operations use the path's canonical model. Other
+    /// Native Gemini operations use the normalized canonical model. Other
     /// operations prefer the body's model and use the canonical fallback only
     /// when that field is absent. Catalog/default-moderation operations have no
     /// model; required-model operations retain the existing `unknown` sentinel.
@@ -10101,6 +10115,7 @@ impl LimitRequest {
             Some(
                 ProviderCapability::GeminiGenerateContent
                     | ProviderCapability::GeminiCountTokens
+                    | ProviderCapability::GeminiCachedContentsCreate
                     | ProviderCapability::GeminiEmbedContent
                     | ProviderCapability::GeminiPredict
             )

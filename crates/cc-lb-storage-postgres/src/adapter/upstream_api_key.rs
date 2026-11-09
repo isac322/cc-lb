@@ -292,7 +292,8 @@ impl UpstreamApiKeyStore for PostgresStorage {
     ) -> StorageResult<()> {
         let now = unix_secs(self.clock.now());
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        ensure_live_spec_revision_in_tx(&mut tx, upstream_id, expected_spec_revision).await?;
+        ensure_live_spec_revision_for_access_in_tx(&mut tx, upstream_id, expected_spec_revision)
+            .await?;
         let project_changed =
             api_key_access_project_changed_in_tx(&mut tx, upstream_id, access).await?;
         write_api_key_access_in_tx(&mut tx, upstream_id, access, now).await?;
@@ -669,6 +670,28 @@ async fn ensure_live_spec_revision_in_tx(
         "SELECT 1 FROM upstream_spec_v1 \
          WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL \
          FOR SHARE",
+    )
+    .bind(upstream_id)
+    .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if row.is_none() {
+        return Err(conflict("stale or deleted upstream"));
+    }
+    Ok(())
+}
+/// Access writes take the spec lock exclusively before locking the details row,
+/// avoiding a shared-to-exclusive upgrade deadlock with concurrent writers.
+async fn ensure_live_spec_revision_for_access_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    upstream_id: Uuid,
+    expected_revision: u64,
+) -> StorageResult<()> {
+    let row: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM upstream_spec_v1 \
+         WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL \
+         FOR UPDATE",
     )
     .bind(upstream_id)
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)

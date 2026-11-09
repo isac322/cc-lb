@@ -17,8 +17,9 @@ use cc_lb_engine::{
     DispatchError, Lifecycle, LifecycleConfig, ProviderScope, ProxyError, UpstreamDispatch,
 };
 use cc_lb_storage_api::{
-    StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
-    UpstreamAffinityKind, UpstreamAffinityStore,
+    MetaStore, StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
+    UpstreamAffinityKind, UpstreamAffinityStore, UpstreamCreate, UpstreamStore,
+    upstream::UpstreamKind,
 };
 use cc_lb_upstream::SignedRequest;
 use http::header::CONTENT_TYPE;
@@ -1747,12 +1748,10 @@ async fn gemini_cached_contents_bind_failure_and_missing_store_fail_closed() {
         .await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        if !missing_store {
-            assert_eq!(dispatch.call_count(), 1);
-            let error_body: Value = serde_json::from_slice(&body).expect("Gemini error body JSON");
-            assert_eq!(error_body["error"]["code"], 503);
-            assert_eq!(error_body["error"]["status"], "UNAVAILABLE");
-        }
+        assert_eq!(dispatch.call_count(), if missing_store { 0 } else { 1 });
+        let error_body: Value = serde_json::from_slice(&body).expect("Gemini error body JSON");
+        assert_eq!(error_body["error"]["code"], 503);
+        assert_eq!(error_body["error"]["status"], "UNAVAILABLE");
         assert_eq!(store.len(), 0);
         assert!(!String::from_utf8_lossy(&body).contains("cachedContents/test-cache"));
     }
@@ -1802,4 +1801,138 @@ async fn gemini_cached_contents_create_binds_routed_owner_epoch_before_return() 
             .expires_at_unix_secs,
         Some(4_102_444_800),
     );
+}
+
+#[tokio::test]
+async fn gemini_cached_contents_body_collection_failure_returns_native_error_without_binding() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    let dispatch =
+        RecordingDispatch::with_response(ResponseSpec::JsonThenError(Bytes::from_static(
+            br#"{"name":"cachedContents/incomplete","expireTime":"2100-01-01T00:00:00Z"}"#,
+        )));
+    let lifecycle = lifecycle(
+        vec![gemini_upstream_record(upstream, "gemini", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let (status, _, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            gemini_cached_contents_request(json!({
+                "model": "models/gemini-2.5-flash",
+                "contents": [],
+            })),
+        )
+        .await
+        .expect("Gemini cached contents request handled"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(dispatch.call_count(), 1);
+    assert_eq!(store.len(), 0);
+    let error_body: Value = serde_json::from_slice(&body).expect("Gemini error body JSON");
+    assert_eq!(error_body["error"]["code"], 503);
+    assert_eq!(error_body["error"]["status"], "UNAVAILABLE");
+    assert!(!String::from_utf8_lossy(&body).contains("cachedContents/incomplete"));
+}
+
+#[tokio::test]
+async fn gemini_sqlite_affinity_rejects_stale_dynamic_view_before_dispatch() {
+    let temp_dir = tempfile::tempdir().expect("create sqlite tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir.path().join("affinity.sqlite").display()
+    );
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(
+            &database_url,
+            Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+        )
+        .await
+        .expect("open sqlite affinity storage"),
+    );
+    storage
+        .initialize()
+        .await
+        .expect("initialize sqlite affinity storage");
+    let old_record = storage
+        .create(UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "gemini-stale-view".to_owned(),
+            kind: UpstreamKind::GeminiApiKey,
+            base_url: Some(Url::parse("http://gemini.local/").expect("test URL")),
+            api_key_ciphertext: Some(vec![1]),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        })
+        .await
+        .expect("create Gemini upstream");
+    let current_record = storage
+        .update_api_key_secret(old_record.id, Some(vec![2]))
+        .await
+        .expect("replace Gemini credential");
+    assert_ne!(old_record.revision, current_record.revision);
+
+    let create_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "name": "cachedContents/current-owner",
+        "expireTime": "2100-01-01T00:00:00Z",
+    })));
+    let current = lifecycle(vec![current_record.clone()], create_dispatch.clone(), None)
+        .with_upstream_affinity_store(storage.clone());
+    let created = handle_authenticated(
+        &current,
+        gemini_cached_contents_request(json!({
+            "model": "models/gemini-2.5-flash",
+            "contents": [],
+        })),
+    )
+    .await
+    .expect("current owner create handled");
+    assert_eq!(created.status(), StatusCode::OK);
+    assert_eq!(create_dispatch.call_count(), 1);
+
+    let cached_request = |action: &str| {
+        let mut request = gemini_cached_contents_request(json!({
+            "cachedContent": "cachedContents/current-owner",
+            "contents": [],
+        }));
+        *request.uri_mut() = format!("/v1beta/models/gemini-2.5-flash:{action}")
+            .parse()
+            .expect("Gemini action URI");
+        request
+    };
+    let stale_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let stale = lifecycle(vec![old_record], stale_dispatch.clone(), None)
+        .with_upstream_affinity_store(storage.clone());
+    for request in [
+        gemini_cached_contents_request(json!({
+            "model": "models/gemini-2.5-flash",
+            "contents": [],
+        })),
+        cached_request("generateContent"),
+        cached_request("countTokens"),
+    ] {
+        let response = handle_authenticated(&stale, request)
+            .await
+            .expect("stale view request handled");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert_eq!(stale_dispatch.call_count(), 0);
+
+    let healthy_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "candidates": [],
+    })));
+    let healthy = lifecycle(vec![current_record], healthy_dispatch.clone(), None)
+        .with_upstream_affinity_store(storage);
+    let response = handle_authenticated(&healthy, cached_request("generateContent"))
+        .await
+        .expect("current view cached generation handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(healthy_dispatch.call_count(), 1);
 }

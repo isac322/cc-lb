@@ -796,6 +796,90 @@ async fn upstream_affinity_owner_epoch_fences_gemini_identity_only() -> TestResu
     fixture.drop_schema().await
 }
 
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn upstream_api_key_access_writers_lock_spec_before_details() -> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let storage = fixture.store();
+    storage.initialize().await?;
+    let upstream_id = create_upstream_kind(
+        &storage,
+        "access-lock-order",
+        UpstreamKind::GeminiApiKey,
+        Some(b"access-lock-order-key".to_vec()),
+    )
+    .await?;
+    let seeded = access(Some("seed-project"), 1);
+    UpstreamApiKeyStore::write_api_key_access(&storage, upstream_id, 1, &seeded).await?;
+
+    let mut held_tx = fixture.pool().begin().await?;
+    let _: Option<String> = sqlx::query_scalar(
+        "SELECT project_id
+           FROM upstream_api_key_details_v1
+          WHERE upstream_id = $1
+          FOR UPDATE",
+    )
+    .bind(upstream_id)
+    .fetch_one(&mut *held_tx)
+    .await?;
+
+    let first_storage = storage.clone();
+    let second_storage = storage.clone();
+    let first_access = access(Some("writer-one-project"), 2);
+    let second_access = access(Some("writer-two-project"), 3);
+    let first = tokio::spawn(async move {
+        UpstreamApiKeyStore::write_api_key_access(&first_storage, upstream_id, 1, &first_access)
+            .await
+    });
+    let second = tokio::spawn(async move {
+        UpstreamApiKeyStore::write_api_key_access(&second_storage, upstream_id, 1, &second_access)
+            .await
+    });
+
+    wait_for_access_writer_lock_barrier(fixture.pool(), &fixture.application_name).await?;
+    held_tx.commit().await?;
+    first.await??;
+    second.await??;
+
+    fixture.drop_schema().await
+}
+
+async fn wait_for_access_writer_lock_barrier(
+    pool: &PgPool,
+    application_name: &str,
+) -> TestResult<()> {
+    for _ in 0..500 {
+        let (detail_waiters, spec_waiters, waiters): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (
+                        WHERE query LIKE '%upstream_api_key_details_v1%'
+                    ),
+                    COUNT(*) FILTER (
+                        WHERE query LIKE '%upstream_spec_v1%'
+                    ),
+                    COUNT(*)
+               FROM pg_stat_activity
+              WHERE application_name = $1
+                AND pid <> pg_backend_pid()
+                AND state = 'active'
+                AND wait_event_type = 'Lock'
+                AND (
+                    query LIKE '%upstream_api_key_details_v1%'
+                    OR query LIKE '%upstream_spec_v1%'
+                )",
+        )
+        .bind(application_name)
+        .fetch_one(pool)
+        .await?;
+        if waiters == 2 && detail_waiters >= 1 && (spec_waiters >= 1 || detail_waiters == 2) {
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
+    }
+    Err("timed out waiting for both access writers to block".into())
+}
+
 async fn create_upstream(storage: &PostgresStorage, name: &str) -> TestResult<Uuid> {
     create_upstream_kind(storage, name, UpstreamKind::AnthropicOauth, None).await
 }
@@ -890,6 +974,7 @@ fn digest(value: &str) -> [u8; 32] {
 
 struct Fixture {
     schema: String,
+    application_name: String,
     admin_pool: PgPool,
     pool: PgPool,
 }
@@ -901,6 +986,7 @@ impl Fixture {
             return Ok(None);
         };
         let schema = format!("upstream_affinity_{}", Uuid::new_v4().simple());
+        let application_name = format!("upstream-affinity-{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)
@@ -911,13 +997,16 @@ impl Fixture {
         )))
         .execute(&admin_pool)
         .await?;
-        let options = PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]);
+        let options = PgConnectOptions::from_str(&url)?
+            .options([("search_path", schema.as_str())])
+            .application_name(&application_name);
         let pool = PgPoolOptions::new()
-            .max_connections(4)
+            .max_connections(8)
             .connect_with(options)
             .await?;
         Ok(Some(Self {
             schema,
+            application_name,
             admin_pool,
             pool,
         }))
