@@ -38,13 +38,14 @@ const BOUNDED_WAIT: Duration = Duration::from_secs(2);
 const SPAN_CHILD_ENV: &str = "CC_LB_RESPONSE_SPAN_REGRESSION_CHILD";
 const SPAN_TEST_NAME: &str =
     "response_observation_regressions::response_span_closes_at_eos_and_body_drop";
+const NUMERIC_SPAN_TEST_NAME: &str = "response_observation_regressions::lifecycle_exports_queryable_numeric_stage_and_response_stream_attributes";
 const CHILD_WAIT: Duration = Duration::from_secs(15);
 
-fn run_span_regression_child() {
+fn run_span_regression_child(test_name: &str) {
     let executable = std::env::current_exe().expect("locate integration test executable");
     let child = Command::new(executable)
-        .args(["--exact", SPAN_TEST_NAME, "--nocapture", "--test-threads=1"])
-        .env(SPAN_CHILD_ENV, "1")
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(SPAN_CHILD_ENV, test_name)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -111,6 +112,11 @@ fn assert_child_success(output: Output) {
 
 #[test]
 fn lifecycle_exports_queryable_numeric_stage_and_response_stream_attributes() {
+    if std::env::var(SPAN_CHILD_ENV).as_deref() != Ok(NUMERIC_SPAN_TEST_NAME) {
+        run_span_regression_child(NUMERIC_SPAN_TEST_NAME);
+        return;
+    }
+
     use opentelemetry::Value;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
@@ -554,8 +560,8 @@ data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
 
 #[tokio::test(flavor = "current_thread")]
 async fn response_span_closes_at_eos_and_body_drop() {
-    if std::env::var_os(SPAN_CHILD_ENV).is_none() {
-        run_span_regression_child();
+    if std::env::var(SPAN_CHILD_ENV).as_deref() != Ok(SPAN_TEST_NAME) {
+        run_span_regression_child(SPAN_TEST_NAME);
         return;
     }
 
