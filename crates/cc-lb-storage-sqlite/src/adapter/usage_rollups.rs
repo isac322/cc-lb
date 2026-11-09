@@ -411,6 +411,25 @@ async fn merge_stale_gemini_rollups(
                AND marker.upstream_id = rollup.upstream_id \
                AND marker.marker_model = rollup.model \
            ) \
+           AND ( \
+             ? = 0 \
+             OR NOT EXISTS ( \
+               SELECT 1 FROM usage_rollups_v2 AS pending \
+               WHERE pending.resolution = rollup.resolution \
+                 AND pending.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                 AND pending.principal_id = rollup.principal_id \
+                 AND pending.upstream_id = rollup.upstream_id \
+                 AND pending.model = substr(rollup.model, 8) \
+                 AND NOT EXISTS ( \
+                   SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                   WHERE marker.resolution = pending.resolution \
+                     AND marker.bucket_start_unix_secs = pending.bucket_start_unix_secs \
+                     AND marker.principal_id = pending.principal_id \
+                     AND marker.upstream_id = pending.upstream_id \
+                     AND marker.marker_model = pending.model \
+                 ) \
+             ) \
+           ) \
          ORDER BY rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
                   rollup.upstream_id, rollup.model \
          LIMIT ?",
@@ -418,8 +437,8 @@ async fn merge_stale_gemini_rollups(
     .bind(rollup_upper_bound)
     .bind(if nested { 1_i64 } else { 0_i64 })
     .bind(if nested { 1_i64 } else { 0_i64 })
+    .bind(if nested { 1_i64 } else { 0_i64 })
     .bind(ROLLUP_BATCH_LIMIT)
-    .fetch_all(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
 

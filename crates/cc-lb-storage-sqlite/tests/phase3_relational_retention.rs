@@ -511,6 +511,29 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     .bind("rollup-only-triple-prefix")
     .bind(gemini_upstream_id.to_string())
     .bind("gemini-history")
+    .bind("models_models_gemini-2.5-flash")
+    .bind(2_i64)
+    .bind(11_i64)
+    .bind(5_i64)
+    .bind(0_i64)
+    .bind(1_i64)
+    .bind(6_i64)
+    .bind(0_i64)
+    .execute(storage.pool())
+    .await
+    .expect("seed two-prefix rollup-only row");
+    sqlx::query(
+        "INSERT INTO usage_rollups_v2 (
+            resolution, bucket_start_unix_secs, principal_id, upstream_id,
+            upstream_name, model, request_count, input_tokens, output_tokens,
+            error_count, latency_count, latency_ms_sum, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind("minute")
+    .bind(1_800_000_000_i64)
+    .bind("rollup-only-triple-prefix")
+    .bind(gemini_upstream_id.to_string())
+    .bind("gemini-history")
     .bind("models_models_models_gemini-2.5-flash")
     .bind(7_i64)
     .bind(31_i64)
@@ -545,7 +568,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
             .fetch_one(storage.pool())
             .await
             .expect("count retained rollups"),
-        8
+        9
     );
 
     let first_reconciliation_run = storage
@@ -558,7 +581,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
             .fetch_one(storage.pool())
             .await
             .expect("count retained rollups"),
-        8
+        9
     );
     let second_reconciliation_run = storage
         .rollup_usage_once()
@@ -610,7 +633,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
         .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, 1_800_000_060)
         .await
         .expect("query migrated rollups");
-    assert_eq!(rollups.len(), 7);
+    assert_eq!(rollups.len(), 9);
     let gemini = rollups
         .iter()
         .find(|rollup| rollup.model == "gemini-2.5-flash")
@@ -650,6 +673,15 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
         .expect("triple-prefix Gemini rollup is canonicalized exactly once");
     assert_eq!(triple_prefix.request_count, 7);
     assert_eq!(triple_prefix.input_tokens, 31);
+    let two_prefix_source = rollups
+        .iter()
+        .find(|rollup| {
+            rollup.model == "models/gemini-2.5-flash"
+                && rollup.principal == "rollup-only-triple-prefix"
+        })
+        .expect("two-prefix source is processed before its deeper destination");
+    assert_eq!(two_prefix_source.request_count, 2);
+    assert_eq!(two_prefix_source.input_tokens, 11);
     assert!(
         !rollups
             .iter()

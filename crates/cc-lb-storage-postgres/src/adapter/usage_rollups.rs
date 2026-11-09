@@ -339,6 +339,25 @@ async fn merge_stale_gemini_rollups(
                AND marker.upstream_id = rollup.upstream_id \
                AND marker.marker_model = rollup.model \
            ) \
+           AND ( \
+             $2 = FALSE \
+             OR NOT EXISTS ( \
+               SELECT 1 FROM usage_rollups_v2 AS pending \
+               WHERE pending.resolution = rollup.resolution \
+                 AND pending.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                 AND pending.principal_id = rollup.principal_id \
+                 AND pending.upstream_id = rollup.upstream_id \
+                 AND pending.model = substring(rollup.model FROM 8) \
+                 AND NOT EXISTS ( \
+                   SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                   WHERE marker.resolution = pending.resolution \
+                     AND marker.bucket_start_unix_secs = pending.bucket_start_unix_secs \
+                     AND marker.principal_id = pending.principal_id \
+                     AND marker.upstream_id = pending.upstream_id \
+                     AND marker.marker_model = pending.model \
+                 ) \
+             ) \
+           ) \
          ORDER BY rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
                   rollup.upstream_id, rollup.model \
          LIMIT $1",
