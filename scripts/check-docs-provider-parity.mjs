@@ -250,11 +250,19 @@ function isAllowedAnthropicSpecificExample(sectionHeading, sentence, allowAnthro
   const anthropicExampleHeading =
     /\bAnthropic\b/i.test(sectionHeading) &&
     /\b(?:example|request|upstream|api[- ]key|messages|oauth|setup|flow)\b/i.test(sectionHeading);
-  return (
-    anthropicExampleHeading &&
-    /\bAnthropic\b/i.test(sentence) &&
-    /\b(?:example|this request|this flow|this upstream|shown|specific)\b/i.test(sentence)
-  );
+  if (!anthropicExampleHeading || !/\bAnthropic\b/i.test(sentence)) return false;
+  if (!/\b(?:example|this request|this flow|this upstream|shown|specific)\b/i.test(sentence)) return false;
+
+  // Keep this escape hatch scoped to setup prose. Example wording must not
+  // hide the claims this checker is intended to reject.
+  const disallowedExampleClaims = [
+    /\b(?:cc-lb|the\s+(?:proxy|gateway))\s+(?:translates?|supports?|provides?)\b[^.\n]{0,120}\b(?:between\s+providers|cross[- ]provider\s+translation)\b/i,
+    /\b(?:universal|all|every|any)\s+(?:provider|upstream)s?\b|\b(?:product|proxy|supported)\s+scope\b|\b(?:multi[- ]provider)\s+gateway\b/i,
+    /\bcloud\s+(?:setup|translation)\b|\b(?:setup|translation)\s+(?:for|with|via)\s+(?:AWS|Google|Azure)\s+Cloud\b/i,
+    /\b(?:Bedrock|Vertex|SigV4|ADC)\b/i,
+    /\b(?:AWS|Google|Azure)\s+Cloud\b/i,
+  ];
+  return !disallowedExampleClaims.some((pattern) => pattern.test(sentence));
 }
 
 function isAllowedScopedAnthropicClaim(claim, sentence) {
