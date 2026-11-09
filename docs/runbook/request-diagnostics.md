@@ -49,7 +49,7 @@ The lifecycle assembler and diagnostics writer drain during graceful shutdown. T
 
 Reconcile the diagnostics sink against committed storage by querying `SELECT (ts AT TIME ZONE 'UTC')::date AS day, COUNT(DISTINCT event_id) FROM request_events_v1 WHERE ts > '1970-01-01T00:00:00Z' GROUP BY 1` and comparing against distinct `event_id` counts per UTC day in the log sink. Keep the first ingested line for each `event_id`; a late terminal lifecycle event can produce a second line for a row that the database already accepted.
 
-Admin event detail, delta, and stream reads use the typed relational columns directly and do not deserialize a JSON payload; they return the 99 relational fields and omit the five deep diagnostic fields (which live only in the diagnostics log).
+Admin event detail, delta, and stream reads use the typed relational columns directly and do not deserialize a JSON payload; they return the 99 relational fields and omit the six deep diagnostic fields (which live only in the diagnostics log).
 
 ## Schema and rollout checks
 
