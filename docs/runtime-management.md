@@ -99,6 +99,10 @@ An unsupported operation under a provider prefix returns HTTP **404**, with a pr
 
 Multipart audio transcription/translation and image edit/variation requests use `files_body_cap_bytes`; other supported HTTP operations use `messages_body_cap_bytes`. Bodies and provider-owned state are forwarded without rewriting. Model catalogs and model-less default moderation requests still pass through key/principal, rate, and concurrency admission rather than requiring a fabricated model id.
 
+#### OpenAI Responses streaming failures
+
+Before a streaming `POST /v1/responses` response starts, a proxy-generated failure returns the route's provider-shaped JSON error envelope with the matching error status (500, 502, or 503). After streaming has begun, the HTTP status remains `200`, and a proxy-generated failure is sent as a `response.failed` SSE event. The event's `response` object has `status: "failed"` and a nested `error` with a safe `code` and `message`, plus the observed response id when one is known. Provider-supplied SSE events are forwarded unchanged.
+
 ### Request events API
 
 The authenticated request-event endpoints accept the same filters:

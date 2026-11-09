@@ -73,8 +73,10 @@ use crate::completion_observer::{CompletionObserver, StreamCompletionLog, Stream
 use crate::downstream_stream_drop_guard::{
     DownstreamStreamDropGuard, StreamTerminationAttribution,
 };
+#[cfg(test)]
+use crate::error_format::anthropic_error_body;
 use crate::error_format::{
-    anthropic_error_body, anthropic_error_response, provider_error_body_with_retry_after,
+    anthropic_error_response, provider_error_body, provider_error_body_with_retry_after,
     provider_error_response, provider_error_response_with_retry_after,
 };
 use crate::hop_by_hop::strip_hop_by_hop;
@@ -100,7 +102,9 @@ use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
     WebSocketPluginRequest,
 };
-use crate::sse_error_frame::make_provider_error_frame;
+use crate::sse_error_frame::{
+    ResponsesSseErrorContext, make_provider_error_frame, make_responses_failed_frame,
+};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamErrorClassification, StreamTerminationCause,
@@ -342,17 +346,25 @@ impl SseDownstreamBoundaryTracker {
 
 fn make_stream_error_frame(
     capability: ProviderCapability,
+    context: &ResponsesSseErrorContext,
     error_type: &str,
     message: &str,
     separate_from_partial_event: bool,
 ) -> Bytes {
-    let frame = make_provider_error_frame(
+    let frame = if matches!(
         capability,
-        StatusCode::BAD_GATEWAY,
-        error_type,
-        message,
-        None,
-    );
+        ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact
+    ) {
+        make_responses_failed_frame(context, error_type, message)
+    } else {
+        make_provider_error_frame(
+            capability,
+            StatusCode::BAD_GATEWAY,
+            error_type,
+            message,
+            None,
+        )
+    };
     if !separate_from_partial_event {
         return frame;
     }
@@ -5067,10 +5079,23 @@ impl Lifecycle {
         handle_span.record("cc_lb.principal.id", principal_id.as_str());
         let Some(cached) = principal_view.get(&principal_id) else {
             tracing::error!(%principal_id, "authenticated principal missing from principal view");
-            let response = anthropic_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "api_error",
-                "authenticated principal is unavailable",
+            let response = request_capability.map_or_else(
+                || {
+                    anthropic_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "api_error",
+                        "authenticated principal is unavailable",
+                    )
+                },
+                |capability| {
+                    provider_error_response(
+                        capability,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "api_error",
+                        "authenticated principal is unavailable",
+                        None,
+                    )
+                },
             );
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
@@ -5850,7 +5875,8 @@ impl Lifecycle {
                     if unauthorized.body.is_none() {
                         // A proxy-generated body is not an upstream response:
                         // do not pass it through the custom response hook.
-                        let mut response = response_from_collected(unauthorized);
+                        let mut response =
+                            response_from_collected(unauthorized, request_capability);
                         self.attach_limit_headers(
                             &mut response,
                             active_limit.as_ref(),
@@ -5863,7 +5889,7 @@ impl Lifecycle {
                         return Ok(response);
                     }
                     break (
-                        response_from_collected(unauthorized),
+                        response_from_collected(unauthorized, request_capability),
                         dispatch_started,
                         dispatch_unix_secs,
                         signer,
@@ -5928,7 +5954,8 @@ impl Lifecycle {
                     // or forward a body that could not be collected completely.
                     let unauthorized = collect_error_response(response).await;
                     if unauthorized.body.is_none() {
-                        let mut response = response_from_collected(unauthorized);
+                        let mut response =
+                            response_from_collected(unauthorized, request_capability);
                         self.attach_limit_headers(
                             &mut response,
                             active_limit.as_ref(),
@@ -5940,7 +5967,7 @@ impl Lifecycle {
                         }
                         return Ok(response);
                     }
-                    response = response_from_collected(unauthorized);
+                    response = response_from_collected(unauthorized, request_capability);
                 }
             }
 
@@ -6420,7 +6447,13 @@ impl Lifecycle {
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/json; charset=utf-8"),
             );
-            anthropic_error_body("api_error", UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE)
+            provider_error_body(
+                response_affinity_context.capability,
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE,
+                None,
+            )
         } else {
             body
         };
@@ -6522,8 +6555,13 @@ impl Lifecycle {
                     CONTENT_TYPE,
                     HeaderValue::from_static("application/json; charset=utf-8"),
                 );
-                downstream_body =
-                    anthropic_error_body("api_error", UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE);
+                downstream_body = provider_error_body(
+                    response_affinity_context.capability,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "api_error",
+                    UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                    None,
+                );
             }
         }
         let client_status = parts.status;
@@ -7328,6 +7366,7 @@ impl Lifecycle {
             let mut batch_index = 0_u64;
             let mut buffer = BytesMut::new();
             let mut usage = UsageCounts::default();
+            let mut responses_error_context = ResponsesSseErrorContext::default();
             let mut first_chunk_at: Option<Instant> = None;
             let mut last_chunk_at: Option<Instant> = None;
             let mut message_start_at: Option<Instant> = None;
@@ -7413,6 +7452,7 @@ impl Lifecycle {
                                 });
                                 let frame = make_stream_error_frame(
                                     response_affinity_context.capability,
+                                    &responses_error_context,
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                     false,
@@ -7522,6 +7562,7 @@ impl Lifecycle {
                                             });
                                         let frame = make_stream_error_frame(
                                             response_affinity_context.capability,
+                                            &responses_error_context,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                             false,
@@ -7561,6 +7602,7 @@ impl Lifecycle {
                                         {
                                             let frame = make_stream_error_frame(
                                                 response_affinity_context.capability,
+                                                &responses_error_context,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 &error_message,
                                                 false,
@@ -7601,6 +7643,7 @@ impl Lifecycle {
                                             let frame =
                                                 make_response_transform_error_frame(
                                                     response_affinity_context.capability,
+                                                    &responses_error_context,
                                                     &transform_error,
                                                 );
                                             stream_transform_error = Some(transform_error);
@@ -7633,6 +7676,15 @@ impl Lifecycle {
                                     };
                                 let raw = split_sse_event(&mut buffer, end);
                                 let parsed_event = parse_sse_event(&raw);
+                                if matches!(
+                                    response_affinity_context.capability,
+                                    ProviderCapability::OpenaiResponses
+                                        | ProviderCapability::OpenaiResponsesCompact
+                                ) {
+                                    responses_error_context.observe(
+                                        parsed_event.value().ok().flatten(),
+                                    );
+                                }
                                 let usage_update = usage_parser::accumulate_sse_usage_for_shape(
                                     &parsed_event,
                                     &mut usage,
@@ -7714,7 +7766,8 @@ impl Lifecycle {
                                             raw_before_transform_output.clear();
                                             let frame = make_stream_error_frame(
                                                 response_affinity_context.capability,
-                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                            &responses_error_context,
+                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                                 false,
                                             );
@@ -7804,7 +7857,8 @@ impl Lifecycle {
                                     {
                                         let frame = make_stream_error_frame(
                                             response_affinity_context.capability,
-                                            "api_error",
+                                            &responses_error_context,
+                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
                                             false,
                                         );
@@ -8019,6 +8073,7 @@ impl Lifecycle {
                                                     let frame =
                                                         make_response_transform_error_frame(
                                                             response_affinity_context.capability,
+                                                            &responses_error_context,
                                                             &error,
                                                         );
                                                     stream_transform_error = Some(error);
@@ -8068,6 +8123,7 @@ impl Lifecycle {
                                                         // hook details to the client.
                                                         make_stream_error_frame(
                                                             response_affinity_context.capability,
+                                                            &responses_error_context,
                                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                                             false,
@@ -8075,6 +8131,7 @@ impl Lifecycle {
                                                     } else {
                                                         make_response_transform_error_frame(
                                                             response_affinity_context.capability,
+                                                            &responses_error_context,
                                                             &error,
                                                         )
                                                     };
@@ -8122,7 +8179,8 @@ impl Lifecycle {
                                             });
                                         let frame = make_stream_error_frame(
                                             response_affinity_context.capability,
-                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                        &responses_error_context,
+                                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                             false,
                                         );
@@ -8224,6 +8282,7 @@ impl Lifecycle {
                                         });
                                     let frame = make_stream_error_frame(
                                         response_affinity_context.capability,
+                                        &responses_error_context,
                                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                         UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                         false,
@@ -8261,6 +8320,7 @@ impl Lifecycle {
                                         };
                                         let frame = make_response_transform_error_frame(
                                             response_affinity_context.capability,
+                                            &responses_error_context,
                                             &error,
                                         );
                                         stream_transform_error = Some(error);
@@ -8399,6 +8459,7 @@ impl Lifecycle {
                             };
                             let frame = make_stream_error_frame(
                                 response_affinity_context.capability,
+                                &responses_error_context,
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 client_error_message,
                                 !success_sse_affinity_gate
@@ -8432,6 +8493,14 @@ impl Lifecycle {
                         while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
+                            if matches!(
+                                response_affinity_context.capability,
+                                ProviderCapability::OpenaiResponses
+                                    | ProviderCapability::OpenaiResponsesCompact
+                            ) {
+                                responses_error_context
+                                    .observe(parsed_event.value().ok().flatten());
+                            }
                             let usage_update = usage_parser::accumulate_sse_usage_for_shape(
                                 &parsed_event,
                                 &mut usage,
@@ -8475,6 +8544,7 @@ impl Lifecycle {
                                         raw_before_transform_output.clear();
                                         let frame = make_stream_error_frame(
                                             response_affinity_context.capability,
+                                            &responses_error_context,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                             false,
@@ -8553,7 +8623,8 @@ impl Lifecycle {
                                 {
                                     let frame = make_stream_error_frame(
                                         response_affinity_context.capability,
-                                        "api_error",
+                                        &responses_error_context,
+                                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
                                         false,
                                     );
@@ -8656,6 +8727,7 @@ impl Lifecycle {
                                         );
                                         let frame = make_stream_error_frame(
                                             response_affinity_context.capability,
+                                            &responses_error_context,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                             false,
@@ -8696,6 +8768,7 @@ impl Lifecycle {
                                             );
                                             let frame = make_stream_error_frame(
                                                 response_affinity_context.capability,
+                                                &responses_error_context,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                                 false,
@@ -8754,6 +8827,7 @@ impl Lifecycle {
                                 );
                                 let frame = make_stream_error_frame(
                                     response_affinity_context.capability,
+                                    &responses_error_context,
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                     false,
@@ -8776,6 +8850,7 @@ impl Lifecycle {
                                     };
                                     let frame = make_response_transform_error_frame(
                                         response_affinity_context.capability,
+                                        &responses_error_context,
                                         &error,
                                     );
                                     stream_transform_error = Some(error);
@@ -8873,6 +8948,7 @@ impl Lifecycle {
                         );
                         let frame = make_stream_error_frame(
                             response_affinity_context.capability,
+                            &responses_error_context,
                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                             false,
@@ -8911,6 +8987,7 @@ impl Lifecycle {
                                 .clone();
                             let frame = make_stream_error_frame(
                                 response_affinity_context.capability,
+                                &responses_error_context,
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 &error_message,
                                 false,
@@ -8941,6 +9018,7 @@ impl Lifecycle {
                             };
                             let frame = make_response_transform_error_frame(
                                 response_affinity_context.capability,
+                                &responses_error_context,
                                 &transform_error,
                             );
                             stream_transform_error = Some(transform_error);
@@ -8990,6 +9068,7 @@ impl Lifecycle {
                 {
                     let frame = make_stream_error_frame(
                         response_affinity_context.capability,
+                        &responses_error_context,
                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                         &error_message,
                         downstream_stream_is_identity
@@ -9068,7 +9147,8 @@ impl Lifecycle {
                 {
                     let frame = make_stream_error_frame(
                         response_affinity_context.capability,
-                        "api_error",
+                        &responses_error_context,
+                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
                         false,
                     );
@@ -9610,15 +9690,20 @@ async fn collect_error_response(response: Response<Body>) -> CollectedResponse {
     }
 }
 
-fn response_from_collected(collected: CollectedResponse) -> Response<Body> {
+fn response_from_collected(
+    collected: CollectedResponse,
+    capability: ProviderCapability,
+) -> Response<Body> {
     let Some(body) = collected.body else {
         // A stalled, truncated, or failed upstream body is never relayed in
         // part; the relayed status stays honest instead of echoing the
         // upstream code next to proxy-generated bytes.
-        return anthropic_error_response(
+        return provider_error_response(
+            capability,
             StatusCode::BAD_GATEWAY,
             "api_error",
             UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE,
+            None,
         );
     };
     let mut response = Response::new(Body::from(body));
@@ -18106,34 +18191,49 @@ mod tests {
 
     #[test]
     fn proxy_generated_stream_error_frames_use_selected_provider_envelope() {
-        for (capability, forbidden, required) in [
-            (
-                ProviderCapability::AnthropicMessages,
-                "\"code\"",
-                "\"type\":\"error\"",
-            ),
-            (
-                ProviderCapability::OpenaiResponses,
-                "\"type\":\"error\"",
-                "\"error\"",
-            ),
-            (
-                ProviderCapability::GeminiGenerateContent,
-                "\"type\":\"error\"",
-                "\"error\"",
-            ),
+        for capability in [
+            ProviderCapability::AnthropicMessages,
+            ProviderCapability::OpenaiResponses,
+            ProviderCapability::OpenaiResponsesCompact,
+            ProviderCapability::GeminiGenerateContent,
         ] {
             let frame = make_stream_error_frame(
                 capability,
+                &ResponsesSseErrorContext::default(),
                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                 "synthetic relay failure",
                 false,
             );
             let text = std::str::from_utf8(&frame).expect("SSE frame is UTF-8");
-            assert!(text.starts_with("event: error\ndata: "));
             assert!(text.ends_with("\n\n"));
-            assert!(text.contains(required), "{text}");
-            assert!(!text.contains(forbidden), "{text}");
+            if matches!(
+                capability,
+                ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact
+            ) {
+                assert!(text.starts_with("event: response.failed\ndata: "));
+                let payload = text
+                    .strip_prefix("event: response.failed\ndata: ")
+                    .and_then(|value| value.strip_suffix("\n\n"))
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                    .expect("Responses failure data is JSON");
+                assert_eq!(payload["type"], "response.failed");
+                assert_eq!(payload["sequence_number"], 0);
+                assert_eq!(payload["response"]["status"], "failed");
+                assert_eq!(
+                    payload["response"]["error"]["message"],
+                    "synthetic relay failure"
+                );
+                assert!(payload.get("error").is_none(), "{payload}");
+            } else {
+                assert!(text.starts_with("event: error\ndata: "));
+                assert!(
+                    text.contains("\"message\":\"synthetic relay failure\""),
+                    "{text}"
+                );
+                if capability == ProviderCapability::AnthropicMessages {
+                    assert!(!text.contains("\"code\""), "{text}");
+                }
+            }
         }
     }
 
