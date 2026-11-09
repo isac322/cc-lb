@@ -41,7 +41,7 @@ Creating an upstream from a completed draft stores the provider-specific credent
 
 ## Warm-up
 
-`warmup_enabled` is accepted for OAuth upstreams of kind `anthropic_oauth`, `openai_oauth`, and `gemini_oauth`. OAuth sign-in creates these upstreams with warm-up enabled by default. API-key upstreams reject the field. Warm-up requires stored OAuth credentials; it does not send requests for disabled or credential-less upstreams.
+`warmup_enabled` is accepted for OAuth upstreams of kind `anthropic_oauth`, `openai_oauth`, and `gemini_oauth`. `POST /admin/v1/upstreams` and OAuth sign-in create these upstreams with warm-up enabled by default. API-key upstreams reject the field. Warm-up requires stored OAuth credentials; it does not send requests for disabled or credential-less upstreams.
 
 The admin upstream detail exposes the Warm-up toggle, status, manual **Fire now** action, and history for supported OAuth upstreams. `warmup_dialect_plugin` remains available only for `anthropic_oauth`.
 
