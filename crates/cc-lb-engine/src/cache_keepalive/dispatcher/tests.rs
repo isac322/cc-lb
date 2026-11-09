@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use cc_lb_control::PromptCacheObservationSinkLike;
-use cc_lb_domain::TtlClass;
+use cc_lb_domain::{Provider, TtlClass};
 use cc_lb_storage_api::PromptCacheObservationRecord;
 
 // Schema-6 identity independently derived from the three-block golden body below.
@@ -1065,7 +1065,10 @@ async fn assert_billing_keepalive_observation(
     };
     assert_eq!(request.body(), &dispatched_body);
     let request_value: Value = serde_json::from_slice(request.body())?;
-    let analysis = analyze_v3_prompt_cache(&request_value, canonical_model_id("claude-sonnet-4-5"));
+    let analysis = analyze_v3_prompt_cache(
+        &request_value,
+        canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+    );
     let expected = if literal {
         analysis.literal_breakpoints.last()
     } else {

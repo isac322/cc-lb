@@ -1,17 +1,22 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Debug;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
+use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
 use cc_lb_engine::realtime_websocket::{
     RealtimeStreamMetrics, RealtimeUsage, RealtimeWebSocketDiagnostics, RealtimeWebSocketKind,
     RealtimeWebSocketTarget, RealtimeWebSocketTermination,
 };
 use cc_lb_engine::responses_websocket::{ResponsesWebSocketGateway, WebSocketError};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -19,10 +24,98 @@ use cc_lb_upstream::SignedRequest;
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use http_body_util::BodyExt;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::layer::{Context, SubscriberExt as _};
+use tracing_subscriber::{Layer, Registry};
+use url::Url;
+use uuid::Uuid;
 
 use crate::common::{
     TestAuthn, TestLifecycleBus, TestState, lifecycle_with_parts, managed_api_key, messages_request,
 };
+
+const UNKNOWN_ALIAS_MESSAGE: &str = "unknown model alias, returning unchanged";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CapturedWarning {
+    message: String,
+    model: Option<String>,
+}
+
+#[derive(Default)]
+struct EventFields {
+    message: Option<String>,
+    model: Option<String>,
+}
+
+impl tracing::field::Visit for EventFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+        let value = format!("{value:?}");
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .map_or(value.clone(), str::to_owned);
+        self.record(field, value);
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.record(field, value.to_owned());
+    }
+}
+
+impl EventFields {
+    fn record(&mut self, field: &tracing::field::Field, value: String) {
+        match field.name() {
+            "message" => self.message = Some(value),
+            "model" => self.model = Some(value),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WarningLayer {
+    warnings: Arc<Mutex<Vec<CapturedWarning>>>,
+}
+
+impl<S> Layer<S> for WarningLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if *event.metadata().level() != Level::WARN {
+            return;
+        }
+        let mut fields = EventFields::default();
+        event.record(&mut fields);
+        let Some(message) = fields.message else {
+            return;
+        };
+        self.warnings
+            .lock()
+            .expect("warning capture lock")
+            .push(CapturedWarning {
+                message,
+                model: fields.model,
+            });
+    }
+}
+
+async fn capture_warnings<F, Fut, R>(operation: F) -> (R, Vec<CapturedWarning>)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = R>,
+{
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let layer = WarningLayer {
+        warnings: Arc::clone(&warnings),
+    };
+    let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+    let result = operation().await;
+    let warnings = warnings.lock().expect("warning capture lock").clone();
+    (result, warnings)
+}
 
 #[tokio::test]
 async fn openai_image_and_transcription_usage_persist_in_request_events()
@@ -535,6 +628,92 @@ async fn realtime_relay_finish_publishes_typed_io_diagnostics_and_single_termina
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn responses_websocket_admission_records_canonical_model_without_alias_warning() {
+    let upstream_id = Uuid::from_u128(1196);
+    let canonical_models = Arc::new(Mutex::new(Vec::new()));
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![Arc::new(ResponsesRecordingModelFilter {
+            canonical_models: Arc::clone(&canonical_models),
+            kept_upstream_ids: vec![upstream_id],
+        })],
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: None,
+    });
+    let mut chains = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (Some(pipeline), DialectCache::Inherit),
+    );
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ));
+    let authn = TestAuthn::with_principal_view(TestState::default(), principal_view.clone());
+    let test_bus = TestLifecycleBus::new();
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(principal_view)
+        .upstream_records(vec![UpstreamRecord {
+            id: upstream_id,
+            name: "responses-admission-upstream".to_owned(),
+            kind: StorageUpstreamKind::OpenaiApiKey,
+            base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    let lifecycle = Arc::new(
+        Lifecycle::new_with_dynamic_view(
+            authn.authn.clone(),
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(CapturingDispatch::default()),
+            LifecycleConfig::default(),
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .with_event_bus(test_bus.bus_arc()),
+    );
+    let headers = messages_request(Bytes::new()).headers().clone();
+    let auth = lifecycle
+        .authenticate(&headers)
+        .await
+        .expect("Responses WebSocket authenticates");
+    let mut gateway =
+        ResponsesWebSocketGateway::new(Arc::clone(&lifecycle), &auth, headers, 1 << 20, 8);
+    let (dispatch, warnings) = capture_warnings(|| async {
+        gateway
+            .client_message(
+                auth,
+                Bytes::from_static(
+                    br#"{"type":"response.create","stream_id":"main","model":"gpt-test","store":false,"input":"canonical model fixture"}"#,
+                ),
+            )
+            .await
+    })
+    .await;
+    let dispatch = dispatch
+        .expect("response.create admission succeeds")
+        .expect("first response.create dispatches");
+    assert_eq!(dispatch.candidates.len(), 1);
+    assert_eq!(canonical_models.lock().unwrap().as_slice(), ["gpt-test"]);
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| {
+                warning.message == UNKNOWN_ALIAS_MESSAGE
+                    && warning.model.as_deref() == Some("gpt-test")
+            })
+            .count(),
+        0,
+        "native OpenAI admission model emitted alias warnings: {warnings:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn responses_websocket_terminal_matrix_settles_once_and_labels_every_outcome() {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
@@ -912,6 +1091,39 @@ impl UpstreamDispatch for OpenAiUsageDispatch {
             http::HeaderValue::from_static("application/json"),
         );
         Ok(response)
+    }
+}
+
+struct ResponsesRecordingModelFilter {
+    canonical_models: Arc<Mutex<Vec<String>>>,
+    kept_upstream_ids: Vec<Uuid>,
+}
+
+impl FilterPlugin for ResponsesRecordingModelFilter {
+    fn filter(
+        &self,
+        ctx: &cc_lb_routing::RoutingContext,
+        _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        self.canonical_models
+            .lock()
+            .expect("canonical model capture lock")
+            .push(ctx.canonical_model_id.clone());
+        Ok(FilterOutput {
+            kept_upstream_ids: self.kept_upstream_ids.clone(),
+            reason: "record:responses-model".to_owned(),
+            per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+        })
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        Uuid::nil()
+    }
+
+    fn plugin_name(&self) -> &str {
+        "record-responses-model"
     }
 }
 

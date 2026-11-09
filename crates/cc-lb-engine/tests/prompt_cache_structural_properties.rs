@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 
+use cc_lb_domain::Provider;
 use cc_lb_engine::model_resolution::canonical_model_id;
 use cc_lb_engine::prompt_cache_simulator::{V3PromptCacheBlockSource, analyze_v3_prompt_cache};
 
@@ -72,7 +73,10 @@ fn all_invalidator_request(request: &Value) -> Value {
 }
 
 fn breakpoint_prefix_key(request: &Value, source: V3PromptCacheBlockSource) -> String {
-    let analysis = analyze_v3_prompt_cache(request, canonical_model_id(CANONICAL_MODEL));
+    let analysis = analyze_v3_prompt_cache(
+        request,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
     let Some(breakpoint) = analysis
         .breakpoints
         .iter()
@@ -94,7 +98,10 @@ fn v6_blake3_prefix_key_golden() {
         "messages": [{"role":"user","content":[{"type":"text","text":"tail"}]}]
     });
 
-    let analysis = analyze_v3_prompt_cache(&request, canonical_model_id(CANONICAL_MODEL));
+    let analysis = analyze_v3_prompt_cache(
+        &request,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
     let breakpoint = analysis.breakpoints.first().expect("v6 breakpoint");
 
     assert_eq!(breakpoint.block_index, 1);
@@ -200,7 +207,10 @@ fn flatten_order_is_tools_then_system_then_messages() {
         ]
     });
 
-    let analysis = analyze_v3_prompt_cache(&request, canonical_model_id(CANONICAL_MODEL));
+    let analysis = analyze_v3_prompt_cache(
+        &request,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
 
     let sources = analysis
         .blocks
@@ -267,7 +277,10 @@ fn lookback_window_spans_at_most_twenty_positions() {
         "messages": [{"role":"user","content": content}]
     });
 
-    let analysis = analyze_v3_prompt_cache(&request, canonical_model_id(CANONICAL_MODEL));
+    let analysis = analyze_v3_prompt_cache(
+        &request,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
 
     let breakpoint = analysis
         .breakpoints
@@ -309,8 +322,14 @@ fn cache_control_excluded_from_prefix_key() {
         ]}]
     });
 
-    let analysis_a = analyze_v3_prompt_cache(&request_a, canonical_model_id(CANONICAL_MODEL));
-    let analysis_b = analyze_v3_prompt_cache(&request_b, canonical_model_id(CANONICAL_MODEL));
+    let analysis_a = analyze_v3_prompt_cache(
+        &request_a,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
+    let analysis_b = analyze_v3_prompt_cache(
+        &request_b,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
 
     let breakpoint_a = analysis_a
         .breakpoints
@@ -342,10 +361,12 @@ fn cache_control_excluded_from_prefix_key() {
 
     let without_earlier = analyze_v3_prompt_cache(
         &request_without_earlier,
-        canonical_model_id(CANONICAL_MODEL),
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
     );
-    let with_earlier =
-        analyze_v3_prompt_cache(&request_with_earlier, canonical_model_id(CANONICAL_MODEL));
+    let with_earlier = analyze_v3_prompt_cache(
+        &request_with_earlier,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
 
     let deep_without_earlier = without_earlier
         .breakpoints
@@ -383,7 +404,10 @@ fn deeper_breakpoint_lookback_reuses_shallower_prefix_key() {
         "messages": [{"role":"user","content": content}]
     });
 
-    let analysis = analyze_v3_prompt_cache(&request, canonical_model_id(CANONICAL_MODEL));
+    let analysis = analyze_v3_prompt_cache(
+        &request,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
 
     let shallower = analysis
         .breakpoints
@@ -422,7 +446,10 @@ fn four_breakpoints_map_to_four_breakpoints() {
         "messages": [{"role":"user","content": content}]
     });
 
-    let analysis = analyze_v3_prompt_cache(&request, canonical_model_id(CANONICAL_MODEL));
+    let analysis = analyze_v3_prompt_cache(
+        &request,
+        canonical_model_id(Provider::Anthropic, CANONICAL_MODEL),
+    );
 
     let breakpoint_indices = analysis
         .breakpoints

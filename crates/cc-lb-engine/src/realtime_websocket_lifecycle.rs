@@ -157,7 +157,9 @@ impl Lifecycle {
                 .path(path.to_owned())
                 .query(query)
                 .body_bytes(setup)
-                .canonical_model_id(canonical_model_id(model.unwrap_or_default()).to_owned())
+                .canonical_model_id(
+                    canonical_model_id(kind.provider(), model.unwrap_or_default()).to_owned(),
+                )
                 .build();
             let principal = Principal {
                 id: auth.principal_id().to_owned(),

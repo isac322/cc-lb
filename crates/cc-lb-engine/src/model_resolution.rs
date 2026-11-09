@@ -3,47 +3,62 @@
 //! Source: https://platform.claude.com/docs/en/build-with-claude/prompt-caching#cache-limitations
 //! Retrieved: 2026-07-27
 
-/// Resolve a model alias to its canonical (dated) form.
+use cc_lb_domain::Provider;
+
+/// Resolve an Anthropic model alias to its canonical (dated) form.
 ///
-/// Supports rolling aliases (e.g., `claude-sonnet-4-5`) that map to specific dated versions.
-/// Already-dated forms and unknown models pass through unchanged (with a warn log).
+/// Supports rolling Anthropic aliases (e.g., `claude-sonnet-4-5`) that map to specific dated
+/// versions. Already-dated forms and unknown Anthropic models pass through unchanged; unknown
+/// aliases are warned. OpenAI and Gemini model IDs pass through unchanged without alias warnings.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// assert_eq!(canonical_model_id("claude-sonnet-4-5"), "claude-sonnet-4-5-20250929");
-/// assert_eq!(canonical_model_id("claude-sonnet-4-5-20250929"), "claude-sonnet-4-5-20250929");
-/// assert_eq!(canonical_model_id("unknown-model"), "unknown-model"); // passes through
+/// assert_eq!(
+///     canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+///     "claude-sonnet-4-5-20250929"
+/// );
+/// assert_eq!(
+///     canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5-20250929"),
+///     "claude-sonnet-4-5-20250929"
+/// );
+/// assert_eq!(
+///     canonical_model_id(Provider::Openai, "gpt-5"),
+///     "gpt-5"
+/// );
 /// ```
-pub fn canonical_model_id(requested: &str) -> &str {
-    match requested {
-        "claude-fable-5" => "claude-fable-5",
-        "claude-opus-5" => "claude-opus-5",
-        "claude-mythos-5" => "claude-mythos-5",
-        "claude-mythos-preview" => "claude-mythos-preview",
-        "claude-sonnet-5" => "claude-sonnet-5",
-        "claude-sonnet-4-6" => "claude-sonnet-4-6",
-        "claude-opus-4-6" => "claude-opus-4-6",
-        "claude-opus-4-7" => "claude-opus-4-7",
+pub fn canonical_model_id(provider: Provider, requested: &str) -> &str {
+    match provider {
+        Provider::Anthropic => match requested {
+            "claude-fable-5" => "claude-fable-5",
+            "claude-opus-5" => "claude-opus-5",
+            "claude-mythos-5" => "claude-mythos-5",
+            "claude-mythos-preview" => "claude-mythos-preview",
+            "claude-sonnet-5" => "claude-sonnet-5",
+            "claude-sonnet-4-6" => "claude-sonnet-4-6",
+            "claude-opus-4-6" => "claude-opus-4-6",
+            "claude-opus-4-7" => "claude-opus-4-7",
 
-        // Sonnet aliases
-        "claude-sonnet-4-5" => "claude-sonnet-4-5-20250929",
+            // Sonnet aliases
+            "claude-sonnet-4-5" => "claude-sonnet-4-5-20250929",
 
-        // Opus aliases
-        "claude-opus-4-5" => "claude-opus-4-5-20251101",
-        "claude-opus-4-8" => "claude-opus-4-8-20250514",
+            // Opus aliases
+            "claude-opus-4-5" => "claude-opus-4-5-20251101",
+            "claude-opus-4-8" => "claude-opus-4-8-20250514",
 
-        // Haiku aliases
-        "claude-haiku-4-5" => "claude-haiku-4-5-20251001",
+            // Haiku aliases
+            "claude-haiku-4-5" => "claude-haiku-4-5-20251001",
 
-        // Already-dated or unknown: pass through unchanged
-        other => {
-            // Only warn if it looks like an alias (doesn't end with -YYYYMMDD)
-            if !other.ends_with('-') && !is_dated_model(other) {
-                tracing::warn!(model = %other, "unknown model alias, returning unchanged");
+            // Already-dated or unknown: pass through unchanged
+            other => {
+                // Only warn if it looks like an alias (doesn't end with -YYYYMMDD)
+                if !other.ends_with('-') && !is_dated_model(other) {
+                    tracing::warn!(model = %other, "unknown model alias, returning unchanged");
+                }
+                other
             }
-            other
-        }
+        },
+        Provider::Openai | Provider::Gemini => requested,
     }
 }
 
@@ -129,7 +144,7 @@ mod tests {
     #[test]
     fn alias_resolves_to_dated_sonnet45() {
         assert_eq!(
-            canonical_model_id("claude-sonnet-4-5"),
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
             "claude-sonnet-4-5-20250929"
         );
     }
@@ -137,7 +152,7 @@ mod tests {
     #[test]
     fn dated_sonnet45_passes_through() {
         assert_eq!(
-            canonical_model_id("claude-sonnet-4-5-20250929"),
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5-20250929"),
             "claude-sonnet-4-5-20250929"
         );
     }
@@ -145,14 +160,28 @@ mod tests {
     #[test]
     fn opus45_alias_resolves() {
         assert_eq!(
-            canonical_model_id("claude-opus-4-5"),
+            canonical_model_id(Provider::Anthropic, "claude-opus-4-5"),
             "claude-opus-4-5-20251101"
         );
     }
 
     #[test]
     fn unknown_passes_through() {
-        assert_eq!(canonical_model_id("future-model-xyz"), "future-model-xyz");
+        assert_eq!(
+            canonical_model_id(Provider::Anthropic, "future-model-xyz"),
+            "future-model-xyz"
+        );
+    }
+
+    #[test]
+    fn non_anthropic_models_pass_through_without_alias_resolution() {
+        for provider in [Provider::Openai, Provider::Gemini] {
+            assert_eq!(
+                canonical_model_id(provider, "claude-sonnet-4-5"),
+                "claude-sonnet-4-5"
+            );
+            assert_eq!(canonical_model_id(provider, "gpt-5"), "gpt-5");
+        }
     }
 
     #[test]
@@ -178,7 +207,7 @@ mod tests {
     #[test]
     fn alias_haiku45_resolves() {
         assert_eq!(
-            canonical_model_id("claude-haiku-4-5"),
+            canonical_model_id(Provider::Anthropic, "claude-haiku-4-5"),
             "claude-haiku-4-5-20251001"
         );
     }
@@ -190,7 +219,10 @@ mod tests {
 
     #[test]
     fn fable5_is_a_dateless_canonical_model() {
-        assert_eq!(canonical_model_id("claude-fable-5"), "claude-fable-5");
+        assert_eq!(
+            canonical_model_id(Provider::Anthropic, "claude-fable-5"),
+            "claude-fable-5"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crate::common;
 use crate::prompt_cache_routing_support;
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -10,7 +11,9 @@ use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, Route
 use cc_lb_control::{
     ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
-use cc_lb_domain::{Principal, TerminalStrategy, TtlClass, UpstreamCandidate, WarmCacheEntry};
+use cc_lb_domain::{
+    Principal, Provider, TerminalStrategy, TtlClass, UpstreamCandidate, WarmCacheEntry,
+};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
 use cc_lb_engine::prompt_cache_simulator::{V3PromptCacheBreakpoint, analyze_v3_prompt_cache};
@@ -22,6 +25,9 @@ use prompt_cache_routing_support::{
     TestPromptCacheObservationCache, TestSubscriptionQuotaCache, known_base_quota_snapshots,
 };
 use serde_json::Value;
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::layer::{Context, SubscriberExt as _};
+use tracing_subscriber::{Layer, Registry};
 use url::Url;
 use uuid::Uuid;
 
@@ -199,6 +205,94 @@ async fn preview_route_preserves_provider_metadata_trace_and_has_no_side_effects
                 .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "{provider:?} preview must never dispatch or reserve a provider request",
+        );
+    }
+}
+
+#[tokio::test]
+async fn preview_route_native_models_preserve_context_body_and_alias_diagnostics() {
+    let cases = [
+        (
+            cc_lb_domain::Provider::Openai,
+            StorageUpstreamKind::OpenaiApiKey,
+            "/v1/responses",
+            br#"{"model":"gpt-5-mini","input":[],"service_tier":"priority"}"# as &'static [u8],
+            "gpt-5-mini",
+            Some("priority"),
+        ),
+        (
+            cc_lb_domain::Provider::Gemini,
+            StorageUpstreamKind::GeminiApiKey,
+            "/v1beta/models/gemini-3.5-flash-lite:generateContent",
+            br#"{"contents":[],"serviceTier":"priority"}"# as &'static [u8],
+            "gemini-3.5-flash-lite",
+            Some("priority"),
+        ),
+        (
+            cc_lb_domain::Provider::Gemini,
+            StorageUpstreamKind::GeminiApiKey,
+            "/v1beta/models/gemini-3.5-flash-lite:countTokens",
+            br#"{"contents":[]}"# as &'static [u8],
+            "gemini-3.5-flash-lite",
+            None,
+        ),
+    ];
+
+    for (provider, upstream_kind, path, body, expected_model, expected_service_tier) in cases {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let filter = Arc::new(PreviewContractFilter {
+            calls: calls.clone(),
+        });
+        let mut upstream = upstream_record(0);
+        upstream.kind = upstream_kind;
+        let lifecycle = build_lifecycle_with_status_snapshot(
+            principal_view_with_pipeline(vec![filter]),
+            vec![upstream.clone()],
+            UpstreamStatusSnapshot::default(),
+        );
+        let request_id = format!("native-preview-{provider:?}-{expected_model}");
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(WarningLayer {
+            warnings: Arc::clone(&warnings),
+        });
+        let guard = tracing::subscriber::set_default(subscriber);
+        let outcome = lifecycle
+            .preview_route(PreviewRouteInput {
+                principal_id: PRINCIPAL.to_owned(),
+                request_id: Some(request_id.clone()),
+                headers: HeaderMap::new(),
+                body_bytes: Bytes::from_static(body),
+                provider: Some(provider),
+                path: path.to_owned(),
+            })
+            .await
+            .expect("native provider preview succeeds");
+        drop(guard);
+
+        assert_eq!(outcome.winner_upstream_id, Some(upstream.id), "{path}");
+        let calls = calls.lock().expect("recorded routing contexts");
+        assert_eq!(calls.len(), 1, "{path} filter invocation");
+        assert_eq!(calls[0].request_id, request_id, "{path} request id");
+        assert_eq!(calls[0].path, path, "{path} path");
+        assert_eq!(
+            calls[0].canonical_model_id, expected_model,
+            "{path} canonical model"
+        );
+        assert_eq!(
+            calls[0].requested_service_tier.as_deref(),
+            expected_service_tier,
+            "{path} service tier"
+        );
+        assert_eq!(
+            calls[0].body.as_ref(),
+            Some(&Bytes::from_static(body)),
+            "{path} forwarded body bytes"
+        );
+        let warnings = warnings.lock().expect("warning capture lock").clone();
+        assert_eq!(
+            warnings,
+            Vec::<CapturedWarning>::new(),
+            "{path} native model must not emit alias or cache warnings"
         );
     }
 }
@@ -688,6 +782,7 @@ fn payload_cache_keys(body: &Bytes) -> PayloadCacheKeys {
     let analysis = analyze_v3_prompt_cache(
         &value,
         cc_lb_engine::model_resolution::canonical_model_id(
+            Provider::Anthropic,
             value.get("model").and_then(Value::as_str).unwrap_or(""),
         ),
     );
@@ -1012,6 +1107,72 @@ struct PreviewFilterCall {
     body: Option<Bytes>,
     thread_id: Option<String>,
     requested_service_tier: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CapturedWarning {
+    message: String,
+    model: Option<String>,
+}
+
+#[derive(Default)]
+struct WarningFields {
+    message: Option<String>,
+    model: Option<String>,
+}
+
+impl tracing::field::Visit for WarningFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+        let value = format!("{value:?}");
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .map_or(value.clone(), str::to_owned);
+        self.record(field, value);
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.record(field, value.to_owned());
+    }
+}
+
+impl WarningFields {
+    fn record(&mut self, field: &tracing::field::Field, value: String) {
+        match field.name() {
+            "message" => self.message = Some(value),
+            "model" => self.model = Some(value),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WarningLayer {
+    warnings: Arc<Mutex<Vec<CapturedWarning>>>,
+}
+
+impl<S> Layer<S> for WarningLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if *event.metadata().level() != Level::WARN {
+            return;
+        }
+
+        let mut fields = WarningFields::default();
+        event.record(&mut fields);
+        let Some(message) = fields.message else {
+            return;
+        };
+        self.warnings
+            .lock()
+            .expect("warning capture lock")
+            .push(CapturedWarning {
+                message,
+                model: fields.model,
+            });
+    }
 }
 
 struct PreviewContractFilter {

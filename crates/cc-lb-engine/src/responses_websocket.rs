@@ -2051,7 +2051,11 @@ fn transform_websocket_event(
             upstream: context.upstream.clone(),
             request_method: context.request_method.clone(),
             request_path: context.request_path.clone(),
-            canonical_model_id: crate::model_resolution::canonical_model_id(model).to_owned(),
+            canonical_model_id: crate::model_resolution::canonical_model_id(
+                cc_lb_domain::Provider::Openai,
+                model,
+            )
+            .to_owned(),
             response_status: StatusCode::OK,
             response_headers: HeaderMap::new(),
             event: SseEvent {
@@ -2330,10 +2334,16 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
 pub(crate) mod tests {
     use super::*;
     use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+    use std::fmt::Debug;
+    use std::sync::{Arc, Mutex};
+
     use cc_lb_control::api_keys::limit_engine::{ApiKeyUsageHandle, RejectReason};
     use cc_lb_control::api_keys::principal_view::PrincipalView;
     use cc_lb_storage_api::principal::{Limit, LimitKind};
     use cc_lb_storage_api::{ApiKeyUsageBucketQuery, MetaStore, Storage, StoredApiKeyRecord};
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt as _};
+    use tracing_subscriber::{Layer, Registry};
 
     pub(crate) static DIRECT_PRICING_LOCK: tokio::sync::Mutex<()> =
         tokio::sync::Mutex::const_new(());
@@ -2863,8 +2873,86 @@ pub(crate) mod tests {
         );
     }
 
+    const UNKNOWN_ALIAS_MESSAGE: &str = "unknown model alias, returning unchanged";
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct CapturedWarning {
+        message: String,
+        model: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct EventFields {
+        message: Option<String>,
+        model: Option<String>,
+    }
+
+    impl tracing::field::Visit for EventFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+            let value = format!("{value:?}");
+            let value = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .map_or(value.clone(), str::to_owned);
+            self.record(field, value);
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record(field, value.to_owned());
+        }
+    }
+
+    impl EventFields {
+        fn record(&mut self, field: &tracing::field::Field, value: String) {
+            match field.name() {
+                "message" => self.message = Some(value),
+                "model" => self.model = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct WarningLayer {
+        warnings: Arc<Mutex<Vec<CapturedWarning>>>,
+    }
+
+    impl<S> Layer<S> for WarningLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() != Level::WARN {
+                return;
+            }
+            let mut fields = EventFields::default();
+            event.record(&mut fields);
+            let Some(message) = fields.message else {
+                return;
+            };
+            self.warnings
+                .lock()
+                .expect("warning capture lock")
+                .push(CapturedWarning {
+                    message,
+                    model: fields.model,
+                });
+        }
+    }
+
+    fn capture_warnings<R>(operation: impl FnOnce() -> R) -> (R, Vec<CapturedWarning>) {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let layer = WarningLayer {
+            warnings: Arc::clone(&warnings),
+        };
+        let result = tracing::subscriber::with_default(Registry::default().with(layer), operation);
+        let warnings = warnings.lock().expect("warning capture lock").clone();
+        (result, warnings)
+    }
+
     struct TestWebSocketTransformDialect {
         result: TransformSseEventResult,
+        canonical_models: Arc<Mutex<Vec<String>>>,
     }
 
     impl cc_lb_upstream::UpstreamDialect for TestWebSocketTransformDialect {
@@ -2886,13 +2974,20 @@ pub(crate) mod tests {
     impl cc_lb_upstream::SseEventTransformHook for TestWebSocketTransformDialect {
         fn transform_sse_event(
             &self,
-            _request: cc_lb_upstream::TransformSseEventRequest,
+            request: cc_lb_upstream::TransformSseEventRequest,
         ) -> Result<TransformSseEventResult, cc_lb_upstream::ResponseTransformError> {
+            self.canonical_models
+                .lock()
+                .expect("canonical model capture lock")
+                .push(request.canonical_model_id);
             Ok(self.result.clone())
         }
     }
 
-    fn websocket_transform_context(result: TransformSseEventResult) -> ResponseTransformContext {
+    fn websocket_transform_context(
+        result: TransformSseEventResult,
+        canonical_models: Arc<Mutex<Vec<String>>>,
+    ) -> ResponseTransformContext {
         ResponseTransformContext {
             principal: cc_lb_domain::Principal {
                 id: "principal".to_owned(),
@@ -2901,40 +2996,70 @@ pub(crate) mod tests {
             upstream: cc_lb_domain::Upstream::OpenaiDirect { base_url: None },
             request_method: http::Method::POST,
             request_path: "/v1/responses".to_owned(),
-            dialect: Arc::new(TestWebSocketTransformDialect { result }),
+            dialect: Arc::new(TestWebSocketTransformDialect {
+                result,
+                canonical_models,
+            }),
             gemini_oauth: false,
         }
     }
 
     #[test]
     fn websocket_sse_transform_maps_replace_drop_and_event_type() {
-        let replacement = transform_websocket_event(
-            &websocket_transform_context(TransformSseEventResult::Replace {
-                events: vec![SseEvent {
-                    event: "response.output_text.delta".to_owned(),
-                    data: Bytes::from_static(br#"{"delta":"rewritten"}"#),
-                }],
-            }),
-            "request",
-            "gpt-test",
-            &Bytes::from_static(br#"{"type":"response.output_text.delta","delta":"raw"}"#),
-            1024,
-        )
-        .expect("replacement succeeds")
-        .expect("replacement emits frames");
+        let canonical_models = Arc::new(Mutex::new(Vec::new()));
+        let ((replacement, dropped), warnings) = capture_warnings(|| {
+            let replacement = transform_websocket_event(
+                &websocket_transform_context(
+                    TransformSseEventResult::Replace {
+                        events: vec![SseEvent {
+                            event: "response.output_text.delta".to_owned(),
+                            data: Bytes::from_static(br#"{"delta":"rewritten"}"#),
+                        }],
+                    },
+                    Arc::clone(&canonical_models),
+                ),
+                "request",
+                "gpt-test",
+                &Bytes::from_static(br#"{"type":"response.output_text.delta","delta":"raw"}"#),
+                1024,
+            )
+            .expect("replacement succeeds")
+            .expect("replacement emits frames");
+            let dropped = transform_websocket_event(
+                &websocket_transform_context(
+                    TransformSseEventResult::Drop,
+                    Arc::clone(&canonical_models),
+                ),
+                "request",
+                "gpt-test",
+                &Bytes::from_static(br#"{"type":"response.completed"}"#),
+                1024,
+            )
+            .expect("drop succeeds");
+            (replacement, dropped)
+        });
         let value: Value = sonic_rs::from_slice(&replacement[0]).expect("frame is JSON");
         assert_eq!(value["type"], "response.output_text.delta");
         assert_eq!(value["delta"], "rewritten");
-
-        let dropped = transform_websocket_event(
-            &websocket_transform_context(TransformSseEventResult::Drop),
-            "request",
-            "gpt-test",
-            &Bytes::from_static(br#"{"type":"response.completed"}"#),
-            1024,
-        )
-        .expect("drop succeeds");
         assert_eq!(dropped, Some(Vec::new()));
+        assert_eq!(
+            canonical_models
+                .lock()
+                .expect("canonical model capture lock")
+                .as_slice(),
+            ["gpt-test", "gpt-test"]
+        );
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| {
+                    warning.message == UNKNOWN_ALIAS_MESSAGE
+                        && warning.model.as_deref() == Some("gpt-test")
+                })
+                .count(),
+            0,
+            "native OpenAI transform models emitted alias warnings: {warnings:?}"
+        );
     }
 
     #[test]
