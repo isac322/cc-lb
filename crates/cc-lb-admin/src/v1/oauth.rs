@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::{
@@ -48,6 +49,27 @@ use crate::oauth_pkce::{
 };
 
 const PKCE_FLOW_TTL_SECS: u64 = 900;
+
+static GEMINI_OPERATION_POLL_DELAY_MS: AtomicU64 = AtomicU64::new(2_000);
+
+#[doc(hidden)]
+pub struct GeminiOperationPollDelayGuard {
+    previous_ms: u64,
+}
+
+impl Drop for GeminiOperationPollDelayGuard {
+    fn drop(&mut self) {
+        GEMINI_OPERATION_POLL_DELAY_MS.store(self.previous_ms, Ordering::Relaxed);
+    }
+}
+
+#[doc(hidden)]
+pub fn set_gemini_operation_poll_delay_for_tests(delay: Duration) -> GeminiOperationPollDelayGuard {
+    let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+    GeminiOperationPollDelayGuard {
+        previous_ms: GEMINI_OPERATION_POLL_DELAY_MS.swap(delay_ms, Ordering::Relaxed),
+    }
+}
 
 const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_OAUTH_UPSTREAM_BASE_URL: &str = "https://api.anthropic.com";
@@ -2633,7 +2655,10 @@ async fn complete_gemini_oauth(
             let Some(name) = operation_name.as_deref() else {
                 break;
             };
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_millis(
+                GEMINI_OPERATION_POLL_DELAY_MS.load(Ordering::Relaxed),
+            ))
+            .await;
             onboard = provider_completion_json(
                 client
                     .get(format!("{endpoint}/{name}"))

@@ -157,10 +157,10 @@ jobs:
       DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
       DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
       SQLX_OFFLINE: "true"
-      # Shard-unique profraw prefix so the merge job can flatten every shard's
-      # artifact into one dir without filename collisions. %p (pid) + %m keep
-      # per-process files distinct within a shard.
-      LLVM_PROFILE_FILE_NAME: shard-${{ matrix.shard }}-%p-%m.profraw
+      # Shard-unique profraw prefix with %8m lock-striped online pool merging
+      # inside /dev/shm (RAM tmpfs) so static metadata/names (89% of .profraw)
+      # are written once per binary slot rather than per test process exit.
+      LLVM_PROFILE_FILE_NAME: profraw-ram/shard-${{ matrix.shard }}-%8m.profraw
 
     steps:
       - uses: actions/checkout@v7
@@ -194,14 +194,16 @@ jobs:
 
       - name: Run test shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
         run: |
-          mkdir -p target/llvm-cov-target
+          mkdir -p /dev/shm/cc-lb-profraw target/llvm-cov-target
+          ln -sfn /dev/shm/cc-lb-profraw target/llvm-cov-target/profraw-ram
           ln -sfn target/debug target/llvm-cov-target/debug
           cargo llvm-cov nextest \
             --archive-file nextest-archive.tar.zst \
             --partition slice:${{ matrix.shard }}/${{ env.SHARD_TOTAL }} \
             --test-threads=4 \
             --no-report
-
+          rm -f target/llvm-cov-target/profraw-ram
+          mv /dev/shm/cc-lb-profraw/*.profraw target/llvm-cov-target/
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-profraw-${{ matrix.shard }}

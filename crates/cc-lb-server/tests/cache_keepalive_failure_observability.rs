@@ -195,6 +195,9 @@ async fn c3_transport_error_terminalizes_without_renewal_rows() {
 
 #[tokio::test]
 async fn c4_timeout_terminalizes_without_renewal_rows() {
+    cc_lb_engine::cache_keepalive::set_keepalive_dispatch_timeout_for_tests(Duration::from_millis(
+        500,
+    ));
     let (_harness, _session_key_hash) = run_sqlite_failure_case(FailureCase::Timeout).await;
 }
 

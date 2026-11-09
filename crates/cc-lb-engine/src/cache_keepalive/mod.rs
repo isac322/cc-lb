@@ -21,7 +21,7 @@ mod scheduler;
 mod session_key;
 
 pub use classifier::{HeuristicClassifier, TurnDecision};
-pub use dispatcher::AnthropicKeepaliveDispatcher;
+pub use dispatcher::{AnthropicKeepaliveDispatcher, set_keepalive_dispatch_timeout_for_tests};
 pub use lifecycle_glue::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,

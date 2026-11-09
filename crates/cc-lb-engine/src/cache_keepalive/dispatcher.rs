@@ -43,7 +43,17 @@ use super::scheduler::{
 };
 
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
+static DISPATCH_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(DISPATCH_TIMEOUT.as_millis() as u64);
 const ERROR_BODY_PREFIX_BYTES: usize = 512;
+
+#[doc(hidden)]
+pub fn set_keepalive_dispatch_timeout_for_tests(timeout: Duration) {
+    DISPATCH_TIMEOUT_MS.store(
+        timeout.as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
 
 pub struct AnthropicKeepaliveDispatcher {
     dynamic_view: Arc<DynamicViewHolder>,
@@ -65,7 +75,9 @@ impl AnthropicKeepaliveDispatcher {
             upstream_store,
             http_client,
             clock,
-            timeout: DISPATCH_TIMEOUT,
+            timeout: Duration::from_millis(
+                DISPATCH_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed),
+            ),
         }
     }
 

@@ -29,7 +29,7 @@ use cc_lb_admin::AdminState;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AdminAuthProviderConfig, Config, StorageConfig};
 use cc_lb_control::DynamicViewHolder;
-use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
+use cc_lb_control::anthropic_api_key::{AnthropicOrgApi, ProbeLimits};
 use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
@@ -815,9 +815,9 @@ fn slow_org_policy(key: &str) -> KeyPolicy {
     KeyPolicy {
         requires_workspace: true,
         workspaces: vec![FakeWorkspace::new("wrkspc_P", "Production")],
-        workspaces_list: Script::delay(8, Script::Default),
-        api_keys: Script::delay(8, Script::Default),
-        usage_report: Script::delay(12, Script::Default),
+        workspaces_list: Script::delay(1, Script::Default),
+        api_keys: Script::delay(1, Script::Default),
+        usage_report: Script::delay(3, Script::Default),
         api_key_items: vec![FakeApiKey {
             id: "apikey_pf03".to_owned(),
             partial_key_hint: anthropic_hint(key),
@@ -888,7 +888,15 @@ async fn admin_with_fake_org(stack: &Stack) -> Router {
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
-        anthropic_org_api: AnthropicOrgApi::with_origin(stage.fake.url.clone()),
+        anthropic_org_api: AnthropicOrgApi::with_origin_and_limits(
+            stage.fake.url.clone(),
+            ProbeLimits {
+                per_probe: Duration::from_millis(1_500),
+                total: Duration::from_secs(5),
+                max_concurrent_probes: 4,
+                ..ProbeLimits::PRODUCTION
+            },
+        ),
     })
 }
 

@@ -1380,7 +1380,7 @@ async fn sec_06_no_key_at_rest_outside_the_ciphertext() {
 
 #[tokio::test]
 async fn auth_01_unauthenticated_requests_cost_nothing() {
-    let harness = harness().await;
+    let harness = std::sync::Arc::new(harness().await);
     let id = create_ok(&harness, "auth", PLAIN, json!({})).await;
     let rows_before = harness.audit_rows().await.len();
     let outbound = harness.outbound_count();
@@ -1399,15 +1399,26 @@ async fn auth_01_unauthenticated_requests_cost_nothing() {
         ("GET", format!("{UPSTREAMS}/{id}/workspaces")),
         ("GET", format!("{UPSTREAMS}/{id}/usage")),
     ];
+    let mut set = tokio::task::JoinSet::new();
     for (method, uri) in &routes {
         for token in [None, Some("wrong-token"), Some("")] {
             for body in &bodies {
-                let response = harness
-                    .raw_request(method, uri, body.clone(), Some("W/\"1\""), token)
-                    .await;
-                assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{method} {uri}");
+                let harness = std::sync::Arc::clone(&harness);
+                let method = *method;
+                let uri = uri.clone();
+                let body = body.clone();
+                set.spawn(async move {
+                    let response = harness
+                        .raw_request(method, &uri, body, Some("W/\"1\""), token)
+                        .await;
+                    (method, uri, response)
+                });
             }
         }
+    }
+    while let Some(res) = set.join_next().await {
+        let (method, uri, response) = res.unwrap();
+        assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{method} {uri}");
     }
     assert_eq!(harness.outbound_count(), outbound);
     assert_eq!(harness.upstream_count().await, 1);
