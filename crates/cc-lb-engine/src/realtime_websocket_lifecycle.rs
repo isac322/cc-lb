@@ -72,6 +72,7 @@ impl Lifecycle {
                     cache_control_block_count: None,
                     thinking_budget_tokens: None,
                     reasoning_effort: None,
+                    thinking_level: None,
                     cache_breakpoints: Vec::new(),
                     cache_prefix_hash: None,
                     thread_id: thread_id.clone(),

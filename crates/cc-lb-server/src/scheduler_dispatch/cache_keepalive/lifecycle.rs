@@ -63,6 +63,7 @@ pub(super) fn publish_renewal_lifecycle(
             cache_control_message_indices: Vec::new(),
             thinking_budget_tokens: None,
             reasoning_effort: None,
+            thinking_level: None,
         }),
     });
     event_bus.publish_lifecycle(LifecycleEvent::AuthCompleted {

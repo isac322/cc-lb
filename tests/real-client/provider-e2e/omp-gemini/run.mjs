@@ -14,6 +14,9 @@
 // structure (keys, part kinds, signature presence + sha256 prefix). Locally answered requests (driver
 // attempt budget) are labeled `injected_locally: true` with an `x-qa-injected` response header.
 // cachedContent is NOT native OMP coverage; it is a separate server-contract probe outside this driver.
+// Secret-free supported-SDK wire capture (HTTPX mock transport; NOT real-provider QA):
+//   node tests/real-client/provider-e2e/omp-gemini/run.mjs --capture-google-genai
+// Requires uv; the adjacent PEP 723 fixture pins and invokes the real google-genai SDK.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -221,7 +224,7 @@ function summarizeContents(contents) {
   return out;
 }
 
-function summarizeRequest(req, rawBody) {
+export function summarizeRequest(req, rawBody) {
   const url = splitUrl(req.url ?? "/");
   const headerNames = Object.keys(req.headers).map((name) => name.toLowerCase()).sort();
   const summary = {
@@ -251,8 +254,22 @@ function summarizeRequest(req, rawBody) {
     const declarations = (Array.isArray(body.tools) ? body.tools : []).flatMap((tool) => (Array.isArray(tool?.functionDeclarations) ? tool.functionDeclarations : []));
     summary.top_level_keys = Object.keys(body).sort();
     summary.generation_config_keys = Object.keys(gen).sort();
+    // Record both names exactly as sent, including explicit null and conflicting aliases.
+    summary.service_tier_aliases = Object.fromEntries(["service_tier", "serviceTier"].filter((key) => Object.hasOwn(body, key)).map((key) => [key, body[key]]));
     summary.max_output_tokens = gen.maxOutputTokens ?? null;
-    summary.thinking_config = thinking ? { keys: Object.keys(thinking).sort(), thinkingLevel: thinking.thinkingLevel ?? null, thinkingBudget: thinking.thinkingBudget ?? null, includeThoughts: thinking.includeThoughts ?? null } : null;
+    if (thinking && typeof thinking === "object") {
+      const leaf = (camel, snake, valid) => {
+        // Match runtime extraction: a present camelCase field wins, even when malformed.
+        const key = Object.hasOwn(thinking, camel) ? camel : Object.hasOwn(thinking, snake) ? snake : null;
+        return key === null || !valid(thinking[key]) ? null : thinking[key];
+      };
+      const thinkingLevel = leaf("thinkingLevel", "thinking_level", (value) => typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= 64);
+      const thinkingBudget = leaf("thinkingBudget", "thinking_budget", (value) => Number.isSafeInteger(value) && value >= 0);
+      const includeThoughts = leaf("includeThoughts", "include_thoughts", (value) => typeof value === "boolean");
+      summary.thinking_config = { keys: Object.keys(thinking).sort(), thinkingLevel, thinkingBudget, includeThoughts };
+    } else {
+      summary.thinking_config = null;
+    }
     summary.tool_kinds = (Array.isArray(body.tools) ? body.tools : []).map((tool) => Object.keys(tool ?? {}).sort().join("+"));
     summary.function_declaration_names = declarations.map((decl) => decl?.name ?? null).sort();
     summary.tool_config_keys = body.toolConfig ? Object.keys(body.toolConfig).sort() : null;
@@ -269,6 +286,7 @@ function summarizeRequest(req, rawBody) {
       headers: headerNames.filter((name) => !["content-length", "transfer-encoding", "connection"].includes(name)),
       top: summary.top_level_keys ?? null,
       gen: summary.generation_config_keys ?? null,
+      service_tier: summary.service_tier_aliases ?? null,
       max: summary.max_output_tokens ?? null,
       thinking: summary.thinking_config ?? null,
       tools: summary.tool_kinds ?? null,
@@ -713,7 +731,7 @@ function driverCostUsd(usage, price) {
   return Math.max(prompt - cached, 0) * price.input + cached * price.cache_read + output * price.output + thoughts * price.reasoning;
 }
 
-function summarizeEvent(event) {
+export function summarizeEvent(event) {
   return {
     request_id: event.request_id ?? null,
     ts_ms: event.ts_ms ?? null,
@@ -732,6 +750,10 @@ function summarizeEvent(event) {
     output_tokens: event.output_tokens ?? null,
     cache_read_input_tokens: event.cache_read_input_tokens ?? null,
     thinking_tokens: event.thinking_tokens ?? null,
+    service_tier: event.service_tier ?? null,
+    thinking_level: event.thinking_level ?? null,
+    thinking_budget_tokens: event.thinking_budget_tokens ?? null,
+    reasoning_effort: event.reasoning_effort ?? null,
     cost_usd_micros: event.cost_usd_micros ?? null,
     cost_input_micros: event.cost_input_micros ?? null,
     cost_output_micros: event.cost_output_micros ?? null,
@@ -778,7 +800,7 @@ function correlate(records, events) {
         status_tap: record.response?.status ?? null,
         status_event: event?.status ?? null,
         provider_usage: usage ? { prompt: usage.promptTokenCount ?? null, cached: usage.cachedContentTokenCount ?? null, candidates: usage.candidatesTokenCount ?? null, thoughts: usage.thoughtsTokenCount ?? null, total: usage.totalTokenCount ?? null } : null,
-        cclb: event ? { input: event.input_tokens, output: event.output_tokens, cache_read: event.cache_read_input_tokens, thinking: event.thinking_tokens, cost_usd_micros: event.cost_usd_micros } : null,
+        cclb: event ? { input: event.input_tokens, output: event.output_tokens, cache_read: event.cache_read_input_tokens, thinking: event.thinking_tokens, service_tier: event.service_tier ?? null, thinking_level: event.thinking_level ?? null, thinking_budget_tokens: event.thinking_budget_tokens ?? null, reasoning_effort: event.reasoning_effort ?? null, cost_usd_micros: event.cost_usd_micros } : null,
         event_found: Boolean(event),
       };
     });
@@ -883,6 +905,7 @@ function shapeComparison(primaryFirst, controlFirst) {
     top_level_keys: r.top_level_keys,
     generation_config_keys: r.generation_config_keys,
     max_output_tokens: r.max_output_tokens,
+    service_tier_aliases: r.service_tier_aliases,
     thinking_config: r.thinking_config,
     tool_kinds: r.tool_kinds,
     function_declaration_names: r.function_declaration_names,
@@ -1022,7 +1045,11 @@ function collectorRun(result, ctx) {
         thoughtSignatureReplayedPresent: (request.contents?.function_call_parts ?? 0) > 0 && request.contents.first_function_call_in_turn_signed.every(Boolean) && request.contents.function_call_parts_with_signature > 0,
         cachedContentPresent: request.cached_content_present ?? null,
         maxOutputTokens: request.max_output_tokens ?? null,
+        serviceTierAliases: request.service_tier_aliases ?? {},
         thinkingLevel: request.thinking_config?.thinkingLevel ?? null,
+        thinkingBudget: request.thinking_config?.thinkingBudget ?? null,
+        includeThoughts: request.thinking_config?.includeThoughts ?? null,
+        requestEventMetadata: event ? { service_tier: event.service_tier ?? null, thinking_level: event.thinking_level ?? null, thinking_budget_tokens: event.thinking_budget_tokens ?? null, reasoning_effort: event.reasoning_effort ?? null, thinking_tokens: event.thinking_tokens ?? null } : null,
         httpStatus: response.status ?? (record.injected_locally ? 503 : null),
         providerResponseIdPresent: Boolean(firstResponseId),
         providerResponseIdSha256: firstResponseId ? sha256Hex(firstResponseId) : null,
@@ -1382,6 +1409,8 @@ async function main() {
     provider_input_cached_output_reasoning_tokens: "runs[].wire[].providerUsage",
     cc_lb_tokens_and_cost: "evidence/<label>.run.json correlated[].cclb + totals; runtime budget",
     Gemini_replayed_function_call_thoughtSignature_presence: "runs[].wire[].thoughtSignatureReplayedPresent + assertions[] + scenarios.*.signature_replay",
+    Gemini_request_tier_and_thinking_configuration: "runs[].wire[].serviceTierAliases/thinkingLevel/thinkingBudget/includeThoughts",
+    normalized_request_event_metadata: "runs[].wire[].requestEventMetadata (actual committed events, never synthesized)",
   };
   summary.principalFresh = Boolean(ctx.principalId);
   summary.sharedPrincipalsUnmodified = true; // driver only reads/writes this slice's fresh SQLite principal
@@ -1394,6 +1423,31 @@ async function main() {
   return summary;
 }
 
+// Calls the real SDK, but replaces its HTTP transport before any network I/O.
+// The subprocess returns original SDK bytes; only their redacted structural summary
+// leaves this function. This route does not start cc-lb or manufacture request events.
+export function captureGoogleGenai() {
+  const result = spawnSync("uv", ["run", "--script", join(SLICE_DIR, "capture-google-genai.py")], {
+    encoding: "utf8",
+    timeout: 120_000,
+    maxBuffer: RESPONSE_PARSE_CAP,
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", LANG: "C.UTF-8" },
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`google-genai offline capture failed (requires uv and its pinned SDK): ${result.error?.message ?? redactText(result.stderr)}`);
+  }
+  const capture = JSON.parse(result.stdout);
+  return {
+    ...capture,
+    request_events: "NOT_EXERCISED: use live driver event metadata or backend integration tests",
+    captures: capture.captures.map((entry) => ({
+      case: entry.case,
+      service_tier_source: entry.service_tier_source,
+      requests: entry.requests.map((request) => summarizeRequest(request, Buffer.from(request.body_base64, "base64"))),
+    })),
+  };
+}
+
 // Run only when executed directly; importing (offline adjudicator) reuses the predicate without side effects.
 const invokedDirectly = (() => {
   try {
@@ -1402,7 +1456,14 @@ const invokedDirectly = (() => {
     return false;
   }
 })();
-if (invokedDirectly) {
+if (invokedDirectly && process.argv.includes("--capture-google-genai")) {
+  try {
+    console.log(JSON.stringify(captureGoogleGenai(), null, 2));
+  } catch (error) {
+    console.error(redactText(String(error?.stack ?? error)));
+    process.exitCode = 1;
+  }
+} else if (invokedDirectly) {
   main()
     .then((summary) => {
       console.log(JSON.stringify({ slice: SLICE, verdict: summary.verdict, scenarios: Object.fromEntries(Object.entries(summary.scenarios).map(([id, s]) => [id, s.verdict])) }));
