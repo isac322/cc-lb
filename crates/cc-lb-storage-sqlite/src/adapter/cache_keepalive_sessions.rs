@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
+const TERMINAL_SESSION_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+
 #[async_trait]
 impl CacheKeepaliveSessionStore for SqliteStorage {
     async fn prune_cache_keepalive_history_before(
@@ -447,13 +449,18 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
         let error = error.map(cc_lb_storage_api::truncate_cache_keepalive_error);
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = ?,
-             running_since_unix_secs = NULL, encrypted_payload = X'', updated_at = ?
+             running_since_unix_secs = NULL, encrypted_payload = X'', expires_at = MAX(expires_at, ?), updated_at = ?
              WHERE session_key_hash = ? AND generation = ? AND status = 'active'",
         )
         .bind(reason.as_str())
         .bind(error)
+        .bind(retained_expires_at)
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
         .bind(u64_to_i64(generation, "cache keepalive generation")?)
@@ -501,14 +508,21 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             cancel_anchor_at_unix_secs,
             "cache keepalive cancel_anchor_at",
         )?;
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = X'', updated_at = ?,
+             encrypted_payload = X'',
+             expires_at = CASE WHEN refresh_count > 0 THEN MAX(expires_at, ?) ELSE expires_at END,
+             updated_at = ?,
              first_scheduled_at = CASE WHEN ? THEN ? ELSE first_scheduled_at END
              WHERE session_key_hash = ? AND status = 'active'
                AND (CASE WHEN ? THEN first_scheduled_at ELSE cache_anchor_at END) <= ?",
         )
         .bind(reason.as_str())
+        .bind(retained_expires_at)
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(expected_ticket.is_some())
         .bind(cancel_anchor)
@@ -533,12 +547,19 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         reason: CacheKeepaliveTerminalReason,
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = X'', updated_at = ?
+             encrypted_payload = X'',
+             expires_at = CASE WHEN refresh_count > 0 THEN MAX(expires_at, ?) ELSE expires_at END,
+             updated_at = ?
              WHERE session_key_hash = ? AND status = 'active'",
         )
         .bind(reason.as_str())
+        .bind(retained_expires_at)
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
         .execute(self.pool())

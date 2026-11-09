@@ -33,6 +33,12 @@ pub fn state_from_item(item: &CacheKeepaliveSessionListItem) -> CacheKeepaliveVi
         ) => CacheKeepaliveViewState::Expired,
         (
             Some(CacheKeepaliveSessionStatus::Terminal),
+            Some(CacheKeepaliveTerminalReason::Cancelled),
+        ) if item.refresh_count.unwrap_or(0) == 0 && item.error.is_none() => {
+            CacheKeepaliveViewState::NotTracked
+        }
+        (
+            Some(CacheKeepaliveSessionStatus::Terminal),
             Some(
                 CacheKeepaliveTerminalReason::MaxRefreshes
                 | CacheKeepaliveTerminalReason::MaxDuration,

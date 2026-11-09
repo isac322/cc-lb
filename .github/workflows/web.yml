@@ -26,14 +26,65 @@ jobs:
         working-directory: crates/cc-lb-admin/web
     steps:
       - uses: actions/checkout@v7
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.4
-      - name: Verify Bun launchers
+      - name: Install bun 1.4.4
+        working-directory: .
         run: |
-          bun --version
-          bunx --version
+          set -euo pipefail
+          arch=$(uname -m)
+          os=$(uname -s)
+          case "$os-$arch" in
+            Linux-aarch64|Linux-arm64) asset=bun-linux-aarch64.zip ;;
+            Linux-x86_64) asset=bun-linux-x64.zip ;;
+            Darwin-arm64) asset=bun-darwin-aarch64.zip ;;
+            Darwin-x86_64) asset=bun-darwin-x64.zip ;;
+            *)
+              echo "::error::unsupported $os $arch for bun"
+              exit 1
+              ;;
+          esac
+          dest="$HOME/.local/bin"
+          mkdir -p "$dest"
+          python3 - "$asset" "$dest" <<'PY'
+          import io, os, stat, sys, tarfile, urllib.error, urllib.request, zipfile
+          asset, dest = sys.argv[1], sys.argv[2]
+          pkg = asset.removesuffix(".zip")
+          gh_url = f"https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/{asset}"
+          npm_url = f"https://registry.npmjs.org/@oven/{pkg}/-/{pkg}-1.4.4.tgz"
+          target = os.path.join(dest, "bun")
+          try:
+              req = urllib.request.Request(gh_url, headers={"User-Agent": "cc-lb-ci"})
+              data = urllib.request.urlopen(req, timeout=15).read()
+              zf = zipfile.ZipFile(io.BytesIO(data))
+              for info in zf.infolist():
+                  name = info.filename.rsplit("/", 1)[-1]
+                  if name == "bun" and not info.is_dir():
+                      with zf.open(info) as src, open(target, "wb") as out:
+                          out.write(src.read())
+                      print(f"installed {target} from {info.filename}")
+                      break
+              else:
+                  raise SystemExit(f"bun binary not in {asset}: {zf.namelist()}")
+          except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+              print(f"GitHub release download failed ({exc}); falling back to {npm_url}")
+              req = urllib.request.Request(npm_url, headers={"User-Agent": "cc-lb-ci"})
+              data = urllib.request.urlopen(req, timeout=30).read()
+              with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+                  for member in tf.getmembers():
+                      if member.name.endswith("/bin/bun") and member.isfile():
+                          src = tf.extractfile(member)
+                          assert src is not None
+                          with src, open(target, "wb") as out:
+                              out.write(src.read())
+                          print(f"installed {target} from {member.name}")
+                          break
+                  else:
+                      raise SystemExit(f"bun binary not in {pkg}.tgz: {[m.name for m in tf.getmembers()]}")
+          os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+          PY
+          ln -sfn "$dest/bun" "$dest/bunx"
+          echo "$dest" >> "$GITHUB_PATH"
+          "$dest/bun" --version
+          "$dest/bunx" --version
       - name: Cache Bun install store
         uses: actions/cache@v6
         with:

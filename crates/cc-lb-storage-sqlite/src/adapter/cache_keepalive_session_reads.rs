@@ -39,6 +39,7 @@ SELECT
         WHEN 'dispatch_error' THEN 'renewal dispatch unavailable'
         ELSE display_reason
     END AS reason,
+    display_reason,
     error,
     config_snapshot
 FROM cache_keepalive_sessions";
@@ -60,6 +61,7 @@ SELECT
     NULL AS terminal_reason,
     decision,
     reason,
+    reason AS display_reason,
     error,
     config_snapshot
 FROM cache_keepalive_decisions";
@@ -104,7 +106,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             .transpose()?;
         let branch_limit = i64::from(query.limit.saturating_add(1));
 
-        let include_sessions = !matches!(query.filter, CacheKeepaliveSessionFilter::NotTracked);
+        let include_sessions = true;
         let include_decisions = matches!(
             query.filter,
             CacheKeepaliveSessionFilter::All
@@ -898,13 +900,19 @@ fn push_session_branch(
         }
         CacheKeepaliveSessionFilter::Capped => {
             builder.push(
-                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss')",
+                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss') \
+                  AND NOT (terminal_reason = 'cancelled' AND refresh_count = 0 AND error IS NULL)",
             );
         }
         CacheKeepaliveSessionFilter::Expired => {
             builder.push(" AND terminal_reason IN ('expired', 'cache_miss')");
         }
-        CacheKeepaliveSessionFilter::NotTracked => unreachable!("session branch is skipped"),
+        CacheKeepaliveSessionFilter::NotTracked => {
+            builder.push(
+                " AND status = 'terminal' AND terminal_reason = 'cancelled' \
+                  AND refresh_count = 0 AND error IS NULL",
+            );
+        }
         CacheKeepaliveSessionFilter::Error => {
             builder.push(" AND error IS NOT NULL");
         }
