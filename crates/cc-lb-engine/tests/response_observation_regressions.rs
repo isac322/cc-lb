@@ -35,20 +35,22 @@ use url::Url;
 use common::{TestAuthn, TestLifecycleBus, TestState, messages_request};
 
 const BOUNDED_WAIT: Duration = Duration::from_secs(2);
-const SPAN_CHILD_ENV: &str = "CC_LB_RESPONSE_SPAN_REGRESSION_CHILD";
-const SPAN_TEST_NAME: &str =
+const RESPONSE_SPAN_CHILD_ENV: &str = "CC_LB_RESPONSE_SPAN_REGRESSION_CHILD";
+const RESPONSE_SPAN_TEST_NAME: &str =
     "response_observation_regressions::response_span_closes_at_eos_and_body_drop";
+const NUMERIC_TELEMETRY_CHILD_ENV: &str = "CC_LB_NUMERIC_TELEMETRY_REGRESSION_CHILD";
+const NUMERIC_TELEMETRY_TEST_NAME: &str = "response_observation_regressions::lifecycle_exports_queryable_numeric_stage_and_response_stream_attributes";
 const CHILD_WAIT: Duration = Duration::from_secs(15);
 
-fn run_span_regression_child() {
+fn run_span_regression_child(test_name: &str, child_env: &str) {
     let executable = std::env::current_exe().expect("locate integration test executable");
     let child = Command::new(executable)
-        .args(["--exact", SPAN_TEST_NAME, "--nocapture", "--test-threads=1"])
-        .env(SPAN_CHILD_ENV, "1")
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(child_env, "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn isolated response-span regression child");
+        .expect("spawn isolated response regression child");
     let child_id = child.id();
     let (output_tx, output_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
@@ -56,34 +58,40 @@ fn run_span_regression_child() {
     });
 
     let output = match output_rx.recv_timeout(CHILD_WAIT) {
-        Ok(output) => output.expect("wait for response-span regression child"),
+        Ok(output) => output.expect("wait for isolated response regression child"),
         Err(mpsc::RecvTimeoutError::Timeout) => {
             signal_child(child_id, "-TERM");
             let output = match output_rx.recv_timeout(BOUNDED_WAIT) {
-                Ok(output) => output.expect("wait for terminated response-span regression child"),
+                Ok(output) => {
+                    output.expect("wait for terminated isolated response regression child")
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     signal_child(child_id, "-KILL");
                     output_rx
                         .recv_timeout(BOUNDED_WAIT)
-                        .expect("killed response-span regression child exits")
-                        .expect("wait for killed response-span regression child")
+                        .expect("killed isolated response regression child exits")
+                        .expect("wait for killed isolated response regression child")
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    panic!("response-span regression child waiter disconnected after timeout")
+                    panic!("isolated response regression child waiter disconnected after timeout")
                 }
             };
-            waiter.join().expect("response-span child waiter joins");
+            waiter
+                .join()
+                .expect("isolated response regression child waiter joins");
             panic!(
-                "isolated response-span regression child timed out\nstdout:\n{}\nstderr:\n{}",
+                "isolated response regression child timed out\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            panic!("response-span regression child waiter disconnected")
+            panic!("isolated response regression child waiter disconnected")
         }
     };
-    waiter.join().expect("response-span child waiter joins");
+    waiter
+        .join()
+        .expect("isolated response regression child waiter joins");
     assert_child_success(output);
 }
 
@@ -92,7 +100,7 @@ fn signal_child(child_id: u32, signal: &str) {
     let status = Command::new("kill")
         .args([signal, child_id.as_str()])
         .status()
-        .expect("invoke kill for response-span regression child");
+        .expect("invoke kill for isolated response regression child");
     assert!(
         status.success(),
         "failed to {signal} child process {child_id}"
@@ -102,7 +110,7 @@ fn signal_child(child_id: u32, signal: &str) {
 fn assert_child_success(output: Output) {
     assert!(
         output.status.success(),
-        "isolated response-span regression child failed with {}\nstdout:\n{}\nstderr:\n{}",
+        "isolated response regression child failed with {}\nstdout:\n{}\nstderr:\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -111,6 +119,10 @@ fn assert_child_success(output: Output) {
 
 #[test]
 fn lifecycle_exports_queryable_numeric_stage_and_response_stream_attributes() {
+    if std::env::var_os(NUMERIC_TELEMETRY_CHILD_ENV).is_none() {
+        run_span_regression_child(NUMERIC_TELEMETRY_TEST_NAME, NUMERIC_TELEMETRY_CHILD_ENV);
+        return;
+    }
     use opentelemetry::Value;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
@@ -554,8 +566,8 @@ data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
 
 #[tokio::test(flavor = "current_thread")]
 async fn response_span_closes_at_eos_and_body_drop() {
-    if std::env::var_os(SPAN_CHILD_ENV).is_none() {
-        run_span_regression_child();
+    if std::env::var_os(RESPONSE_SPAN_CHILD_ENV).is_none() {
+        run_span_regression_child(RESPONSE_SPAN_TEST_NAME, RESPONSE_SPAN_CHILD_ENV);
         return;
     }
 
