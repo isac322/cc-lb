@@ -16,8 +16,12 @@ pub(crate) struct CacheKeepaliveSummaryResponse {
     pub(crate) renewals_fired: u64,
     pub(crate) retained_successful_hits: u64,
     pub(crate) cost_saved: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved_cost_saved: Option<f64>,
     pub(crate) total_spent: f64,
     pub(crate) total_avoided: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved_total_avoided: Option<f64>,
     pub(crate) evidence_status: String,
     pub(crate) unknown_cycles: u64,
     pub(crate) retained_from_ms: Option<u64>,
@@ -32,6 +36,8 @@ pub(crate) struct CacheKeepaliveRowResponse {
     pub(crate) attempts: Option<u32>,
     pub(crate) max_attempts: u32,
     pub(crate) reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) display_reason: Option<String>,
     pub(crate) generation: u64,
     pub(crate) upstream: Option<String>,
     pub(crate) error: Option<String>,

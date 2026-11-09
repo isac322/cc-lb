@@ -367,7 +367,7 @@ describe('cacheKeepaliveSessionsPath', () => {
 
 describe('cache keepalive filter enums', () => {
   it('accepts every valid horizon value', () => {
-    for (const horizon of ['24h', '7d', 'all']) {
+    for (const horizon of ['1h', '6h', '24h', '7d', 'all']) {
       expect(CacheKeepaliveHorizonSchema.safeParse(horizon).success).toBe(true);
     }
   });

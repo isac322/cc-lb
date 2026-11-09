@@ -12,6 +12,7 @@ use crate::{
     adapter::{PostgresStorage, i64_to_u64, u64_to_i64},
     error_map::map_sqlx_error,
 };
+const TERMINAL_SESSION_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
 #[async_trait]
 impl CacheKeepaliveSessionStore for PostgresStorage {
@@ -457,9 +458,13 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
         let error = error.map(cc_lb_storage_api::truncate_cache_keepalive_error);
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, error = $2, running_since_unix_secs = NULL,
-             encrypted_payload = ''::bytea, updated_at = $3
+             encrypted_payload = ''::bytea, expires_at = GREATEST(expires_at, $6), updated_at = $3
              WHERE session_key_hash = $4 AND generation = $5 AND status = 'active'",
         )
         .bind(reason.as_str())
@@ -467,6 +472,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
         .bind(u64_to_i64(generation, "cache keepalive generation")?)
+        .bind(retained_expires_at)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -511,9 +517,15 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         }
         // Ticketed cancellation advances the stable logical boundary while
         // leaving the synthetic scheduling/activity anchor unchanged.
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = ''::bytea, updated_at = $2,
+             encrypted_payload = ''::bytea,
+             expires_at = CASE WHEN refresh_count > 0 THEN GREATEST(expires_at, $6) ELSE expires_at END,
+             updated_at = $2,
              first_scheduled_at = CASE WHEN $4 THEN $5 ELSE first_scheduled_at END
              WHERE session_key_hash = $3 AND status = 'active'
                AND (CASE WHEN $4 THEN first_scheduled_at ELSE cache_anchor_at END) <= $5",
@@ -526,6 +538,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
             cancel_anchor_at_unix_secs,
             "cache keepalive cancel_anchor_at",
         )?)
+        .bind(retained_expires_at)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -544,14 +557,21 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         reason: CacheKeepaliveTerminalReason,
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = ''::bytea, updated_at = $2
+             encrypted_payload = ''::bytea,
+             expires_at = CASE WHEN refresh_count > 0 THEN GREATEST(expires_at, $4) ELSE expires_at END,
+             updated_at = $2
              WHERE session_key_hash = $3 AND status = 'active'",
         )
         .bind(reason.as_str())
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
+        .bind(retained_expires_at)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;

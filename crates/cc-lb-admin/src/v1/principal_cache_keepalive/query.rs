@@ -9,10 +9,15 @@ use super::RawCacheKeepaliveQuery;
 
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 100;
-const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+const HOUR_MS: u64 = 60 * 60 * 1_000;
+const DAY_MS: u64 = 24 * HOUR_MS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) enum CacheKeepaliveHorizon {
+    #[serde(rename = "1h")]
+    Hours1,
+    #[serde(rename = "6h")]
+    Hours6,
     #[serde(rename = "24h")]
     Hours24,
     #[serde(rename = "7d")]
@@ -24,6 +29,8 @@ pub(super) enum CacheKeepaliveHorizon {
 impl CacheKeepaliveHorizon {
     fn start_ms(self, now_ms: u64) -> Option<u64> {
         match self {
+            Self::Hours1 => Some(now_ms.saturating_sub(HOUR_MS)),
+            Self::Hours6 => Some(now_ms.saturating_sub(HOUR_MS.saturating_mul(6))),
             Self::Hours24 => Some(now_ms.saturating_sub(DAY_MS)),
             Self::Days7 => Some(now_ms.saturating_sub(DAY_MS.saturating_mul(7))),
             Self::All => None,
@@ -32,7 +39,7 @@ impl CacheKeepaliveHorizon {
 
     fn matches_start(self, start_ms: Option<u64>) -> bool {
         match self {
-            Self::Hours24 | Self::Days7 => start_ms.is_some(),
+            Self::Hours1 | Self::Hours6 | Self::Hours24 | Self::Days7 => start_ms.is_some(),
             Self::All => start_ms.is_none(),
         }
     }
@@ -58,6 +65,7 @@ struct CursorEnvelope<'a> {
     storage: &'a CacheKeepaliveSessionCursor,
 }
 
+#[derive(Debug)]
 pub(super) enum QueryError {
     Invalid(&'static str),
     CursorMismatch,
@@ -148,6 +156,8 @@ fn parse_limit(value: Option<&str>) -> Result<u32, QueryError> {
 
 fn parse_horizon(value: Option<&str>) -> Result<CacheKeepaliveHorizon, QueryError> {
     match value.unwrap_or("24h") {
+        "1h" => Ok(CacheKeepaliveHorizon::Hours1),
+        "6h" => Ok(CacheKeepaliveHorizon::Hours6),
         "24h" => Ok(CacheKeepaliveHorizon::Hours24),
         "7d" => Ok(CacheKeepaliveHorizon::Days7),
         "all" => Ok(CacheKeepaliveHorizon::All),
@@ -219,6 +229,26 @@ mod tests {
             Ok(encoded) => encoded,
             Err(_) => panic!("cursor should encode"),
         }
+    }
+
+    #[test]
+    fn short_horizons_parse_and_compute_start_ms() {
+        assert_eq!(
+            parse_horizon(Some("1h")).expect("1h horizon should parse"),
+            CacheKeepaliveHorizon::Hours1
+        );
+        assert_eq!(
+            CacheKeepaliveHorizon::Hours1.start_ms(NOW_MS),
+            Some(NOW_MS - 3_600_000)
+        );
+        assert_eq!(
+            parse_horizon(Some("6h")).expect("6h horizon should parse"),
+            CacheKeepaliveHorizon::Hours6
+        );
+        assert_eq!(
+            CacheKeepaliveHorizon::Hours6.start_ms(NOW_MS),
+            Some(NOW_MS - 21_600_000)
+        );
     }
 
     #[test]
