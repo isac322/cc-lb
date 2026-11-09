@@ -136,7 +136,7 @@ fn renewal_projections() -> RequestEventProjections {
             cache_creation_input_tokens_5m: 0,
             cache_creation_input_tokens_1h: 0,
             cache_read_input_tokens: 10,
-            cost_micros: 10,
+            cost_micros: Some(10),
             hit_miss: "hit".to_owned(),
             ts: 1_003,
         }),

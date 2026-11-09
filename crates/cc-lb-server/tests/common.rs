@@ -236,6 +236,7 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
         Vec::new(),
         TestTopology::Single,
         &[],
+        None,
     )
     .await
 }
@@ -248,6 +249,7 @@ pub async fn spawn_test_server_with_env(extra_toml: &str, envs: &[(String, Strin
         Vec::new(),
         TestTopology::Single,
         envs,
+        None,
     )
     .await
 }
@@ -262,6 +264,7 @@ pub async fn spawn_test_server_with_fake_config(
         Vec::new(),
         TestTopology::Single,
         &[],
+        None,
     )
     .await
 }
@@ -276,6 +279,7 @@ pub async fn spawn_test_server_with_two_upstreams(
         Vec::new(),
         TestTopology::SubscriptionPreferencePair,
         &[],
+        None,
     )
     .await
 }
@@ -291,6 +295,25 @@ pub async fn spawn_test_server_with_principal_limits(
         principal_limits,
         TestTopology::Single,
         &[],
+        None,
+    )
+    .await
+}
+
+/// Like [`spawn_test_server_with_principal_limits`], with an explicit message budget.
+pub async fn spawn_test_server_with_principal_limits_and_messages_cap(
+    extra_toml: &str,
+    principal_limits: Vec<Limit>,
+    fake_config: AppConfig,
+    messages_cap_bytes: u64,
+) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        fake_config,
+        principal_limits,
+        TestTopology::Single,
+        &[],
+        Some(messages_cap_bytes),
     )
     .await
 }
@@ -340,6 +363,7 @@ async fn spawn_test_server_with_options(
     principal_limits: Vec<Limit>,
     topology: TestTopology,
     envs: &[(String, String)],
+    messages_cap_bytes: Option<u64>,
 ) -> TestServer {
     let fake_listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -357,6 +381,7 @@ async fn spawn_test_server_with_options(
             principal_limits.clone(),
             topology,
             envs,
+            messages_cap_bytes.unwrap_or_else(|| topology.messages_cap_bytes()),
         )
         .await
         {
@@ -391,6 +416,7 @@ async fn spawn_test_server_attempt(
     principal_limits: Vec<Limit>,
     topology: TestTopology,
     envs: &[(String, String)],
+    messages_cap_bytes: u64,
 ) -> Result<SpawnedTestServer, StartupFailure> {
     let proxy_listener = reserve_addr();
     let admin_listener = reserve_addr();
@@ -407,7 +433,7 @@ async fn spawn_test_server_attempt(
         admin_addr,
         metrics_addr,
         extra_toml,
-        topology.messages_cap_bytes(),
+        messages_cap_bytes,
     );
     let managed_key = seed_storage(&sqlite_path, fake_addr, principal_limits, topology).await;
 

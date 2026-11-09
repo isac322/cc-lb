@@ -1628,6 +1628,8 @@ mod cache_score_tests {
                     cached_input_read: NativePricingRate::known(UsdPerMillion::from_micros_usd(
                         100_000,
                     )),
+                    cached_input_read_by_tier: BTreeMap::new(),
+                    cached_input_read_above_tokens: BTreeMap::new(),
                     total_write: BTreeMap::from([(
                         NativePricingLifetime::ThirtyMinutes,
                         NativePricingRate::known(UsdPerMillion::from_whole_usd(3)),
@@ -1701,6 +1703,8 @@ mod cache_score_tests {
                     provider: NativePricingProvider::OpenAi,
                     ordinary_input: NativePricingRate::known(UsdPerMillion::from_micros_usd(0)),
                     cached_input_read: NativePricingRate::unknown(),
+                    cached_input_read_by_tier: BTreeMap::new(),
+                    cached_input_read_above_tokens: BTreeMap::new(),
                     total_write: BTreeMap::new(),
                     explicit_resource: Default::default(),
                 }),

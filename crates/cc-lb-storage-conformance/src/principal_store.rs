@@ -34,7 +34,14 @@ async fn principal_store_postgres() -> Result<()> {
         return Ok(());
     };
     let clock: ClockHandle = Arc::new(SystemClock);
-    run_all(Arc::new(PostgresPrincipalBackend { url, clock })).await
+    let backend = Arc::new(PostgresPrincipalBackend {
+        url,
+        clock,
+        reused: tokio::sync::Mutex::new(None),
+    });
+    let result = run_all(Arc::clone(&backend)).await;
+    backend.cleanup().await?;
+    result
 }
 
 #[tokio::test]
@@ -51,7 +58,14 @@ async fn principal_store_stale_revision_conflict_postgres() -> Result<()> {
         return Ok(());
     };
     let clock: ClockHandle = Arc::new(SystemClock);
-    stale_revision_conflict(Arc::new(PostgresPrincipalBackend { url, clock })).await
+    let backend = Arc::new(PostgresPrincipalBackend {
+        url,
+        clock,
+        reused: tokio::sync::Mutex::new(None),
+    });
+    let result = stale_revision_conflict(Arc::clone(&backend)).await;
+    backend.cleanup().await?;
+    result
 }
 
 struct SqlitePrincipalBackend {
@@ -97,55 +111,23 @@ impl ConformanceBackend for SqlitePrincipalBackend {
 struct PostgresPrincipalBackend {
     url: String,
     clock: ClockHandle,
+    reused: tokio::sync::Mutex<Option<PostgresFixture>>,
 }
 
 #[cfg(feature = "postgres")]
+#[derive(Clone)]
 struct PostgresFixture {
     url: String,
     schema: String,
     pool: sqlx::PgPool,
 }
 
-#[async_trait]
 #[cfg(feature = "postgres")]
-impl ConformanceBackend for PostgresPrincipalBackend {
-    type Storage = PostgresStorage;
-    type Fixture = PostgresFixture;
-
-    async fn create_fixture(&self) -> Result<Self::Fixture> {
-        let schema = format!("test_principal_store_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&self.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&admin_pool)
-            .await?;
-        admin_pool.close().await;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(
-                PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
-            )
-            .await?;
-        let storage = PostgresStorage::new(pool.clone(), self.clock.clone());
-        MetaStore::initialize(&storage).await?;
-        Ok(PostgresFixture {
-            url: self.url.clone(),
-            schema,
-            pool,
-        })
-    }
-
-    async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage> {
-        Ok(PostgresStorage::new(
-            fixture.pool.clone(),
-            self.clock.clone(),
-        ))
-    }
-
-    async fn teardown(&self, fixture: Self::Fixture) -> Result<()> {
+impl PostgresPrincipalBackend {
+    async fn cleanup(&self) -> Result<()> {
+        let Some(fixture) = self.reused.lock().await.take() else {
+            return Ok(());
+        };
         fixture.pool.close().await;
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -158,6 +140,73 @@ impl ConformanceBackend for PostgresPrincipalBackend {
         .execute(&admin_pool)
         .await?;
         admin_pool.close().await;
+        Ok(())
+    }
+}
+#[async_trait]
+#[cfg(feature = "postgres")]
+impl ConformanceBackend for PostgresPrincipalBackend {
+    type Storage = PostgresStorage;
+    type Fixture = PostgresFixture;
+
+    async fn create_fixture(&self) -> Result<Self::Fixture> {
+        let mut reused = self.reused.lock().await;
+        if let Some(existing) = reused.as_ref() {
+            sqlx::query(
+                "TRUNCATE TABLE audit_log_v1, principals_v1, plugin_chains_v2 \
+                 RESTART IDENTITY CASCADE",
+            )
+            .execute(&existing.pool)
+            .await?;
+            sqlx::query(
+                "DELETE FROM wasm_registry_v2 \
+                 WHERE original_filename != 'builtin://subscription-preference'",
+            )
+            .execute(&existing.pool)
+            .await?;
+            sqlx::query(
+                "DELETE FROM wasm_blobs_v2 \
+                 WHERE NOT EXISTS (SELECT 1 FROM wasm_registry_v2 r \
+                                   WHERE r.sha256 = wasm_blobs_v2.sha256)",
+            )
+            .execute(&existing.pool)
+            .await?;
+            return Ok(existing.clone());
+        }
+        let schema = format!("test_principal_store_{}", Uuid::new_v4().simple());
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(PgConnectOptions::from_str(&self.url)?)
+            .await?;
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin_pool)
+            .await?;
+        admin_pool.close().await;
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(
+                PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
+            )
+            .await?;
+        let storage = PostgresStorage::new(pool.clone(), self.clock.clone());
+        MetaStore::initialize(&storage).await?;
+        let fixture = PostgresFixture {
+            url: self.url.clone(),
+            schema,
+            pool,
+        };
+        *reused = Some(fixture.clone());
+        Ok(fixture)
+    }
+
+    async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage> {
+        Ok(PostgresStorage::new(
+            fixture.pool.clone(),
+            self.clock.clone(),
+        ))
+    }
+
+    async fn teardown(&self, _fixture: Self::Fixture) -> Result<()> {
         Ok(())
     }
 

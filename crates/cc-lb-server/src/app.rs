@@ -6024,7 +6024,7 @@ mod tests {
             );
             assert_eq!(reservation_ids.len(), 1);
             assert!(!engine.refund_by_id(&reservation_ids[0]));
-            assert!(!engine.reconcile_by_id(&reservation_ids[0], 0, 0, 0));
+            assert!(!engine.reconcile_by_id(&reservation_ids[0], 0, 0, Some(0)));
             let headers = engine.headers_for(&record.key_hash_b64, TEST_PRINCIPAL);
             assert!(
                 headers.iter().any(|(name, value)| {

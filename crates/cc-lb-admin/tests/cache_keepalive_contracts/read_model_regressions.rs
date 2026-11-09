@@ -156,7 +156,7 @@ async fn append_turn(storage: &cc_lb_storage_sqlite::SqliteStorage, params: Appe
         cache_creation_input_tokens_5m: 0,
         cache_creation_input_tokens_1h: 0,
         cache_read_input_tokens,
-        cost_micros,
+        cost_micros: Some(cost_micros),
         hit_miss: hit_miss.to_owned(),
         ts,
     };
@@ -1312,7 +1312,7 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
                     cache_creation_input_tokens_5m: 0,
                     cache_creation_input_tokens_1h: 0,
                     cache_read_input_tokens: 20_000,
-                    cost_micros: 15_000,
+                    cost_micros: Some(15_000),
                     hit_miss: "hit".to_owned(),
                     ts: old_ts,
                 }),

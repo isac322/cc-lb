@@ -438,7 +438,6 @@ fn now_unix_secs(clock: &dyn cc_lb_clock::Clock) -> u64 {
     cc_lb_clock::unix_secs(clock.now())
 }
 
-#[tokio::test]
 async fn happy_pkce_roundtrip_persists_encrypted_tokens_and_emits_redacted_audit() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -510,7 +509,6 @@ async fn happy_pkce_roundtrip_persists_encrypted_tokens_and_emits_redacted_audit
     assert!(!serialized_audit.contains(&bundle.refresh_token));
 }
 
-#[tokio::test]
 async fn tampered_state_token_returns_400_invalid_state() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -526,7 +524,6 @@ async fn tampered_state_token_returns_400_invalid_state() {
     assert_eq!(body["error"], "invalid_state");
 }
 
-#[tokio::test]
 async fn reusing_code_after_completion_returns_400() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -545,7 +542,6 @@ async fn reusing_code_after_completion_returns_400() {
     assert_eq!(body["error"], "invalid_state");
 }
 
-#[tokio::test]
 async fn upstream_wrong_kind_anthropic_api_key_returns_400() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -558,7 +554,6 @@ async fn upstream_wrong_kind_anthropic_api_key_returns_400() {
     assert_eq!(body["error"], "wrong_kind");
 }
 
-#[tokio::test]
 async fn unknown_upstream_start_returns_json_404() {
     let fixture = Fixture::new().await;
 
@@ -568,7 +563,6 @@ async fn unknown_upstream_start_returns_json_404() {
     assert_eq!(body["error"], "upstream_not_found");
 }
 
-#[tokio::test]
 async fn audit_entries_contain_fingerprint_only_no_raw_tokens() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -609,7 +603,6 @@ async fn audit_entries_contain_fingerprint_only_no_raw_tokens() {
     assert!(!complete.to_string().contains(&bundle.refresh_token));
 }
 
-#[tokio::test]
 async fn complete_with_stale_revision_returns_409() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -632,7 +625,6 @@ async fn complete_with_stale_revision_returns_409() {
     assert_eq!(body["current_revision"], upstream.revision + 1);
 }
 
-#[tokio::test]
 async fn draft_start_returns_top_level_authorize_url_and_state() {
     let fixture = Fixture::new().await;
 
@@ -652,7 +644,6 @@ async fn draft_start_returns_top_level_authorize_url_and_state() {
     assert!(start.get("revision").is_none());
 }
 
-#[tokio::test]
 async fn draft_complete_invalid_code_reaches_endpoint_and_returns_structured_error() {
     let fixture = Fixture::new().await;
     let (status, start) = fixture.start_draft().await;
@@ -667,7 +658,6 @@ async fn draft_complete_invalid_code_reaches_endpoint_and_returns_structured_err
     assert_eq!(body["error"], "invalid_grant");
 }
 
-#[tokio::test]
 async fn create_from_incomplete_draft_returns_invalid_state() {
     let fixture = Fixture::new().await;
     let (status, start) = fixture.start_draft().await;
@@ -682,7 +672,6 @@ async fn create_from_incomplete_draft_returns_invalid_state() {
     assert_eq!(body["error"], "invalid_state");
 }
 
-#[tokio::test]
 async fn create_from_draft_with_invalid_name_returns_structured_bad_request() {
     let fixture = Fixture::new().await;
 
@@ -700,7 +689,6 @@ async fn create_from_draft_with_invalid_name_returns_structured_bad_request() {
     );
 }
 
-#[tokio::test]
 async fn create_from_completed_draft_with_active_name_returns_name_conflict() {
     let fixture = Fixture::new().await;
     let existing = fixture
@@ -723,7 +711,6 @@ async fn create_from_completed_draft_with_active_name_returns_name_conflict() {
     assert_eq!(body["existing_upstream_id"], existing.id.to_string());
 }
 
-#[tokio::test]
 async fn oauth_draft_precreation_decrypt_failure_deletes_pkce_flow() {
     let fixture = Fixture::new().await;
     let state_token = fixture.completed_draft().await;
@@ -761,7 +748,6 @@ async fn oauth_draft_precreation_decrypt_failure_deletes_pkce_flow() {
     assert_eq!(retry["error"], "invalid_state");
 }
 
-#[tokio::test]
 async fn oauth_draft_post_create_metadata_failure_rolls_back_via_hard_delete() {
     let fixture = Fixture::new().await;
     let state_token = fixture.completed_draft().await;
@@ -811,7 +797,6 @@ async fn oauth_draft_post_create_metadata_failure_rolls_back_via_hard_delete() {
     assert_eq!(retry["error"], "invalid_state");
 }
 
-#[tokio::test]
 async fn create_from_oauth_draft_returns_the_stored_base_url_without_secrets() {
     let fixture = Fixture::new().await;
     let (status, start) = fixture.start_draft().await;
@@ -846,7 +831,6 @@ async fn create_from_oauth_draft_returns_the_stored_base_url_without_secrets() {
     assert_eq!(stored.base_url.as_ref().map(Url::as_str), Some(base_url));
 }
 
-#[tokio::test]
 async fn create_from_oauth_draft_audits_human_readable_upstream_name() {
     let fixture = Fixture::new().await;
     let (status, start) = fixture.start_draft().await;
@@ -874,7 +858,6 @@ async fn create_from_oauth_draft_audits_human_readable_upstream_name() {
     }));
 }
 
-#[tokio::test]
 async fn oauth_status_reflects_completion_realtime() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -908,7 +891,6 @@ async fn oauth_status_reflects_completion_realtime() {
     assert_eq!(after["refresh_token_present"], true);
 }
 
-#[tokio::test]
 async fn oauth_status_unchanged_when_only_start_called() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -932,7 +914,6 @@ async fn oauth_status_unchanged_when_only_start_called() {
     );
 }
 
-#[tokio::test]
 async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -977,7 +958,6 @@ async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
 async fn gemini_oauth_import_seeds_refresh_task_and_persists_project_id() {
     let (fixture, scheduler) = Fixture::new_with_scheduler().await;
     let expires_at = TEST_NOW_UNIX_SECS + 3_600;
@@ -1016,7 +996,6 @@ async fn gemini_oauth_import_seeds_refresh_task_and_persists_project_id() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
 async fn openai_oauth_import_derives_account_id_from_jwt_and_seeds_refresh_task() {
     let (fixture, scheduler) = Fixture::new_with_scheduler().await;
     let access_token = test_openai_access_token("acct_imported");
@@ -1052,7 +1031,6 @@ async fn openai_oauth_import_derives_account_id_from_jwt_and_seeds_refresh_task(
     );
 }
 
-#[tokio::test]
 async fn oauth_bundle_import_rejects_anthropic_and_api_key_kinds() {
     let fixture = Fixture::new().await;
     let bundle = json!({
@@ -1079,7 +1057,6 @@ async fn oauth_bundle_import_rejects_anthropic_and_api_key_kinds() {
     }
 }
 
-#[tokio::test]
 async fn oauth_bundle_import_rejects_never_refresh_credentials() {
     let fixture = Fixture::new().await;
     let (status, body) = fixture
@@ -1100,7 +1077,6 @@ async fn oauth_bundle_import_rejects_never_refresh_credentials() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
-#[tokio::test]
 async fn gemini_oauth_import_requires_project_id() {
     let fixture = Fixture::new().await;
     let (status, body) = fixture
@@ -1122,7 +1098,6 @@ async fn gemini_oauth_import_requires_project_id() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
 async fn oauth_reconnect_seeds_refresh_at_granted_expiry_and_preserves_disabled_state() {
     let (fixture, scheduler) = Fixture::with_oauth_state_and_scheduler(
         MockOAuthState::default().with_expires_in_cap(28_800),
@@ -1185,7 +1160,6 @@ async fn oauth_reconnect_seeds_refresh_at_granted_expiry_and_preserves_disabled_
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
 async fn long_lived_oauth_reconnect_skips_refresh_task() {
     let (fixture, scheduler) = Fixture::new_with_scheduler().await;
     let upstream = fixture
@@ -1236,7 +1210,6 @@ async fn run_draft_flow(fixture: &Fixture, start_body: Value) -> (Value, Uuid) {
     (complete, upstream_id)
 }
 
-#[tokio::test]
 async fn long_lived_is_default_and_stored_as_non_refreshable() {
     let fixture = Fixture::new().await;
 
@@ -1261,7 +1234,6 @@ async fn long_lived_is_default_and_stored_as_non_refreshable() {
     );
 }
 
-#[tokio::test]
 async fn default_connect_requests_long_lived_and_stores_it() {
     let fixture = Fixture::new().await;
 
@@ -1301,7 +1273,6 @@ async fn run_rejected_long_lived_draft(
     (complete, bundle, requested_expires_in)
 }
 
-#[tokio::test]
 async fn long_lived_exchange_falls_back_on_invalid_expiry_for_scope() {
     let (complete, bundle, requested_expires_in) =
         run_rejected_long_lived_draft(RejectionShape::InvalidExpiryForScope).await;
@@ -1325,7 +1296,6 @@ async fn long_lived_exchange_falls_back_on_invalid_expiry_for_scope() {
     assert_eq!(bundle.expires_at_unix_secs, TEST_NOW_UNIX_SECS + 3600);
 }
 
-#[tokio::test]
 async fn long_lived_exchange_falls_back_on_custom_expires_in_not_allowed() {
     let (complete, bundle, requested_expires_in) = run_rejected_long_lived_draft(
         RejectionShape::CustomExpiresInNotAllowed("user:mcp_servers".to_owned()),
@@ -1348,7 +1318,6 @@ async fn long_lived_exchange_falls_back_on_custom_expires_in_not_allowed() {
     assert!(bundle.access_token.starts_with("sk-ant-oat01-"));
 }
 
-#[tokio::test]
 async fn long_lived_exchange_reports_scope_rejected_for_non_inference_scope() {
     // An operator who configures a scope Anthropic will not grant a year-long
     // token for (here `org:create_api_key`) must see that their own scope
@@ -1386,7 +1355,6 @@ async fn long_lived_exchange_reports_scope_rejected_for_non_inference_scope() {
     assert!(bundle.access_token.starts_with("sk-ant-oat01-"));
 }
 
-#[tokio::test]
 async fn long_lived_grant_clamped_below_floor_demotes_to_refreshing() {
     const CLAMPED_EXPIRES_IN: u64 = 28_800;
     let fixture = Fixture::with_oauth_state(
@@ -1418,7 +1386,6 @@ async fn long_lived_grant_clamped_below_floor_demotes_to_refreshing() {
     );
 }
 
-#[tokio::test]
 async fn long_lived_grant_at_floor_demotes_to_refreshing() {
     let fixture = Fixture::with_oauth_state(
         MockOAuthState::default().with_expires_in_cap(cc_lb_config::LONG_LIVED_MIN_GRANT_SECS),
@@ -1444,7 +1411,6 @@ async fn long_lived_grant_at_floor_demotes_to_refreshing() {
     );
 }
 
-#[tokio::test]
 async fn long_lived_grant_above_floor_stays_long_lived() {
     const GRANTED_EXPIRES_IN: u64 = cc_lb_config::LONG_LIVED_MIN_GRANT_SECS + 1;
     let fixture = Fixture::with_oauth_state(
@@ -1467,7 +1433,6 @@ async fn long_lived_grant_above_floor_stays_long_lived() {
     );
 }
 
-#[tokio::test]
 async fn authorize_always_requests_the_configured_scopes() {
     let fixture = Fixture::new().await;
 
@@ -1490,7 +1455,6 @@ async fn authorize_always_requests_the_configured_scopes() {
     );
 }
 
-#[tokio::test]
 async fn oauth_status_reports_long_lived_mode_without_refresh() {
     let fixture = Fixture::new().await;
     let (_complete, upstream_id) = run_draft_flow(&fixture, json!({})).await;
@@ -1504,7 +1468,6 @@ async fn oauth_status_reports_long_lived_mode_without_refresh() {
     assert!(body["refresh_token_expires_at_unix_secs"].is_null());
 }
 
-#[tokio::test]
 async fn oauth_status_reports_refreshing_mode_and_refresh_token_expiry() {
     let fixture = Fixture::new().await;
     let upstream = fixture
@@ -1540,7 +1503,6 @@ async fn oauth_status_reports_refreshing_mode_and_refresh_token_expiry() {
     );
 }
 
-#[tokio::test]
 async fn oauth_status_supports_openai_and_gemini_oauth_modes() {
     let fixture = Fixture::new().await;
     for (index, kind) in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth]
@@ -1608,7 +1570,6 @@ async fn oauth_status_supports_openai_and_gemini_oauth_modes() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
 async fn long_lived_upstream_seeds_no_oauth_refresh_task() {
     let (long_lived_fixture, long_lived_scheduler) = Fixture::new_with_scheduler().await;
     // A refreshing credential now only results from demotion, so the second
@@ -1659,7 +1620,6 @@ async fn long_lived_upstream_seeds_no_oauth_refresh_task() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
 async fn clamped_upstream_seeds_oauth_refresh_task() {
     let (fixture, scheduler) = Fixture::with_oauth_state_and_scheduler(
         MockOAuthState::default().with_expires_in_cap(28_800),
@@ -1765,4 +1725,66 @@ fn fingerprint(access_token: &str) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+#[tokio::test]
+async fn v1_oauth_suite_part_1() {
+    happy_pkce_roundtrip_persists_encrypted_tokens_and_emits_redacted_audit().await;
+    tampered_state_token_returns_400_invalid_state().await;
+    reusing_code_after_completion_returns_400().await;
+    upstream_wrong_kind_anthropic_api_key_returns_400().await;
+    unknown_upstream_start_returns_json_404().await;
+    audit_entries_contain_fingerprint_only_no_raw_tokens().await;
+    complete_with_stale_revision_returns_409().await;
+    draft_start_returns_top_level_authorize_url_and_state().await;
+    draft_complete_invalid_code_reaches_endpoint_and_returns_structured_error().await;
+    create_from_incomplete_draft_returns_invalid_state().await;
+}
+
+#[tokio::test]
+async fn v1_oauth_suite_part_2() {
+    create_from_draft_with_invalid_name_returns_structured_bad_request().await;
+    create_from_completed_draft_with_active_name_returns_name_conflict().await;
+    oauth_draft_precreation_decrypt_failure_deletes_pkce_flow().await;
+    oauth_draft_post_create_metadata_failure_rolls_back_via_hard_delete().await;
+    create_from_oauth_draft_returns_the_stored_base_url_without_secrets().await;
+    create_from_oauth_draft_audits_human_readable_upstream_name().await;
+    oauth_status_reflects_completion_realtime().await;
+    oauth_status_unchanged_when_only_start_called().await;
+    oauth_status_flips_from_expired_to_active_after_reconnect().await;
+    #[cfg(feature = "sqlite")]
+    gemini_oauth_import_seeds_refresh_task_and_persists_project_id().await;
+}
+
+#[tokio::test]
+async fn v1_oauth_suite_part_3() {
+    #[cfg(feature = "sqlite")]
+    openai_oauth_import_derives_account_id_from_jwt_and_seeds_refresh_task().await;
+    oauth_bundle_import_rejects_anthropic_and_api_key_kinds().await;
+    oauth_bundle_import_rejects_never_refresh_credentials().await;
+    gemini_oauth_import_requires_project_id().await;
+    #[cfg(feature = "sqlite")]
+    oauth_reconnect_seeds_refresh_at_granted_expiry_and_preserves_disabled_state().await;
+    #[cfg(feature = "sqlite")]
+    long_lived_oauth_reconnect_skips_refresh_task().await;
+    long_lived_is_default_and_stored_as_non_refreshable().await;
+    default_connect_requests_long_lived_and_stores_it().await;
+    long_lived_exchange_falls_back_on_invalid_expiry_for_scope().await;
+    long_lived_exchange_falls_back_on_custom_expires_in_not_allowed().await;
+}
+
+#[tokio::test]
+async fn v1_oauth_suite_part_4() {
+    long_lived_exchange_reports_scope_rejected_for_non_inference_scope().await;
+    long_lived_grant_clamped_below_floor_demotes_to_refreshing().await;
+    long_lived_grant_at_floor_demotes_to_refreshing().await;
+    long_lived_grant_above_floor_stays_long_lived().await;
+    authorize_always_requests_the_configured_scopes().await;
+    oauth_status_reports_long_lived_mode_without_refresh().await;
+    oauth_status_reports_refreshing_mode_and_refresh_token_expiry().await;
+    oauth_status_supports_openai_and_gemini_oauth_modes().await;
+    #[cfg(feature = "sqlite")]
+    long_lived_upstream_seeds_no_oauth_refresh_task().await;
+    #[cfg(feature = "sqlite")]
+    clamped_upstream_seeds_oauth_refresh_task().await;
 }

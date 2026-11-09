@@ -65,7 +65,7 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
                 reservation_id,
                 input.finalization.usage.input_tokens,
                 input.finalization.usage.output_tokens,
-                cost.total_micros,
+                Some(cost.total_micros),
             ),
             "durable renewal write must precede one direct reconciliation"
         );
@@ -173,7 +173,7 @@ fn renewal_projections(
             cache_creation_input_tokens_5m: input.finalization.usage.cache_creation_input_tokens_5m,
             cache_creation_input_tokens_1h: input.finalization.usage.cache_creation_input_tokens_1h,
             cache_read_input_tokens: input.finalization.usage.cache_read_input_tokens,
-            cost_micros,
+            cost_micros: Some(cost_micros),
             hit_miss: "hit".to_owned(),
             ts: 1_003,
         }),

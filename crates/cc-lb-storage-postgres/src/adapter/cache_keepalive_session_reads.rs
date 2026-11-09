@@ -38,6 +38,7 @@ SELECT \
         WHEN 'dispatch_error' THEN 'renewal dispatch unavailable' \
         ELSE display_reason \
     END AS reason, \
+    display_reason, \
     error, \
     config_snapshot";
 
@@ -58,6 +59,7 @@ SELECT \
     NULL::TEXT AS terminal_reason, \
     decision, \
     reason, \
+    reason AS display_reason, \
     error, \
     config_snapshot";
 
@@ -92,6 +94,7 @@ SELECT
     cache_creation_input_tokens_1h,
     cache_read_input_tokens,
     cost_micros,
+    cost_known,
     hit_miss,
     ts
 FROM cache_keepalive_turns
@@ -106,8 +109,8 @@ fn query_u64_to_i64(value: u64, field: &str, reason: &str) -> StorageResult<i64>
     })
 }
 
-fn filter_includes_sessions(filter: CacheKeepaliveSessionFilter) -> bool {
-    !matches!(filter, CacheKeepaliveSessionFilter::NotTracked)
+fn filter_includes_sessions(_filter: CacheKeepaliveSessionFilter) -> bool {
+    true
 }
 
 fn filter_includes_decisions(filter: CacheKeepaliveSessionFilter) -> bool {
@@ -130,13 +133,19 @@ fn push_session_filter(builder: &mut QueryBuilder<Postgres>, filter: CacheKeepal
         }
         CacheKeepaliveSessionFilter::Capped => {
             builder.push(
-                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss')",
+                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss') \
+                  AND NOT (terminal_reason = 'cancelled' AND refresh_count = 0 AND error IS NULL)",
             );
         }
         CacheKeepaliveSessionFilter::Expired => {
             builder.push(" AND terminal_reason IN ('expired', 'cache_miss')");
         }
-        CacheKeepaliveSessionFilter::NotTracked => unreachable!("session branch is omitted"),
+        CacheKeepaliveSessionFilter::NotTracked => {
+            builder.push(
+                " AND status = 'terminal' AND terminal_reason = 'cancelled' \
+                  AND refresh_count = 0 AND error IS NULL",
+            );
+        }
     }
     if matches!(filter, CacheKeepaliveSessionFilter::Error) {
         builder.push(" AND error IS NOT NULL");
@@ -691,7 +700,7 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
                 ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = $3 AND last_message_at_ms >= $4)
                  + (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = $5 AND last_message_at_ms >= $6 AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id))) AS sessions_last_5m,
                 (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = $7 AND last_message_at_ms >= $8 AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id)) AS recent_decisions,
-                (SELECT COALESCE(SUM(cost_micros), 0)::BIGINT FROM cache_keepalive_turns WHERE principal_id = $9 AND ($14 IS NULL OR ts * 1000 >= $14)) AS total_spent_micros,
+                (SELECT COALESCE(SUM(CASE WHEN cost_known THEN cost_micros ELSE 0 END), 0)::BIGINT FROM cache_keepalive_turns WHERE principal_id = $9 AND ($14 IS NULL OR ts * 1000 >= $14)) AS total_spent_micros,
                 (SELECT COUNT(*) FROM cache_keepalive_turns WHERE principal_id = $10 AND lower(hit_miss) = 'hit' AND ($14 IS NULL OR ts * 1000 >= $14)) AS successful_hits,
                 (SELECT COUNT(*) FROM pending_current WHERE principal_id = $11) AS pending_evidence,
                 (SELECT COUNT(*) FROM cache_keepalive_turns t

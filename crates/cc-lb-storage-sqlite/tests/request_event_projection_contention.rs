@@ -71,7 +71,7 @@ fn projections(source_ref_id: &str) -> RequestEventProjections {
             cache_creation_input_tokens_5m: 10,
             cache_creation_input_tokens_1h: 0,
             cache_read_input_tokens: 70,
-            cost_micros: 123_456,
+            cost_micros: Some(123_456),
             hit_miss: "hit".to_owned(),
             ts: 1_800_000_000,
         }),
