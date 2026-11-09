@@ -623,6 +623,9 @@ async fn reconcile_gemini_model_identity(
 }
 
 async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<UsageRollupRun> {
+    if let Some(run) = reconcile_gemini_model_identity(storage).await? {
+        return Ok(run);
+    }
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
 
     let locked = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
