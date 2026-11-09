@@ -4,6 +4,7 @@ import {
   type RenderOptions,
   render as rtlRender,
   screen,
+  within,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
@@ -734,6 +735,86 @@ describe('RequestEventsTable', () => {
   });
 
   describe('Badges', () => {
+    it('shows the requested Gemini thinking level alongside the observed tier and retains reasoning in the drawer', async () => {
+      const user = userEvent.setup();
+      const event = {
+        event_id: 'evt_gemini_metadata',
+        request_id: 'req_gemini_metadata',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 200,
+        duration_ms: 100,
+        model: 'gemini-2.5-pro',
+        thinking_level: 'high',
+        thinking_budget_tokens: 18000,
+        thinking_tokens: 8200,
+        service_tier: 'priority',
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      render(
+        <RequestEventsTable
+          events={[event]}
+          principalNameMap={principalNameMap}
+        />,
+      );
+
+      const row = screen.getByRole('row', {
+        name: 'View request evt_gemini_metadata',
+      });
+      expect(within(row).getByText('high')).toBeDefined();
+      expect(within(row).getByText('priority')).toBeDefined();
+      expect(within(row).queryByText('high · 8.2k')).toBeNull();
+
+      await user.click(row);
+
+      expect(
+        screen.getByText('Thinking level').parentElement?.textContent,
+      ).toContain('high');
+      expect(
+        screen.getByText('Reasoning').parentElement?.textContent,
+      ).toContain('high · 8.2k');
+      expect(
+        screen.getByText('Service tier').parentElement?.textContent,
+      ).toContain('priority');
+    });
+
+    it.each([
+      ['claude-sonnet-4-5', undefined],
+      ['gpt-5', undefined],
+      ['gemini-2.5-pro', null],
+      ['gemini-2.5-pro', ''],
+      ['gemini-2.5-pro', '  '],
+    ] as const)(
+      'does not infer a thinking-level badge for %s when level is %s',
+      (model, thinkingLevel) => {
+        render(
+          <RequestEventsTable
+            events={[
+              {
+                event_id: 'evt_no_level',
+                request_id: 'req_no_level',
+                ts: 1718553120,
+                status: 200,
+                duration_ms: 100,
+                model,
+                thinking_level: thinkingLevel,
+                reasoning_effort: 'max',
+                thinking_budget_tokens: 18000,
+                service_tier: 'priority',
+                _phase: 'final',
+              },
+            ]}
+            principalNameMap={principalNameMap}
+          />,
+        );
+
+        expect(screen.queryByText('high')).toBeNull();
+        expect(screen.queryByText('max')).toBeNull();
+        expect(screen.getByText('priority')).toBeDefined();
+      },
+    );
+
     it('does not render the reasoning badge in the table even when reasoning fields are set', () => {
       const events: RequestEventWithPhase[] = [
         {

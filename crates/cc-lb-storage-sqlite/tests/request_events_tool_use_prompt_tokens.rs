@@ -115,6 +115,7 @@ async fn migration_preserves_legacy_request_event_with_null_tool_use_prompt_toke
     assert_eq!(stored.input_tokens, Some(12));
     assert_eq!(stored.output_tokens, Some(34));
     assert_eq!(stored.tool_use_prompt_tokens, None);
+    assert_eq!(stored.thinking_level, None);
 }
 
 async fn test_storage(filename: &str) -> (tempfile::TempDir, SqliteStorage) {
