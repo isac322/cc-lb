@@ -75,6 +75,10 @@ fn sqlx_migration_lock_id(database_name: &str) -> i64 {
 impl MetaStore for PostgresStorage {
     async fn initialize(&self) -> StorageResult<()> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
 
         let (is_non_public, database_name): (bool, String) =
             sqlx::query_as("SELECT current_schema() IS DISTINCT FROM 'public', current_database()")
