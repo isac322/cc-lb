@@ -1265,6 +1265,151 @@ async fn realtime_and_live_publish_active_cumulative_usage_then_preserve_provide
         proxy_task.abort();
     }
 }
+#[tokio::test]
+async fn realtime_and_live_normal_downstream_close_after_completion_is_success() {
+    use cc_lb_request_log::RequestEventUpdate;
+    use cc_lb_storage_api::RequestEventStreamFilters;
+
+    for gemini in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket =
+                tokio_tungstenite::accept_hdr_async(stream, NativeResponseHeaders)
+                    .await.unwrap();
+            if gemini {
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap().to_text().unwrap(),
+                    r#"{"setup":{"model":"models/gemini-live"}}"#,
+                );
+            }
+            let completed = if gemini {
+                r#"{"serverContent":{"modelTurn":{"parts":[{"text":"done"}]},"turnComplete":true},"usageMetadata":{"promptTokenCount":10,"responseTokenCount":3,"thoughtsTokenCount":1,"cachedContentTokenCount":0,"toolUsePromptTokenCount":0}}"#
+            } else {
+                r#"{"type":"response.done","response":{"id":"completed","usage":{"input_tokens":10,"output_tokens":3}}}"#
+            };
+            socket.send(UpstreamMessage::Text(completed.into())).await.unwrap();
+            let UpstreamMessage::Close(Some(close)) =
+                tokio::time::timeout(Duration::from_secs(5), socket.next())
+                    .await.unwrap().unwrap().unwrap()
+            else {
+                panic!("normal downstream close must reach the provider");
+            };
+            assert_eq!(u16::from(close.code), 1000);
+            assert_eq!(close.reason.as_str(), "client finished");
+        });
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut updates = bus.subscribe();
+        let mut lifecycle_events = bus.subscribe_lifecycle();
+        let state = native_websocket_observed_state(address, gemini, bus.clone(), Some(1)).await;
+        let storage = state.storage.clone();
+        let assembler = cc_lb_engine::spawn_request_event_assembler(
+            bus.attach_lifecycle_assembler(128),
+            storage.clone(),
+            Some(bus),
+            Arc::new(cc_lb_observability::NoopMetricsHook),
+        );
+        let (proxy, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+        let (mut client, response) =
+            connect_async(realtime_request(proxy, native_websocket_path(gemini)))
+                .await.unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        if gemini {
+            client.send(UpstreamMessage::Text(
+                r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
+            )).await.unwrap();
+        }
+        let event_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match updates.recv().await.unwrap() {
+                    RequestEventUpdate::Partial(partial)
+                        if partial.upstream_response_status == Some(101) => break partial.event_id,
+                    RequestEventUpdate::Final(_) => panic!("session finalized before completion"),
+                    _ => {}
+                }
+            }
+        }).await.expect("active dashboard sees the provider upgrade");
+        let completed = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await.unwrap().unwrap().unwrap();
+        assert!(completed.is_text());
+        client.send(UpstreamMessage::Close(Some(
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                reason: "client finished".into(),
+            },
+        ))).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), provider)
+            .await.unwrap().unwrap();
+        let final_row = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let RequestEventUpdate::Final(update) = updates.recv().await.unwrap() {
+                    assert_eq!(update.event.event_id.as_deref(), Some(event_id.as_str()));
+                    break update.event;
+                }
+            }
+        }).await.expect("normal downstream close produces a durable final row");
+        assert_eq!(final_row.status, 101);
+        assert_eq!(final_row.error_code, None);
+        assert_eq!(final_row.upstream_error_message, None);
+        assert_eq!((final_row.input_tokens, final_row.output_tokens), (Some(10), Some(3)));
+        let mut reserved = 0;
+        let mut stream_completed = 0;
+        let mut request_terminated = 0;
+        let mut saw_diagnostics = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = lifecycle_events.recv().await.unwrap();
+                assert_eq!(event.event_id(), &event_id);
+                match event {
+                    LifecycleEvent::LimitDecision {
+                        decision: cc_lb_lifecycle::LimitDecisionKind::Reserved { .. }, ..
+                    } => reserved += 1,
+                    LifecycleEvent::UpstreamStreamDiagnosticsObserved { diagnostics, .. } => {
+                        assert_eq!(diagnostics.warning_type.as_deref(), Some("websocket_close"));
+                        assert_native_close_details(
+                            diagnostics.warning_message.as_deref().unwrap(),
+                            1000,
+                            "client finished",
+                        );
+                        saw_diagnostics = true;
+                    }
+                    LifecycleEvent::StreamCompleted { result, .. } => {
+                        assert!(result.is_ok(), "completed downstream close is successful");
+                        stream_completed += 1;
+                    }
+                    LifecycleEvent::RequestTerminated { reason, client_status, .. } => {
+                        assert_eq!(reason, cc_lb_lifecycle::TerminationReason::Success);
+                        assert_eq!(client_status, 101);
+                        request_terminated += 1;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }).await.expect("successful lifecycle termination arrives");
+        assert_eq!(reserved, 1, "one reservation is handed to the response lifecycle");
+        assert_eq!(stream_completed, 1);
+        assert_eq!(request_terminated, 1);
+        assert!(saw_diagnostics);
+        assembler.shutdown().await;
+        let cursor = storage.current_request_event_cursor().await.unwrap();
+        let rows = storage.query_request_events_between_cursors(
+            0, cursor, 10, &RequestEventStreamFilters::default(),
+        ).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(rows[0].1.status, 101);
+        assert_eq!(rows[0].1.error_code, None);
+        assert_eq!((rows[0].1.input_tokens, rows[0].1.output_tokens), (Some(10), Some(3)));
+        assert_native_close_details(
+            rows[0].1.upstream_stream_warning_message.as_deref().unwrap(),
+            1000,
+            "client finished",
+        );
+        proxy_task.abort();
+    }
+}
 
 #[tokio::test]
 async fn realtime_and_live_persist_native_close_details_and_request_id() {

@@ -10,6 +10,16 @@ fn downstream_close_frame(
         reason: frame.reason.to_string().into(),
     }
 }
+fn downstream_close_termination(
+    frame: Option<&axum::extract::ws::CloseFrame>,
+) -> cc_lb_engine::realtime_websocket::RealtimeWebSocketTermination {
+    match frame {
+        Some(frame) if frame.code == 1000 => {
+            cc_lb_engine::realtime_websocket::RealtimeWebSocketTermination::DownstreamClosed
+        }
+        _ => cc_lb_engine::realtime_websocket::RealtimeWebSocketTermination::DownstreamCancelled,
+    }
+}
 
 fn upstream_close_frame(
     frame: tokio_tungstenite::tungstenite::protocol::CloseFrame,
@@ -472,10 +482,11 @@ async fn relay_realtime_websocket(
                                     close.reason.as_str(),
                                 );
                             }
+                            let termination = downstream_close_termination(frame.as_ref());
                             let frame = frame.map(downstream_close_frame);
                             let _ = upstream.send(UpstreamMessage::Close(frame)).await;
                             let _ = downstream.flush().await;
-                            return (RealtimeWebSocketTermination::DownstreamCancelled, diagnostics);
+                            return (termination, diagnostics);
                         }
                         Some(Err(error)) => {
                             diagnostics = diagnostics.with_relay_error(&error);
@@ -624,5 +635,29 @@ mod tests {
             "response.create".to_owned().into()
         )));
         assert!(realtime_data_frame(&UpstreamMessage::Binary(Bytes::new())));
+    }
+
+    #[test]
+    fn only_explicit_normal_downstream_closes_are_completion_candidates() {
+        let normal = axum::extract::ws::CloseFrame {
+            code: 1000,
+            reason: "".into(),
+        };
+        let abnormal = axum::extract::ws::CloseFrame {
+            code: 1001,
+            reason: "".into(),
+        };
+        assert_eq!(
+            downstream_close_termination(Some(&normal)),
+            RealtimeWebSocketTermination::DownstreamClosed
+        );
+        assert_eq!(
+            downstream_close_termination(Some(&abnormal)),
+            RealtimeWebSocketTermination::DownstreamCancelled
+        );
+        assert_eq!(
+            downstream_close_termination(None),
+            RealtimeWebSocketTermination::DownstreamCancelled
+        );
     }
 }

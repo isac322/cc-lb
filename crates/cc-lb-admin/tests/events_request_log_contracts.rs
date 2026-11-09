@@ -12,7 +12,7 @@ use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use events_request_log_contracts_support::{
     BROAD_REQUEST_ID, CANCELED_REQUEST_ID, DROPPED_REQUEST_ID, EVENT_ID, MODEL,
-    STRUCTURED_REQUEST_ID, THREAD_ID, UPSTREAM_ID, UPSTREAM_NAME, event_bus, publish_enriched,
+    STRUCTURED_REQUEST_ID, SUCCESSFUL_CLOSED_REQUEST_ID, THREAD_ID, UPSTREAM_ID, UPSTREAM_NAME,
     publish_recent_contracts, publish_source_kind_contracts,
     read_message_updates_through_final_window, stream_response, wait_for_initial_cursor,
 };
@@ -146,7 +146,17 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(errors["count"], 4);
-    assert!(errors["events"].as_array().unwrap().iter().all(|event| {
+    let error_events = errors["events"].as_array().expect("error events");
+    let canceled_error = event_by_request_id(error_events, CANCELED_REQUEST_ID);
+    assert_eq!(canceled_error["status"], 499);
+    assert_eq!(canceled_error["error_code"], "client_closed_request");
+    assert!(
+        !error_events
+            .iter()
+            .any(|event| event["request_id"] == SUCCESSFUL_CLOSED_REQUEST_ID),
+        "successful normal close must be excluded from errors filter"
+    );
+    assert!(error_events.iter().all(|event| {
         event["status"].as_u64().unwrap_or_default() >= 400 || !event["error_code"].is_null()
     }));
 
@@ -167,7 +177,7 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
     assert_no_fabricated_diagnostics(dropped);
 
     let rows = stored_request_events(storage.as_ref()).await;
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 5);
 }
 
 /// Reads every persisted request event in append order through the cursor API.
