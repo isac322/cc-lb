@@ -124,9 +124,9 @@ ttl_days = 7
 
 ## Request diagnostics
 
-Request events store all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so event reads have zero TOAST overhead. The five deep diagnostic fields are `cache_breakpoints` (with `lookback_prefixes` omitted from diagnostics lines), `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`.
+Request events store all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so event reads have zero TOAST overhead. The deep diagnostic fields are `cache_breakpoints` (with `lookback_prefixes` omitted from diagnostics lines), `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`, plus the optional `native_cache` object, which is omitted when no native cache analysis is recorded.
 
-The optional startup setting below emits one `cc_lb.request_diagnostics.v1` JSON line to stdout after each stored request event commits. The line also carries `thread_id`, `observed_session_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `duration_ms`, and `upstream_ttfb_ms`.
+The optional startup setting below emits one `cc_lb.request_diagnostics.v1` JSON line to stdout after each stored request event commits. The line also carries `thread_id`, `observed_session_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `duration_ms`, and `upstream_ttfb_ms`. The optional `cache_write_input_tokens`, `cache_write_input_tokens_30m`, and `cache_write_input_tokens_12h` integers are omitted when unreported or when the write component is invalid; a valid reported `0` is kept.
 
 | Key | Default | Environment variable | Effect |
 | --- | --- | --- | --- |

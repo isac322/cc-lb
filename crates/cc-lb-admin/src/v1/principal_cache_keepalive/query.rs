@@ -171,6 +171,7 @@ fn parse_filter(
 ) -> Result<CacheKeepaliveSessionFilter, QueryError> {
     let status = match status.unwrap_or("all") {
         "all" => CacheKeepaliveSessionFilter::All,
+        "tracked" => CacheKeepaliveSessionFilter::Tracked,
         "renewed" => CacheKeepaliveSessionFilter::Renewed,
         "scheduled" => CacheKeepaliveSessionFilter::Scheduled,
         "capped" => CacheKeepaliveSessionFilter::Capped,

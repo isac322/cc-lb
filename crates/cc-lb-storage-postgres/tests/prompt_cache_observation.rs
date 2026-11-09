@@ -272,6 +272,98 @@ async fn postgres_prompt_cache_batch_lookup_isolates_candidates() -> TestResult<
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn postgres_native_cache_openai_write_observation_roundtrips_and_filters_nulls()
+-> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let store = fixture.store();
+    let upstream_id = Uuid::new_v4();
+    let record = ProviderPromptCacheObservationRecord {
+        upstream_id,
+        provider: "openai".to_owned(),
+        canonical_model_id: "gpt-5".to_owned(),
+        mode: "responses".to_owned(),
+        isolation_scope: "account".to_owned(),
+        identity_hash: "sha256:openai-account".to_owned(),
+        boundary: "request".to_owned(),
+        evidence_source: "responses_usage".to_owned(),
+        observed_cached_tokens: None,
+        observed_write_tokens: Some(300),
+        retention_secs: Some(1_800),
+        expires_at_unix_secs: Some(2_800),
+        last_observed_at_unix_secs: 1_900,
+    };
+
+    PromptCacheObservationStore::upsert_provider_observation(&store, &record).await?;
+
+    let observed = PromptCacheObservationStore::list_active_provider_observations(
+        &store,
+        upstream_id,
+        "openai",
+        "gpt-5",
+        "responses",
+        "account",
+        "sha256:openai-account",
+        2_000,
+    )
+    .await?;
+    assert_eq!(observed, vec![record.clone()]);
+    assert_eq!(observed[0].observed_cached_tokens, None);
+    assert_eq!(observed[0].observed_write_tokens, Some(300));
+    assert_eq!(observed[0].retention_secs, Some(1_800));
+    assert_eq!(observed[0].expires_at_unix_secs, Some(2_800));
+    assert_eq!(observed[0].evidence_source, "responses_usage");
+
+    let matching_retention =
+        PromptCacheObservationStore::list_active_provider_observations_for_candidates(
+            &store,
+            &[upstream_id],
+            "openai",
+            "gpt-5",
+            "responses",
+            "account",
+            "sha256:openai-account",
+            Some(1_800),
+            2_000,
+        )
+        .await?;
+    assert_eq!(matching_retention, vec![record.clone()]);
+
+    let null_retention =
+        PromptCacheObservationStore::list_active_provider_observations_for_candidates(
+            &store,
+            &[upstream_id],
+            "openai",
+            "gpt-5",
+            "responses",
+            "account",
+            "sha256:openai-account",
+            None,
+            2_000,
+        )
+        .await?;
+    assert!(null_retention.is_empty());
+
+    let wrong_model = PromptCacheObservationStore::list_active_provider_observations(
+        &store,
+        upstream_id,
+        "openai",
+        "gpt-5-mini",
+        "responses",
+        "account",
+        "sha256:openai-account",
+        2_000,
+    )
+    .await?;
+    assert!(wrong_model.is_empty());
+
+    fixture.drop_schema().await?;
+    Ok(())
+}
+
 struct Fixture {
     url: String,
     schema: String,

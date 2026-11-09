@@ -538,13 +538,13 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     await user.click(range.getByRole('radio', { name: '1h' }));
     expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenCalledWith(
       'p-123',
-      { horizon: '1h', status: undefined, error: undefined },
+      { horizon: '1h', status: 'tracked', error: undefined },
       true,
     );
     await user.click(range.getByRole('radio', { name: '6h' }));
     expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenCalledWith(
       'p-123',
-      { horizon: '6h', status: undefined, error: undefined },
+      { horizon: '6h', status: 'tracked', error: undefined },
       true,
     );
     expect(screen.getByText('Retained history:')).toBeDefined();
@@ -673,7 +673,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         ...cacheKeepaliveApiRows[0]!,
         id: 'unsupported-tool-choice',
         reason: 'zero-token renewal unsupported: forced tool_choice',
-        display_reason: null,
+        display_reason: 'zero-token renewal unsupported: forced tool_choice',
       },
       {
         ...cacheKeepaliveApiRows[0]!,
@@ -738,6 +738,11 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         text.includes('Unsupported: forced tool_choice'),
       ),
     ).toBe(true);
+    expect(
+      groupHeaders.filter((text) =>
+        text.includes('Unsupported: forced tool_choice'),
+      ),
+    ).toHaveLength(1);
     expect(
       groupHeaders.some((text) => text.includes('Prefix < min tokens')),
     ).toBe(true);
@@ -1416,11 +1421,9 @@ describe('CacheKeepaliveSessionsDrawer', () => {
 
     expect(screen.queryByText('Session detail')).toBeNull();
     expect(screen.getByText('session-b')).toBeDefined();
-    expect(
-      vi.mocked(queries.useCacheKeepaliveSessions),
-    ).toHaveBeenLastCalledWith(
+    expect(vi.mocked(queries.useCacheKeepaliveSessions)).toHaveBeenCalledWith(
       activePrincipal,
-      { horizon: '24h', status: undefined, error: undefined },
+      { horizon: '24h', status: 'tracked', error: undefined },
       true,
     );
   });

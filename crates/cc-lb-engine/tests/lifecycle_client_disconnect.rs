@@ -1,4 +1,6 @@
-mod client_disconnect_support;
+pub(crate) mod client_disconnect_support;
+#[path = "lifecycle_client_disconnect/native_errors.rs"]
+mod native_errors;
 use crate::common;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -128,7 +130,7 @@ async fn native_provider_stream_fault_emits_one_relay_error_and_terminal() {
             cc_lb_domain::Provider::Openai,
             "/v1/responses",
             br#"{"model":"gpt-test","input":[],"stream":true}"# as &'static [u8],
-            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n".as_slice(),
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"partial\"}\n\n".as_slice(),
         ),
         (
             StorageUpstreamKind::GeminiApiKey,
@@ -172,16 +174,19 @@ async fn native_provider_stream_fault_emits_one_relay_error_and_terminal() {
             .await
             .expect("native provider fault body collects")
             .to_bytes();
-        let text = std::str::from_utf8(&body).expect("native provider fault body is UTF-8");
-        assert_eq!(
-            text.matches("event: error\n").count(),
-            1,
-            "{provider:?} must receive exactly one proxy error frame",
-        );
-        assert!(
-            text.contains("\"api_error\""),
-            "{provider:?} proxy error frame must use the provider error envelope: {text:?}",
-        );
+        if path == "/v1/responses" {
+            let failure = client_disconnect_support::assert_responses_failed(&body, None, 7);
+            assert_eq!(failure["response"]["error"]["code"], "api_error");
+        } else {
+            let events = client_disconnect_support::sse_json_events(&body);
+            let errors = events
+                .iter()
+                .filter(|(name, _)| name == "error")
+                .collect::<Vec<_>>();
+            assert_eq!(errors.len(), 1, "{provider:?} receives one native error");
+            assert_eq!(errors[0].1["error"]["code"], 502);
+            assert_eq!(errors[0].1["error"]["status"], "UNAVAILABLE");
+        }
         assert_error_terminal(
             &mut lifecycle_rx,
             StatusCode::OK.as_u16(),
@@ -345,7 +350,16 @@ async fn native_provider_transform_failure_is_terminal_once() {
         let test_bus = TestLifecycleBus::new();
         let mut lifecycle_rx = lifecycle_receiver(&test_bus);
         let lifecycle = transform_lifecycle_with_kind(
-            sse_dispatch(StatusCode::OK, transform_body()),
+            sse_dispatch(
+                StatusCode::OK,
+                if path == "/v1/responses" {
+                    Body::from(
+                        b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"partial\"}\n\n".repeat(2),
+                    )
+                } else {
+                    transform_body()
+                },
+            ),
             &test_bus,
             kind,
         );
@@ -370,22 +384,22 @@ async fn native_provider_transform_failure_is_terminal_once() {
             .await
             .expect("native provider transform body collects")
             .to_bytes();
-        let text = std::str::from_utf8(&body).expect("native provider transform body is UTF-8");
-        assert_eq!(
-            text.matches("event: error\n").count(),
-            1,
-            "{provider:?} transform failure must relay exactly one provider error frame: {text:?}",
-        );
-        assert!(
-            !text.contains("{\"type\":\"error\",\"error\":"),
-            "{provider:?} transform failure must not use the Anthropic outer error wrapper: {text:?}",
-        );
-        assert!(
-            text.contains("\"error\":{")
-                && (text.contains("\"api_error\"")
-                    || text.contains("\"response_transform_error\"")),
-            "{provider:?} transform failure must use a provider-shaped error object: {text:?}",
-        );
+        if path == "/v1/responses" {
+            client_disconnect_support::assert_responses_failed(&body, None, 7);
+        } else {
+            let events = client_disconnect_support::sse_json_events(&body);
+            let errors = events
+                .iter()
+                .filter(|(name, _)| name == "error")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                errors.len(),
+                1,
+                "{provider:?} transform has one native error"
+            );
+            assert_eq!(errors[0].1["error"]["code"], 502);
+            assert_eq!(errors[0].1["error"]["status"], "UNAVAILABLE");
+        }
         assert_error_terminal(
             &mut lifecycle_rx,
             StatusCode::OK.as_u16(),

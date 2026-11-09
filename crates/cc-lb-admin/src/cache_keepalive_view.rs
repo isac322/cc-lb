@@ -82,7 +82,13 @@ pub fn derive_activity_view(
     source: CacheKeepaliveActivitySource<'_>,
     catalog: &PriceCatalog,
 ) -> CacheKeepaliveActivityView {
-    let state = state_from_item(source.item);
+    let mut state = state_from_item(source.item);
+    if state == CacheKeepaliveViewState::NotTracked
+        && !source.item.is_decision()
+        && !source.turns.is_empty()
+    {
+        state = CacheKeepaliveViewState::Capped;
+    }
     // The session row is the authoritative current-generation projection for
     // detail views. List items normally carry the same cycle id, but older
     // projections can omit or lag it while the session record is current.

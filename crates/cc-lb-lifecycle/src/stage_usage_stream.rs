@@ -37,6 +37,9 @@ pub struct UsageSnapshot {
     /// an explicitly reported zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_input_tokens: Option<u64>,
+    /// Native write validity is independent of Anthropic creation evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_evidence: Option<cc_lb_request_log::RequestCacheEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_input_tokens_30m: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

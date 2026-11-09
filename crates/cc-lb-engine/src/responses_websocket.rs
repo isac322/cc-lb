@@ -26,7 +26,7 @@ use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
     UpstreamErrorCode, record_websocket_terminal_span,
 };
-use crate::usage_parser::{UsageCounts, observe_non_stream_json_value};
+use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
 use cc_lb_upstream::{SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
 #[derive(Clone, Debug)]
@@ -1880,19 +1880,23 @@ impl ResponsesWebSocketGateway {
             if let (Some(engine), Some(usage)) =
                 (turn.prepared.limit_engine.as_ref(), turn.usage.as_ref())
             {
-                let cost = cc_lb_pricing::virtual_cost_micros_full_with_context_and_images(
-                    &turn.prepared.model,
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.input_image_tokens.unwrap_or(0),
-                    usage.output_image_tokens.unwrap_or(0),
-                    usage.cache_creation_input_tokens,
-                    usage.cache_creation_input_tokens_5m,
-                    usage.cache_creation_input_tokens_1h,
-                    usage.cache_read_input_tokens,
-                    usage.service_tier.as_deref(),
-                )
-                .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown);
+                let cost =
+                    cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
+                        &turn.prepared.model,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.input_image_tokens.unwrap_or(0),
+                        usage.output_image_tokens.unwrap_or(0),
+                        usage.cache_creation_input_tokens,
+                        usage.cache_creation_input_tokens_5m,
+                        usage.cache_creation_input_tokens_1h,
+                        usage.cache_read_input_tokens,
+                        usage.cache_write_input_tokens,
+                        usage.cache_write_input_tokens_30m,
+                        usage.cache_write_input_tokens_12h,
+                        usage.service_tier.as_deref(),
+                    )
+                    .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown);
                 engine.reconcile(
                     reservation,
                     usage.input_tokens,
@@ -2187,6 +2191,18 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
         cache_read_input_tokens: usage.cache_read_input_tokens,
         cache_write_input_tokens: usage.cache_write_input_tokens,
+        cache_write_evidence: match usage.cache_write_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
         cache_write_input_tokens_30m: usage.cache_write_input_tokens_30m,
         cache_write_input_tokens_12h: usage.cache_write_input_tokens_12h,
         cache_read_evidence: match usage.cache_read_evidence {
@@ -2290,7 +2306,11 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
     if input.is_none() && output.is_none() {
         return None;
     }
-    let mut usage = observe_non_stream_json_value(response).usage;
+    let mut usage = observe_non_stream_json_value_for_shape(
+        response,
+        crate::provider_capability::UsageShape::OpenaiResponses,
+    )
+    .usage;
     if let Some(tier) = response
         .get("service_tier")
         .and_then(Value::as_str)
@@ -2564,24 +2584,88 @@ pub(crate) mod tests {
     async fn observerless_finish_settles_native_cache_unknown_and_zero_cost() {
         let _guard = DIRECT_PRICING_LOCK.lock().await;
         install_direct_pricing();
-        for (model, zero, expected) in [
-            ("ws-openai-known", false, 4_010),
-            ("ws-openai-unknown", false, 8_010),
-            ("ws-openai-known", true, 0),
+        for (model, response, expected_cost, expected_input, expected_output) in [
+            (
+                "ws-openai-known",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 21_000,
+                        "output_tokens": 1,
+                        "input_tokens_details": { "cached_tokens": 20_000 }
+                    }
+                }),
+                4_010,
+                1_000,
+                1,
+            ),
+            (
+                "ws-openai-unknown",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 21_000,
+                        "output_tokens": 1,
+                        "input_tokens_details": { "cached_tokens": 20_000 }
+                    }
+                }),
+                8_010,
+                1_000,
+                1,
+            ),
+            (
+                "ws-openai-known",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }),
+                0,
+                0,
+                0,
+            ),
+            (
+                "ws-openai-known",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 1_200,
+                        "output_tokens": 0,
+                        "input_tokens_details": {
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 300,
+                            "cache_write_tokens_details": {
+                                "ttl_30m_tokens": 200,
+                                "ttl_12h_tokens": 100
+                            }
+                        }
+                    }
+                }),
+                // 900*2 + 200*(2*5/4) + 100*(2*5/2).
+                2_800,
+                900,
+                0,
+            ),
+            (
+                "ws-openai-known",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 1_200,
+                        "output_tokens": 0,
+                        "input_tokens_details": {
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 300
+                        }
+                    }
+                }),
+                8_010,
+                900,
+                0,
+            ),
         ] {
             let fixture = DirectAccountingFixture::new().await;
             let reservation = fixture.reserve(model);
             let reservation_id = reservation.id().to_owned();
-            let response = serde_json::json!({
-                "usage": {
-                    "input_tokens": if zero { 0 } else { 21_000 },
-                    "output_tokens": if zero { 0 } else { 1 },
-                    "input_tokens_details": { "cached_tokens": if zero { 0 } else { 20_000 } }
-                }
-            });
             let (usage, usage_complete) = observed_response_usage(&response).unwrap();
-            assert_eq!(usage.cache_read_input_tokens, if zero { 0 } else { 20_000 });
-            assert_eq!(usage.input_tokens, if zero { 0 } else { 1_000 });
             let mut gateway = ResponsesWebSocketGateway::new(
                 fixture.lifecycle.clone(),
                 &fixture.auth,
@@ -2642,12 +2726,35 @@ pub(crate) mod tests {
                 .assert_settled(
                     &reservation_id,
                     model,
-                    expected,
-                    if zero { 0 } else { 1_000 },
-                    if zero { 0 } else { 1 },
+                    expected_cost,
+                    expected_input,
+                    expected_output,
                 )
                 .await;
         }
+    }
+
+    #[test]
+    fn native_cache_write_response_usage_preserves_provider_fields() {
+        let (usage, complete) = observed_response_usage(&serde_json::json!({
+            "usage": {
+                "input_tokens": 1200, "output_tokens": 1,
+                "input_tokens_details": {
+                    "cached_tokens": 0,
+                    "cache_write_tokens": 300,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": 200, "ttl_12h_tokens": 100
+                    }
+                }
+            }
+        }))
+        .expect("complete provider usage");
+        assert!(complete);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_write_input_tokens, Some(300));
+        assert_eq!(usage.cache_write_input_tokens_30m, Some(200));
+        assert_eq!(usage.cache_write_input_tokens_12h, Some(100));
+        assert_eq!(usage.input_tokens, 900);
     }
 
     #[test]

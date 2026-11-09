@@ -63,7 +63,10 @@ const TRACKED_STATUS_KEYS = new Set<TrackedStatus>(
 );
 
 function extractTriggerLabel(row: CacheKeepaliveRow): string {
-  const sourceText = `${row.display_reason ?? ''} ${row.reason}`;
+  const sourceText =
+    row.display_reason && row.display_reason !== row.reason
+      ? `${row.display_reason} · ${row.reason}`
+      : (row.display_reason ?? row.reason);
   const backtickToolMatch = sourceText.match(/tool_use:\s*`([^`]+)`/i);
   if (backtickToolMatch?.[1]) return backtickToolMatch[1];
   const toolMatch = sourceText.match(/tool_use:\s*([A-Za-z0-9_.:/-]+)/i);
@@ -79,6 +82,10 @@ function extractTriggerLabel(row: CacheKeepaliveRow): string {
   if (/snapshot too large/i.test(sourceText)) return 'Snapshot too large';
   if (/ambiguous turn/i.test(sourceText)) return 'Ambiguous turn';
   if (/agent-in-turn/i.test(sourceText)) return 'Agent in-turn';
+  if (/max renewals reached/i.test(sourceText)) return 'Max renewals reached';
+  if (/max duration reached/i.test(sourceText)) return 'Max duration reached';
+  if (/TTL expired before follow-up/i.test(sourceText)) return 'TTL expired';
+  if (/renewal dispatch unavailable/i.test(sourceText)) return 'Dispatch error';
   return 'Other';
 }
 
@@ -550,8 +557,12 @@ export function CacheKeepaliveSessionsDrawer({
 
   const enabled = principal.cache_keepalive?.enabled ?? false;
   const selectedQueryStatus =
-    enabled && !showNotTracked && selectedStatuses.size === 1
-      ? [...selectedStatuses][0]
+    enabled && !showNotTracked
+      ? selectedStatuses.size === TRACKED_STATUS_OPTIONS.length
+        ? 'tracked'
+        : selectedStatuses.size === 1
+          ? [...selectedStatuses][0]
+          : undefined
       : undefined;
 
   const query = useCacheKeepaliveSessions(
@@ -634,7 +645,10 @@ export function CacheKeepaliveSessionsDrawer({
       const key = row.error != null ? 'error' : row.state;
       computed[key] = (computed[key] ?? 0) + 1;
     }
-    if (selectedQueryStatus !== undefined) {
+    if (
+      selectedQueryStatus !== undefined &&
+      selectedQueryStatus !== 'tracked'
+    ) {
       computed[selectedQueryStatus] = Math.max(
         computed[selectedQueryStatus],
         allRows.filter(

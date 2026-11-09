@@ -34,7 +34,12 @@ export type CacheKeepaliveHorizon = z.infer<typeof CacheKeepaliveHorizonSchema>;
 
 export const CACHE_KEEPALIVE_STATUS_FILTERS = [
   'all',
-  ...CACHE_KEEPALIVE_STATES,
+  'tracked',
+  'renewed',
+  'scheduled',
+  'capped',
+  'expired',
+  'not_tracked',
   'error',
 ] as const;
 
