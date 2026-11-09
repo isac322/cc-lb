@@ -45,6 +45,30 @@ pub(crate) fn analyze(
     Some(observation)
 }
 
+/// Project provider-native usage without borrowing Anthropic creation counters.
+/// Unsupported request forms and malformed writes cannot establish cache state.
+pub(crate) fn project_usage(
+    native: &RequestNativeCacheObservation,
+    read_evidence: RequestCacheEvidence,
+    cached_tokens: u64,
+    write_evidence: RequestCacheEvidence,
+    write_tokens: Option<u64>,
+) -> (RequestCacheEvidence, Option<u64>, Option<u64>) {
+    if native.mode == "unknown"
+        || native.evidence_source.as_deref() == Some("unsupported_model_or_api")
+    {
+        return (RequestCacheEvidence::Unreported, None, None);
+    }
+    if write_evidence == RequestCacheEvidence::Invalid {
+        return (RequestCacheEvidence::Invalid, None, None);
+    }
+    let cached_tokens = match read_evidence {
+        RequestCacheEvidence::Zero | RequestCacheEvidence::Positive => Some(cached_tokens),
+        RequestCacheEvidence::Unreported | RequestCacheEvidence::Invalid => None,
+    };
+    (read_evidence, cached_tokens, write_tokens)
+}
+
 fn analyze_openai(
     body: &Value,
     model: &str,

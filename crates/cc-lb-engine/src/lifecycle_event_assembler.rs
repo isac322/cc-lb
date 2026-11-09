@@ -1463,47 +1463,30 @@ fn native_cache_with_usage(
         .parse
         .as_ref()
         .and_then(|parse| parse.native_cache.clone())?;
-    let evidence = partial
-        .usage
-        .cache_read_evidence
-        .unwrap_or(cc_lb_request_log::RequestCacheEvidence::Unreported);
+    let (evidence, cached_tokens, write_tokens) = crate::provider_cache::project_usage(
+        &native,
+        partial.usage.cache_read_evidence.unwrap_or_default(),
+        partial.usage.cache_read_input_tokens,
+        partial.usage.cache_write_evidence.unwrap_or_default(),
+        partial.usage.cache_write_input_tokens,
+    );
     native.evidence = evidence;
-    native.cached_tokens = match evidence {
-        cc_lb_request_log::RequestCacheEvidence::Zero
-        | cc_lb_request_log::RequestCacheEvidence::Positive => {
+    native.cached_tokens = cached_tokens
+        .filter(|_| partial.usage_seen)
+        .map(|cached_tokens| {
             let model = partial
                 .parse
                 .as_ref()
                 .and_then(|parse| parse.model.as_deref());
-            partial.usage_seen.then_some({
-                let tokens = crate::provider_cache::normalize_cached_tokens(
-                    model,
-                    partial.usage.cache_read_input_tokens,
-                );
-                // Older OpenAI cache contracts round token counts down to 128-token
-                // boundaries, but a reported positive observation must remain
-                // positive in durable request evidence.
-                if evidence == cc_lb_request_log::RequestCacheEvidence::Positive
-                    && partial.usage.cache_read_input_tokens > 0
-                {
-                    tokens.max(1)
-                } else {
-                    tokens
-                }
-            })
-        }
-        cc_lb_request_log::RequestCacheEvidence::Unreported
-        | cc_lb_request_log::RequestCacheEvidence::Invalid => None,
-    };
-    native.write_tokens = match partial.usage.cache_creation_evidence {
-        Some(
-            cc_lb_request_log::RequestCacheEvidence::Zero
-            | cc_lb_request_log::RequestCacheEvidence::Positive,
-        ) => partial
-            .usage_seen
-            .then_some(partial.usage.cache_creation_input_tokens),
-        _ => None,
-    };
+            let tokens = crate::provider_cache::normalize_cached_tokens(model, cached_tokens);
+            // Older OpenAI contracts round down, but affirmative reads remain positive.
+            if evidence == cc_lb_request_log::RequestCacheEvidence::Positive && cached_tokens > 0 {
+                tokens.max(1)
+            } else {
+                tokens
+            }
+        });
+    native.write_tokens = write_tokens.filter(|_| partial.usage_seen);
     Some(native)
 }
 
@@ -5616,6 +5599,79 @@ mod tests {
             cc_lb_request_log::RequestCacheEvidence::Positive
         );
     }
+    #[test]
+    fn native_cache_write_uses_provider_write_not_anthropic_creation() {
+        let mut partial = Partial {
+            parse: Some(ParseInfo {
+                model: Some("gpt-5".to_owned()),
+                native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                    provider: "openai".to_owned(),
+                    mode: "implicit".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            usage_seen: true,
+            ..Default::default()
+        };
+        let mut usage = serde_json::to_value(UsageSnapshot {
+            cache_read_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Zero),
+            cache_creation_input_tokens: 50,
+            cache_creation_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Positive),
+            cache_write_input_tokens: Some(300),
+            ..Default::default()
+        })
+        .expect("usage snapshot serializes");
+        usage["cache_write_evidence"] = serde_json::json!("positive");
+        partial.usage = serde_json::from_value(usage.clone()).expect("usage snapshot deserializes");
+
+        let row = finalize_base(&partial, &TerminationReason::Success, 200, 1, false);
+        let native = row.native_cache.expect("native cache observation");
+        assert_eq!(row.cache_write_input_tokens, Some(300));
+        assert_eq!(native.write_tokens, Some(300));
+
+        usage["cache_write_input_tokens"] = serde_json::json!(0);
+        usage["cache_write_evidence"] = serde_json::json!("zero");
+        partial.usage = serde_json::from_value(usage).expect("zero usage snapshot deserializes");
+        let zero = finalize_base(&partial, &TerminationReason::Success, 200, 1, false);
+        assert_eq!(
+            zero.native_cache
+                .expect("native cache observation")
+                .write_tokens,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn native_cache_write_none_does_not_fallback_to_anthropic_creation() {
+        let mut partial = Partial {
+            parse: Some(ParseInfo {
+                model: Some("gpt-5".to_owned()),
+                native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                    provider: "openai".to_owned(),
+                    mode: "implicit".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            usage_seen: true,
+            ..Default::default()
+        };
+        let mut usage = serde_json::to_value(UsageSnapshot {
+            cache_read_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Zero),
+            cache_creation_input_tokens: 50,
+            cache_creation_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Positive),
+            ..Default::default()
+        })
+        .expect("usage snapshot serializes");
+        usage["cache_write_evidence"] = serde_json::json!("unreported");
+        partial.usage = serde_json::from_value(usage).expect("usage snapshot deserializes");
+
+        let row = finalize_base(&partial, &TerminationReason::Success, 200, 1, false);
+        let native = row.native_cache.expect("native cache observation");
+        assert_eq!(native.write_tokens, None);
+    }
+
     #[test]
     fn follow_up_evidence_prioritizes_trailing_message_breakpoint_and_keeps_fingerprint() {
         let make_lookbacks = |tag: &str| {

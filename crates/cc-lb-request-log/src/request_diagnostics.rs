@@ -107,6 +107,12 @@ pub struct RequestDiagnosticsRecord {
     pub output_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
     pub duration_ms: u64,
     pub upstream_ttfb_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +177,9 @@ impl RequestDiagnosticsRecord {
             output_tokens: event.output_tokens,
             cache_read_input_tokens: event.cache_read_input_tokens,
             cache_creation_input_tokens: event.cache_creation_input_tokens,
+            cache_write_input_tokens: event.cache_write_input_tokens,
+            cache_write_input_tokens_30m: event.cache_write_input_tokens_30m,
+            cache_write_input_tokens_12h: event.cache_write_input_tokens_12h,
             duration_ms: event.duration_ms,
             upstream_ttfb_ms: event.upstream_ttfb_ms,
             matched_v3_cache_key: diagnostics.matched_v3_cache_key,
@@ -337,6 +346,60 @@ mod tests {
         let line = render(&record)?;
         assert!(line.starts_with(PREFIX));
         assert_eq!(line, expected);
+        Ok(())
+    }
+    #[test]
+    fn native_cache_write_fields_preserve_reported_totals_and_lifetimes() -> TestResult {
+        let mut event = sample_event();
+        event.cache_write_input_tokens = Some(300);
+        event.cache_write_input_tokens_30m = Some(200);
+        event.cache_write_input_tokens_12h = Some(100);
+        let diagnostics = RequestDiagnostics {
+            native_cache: Some(crate::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "responses".to_owned(),
+                scope: Some("resource".to_owned()),
+                identity_hash: Some("sha256:identity".to_owned()),
+                boundary: Some("resource".to_owned()),
+                evidence_source: Some("responses_usage".to_owned()),
+                cached_tokens: Some(120),
+                write_tokens: Some(300),
+                evidence: crate::RequestCacheEvidence::Positive,
+                retention_secs: Some(1_800),
+                expires_at_unix_secs: Some(2_800),
+                analysis_ms: Some(1.25),
+            }),
+            ..RequestDiagnostics::default()
+        };
+        let record = RequestDiagnosticsRecord::new(
+            RequestDiagnosticsSource::Live,
+            42,
+            "evt-1".to_owned(),
+            &event,
+            diagnostics,
+        );
+        let line = render(&record)?;
+        assert!(line.ends_with('\n'));
+        let parsed: Map<String, JsonValue> = serde_json::from_str(&line)?;
+        assert_eq!(parsed["cache_write_input_tokens"], json!(300));
+        assert_eq!(parsed["cache_write_input_tokens_30m"], json!(200));
+        assert_eq!(parsed["cache_write_input_tokens_12h"], json!(100));
+
+        let native = parsed
+            .get("native_cache")
+            .expect("native cache diagnostics field");
+        assert_eq!(native["provider"], json!("openai"));
+        assert_eq!(native["mode"], json!("responses"));
+        assert_eq!(native["scope"], json!("resource"));
+        assert_eq!(native["identity_hash"], json!("sha256:identity"));
+        assert_eq!(native["boundary"], json!("resource"));
+        assert_eq!(native["evidence_source"], json!("responses_usage"));
+        assert_eq!(native["cached_tokens"], json!(120));
+        assert_eq!(native["write_tokens"], json!(300));
+        assert_eq!(native["evidence"], json!("positive"));
+        assert_eq!(native["retention_secs"], json!(1_800));
+        assert_eq!(native["expires_at_unix_secs"], json!(2_800));
+        assert_eq!(native["analysis_ms"], json!(1.25));
         Ok(())
     }
 

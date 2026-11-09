@@ -26,7 +26,7 @@ use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
     UpstreamErrorCode, record_websocket_terminal_span,
 };
-use crate::usage_parser::{UsageCounts, observe_non_stream_json_value};
+use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
 use cc_lb_upstream::{SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
 #[derive(Clone, Debug)]
@@ -2186,6 +2186,18 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
         cache_read_input_tokens: usage.cache_read_input_tokens,
         cache_write_input_tokens: usage.cache_write_input_tokens,
+        cache_write_evidence: match usage.cache_write_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
         cache_write_input_tokens_30m: usage.cache_write_input_tokens_30m,
         cache_write_input_tokens_12h: usage.cache_write_input_tokens_12h,
         cache_read_evidence: match usage.cache_read_evidence {
@@ -2289,7 +2301,11 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
     if input.is_none() && output.is_none() {
         return None;
     }
-    let mut usage = observe_non_stream_json_value(response).usage;
+    let mut usage = observe_non_stream_json_value_for_shape(
+        response,
+        crate::provider_capability::UsageShape::OpenaiResponses,
+    )
+    .usage;
     if let Some(tier) = response
         .get("service_tier")
         .and_then(Value::as_str)
@@ -2308,6 +2324,29 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_cache_write_response_usage_preserves_provider_fields() {
+        let (usage, complete) = observed_response_usage(&serde_json::json!({
+            "usage": {
+                "input_tokens": 1200, "output_tokens": 1,
+                "input_tokens_details": {
+                    "cached_tokens": 0,
+                    "cache_write_tokens": 300,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": 200, "ttl_12h_tokens": 100
+                    }
+                }
+            }
+        }))
+        .expect("complete provider usage");
+        assert!(complete);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_write_input_tokens, Some(300));
+        assert_eq!(usage.cache_write_input_tokens_30m, Some(200));
+        assert_eq!(usage.cache_write_input_tokens_12h, Some(100));
+        assert_eq!(usage.input_tokens, 900);
+    }
 
     #[test]
     fn absent_null_and_empty_usage_remain_unknown_not_zero() {

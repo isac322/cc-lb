@@ -67,7 +67,13 @@ export function TokenCell({
   className?: string;
 }) {
   const b = tokenBreakdown(event);
-  const prompt = b.cache_read + b.cache_create_5m + b.cache_create_1h + b.input;
+  const nativeWrite = event.cache_write_input_tokens ?? 0;
+  const prompt =
+    b.cache_read +
+    b.cache_create_5m +
+    b.cache_create_1h +
+    nativeWrite +
+    b.input;
   const hit = cacheHitPercent(b, prompt);
   const rows = USAGE_CATEGORIES.map((category) => ({
     label: category.label,
