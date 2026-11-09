@@ -948,9 +948,10 @@ async fn create_upstream(
             None
         }
     };
-    let warmup_enabled = body
-        .warmup_enabled
-        .unwrap_or(kind == UpstreamKind::AnthropicOauth);
+    let warmup_enabled = body.warmup_enabled.unwrap_or(matches!(
+        kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ));
     // The api key is sealed under the preallocated id so the spec row and its
     // credential land in one storage transaction; no reader ever observes an
     // api-key upstream without its key.
@@ -3471,6 +3472,63 @@ mod tests {
         (status, body)
     }
 
+    async fn create_upstream_response(context: &TestContext, body: Value) -> (StatusCode, Value) {
+        let response = router()
+            .with_state(context.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/v1/upstreams")
+                    .header("content-type", "application/json")
+                    .extension(test_admin_identity())
+                    .body(AxumBody::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body read succeeds");
+        let body = serde_json::from_slice(&bytes).expect("response is json");
+        (status, body)
+    }
+
+    fn oauth_create_body(kind: &str, warmup_enabled: Option<bool>) -> Value {
+        let mut body = json!({
+            "name": format!("oauth-warmup-{kind}-{}", Uuid::new_v4().simple()),
+            "kind": kind,
+        });
+        if matches!(kind, "openai_oauth" | "gemini_oauth") {
+            body["oauth_token_bundle"] = json!({
+                "access_token": "test-access-token",
+                "refresh_token": "test-refresh-token",
+                "expires_at_unix_secs": 4_000_000_000u64,
+                "scopes": [],
+            });
+        }
+        if kind == "gemini_oauth" {
+            body["project_id"] = json!("test-project");
+        }
+        if let Some(warmup_enabled) = warmup_enabled {
+            body["warmup_enabled"] = json!(warmup_enabled);
+        }
+        body
+    }
+
+    fn api_key_create_body(kind: &str, warmup_enabled: Option<bool>) -> Value {
+        let mut body = json!({
+            "name": format!("api-key-warmup-{kind}-{}", Uuid::new_v4().simple()),
+            "kind": kind,
+            "api_key_value": "test-api-key",
+            "skip_preflight": true,
+        });
+        if let Some(warmup_enabled) = warmup_enabled {
+            body["warmup_enabled"] = json!(warmup_enabled);
+        }
+        body
+    }
+
     async fn spawn_warmup_server(status: StatusCode) -> (Url, tokio::task::JoinHandle<()>) {
         let app = Router::new().route(
             "/v1/messages",
@@ -3514,63 +3572,102 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_upstream_defaults_warmup_enabled_for_anthropic_oauth_kind() {
-        let context = test_context().await;
-        let body = serde_json::json!({
-            "name": "oauth-warmup-default",
-            "kind": "anthropic_oauth",
-        });
-        let response = router()
-            .with_state(context.state)
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/admin/v1/upstreams")
-                    .header("content-type", "application/json")
-                    .extension(test_admin_identity())
-                    .body(AxumBody::from(body.to_string()))
-                    .expect("request builds"),
-            )
-            .await
-            .expect("request completes");
+    async fn create_upstream_defaults_warmup_enabled_for_all_oauth_kinds() {
+        for kind in ["anthropic_oauth", "openai_oauth", "gemini_oauth"] {
+            let context = test_context().await;
+            let (status, body) =
+                create_upstream_response(&context, oauth_create_body(kind, None)).await;
 
-        assert_eq!(response.status(), StatusCode::CREATED);
-        let bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body read succeeds");
-        let body: Value = serde_json::from_slice(&bytes).expect("response is json");
-        assert_eq!(body["warmup_enabled"], true);
+            assert_eq!(status, StatusCode::CREATED, "{kind}");
+            assert_eq!(body["warmup_enabled"], true, "{kind}");
+            let upstream_id: Uuid = body["id"]
+                .as_str()
+                .expect("id is a string")
+                .parse()
+                .expect("id is a uuid");
+            let stored = context
+                .storage
+                .get_by_id(upstream_id)
+                .await
+                .expect("read succeeds")
+                .expect("upstream exists");
+            assert!(stored.warmup_enabled, "{kind}");
+            if kind == "anthropic_oauth" {
+                assert!(
+                    stored.oauth_credentials.is_none(),
+                    "Anthropic direct create keeps its no-credential shape"
+                );
+            } else {
+                assert!(stored.oauth_credentials.is_some(), "{kind}");
+            }
+        }
     }
 
     #[tokio::test]
-    async fn create_upstream_defaults_warmup_disabled_for_api_key_kind() {
-        let context = test_context().await;
-        let body = serde_json::json!({
-            "name": "api-key-warmup-default",
-            "kind": "anthropic_api_key",
-            "api_key_value": "test-api-key",
-            "skip_preflight": true,
-        });
-        let response = router()
-            .with_state(context.state)
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/admin/v1/upstreams")
-                    .header("content-type", "application/json")
-                    .extension(test_admin_identity())
-                    .body(AxumBody::from(body.to_string()))
-                    .expect("request builds"),
-            )
-            .await
-            .expect("request completes");
+    async fn create_upstream_preserves_explicitly_disabled_warmup_for_all_oauth_kinds() {
+        for kind in ["anthropic_oauth", "openai_oauth", "gemini_oauth"] {
+            let context = test_context().await;
+            let (status, body) =
+                create_upstream_response(&context, oauth_create_body(kind, Some(false))).await;
 
-        assert_eq!(response.status(), StatusCode::CREATED);
-        let bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body read succeeds");
-        let body: Value = serde_json::from_slice(&bytes).expect("response is json");
-        assert_eq!(body["warmup_enabled"], false);
+            assert_eq!(status, StatusCode::CREATED, "{kind}");
+            assert_eq!(body["warmup_enabled"], false, "{kind}");
+            let upstream_id: Uuid = body["id"]
+                .as_str()
+                .expect("id is a string")
+                .parse()
+                .expect("id is a uuid");
+            let stored = context
+                .storage
+                .get_by_id(upstream_id)
+                .await
+                .expect("read succeeds")
+                .expect("upstream exists");
+            assert!(!stored.warmup_enabled, "{kind}");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_upstream_keeps_warmup_disabled_for_all_api_key_kinds_when_omitted_or_false() {
+        for warmup_enabled in [None, Some(false)] {
+            for kind in ["anthropic_api_key", "openai_api_key", "gemini_api_key"] {
+                let context = test_context().await;
+                let (status, body) =
+                    create_upstream_response(&context, api_key_create_body(kind, warmup_enabled))
+                        .await;
+
+                assert_eq!(status, StatusCode::CREATED, "{kind} {warmup_enabled:?}");
+                assert_eq!(body["warmup_enabled"], false, "{kind} {warmup_enabled:?}");
+                let upstream_id: Uuid = body["id"]
+                    .as_str()
+                    .expect("id is a string")
+                    .parse()
+                    .expect("id is a uuid");
+                let stored = context
+                    .storage
+                    .get_by_id(upstream_id)
+                    .await
+                    .expect("read succeeds")
+                    .expect("upstream exists");
+                assert!(!stored.warmup_enabled, "{kind} {warmup_enabled:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_upstream_rejects_explicitly_enabled_warmup_for_all_api_key_kinds() {
+        for kind in ["anthropic_api_key", "openai_api_key", "gemini_api_key"] {
+            let context = test_context().await;
+            let body = json!({
+                "name": format!("api-key-warmup-rejected-{kind}"),
+                "kind": kind,
+                "warmup_enabled": true,
+            });
+            let (status, response_body) = create_upstream_response(&context, body).await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}");
+            assert_eq!(response_body["error"], "warmup_unsupported_kind", "{kind}");
+        }
     }
 
     #[tokio::test]
