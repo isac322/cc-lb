@@ -19,6 +19,7 @@ pub struct RecordedResponseRequest {
     pub raw_body: Vec<u8>,
     pub stream: bool,
     pub response_cache_options: Value,
+    pub headers: axum::http::HeaderMap,
 }
 
 #[derive(Clone, Default)]
@@ -113,8 +114,8 @@ async fn openai_handler(State(state): State<MockState>, request: Request) -> Res
     if request.method() != axum::http::Method::POST {
         return (StatusCode::METHOD_NOT_ALLOWED, "unexpected OpenAI method").into_response();
     }
-    let authorization = request
-        .headers()
+    let headers = request.headers().clone();
+    let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
     if authorization != Some("Bearer sk-openai-cache-test") {
@@ -175,6 +176,7 @@ async fn openai_handler(State(state): State<MockState>, request: Request) -> Res
         raw_body: body.to_vec(),
         stream,
         response_cache_options: options,
+        headers,
     });
     let cached_tokens = state
         .cached_tokens
@@ -246,6 +248,7 @@ pub struct OpenAiFixture {
     pub server: TestServer,
     pub mock: StrictOpenAiMock,
     pub principal_id: String,
+    pub upstream_id: String,
     key: String,
     pub client: reqwest::Client,
 }
@@ -284,6 +287,7 @@ impl OpenAiFixture {
             server,
             mock,
             principal_id,
+            upstream_id,
             key,
             client,
         }
@@ -331,10 +335,24 @@ impl OpenAiFixture {
     }
 
     pub async fn post(&self, session: &str, body: Value) -> reqwest::Response {
-        self.client
+        self.post_with_headers(session, body, &[]).await
+    }
+
+    pub async fn post_with_headers(
+        &self,
+        session: &str,
+        body: Value,
+        extra_headers: &[(&str, &str)],
+    ) -> reqwest::Response {
+        let mut request = self
+            .client
             .post(format!("http://{}/v1/responses", self.server.proxy_addr))
             .header("x-api-key", &self.key)
-            .header("x-session-id", session)
+            .header("x-session-id", session);
+        for (name, value) in extra_headers {
+            request = request.header(*name, *value);
+        }
+        request
             .json(&body)
             .send()
             .await
