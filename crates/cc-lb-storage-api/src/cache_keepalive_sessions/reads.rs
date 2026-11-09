@@ -149,7 +149,7 @@ pub struct CacheKeepaliveTurnRecord {
     pub cache_creation_input_tokens_5m: u64,
     pub cache_creation_input_tokens_1h: u64,
     pub cache_read_input_tokens: u64,
-    pub cost_micros: i64,
+    pub cost_micros: Option<i64>,
     pub hit_miss: String,
     pub ts: u64,
 }

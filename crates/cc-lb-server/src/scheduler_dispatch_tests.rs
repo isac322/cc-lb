@@ -1297,9 +1297,8 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
         .fetch_one(fixture.storage.pool())
         .await
         .expect("count turn projections");
-    // The fixture has no applicable cached-read price, so the request event is
-    // retained while the numeric turn projection stays absent.
-    assert_eq!(turn_count, 0);
+    // Measured renewal facts remain visible even when actual cost is unknown.
+    assert_eq!(turn_count, 1);
     let key_store = KeyStore::new(fixture.storage.clone());
     let key = key_store
         .get("principal", &key_id)

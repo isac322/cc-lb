@@ -230,7 +230,7 @@ fn turn_fixture(
         cache_creation_input_tokens_5m: seed.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: seed.cache_creation_input_tokens_1h,
         cache_read_input_tokens: seed.cache_read_input_tokens,
-        cost_micros: seed.cost_micros,
+        cost_micros: Some(seed.cost_micros),
         hit_miss: seed.hit_miss.to_owned(),
         ts: seed.ts,
     };

@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow, CacheKeepaliveProjectionStore,
-    CacheKeepaliveTurnRow, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
-    RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
-    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
+    CACHE_KEEPALIVE_UNKNOWN_COST_MICROS, CacheKeepaliveDecisionRow, CacheKeepaliveEvidenceRow,
+    CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent, RequestEventExportPage,
+    RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
+    RequestEventKeyLastUsedQuery, RequestEventListItem, RequestEventListQuery,
+    RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
+    StorageResult, model_filter_like_patterns,
 };
 use sqlx::{AssertSqlSafe, Row};
 use std::time::Instant;
@@ -955,7 +956,10 @@ async fn insert_keepalive_turn_in_tx(
         row.cache_read_input_tokens,
         "cache keepalive cache_read_input_tokens",
     )?)
-    .bind(row.cost_micros)
+    .bind(
+        row.cost_micros
+            .unwrap_or(CACHE_KEEPALIVE_UNKNOWN_COST_MICROS),
+    )
     .bind(&row.hit_miss)
     .bind(u64_to_i64(row.ts, "cache keepalive ts")?)
     .execute(&mut **tx)

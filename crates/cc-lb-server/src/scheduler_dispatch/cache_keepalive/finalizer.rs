@@ -227,9 +227,7 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
 
 fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProjections {
     RequestEventProjections {
-        // Turn projections require a known numeric price. Preserve the
-        // measured request event and unknown evidence rather than invent zero.
-        turn: input.cost_micros.map(|cost_micros| CacheKeepaliveTurnRow {
+        turn: Some(CacheKeepaliveTurnRow {
             source_ref_id: input.source_ref_id.to_owned(),
             session_key_hash: input.record.session_key_hash.clone(),
             principal_id: input.record.principal_id.clone(),
@@ -243,7 +241,7 @@ fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProject
             cache_creation_input_tokens_5m: input.usage.cache_creation_input_tokens_5m,
             cache_creation_input_tokens_1h: input.usage.cache_creation_input_tokens_1h,
             cache_read_input_tokens: input.usage.cache_read_input_tokens,
-            cost_micros,
+            cost_micros: input.cost_micros,
             hit_miss: input.hit_miss.to_owned(),
             ts: input.ts,
         }),
@@ -286,7 +284,63 @@ fn cache_keepalive_renewal_reason(hit_miss: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_keepalive_renewal_reason;
+
+    use super::{RenewalProjectionInput, cache_keepalive_renewal_reason, renewal_projections};
+    use cc_lb_engine::cache_keepalive::RenewalUsage;
+    use cc_lb_storage_api::{
+        CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
+        CacheTtl,
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn unknown_pricing_keeps_turn_projection_with_hit_identity() {
+        let record = CacheKeepaliveSessionRecord {
+            session_key_hash: "session".to_owned(),
+            principal_id: "principal".to_owned(),
+            accounting_key_id: None,
+            upstream_id: Uuid::nil(),
+            cycle_id: None,
+            generation: 1,
+            refresh_count: 0,
+            first_scheduled_at_unix_secs: 1,
+            cache_anchor_at_unix_secs: 1,
+            run_at_unix_secs: 2,
+            ttl: CacheTtl::Ttl5m,
+            status: CacheKeepaliveSessionStatus::Active,
+            enqueue_state: CacheKeepaliveEnqueueState::Enqueued,
+            running_since_unix_secs: None,
+            current_job_key: "job".to_owned(),
+            encrypted_payload: Vec::new(),
+            display_reason: "cache hit".to_owned(),
+            error: None,
+            config_snapshot: None,
+            terminal_reason: None,
+            expires_at_unix_secs: 3,
+            created_at_unix_secs: 1,
+            updated_at_unix_secs: 1,
+        };
+        let projections = renewal_projections(RenewalProjectionInput {
+            source_ref_id: "session:1",
+            record: &record,
+            model: "gpt-5",
+            usage: &RenewalUsage {
+                cache_read_input_tokens: 42,
+                provider_cost_unknown: true,
+                ..RenewalUsage::default()
+            },
+            cost_micros: None,
+            hit_miss: "hit",
+            authorized_after_dispatch: true,
+            generation: 1,
+            ts: 2,
+        });
+
+        let turn = projections.turn.expect("unknown-priced turn is retained");
+        assert_eq!(turn.hit_miss, "hit");
+        assert_eq!(turn.cost_micros, None);
+        assert_eq!(projections.decision.decision, "reschedule");
+    }
 
     #[test]
     fn cache_hit_reason_is_human_readable() {
