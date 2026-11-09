@@ -3,7 +3,10 @@
 use std::{
     future::Future,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -33,8 +36,11 @@ use tokio::{runtime::Runtime, sync::Barrier};
 
 struct PostgresConformanceBackend {
     url: String,
+    reused: tokio::sync::Mutex<Option<PostgresFixture>>,
+    schema_tainted: AtomicBool,
 }
 
+#[derive(Clone)]
 struct PostgresFixture {
     url: String,
     schema: String,
@@ -42,55 +48,19 @@ struct PostgresFixture {
 }
 
 static PRICE_CATALOG_SCENARIO_LOCK: Mutex<()> = Mutex::new(());
-
-#[async_trait]
-impl ConformanceBackend for PostgresConformanceBackend {
-    type Storage = PostgresStorage;
-    type Fixture = PostgresFixture;
-
-    async fn create_fixture(&self) -> anyhow::Result<Self::Fixture> {
-        let schema = schema_name();
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&self.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await?;
-        admin_pool.close().await;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(
-                PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
-            )
-            .await?;
-        PostgresStorage::new(pool.clone(), system_clock())
-            .initialize()
-            .await?;
-
-        Ok(PostgresFixture {
-            url: self.url.clone(),
-            schema,
-            pool,
-        })
+impl PostgresConformanceBackend {
+    fn new(url: String) -> Self {
+        Self {
+            url,
+            reused: tokio::sync::Mutex::new(None),
+            schema_tainted: AtomicBool::new(false),
+        }
     }
 
-    async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(
-                PgConnectOptions::from_str(&fixture.url)?
-                    .options([("search_path", fixture.schema.as_str())]),
-            )
-            .await?;
-        Ok(PostgresStorage::new(pool, system_clock()))
-    }
-
-    async fn teardown(&self, fixture: Self::Fixture) -> anyhow::Result<()> {
+    async fn cleanup(&self) -> anyhow::Result<()> {
+        let Some(fixture) = self.reused.lock().await.take() else {
+            return Ok(());
+        };
         fixture.pool.close().await;
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -103,6 +73,105 @@ impl ConformanceBackend for PostgresConformanceBackend {
         .execute(&admin_pool)
         .await?;
         admin_pool.close().await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ConformanceBackend for PostgresConformanceBackend {
+    type Storage = PostgresStorage;
+    type Fixture = PostgresFixture;
+
+    async fn create_fixture(&self) -> anyhow::Result<Self::Fixture> {
+        let mut reused = self.reused.lock().await;
+        if let Some(existing) = reused.as_ref()
+            && !self.schema_tainted.swap(false, Ordering::SeqCst)
+        {
+            sqlx::raw_sql(
+                "TRUNCATE TABLE \
+                 api_key_concurrency_holds_v1, audit_log_v1, cache_keepalive_decisions, \
+                 anthropic_compatibility_kv_v1, cache_keepalive_evidence, cache_keepalive_sessions, \
+                 cache_keepalive_turns, config_draft_v1, config_history_v1, \
+                 metadata_tier_mapping_override_v1, oauth_pkce_flows_v1, organization_metadata_v1, \
+                 overview_excluded_error_rollups_v1, pool_subscription_quota_history_v1, \
+                 price_catalog_snapshots_v1, principals_v1, prompt_cache_observations, \
+                 provider_native_cache_observations, request_events_v1, \
+                 upstream_plan_tier_history_v1, upstream_rate_limit_state_v1, \
+                 upstream_subscription_metadata_v1, upstream_subscription_quota_checkpoints_v1, \
+                 upstream_subscription_quota_latest_v1, usage_rollup_checkpoints_v1, \
+                 usage_rollups_v2, api_key_usage_buckets_v1, managed_api_keys_v1, \
+                 managed_api_key_index_v1, plugin_chains_v2, upstream_spec_v1, \
+                 upstream_affinity_v1, upstream_api_key_details_v1, upstream_api_key_secret_v1, \
+                 upstream_api_usage_v1, upstream_oauth_token_v1, upstream_status_v1, \
+                 warmup_attempts_v1 RESTART IDENTITY CASCADE; \
+                 DELETE FROM meta WHERE key NOT IN ('contract_version', 'backend_kind'); \
+                 DELETE FROM wasm_registry_v2 \
+                 WHERE original_filename != 'builtin://subscription-preference'; \
+                 DELETE FROM wasm_blobs_v2 \
+                 WHERE NOT EXISTS (SELECT 1 FROM wasm_registry_v2 r \
+                                   WHERE r.sha256 = wasm_blobs_v2.sha256); \
+                 DELETE FROM plan_tier_ratio_history_v1 \
+                 WHERE provenance != 'migration:0069_plan_tier_history'; \
+                 UPDATE plan_tier_ratio_history_v1 \
+                 SET effective_to_unix_millis = NULL \
+                 WHERE provenance = 'migration:0069_plan_tier_history'; \
+                 UPDATE api_key_usage_writers_v1 \
+                 SET writer_epoch = '00000000-0000-0000-0000-000000000000', \
+                     lease_until_unix_secs = 9223372036854775807, last_flush_id = NULL;",
+            )
+            .execute(&existing.pool)
+            .await?;
+            return Ok(existing.clone());
+        }
+        if let Some(existing) = reused.take() {
+            existing.pool.close().await;
+            let admin_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(PgConnectOptions::from_str(&existing.url)?)
+                .await?;
+            sqlx::query(AssertSqlSafe(format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE",
+                quote_ident(&existing.schema)
+            )))
+            .execute(&admin_pool)
+            .await?;
+            admin_pool.close().await;
+        }
+        let schema = schema_name();
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(PgConnectOptions::from_str(&self.url)?)
+            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE SCHEMA {}",
+            quote_ident(&schema)
+        )))
+        .execute(&admin_pool)
+        .await?;
+        admin_pool.close().await;
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(
+                PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
+            )
+            .await?;
+        PostgresStorage::new(pool.clone(), system_clock())
+            .initialize()
+            .await?;
+        let fixture = PostgresFixture {
+            url: self.url.clone(),
+            schema,
+            pool,
+        };
+        *reused = Some(fixture.clone());
+        Ok(fixture)
+    }
+
+    async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
+        Ok(PostgresStorage::new(fixture.pool.clone(), system_clock()))
+    }
+
+    async fn teardown(&self, _fixture: Self::Fixture) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -141,6 +210,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
         storage: &Self::Storage,
         sql: &'static str,
     ) -> anyhow::Result<u64> {
+        self.schema_tainted.store(true, Ordering::SeqCst);
         Ok(sqlx::query(sql)
             .execute(storage.pool())
             .await?
@@ -577,6 +647,14 @@ prompt_cache_observation_postgres_test!(
     purge_expired_before_removes_only_expired
 );
 prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_provider_unknown_expiry_is_retained_and_not_active_postgres,
+    provider_unknown_expiry_is_retained_and_not_active
+);
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_provider_newer_unreported_counts_replace_prior_counts_postgres,
+    provider_newer_unreported_counts_replace_prior_counts
+);
+prompt_cache_observation_postgres_test!(
     prompt_cache_observation_hydrate_after_restart_filters_expired_postgres,
     hydrate_after_restart_filters_expired
 );
@@ -734,12 +812,12 @@ fn upstream_api_key_sto05_workspace_update_notifies_postgres() {
     Runtime::new()
         .expect("tokio runtime")
         .block_on(async move {
-            let backend = PostgresConformanceBackend { url };
+            let backend = PostgresConformanceBackend::new(url);
             let fixture = backend.create_fixture().await?;
             let result = workspace_update_notifies(&backend, &fixture).await;
-            let teardown = backend.teardown(fixture).await;
+            let cleanup = backend.cleanup().await;
             result?;
-            teardown
+            cleanup
         })
         .unwrap_or_else(|error| panic!("sto05 workspace notify postgres: {error}"));
 }
@@ -829,12 +907,12 @@ fn upstream_api_key_sto03_fresh_schema_parity_postgres() {
     Runtime::new()
         .expect("tokio runtime")
         .block_on(async move {
-            let backend = PostgresConformanceBackend { url };
+            let backend = PostgresConformanceBackend::new(url);
             let fixture = backend.create_fixture().await?;
             let result = fresh_schema_parity(&fixture.pool).await;
-            let teardown = backend.teardown(fixture).await;
+            let cleanup = backend.cleanup().await;
             result?;
-            teardown
+            cleanup
         })
         .unwrap_or_else(|error| panic!("sto03 schema parity: {error}"));
 }
@@ -1036,7 +1114,13 @@ where
 
     Runtime::new()
         .expect("tokio runtime")
-        .block_on(scenario(Arc::new(PostgresConformanceBackend { url })))
+        .block_on(async move {
+            let backend = Arc::new(PostgresConformanceBackend::new(url));
+            let result = scenario(Arc::clone(&backend)).await;
+            let cleanup = backend.cleanup().await;
+            result?;
+            cleanup
+        })
         .unwrap_or_else(|error| panic!("{name} postgres: {error}"));
 }
 
@@ -1059,12 +1143,12 @@ fn postgres_url() -> Option<String> {
 }
 
 async fn concurrent_upload_returns_existed_once(url: String) -> anyhow::Result<()> {
-    let backend = PostgresConformanceBackend { url };
+    let backend = PostgresConformanceBackend::new(url);
     let fixture = backend.create_fixture().await?;
     let result = concurrent_upload_returns_existed_once_on_fixture(&backend, &fixture).await;
-    let teardown = backend.teardown(fixture).await;
+    let cleanup = backend.cleanup().await;
     result?;
-    teardown?;
+    cleanup?;
     Ok(())
 }
 

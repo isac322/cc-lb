@@ -45,6 +45,12 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_session_id: Option<String>,
@@ -64,10 +70,17 @@ pub struct RequestEvent {
     pub thinking_budget_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Requested provider-native thinking level; metadata only, not a routing hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_control_message_indices: Vec<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
+    /// Provider-native cache facts. Anthropic breakpoint fields remain
+    /// unchanged and are intentionally kept separate from this extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_cache: Option<crate::RequestNativeCacheObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_estimate_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,6 +95,12 @@ pub struct RequestEvent {
     pub cost_cache_creation_1h_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_cache_read_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_30m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_12h_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +184,8 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_message_stop_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_output_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_last_chunk_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_total_ms: Option<u64>,
@@ -174,6 +195,14 @@ pub struct RequestEvent {
     pub content_delta_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ping_count: Option<u64>,
+    /// Provider-neutral average time between consecutive output frames.
+    /// Anthropic SSE rows continue to use `inter_token_avg_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_inter_output_avg_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inter_token_avg_ms: Option<u64>,
     pub error_code: Option<String>,
@@ -195,7 +224,8 @@ pub struct RequestEvent {
     /// whose upstream body ended abnormally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_http_version: Option<String>,
-    /// Anthropic `request-id` upstream response header.
+    /// Provider response request identifier, such as `x-request-id`,
+    /// `request-id`, or `x-goog-request-id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -215,8 +245,9 @@ pub struct RequestEvent {
     pub upstream_body_error_io_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_body_error_h2_reason: Option<String>,
-    /// Set when a stream was accepted after upstream `message_stop` despite a
-    /// trailing body/decode failure. Never mirrored into
+    /// Optional warning or close diagnostic retained after a stream ended.
+    /// This may describe a trailing body/decode failure or another
+    /// provider-neutral transport condition and is not mirrored into
     /// `upstream_error_type`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_stream_warning_type: Option<String>,
@@ -287,6 +318,29 @@ mod tests {
         let restored: RequestEvent =
             serde_json::from_value(json).expect("deserialize request latency fields");
         assert_eq!(restored, event);
+    }
+
+    #[test]
+    fn websocket_neutral_timing_and_provider_identity_roundtrip() {
+        let event = RequestEvent {
+            stream_first_output_ms: Some(8),
+            stream_last_chunk_ms: Some(34),
+            body_chunk_count: Some(4),
+            stream_total_ms: Some(40),
+            stream_inter_output_avg_ms: Some(8),
+            provider_session_id: Some("resp_123".to_owned()),
+            provider_connection_id: Some("conn_456".to_owned()),
+            ..RequestEvent::default()
+        };
+        let json = serde_json::to_value(&event).expect("serialize websocket fields");
+        assert_eq!(json["stream_first_output_ms"], 8);
+        assert_eq!(json["stream_inter_output_avg_ms"], 8);
+        assert_eq!(json["provider_session_id"], "resp_123");
+        assert_eq!(json["provider_connection_id"], "conn_456");
+        assert_eq!(
+            serde_json::from_value::<RequestEvent>(json).expect("deserialize websocket fields"),
+            event
+        );
     }
 
     const DIAGNOSTIC_KEYS: [&str; 11] = [
@@ -382,5 +436,30 @@ mod tests {
         let legacy: RequestEvent =
             serde_json::from_value(legacy).expect("deserialize legacy event");
         assert_eq!(legacy.tool_use_prompt_tokens, None);
+    }
+    #[test]
+    fn native_cache_observation_serializes_without_raw_identity() {
+        let event = RequestEvent {
+            native_cache: Some(crate::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                scope: Some("org=o1;region=us".to_owned()),
+                identity_hash: Some("sha256:abc".to_owned()),
+                boundary: Some("latest_message=3".to_owned()),
+                evidence_source: Some("provider_usage_metadata".to_owned()),
+                cached_tokens: Some(256),
+                write_tokens: None,
+                evidence: crate::RequestCacheEvidence::Positive,
+                retention_secs: Some(1_800),
+                expires_at_unix_secs: None,
+                analysis_ms: Some(0.5),
+            }),
+            ..RequestEvent::default()
+        };
+        let json = serde_json::to_value(&event).expect("serialize native cache");
+        assert_eq!(json["native_cache"]["provider"], "openai");
+        assert_eq!(json["native_cache"]["cached_tokens"], 256);
+        assert!(json.to_string().contains("sha256:abc"));
+        assert!(!json.to_string().contains("raw prompt"));
     }
 }

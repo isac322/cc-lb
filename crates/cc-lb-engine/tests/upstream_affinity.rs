@@ -1,4 +1,8 @@
-use crate::common::{TestAuthn, TestState, collect_body, messages_request};
+use crate::common::{TestAuthn, TestLifecycleBus, TestState, collect_body, messages_request};
+use crate::lifecycle_client_disconnect::client_disconnect_support::{
+    assert_error_terminal, assert_one_final, assert_responses_failed, assert_stream_failure_once,
+    lifecycle_receiver, sqlite_storage,
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -11,12 +15,16 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_clock::TestClock;
 use cc_lb_control::{
-    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry, UpstreamStatusSnapshot,
+    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, RequestEventBus, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
 };
-use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProxyError, UpstreamDispatch};
+use cc_lb_engine::{
+    DispatchError, Lifecycle, LifecycleConfig, ProviderScope, ProxyError, UpstreamDispatch,
+};
 use cc_lb_storage_api::{
-    StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
-    UpstreamAffinityKind, UpstreamAffinityStore,
+    MetaStore, StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
+    UpstreamAffinityKind, UpstreamAffinityStore, UpstreamCreate, UpstreamStore,
+    upstream::UpstreamKind,
 };
 use cc_lb_upstream::SignedRequest;
 use http::header::CONTENT_TYPE;
@@ -148,17 +156,22 @@ impl UpstreamDispatch for RecordingDispatch {
 }
 
 #[derive(Default)]
-struct MemoryAffinityStore {
+pub(super) struct MemoryAffinityStore {
     bindings: Mutex<HashMap<UpstreamAffinityKey, UpstreamAffinityBinding>>,
+    owner_epochs: Mutex<HashMap<Uuid, u64>>,
     resolve_failure: Mutex<Option<String>>,
     bind_failure: Mutex<Option<String>>,
 }
 
 impl MemoryAffinityStore {
+    pub(crate) fn fail_bind(&self, message: &str) {
+        *self.bind_failure.lock().expect("bind failure lock") = Some(message.to_owned());
+    }
     fn insert(&self, key: UpstreamAffinityKey, upstream_id: Uuid) {
         self.insert_binding(UpstreamAffinityBinding {
             key,
             upstream_id,
+            owner_epoch: 0,
             observed_at_unix_secs: TEST_NOW_UNIX_SECS,
             expires_at_unix_secs: None,
         });
@@ -178,9 +191,31 @@ impl MemoryAffinityStore {
             .get(key)
             .map(|binding| binding.upstream_id)
     }
+    fn binding_epoch_for(&self, key: &UpstreamAffinityKey) -> Option<u64> {
+        self.bindings
+            .lock()
+            .expect("affinity binding lock")
+            .get(key)
+            .map(|binding| binding.owner_epoch)
+    }
 
     fn len(&self) -> usize {
         self.bindings.lock().expect("affinity binding lock").len()
+    }
+    fn set_owner_epoch(&self, upstream_id: Uuid, owner_epoch: u64) {
+        self.owner_epochs
+            .lock()
+            .expect("owner epoch lock")
+            .insert(upstream_id, owner_epoch);
+    }
+
+    fn owner_epoch(&self, upstream_id: Uuid) -> u64 {
+        self.owner_epochs
+            .lock()
+            .expect("owner epoch lock")
+            .get(&upstream_id)
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -215,8 +250,16 @@ impl UpstreamAffinityStore for MemoryAffinityStore {
             .iter()
             .filter_map(|key| bindings.get(key))
             .filter(|binding| binding_is_active(binding, now_unix_secs, ttl_secs))
+            .filter(|binding| binding.owner_epoch == self.owner_epoch(binding.upstream_id))
             .cloned()
             .collect())
+    }
+    async fn read_upstream_owner_epoch(
+        &self,
+        upstream_id: Uuid,
+        _expected_spec_revision: u64,
+    ) -> StorageResult<Option<u64>> {
+        Ok(Some(self.owner_epoch(upstream_id)))
     }
 
     async fn bind_upstream_affinities(
@@ -227,6 +270,13 @@ impl UpstreamAffinityStore for MemoryAffinityStore {
     ) -> StorageResult<()> {
         if let Some(message) = self.bind_failure.lock().expect("bind failure lock").clone() {
             return Err(StorageError::Unavailable { message });
+        }
+        for binding in incoming {
+            if binding.owner_epoch != self.owner_epoch(binding.upstream_id) {
+                return Err(StorageError::Conflict {
+                    message: "upstream owner epoch differs".to_owned(),
+                });
+            }
         }
 
         let mut prepared = HashMap::<UpstreamAffinityKey, UpstreamAffinityBinding>::new();
@@ -330,6 +380,29 @@ fn openai_upstream_record(
     let mut record = upstream_record(id, name, enabled);
     record.kind = cc_lb_storage_api::upstream::UpstreamKind::OpenaiApiKey;
     record
+}
+
+fn gemini_upstream_record(
+    id: Uuid,
+    name: &str,
+    enabled: bool,
+) -> cc_lb_storage_api::UpstreamRecord {
+    let mut record = upstream_record(id, name, enabled);
+    record.kind = cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey;
+    record
+}
+
+fn gemini_cached_contents_request(body: Value) -> Request<Bytes> {
+    let mut request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1beta/cachedContents")
+        .header("x-api-key", crate::common::managed_api_key())
+        .body(Bytes::from(body.to_string()))
+        .expect("Gemini cached contents request builds");
+    request
+        .extensions_mut()
+        .insert(ProviderScope(cc_lb_domain::Provider::Gemini));
+    request
 }
 
 fn responses_request(body: Value) -> Request<Bytes> {
@@ -477,6 +550,7 @@ async fn legacy_null_binding_expires_at_retention_boundary_without_read_extensio
     store.insert_binding(UpstreamAffinityBinding {
         key: affinity_key("retention-boundary"),
         upstream_id: origin,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS - 9,
         expires_at_unix_secs: None,
     });
@@ -529,12 +603,14 @@ async fn memory_affinity_purge_removes_explicit_and_retention_expiry_in_bounded_
     store.insert_binding(UpstreamAffinityBinding {
         key: affinity_key("active"),
         upstream_id: origin,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS,
         expires_at_unix_secs: None,
     });
     store.insert_binding(UpstreamAffinityBinding {
         key: affinity_key("retention-expired"),
         upstream_id: origin,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS - 10,
         expires_at_unix_secs: None,
     });
@@ -542,6 +618,7 @@ async fn memory_affinity_purge_removes_explicit_and_retention_expiry_in_bounded_
         key: affinity_key("explicit-expired"),
         upstream_id: origin,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+        owner_epoch: 0,
         expires_at_unix_secs: Some(TEST_NOW_UNIX_SECS),
     });
 
@@ -587,6 +664,7 @@ async fn memory_affinity_bind_replaces_expired_target_without_waiting_for_purge(
     store.insert_binding(UpstreamAffinityBinding {
         key: key.clone(),
         upstream_id: old,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS - 10,
         expires_at_unix_secs: None,
     });
@@ -596,6 +674,7 @@ async fn memory_affinity_bind_replaces_expired_target_without_waiting_for_purge(
             &[UpstreamAffinityBinding {
                 key: key.clone(),
                 upstream_id: new,
+                owner_epoch: 0,
                 observed_at_unix_secs: TEST_NOW_UNIX_SECS,
                 expires_at_unix_secs: None,
             }],
@@ -633,6 +712,10 @@ async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
     assert_eq!(
         store.upstream_for(&affinity_key("opaque-known")),
         Some(origin)
+    );
+    assert_eq!(
+        store.binding_epoch_for(&affinity_key("opaque-known")),
+        Some(0)
     );
 
     let pinned_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
@@ -767,6 +850,7 @@ async fn no_failover_when_request_affinity_pinned() {
     store.insert_binding(UpstreamAffinityBinding {
         key: affinity_key("opaque-pinned"),
         upstream_id: origin,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS,
         expires_at_unix_secs: None,
     });
@@ -799,6 +883,35 @@ async fn no_failover_when_request_affinity_pinned() {
         dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
         &["http://origin.local/v1/messages".to_owned()]
     );
+}
+
+#[tokio::test]
+async fn stale_owner_epoch_binding_is_treated_as_unbound() {
+    let owner = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert_binding(UpstreamAffinityBinding {
+        key: affinity_key("stale-owner-epoch"),
+        upstream_id: owner,
+        owner_epoch: 1,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+        expires_at_unix_secs: None,
+    });
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let lifecycle = lifecycle(
+        vec![upstream_record(owner, "owner", true)],
+        dispatch.clone(),
+        Some(store),
+    );
+
+    let response = handle_authenticated(
+        &lifecycle,
+        messages_request(opaque_request(&["stale-owner-epoch"], false)),
+    )
+    .await
+    .expect("stale affinity request handled");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(dispatch.call_count(), 0);
 }
 
 #[tokio::test]
@@ -1073,6 +1186,356 @@ async fn sse_bind_failure_suppresses_the_encrypted_content_block() {
     assert!(!body.contains(ciphertext));
     assert!(!body.contains(&ciphertext[..10]));
     assert_eq!(dispatch.call_count(), 1);
+}
+
+fn provider_request(provider: cc_lb_domain::Provider, path: &str, body: Value) -> Request<Bytes> {
+    let mut request = Request::builder()
+        .method(http::Method::POST)
+        .uri(path)
+        .header("x-api-key", crate::common::managed_api_key())
+        .body(Bytes::from(body.to_string()))
+        .expect("provider request builds");
+    request
+        .extensions_mut()
+        .insert(cc_lb_engine::ProviderScope(provider));
+    request
+}
+
+#[tokio::test]
+async fn provider_affinity_store_failures_use_native_503() -> Result<(), Box<dyn std::error::Error>>
+{
+    let cases = [
+        (
+            cc_lb_domain::Provider::Anthropic,
+            upstream_record(Uuid::from_u128(2), "anthropic-owner", true),
+            "/v1/messages",
+            json!({"model":"claude-test","messages":[]}),
+            json!({"type":"message","container":{"id":"container-bind-failure"}}),
+            UpstreamAffinityKind::AnthropicContainerId,
+            "container-bind-failure",
+        ),
+        (
+            cc_lb_domain::Provider::Openai,
+            openai_upstream_record(Uuid::from_u128(2), "openai-owner", true),
+            "/v1/responses",
+            json!({"model":"gpt-test","input":[]}),
+            json!({"id":"resp-bind-failure","object":"response","status":"completed"}),
+            UpstreamAffinityKind::OpenaiResponseId,
+            "resp-bind-failure",
+        ),
+        (
+            cc_lb_domain::Provider::Gemini,
+            {
+                let mut record = upstream_record(Uuid::from_u128(2), "gemini-owner", true);
+                record.kind = cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey;
+                record
+            },
+            "/v1beta/models/gemini-test:generateContent",
+            json!({"contents":[],"cachedContent":"cachedContents/request-bind-failure"}),
+            json!({"candidates":[]}),
+            UpstreamAffinityKind::GeminiCachedContent,
+            "cachedContents/request-bind-failure",
+        ),
+    ];
+
+    for (provider, record, path, request_body, response_body, kind, raw_key) in cases {
+        let dir = tempfile::tempdir()?;
+        let storage = Arc::new(sqlite_storage(&dir).await?);
+        let bus = TestLifecycleBus::new()
+            .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
+        let mut events = lifecycle_receiver(&bus);
+        let mut updates = bus.bus.subscribe();
+        let store = Arc::new(MemoryAffinityStore::default());
+        if provider == cc_lb_domain::Provider::Gemini {
+            // Gemini learns no response keys. A valid cachedContent reference
+            // can fail at lookup, but cannot produce a buffered pending bind.
+            *store.resolve_failure.lock().expect("resolve failure lock") =
+                Some("forced affinity store failure".to_owned());
+        } else {
+            *store.bind_failure.lock().expect("bind failure lock") =
+                Some("forced affinity store failure".to_owned());
+        }
+        let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(response_body));
+        let lifecycle = lifecycle(vec![record], dispatch.clone(), Some(store.clone()))
+            .with_event_bus(bus.bus_arc());
+        let (status, _, body) = collect_body(
+            handle_authenticated(&lifecycle, provider_request(provider, path, request_body))
+                .await
+                .expect("provider affinity bind failure handled"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{provider:?}");
+        let body: Value = serde_json::from_slice(&body).expect("native affinity error JSON");
+        assert_eq!(
+            body["error"]["message"],
+            "upstream affinity is unavailable for opaque request content",
+        );
+        match provider {
+            cc_lb_domain::Provider::Anthropic => {
+                assert_eq!(body["type"], "error");
+                assert_eq!(body["error"]["type"], "api_error");
+            }
+            cc_lb_domain::Provider::Openai => {
+                assert!(body.get("type").is_none());
+                assert_eq!(body["error"]["type"], "api_error");
+                assert!(body["error"].get("param").is_some());
+                assert!(body["error"].get("code").is_some());
+            }
+            cc_lb_domain::Provider::Gemini => {
+                assert!(body.get("type").is_none());
+                assert_eq!(body["error"]["code"], 503);
+                assert_eq!(body["error"]["status"], "UNAVAILABLE");
+            }
+        }
+        assert_eq!(
+            dispatch.call_count(),
+            usize::from(provider != cc_lb_domain::Provider::Gemini),
+        );
+        assert_eq!(
+            store.upstream_for(&UpstreamAffinityKey {
+                principal_id: "principal-test".to_owned(),
+                provider: match provider {
+                    cc_lb_domain::Provider::Anthropic => "anthropic".to_owned(),
+                    cc_lb_domain::Provider::Openai => "openai".to_owned(),
+                    cc_lb_domain::Provider::Gemini => "gemini".to_owned(),
+                },
+                kind,
+                value_sha256: Sha256::digest(raw_key.as_bytes()).into(),
+            }),
+            None,
+            "{provider:?} failed bind must not persist affinity",
+        );
+        if provider == cc_lb_domain::Provider::Gemini {
+            assert_error_terminal(&mut events, 503, "upstream_affinity_unavailable").await;
+        } else {
+            assert_stream_failure_once(
+                &mut events,
+                "upstream_affinity_error",
+                503,
+                "upstream_affinity_unavailable",
+            )
+            .await;
+        }
+        assert_one_final(&mut updates).await;
+        let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, 503);
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("upstream_affinity_unavailable")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn buffered_response_affinity_extraction_failure_uses_native_503_and_one_final()
+-> Result<(), Box<dyn std::error::Error>> {
+    for provider in [
+        cc_lb_domain::Provider::Anthropic,
+        cc_lb_domain::Provider::Openai,
+    ] {
+        let dir = tempfile::tempdir()?;
+        let storage = Arc::new(sqlite_storage(&dir).await?);
+        let bus = TestLifecycleBus::new()
+            .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
+        let mut events = lifecycle_receiver(&bus);
+        let mut updates = bus.bus.subscribe();
+        let owner = Uuid::from_u128(2);
+        let (record, path, request, response) = match provider {
+            cc_lb_domain::Provider::Anthropic => (
+                upstream_record(owner, "anthropic-owner", true),
+                "/v1/messages",
+                json!({"model":"claude-test","messages":[]}),
+                json!({"type":"message","content":[{
+                    "type":"web_search_tool_result",
+                    "content": (0..1025).map(|i| json!({"encrypted_content":format!("private-state-{i}")})).collect::<Vec<_>>(),
+                }]}),
+            ),
+            cc_lb_domain::Provider::Openai => (
+                openai_upstream_record(owner, "openai-owner", true),
+                "/v1/responses",
+                json!({"model":"gpt-test","input":[]}),
+                json!({"id":"resp-too-many","object":"response","status":"completed",
+                    "output": (0..1025).map(|i| json!({"type":"reasoning","encrypted_content":format!("private-state-{i}")})).collect::<Vec<_>>(),
+                }),
+            ),
+            _ => unreachable!(),
+        };
+        let store = Arc::new(MemoryAffinityStore::default());
+        let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(response));
+        let lifecycle = lifecycle(vec![record], dispatch.clone(), Some(store.clone()))
+            .with_event_bus(bus.bus_arc());
+        let (status, _, body) = collect_body(
+            handle_authenticated(&lifecycle, provider_request(provider, path, request)).await?,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let value: Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            value["error"]["message"],
+            "upstream affinity is unavailable for opaque request content"
+        );
+        assert_eq!(value["error"]["type"], "api_error");
+        if provider == cc_lb_domain::Provider::Anthropic {
+            assert_eq!(value["type"], "error");
+        } else {
+            assert!(
+                value.get("type").is_none(),
+                "OpenAI has no Anthropic wrapper"
+            );
+            assert!(value["error"].get("code").is_some());
+            assert!(value["error"].get("param").is_some());
+        }
+        assert!(!String::from_utf8_lossy(&body).contains("private-state"));
+        assert_eq!(
+            store.len(),
+            0,
+            "failed extraction never binds response state"
+        );
+        assert_eq!(dispatch.call_count(), 1);
+        assert_stream_failure_once(
+            &mut events,
+            "upstream_affinity_error",
+            503,
+            "upstream_affinity_unavailable",
+        )
+        .await;
+        assert_one_final(&mut updates).await;
+        let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, 503);
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("upstream_affinity_unavailable")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_sse_bind_failure_emits_native_failed_without_binding_pending_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new()
+        .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
+    let mut events = lifecycle_receiver(&bus);
+    let mut updates = bus.bus.subscribe();
+    let owner = Uuid::from_u128(2);
+    let store = Arc::new(MemoryAffinityStore::default());
+    let known = UpstreamAffinityKey {
+        principal_id: "principal-test".to_owned(),
+        provider: "openai".to_owned(),
+        kind: UpstreamAffinityKind::OpenaiResponseId,
+        value_sha256: Sha256::digest(b"resp-known").into(),
+    };
+    store.insert(known, owner);
+    *store.bind_failure.lock().expect("bind failure lock") =
+        Some("private failed state".to_owned());
+    let first = Bytes::from_static(
+        b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"partial\"}\n\n",
+    );
+    let blocked = Bytes::from_static(
+        b"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":8,\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"private-response-state\"}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":9,\"response\":{\"status\":\"completed\"}}\n\n",
+    );
+    let dispatch =
+        RecordingDispatch::with_response(ResponseSpec::SseChunks(vec![first.clone(), blocked]));
+    let lifecycle = lifecycle(
+        vec![openai_upstream_record(owner, "openai-owner", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    )
+    .with_event_bus(bus.bus_arc());
+    let (status, _, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            responses_request(json!({
+                "model":"gpt-test","stream":true,"previous_response_id":"resp-known",
+                "input":[{"type":"reasoning","encrypted_content":"private-pending-state"}],
+            })),
+        )
+        .await?,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(&first));
+    let failure = assert_responses_failed(&body, None, 8);
+    assert_eq!(
+        failure["response"]["error"]["message"],
+        "upstream affinity is unavailable for opaque request content"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("private-"));
+    assert_eq!(
+        store.len(),
+        1,
+        "neither blocked response nor pending request key is bound"
+    );
+    assert_eq!(dispatch.call_count(), 1);
+    assert_stream_failure_once(
+        &mut events,
+        "upstream_affinity_error",
+        200,
+        "upstream_stream_error",
+    )
+    .await;
+    assert_one_final(&mut updates).await;
+    let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn healthy_native_buffered_responses_preserve_bytes_and_cached_content_owner() {
+    let owner = Uuid::from_u128(2);
+    for provider in [
+        cc_lb_domain::Provider::Openai,
+        cc_lb_domain::Provider::Gemini,
+    ] {
+        let store = Arc::new(MemoryAffinityStore::default());
+        let (record, path, request, response) = if provider == cc_lb_domain::Provider::Openai {
+            (
+                openai_upstream_record(owner, "openai-owner", true),
+                "/v1/responses",
+                json!({"model":"gpt-test","input":[]}),
+                json!({"id":"resp-healthy","object":"response","status":"completed","output":[]}),
+            )
+        } else {
+            store.insert(
+                UpstreamAffinityKey {
+                    principal_id: "principal-test".to_owned(),
+                    provider: "gemini".to_owned(),
+                    kind: UpstreamAffinityKind::GeminiCachedContent,
+                    value_sha256: Sha256::digest(b"cachedContents/healthy").into(),
+                },
+                owner,
+            );
+            let mut record = upstream_record(owner, "gemini-owner", true);
+            record.kind = cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey;
+            (
+                record,
+                "/v1beta/models/gemini-test:generateContent",
+                json!({"contents":[],"cachedContent":"cachedContents/healthy"}),
+                json!({"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}),
+            )
+        };
+        let raw = Bytes::from(response.to_string());
+        let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(response));
+        let lifecycle = lifecycle(vec![record], dispatch.clone(), Some(store.clone()));
+        let (status, _, body) = collect_body(
+            handle_authenticated(&lifecycle, provider_request(provider, path, request))
+                .await
+                .expect("healthy native request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, raw, "healthy provider bytes stay unchanged");
+        assert_eq!(dispatch.call_count(), 1);
+        assert_eq!(store.len(), 1);
+    }
 }
 #[tokio::test]
 async fn ordinary_anthropic_sse_without_affinity_state_passes_through() {
@@ -1610,4 +2073,238 @@ fn gzip_without_trailer(body: &Bytes) -> Bytes {
     encoder.write_all(body).expect("gzip write succeeds");
     let compressed = encoder.finish().expect("gzip finish succeeds");
     Bytes::copy_from_slice(&compressed[..compressed.len() - 8])
+}
+
+#[tokio::test]
+async fn gemini_cached_contents_bind_failure_and_missing_store_fail_closed() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    for missing_store in [false, true] {
+        let store = Arc::new(MemoryAffinityStore::default());
+        *store.bind_failure.lock().expect("bind failure lock") =
+            Some("forced bind failure".to_owned());
+        let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+            "name": "cachedContents/test-cache",
+            "expireTime": "2100-01-01T00:00:00Z",
+        })));
+        let lifecycle = lifecycle(
+            vec![gemini_upstream_record(upstream, "gemini", true)],
+            dispatch.clone(),
+            (!missing_store).then(|| store.clone()),
+        );
+
+        let (status, _, body) = collect_body(
+            handle_authenticated(
+                &lifecycle,
+                gemini_cached_contents_request(json!({
+                    "model": "models/gemini-2.5-flash",
+                    "contents": [],
+                })),
+            )
+            .await
+            .expect("Gemini cached contents request handled"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(dispatch.call_count(), if missing_store { 0 } else { 1 });
+        let error_body: Value = serde_json::from_slice(&body).expect("Gemini error body JSON");
+        assert_eq!(error_body["error"]["code"], 503);
+        assert_eq!(error_body["error"]["status"], "UNAVAILABLE");
+        assert_eq!(store.len(), 0);
+        assert!(!String::from_utf8_lossy(&body).contains("cachedContents/test-cache"));
+    }
+}
+
+#[tokio::test]
+async fn gemini_cached_contents_create_binds_routed_owner_epoch_before_return() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.set_owner_epoch(upstream, 7);
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "name": "cachedContents/owner-epoch",
+        "expireTime": "2100-01-01T00:00:00Z",
+    })));
+    let lifecycle = lifecycle(
+        vec![gemini_upstream_record(upstream, "gemini", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let response = handle_authenticated(
+        &lifecycle,
+        gemini_cached_contents_request(json!({
+            "model": "models/gemini-2.5-flash",
+            "contents": [],
+        })),
+    )
+    .await
+    .expect("Gemini cached contents request handled");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(dispatch.call_count(), 1);
+    let key = UpstreamAffinityKey {
+        principal_id: "principal-test".to_owned(),
+        provider: "gemini".to_owned(),
+        kind: UpstreamAffinityKind::GeminiCachedContent,
+        value_sha256: Sha256::digest(b"cachedContents/owner-epoch").into(),
+    };
+    assert_eq!(store.binding_epoch_for(&key), Some(7));
+    assert_eq!(
+        store
+            .bindings
+            .lock()
+            .expect("affinity binding lock")
+            .get(&key)
+            .expect("binding persisted before response is returned")
+            .expires_at_unix_secs,
+        Some(4_102_444_800),
+    );
+}
+
+#[tokio::test]
+async fn gemini_cached_contents_body_collection_failure_returns_native_error_without_binding() {
+    use cc_lb_control::RequestEventBus as _;
+
+    let test_bus = crate::common::TestLifecycleBus::new();
+    let mut events = test_bus.bus.subscribe_lifecycle();
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    let dispatch =
+        RecordingDispatch::with_response(ResponseSpec::JsonThenError(Bytes::from_static(
+            br#"{"name":"cachedContents/incomplete","expireTime":"2100-01-01T00:00:00Z"}"#,
+        )));
+    let lifecycle = lifecycle(
+        vec![gemini_upstream_record(upstream, "gemini", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    )
+    .with_event_bus(test_bus.bus.clone());
+
+    let (status, _, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            gemini_cached_contents_request(json!({
+                "model": "models/gemini-2.5-flash",
+                "contents": [],
+            })),
+        )
+        .await
+        .expect("Gemini cached contents request handled"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(dispatch.call_count(), 1);
+    assert_eq!(store.len(), 0);
+    let terminal_statuses = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            cc_lb_lifecycle::LifecycleEvent::RequestTerminated { client_status, .. } => {
+                Some(client_status)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_statuses, vec![status.as_u16()]);
+    let error_body: Value = serde_json::from_slice(&body).expect("Gemini error body JSON");
+    assert_eq!(error_body["error"]["code"], 503);
+    assert_eq!(error_body["error"]["status"], "UNAVAILABLE");
+    assert!(!String::from_utf8_lossy(&body).contains("cachedContents/incomplete"));
+}
+
+#[tokio::test]
+async fn gemini_sqlite_affinity_rejects_stale_dynamic_view_before_dispatch() {
+    let temp_dir = tempfile::tempdir().expect("create sqlite tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir.path().join("affinity.sqlite").display()
+    );
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(
+            &database_url,
+            Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+        )
+        .await
+        .expect("open sqlite affinity storage"),
+    );
+    storage
+        .initialize()
+        .await
+        .expect("initialize sqlite affinity storage");
+    let old_record = storage
+        .create(UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "gemini-stale-view".to_owned(),
+            kind: UpstreamKind::GeminiApiKey,
+            base_url: Some(Url::parse("http://gemini.local/").expect("test URL")),
+            api_key_ciphertext: Some(vec![1]),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        })
+        .await
+        .expect("create Gemini upstream");
+    let current_record = storage
+        .update_api_key_secret(old_record.id, Some(vec![2]))
+        .await
+        .expect("replace Gemini credential");
+    assert_ne!(old_record.revision, current_record.revision);
+
+    let create_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "name": "cachedContents/current-owner",
+        "expireTime": "2100-01-01T00:00:00Z",
+    })));
+    let current = lifecycle(vec![current_record.clone()], create_dispatch.clone(), None)
+        .with_upstream_affinity_store(storage.clone());
+    let created = handle_authenticated(
+        &current,
+        gemini_cached_contents_request(json!({
+            "model": "models/gemini-2.5-flash",
+            "contents": [],
+        })),
+    )
+    .await
+    .expect("current owner create handled");
+    assert_eq!(created.status(), StatusCode::OK);
+    assert_eq!(create_dispatch.call_count(), 1);
+
+    let cached_request = |action: &str| {
+        let mut request = gemini_cached_contents_request(json!({
+            "cachedContent": "cachedContents/current-owner",
+            "contents": [],
+        }));
+        *request.uri_mut() = format!("/v1beta/models/gemini-2.5-flash:{action}")
+            .parse()
+            .expect("Gemini action URI");
+        request
+    };
+    let stale_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let stale = lifecycle(vec![old_record], stale_dispatch.clone(), None)
+        .with_upstream_affinity_store(storage.clone());
+    for request in [
+        gemini_cached_contents_request(json!({
+            "model": "models/gemini-2.5-flash",
+            "contents": [],
+        })),
+        cached_request("generateContent"),
+        cached_request("countTokens"),
+    ] {
+        let response = handle_authenticated(&stale, request)
+            .await
+            .expect("stale view request handled");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert_eq!(stale_dispatch.call_count(), 0);
+
+    let healthy_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "candidates": [],
+    })));
+    let healthy = lifecycle(vec![current_record], healthy_dispatch.clone(), None)
+        .with_upstream_affinity_store(storage);
+    let response = handle_authenticated(&healthy, cached_request("generateContent"))
+        .await
+        .expect("current view cached generation handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(healthy_dispatch.call_count(), 1);
 }

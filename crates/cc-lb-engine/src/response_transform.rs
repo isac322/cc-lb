@@ -12,9 +12,12 @@ use cc_lb_upstream::{
     TransformSseEventResult, UpstreamDialect,
 };
 
-use crate::hop_by_hop::strip_hop_by_hop;
 use crate::lifecycle::RequestEventContext;
-use crate::sse_error_frame::make_error_frame;
+use crate::provider_capability::ProviderCapability;
+use crate::sse_error_frame::{
+    ResponsesSseErrorContext, make_provider_error_frame, make_responses_failed_frame,
+};
+use crate::strip_hop_by_hop;
 
 #[derive(Clone)]
 pub(crate) struct ResponseTransformContext {
@@ -34,6 +37,7 @@ pub(crate) struct BufferedTransformParts {
 
 pub(crate) enum SseTransformOutcome {
     Emit(Bytes),
+    EmitTransformed(Bytes),
     Drop,
     FailOpen,
     Error(ResponseTransformError),
@@ -307,7 +311,7 @@ pub(crate) fn transform_sse_event_bytes(
     }) {
         Ok(TransformSseEventResult::Unchanged) => SseTransformOutcome::Emit(raw),
         Ok(TransformSseEventResult::Replace { events }) => match format_sse_events(&events) {
-            Ok(bytes) => SseTransformOutcome::Emit(bytes),
+            Ok(bytes) => SseTransformOutcome::EmitTransformed(bytes),
             Err(error) => SseTransformOutcome::Error(error),
         },
         Ok(TransformSseEventResult::Drop) => SseTransformOutcome::Drop,
@@ -364,6 +368,23 @@ fn format_sse_events(events: &[SseEvent]) -> Result<Bytes, ResponseTransformErro
     Ok(Bytes::from(output))
 }
 
-pub(crate) fn make_response_transform_error_frame(error: &ResponseTransformError) -> Bytes {
-    make_error_frame("response_transform_error", &error.to_string())
+pub(crate) fn make_response_transform_error_frame(
+    capability: ProviderCapability,
+    context: &ResponsesSseErrorContext,
+    error: &ResponseTransformError,
+) -> Bytes {
+    if matches!(
+        capability,
+        ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact
+    ) {
+        make_responses_failed_frame(context, "response_transform_error", &error.to_string())
+    } else {
+        make_provider_error_frame(
+            capability,
+            http::StatusCode::BAD_GATEWAY,
+            "response_transform_error",
+            &error.to_string(),
+            None,
+        )
+    }
 }

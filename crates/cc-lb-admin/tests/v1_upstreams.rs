@@ -54,8 +54,22 @@ async fn provider_probe_handler(
         .get("x-goog-api-key")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    seen.lock().unwrap().push((path, authorization, google_key));
-    (StatusCode::OK, "")
+    seen.lock()
+        .unwrap()
+        .push((path.clone(), authorization, google_key));
+    let body = match path.as_str() {
+        "/v1/models" => r#"{"data":[{"id":"gpt-test"}]}"#,
+        "/v1/chat/completions" => {
+            r#"{"id":"chatcmpl-test","choices":[{"message":{"role":"assistant","content":"pong"}}]}"#
+        }
+        "/v1beta/models" => r#"{"models":[{"name":"models/gemini-test"}]}"#,
+        path if path.ends_with(":generateContent") => {
+            r#"{"candidates":[{"content":{"parts":[{"text":"pong"}],"role":"model"},"finishReason":"STOP"}]}"#
+        }
+        path if path.ends_with(":countTokens") => r#"{"totalTokens":1}"#,
+        _ => return (StatusCode::NOT_FOUND, ""),
+    };
+    (StatusCode::OK, body)
 }
 
 struct TestResponse {
@@ -153,7 +167,6 @@ fn body(response: &TestResponse) -> &Value {
     response.body.as_ref().unwrap()
 }
 
-#[tokio::test]
 async fn create_returns_201_with_body_and_location_header() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -175,7 +188,6 @@ async fn create_returns_201_with_body_and_location_header() {
     );
 }
 
-#[tokio::test]
 async fn create_with_invalid_name_returns_structured_bad_request() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -204,7 +216,6 @@ async fn create_with_invalid_name_returns_structured_bad_request() {
     );
 }
 
-#[tokio::test]
 async fn get_after_create_returns_etag_with_revision() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -218,7 +229,6 @@ async fn get_after_create_returns_etag_with_revision() {
     assert_eq!(response.headers.get(header::ETAG).unwrap(), "W/\"1\"");
 }
 
-#[tokio::test]
 async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -444,7 +454,6 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
     assert_eq!(body(&restored)["base_url"], "https://restored.example.com/");
 }
 
-#[tokio::test]
 async fn list_paginates_with_x_total_count() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -479,7 +488,6 @@ async fn list_paginates_with_x_total_count() {
     assert_eq!(body(&second)["upstreams"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
 async fn update_with_correct_if_match_returns_200_and_bumps_revision() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -500,7 +508,6 @@ async fn update_with_correct_if_match_returns_200_and_bumps_revision() {
     assert_eq!(body(&response)["spec_revision"], 2);
 }
 
-#[tokio::test]
 async fn patch_flips_enabled_and_warmup_enabled_atomically() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -523,7 +530,6 @@ async fn patch_flips_enabled_and_warmup_enabled_atomically() {
     assert_eq!(body(&response)["spec_revision"], 2);
 }
 
-#[tokio::test]
 async fn update_with_stale_if_match_returns_409_with_current_revision() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -544,7 +550,6 @@ async fn update_with_stale_if_match_returns_409_with_current_revision() {
     assert_eq!(body(&response)["current_revision"], 1);
 }
 
-#[tokio::test]
 async fn update_without_if_match_returns_428_precondition_required() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -564,7 +569,6 @@ async fn update_without_if_match_returns_428_precondition_required() {
     assert_eq!(body(&response)["error"], "if_match_required");
 }
 
-#[tokio::test]
 async fn enable_disable_emits_audit_and_persists_state() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage.clone()));
@@ -617,7 +621,6 @@ async fn enable_disable_emits_audit_and_persists_state() {
     }));
 }
 
-#[tokio::test]
 async fn delete_soft_deletes_upstream() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -649,7 +652,6 @@ async fn delete_soft_deletes_upstream() {
     assert_eq!(body(&list)["upstreams"].as_array().unwrap().len(), 0);
 }
 
-#[tokio::test]
 async fn recreate_after_delete_returns_created_then_name_conflict() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -704,7 +706,6 @@ async fn recreate_after_delete_returns_created_then_name_conflict() {
     assert_eq!(body(&conflict)["existing_upstream_id"], second_id);
 }
 
-#[tokio::test]
 async fn concurrent_same_name_create_has_one_winner() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage));
@@ -743,7 +744,6 @@ fn oauth_bundle_json(
     })
 }
 
-#[tokio::test]
 async fn access_only_oauth_create_persists_no_refresh_secret()
 -> Result<(), Box<dyn std::error::Error>> {
     for kind in ["openai_oauth", "gemini_oauth"] {
@@ -798,7 +798,6 @@ async fn access_only_oauth_create_persists_no_refresh_secret()
     Ok(())
 }
 
-#[tokio::test]
 async fn access_only_oauth_update_replaces_previous_refresh_secret()
 -> Result<(), Box<dyn std::error::Error>> {
     for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
@@ -934,7 +933,6 @@ async fn access_only_oauth_update_replaces_previous_refresh_secret()
     Ok(())
 }
 
-#[tokio::test]
 async fn access_only_oauth_rejects_mixed_refresh_credentials_without_write()
 -> Result<(), Box<dyn std::error::Error>> {
     for kind in ["openai_oauth", "gemini_oauth"] {
@@ -991,7 +989,6 @@ async fn access_only_oauth_rejects_mixed_refresh_credentials_without_write()
     Ok(())
 }
 
-#[tokio::test]
 async fn openai_oauth_create_derives_account_id_and_does_not_disclose_tokens() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage.clone()));
@@ -1042,7 +1039,6 @@ async fn openai_oauth_create_derives_account_id_and_does_not_disclose_tokens() {
     assert!(!bundle.never_refresh);
 }
 
-#[tokio::test]
 async fn openai_oauth_update_accepts_bundle_and_does_not_disclose_tokens() {
     let (_dir, storage) = new_store().await;
     let upstream = UpstreamStore::create(
@@ -1108,7 +1104,6 @@ async fn openai_oauth_update_accepts_bundle_and_does_not_disclose_tokens() {
     assert_eq!(bundle.refresh_token, refresh_token);
 }
 
-#[tokio::test]
 async fn openai_oauth_update_rejects_api_key_value() {
     let (_dir, storage) = new_store().await;
     let upstream = UpstreamStore::create(
@@ -1142,7 +1137,6 @@ async fn openai_oauth_update_rejects_api_key_value() {
     assert_eq!(body(&response)["error"], "unexpected_api_key");
 }
 
-#[tokio::test]
 async fn openai_oauth_import_rejects_refresh_token_in_access_only_mode() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage.clone()));
@@ -1181,7 +1175,6 @@ async fn openai_oauth_import_rejects_refresh_token_in_access_only_mode() {
     assert!(body(&list)["upstreams"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
 async fn gemini_oauth_requires_project_id_and_persists_body_project_id_without_secrets() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage.clone()));
@@ -1245,7 +1238,6 @@ async fn gemini_oauth_requires_project_id_and_persists_body_project_id_without_s
     assert_eq!(bundle.project_id.as_deref(), Some("project-from-request"));
 }
 
-#[tokio::test]
 async fn gemini_oauth_rejects_api_key_import() {
     let (_dir, storage) = new_store().await;
     let response = request(
@@ -1273,7 +1265,6 @@ async fn gemini_oauth_rejects_api_key_import() {
     assert_eq!(body(&response)["error"], "invalid_gemini_oauth_credential");
 }
 
-#[tokio::test]
 async fn anthropic_and_api_key_oauth_imports_remain_rejected() {
     for (index, kind) in ["anthropic_oauth", "openai_api_key"]
         .into_iter()
@@ -1305,7 +1296,6 @@ async fn anthropic_and_api_key_oauth_imports_remain_rejected() {
     }
 }
 
-#[tokio::test]
 async fn openai_oauth_rejects_api_key_value_on_create() {
     let (_dir, storage) = new_store().await;
     let response = request(
@@ -1325,7 +1315,6 @@ async fn openai_oauth_rejects_api_key_value_on_create() {
     assert_eq!(body(&response)["error"], "unexpected_api_key");
 }
 
-#[tokio::test]
 async fn openai_and_gemini_api_key_writes_are_not_cacheable() {
     for (index, kind) in ["openai_api_key", "gemini_api_key"].into_iter().enumerate() {
         let (_dir, storage) = new_store().await;
@@ -1355,7 +1344,8 @@ async fn openai_and_gemini_api_key_writes_are_not_cacheable() {
             Some(json!({
                 "name": format!("non-anthropic-default-preflight-{index}"),
                 "kind": kind,
-                "api_key_value": "provider-secret-key"
+                "api_key_value": "provider-secret-key",
+                "skip_preflight": true
             })),
             None,
         )
@@ -1374,7 +1364,7 @@ async fn openai_and_gemini_api_key_writes_are_not_cacheable() {
             app,
             "PATCH",
             &format!("/admin/v1/upstreams/{id}"),
-            Some(json!({ "api_key_value": "replacement-provider-secret-key" })),
+            Some(json!({ "api_key_value": "replacement-provider-secret-key", "skip_preflight": true })),
             Some("W/\"1\""),
         )
         .await;
@@ -1387,7 +1377,6 @@ async fn openai_and_gemini_api_key_writes_are_not_cacheable() {
     }
 }
 
-#[tokio::test]
 async fn api_key_warmup_and_dialects_are_rejected() {
     for kind in ["openai_api_key", "gemini_api_key"] {
         let (_dir, storage) = new_store().await;
@@ -1453,11 +1442,15 @@ async fn api_key_warmup_and_dialects_are_rejected() {
             );
         }
 
+        let mut successful_create_body = create_body.clone();
+        if kind.ends_with("_api_key") {
+            successful_create_body["skip_preflight"] = json!(true);
+        }
         let created = request(
             app.clone(),
             "POST",
             "/admin/v1/upstreams",
-            Some(create_body),
+            Some(successful_create_body),
             None,
         )
         .await;
@@ -1517,7 +1510,6 @@ async fn api_key_warmup_and_dialects_are_rejected() {
     }
 }
 
-#[tokio::test]
 async fn provider_warmup_plugins_require_the_upstreams_qualified_shape_export() {
     use cc_lb_storage_api::{
         PluginRegistryStore, PluginSlotKind, WasmBlob, WasmRegistryEntryInput,
@@ -1640,21 +1632,10 @@ async fn provider_warmup_plugins_require_the_upstreams_qualified_shape_export() 
     }
 }
 
-#[tokio::test]
 async fn provider_api_key_preflight_and_recheck_use_native_models_probe() {
-    for (index, (kind, expected_path, expected_auth, expected_google_key)) in [
-        (
-            "openai_api_key",
-            "/v1/models",
-            Some("Bearer provider-secret-key"),
-            None,
-        ),
-        (
-            "gemini_api_key",
-            "/v1beta/models",
-            None,
-            Some("provider-secret-key"),
-        ),
+    for (index, (kind, expected_auth, expected_google_key)) in [
+        ("openai_api_key", Some("Bearer provider-secret-key"), None),
+        ("gemini_api_key", None, Some("provider-secret-key")),
     ]
     .into_iter()
     .enumerate()
@@ -1717,16 +1698,28 @@ async fn provider_api_key_preflight_and_recheck_use_native_models_probe() {
         assert_eq!(body(&detail)["api_key_access"]["verified"], true);
         assert!(body(&detail)["api_key_access"]["workspace"]["id"].is_null());
         let requests = seen.lock().unwrap();
-        assert_eq!(requests.len(), 2, "{kind}");
-        for (path, authorization, google_key) in requests.iter() {
-            assert_eq!(path, expected_path, "{kind}");
+        let expected_paths: Vec<&str> = match kind {
+            "openai_api_key" => vec!["/v1/models", "/v1/chat/completions"],
+            "gemini_api_key" => vec![
+                "/v1beta/models",
+                "/v1beta/models/gemini-test:generateContent",
+                "/v1beta/models/gemini-test:countTokens",
+            ],
+            _ => unreachable!("provider probe test only covers native API-key kinds"),
+        };
+        assert_eq!(requests.len(), expected_paths.len() * 2, "{kind}");
+        for (request_index, (path, authorization, google_key)) in requests.iter().enumerate() {
+            assert_eq!(
+                path,
+                expected_paths[request_index % expected_paths.len()],
+                "{kind}"
+            );
             assert_eq!(authorization.as_deref(), expected_auth, "{kind}");
             assert_eq!(google_key.as_deref(), expected_google_key, "{kind}");
         }
     }
 }
 
-#[tokio::test]
 async fn openai_and_gemini_oauth_patch_supports_metadata_only_and_combined_updates() {
     let (_dir, storage) = new_store().await;
     let state = test_state(storage);
@@ -1838,4 +1831,55 @@ async fn openai_and_gemini_oauth_patch_supports_metadata_only_and_combined_updat
         combined.headers.get("etag").and_then(|v| v.to_str().ok()),
         Some("W/\"3\"")
     );
+}
+
+#[tokio::test]
+async fn v1_upstreams_suite_part_1() {
+    create_returns_201_with_body_and_location_header().await;
+    create_with_invalid_name_returns_structured_bad_request().await;
+    get_after_create_returns_etag_with_revision().await;
+    base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret().await;
+    list_paginates_with_x_total_count().await;
+    update_with_correct_if_match_returns_200_and_bumps_revision().await;
+    patch_flips_enabled_and_warmup_enabled_atomically().await;
+    update_with_stale_if_match_returns_409_with_current_revision().await;
+}
+
+#[tokio::test]
+async fn v1_upstreams_suite_part_2() {
+    update_without_if_match_returns_428_precondition_required().await;
+    enable_disable_emits_audit_and_persists_state().await;
+    delete_soft_deletes_upstream().await;
+    recreate_after_delete_returns_created_then_name_conflict().await;
+    concurrent_same_name_create_has_one_winner().await;
+    access_only_oauth_create_persists_no_refresh_secret()
+        .await
+        .unwrap();
+    access_only_oauth_update_replaces_previous_refresh_secret()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn v1_upstreams_suite_part_3() {
+    access_only_oauth_rejects_mixed_refresh_credentials_without_write()
+        .await
+        .unwrap();
+    openai_oauth_create_derives_account_id_and_does_not_disclose_tokens().await;
+    openai_oauth_update_accepts_bundle_and_does_not_disclose_tokens().await;
+    openai_oauth_update_rejects_api_key_value().await;
+    openai_oauth_import_rejects_refresh_token_in_access_only_mode().await;
+    gemini_oauth_requires_project_id_and_persists_body_project_id_without_secrets().await;
+    gemini_oauth_rejects_api_key_import().await;
+}
+
+#[tokio::test]
+async fn v1_upstreams_suite_part_4() {
+    anthropic_and_api_key_oauth_imports_remain_rejected().await;
+    openai_oauth_rejects_api_key_value_on_create().await;
+    openai_and_gemini_api_key_writes_are_not_cacheable().await;
+    api_key_warmup_and_dialects_are_rejected().await;
+    provider_warmup_plugins_require_the_upstreams_qualified_shape_export().await;
+    provider_api_key_preflight_and_recheck_use_native_models_probe().await;
+    openai_and_gemini_oauth_patch_supports_metadata_only_and_combined_updates().await;
 }

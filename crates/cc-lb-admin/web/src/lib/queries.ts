@@ -140,6 +140,7 @@ export interface Principal {
     classifier: {
       extra_wait_for_user_tools: string[];
       treat_end_turn_as_ambiguous: boolean;
+      openai_responses_enabled?: boolean;
       llm_judge?: unknown;
     };
   } | null;

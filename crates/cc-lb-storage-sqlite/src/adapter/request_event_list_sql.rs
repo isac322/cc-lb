@@ -31,6 +31,7 @@ SELECT \
     session_id_source, \
     model, \
     reasoning_effort, \
+    thinking_level, \
     thinking_budget_tokens, \
     thinking_tokens, \
     service_tier, \
@@ -80,12 +81,18 @@ SELECT \
     cache_creation_input_tokens_5m, \
     cache_creation_input_tokens_1h, \
     cache_read_input_tokens, \
+    cache_write_input_tokens, \
+    cache_write_input_tokens_30m, \
+    cache_write_input_tokens_12h, \
     list_cost_usd_micros AS cost_usd_micros, \
     list_cost_input_micros AS cost_input_micros, \
     list_cost_output_micros AS cost_output_micros, \
     list_cost_cache_creation_5m_micros AS cost_cache_creation_5m_micros, \
     list_cost_cache_creation_1h_micros AS cost_cache_creation_1h_micros, \
-    list_cost_cache_read_micros AS cost_cache_read_micros \
+    list_cost_cache_read_micros AS cost_cache_read_micros, \
+    list_cost_cache_write_micros AS cost_cache_write_micros, \
+    list_cost_cache_write_30m_micros AS cost_cache_write_30m_micros, \
+    list_cost_cache_write_12h_micros AS cost_cache_write_12h_micros \
 FROM request_events_v1 \
 WHERE ";
 
@@ -150,6 +157,7 @@ pub(super) struct ListRow {
     pub(super) session_id_source: Option<String>,
     pub(super) model: Option<String>,
     pub(super) reasoning_effort: Option<String>,
+    pub(super) thinking_level: Option<String>,
     pub(super) thinking_budget_tokens: Option<i64>,
     pub(super) thinking_tokens: Option<i64>,
     pub(super) service_tier: Option<String>,
@@ -199,12 +207,18 @@ pub(super) struct ListRow {
     pub(super) cache_creation_input_tokens_5m: Option<i64>,
     pub(super) cache_creation_input_tokens_1h: Option<i64>,
     pub(super) cache_read_input_tokens: Option<i64>,
+    pub(super) cache_write_input_tokens: Option<i64>,
+    pub(super) cache_write_input_tokens_30m: Option<i64>,
+    pub(super) cache_write_input_tokens_12h: Option<i64>,
     pub(super) cost_usd_micros: Option<i64>,
     pub(super) cost_input_micros: Option<i64>,
     pub(super) cost_output_micros: Option<i64>,
     pub(super) cost_cache_creation_5m_micros: Option<i64>,
     pub(super) cost_cache_creation_1h_micros: Option<i64>,
     pub(super) cost_cache_read_micros: Option<i64>,
+    pub(super) cost_cache_write_micros: Option<i64>,
+    pub(super) cost_cache_write_30m_micros: Option<i64>,
+    pub(super) cost_cache_write_12h_micros: Option<i64>,
 }
 
 pub(super) async fn list_request_events(

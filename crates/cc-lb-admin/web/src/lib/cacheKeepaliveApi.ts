@@ -20,15 +20,26 @@ export const CACHE_KEEPALIVE_STATES = [
 export const CacheKeepaliveStateSchema = z.enum(CACHE_KEEPALIVE_STATES);
 export type CacheKeepaliveState = z.infer<typeof CacheKeepaliveStateSchema>;
 
-export const CacheKeepaliveTtlSchema = z.enum(['5m', '1h']);
+export const CacheKeepaliveTtlSchema = z.enum(['5m', '1h', '30m', '12h']);
 export type CacheKeepaliveTtl = z.infer<typeof CacheKeepaliveTtlSchema>;
 
-export const CacheKeepaliveHorizonSchema = z.enum(['24h', '7d', 'all']);
+export const CacheKeepaliveHorizonSchema = z.enum([
+  '1h',
+  '6h',
+  '24h',
+  '7d',
+  'all',
+]);
 export type CacheKeepaliveHorizon = z.infer<typeof CacheKeepaliveHorizonSchema>;
 
 export const CACHE_KEEPALIVE_STATUS_FILTERS = [
   'all',
-  ...CACHE_KEEPALIVE_STATES,
+  'tracked',
+  'renewed',
+  'scheduled',
+  'capped',
+  'expired',
+  'not_tracked',
   'error',
 ] as const;
 
@@ -56,8 +67,10 @@ export const CacheKeepaliveSummarySchema = z.object({
   renewals_fired: z.number(),
   retained_successful_hits: z.number(),
   cost_saved: z.number().nullable(),
+  resolved_cost_saved: z.number().nullable().optional(),
   total_spent: z.number(),
   total_avoided: z.number().nullable(),
+  resolved_total_avoided: z.number().nullable().optional(),
   evidence_status: CacheKeepaliveEvidenceStatusSchema,
   unknown_cycles: z.number(),
   retained_from_ms: z.number().nullable(),
@@ -74,6 +87,7 @@ export const CacheKeepaliveRowSchema = z.object({
   attempts: z.number().nullable(),
   max_attempts: z.number(),
   reason: z.string(),
+  display_reason: z.string().nullable().optional(),
   generation: z.number(),
   upstream: z.string().nullable(),
   error: z.string().nullable(),
@@ -82,6 +96,7 @@ export const CacheKeepaliveRowSchema = z.object({
   total_avoided: z.number().nullable(),
   evidence_status: CacheKeepaliveEvidenceStatusSchema,
   session_key_hash: z.string(),
+  retained_renewals: z.number().optional(),
 });
 export type CacheKeepaliveRow = z.infer<typeof CacheKeepaliveRowSchema>;
 
@@ -131,6 +146,36 @@ export type CacheKeepaliveRawRecord = z.infer<
   typeof CacheKeepaliveRawRecordSchema
 >;
 
+export const CacheKeepalivePulseSchema = z.object({
+  pulse_number: z.number(),
+  time_ms: z.number(),
+  offset_sec: z.number(),
+  since_prev_renewal_sec: z.number().nullable(),
+  spent_usd: z.number().nullable(),
+  hit: z.boolean(),
+});
+export type CacheKeepalivePulse = z.infer<typeof CacheKeepalivePulseSchema>;
+
+export const CacheKeepaliveGapSchema = z.object({
+  cycle_id: z.string().nullable(),
+  pause_at_ms: z.number(),
+  cached_tokens: z.number(),
+  pulses: z.array(CacheKeepalivePulseSchema),
+  ending_kind: z.enum([
+    'followup_hit',
+    'scheduled_waiting',
+    'capped_no_followup',
+    'ttl_expired_no_followup',
+  ]),
+  ending_at_ms: z.number(),
+  total_duration_sec: z.number(),
+  since_last_renewal_sec: z.number().nullable(),
+  spent_usd: z.number(),
+  avoided_usd: z.number().nullable(),
+  net_pnl_usd: z.number().nullable(),
+});
+export type CacheKeepaliveGap = z.infer<typeof CacheKeepaliveGapSchema>;
+
 export const CacheKeepaliveDetailSchema = CacheKeepaliveRowSchema.extend({
   renewal_tokens: z.number(),
   total_renewals_current_cycle: z.number(),
@@ -138,6 +183,7 @@ export const CacheKeepaliveDetailSchema = CacheKeepaliveRowSchema.extend({
   turns: z.array(CacheKeepaliveTurnSchema),
   config_snapshot: CacheKeepaliveConfigSnapshotSchema.nullable(),
   raw_record: CacheKeepaliveRawRecordSchema,
+  gaps: z.array(CacheKeepaliveGapSchema).optional(),
 });
 export type CacheKeepaliveDetail = z.infer<typeof CacheKeepaliveDetailSchema>;
 

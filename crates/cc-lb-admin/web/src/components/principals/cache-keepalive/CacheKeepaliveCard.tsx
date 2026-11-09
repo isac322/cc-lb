@@ -124,6 +124,8 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
     principal.cache_keepalive?.enabled ?? false,
   );
   const summary = summaryQ.data;
+  const effectiveCostSaved =
+    summary?.cost_saved ?? summary?.resolved_cost_saved ?? null;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -336,14 +338,17 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
                 value={
                   summaryQ.isLoading
                     ? undefined
-                    : summary?.cost_saved === null || !summary
+                    : effectiveCostSaved === null || !summary
                       ? '—'
-                      : formatMoney(summary.cost_saved)
+                      : formatMoney(effectiveCostSaved)
                 }
                 subtext={
                   summary?.evidence_status === 'unknown'
                     ? 'unknown evidence coverage'
-                    : 'net, after renewal spend'
+                    : summary?.evidence_status === 'pending' &&
+                        summary?.resolved_cost_saved != null
+                      ? 'net (active renewal pending)'
+                      : 'net, after renewal spend'
                 }
               />
             </div>

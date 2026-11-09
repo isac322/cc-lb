@@ -146,19 +146,31 @@ async fn observe(
     record: UpstreamRecord,
     request: http::Request<Bytes>,
 ) -> TestResult<Observation> {
+    let hook = transform
+        .then(|| Arc::new(UnchangedSseTransform::default()) as Arc<dyn SseEventTransformHook>);
+    observe_with_sse_hook(dispatcher, hook, record, request).await
+}
+
+async fn observe_with_sse_hook(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    hook: Option<Arc<dyn SseEventTransformHook>>,
+    record: UpstreamRecord,
+    request: http::Request<Bytes>,
+) -> TestResult<Observation> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "semantic-sse-eof.sqlite").await?);
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut rx = test_bus.bus.subscribe_lifecycle();
-    let hook = transform
-        .then(|| Arc::new(UnchangedSseTransform::default()) as Arc<dyn SseEventTransformHook>);
     let lifecycle = with_test_limit_subject(lifecycle_with_record_and_config(
         None,
         hook,
         dispatcher,
         LifecycleConfig::default(),
         record,
+    ))
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
     ))
     .with_event_bus(test_bus.bus_arc());
     let response = handle_authenticated(&lifecycle, request).await?;
@@ -942,6 +954,871 @@ async fn semantic_sse_eof_gemini_json_array_stream_records_usage_and_preserves_b
     Ok(())
 }
 
+const RESPONSES_CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_eof\",\"object\":\"response\",\"status\":\"in_progress\",\"usage\":null}}\n\n";
+const RESPONSES_DELTA: &str = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"private-partial-output\"}\n\n";
+const RESPONSES_ITEM_DONE: &str = "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":8,\"output_index\":0,\"item\":{\"id\":\"msg_eof\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[]}}\n\n";
+const RESPONSES_USAGE: &str = "event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":9,\"response\":{\"status\":\"in_progress\",\"usage\":{\"input_tokens\":13,\"output_tokens\":7,\"total_tokens\":20}}}\n\n";
+
+fn responses_eof_request(path: &str) -> TestResult<http::Request<Bytes>> {
+    let mut request = http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(
+            br#"{"model":"gpt-test","input":"hello","max_output_tokens":16,"stream":true}"#,
+        ))?;
+    request
+        .extensions_mut()
+        .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+    Ok(request)
+}
+
+fn responses_eof_record(oauth: bool) -> UpstreamRecord {
+    if oauth {
+        upstream_record(
+            StorageUpstreamKind::OpenaiOauth,
+            "https://chatgpt.com/backend-api/",
+        )
+    } else {
+        upstream_record(StorageUpstreamKind::OpenaiApiKey, "https://api.openai.com/")
+    }
+}
+
+fn assert_responses_eof_frame(
+    body: &[u8],
+    prefix: &[u8],
+    response_id: Option<&str>,
+    sequence_number: u64,
+) {
+    assert!(body.starts_with(prefix), "upstream progress is preserved");
+    let tail = std::str::from_utf8(&body[prefix.len()..]).expect("native failure is UTF-8");
+    assert_eq!(
+        tail.lines()
+            .filter_map(|line| line.strip_prefix("event:"))
+            .map(str::trim)
+            .collect::<Vec<_>>(),
+        ["response.failed"],
+        "one native terminal event and no Anthropic wrapper"
+    );
+    let data = tail
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .collect::<Vec<_>>();
+    assert_eq!(data.len(), 1, "exactly one appended failure payload");
+    let failure: serde_json::Value = serde_json::from_str(data[0]).expect("native failure JSON");
+    assert_eq!(failure["type"], "response.failed");
+    assert_eq!(failure["sequence_number"].as_u64(), Some(sequence_number));
+    assert_eq!(
+        failure["response"]["id"].as_str(),
+        response_id,
+        "reuse only a bounded observed identity"
+    );
+    assert_eq!(failure["response"]["object"], "response");
+    assert_eq!(failure["response"]["status"], "failed");
+    assert_eq!(failure["response"]["error"]["code"], "api_error");
+    let message = failure["response"]["error"]["message"]
+        .as_str()
+        .expect("safe public error message");
+    assert!(!message.is_empty());
+    assert!(!message.contains("private-partial-output"));
+    assert!(!message.contains("gpt-test"));
+    assert_eq!(failure["response"]["usage"], serde_json::Value::Null);
+    assert_eq!(failure["response"]["output"], serde_json::json!([]));
+    assert!(tail.ends_with("\n\n"), "complete SSE frame");
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_missing_terminal_matrix() -> TestResult {
+    let progress = [
+        String::new(),
+        RESPONSES_CREATED.to_owned(),
+        format!("{RESPONSES_CREATED}{RESPONSES_DELTA}"),
+        format!("{RESPONSES_CREATED}{RESPONSES_DELTA}{RESPONSES_ITEM_DONE}\r\n\n"),
+    ];
+    // Eight cases cover each progress state with and without an unchanged
+    // transform; rotate credentials, encodings, and transport boundaries.
+    for (state, plaintext) in progress.iter().enumerate() {
+        for transform in [false, true] {
+            let case = state * 2 + usize::from(transform);
+            let plaintext = Bytes::copy_from_slice(plaintext.as_bytes());
+            let encoding = ["identity", "gzip", "br"][case % 3];
+            let wire = match encoding {
+                "gzip" => gzip_bytes(&plaintext),
+                "br" => brotli_bytes(&plaintext),
+                _ => plaintext.clone(),
+            };
+            let mut headers = sse_headers();
+            if encoding != "identity" {
+                headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding));
+            }
+            let chunk_size = match case % 3 {
+                0 => wire.len().max(1),
+                1 => 1,
+                _ => 7,
+            };
+            let observed = observe(
+                Arc::new(ScriptedDispatch {
+                    version: http::Version::HTTP_2,
+                    headers,
+                    chunks: wire
+                        .chunks(chunk_size)
+                        .map(Bytes::copy_from_slice)
+                        .collect(),
+                    trailing_error: None,
+                }),
+                transform,
+                responses_eof_record(matches!(case, 1 | 2 | 5 | 6)),
+                responses_eof_request("/v1/responses")?,
+            )
+            .await?;
+            observed.assert_incomplete_outcome();
+            assert_responses_eof_frame(
+                &observed.body,
+                if state == 3 {
+                    &plaintext[..plaintext.len() - 3]
+                } else {
+                    &plaintext
+                },
+                (state > 0).then_some("resp_eof"),
+                [0, 1, 8, 9][state],
+            );
+            assert_eq!(
+                (
+                    observed.row.input_tokens,
+                    observed.row.output_tokens,
+                    observed.row.cost_usd_micros,
+                ),
+                (None, None, None),
+                "missing usage remains unknown in case {case}"
+            );
+            assert!(observed.events.iter().all(|event| !matches!(
+                event,
+                LifecycleEvent::UsageObserved { .. } | LifecycleEvent::Priced { .. }
+            )));
+            assert!(observed.headers.get(CONTENT_ENCODING).is_none());
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_preserves_bounded_identity_and_sequence() -> TestResult {
+    for (id, expected_id, sequence) in [
+        ("r".repeat(512), true, 7),
+        ("r".repeat(513), false, u64::MAX),
+        (String::new(), false, 0),
+    ] {
+        let prefix = Bytes::from(format!(
+            "event: response.created\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.created",
+                "sequence_number": sequence,
+                "response": {"id": id, "status": "in_progress", "usage": null},
+            })
+        ));
+        let observed = observe(
+            Arc::new(ScriptedDispatch::identity_sse(vec![prefix.clone()], None)),
+            false,
+            responses_eof_record(false),
+            responses_eof_request("/v1/responses")?,
+        )
+        .await?;
+        observed.assert_incomplete_outcome();
+        assert_responses_eof_frame(
+            &observed.body,
+            &prefix,
+            expected_id.then_some(id.as_str()),
+            sequence.saturating_add(1),
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_compact_retains_provider_usage() -> TestResult {
+    let prefix = Bytes::from(format!("{RESPONSES_CREATED}{RESPONSES_USAGE}"));
+    let observed = observe(
+        Arc::new(ScriptedDispatch::identity_sse(vec![prefix.clone()], None)),
+        true,
+        responses_eof_record(false),
+        responses_eof_request("/v1/responses/compact")?,
+    )
+    .await?;
+    observed.assert_incomplete(13, 7);
+    assert_responses_eof_frame(&observed.body, &prefix, Some("resp_eof"), 10);
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_terminal_controls() -> TestResult {
+    for terminal in ["completed", "incomplete"] {
+        for type_only in [false, true] {
+            let event = if type_only {
+                "message".to_owned()
+            } else {
+                format!("response.{terminal}")
+            };
+            let mut value = serde_json::json!({
+                "sequence_number": 8,
+                "response": {
+                    "status": terminal,
+                    "usage": {"input_tokens": 13, "output_tokens": 7, "total_tokens": 20},
+                },
+            });
+            if type_only {
+                value["type"] = serde_json::json!(format!("response.{terminal}"));
+            }
+            let prefix = Bytes::from(format!(
+                "{RESPONSES_CREATED}{RESPONSES_DELTA}event: {event}\ndata: {value}\n\n"
+            ));
+            let observed = observe(
+                Arc::new(ScriptedDispatch::identity_sse(vec![prefix.clone()], None)),
+                type_only,
+                responses_eof_record(type_only),
+                responses_eof_request("/v1/responses")?,
+            )
+            .await?;
+            assert_eq!(observed.body, prefix, "no extra event after {terminal}");
+            observed.assert_success(13, 7, false);
+        }
+    }
+    Ok(())
+}
+
+struct ResponsesNativeFailureTransform;
+
+impl SseEventTransformHook for ResponsesNativeFailureTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        if request.event.event == "response.output_text.delta" {
+            Ok(TransformSseEventResult::Replace {
+                events: vec![SseEvent {
+                    event: "response.failed".to_owned(),
+                    data: Bytes::from_static(
+                        br#"{"type":"response.failed","sequence_number":8,"response":{"status":"failed","error":{"code":"server_error","message":"transformed failure"}}}"#,
+                    ),
+                }],
+            })
+        } else {
+            Ok(TransformSseEventResult::Unchanged)
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_forwarded_transform_failure_is_not_duplicated() -> TestResult {
+    let observed = observe_with_sse_hook(
+        Arc::new(ScriptedDispatch::identity_sse(
+            vec![Bytes::from(format!("{RESPONSES_CREATED}{RESPONSES_DELTA}"))],
+            None,
+        )),
+        Some(Arc::new(ResponsesNativeFailureTransform)),
+        responses_eof_record(false),
+        responses_eof_request("/v1/responses")?,
+    )
+    .await?;
+    let events = std::str::from_utf8(&observed.body)?
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let failures = events
+        .iter()
+        .filter(|event| event["type"] == "response.failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1, "forward native transform failure once");
+    assert_eq!(failures[0]["response"]["error"]["code"], "server_error");
+    assert_eq!(
+        failures[0]["response"]["error"]["message"],
+        "transformed failure"
+    );
+    assert_ne!(
+        observed.row.upstream_error_type.as_deref(),
+        Some("upstream_response_incomplete")
+    );
+    assert!(
+        observed.completion().is_ok(),
+        "retain existing transform outcome"
+    );
+    observed.assert_terminal(None);
+    Ok(())
+}
+
+struct DropResponsesTerminalTransform;
+
+impl SseEventTransformHook for DropResponsesTerminalTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        if matches!(
+            request.event.event.as_str(),
+            "response.completed" | "response.incomplete"
+        ) {
+            Ok(TransformSseEventResult::Drop)
+        } else {
+            Ok(TransformSseEventResult::Unchanged)
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_dropped_terminal_becomes_native_failure() -> TestResult {
+    for (event, status) in [
+        ("response.completed", "completed"),
+        ("response.incomplete", "incomplete"),
+    ] {
+        let terminal = format!(
+            "event: {event}\ndata: {{\"type\":\"{event}\",\"sequence_number\":10,\"response\":{{\"status\":\"{status}\",\"usage\":{{\"input_tokens\":13,\"output_tokens\":7,\"total_tokens\":20}}}}}}\n\n"
+        );
+        let observed = observe_with_sse_hook(
+            Arc::new(ScriptedDispatch::identity_sse(
+                vec![Bytes::from(format!(
+                    "{RESPONSES_CREATED}{RESPONSES_DELTA}{RESPONSES_USAGE}{terminal}"
+                ))],
+                None,
+            )),
+            Some(Arc::new(DropResponsesTerminalTransform)),
+            responses_eof_record(false),
+            responses_eof_request("/v1/responses")?,
+        )
+        .await?;
+
+        observed.assert_incomplete_outcome();
+        let body = std::str::from_utf8(&observed.body)?;
+        let failures = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .filter(|data| data["type"] == "response.failed")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failures.len(),
+            1,
+            "clean EOF appends one native failure after dropped {event}"
+        );
+        assert_eq!(failures[0]["response"]["status"], "failed");
+        assert!(
+            !body.contains(event),
+            "dropped upstream terminal is not forwarded: {event}"
+        );
+        assert!(
+            !body.contains("event: response.completed"),
+            "dropped terminal must not become a successful completion"
+        );
+    }
+    Ok(())
+}
+
+struct ReplaceResponsesDeltaWithTerminal {
+    event: &'static str,
+    status: &'static str,
+}
+
+impl SseEventTransformHook for ReplaceResponsesDeltaWithTerminal {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        if request.event.event == "response.output_text.delta" {
+            Ok(TransformSseEventResult::Replace {
+                events: vec![SseEvent {
+                    event: self.event.to_owned(),
+                    data: Bytes::from(format!(
+                        r#"{{"type":"{}","sequence_number":10,"response":{{"status":"{}","usage":{{"input_tokens":13,"output_tokens":7,"total_tokens":20}}}}}}"#,
+                        self.event, self.status
+                    )),
+                }],
+            })
+        } else {
+            Ok(TransformSseEventResult::Unchanged)
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_replaced_delta_is_terminal_success() -> TestResult {
+    for (event, status) in [
+        ("response.completed", "completed"),
+        ("response.incomplete", "incomplete"),
+    ] {
+        let observed = observe_with_sse_hook(
+            Arc::new(ScriptedDispatch::identity_sse(
+                vec![Bytes::from(format!(
+                    "{RESPONSES_CREATED}{RESPONSES_USAGE}{RESPONSES_DELTA}"
+                ))],
+                None,
+            )),
+            Some(Arc::new(ReplaceResponsesDeltaWithTerminal {
+                event,
+                status,
+            })),
+            responses_eof_record(false),
+            responses_eof_request("/v1/responses")?,
+        )
+        .await?;
+
+        observed.assert_success(13, 7, false);
+        let body = std::str::from_utf8(&observed.body)?;
+        assert!(
+            body.contains(&format!("event: {event}\n")),
+            "transformed terminal is forwarded: {event}"
+        );
+        assert_eq!(
+            body.matches("event: response.failed").count(),
+            0,
+            "transformed terminal must not receive a synthetic failure"
+        );
+        assert_eq!(
+            observed.row.upstream_error_type, None,
+            "transformed {event} remains successful"
+        );
+    }
+    Ok(())
+}
+
+fn responses_terminal_faults(
+    plaintext: &Bytes,
+) -> [(&'static str, &'static str, ScriptedDispatch); 3] {
+    let compressed = gzip_bytes(plaintext);
+    [
+        (
+            "upstream_response_body_error",
+            "transport_error",
+            ScriptedDispatch::identity_sse(
+                vec![plaintext.clone()],
+                Some(std::io::ErrorKind::ConnectionReset),
+            ),
+        ),
+        (
+            "upstream_response_decode_error",
+            "decode_error_mid_body",
+            // Sync-flush all terminal-containing plaintext before a separate
+            // DEFLATE block with reserved BTYPE=3 makes decoder.push fail.
+            ScriptedDispatch::gzip_sse(
+                vec![
+                    incomplete_gzip_prefix(plaintext),
+                    Bytes::from_static(b"\x07"),
+                ],
+                None,
+            ),
+        ),
+        (
+            "upstream_response_decode_error",
+            "decode_error_after_clean_end",
+            // Keep the complete DEFLATE payload so every SSE event is emitted;
+            // only the CRC32/ISIZE trailer is missing when decoder.finish runs.
+            ScriptedDispatch::gzip_sse(vec![compressed.slice(..compressed.len() - 8)], None),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_dropped_terminal_later_fault_stays_fatal() -> TestResult {
+    for (event, status) in [
+        ("response.completed", "completed"),
+        ("response.incomplete", "incomplete"),
+    ] {
+        let prefix = Bytes::from(format!("{RESPONSES_CREATED}{RESPONSES_DELTA}"));
+        // Usage occurs only in the dropped upstream terminal. Persisting it and
+        // advancing the failure sequence prove the terminal decoded before fault.
+        let plaintext = Bytes::from(format!(
+            "{RESPONSES_CREATED}{RESPONSES_DELTA}event: {event}\ndata: {{\"type\":\"{event}\",\"sequence_number\":10,\"response\":{{\"status\":\"{status}\",\"usage\":{{\"input_tokens\":13,\"output_tokens\":7,\"total_tokens\":20}}}}}}\n\n"
+        ));
+        for (error_type, body_end, dispatcher) in responses_terminal_faults(&plaintext) {
+            let observed = observe_with_sse_hook(
+                Arc::new(dispatcher),
+                Some(Arc::new(DropResponsesTerminalTransform)),
+                responses_eof_record(false),
+                responses_eof_request("/v1/responses")?,
+            )
+            .await?;
+
+            assert_eq!(observed.status, StatusCode::OK);
+            let error = observed
+                .completion()
+                .as_ref()
+                .expect_err("a dropped terminal cannot make a later fault acceptable");
+            assert_eq!(error.error_type, error_type, "{event}: {body_end}");
+            observed.assert_terminal(Some("upstream_stream_error"));
+            assert_eq!(
+                observed.row.upstream_error_type.as_deref(),
+                Some(error_type),
+                "{event}: {body_end}"
+            );
+            assert_eq!(
+                observed.row.upstream_error_message.as_deref(),
+                Some(error.error_message.as_str())
+            );
+            assert_eq!(
+                observed.row.upstream_body_end.as_deref(),
+                Some(body_end),
+                "{event}: {body_end}"
+            );
+            assert_eq!(
+                (observed.row.input_tokens, observed.row.output_tokens),
+                (Some(13), Some(7)),
+                "retain upstream terminal usage even when dropped: {body_end}"
+            );
+            assert_responses_eof_frame(&observed.body, &prefix, Some("resp_eof"), 11);
+            let body = std::str::from_utf8(&observed.body)?;
+            assert!(!body.contains(event), "never forward dropped {event}");
+            assert!(
+                !body.contains("event: response.completed"),
+                "a later fault must not become a synthetic success"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_replaced_terminal_later_fault_is_warning() -> TestResult {
+    for (event, status) in [
+        ("response.completed", "completed"),
+        ("response.incomplete", "incomplete"),
+    ] {
+        for measured in [false, true] {
+            let usage = if measured { RESPONSES_USAGE } else { "" };
+            let plaintext = Bytes::from(format!("{RESPONSES_CREATED}{usage}{RESPONSES_DELTA}"));
+            for (warning_type, body_end, dispatcher) in responses_terminal_faults(&plaintext) {
+                let observed = observe_with_sse_hook(
+                    Arc::new(dispatcher),
+                    Some(Arc::new(ReplaceResponsesDeltaWithTerminal {
+                        event,
+                        status,
+                    })),
+                    responses_eof_record(false),
+                    responses_eof_request("/v1/responses")?,
+                )
+                .await?;
+
+                assert_eq!(observed.status, StatusCode::OK);
+                let success = observed
+                    .completion()
+                    .as_ref()
+                    .expect("an emitted replacement terminal makes the later fault a warning");
+                assert_eq!(observed.row.error_code, None, "{event}: {body_end}");
+                assert_eq!(observed.row.upstream_error_type, None);
+                assert_eq!(observed.row.upstream_error_message, None);
+                assert_eq!(
+                    observed.row.upstream_stream_warning_type.as_deref(),
+                    Some(warning_type),
+                    "{event}: {body_end}"
+                );
+                assert!(
+                    observed
+                        .row
+                        .upstream_stream_warning_message
+                        .as_deref()
+                        .is_some_and(|message| !message.is_empty())
+                );
+                assert_eq!(
+                    observed.row.upstream_body_end.as_deref(),
+                    Some(body_end),
+                    "{event}: {body_end}"
+                );
+                let terminations = observed
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LifecycleEvent::RequestTerminated {
+                            reason,
+                            client_status,
+                            ..
+                        } => Some((reason, client_status)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(terminations.len(), 1);
+                assert_eq!(terminations[0].0, &TerminationReason::Success);
+                assert_eq!(*terminations[0].1, StatusCode::OK.as_u16());
+                assert_eq!(observed.row.status, StatusCode::OK.as_u16());
+                let expected_usage = if measured {
+                    (Some(13), Some(7))
+                } else {
+                    (None, None)
+                };
+                assert_eq!(
+                    (observed.row.input_tokens, observed.row.output_tokens),
+                    expected_usage,
+                    "replacement terminal usage must not become provider usage: {body_end}"
+                );
+                assert_eq!(
+                    (success.usage.input_tokens, success.usage.output_tokens),
+                    if measured { (13, 7) } else { (0, 0) }
+                );
+                if !measured {
+                    assert_eq!(observed.row.cost_usd_micros, None);
+                    assert!(observed.events.iter().all(|event| !matches!(
+                        event,
+                        LifecycleEvent::UsageObserved { .. } | LifecycleEvent::Priced { .. }
+                    )));
+                }
+                assert_eq!(success.stream_message_stop_ms, None);
+                assert_eq!(observed.row.stream_message_stop_ms, None);
+                let body = std::str::from_utf8(&observed.body)?;
+                assert_eq!(
+                    body.matches(&format!("event: {event}\n")).count(),
+                    1,
+                    "forward one replacement terminal before {body_end}"
+                );
+                assert!(!body.contains("event: response.output_text.delta"));
+                assert!(!body.contains("event: response.failed"));
+                assert!(!body.contains("event: error"));
+                assert!(body.ends_with("\n\n"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_out_of_scope_controls() -> TestResult {
+    let partial =
+        Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
+    let json = Bytes::from_static(br#"{"object":"response","status":"in_progress","usage":null}"#);
+    let stacked = brotli_bytes(&gzip_bytes(&Bytes::from_static(
+        RESPONSES_CREATED.as_bytes(),
+    )));
+    let mut stacked_headers = sse_headers();
+    stacked_headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip, br"));
+    for (record, path, request_body, body, headers) in [
+        (
+            responses_eof_record(false),
+            "/v1/chat/completions",
+            br#"{"model":"gpt-test","messages":[],"stream":true}"#.as_slice(),
+            partial,
+            sse_headers(),
+        ),
+        (
+            upstream_record(
+                StorageUpstreamKind::GeminiApiKey,
+                "https://generativelanguage.googleapis.com/",
+            ),
+            "/v1beta/models/gemini-test:streamGenerateContent?alt=sse",
+            br#"{"contents":[]}"#.as_slice(),
+            Bytes::new(),
+            sse_headers(),
+        ),
+        (
+            responses_eof_record(false),
+            "/v1/responses",
+            br#"{"model":"gpt-test","input":"hello","stream":true}"#.as_slice(),
+            json.clone(),
+            json_headers(json.len(), false),
+        ),
+    ] {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", common::managed_api_key())
+            .body(Bytes::copy_from_slice(request_body))?;
+        if path.starts_with("/v1/") {
+            request
+                .extensions_mut()
+                .insert(cc_lb_engine::ProviderScope(cc_lb_domain::Provider::Openai));
+        }
+        let observed = observe(
+            Arc::new(FixedDispatch {
+                status: StatusCode::OK,
+                headers,
+                body: body.clone(),
+            }),
+            false,
+            record,
+            request,
+        )
+        .await?;
+        assert_eq!(observed.body, body, "{path} policy is unchanged");
+        observed.assert_terminal(None);
+        assert!(observed.completion().is_ok());
+        assert_eq!(observed.row.upstream_error_type, None);
+    }
+    let observed = observe(
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: stacked_headers,
+            body: stacked.clone(),
+        }),
+        false,
+        responses_eof_record(false),
+        responses_eof_request("/v1/responses")?,
+    )
+    .await?;
+    assert_eq!(observed.status, StatusCode::OK);
+    assert_eq!(
+        observed.headers.get(CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("gzip, br"))
+    );
+    assert_responses_eof_frame(&observed.body, b"", None, 0);
+    let error = observed
+        .completion()
+        .as_ref()
+        .expect_err("unsupported stacked encoding uses the existing safe failure path");
+    assert_eq!(error.error_type, "upstream_response_decode_error");
+    assert_eq!(
+        error.error_message,
+        "upstream SSE response could not be safely processed"
+    );
+    observed.assert_terminal(Some("upstream_stream_error"));
+    assert_eq!(
+        observed.row.upstream_error_type.as_deref(),
+        Some("upstream_response_decode_error")
+    );
+    assert_eq!(
+        (observed.row.input_tokens, observed.row.output_tokens),
+        (None, None)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_failure_refunds_limits_with_or_without_usage() -> TestResult {
+    use cc_lb_storage_api::principal::{Limit, LimitKind};
+
+    for measured in [false, true] {
+        let dir = tempfile::tempdir()?;
+        let storage = Arc::new(sqlite_storage(&dir, "responses-eof-limits.sqlite").await?);
+        let test_bus =
+            TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+        let mut rx = test_bus.bus.subscribe_lifecycle();
+        let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+        let reconcile =
+            cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+        let prefix = Bytes::from(format!(
+            "{RESPONSES_CREATED}{RESPONSES_DELTA}{}",
+            if measured { RESPONSES_USAGE } else { "" }
+        ));
+        let lifecycle = lifecycle_with_options(
+            None,
+            None,
+            Arc::new(ScriptedDispatch::identity_sse(vec![prefix.clone()], None)),
+            LifecycleConfig::default(),
+            responses_eof_record(measured),
+            true,
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 10,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000_000,
+                },
+                Limit {
+                    kind: LimitKind::Concurrent,
+                    window_secs: 0,
+                    cap_micros: 2,
+                },
+            ],
+        )
+        .with_static_limit_subject(
+            engine.clone(),
+            "principal-test".to_owned(),
+            "key-test".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "key-test".to_owned(),
+                status: KeyStatus::Active,
+                ..StoredApiKeyRecord::default()
+            },
+        )
+        .with_upstream_affinity_store(Arc::new(
+            crate::upstream_affinity::MemoryAffinityStore::default(),
+        ))
+        .with_event_bus(test_bus.bus_arc());
+        let response =
+            handle_authenticated(&lifecycle, responses_eof_request("/v1/responses")?).await?;
+        let (status, headers, body) = collect_body(response).await;
+        let events = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut events = Vec::new();
+            loop {
+                let event = rx.recv().await.expect("lifecycle event delivered");
+                let terminated = matches!(event, LifecycleEvent::RequestTerminated { .. });
+                events.push(event);
+                if terminated {
+                    break events;
+                }
+            }
+        })
+        .await?;
+        reconcile.shutdown().await;
+        let mut rows = wait_for_events(storage.as_ref(), 1).await?;
+        assert_eq!(rows.len(), 1);
+        let observed = Observation {
+            status,
+            headers,
+            body,
+            row: rows.remove(0),
+            events,
+        };
+        observed.assert_incomplete_outcome();
+        assert_responses_eof_frame(
+            &observed.body,
+            &prefix,
+            Some("resp_eof"),
+            if measured { 10 } else { 8 },
+        );
+        if measured {
+            observed.assert_incomplete(13, 7);
+        } else {
+            assert_eq!(
+                (
+                    observed.row.input_tokens,
+                    observed.row.output_tokens,
+                    observed.row.cost_usd_micros,
+                ),
+                (None, None, None)
+            );
+            assert!(observed.events.iter().all(|event| !matches!(
+                event,
+                LifecycleEvent::UsageObserved { .. } | LifecycleEvent::Priced { .. }
+            )));
+        }
+        let headers = engine.headers_for("key-test", "principal-test");
+        let remaining = |name: &str| -> i64 {
+            headers
+                .iter()
+                .find(|(header, _)| header == name)
+                .and_then(|(_, value)| value.parse().ok())
+                .expect("remaining limit header")
+        };
+        assert_eq!(
+            remaining("anthropic-ratelimit-requests-remaining"),
+            10,
+            "incomplete failure retains the existing full request refund policy"
+        );
+        assert_eq!(
+            remaining("anthropic-ratelimit-tokens-remaining"),
+            1_000_000,
+            "measured usage is retained without changing failure refund policy"
+        );
+        assert_eq!(concurrency.current("key-test"), 0);
+        let reservation_id = observed
+            .events
+            .iter()
+            .find_map(|event| match event {
+                LifecycleEvent::LimitDecision {
+                    decision: cc_lb_lifecycle::LimitDecisionKind::Reserved { reservation_id, .. },
+                    ..
+                } => Some(reservation_id),
+                _ => None,
+            })
+            .expect("request had a limit reservation");
+        assert!(
+            !engine.refund_by_id(reservation_id),
+            "the failed reservation is already settled exactly once"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn codex_event_name_completed_accepts_transport_close() -> TestResult {
     let body = Bytes::from_static(
@@ -1282,6 +2159,14 @@ impl cc_lb_storage_api::UpstreamAffinityStore for HeldAffinityStore {
         _ttl_secs: u64,
     ) -> cc_lb_storage_api::StorageResult<Vec<cc_lb_storage_api::UpstreamAffinityBinding>> {
         Ok(Vec::new())
+    }
+
+    async fn read_upstream_owner_epoch(
+        &self,
+        _upstream_id: cc_lb_storage_api::UpstreamRecordId,
+        _expected_spec_revision: u64,
+    ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+        Ok(Some(0))
     }
 
     async fn bind_upstream_affinities(

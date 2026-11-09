@@ -22,11 +22,11 @@ use cc_lb_control::anthropic_api_key::{
 };
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability,
-    ApiKeyResolution, ApiKeyWorkspace, ApiKeyWorkspaceMode, RemediationCode, UpstreamKind,
-    UpstreamRecord,
+    ApiKeyResolution, ApiKeyWorkspace, ApiKeyWorkspaceMode, Provider, ProviderProjectSource,
+    RemediationCode, UpstreamApiKeyDetailsRecord, UpstreamKind, UpstreamRecord,
 };
 use http_body_util::{BodyExt, Full, Limited};
-use serde_json::json;
+use serde_json::{Value, json};
 use url::Url;
 
 use super::recheck::stored_api_key;
@@ -105,7 +105,7 @@ async fn preflight(
         kind,
         UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
     ) {
-        provider_native_preflight(state, &key, &base_url, kind, now_unix_secs).await
+        provider_native_preflight(state, &key, &base_url, kind, None, now_unix_secs).await
     } else {
         run_preflight(
             &state.anthropic_org_api,
@@ -146,29 +146,18 @@ pub(crate) async fn provider_native_preflight(
     key: &NormalizedApiKey,
     base_url: &Url,
     kind: UpstreamKind,
+    project_id: Option<&str>,
     now_unix_secs: u64,
 ) -> PreflightOutcome {
-    let url = provider_probe_url(base_url, kind);
-    let header_value = match kind {
-        UpstreamKind::OpenaiApiKey => format!("Bearer {}", key.as_str()),
-        UpstreamKind::GeminiApiKey => key.as_str().to_owned(),
+    let (header_name, header_value) = match kind {
+        UpstreamKind::OpenaiApiKey => ("authorization", format!("Bearer {}", key.as_str())),
+        UpstreamKind::GeminiApiKey => ("x-goog-api-key", key.as_str().to_owned()),
         _ => {
             return provider_outcome(
                 key,
                 now_unix_secs,
-                ProviderProbeResult::Rejected {
-                    code: RemediationCode::KeyInvalid,
-                },
-            );
-        }
-    };
-    let header_name = match kind {
-        UpstreamKind::OpenaiApiKey => "authorization",
-        UpstreamKind::GeminiApiKey => "x-goog-api-key",
-        _ => {
-            return provider_outcome(
-                key,
-                now_unix_secs,
+                kind,
+                project_id,
                 ProviderProbeResult::Rejected {
                     code: RemediationCode::KeyInvalid,
                 },
@@ -181,64 +170,321 @@ pub(crate) async fn provider_native_preflight(
             return provider_outcome(
                 key,
                 now_unix_secs,
+                kind,
+                project_id,
                 ProviderProbeResult::Unreachable { timed_out: false },
             );
         }
     };
-    let request = match axum::http::Request::builder()
-        .method(Method::GET)
+
+    // Discovery is deliberately kept as the first request. A model-list
+    // rejection is a useful provider-native authentication result and must not
+    // be hidden by a follow-up inference request.
+    let models_url = provider_probe_url(base_url, kind);
+    let (status, body) = match provider_request(
+        state,
+        Method::GET,
+        models_url,
+        header_name,
+        header_value.clone(),
+        None,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(result) => return provider_outcome(key, now_unix_secs, kind, project_id, result),
+    };
+    if let Some(result) = provider_status_result(status) {
+        return provider_outcome(key, now_unix_secs, kind, project_id, result);
+    }
+    let models = provider_model_candidates(kind, &body);
+    if models.is_empty() {
+        return provider_outcome(
+            key,
+            now_unix_secs,
+            kind,
+            project_id,
+            ProviderProbeResult::Unreachable { timed_out: false },
+        );
+    }
+
+    let mut result = ProviderProbeResult::Unreachable { timed_out: false };
+    for model in models {
+        let candidate = match kind {
+            UpstreamKind::OpenaiApiKey => {
+                let url = provider_inference_url(base_url, kind, &model, None);
+                match provider_request(
+                    state,
+                    Method::POST,
+                    url,
+                    header_name,
+                    header_value.clone(),
+                    Some(provider_inference_payload(
+                        UpstreamKind::OpenaiApiKey,
+                        &model,
+                        None,
+                    )),
+                )
+                .await
+                {
+                    Ok((status, _)) => {
+                        provider_status_result(status).unwrap_or(ProviderProbeResult::Ok)
+                    }
+                    Err(result) => result,
+                }
+            }
+            UpstreamKind::GeminiApiKey => {
+                let generate = provider_request(
+                    state,
+                    Method::POST,
+                    provider_inference_url(base_url, kind, &model, Some("generateContent")),
+                    header_name,
+                    header_value.clone(),
+                    Some(provider_inference_payload(
+                        UpstreamKind::GeminiApiKey,
+                        &model,
+                        Some("generateContent"),
+                    )),
+                )
+                .await
+                .map(|(status, _)| {
+                    provider_status_result(status).unwrap_or(ProviderProbeResult::Ok)
+                })
+                .unwrap_or_else(|result| result);
+                let count_tokens = provider_request(
+                    state,
+                    Method::POST,
+                    provider_inference_url(base_url, kind, &model, Some("countTokens")),
+                    header_name,
+                    header_value.clone(),
+                    Some(provider_inference_payload(
+                        UpstreamKind::GeminiApiKey,
+                        &model,
+                        Some("countTokens"),
+                    )),
+                )
+                .await
+                .map(|(status, _)| {
+                    provider_status_result(status).unwrap_or(ProviderProbeResult::Ok)
+                })
+                .unwrap_or_else(|result| result);
+                combine_provider_results([generate, count_tokens])
+            }
+            _ => ProviderProbeResult::Rejected {
+                code: RemediationCode::KeyInvalid,
+            },
+        };
+        let try_next = matches!(
+            candidate,
+            ProviderProbeResult::Rejected {
+                code: RemediationCode::KeyInvalid
+            }
+        );
+        result = candidate;
+        if !try_next || matches!(candidate, ProviderProbeResult::Ok) {
+            break;
+        }
+    }
+    provider_outcome(key, now_unix_secs, kind, project_id, result)
+}
+
+async fn provider_request(
+    state: &AdminState,
+    method: Method,
+    url: Url,
+    header_name: &'static str,
+    header_value: HeaderValue,
+    payload: Option<Value>,
+) -> Result<(StatusCode, Bytes), ProviderProbeResult> {
+    let body = match payload {
+        Some(payload) => serde_json::to_vec(&payload).map(Bytes::from).map(Full::new),
+        None => Ok(Full::new(Bytes::new())),
+    }
+    .map_err(|_| ProviderProbeResult::Unreachable { timed_out: false })?;
+    let request = axum::http::Request::builder()
+        .method(method)
         .uri(url.as_str())
         .header(header_name, header_value)
-        .body(Full::new(Bytes::new()))
-    {
-        Ok(request) => request,
-        Err(_) => {
-            return provider_outcome(
-                key,
-                now_unix_secs,
-                ProviderProbeResult::Unreachable { timed_out: false },
-            );
-        }
-    };
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .map_err(|_| ProviderProbeResult::Unreachable { timed_out: false })?;
     let exchange = async {
         let response = state
             .anthropic_org_api
             .http()
             .request(request)
             .await
-            .map_err(|_| ())?;
+            .map_err(|_| ProviderProbeResult::Unreachable { timed_out: false })?;
         let status = response.status();
-        Limited::new(
+        let body = Limited::new(
             response.into_body(),
             state.anthropic_org_api.limits().max_body_bytes,
         )
         .collect()
         .await
-        .map_err(|_| ())?;
-        Ok::<StatusCode, ()>(status)
+        .map_err(|_| ProviderProbeResult::Unreachable { timed_out: false })?
+        .to_bytes();
+        Ok::<_, ProviderProbeResult>((status, body))
     };
-    let result =
-        match tokio::time::timeout(state.anthropic_org_api.limits().per_probe, exchange).await {
-            Ok(Ok(status)) if status == StatusCode::OK => ProviderProbeResult::Ok,
-            Ok(Ok(status)) if status == StatusCode::UNAUTHORIZED => ProviderProbeResult::Rejected {
-                code: RemediationCode::KeyInvalid,
-            },
-            Ok(Ok(status)) if status == StatusCode::FORBIDDEN => ProviderProbeResult::Rejected {
-                code: RemediationCode::KeyForbidden,
-            },
-            Ok(Ok(status)) if status == StatusCode::TOO_MANY_REQUESTS => {
-                ProviderProbeResult::RateLimited
-            }
-            Ok(Ok(status)) if status.is_server_error() => {
-                ProviderProbeResult::Unreachable { timed_out: false }
-            }
-            Ok(Ok(_)) => ProviderProbeResult::Rejected {
-                code: RemediationCode::KeyInvalid,
-            },
-            Ok(Err(())) => ProviderProbeResult::Unreachable { timed_out: false },
-            Err(_) => ProviderProbeResult::Unreachable { timed_out: true },
+    tokio::time::timeout(state.anthropic_org_api.limits().per_probe, exchange)
+        .await
+        .map_err(|_| ProviderProbeResult::Unreachable { timed_out: true })?
+}
+
+fn provider_status_result(status: StatusCode) -> Option<ProviderProbeResult> {
+    match status {
+        status if status.is_success() => None,
+        StatusCode::UNAUTHORIZED => Some(ProviderProbeResult::Rejected {
+            code: RemediationCode::KeyInvalid,
+        }),
+        StatusCode::FORBIDDEN => Some(ProviderProbeResult::Rejected {
+            code: RemediationCode::KeyForbidden,
+        }),
+        StatusCode::TOO_MANY_REQUESTS => Some(ProviderProbeResult::RateLimited),
+        status if status.is_server_error() => {
+            Some(ProviderProbeResult::Unreachable { timed_out: false })
+        }
+        _ => Some(ProviderProbeResult::Rejected {
+            code: RemediationCode::KeyInvalid,
+        }),
+    }
+}
+
+const MAX_PROVIDER_MODEL_CANDIDATES: usize = 3;
+
+fn provider_model_candidates(kind: UpstreamKind, body: &[u8]) -> Vec<String> {
+    let value: Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let models = match kind {
+        UpstreamKind::OpenaiApiKey => value.get("data").and_then(Value::as_array),
+        UpstreamKind::GeminiApiKey => value.get("models").and_then(Value::as_array),
+        _ => None,
+    };
+    let Some(models) = models else {
+        return Vec::new();
+    };
+    let field = match kind {
+        UpstreamKind::OpenaiApiKey => "id",
+        UpstreamKind::GeminiApiKey => "name",
+        _ => return Vec::new(),
+    };
+    let mut candidates = Vec::new();
+    for model in models {
+        let Some(name) = model
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
         };
-    provider_outcome(key, now_unix_secs, result)
+        if !is_non_generating_model(name) && !candidates.iter().any(|candidate| candidate == name) {
+            candidates.push(name.to_owned());
+        }
+    }
+    for model in models {
+        let Some(name) = model
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        if !candidates.iter().any(|candidate| candidate == name) {
+            candidates.push(name.to_owned());
+        }
+        if candidates.len() >= MAX_PROVIDER_MODEL_CANDIDATES {
+            break;
+        }
+    }
+    candidates.truncate(MAX_PROVIDER_MODEL_CANDIDATES);
+    candidates
+}
+
+fn is_non_generating_model(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    [
+        "embedding",
+        "moderation",
+        "rerank",
+        "transcri",
+        "whisper",
+        "text-to-speech",
+        "tts-",
+        "dall-e",
+        "image",
+    ]
+    .iter()
+    .any(|marker| model.contains(marker))
+}
+
+fn provider_inference_url(
+    base_url: &Url,
+    kind: UpstreamKind,
+    model: &str,
+    operation: Option<&str>,
+) -> Url {
+    let path = match kind {
+        UpstreamKind::OpenaiApiKey => "/v1/chat/completions".to_owned(),
+        UpstreamKind::GeminiApiKey => {
+            let model = model.strip_prefix("models/").unwrap_or(model);
+            format!(
+                "/v1beta/models/{model}:{}",
+                operation.unwrap_or("generateContent")
+            )
+        }
+        _ => "/".to_owned(),
+    };
+    let mut url = cc_lb_upstream::upstream_request_url(base_url, &path, None);
+    url.set_fragment(None);
+    url
+}
+
+fn provider_inference_payload(kind: UpstreamKind, model: &str, operation: Option<&str>) -> Value {
+    match (kind, operation) {
+        (UpstreamKind::OpenaiApiKey, _) => json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": false
+        }),
+        (UpstreamKind::GeminiApiKey, Some("countTokens")) => json!({
+            "contents": [{"parts": [{"text": "ping"}]}]
+        }),
+        (UpstreamKind::GeminiApiKey, _) => json!({
+            "contents": [{"parts": [{"text": "ping"}]}],
+            "generationConfig": {"maxOutputTokens": 1}
+        }),
+        _ => json!({}),
+    }
+}
+
+fn combine_provider_results<const N: usize>(
+    results: [ProviderProbeResult; N],
+) -> ProviderProbeResult {
+    if let Some(result) = results.iter().find_map(|result| match result {
+        ProviderProbeResult::Rejected { .. } => Some(*result),
+        _ => None,
+    }) {
+        return result;
+    }
+    if let Some(result) = results.iter().find_map(|result| match result {
+        ProviderProbeResult::Unreachable { .. } => Some(*result),
+        _ => None,
+    }) {
+        return result;
+    }
+    if results
+        .iter()
+        .any(|result| matches!(result, ProviderProbeResult::RateLimited))
+    {
+        ProviderProbeResult::RateLimited
+    } else {
+        ProviderProbeResult::Ok
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -260,9 +506,144 @@ fn provider_probe_url(base_url: &Url, kind: UpstreamKind) -> Url {
     url
 }
 
+fn provider_for_kind(kind: UpstreamKind) -> Option<Provider> {
+    match kind {
+        UpstreamKind::OpenaiApiKey => Some(Provider::Openai),
+        UpstreamKind::GeminiApiKey => Some(Provider::Gemini),
+        _ => None,
+    }
+}
+
+fn configured_project_id(
+    kind: UpstreamKind,
+    project_id: Option<&str>,
+) -> Result<Option<String>, UpstreamError> {
+    let Some(project_id) = project_id else {
+        return Ok(None);
+    };
+    if provider_for_kind(kind).is_none() {
+        return Err(UpstreamError::BadRequest {
+            error: "unexpected_project_id",
+            detail: "project_id is supported only for OpenAI and Gemini API-key upstreams"
+                .to_owned(),
+        });
+    }
+    let project_id = project_id.trim();
+    if project_id.is_empty() {
+        return Err(UpstreamError::BadRequest {
+            error: "missing_project_id",
+            detail: "API-key project_id must be non-empty".to_owned(),
+        });
+    }
+    Ok(Some(project_id.to_owned()))
+}
+
+pub(crate) fn preserve_provider_metadata(
+    access: &mut ApiKeyAccessWrite,
+    existing: Option<&UpstreamApiKeyDetailsRecord>,
+    replace_project: bool,
+) {
+    let Some(existing) = existing else {
+        return;
+    };
+    if replace_project {
+        access.provider_report_state = None;
+        access.provider_report_status_metadata = None;
+    } else {
+        if existing.project_id.is_some() {
+            access.project_id = existing.project_id.clone();
+        }
+        if existing.project_source.is_some() {
+            access.project_source = existing.project_source;
+        }
+        access.provider_report_state = existing.provider_report_state;
+        access.provider_report_status_metadata = existing.provider_report_status_metadata.clone();
+    }
+}
+
+#[cfg(test)]
+mod preserve_provider_metadata_tests {
+    use super::*;
+    use cc_lb_storage_api::ProviderReportState;
+
+    fn existing_details() -> UpstreamApiKeyDetailsRecord {
+        UpstreamApiKeyDetailsRecord {
+            upstream_id: uuid::Uuid::nil(),
+            verified: true,
+            key_class: ApiKeyClass::Unknown,
+            key_hint: "sk-test-...".to_owned(),
+            api_key_id: None,
+            needs_workspace: false,
+            capabilities: ApiKeyCapabilities::not_checked(),
+            remediation: Vec::new(),
+            usage_report_state: None,
+            provider: Some(Provider::Openai),
+            project_id: Some("project-old".to_owned()),
+            project_source: Some(ProviderProjectSource::Configured),
+            provider_report_state: Some(ProviderReportState::Reported),
+            provider_report_status_metadata: Some("old-report".to_owned()),
+            last_error: None,
+            checked_at_unix_secs: Some(1),
+            last_attempt_at_unix_secs: Some(1),
+            access_revision: 1,
+            usage_poll_failures: 0,
+            usage_next_poll_after_unix_secs: None,
+            usage_last_success_at_unix_secs: None,
+            usage_last_attempt_at_unix_secs: None,
+            usage_poll_claim_token: None,
+            usage_poll_claim_lease_until_unix_secs: None,
+            created_at_unix_secs: 1,
+            updated_at_unix_secs: 1,
+        }
+    }
+
+    #[test]
+    fn project_change_resets_report_metadata_but_same_scope_preserves_it() {
+        let key = normalize_api_key("sk-ant-api03-abcdefghijklmnopqrstuvwxyz").unwrap();
+        let existing = existing_details();
+
+        let mut changed = provider_outcome(
+            &key,
+            42,
+            UpstreamKind::OpenaiApiKey,
+            Some("project-new"),
+            ProviderProbeResult::Ok,
+        )
+        .access;
+        changed.provider_report_state = Some(ProviderReportState::Estimated);
+        changed.provider_report_status_metadata = Some("new-report".to_owned());
+        preserve_provider_metadata(&mut changed, Some(&existing), true);
+        assert_eq!(changed.provider, Some(Provider::Openai));
+        assert_eq!(changed.project_id.as_deref(), Some("project-new"));
+        assert_eq!(changed.provider_report_state, None);
+        assert_eq!(changed.provider_report_status_metadata, None);
+
+        let mut unchanged = provider_outcome(
+            &key,
+            42,
+            UpstreamKind::OpenaiApiKey,
+            Some("project-new"),
+            ProviderProbeResult::Ok,
+        )
+        .access;
+        preserve_provider_metadata(&mut unchanged, Some(&existing), false);
+        assert_eq!(unchanged.project_id.as_deref(), Some("project-old"));
+        assert_eq!(
+            unchanged.provider_report_state,
+            Some(ProviderReportState::Reported)
+        );
+        assert_eq!(
+            unchanged.provider_report_status_metadata.as_deref(),
+            Some("old-report")
+        );
+    }
+}
+
 fn provider_outcome(
     key: &NormalizedApiKey,
     now_unix_secs: u64,
+    kind: UpstreamKind,
+    project_id: Option<&str>,
     result: ProviderProbeResult,
 ) -> PreflightOutcome {
     let hint = key_hint(key.as_str());
@@ -360,6 +741,15 @@ fn provider_outcome(
             capabilities,
             remediation,
             usage_report_state: Some(ApiKeyOrgCapability::NotApplicable),
+            provider: provider_for_kind(kind),
+            project_id: project_id.map(ToOwned::to_owned),
+            project_source: provider_for_kind(kind).map(|_| {
+                project_id
+                    .map(|_| ProviderProjectSource::Configured)
+                    .unwrap_or(ProviderProjectSource::Unverified)
+            }),
+            provider_report_state: None,
+            provider_report_status_metadata: None,
             last_error,
             checked_at_unix_secs: checked.then_some(now_unix_secs),
             last_attempt_at_unix_secs: now_unix_secs,
@@ -410,6 +800,8 @@ impl KeyCheck {
     pub(crate) fn unverified(
         key: &NormalizedApiKey,
         workspace_id: Option<&str>,
+        kind: UpstreamKind,
+        project_id: Option<&str>,
         now_unix_secs: u64,
     ) -> Self {
         let mut capabilities = ApiKeyCapabilities::not_checked();
@@ -430,6 +822,15 @@ impl KeyCheck {
                 capabilities,
                 remediation: vec![RemediationCode::UsageNeverChecked],
                 usage_report_state: None,
+                provider: provider_for_kind(kind),
+                project_id: project_id.map(ToOwned::to_owned),
+                project_source: provider_for_kind(kind).map(|_| {
+                    project_id
+                        .map(|_| ProviderProjectSource::Configured)
+                        .unwrap_or(ProviderProjectSource::Unverified)
+                }),
+                provider_report_state: None,
+                provider_report_status_metadata: None,
                 last_error: None,
                 checked_at_unix_secs: None,
                 last_attempt_at_unix_secs: now_unix_secs,
@@ -479,26 +880,32 @@ pub(crate) async fn prepare_api_key_create(
     api_key_value: Option<&str>,
     base_url: Option<&Url>,
     workspace_id: Option<&str>,
+    project_id: Option<&str>,
     skip_preflight: bool,
 ) -> Result<PreparedApiKeyCreate, UpstreamError> {
     let key = normalize_key_input(api_key_value)?;
+    let project_id = configured_project_id(kind, project_id)?;
     if let Some(id) = workspace_id {
         validate_workspace_input(id)?;
     }
     gate_key(&key)?;
     let now = now_unix_secs(state);
     let _ = effective_base_url(base_url, kind)?;
-    let check = if skip_preflight || kind != UpstreamKind::AnthropicApiKey {
-        KeyCheck::unverified(&key, workspace_id, now)
+    let check = if skip_preflight {
+        KeyCheck::unverified(&key, workspace_id, kind, project_id.as_deref(), now)
     } else {
         let base_url = effective_base_url(base_url, kind)?;
         probe_strict(
             state,
             &key,
             &base_url,
-            workspace_id,
-            workspace_id.is_some(),
-            now,
+            StrictProbeContext {
+                workspace_id,
+                explicit_workspace: workspace_id.is_some(),
+                kind,
+                project_id: project_id.as_deref(),
+                now_unix_secs: now,
+            },
         )
         .await?
     };
@@ -514,7 +921,7 @@ pub(crate) struct PreparedApiKeyUpdate {
     pub(crate) workspace_id: Option<Option<String>>,
     /// `Some` when the key was (re-)checked or stored unverified.
     pub(crate) check: Option<KeyCheck>,
-    /// Key, workspace, or host changed: the usage-poll state restarts.
+    /// Key, workspace, project, or host changed: the usage-poll state restarts.
     pub(crate) reset_poll_state: bool,
 }
 
@@ -523,17 +930,19 @@ pub(crate) struct ApiKeyUpdateRequest<'a> {
     pub(crate) api_key_value: Option<&'a str>,
     pub(crate) workspace_id: Option<&'a str>,
     pub(crate) clear_workspace_id: bool,
+    pub(crate) project_id: Option<&'a str>,
+    pub(crate) existing_details: Option<&'a UpstreamApiKeyDetailsRecord>,
     /// The spec's `base_url` after the PUT.
     pub(crate) base_url: Option<&'a Url>,
     pub(crate) skip_preflight: bool,
 }
 
 /// Validates a PUT on an API-key upstream and re-probes when the key, the
-/// workspace, or the host changes.
+/// workspace, project, or host changes.
 ///
-/// A new key or workspace must pass the check (failures persist nothing). A
-/// `base_url`-only change re-probes the stored key at the new host and stores
-/// whatever it finds; it never fails the PUT.
+/// A new key, workspace, or project must pass the check (failures persist
+/// nothing). A `base_url`-only change re-probes the stored key at the new host
+/// and stores whatever it finds; it never fails the PUT.
 pub(crate) async fn prepare_api_key_update(
     state: &AdminState,
     current: &UpstreamRecord,
@@ -543,6 +952,12 @@ pub(crate) async fn prepare_api_key_update(
         .api_key_value
         .map(|raw| normalize_key_input(Some(raw)))
         .transpose()?;
+    let configured_project = configured_project_id(current.kind, request.project_id)?;
+    let existing_project_id = request
+        .existing_details
+        .and_then(|details| details.project_id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
     if let Some(id) = request.workspace_id {
         validate_workspace_input(id)?;
     }
@@ -559,7 +974,9 @@ pub(crate) async fn prepare_api_key_update(
     };
     let workspace_changed = target_workspace != current.workspace_id;
     let host_changed = request.base_url != current.base_url.as_ref();
-    if new_key.is_none() && !workspace_changed && !host_changed {
+    let project_changed =
+        request.project_id.is_some() && configured_project.as_deref() != existing_project_id;
+    if new_key.is_none() && !workspace_changed && !host_changed && !project_changed {
         return Ok(PreparedApiKeyUpdate::default());
     }
 
@@ -573,38 +990,66 @@ pub(crate) async fn prepare_api_key_update(
         }
     };
     let base_url = effective_base_url(request.base_url, current.kind)?;
-    let check = if request.skip_preflight || current.kind != UpstreamKind::AnthropicApiKey {
-        KeyCheck::unverified(key, target_workspace.as_deref(), now)
-    } else if new_key.is_some() || workspace_changed {
+    let project_for_check = configured_project.as_deref().or_else(|| {
+        request
+            .existing_details
+            .filter(|details| details.project_source == Some(ProviderProjectSource::Configured))
+            .and_then(|details| details.project_id.as_deref())
+    });
+    let mut check = if request.skip_preflight {
+        KeyCheck::unverified(
+            key,
+            target_workspace.as_deref(),
+            current.kind,
+            project_for_check,
+            now,
+        )
+    } else if new_key.is_some() || workspace_changed || project_changed {
         probe_strict(
             state,
             key,
             &base_url,
-            target_workspace.as_deref(),
-            request.workspace_id.is_some(),
-            now,
+            StrictProbeContext {
+                workspace_id: target_workspace.as_deref(),
+                explicit_workspace: request.workspace_id.is_some(),
+                kind: current.kind,
+                project_id: project_for_check,
+                now_unix_secs: now,
+            },
         )
         .await?
     } else {
         // Host-only change: probe the stored key exactly as the signer will
         // send it and keep the workspace (D-Z8).
-        let outcome = run_preflight(
-            &state.anthropic_org_api,
-            PreflightInput {
-                key,
-                base_url: &base_url,
-                workspace_id: None,
-                mode: PreflightMode::StoredKey {
-                    stored_workspace_id: current.workspace_id.as_deref(),
+        let outcome = if is_provider_native_kind(current.kind) {
+            provider_native_preflight(state, key, &base_url, current.kind, project_for_check, now)
+                .await
+        } else {
+            run_preflight(
+                &state.anthropic_org_api,
+                PreflightInput {
+                    key,
+                    base_url: &base_url,
+                    workspace_id: None,
+                    mode: PreflightMode::StoredKey {
+                        stored_workspace_id: current.workspace_id.as_deref(),
+                    },
+                    now_unix_secs: now,
                 },
-                now_unix_secs: now,
-            },
-        )
-        .await;
+            )
+            .await
+        };
         let mut check = KeyCheck::from_outcome(outcome, current.workspace_id.as_deref());
         check.workspace_id = current.workspace_id.clone();
         check
     };
+    if is_provider_native_kind(current.kind) {
+        preserve_provider_metadata(
+            &mut check.access,
+            request.existing_details,
+            request.project_id.is_some(),
+        );
+    }
     let workspace_id =
         (check.workspace_id != current.workspace_id).then(|| check.workspace_id.clone());
     Ok(PreparedApiKeyUpdate {
@@ -617,34 +1062,59 @@ pub(crate) async fn prepare_api_key_update(
 
 /// Runs P0-P4 for a candidate and accepts only `ok`. `explicit_workspace`
 /// marks a workspace the operator sent, which a bound key refuses (D-Z4).
+fn is_provider_native_kind(kind: UpstreamKind) -> bool {
+    matches!(
+        kind,
+        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    )
+}
+struct StrictProbeContext<'a> {
+    workspace_id: Option<&'a str>,
+    explicit_workspace: bool,
+    kind: UpstreamKind,
+    project_id: Option<&'a str>,
+    now_unix_secs: u64,
+}
+
 async fn probe_strict(
     state: &AdminState,
     key: &NormalizedApiKey,
     base_url: &Url,
-    workspace_id: Option<&str>,
-    explicit_workspace: bool,
-    now_unix_secs: u64,
+    context: StrictProbeContext<'_>,
 ) -> Result<KeyCheck, UpstreamError> {
-    let outcome = run_preflight(
-        &state.anthropic_org_api,
-        PreflightInput {
+    let outcome = if is_provider_native_kind(context.kind) {
+        provider_native_preflight(
+            state,
             key,
             base_url,
-            workspace_id,
-            mode: PreflightMode::Candidate,
-            now_unix_secs,
-        },
-    )
-    .await;
+            context.kind,
+            context.project_id,
+            context.now_unix_secs,
+        )
+        .await
+    } else {
+        run_preflight(
+            &state.anthropic_org_api,
+            PreflightInput {
+                key,
+                base_url,
+                workspace_id: context.workspace_id,
+                mode: PreflightMode::Candidate,
+                now_unix_secs: context.now_unix_secs,
+            },
+        )
+        .await
+    };
     match outcome.wire.verdict {
         PreflightVerdict::Ok => {
-            if explicit_workspace && outcome.access.key_class == ApiKeyClass::WorkspaceBound {
+            if context.explicit_workspace && outcome.access.key_class == ApiKeyClass::WorkspaceBound
+            {
                 return Err(UpstreamError::InvalidInput {
                     field: "workspace_id".to_owned(),
                     reason: "this key sets its own workspace; remove workspace_id".to_owned(),
                 });
             }
-            Ok(KeyCheck::from_outcome(outcome, workspace_id))
+            Ok(KeyCheck::from_outcome(outcome, context.workspace_id))
         }
         PreflightVerdict::NeedsWorkspace | PreflightVerdict::Rejected => {
             let code = outcome
@@ -816,7 +1286,13 @@ mod tests {
         let key = normalize_api_key("sk-ant-api03-abcdefghijklmnopqrstuvwxyz");
         assert!(key.is_ok());
         let Ok(key) = key else { return };
-        let check = KeyCheck::unverified(&key, Some("wrkspc_P"), 42);
+        let check = KeyCheck::unverified(
+            &key,
+            Some("wrkspc_P"),
+            UpstreamKind::AnthropicApiKey,
+            None,
+            42,
+        );
         assert!(!check.access.verified);
         assert_eq!(check.access.checked_at_unix_secs, None);
         assert_eq!(check.access.key_hint, "sk-ant-api03-...wxyz");
@@ -837,5 +1313,130 @@ mod tests {
             provider_probe_url(&base, UpstreamKind::GeminiApiKey).as_str(),
             "https://proxy.example/v1beta/models"
         );
+    }
+    #[test]
+    fn provider_model_candidates_prioritize_generation_models() {
+        let body = br#"{"data":[{"id":"text-embedding-3-small"},{"id":"gpt-4o"},{"id":"omni-moderation-latest"}]}"#;
+        assert_eq!(
+            provider_model_candidates(UpstreamKind::OpenaiApiKey, body),
+            vec![
+                "gpt-4o".to_owned(),
+                "text-embedding-3-small".to_owned(),
+                "omni-moderation-latest".to_owned()
+            ]
+        );
+    }
+    #[test]
+    fn provider_native_preflight_runs_openai_minimal_inference() {
+        let base = Url::parse("https://proxy.example/prefix").unwrap();
+        let url = provider_inference_url(&base, UpstreamKind::OpenaiApiKey, "gpt-test", None);
+        assert_eq!(url.as_str(), "https://proxy.example/v1/chat/completions");
+        let payload = provider_inference_payload(UpstreamKind::OpenaiApiKey, "gpt-test", None);
+        assert_eq!(payload["model"], "gpt-test");
+        assert_eq!(payload["messages"][0]["role"], "user");
+        assert_eq!(payload["messages"][0]["content"], "ping");
+        assert_eq!(payload["max_tokens"], 1);
+        assert_eq!(payload["stream"], false);
+    }
+
+    #[test]
+    fn provider_native_preflight_runs_gemini_generate_and_count_tokens() {
+        let base = Url::parse("https://proxy.example/prefix").unwrap();
+        assert_eq!(
+            provider_inference_url(
+                &base,
+                UpstreamKind::GeminiApiKey,
+                "models/gemini-test",
+                Some("generateContent")
+            )
+            .as_str(),
+            "https://proxy.example/v1beta/models/gemini-test:generateContent"
+        );
+        assert_eq!(
+            provider_inference_url(
+                &base,
+                UpstreamKind::GeminiApiKey,
+                "models/gemini-test",
+                Some("countTokens")
+            )
+            .as_str(),
+            "https://proxy.example/v1beta/models/gemini-test:countTokens"
+        );
+        let generate = provider_inference_payload(
+            UpstreamKind::GeminiApiKey,
+            "gemini-test",
+            Some("generateContent"),
+        );
+        assert_eq!(generate["contents"][0]["parts"][0]["text"], "ping");
+        assert_eq!(generate["generationConfig"]["maxOutputTokens"], 1);
+        let count = provider_inference_payload(
+            UpstreamKind::GeminiApiKey,
+            "gemini-test",
+            Some("countTokens"),
+        );
+        assert_eq!(count["contents"][0]["parts"][0]["text"], "ping");
+        assert!(count.get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn provider_native_preflight_preserves_model_list_failure_classification() {
+        assert!(matches!(
+            provider_status_result(StatusCode::UNAUTHORIZED),
+            Some(ProviderProbeResult::Rejected {
+                code: RemediationCode::KeyInvalid
+            })
+        ));
+        assert!(matches!(
+            provider_status_result(StatusCode::FORBIDDEN),
+            Some(ProviderProbeResult::Rejected {
+                code: RemediationCode::KeyForbidden
+            })
+        ));
+        assert!(matches!(
+            provider_status_result(StatusCode::TOO_MANY_REQUESTS),
+            Some(ProviderProbeResult::RateLimited)
+        ));
+    }
+    #[test]
+    fn provider_project_provenance_is_explicit() {
+        let key = normalize_api_key("sk-ant-api03-abcdefghijklmnopqrstuvwxyz").unwrap();
+        let configured = provider_outcome(
+            &key,
+            42,
+            UpstreamKind::OpenaiApiKey,
+            Some("project-production"),
+            ProviderProbeResult::Ok,
+        );
+        assert_eq!(configured.access.provider, Some(Provider::Openai));
+        assert_eq!(
+            configured.access.project_id.as_deref(),
+            Some("project-production")
+        );
+        assert_eq!(
+            configured.access.project_source,
+            Some(ProviderProjectSource::Configured)
+        );
+
+        let unverified = provider_outcome(
+            &key,
+            42,
+            UpstreamKind::GeminiApiKey,
+            None,
+            ProviderProbeResult::Ok,
+        );
+        assert_eq!(unverified.access.provider, Some(Provider::Gemini));
+        assert_eq!(unverified.access.project_id, None);
+        assert_eq!(
+            unverified.access.project_source,
+            Some(ProviderProjectSource::Unverified)
+        );
+    }
+
+    #[test]
+    fn provider_project_id_rejects_empty_values() {
+        for value in ["", "   "] {
+            assert!(configured_project_id(UpstreamKind::OpenaiApiKey, Some(value)).is_err());
+            assert!(configured_project_id(UpstreamKind::GeminiApiKey, Some(value)).is_err());
+        }
     }
 }

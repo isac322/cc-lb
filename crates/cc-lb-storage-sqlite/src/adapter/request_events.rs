@@ -6,7 +6,7 @@ use cc_lb_storage_api::{
     RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
 };
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 use std::time::Instant;
 
 use super::request_event_list_sql;
@@ -75,9 +75,7 @@ impl RequestEventStore for SqliteStorage {
             Some(id) => id,
             None => select_existing_event_id_in_tx(&mut tx, event_id).await?,
         };
-        for evidence in evidence {
-            insert_keepalive_evidence_in_tx(&mut tx, evidence).await?;
-        }
+        insert_filtered_keepalive_evidence_in_tx(&mut tx, evidence).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(id, "request event cursor")
     }
@@ -617,40 +615,37 @@ async fn insert_request_event_in_tx(
         "request_id, ts, source_kind, source_ref_id, upstream_id, principal_id, ",
         "created_at, key_id, model, upstream_name, thread_id, input_tokens, ",
         "output_tokens, cache_creation_input_tokens, cache_read_input_tokens, ",
-        "event_id, error_code, upstream_error_type, upstream_error_message, ",
-        "thinking_tokens, tool_use_prompt_tokens, service_tier, cache_creation_input_tokens_5m, ",
-        "cache_creation_input_tokens_1h, token_estimate_source, ",
-        "thinking_budget_tokens, reasoning_effort, list_ts_ms, ",
-        "list_event_key, list_status, list_duration_ms, list_auth_ms, ",
-        "list_route_ms, list_limit_reserve_ms, list_json_parse_ms, ",
-        "list_cache_structure_ms, list_cache_token_key_ms, ",
-        "list_cache_count_lookup_ms, list_cache_tokenizer_queue_ms, ",
-        "list_cache_serialize_ms, list_cache_tokenize_ms, ",
-        "list_prepare_signer_ms, list_bulkhead_wait_ms, list_dns_ms, ",
-        "list_connect_ms, list_connection_reused, list_proxy_setup_ms, ",
-        "list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, ",
-        "list_upstream_body_ms, list_stream_first_content_delta_ms, ",
-        "list_stream_last_content_delta_ms, list_inter_token_avg_ms, ",
-        "list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, ",
-        "list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, ",
-        "list_cost_cache_read_micros, observed_session_id, request_kind, ",
+        "cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h, ",
+        "event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, ",
+        "tool_use_prompt_tokens, service_tier, cache_creation_input_tokens_5m, ",
+        "cache_creation_input_tokens_1h, token_estimate_source, thinking_budget_tokens, ",
+        "reasoning_effort, list_ts_ms, list_event_key, list_status, list_duration_ms, ",
+        "list_auth_ms, list_route_ms, list_limit_reserve_ms, list_json_parse_ms, ",
+        "list_cache_structure_ms, list_cache_token_key_ms, list_cache_count_lookup_ms, ",
+        "list_cache_tokenizer_queue_ms, list_cache_serialize_ms, list_cache_tokenize_ms, ",
+        "list_prepare_signer_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, ",
+        "list_connection_reused, list_proxy_setup_ms, list_shape_ms, list_sign_ms, ",
+        "list_upstream_ttfb_ms, list_upstream_body_ms, list_stream_first_content_delta_ms, ",
+        "list_stream_last_content_delta_ms, list_inter_token_avg_ms, list_cost_usd_micros, ",
+        "list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, ",
+        "list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, ",
+        "list_cost_cache_write_micros, list_cost_cache_write_30m_micros, ",
+        "list_cost_cache_write_12h_micros, observed_session_id, request_kind, ",
         "claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, ",
         "session_id_source, list_request_body_read_ms, list_request_body_bytes, ",
-        "list_finalize_ms, list_request_body_first_chunk_ms, ",
-        "list_request_body_receive_ms, list_request_body_wait_ms, ",
-        "list_request_body_process_ms, list_request_body_chunk_count, ",
+        "list_finalize_ms, list_request_body_first_chunk_ms, list_request_body_receive_ms, ",
+        "list_request_body_wait_ms, list_request_body_process_ms, list_request_body_chunk_count, ",
         "list_response_body_wait_ms, list_response_body_process_ms, ",
         "list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms, ",
         "event_kind, principal_kind, body_chunk_count, body_bytes, ",
-        "stream_message_start_ms, stream_content_block_start_ms, ",
-        "stream_message_stop_ms, stream_last_chunk_ms, stream_total_ms, ",
-        "sse_event_count, content_delta_count, ping_count, upstream_http_version, ",
-        "upstream_request_id, upstream_content_encoding, upstream_content_length, ",
-        "upstream_body_bytes, upstream_body_end, upstream_body_error_cause, ",
-        "upstream_body_error_io_kind, upstream_body_error_h2_reason, ",
-        "upstream_stream_warning_type, upstream_stream_warning_message",
+        "stream_message_start_ms, stream_content_block_start_ms, stream_message_stop_ms, ",
+        "stream_first_output_ms, stream_last_chunk_ms, stream_total_ms, sse_event_count, content_delta_count, ",
+        "ping_count, stream_inter_output_avg_ms, provider_session_id, provider_connection_id, upstream_http_version, upstream_request_id, upstream_content_encoding, ",
+        "upstream_content_length, upstream_body_bytes, upstream_body_end, ",
+        "upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, ",
+        "upstream_stream_warning_type, upstream_stream_warning_message, thinking_level",
         ") VALUES (",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -658,7 +653,7 @@ async fn insert_request_event_in_tx(
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
         ") ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING ",
         "RETURNING id",
     ))
@@ -688,6 +683,18 @@ async fn insert_request_event_in_tx(
     .bind(option_u64_to_i64(
         event.cache_read_input_tokens,
         "request event cache_read_input_tokens",
+    )?)
+    .bind(option_u64_to_i64(
+        event.cache_write_input_tokens,
+        "request event cache_write_input_tokens",
+    )?)
+    .bind(option_u64_to_i64(
+        event.cache_write_input_tokens_30m,
+        "request event cache_write_input_tokens_30m",
+    )?)
+    .bind(option_u64_to_i64(
+        event.cache_write_input_tokens_12h,
+        "request event cache_write_input_tokens_12h",
     )?)
     .bind(event_id)
     .bind(event.error_code.as_deref())
@@ -794,6 +801,9 @@ async fn insert_request_event_in_tx(
     .bind(event.cost_cache_creation_5m_micros)
     .bind(event.cost_cache_creation_1h_micros)
     .bind(event.cost_cache_read_micros)
+    .bind(event.cost_cache_write_micros)
+    .bind(event.cost_cache_write_30m_micros)
+    .bind(event.cost_cache_write_12h_micros)
     .bind(event.observed_session_id.as_deref())
     .bind(event.request_kind.as_deref())
     .bind(event.claude_agent_id.as_deref())
@@ -848,6 +858,10 @@ async fn insert_request_event_in_tx(
         "request event stream_message_stop_ms",
     )?)
     .bind(option_u64_to_i64(
+        event.stream_first_output_ms,
+        "request event stream_first_output_ms",
+    )?)
+    .bind(option_u64_to_i64(
         event.stream_last_chunk_ms,
         "request event stream_last_chunk_ms",
     )?)
@@ -867,6 +881,12 @@ async fn insert_request_event_in_tx(
         event.ping_count,
         "request event ping_count",
     )?)
+    .bind(option_u64_to_i64(
+        event.stream_inter_output_avg_ms,
+        "request event stream_inter_output_avg_ms",
+    )?)
+    .bind(event.provider_session_id.as_deref())
+    .bind(event.provider_connection_id.as_deref())
     .bind(event.upstream_http_version.as_deref())
     .bind(event.upstream_request_id.as_deref())
     .bind(event.upstream_content_encoding.as_deref())
@@ -884,6 +904,7 @@ async fn insert_request_event_in_tx(
     .bind(event.upstream_body_error_h2_reason.as_deref())
     .bind(event.upstream_stream_warning_type.as_deref())
     .bind(event.upstream_stream_warning_message.as_deref())
+    .bind(event.thinking_level.as_deref())
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx_error)
@@ -906,8 +927,8 @@ async fn insert_keepalive_turn_in_tx(
 ) -> StorageResult<()> {
     sqlx::query(
         "INSERT INTO cache_keepalive_turns \
-         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(source_ref_id) DO NOTHING",
     )
     .bind(&row.source_ref_id)
@@ -935,7 +956,8 @@ async fn insert_keepalive_turn_in_tx(
         row.cache_read_input_tokens,
         "cache keepalive cache_read_input_tokens",
     )?)
-    .bind(row.cost_micros)
+    .bind(row.cost_micros.unwrap_or(0))
+    .bind(row.cost_micros.is_some())
     .bind(&row.hit_miss)
     .bind(u64_to_i64(row.ts, "cache keepalive ts")?)
     .execute(&mut **tx)
@@ -977,6 +999,379 @@ async fn insert_keepalive_decision_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn insert_filtered_keepalive_evidence_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    evidence: &[CacheKeepaliveEvidenceRow],
+) -> StorageResult<()> {
+    for row in evidence
+        .iter()
+        .filter(|row| row.evidence_kind != "follow_up")
+    {
+        insert_keepalive_evidence_in_tx(tx, row).await?;
+    }
+    let mut candidates = evidence
+        .iter()
+        .filter(|row| {
+            row.evidence_kind == "follow_up"
+                && row.cache_read_input_tokens.is_some_and(|tokens| tokens > 0)
+                && row.prefix_hash.is_some()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|a, b| {
+        a.request_start_ms
+            .cmp(&b.request_start_ms)
+            .then_with(|| a.evidence_id.cmp(&b.evidence_id))
+    });
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let principals = candidates
+        .iter()
+        .map(|row| row.principal_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let upstreams = candidates
+        .iter()
+        .map(|row| row.upstream_id.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    let min_request_start_ms = candidates
+        .iter()
+        .map(|row| row.request_start_ms)
+        .min()
+        .unwrap_or(0);
+    let min_renewal_start_ms = min_request_start_ms.saturating_sub(3_600_000);
+    let max_request_start_ms = candidates
+        .iter()
+        .map(|row| row.request_start_ms)
+        .max()
+        .unwrap_or(0);
+    let principal_values = principals.iter().cloned().collect::<Vec<_>>();
+    let upstream_values = upstreams.iter().cloned().collect::<Vec<_>>();
+    let running_sql = format!(
+        "SELECT DISTINCT principal_id, upstream_id
+         FROM cache_keepalive_sessions
+         WHERE status = 'active' AND enqueue_state = 'running'
+           AND principal_id IN ({}) AND upstream_id IN ({})",
+        std::iter::repeat_n("?", principals.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+        std::iter::repeat_n("?", upstreams.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    let mut running_query = sqlx::query(AssertSqlSafe(running_sql));
+    for value in &principal_values {
+        running_query = running_query.bind(value);
+    }
+    for value in &upstream_values {
+        running_query = running_query.bind(value);
+    }
+    let running_pairs = running_query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<String, _>("principal_id")
+                    .map_err(map_sqlx_error)?,
+                row.try_get::<String, _>("upstream_id")
+                    .map_err(map_sqlx_error)?,
+            ))
+        })
+        .collect::<StorageResult<std::collections::HashSet<_>>>()?;
+    let recent_sql = format!(
+        "SELECT DISTINCT cycle_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_kind = 'renewal'
+           AND cycle_id IS NOT NULL
+           AND prefix_policy_version IS NOT NULL
+           AND prefix_schema_version IS NOT NULL
+           AND principal_id IN ({})
+           AND upstream_id IN ({})
+           AND request_start_ms >= ?
+           AND request_start_ms <= ?",
+        std::iter::repeat_n("?", principals.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+        std::iter::repeat_n("?", upstreams.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    let mut recent_query = sqlx::query(AssertSqlSafe(recent_sql));
+    for value in &principal_values {
+        recent_query = recent_query.bind(value);
+    }
+    for value in &upstream_values {
+        recent_query = recent_query.bind(value);
+    }
+    let recent_renewals = recent_query
+        .bind(u64_to_i64(
+            min_renewal_start_ms,
+            "cache keepalive evidence request_start_ms",
+        )?)
+        .bind(u64_to_i64(
+            max_request_start_ms,
+            "cache keepalive evidence request_start_ms",
+        )?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    let cycle_ids = recent_renewals
+        .into_iter()
+        .map(|row| {
+            row.try_get::<Option<String>, _>("cycle_id")
+                .map_err(map_sqlx_error)
+        })
+        .collect::<StorageResult<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if running_pairs.is_empty() && cycle_ids.is_empty() {
+        return Ok(());
+    }
+    let mut existing = Vec::new();
+    if !cycle_ids.is_empty() {
+        let renewal_sql = format!(
+            "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
+                    prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
+                    model, ttl, cache_read_input_tokens
+             FROM cache_keepalive_evidence
+             WHERE evidence_kind = 'renewal'
+               AND cycle_id IN ({})
+               AND request_start_ms <= ?",
+            std::iter::repeat_n("?", cycle_ids.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let mut renewal_query = sqlx::query(AssertSqlSafe(renewal_sql));
+        for value in &cycle_ids {
+            renewal_query = renewal_query.bind(value);
+        }
+        let renewal_rows = renewal_query
+            .bind(u64_to_i64(
+                max_request_start_ms,
+                "cache keepalive evidence request_start_ms",
+            )?)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let min_cycle_renewal_start_ms = renewal_rows
+            .iter()
+            .filter_map(|row| row.try_get::<i64, _>("request_start_ms").ok())
+            .min()
+            .unwrap_or(0);
+        existing.extend(renewal_rows);
+        let follow_up_sql = format!(
+            "SELECT evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_hash,
+                    prefix_policy_version, prefix_schema_version, principal_id, upstream_id,
+                    model, ttl, cache_read_input_tokens
+             FROM cache_keepalive_evidence
+             WHERE evidence_kind = 'follow_up'
+               AND principal_id IN ({})
+               AND upstream_id IN ({})
+               AND request_start_ms >= ?
+               AND request_start_ms <= ?",
+            std::iter::repeat_n("?", principals.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+            std::iter::repeat_n("?", upstreams.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let mut follow_up_query = sqlx::query(AssertSqlSafe(follow_up_sql));
+        for value in &principal_values {
+            follow_up_query = follow_up_query.bind(value);
+        }
+        for value in &upstream_values {
+            follow_up_query = follow_up_query.bind(value);
+        }
+        let follow_up_rows = follow_up_query
+            .bind(min_cycle_renewal_start_ms)
+            .bind(u64_to_i64(
+                max_request_start_ms,
+                "cache keepalive evidence request_start_ms",
+            )?)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        existing.extend(follow_up_rows);
+    }
+
+    let mut accepted_cycles = std::collections::HashSet::new();
+    for candidate in candidates {
+        let candidate_start = u64_to_i64(
+            candidate.request_start_ms,
+            "cache keepalive evidence request_start_ms",
+        )?;
+        let running = running_pairs.contains(&(
+            candidate.principal_id.clone(),
+            candidate.upstream_id.to_string(),
+        ));
+        let mut qualifying_cycles = std::collections::HashSet::new();
+        if !running {
+            for renewal in &existing {
+                if renewal
+                    .try_get::<String, _>("evidence_kind")
+                    .map_err(map_sqlx_error)?
+                    != "renewal"
+                {
+                    continue;
+                }
+                let Some(cycle_id) = renewal
+                    .try_get::<Option<String>, _>("cycle_id")
+                    .map_err(map_sqlx_error)?
+                    .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+                else {
+                    continue;
+                };
+                if renewal
+                    .try_get::<Option<String>, _>("prefix_policy_version")
+                    .map_err(map_sqlx_error)?
+                    .is_none()
+                    || renewal
+                        .try_get::<Option<String>, _>("prefix_schema_version")
+                        .map_err(map_sqlx_error)?
+                        .is_none()
+                    || renewal
+                        .try_get::<String, _>("principal_id")
+                        .map_err(map_sqlx_error)?
+                        != candidate.principal_id
+                    || renewal
+                        .try_get::<String, _>("upstream_id")
+                        .map_err(map_sqlx_error)?
+                        != candidate.upstream_id.to_string()
+                    || renewal
+                        .try_get::<String, _>("model")
+                        .map_err(map_sqlx_error)?
+                        != candidate.model
+                    || renewal
+                        .try_get::<Option<String>, _>("prefix_hash")
+                        .map_err(map_sqlx_error)?
+                        .as_deref()
+                        != candidate.prefix_hash.as_deref()
+                {
+                    continue;
+                }
+                let renewal_start = renewal
+                    .try_get::<i64, _>("request_start_ms")
+                    .map_err(map_sqlx_error)?;
+                let ttl_ms = match renewal
+                    .try_get::<String, _>("ttl")
+                    .map_err(map_sqlx_error)?
+                    .as_str()
+                {
+                    "1h" => 60 * 60 * 1_000,
+                    _ => 300_000,
+                };
+                if candidate_start <= renewal_start
+                    || candidate_start > renewal_start.saturating_add(ttl_ms)
+                {
+                    continue;
+                }
+                qualifying_cycles.insert(cycle_id);
+            }
+        }
+
+        let mut accepted = running;
+        if !running {
+            for cycle_id in qualifying_cycles.iter().copied() {
+                if accepted_cycles.contains(&cycle_id) {
+                    continue;
+                }
+                // A persisted follow-up blocks this candidate if it qualifies
+                // against any renewal in the same cycle, not only the renewal
+                // that first matched the candidate.
+                let earlier_follow_up = existing.iter().any(|follow_up| {
+                    let Ok(kind) = follow_up.try_get::<String, _>("evidence_kind") else {
+                        return false;
+                    };
+                    if kind != "follow_up"
+                        || !follow_up
+                            .try_get::<Option<i64>, _>("cache_read_input_tokens")
+                            .ok()
+                            .flatten()
+                            .is_some_and(|tokens| tokens > 0)
+                        || follow_up
+                            .try_get::<Option<String>, _>("prefix_hash")
+                            .ok()
+                            .flatten()
+                            .is_none()
+                    {
+                        return false;
+                    }
+                    let Ok(follow_up_start) = follow_up.try_get::<i64, _>("request_start_ms")
+                    else {
+                        return false;
+                    };
+                    let Ok(follow_up_id) = follow_up.try_get::<String, _>("evidence_id") else {
+                        return false;
+                    };
+                    if !(follow_up_start < candidate_start
+                        || (follow_up_start == candidate_start
+                            && follow_up_id.as_str() < candidate.evidence_id.as_str()))
+                    {
+                        return false;
+                    }
+                    existing.iter().any(|renewal| {
+                        let Ok(kind) = renewal.try_get::<String, _>("evidence_kind") else {
+                            return false;
+                        };
+                        if kind != "renewal"
+                            || renewal
+                                .try_get::<Option<String>, _>("cycle_id")
+                                .ok()
+                                .flatten()
+                                .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+                                != Some(cycle_id)
+                            || renewal
+                                .try_get::<Option<String>, _>("prefix_policy_version")
+                                .ok()
+                                .flatten()
+                                .is_none()
+                            || renewal
+                                .try_get::<Option<String>, _>("prefix_schema_version")
+                                .ok()
+                                .flatten()
+                                .is_none()
+                        {
+                            return false;
+                        }
+                        let Ok(renewal_start) = renewal.try_get::<i64, _>("request_start_ms")
+                        else {
+                            return false;
+                        };
+                        let Ok(ttl) = renewal.try_get::<String, _>("ttl") else {
+                            return false;
+                        };
+                        let ttl_ms = if ttl == "1h" { 3_600_000 } else { 300_000 };
+                        follow_up_start > renewal_start
+                            && follow_up_start <= renewal_start.saturating_add(ttl_ms)
+                            && follow_up.try_get::<String, _>("principal_id").ok()
+                                == renewal.try_get::<String, _>("principal_id").ok()
+                            && follow_up.try_get::<String, _>("upstream_id").ok()
+                                == renewal.try_get::<String, _>("upstream_id").ok()
+                            && follow_up.try_get::<String, _>("model").ok()
+                                == renewal.try_get::<String, _>("model").ok()
+                            && follow_up.try_get::<Option<String>, _>("prefix_hash").ok()
+                                == renewal.try_get::<Option<String>, _>("prefix_hash").ok()
+                    })
+                });
+                if !earlier_follow_up {
+                    accepted = true;
+                    break;
+                }
+            }
+        }
+        if accepted {
+            insert_keepalive_evidence_in_tx(tx, candidate).await?;
+            if !running {
+                accepted_cycles.extend(qualifying_cycles);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1029,6 +1424,8 @@ fn cache_keepalive_ttl_to_db(ttl: cc_lb_storage_api::CacheTtl) -> &'static str {
     match ttl {
         cc_lb_storage_api::CacheTtl::Ttl5m => "5m",
         cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
+        cc_lb_storage_api::CacheTtl::Ttl30m => "30m",
+        cc_lb_storage_api::CacheTtl::Ttl12h => "12h",
     }
 }
 

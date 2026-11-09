@@ -1,9 +1,10 @@
 //! Per-request diagnostic fields shipped as structured stdout NDJSON.
 //!
-//! The five diagnostic fields of [`RequestEvent`] (`cache_breakpoints`,
-//! `cache_control_message_indices`, `routing_trace`, `iterations`,
-//! `internal_errors`) are emitted as one `cc_lb.request_diagnostics.v1` line
-//! per persisted row, together with session correlation and request outcomes.
+//! The six diagnostic fields of [`RequestEvent`] (`cache_breakpoints`,
+//! `cache_control_message_indices`, `native_cache`, `routing_trace`,
+//! `iterations`, `internal_errors`) are emitted as one
+//! `cc_lb.request_diagnostics.v1` line per persisted row, together with session
+//! correlation and request outcomes.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -30,10 +31,11 @@ pub struct RequestDiagnostics {
     pub predicted_cache_read_tokens: Option<u64>,
     pub predicted_cache_creation_tokens_5m: Option<u64>,
     pub predicted_cache_creation_tokens_1h: Option<u64>,
+    pub native_cache: Option<crate::RequestNativeCacheObservation>,
 }
 
 impl RequestDiagnostics {
-    /// Moves the five fields out of `event`, leaving their empty defaults so
+    /// Moves the diagnostic fields out of `event`, leaving their empty defaults so
     /// the row serializes without them.
     pub fn take_from(event: &mut RequestEvent) -> Self {
         let mut cache_breakpoints = std::mem::take(&mut event.cache_breakpoints);
@@ -46,6 +48,7 @@ impl RequestDiagnostics {
             routing_trace: event.routing_trace.take(),
             iterations: event.iterations.take(),
             internal_errors: std::mem::take(&mut event.internal_errors),
+            native_cache: std::mem::take(&mut event.native_cache),
             ..Self::default()
         }
     }
@@ -62,6 +65,7 @@ impl RequestDiagnostics {
             routing_trace: event.routing_trace.clone(),
             iterations: event.iterations.clone(),
             internal_errors: event.internal_errors.clone(),
+            native_cache: event.native_cache.clone(),
             ..Self::default()
         }
     }
@@ -76,7 +80,6 @@ pub enum RequestDiagnosticsSource {
 }
 
 /// One `cc_lb.request_diagnostics.v1` line.
-///
 /// Field declaration order is the wire key order. Every key is always
 /// serialized (no `skip_serializing_if`), so consumers can rely on the full
 /// key set being present.
@@ -104,6 +107,12 @@ pub struct RequestDiagnosticsRecord {
     pub output_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
     pub duration_ms: u64,
     pub upstream_ttfb_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +129,8 @@ pub struct RequestDiagnosticsRecord {
     pub predicted_cache_creation_tokens_5m: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicted_cache_creation_tokens_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_cache: Option<crate::RequestNativeCacheObservation>,
     pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub cache_control_message_indices: Vec<u64>,
     pub routing_trace: Option<cc_lb_domain::RoutingTrace>,
@@ -131,7 +142,7 @@ impl RequestDiagnosticsRecord {
     /// Builds the record for a persisted row.
     ///
     /// `seq` is the storage cursor returned by the insert (Postgres `seq`,
-    /// SQLite `id`). The five diagnostic fields come from `diagnostics`, not
+    /// SQLite `id`). The diagnostic fields come from `diagnostics`, not
     /// from `event`, so callers that stripped the row before persisting still
     /// emit them. `ts_ms` falls back to `ts * 1000` for legacy rows without
     /// millisecond precision.
@@ -166,6 +177,9 @@ impl RequestDiagnosticsRecord {
             output_tokens: event.output_tokens,
             cache_read_input_tokens: event.cache_read_input_tokens,
             cache_creation_input_tokens: event.cache_creation_input_tokens,
+            cache_write_input_tokens: event.cache_write_input_tokens,
+            cache_write_input_tokens_30m: event.cache_write_input_tokens_30m,
+            cache_write_input_tokens_12h: event.cache_write_input_tokens_12h,
             duration_ms: event.duration_ms,
             upstream_ttfb_ms: event.upstream_ttfb_ms,
             matched_v3_cache_key: diagnostics.matched_v3_cache_key,
@@ -175,6 +189,7 @@ impl RequestDiagnosticsRecord {
             predicted_cache_read_tokens: diagnostics.predicted_cache_read_tokens,
             predicted_cache_creation_tokens_5m: diagnostics.predicted_cache_creation_tokens_5m,
             predicted_cache_creation_tokens_1h: diagnostics.predicted_cache_creation_tokens_1h,
+            native_cache: diagnostics.native_cache,
             cache_breakpoints: diagnostics.cache_breakpoints,
             cache_control_message_indices: diagnostics.cache_control_message_indices,
             routing_trace: diagnostics.routing_trace,
@@ -220,9 +235,10 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     const PREFIX: &str = "{\"schema\":\"cc_lb.request_diagnostics.v1\",";
-    const DIAGNOSTIC_KEYS: [&str; 5] = [
+    const DIAGNOSTIC_KEYS: [&str; 6] = [
         "cache_breakpoints",
         "cache_control_message_indices",
+        "native_cache",
         "routing_trace",
         "iterations",
         "internal_errors",
@@ -332,6 +348,60 @@ mod tests {
         assert_eq!(line, expected);
         Ok(())
     }
+    #[test]
+    fn native_cache_write_fields_preserve_reported_totals_and_lifetimes() -> TestResult {
+        let mut event = sample_event();
+        event.cache_write_input_tokens = Some(300);
+        event.cache_write_input_tokens_30m = Some(200);
+        event.cache_write_input_tokens_12h = Some(100);
+        let diagnostics = RequestDiagnostics {
+            native_cache: Some(crate::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "responses".to_owned(),
+                scope: Some("resource".to_owned()),
+                identity_hash: Some("sha256:identity".to_owned()),
+                boundary: Some("resource".to_owned()),
+                evidence_source: Some("responses_usage".to_owned()),
+                cached_tokens: Some(120),
+                write_tokens: Some(300),
+                evidence: crate::RequestCacheEvidence::Positive,
+                retention_secs: Some(1_800),
+                expires_at_unix_secs: Some(2_800),
+                analysis_ms: Some(1.25),
+            }),
+            ..RequestDiagnostics::default()
+        };
+        let record = RequestDiagnosticsRecord::new(
+            RequestDiagnosticsSource::Live,
+            42,
+            "evt-1".to_owned(),
+            &event,
+            diagnostics,
+        );
+        let line = render(&record)?;
+        assert!(line.ends_with('\n'));
+        let parsed: Map<String, JsonValue> = serde_json::from_str(&line)?;
+        assert_eq!(parsed["cache_write_input_tokens"], json!(300));
+        assert_eq!(parsed["cache_write_input_tokens_30m"], json!(200));
+        assert_eq!(parsed["cache_write_input_tokens_12h"], json!(100));
+
+        let native = parsed
+            .get("native_cache")
+            .expect("native cache diagnostics field");
+        assert_eq!(native["provider"], json!("openai"));
+        assert_eq!(native["mode"], json!("responses"));
+        assert_eq!(native["scope"], json!("resource"));
+        assert_eq!(native["identity_hash"], json!("sha256:identity"));
+        assert_eq!(native["boundary"], json!("resource"));
+        assert_eq!(native["evidence_source"], json!("responses_usage"));
+        assert_eq!(native["cached_tokens"], json!(120));
+        assert_eq!(native["write_tokens"], json!(300));
+        assert_eq!(native["evidence"], json!("positive"));
+        assert_eq!(native["retention_secs"], json!(1_800));
+        assert_eq!(native["expires_at_unix_secs"], json!(2_800));
+        assert_eq!(native["analysis_ms"], json!(1.25));
+        Ok(())
+    }
 
     #[test]
     fn empty_row_still_renders_every_key() -> TestResult {
@@ -436,14 +506,21 @@ mod tests {
     }
 
     #[test]
-    fn take_from_removes_the_five_keys_from_row_serialization() -> TestResult {
+    fn take_from_removes_diagnostic_keys_from_row_serialization() -> TestResult {
         let mut event = sample_event();
         let mut expected = sample_diagnostics();
         event.cache_breakpoints = expected.cache_breakpoints.clone();
         event.cache_control_message_indices = expected.cache_control_message_indices.clone();
-        event.routing_trace = Some(RoutingTrace::default());
         event.iterations = expected.iterations.clone();
         event.internal_errors = expected.internal_errors.clone();
+        event.routing_trace = Some(RoutingTrace::default());
+        event.native_cache = Some(crate::RequestNativeCacheObservation {
+            provider: "openai".to_owned(),
+            mode: "implicit".to_owned(),
+            cached_tokens: Some(256),
+            evidence: crate::RequestCacheEvidence::Positive,
+            ..Default::default()
+        });
 
         let cloned = RequestDiagnostics::cloned_from(&event);
         assert!(!event.cache_breakpoints[0].lookback_prefixes.is_empty());
@@ -459,6 +536,13 @@ mod tests {
         }
 
         let taken = RequestDiagnostics::take_from(&mut event);
+        assert_eq!(
+            taken
+                .native_cache
+                .as_ref()
+                .and_then(|cache| cache.cached_tokens),
+            Some(256)
+        );
         assert_eq!(taken, cloned);
         assert_eq!(taken.cache_breakpoints, expected.cache_breakpoints);
         assert_eq!(taken.routing_trace, Some(RoutingTrace::default()));

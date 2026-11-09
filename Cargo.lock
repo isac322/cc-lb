@@ -1164,6 +1164,7 @@ dependencies = [
  "chrono",
  "clap",
  "fake-anthropic",
+ "flate2",
  "futures-util",
  "hex",
  "http",
@@ -1173,6 +1174,8 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "nix",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "parking_lot 0.13.0",
  "rand 0.10.3",
  "reqwest",
@@ -1196,6 +1199,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
  "uuid",
@@ -1262,7 +1266,6 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-domain",
- "cc-lb-engine",
  "cc-lb-plugin-wire",
  "cc-lb-request-log",
  "cc-lb-storage-sqlite",
@@ -1287,7 +1290,6 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-control",
  "cc-lb-domain",
- "cc-lb-engine",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
@@ -1843,16 +1845,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-deque"
-version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
-dependencies = [
- "crossbeam-epoch",
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-epoch"
 version = "0.9.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1943,15 +1935,6 @@ name = "deadpool-runtime"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
-
-[[package]]
-name = "debugid"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
-dependencies = [
- "uuid",
-]
 
 [[package]]
 name = "digest"
@@ -2174,12 +2157,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
-name = "fixedbitset"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
-
-[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2325,20 +2302,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "fxprof-processed-profile"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25234f20a3ec0a962a61770cfe39ecf03cb529a6e474ad8cff025ed497eda557"
-dependencies = [
- "bitflags",
- "debugid",
- "rustc-hash",
- "serde",
- "serde_derive",
- "serde_json",
 ]
 
 [[package]]
@@ -2947,26 +2910,6 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
-
-[[package]]
-name = "ittapi"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b996fe614c41395cdaedf3cf408a9534851090959d90d54a535f675550b64b1"
-dependencies = [
- "anyhow",
- "ittapi-sys",
- "log",
-]
-
-[[package]]
-name = "ittapi-sys"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5385394064fa2c886205dba02598013ce83d3e92d33dbdc0c52fe0e7bf4fc"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "jni"
@@ -3603,16 +3546,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "petgraph"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
-dependencies = [
- "fixedbitset",
- "indexmap",
-]
-
-[[package]]
 name = "phf"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4058,26 +3991,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "rayon"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
-dependencies = [
- "either",
- "rayon-core",
-]
-
-[[package]]
-name = "rayon-core"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
-dependencies = [
- "crossbeam-deque",
- "crossbeam-utils",
 ]
 
 [[package]]
@@ -5972,22 +5885,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-compose"
-version = "0.261.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df7deb87d659b1df555d3195e3df56d1f03b73d165c5a1bc3a0bad24274ea147"
-dependencies = [
- "anyhow",
- "indexmap",
- "log",
- "petgraph",
- "smallvec",
- "wasm-encoder 0.261.0",
- "wasmparser 0.261.0",
- "wat",
-]
-
-[[package]]
 name = "wasm-encoder"
 version = "0.261.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6069,9 +5966,6 @@ dependencies = [
  "cc",
  "encoding_rs",
  "futures",
- "fxprof-processed-profile",
- "gimli",
- "ittapi",
  "libc",
  "log",
  "mach2",
@@ -6080,16 +5974,12 @@ dependencies = [
  "once_cell",
  "postcard",
  "pulley-interpreter",
- "rayon",
  "rustix",
  "semver",
  "serde",
  "serde_derive",
- "serde_json",
  "smallvec",
  "target-lexicon",
- "tempfile",
- "wasm-compose",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
  "wasmtime-environ",
@@ -6104,7 +5994,6 @@ dependencies = [
  "wasmtime-internal-versioned-export-macros",
  "wat",
  "windows-sys 0.61.2",
- "wit-parser",
 ]
 
 [[package]]
@@ -6231,8 +6120,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b78d046468d9aaf81e97954165369693084f43e313daad47f959b1169d596d3"
 dependencies = [
  "cc",
- "object",
- "rustix",
  "wasmtime-internal-versioned-export-macros",
 ]
 

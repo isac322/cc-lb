@@ -50,6 +50,12 @@ probe!(
     ArchivedTransformSseEventResult
 );
 probe!(
+    probe_frame,
+    sample_frame,
+    TransformRealtimeFrame,
+    ArchivedTransformRealtimeFrameResult
+);
+probe!(
     probe_envelope,
     sample_envelope,
     ShapeEnvelopeGemini,
@@ -150,6 +156,24 @@ fn sample_sse(provider: ProviderFamily) -> TransformSseEventRequest {
                 ProviderFamily::Gemini => &br#"{"candidates":[]}"#[..],
             }),
         },
+    }
+}
+fn sample_frame(provider: ProviderFamily) -> TransformRealtimeFrameRequest {
+    TransformRealtimeFrameRequest {
+        request_id: Box::from("probe-req-1"),
+        principal: principal(),
+        upstream: upstream(provider),
+        upstream_identity: identity(provider),
+        request_method: Box::from("GET"),
+        request_path: Box::from(match provider {
+            ProviderFamily::Openai => "/v1/realtime",
+            ProviderFamily::Gemini => "/v1beta.BidiGenerateContent",
+            ProviderFamily::Anthropic => "/v1/realtime",
+        }),
+        canonical_model_id: Box::from(sample_model(provider)),
+        direction: Box::from("provider_to_client"),
+        kind: Box::from("json"),
+        payload: Box::from(&br#"{"type":"probe"}"#[..]),
     }
 }
 

@@ -554,6 +554,8 @@ mod sqlite {
         sqlx::query(
             "CREATE TABLE cache_keepalive_sessions (
                 session_key_hash TEXT PRIMARY KEY,
+                principal_id TEXT,
+                upstream_id TEXT,
                 status TEXT NOT NULL,
                 enqueue_state TEXT NOT NULL,
                 expires_at INTEGER NOT NULL,
@@ -562,6 +564,24 @@ mod sqlite {
                 running_since_unix_secs INTEGER,
                 error TEXT,
                 encrypted_payload BLOB NOT NULL DEFAULT X''
+            )",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE cache_keepalive_evidence (
+                evidence_id TEXT PRIMARY KEY,
+                cycle_id TEXT,
+                evidence_kind TEXT NOT NULL,
+                request_start_ms INTEGER NOT NULL,
+                prefix_hash TEXT,
+                prefix_policy_version TEXT,
+                prefix_schema_version TEXT,
+                principal_id TEXT NOT NULL,
+                upstream_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                ttl TEXT NOT NULL,
+                cache_read_input_tokens INTEGER
             )",
         )
         .execute(pool)
@@ -955,6 +975,8 @@ mod postgres {
         sqlx::query(
             "CREATE TABLE cache_keepalive_sessions (
                 session_key_hash TEXT PRIMARY KEY,
+                principal_id TEXT,
+                upstream_id UUID,
                 status TEXT NOT NULL,
                 enqueue_state TEXT NOT NULL,
                 expires_at BIGINT NOT NULL,
@@ -963,6 +985,24 @@ mod postgres {
                 running_since_unix_secs BIGINT,
                 error TEXT,
                 encrypted_payload BYTEA NOT NULL DEFAULT ''::bytea
+            )",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE cache_keepalive_evidence (
+                evidence_id TEXT PRIMARY KEY,
+                cycle_id UUID,
+                evidence_kind TEXT NOT NULL,
+                request_start_ms BIGINT NOT NULL,
+                prefix_hash TEXT,
+                prefix_policy_version TEXT,
+                prefix_schema_version TEXT,
+                principal_id TEXT NOT NULL,
+                upstream_id UUID NOT NULL,
+                model TEXT NOT NULL,
+                ttl TEXT NOT NULL,
+                cache_read_input_tokens BIGINT
             )",
         )
         .execute(pool)

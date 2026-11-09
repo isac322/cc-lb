@@ -11,7 +11,10 @@ import {
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import type { ProviderFamily } from '../../lib/providers';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
-import { reasoningBadgeText } from '../../lib/reasoningTier';
+import {
+  reasoningBadgeText,
+  serviceTierBadgeText,
+} from '../../lib/reasoningTier';
 import {
   type ErrorCodeTarget,
   explainErrorCode,
@@ -21,7 +24,7 @@ import {
 import { requestKindBadgeText } from '../../lib/requestKind';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { ProviderLogo } from './ProviderLogo';
-import { Badge, cx, Hint, Skeleton } from './primitives';
+import { Badge, cx, Hint, Skeleton, Spinner } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestKindBadge } from './RequestKindBadge';
 import { SessionChip } from './SessionChip';
@@ -58,7 +61,9 @@ export function RequestOutcomeBadge({ outcome }: { outcome: RequestOutcome }) {
   if (outcome.type === 'partial') {
     return (
       <span className="inline-flex items-center gap-1.5 text-text-faint min-w-0 whitespace-normal text-right break-words">
-        <span className="w-3 h-3 border-2 border-text-faint border-t-transparent rounded-full animate-spin shrink-0" />
+        <span aria-hidden="true" className="flex shrink-0">
+          <Spinner className="size-3 text-text-faint motion-reduce:animate-none" />
+        </span>
         <span className="min-w-0 break-words">In progress</span>
       </span>
     );
@@ -108,32 +113,6 @@ function AbsoluteTime({ ts }: { ts: Date | null }) {
   );
 }
 
-export function RequestOutcomeTableCell({
-  outcome,
-}: {
-  outcome: RequestOutcome;
-}) {
-  if (outcome.type === 'partial') {
-    return (
-      <span className="inline-flex items-center gap-1.5">
-        <span className="w-3 h-3 border-2 border-text-faint border-t-transparent rounded-full animate-spin" />
-        In progress
-      </span>
-    );
-  }
-  if (outcome.type === 'client_disconnected') {
-    return (
-      <span className="inline-flex items-center gap-1.5">
-        Client disconnected
-      </span>
-    );
-  }
-  if (outcome.type === 'semantic_error') {
-    return <>{outcome.label}</>;
-  }
-  return <>{outcome.status}</>;
-}
-
 export function RequestEventIdentity({
   event,
   principalLabel,
@@ -154,6 +133,7 @@ export function RequestEventIdentity({
     event._phase === 'final' ? event.error_code : undefined,
     event._phase === 'final' ? event.upstream_error_type : undefined,
   );
+  const thinkingLevel = event.thinking_level?.trim() || null;
   const reasoningText = reasoningBadgeText(
     event.reasoning_effort,
     event.thinking_budget_tokens,
@@ -372,17 +352,25 @@ export function RequestEventIdentity({
             </span>
           }
         />
+        {thinkingLevel != null && (
+          <KvRow
+            label="Thinking level"
+            value={<Badge tone="neutral">{thinkingLevel}</Badge>}
+          />
+        )}
         {reasoningText != null && (
           <KvRow
             label="Reasoning"
             value={<span className="break-all min-w-0">{reasoningText}</span>}
           />
         )}
-        {event.service_tier != null && event.service_tier !== '' && (
+        {serviceTierBadgeText(event.service_tier) != null && (
           <KvRow
             label="Service tier"
             value={
-              <span className="break-all min-w-0">{event.service_tier}</span>
+              <span className="break-all min-w-0">
+                {serviceTierBadgeText(event.service_tier)}
+              </span>
             }
           />
         )}

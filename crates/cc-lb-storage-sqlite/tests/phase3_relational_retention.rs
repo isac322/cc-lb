@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionStore, MetaStore, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
-    RequestEvent, RequestEventExportPage, RequestEventKind, RequestEventStore,
-    RequestEventStreamFilters, SubscriptionQuotaWindow, UsageRollupResolution, UsageRollupStore,
+    CacheKeepaliveEvidenceRow, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheTtl,
+    MetaStore, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, RequestEvent,
+    RequestEventExportPage, RequestEventKind, RequestEventStore, RequestEventStreamFilters,
+    SubscriptionQuotaWindow, UsageRollupResolution, UsageRollupStore,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -222,6 +223,78 @@ async fn every_relational_scalar_roundtrips_without_persisting_diagnostics() {
             .processed_events,
         0
     );
+}
+
+#[tokio::test]
+async fn usage_rollup_conflict_accumulates_nullable_provider_cache_writes() {
+    let (_dir, storage) = storage("usage-rollup-cache-writes.sqlite").await;
+    let upstream_id = Uuid::from_u128(7);
+    let batches = [
+        ("null-cache-writes", None, None),
+        ("zero-cache-writes", Some((0, 0, 0)), Some((0, 0, 0))),
+        ("first-cache-writes", Some((3, 5, 7)), Some((3, 5, 7))),
+        (
+            "second-cache-writes",
+            Some((11, 13, 17)),
+            Some((14, 18, 24)),
+        ),
+    ];
+
+    for (request_id, cache_writes, expected) in batches {
+        let (cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h) =
+            match cache_writes {
+                Some((five_minute, thirty_minute, twelve_hour)) => {
+                    (Some(five_minute), Some(thirty_minute), Some(twelve_hour))
+                }
+                None => (None, None, None),
+            };
+        let event = RequestEvent {
+            ts: 1_800_000_000,
+            ts_ms: Some(1_800_000_000_000),
+            request_id: request_id.to_owned(),
+            event_id: Some(format!("rollup-cache-write-{request_id}")),
+            upstream_id: Some(upstream_id),
+            upstream_name: Some("rollup-upstream".to_owned()),
+            model: Some("rollup-model".to_owned()),
+            status: 200,
+            duration_ms: 1,
+            cache_write_input_tokens,
+            cache_write_input_tokens_30m,
+            cache_write_input_tokens_12h,
+            ..RequestEvent::default()
+        };
+        storage
+            .append_request_event(&event)
+            .await
+            .expect("append cache-write rollup event");
+        storage
+            .rollup_usage_once()
+            .await
+            .expect("roll up cache-write event");
+
+        let rollups = storage
+            .query_usage_rollups_in_range(
+                UsageRollupResolution::Minute,
+                0,
+                u64::try_from(i64::MAX).expect("max"),
+            )
+            .await
+            .expect("query cache-write rollup");
+        assert_eq!(rollups.len(), 1);
+        let rollup = &rollups[0];
+        match expected {
+            Some((five_minute, thirty_minute, twelve_hour)) => {
+                assert_eq!(rollup.cache_write_input_tokens, Some(five_minute));
+                assert_eq!(rollup.cache_write_input_tokens_30m, Some(thirty_minute));
+                assert_eq!(rollup.cache_write_input_tokens_12h, Some(twelve_hour));
+            }
+            None => {
+                assert_eq!(rollup.cache_write_input_tokens, None);
+                assert_eq!(rollup.cache_write_input_tokens_30m, None);
+                assert_eq!(rollup.cache_write_input_tokens_12h, None);
+            }
+        }
+    }
 }
 
 fn pool_record(
@@ -443,6 +516,633 @@ async fn cache_keepalive_evidence_pruning_obeys_the_shared_batch_and_cutoff() {
             .await
             .expect("read remaining evidence");
     assert_eq!(remaining, vec!["boundary-evidence"]);
+}
+#[tokio::test]
+async fn append_evidence_filters_follow_ups_and_deduplicates_overlapping_cycles() {
+    let (_dir, storage) = storage("cache-keepalive-evidence-filter.sqlite").await;
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_id = Uuid::from_u128(8);
+    let overlapping_cycle_id = Uuid::from_u128(9);
+    let evidence =
+        |id: &str, kind: &str, start: u64, cycle_id: Option<Uuid>| CacheKeepaliveEvidenceRow {
+            evidence_id: id.to_owned(),
+            cycle_id,
+            evidence_kind: kind.to_owned(),
+            request_start_ms: start,
+            prefix_fingerprint: Some("fingerprint".to_owned()),
+            prefix_hash: Some("prefix".to_owned()),
+            prefix_policy_version: Some("policy".to_owned()),
+            prefix_schema_version: Some("schema".to_owned()),
+            principal_id: "principal".to_owned(),
+            upstream_id,
+            model: "model".to_owned(),
+            ttl: CacheTtl::Ttl5m,
+            hit_miss: Some("hit".to_owned()),
+            cache_read_input_tokens: Some(1),
+            cost_micros: Some(1),
+            request_ref: Some(id.to_owned()),
+            event_ref: Some(id.to_owned()),
+        };
+    let mut invalid = evidence("invalid", "follow_up", 1_400, None);
+    invalid.cache_read_input_tokens = Some(0);
+    let mut unmatched = evidence("unmatched", "follow_up", 1_500, None);
+    unmatched.prefix_hash = Some("other-prefix".to_owned());
+    let cursor = storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 1,
+                ts_ms: Some(1_000),
+                event_id: Some("filtered-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[
+                evidence("renewal", "renewal", 1_000, Some(cycle_id)),
+                evidence(
+                    "overlapping-renewal",
+                    "renewal",
+                    1_100,
+                    Some(overlapping_cycle_id),
+                ),
+                evidence("first-follow-up", "follow_up", 1_200, None),
+                evidence("second-follow-up", "follow_up", 1_300, None),
+                invalid,
+                unmatched,
+            ],
+        )
+        .await
+        .expect("append request and filtered evidence");
+    assert!(cursor > 0);
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT evidence_id FROM cache_keepalive_evidence ORDER BY evidence_id")
+            .fetch_all(storage.pool())
+            .await
+            .expect("read filtered evidence");
+    assert_eq!(
+        ids,
+        vec!["first-follow-up", "overlapping-renewal", "renewal",]
+    );
+    let running = storage
+        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+            session_key_hash: "running-evidence-session".to_owned(),
+            principal_id: "principal".to_owned(),
+            upstream_id,
+            cycle_id,
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 0,
+            run_at_unix_secs: 1,
+            expires_at_unix_secs: 1_000,
+            encrypted_payload: b"payload".to_vec(),
+            accounting_key_id: None,
+            display_reason: "test".to_owned(),
+            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            },
+            now_unix_secs: 0,
+        })
+        .await
+        .expect("seed running session");
+    storage
+        .mark_cache_keepalive_enqueued(&running.session_key_hash, running.generation, 1)
+        .await
+        .expect("enqueue running session");
+    storage
+        .claim_cache_keepalive_turn(&running.session_key_hash, running.generation, 2)
+        .await
+        .expect("claim running session");
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 2,
+                ts_ms: Some(2_000),
+                event_id: Some("running-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence("running-follow-up", "follow_up", 2_000, None)],
+        )
+        .await
+        .expect("append running-session follow-up");
+    let running_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence WHERE evidence_id = 'running-follow-up'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .expect("read running-session follow-up");
+    assert_eq!(running_count, 1);
+}
+#[tokio::test]
+async fn append_evidence_deduplicates_follow_ups_across_sibling_renewals() {
+    let (_dir, storage) = storage("cache-keepalive-evidence-sibling-filter.sqlite").await;
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_id = Uuid::from_u128(80);
+    let evidence = |id: &str, kind: &str, start: u64, prefix: &str| CacheKeepaliveEvidenceRow {
+        evidence_id: id.to_owned(),
+        cycle_id: (kind == "renewal").then_some(cycle_id),
+        evidence_kind: kind.to_owned(),
+        request_start_ms: start,
+        prefix_fingerprint: Some("fingerprint".to_owned()),
+        prefix_hash: Some(prefix.to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id,
+        model: "model".to_owned(),
+        ttl: CacheTtl::Ttl5m,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(1),
+        cost_micros: Some(1),
+        request_ref: Some(id.to_owned()),
+        event_ref: Some(id.to_owned()),
+    };
+
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 1,
+                ts_ms: Some(1_000),
+                event_id: Some("sibling-append-first-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[
+                evidence("sibling-renewal-a", "renewal", 1_000, "prefix-a"),
+                evidence("sibling-follow-up-a", "follow_up", 1_100, "prefix-a"),
+            ],
+        )
+        .await
+        .expect("append first sibling renewal and follow-up");
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 2,
+                ts_ms: Some(2_000),
+                event_id: Some("sibling-append-second-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[
+                evidence("sibling-renewal-b", "renewal", 1_050, "prefix-b"),
+                evidence("sibling-follow-up-b", "follow_up", 1_200, "prefix-b"),
+            ],
+        )
+        .await
+        .expect("append second sibling renewal and follow-up");
+
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'sibling-%'
+         ORDER BY request_start_ms, evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("read sibling evidence");
+    assert_eq!(
+        ids,
+        vec![
+            "sibling-renewal-a",
+            "sibling-renewal-b",
+            "sibling-follow-up-a",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn append_evidence_rejects_duplicate_follow_up_with_long_lived_proof() {
+    let (_dir, storage) = storage("cache-keepalive-evidence-long-lived.sqlite").await;
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_id = Uuid::from_u128(82);
+    let evidence = |id: &str, kind: &str, start: u64, prefix: &str| CacheKeepaliveEvidenceRow {
+        evidence_id: id.to_owned(),
+        cycle_id: (kind == "renewal").then_some(cycle_id),
+        evidence_kind: kind.to_owned(),
+        request_start_ms: start,
+        prefix_fingerprint: Some("fingerprint".to_owned()),
+        prefix_hash: Some(prefix.to_owned()),
+        prefix_policy_version: Some("policy".to_owned()),
+        prefix_schema_version: Some("schema".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id,
+        model: "model".to_owned(),
+        ttl: CacheTtl::Ttl1h,
+        hit_miss: Some("hit".to_owned()),
+        cache_read_input_tokens: Some(1),
+        cost_micros: Some(1),
+        request_ref: Some(id.to_owned()),
+        event_ref: Some(id.to_owned()),
+    };
+
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 1,
+                ts_ms: Some(3_300_001),
+                event_id: Some("long-lived-anchor-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence(
+                "long-lived-renewal-a",
+                "renewal",
+                3_300_001,
+                "prefix-a",
+            )],
+        )
+        .await
+        .expect("append long-lived anchor renewal");
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 2,
+                ts_ms: Some(3_400_000),
+                event_id: Some("long-lived-proof-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence(
+                "long-lived-proof",
+                "follow_up",
+                3_400_000,
+                "prefix-a",
+            )],
+        )
+        .await
+        .expect("append long-lived proof follow-up");
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 3,
+                ts_ms: Some(18_000_000),
+                event_id: Some("long-lived-sibling-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence(
+                "long-lived-renewal-b",
+                "renewal",
+                18_000_000,
+                "prefix-b",
+            )],
+        )
+        .await
+        .expect("append long-lived sibling renewal");
+    storage
+        .append_request_event_with_evidence(
+            &RequestEvent {
+                ts: 4,
+                ts_ms: Some(21_500_000),
+                event_id: Some("long-lived-duplicate-event".to_owned()),
+                ..RequestEvent::default()
+            },
+            &[evidence(
+                "long-lived-duplicate",
+                "follow_up",
+                21_500_000,
+                "prefix-b",
+            )],
+        )
+        .await
+        .expect("append duplicate follow-up");
+
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'long-lived-%'
+         ORDER BY request_start_ms, evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("read long-lived evidence");
+    assert_eq!(
+        ids,
+        vec![
+            "long-lived-renewal-a",
+            "long-lived-proof",
+            "long-lived-renewal-b",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn purge_expired_prunes_unmatched_and_invalid_follow_ups_without_changing_count() {
+    let (_dir, storage) = storage("cache-keepalive-evidence-purge.sqlite").await;
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_id = Uuid::from_u128(8);
+    let session = storage
+        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+            session_key_hash: "expired-session".to_owned(),
+            principal_id: "principal".to_owned(),
+            upstream_id,
+            cycle_id,
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 0,
+            run_at_unix_secs: 1,
+            expires_at_unix_secs: 50,
+            encrypted_payload: b"payload".to_vec(),
+            accounting_key_id: None,
+            display_reason: "test".to_owned(),
+            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            },
+            now_unix_secs: 0,
+        })
+        .await
+        .expect("seed expired session");
+    storage
+        .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
+        .await
+        .expect("enqueue expired session");
+    storage
+        .claim_cache_keepalive_turn(&session.session_key_hash, session.generation, 2)
+        .await
+        .expect("claim expired session");
+    let zero_cycle_id = Uuid::from_u128(9);
+    let null_cycle_id = Uuid::from_u128(10);
+    for (id, cycle, kind, start, prefix, read_tokens) in [
+        (
+            "renewal",
+            Some(cycle_id),
+            "renewal",
+            1_000_i64,
+            Some("prefix"),
+            Some(1_i64),
+        ),
+        (
+            "earliest",
+            None,
+            "follow_up",
+            1_100,
+            Some("prefix"),
+            Some(1),
+        ),
+        ("later", None, "follow_up", 1_200, Some("prefix"), Some(1)),
+        ("invalid", None, "follow_up", 1_300, Some("prefix"), Some(0)),
+        (
+            "zero-renewal",
+            Some(zero_cycle_id),
+            "renewal",
+            2_000,
+            Some("prefix"),
+            Some(1),
+        ),
+        (
+            "zero-only",
+            None,
+            "follow_up",
+            2_100,
+            Some("prefix"),
+            Some(0),
+        ),
+        (
+            "null-renewal",
+            Some(null_cycle_id),
+            "renewal",
+            3_000,
+            Some("prefix"),
+            Some(1),
+        ),
+        ("null-only", None, "follow_up", 3_100, None, Some(1)),
+    ] {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence
+             (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+              prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+              upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+              request_ref, event_ref, created_at_ms)
+             VALUES (?, ?, ?, ?, 'fingerprint', ?, 'policy', 'schema', ?, ?, 'model', '5m',
+                     'hit', ?, 1, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(cycle.map(|value| value.to_string()))
+        .bind(kind)
+        .bind(start)
+        .bind(prefix)
+        .bind("principal")
+        .bind(upstream_id.to_string())
+        .bind(read_tokens)
+        .bind(id)
+        .bind(id)
+        .bind(start)
+        .execute(storage.pool())
+        .await
+        .expect("seed evidence");
+    }
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_expired(100)
+            .await
+            .expect("purge expired session and evidence"),
+        1
+    );
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT evidence_id FROM cache_keepalive_evidence ORDER BY evidence_id")
+            .fetch_all(storage.pool())
+            .await
+            .expect("read retained evidence");
+    assert_eq!(
+        ids,
+        vec!["earliest", "null-renewal", "renewal", "zero-renewal"]
+    );
+}
+#[tokio::test]
+async fn purge_expired_prunes_later_follow_up_across_sibling_renewals() {
+    let (_dir, storage) = storage("cache-keepalive-evidence-sibling-purge.sqlite").await;
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_id = Uuid::from_u128(81);
+    let session = storage
+        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+            session_key_hash: "sibling-purge-session".to_owned(),
+            principal_id: "principal".to_owned(),
+            upstream_id,
+            cycle_id,
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 0,
+            run_at_unix_secs: 1,
+            expires_at_unix_secs: 50,
+            encrypted_payload: b"payload".to_vec(),
+            accounting_key_id: None,
+            display_reason: "test".to_owned(),
+            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            },
+            now_unix_secs: 0,
+        })
+        .await
+        .expect("seed sibling purge session");
+    storage
+        .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
+        .await
+        .expect("enqueue sibling purge session");
+    storage
+        .claim_cache_keepalive_turn(&session.session_key_hash, session.generation, 2)
+        .await
+        .expect("claim sibling purge session");
+
+    for (id, kind, start, prefix_hash) in [
+        ("sibling-purge-renewal-a", "renewal", 1_000_i64, "prefix-a"),
+        ("sibling-purge-renewal-b", "renewal", 1_050, "prefix-b"),
+        ("sibling-purge-earliest", "follow_up", 1_100, "prefix-a"),
+        ("sibling-purge-later", "follow_up", 1_200, "prefix-b"),
+    ] {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence
+             (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+              prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+              upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+              request_ref, event_ref, created_at_ms)
+             VALUES (?, ?, ?, ?, 'fingerprint', ?, 'policy', 'schema', ?, ?, 'model', '5m',
+                     'hit', 1, 1, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind((kind == "renewal").then_some(cycle_id.to_string()))
+        .bind(kind)
+        .bind(start)
+        .bind(prefix_hash)
+        .bind("principal")
+        .bind(upstream_id.to_string())
+        .bind(id)
+        .bind(id)
+        .bind(start)
+        .execute(storage.pool())
+        .await
+        .expect("seed sibling purge evidence");
+    }
+
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_expired(100)
+            .await
+            .expect("purge sibling follow-ups"),
+        1
+    );
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'sibling-purge-%'
+         ORDER BY evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("read sibling purge evidence");
+    assert_eq!(
+        ids,
+        vec![
+            "sibling-purge-earliest",
+            "sibling-purge-renewal-a",
+            "sibling-purge-renewal-b",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn purge_expired_preserves_follow_up_earliest_for_one_matching_cycle() {
+    let (_dir, storage) = storage("cache-keepalive-evidence-multi-cycle-purge.sqlite").await;
+    let upstream_id = Uuid::from_u128(7);
+    let cycle_one = Uuid::from_u128(83);
+    let cycle_two = Uuid::from_u128(84);
+    let session = storage
+        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+            session_key_hash: "multi-cycle-purge-session".to_owned(),
+            principal_id: "principal".to_owned(),
+            upstream_id,
+            cycle_id: cycle_one,
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 0,
+            run_at_unix_secs: 1,
+            expires_at_unix_secs: 50,
+            encrypted_payload: b"payload".to_vec(),
+            accounting_key_id: None,
+            display_reason: "test".to_owned(),
+            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            },
+            now_unix_secs: 0,
+        })
+        .await
+        .expect("seed multi-cycle purge session");
+    storage
+        .mark_cache_keepalive_enqueued(&session.session_key_hash, session.generation, 1)
+        .await
+        .expect("enqueue multi-cycle purge session");
+    storage
+        .claim_cache_keepalive_turn(&session.session_key_hash, session.generation, 2)
+        .await
+        .expect("claim multi-cycle purge session");
+
+    for (id, cycle, kind, start) in [
+        (
+            "multi-cycle-renewal-earlier",
+            Some(cycle_two),
+            "renewal",
+            1_000_i64,
+        ),
+        ("multi-cycle-earlier-proof", None, "follow_up", 1_500),
+        (
+            "multi-cycle-renewal-later",
+            Some(cycle_one),
+            "renewal",
+            2_000,
+        ),
+        ("multi-cycle-later-proof", None, "follow_up", 2_500),
+    ] {
+        sqlx::query(
+            "INSERT INTO cache_keepalive_evidence
+             (evidence_id, cycle_id, evidence_kind, request_start_ms, prefix_fingerprint,
+              prefix_hash, prefix_policy_version, prefix_schema_version, principal_id,
+              upstream_id, model, ttl, hit_miss, cache_read_input_tokens, cost_micros,
+              request_ref, event_ref, created_at_ms)
+             VALUES (?, ?, ?, ?, 'fingerprint', 'shared-prefix', 'policy', 'schema',
+                     ?, ?, 'model', '5m', 'hit', 1, 1, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(cycle.map(|value| value.to_string()))
+        .bind(kind)
+        .bind(start)
+        .bind("principal")
+        .bind(upstream_id.to_string())
+        .bind(id)
+        .bind(id)
+        .bind(start)
+        .execute(storage.pool())
+        .await
+        .expect("seed multi-cycle purge evidence");
+    }
+
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_expired(100)
+            .await
+            .expect("purge multi-cycle follow-ups"),
+        1
+    );
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id
+         FROM cache_keepalive_evidence
+         WHERE evidence_id LIKE 'multi-cycle-%'
+         ORDER BY request_start_ms, evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("read multi-cycle purge evidence");
+    assert_eq!(
+        ids,
+        vec![
+            "multi-cycle-renewal-earlier",
+            "multi-cycle-earlier-proof",
+            "multi-cycle-renewal-later",
+            "multi-cycle-later-proof",
+        ]
+    );
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@ import { cx } from './primitives';
 
 const DASH = '—';
 const BADGE =
-  'inline-flex min-h-5 shrink-0 items-center rounded-sm px-1.5 text-caption font-medium';
+  'inline-flex min-h-5 max-w-full shrink-0 items-center rounded-sm px-1.5 text-caption font-medium';
 
 export function RequestKindBadge({
   requestKind,
@@ -13,11 +13,13 @@ export function RequestKindBadge({
 }) {
   const text = requestKindBadgeText(requestKind);
   if (text == null) return <span className="text-text-faint">{DASH}</span>;
-  const tone = requestKindTone(requestKind?.trim() ?? '');
+  const rawKind = requestKind!.trim();
+  const tone = requestKindTone(rawKind);
   if (tone.kind !== 'hue') {
     return (
       <span
         data-request-kind=""
+        title={rawKind}
         className={cx(
           BADGE,
           'text-text-muted',
@@ -26,7 +28,7 @@ export function RequestKindBadge({
             : 'border border-dashed border-border-strong',
         )}
       >
-        {text}
+        <span className="truncate">{text}</span>
       </span>
     );
   }
@@ -34,10 +36,11 @@ export function RequestKindBadge({
   return (
     <span
       data-request-kind=""
+      title={rawKind}
       className={BADGE}
       style={{ backgroundColor: color.bg, color: color.text }}
     >
-      {text}
+      <span className="truncate">{text}</span>
     </span>
   );
 }

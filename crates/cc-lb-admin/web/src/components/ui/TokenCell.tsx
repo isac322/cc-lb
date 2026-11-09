@@ -12,6 +12,8 @@ function tokenBreakdown(e: RequestEventWithPhase): TokenBreakdown {
     cache_read: e.cache_read_input_tokens ?? 0,
     cache_create_5m: e.cache_creation_input_tokens_5m ?? 0,
     cache_create_1h: e.cache_creation_input_tokens_1h ?? 0,
+    cache_write_30m: e.cache_write_input_tokens_30m ?? 0,
+    cache_write_12h: e.cache_write_input_tokens_12h ?? 0,
     input: e.input_tokens ?? 0,
     output: e.output_tokens ?? 0,
   };
@@ -32,15 +34,23 @@ function cacheHitPercent(b: TokenBreakdown, promptTokens: number) {
  * unit in a fixed trailing slot, so every row's digits line up whatever the
  * magnitude ("21", "2.8k", "120k", "1.2M").
  */
-function TokenFigure({ tokens, slot }: { tokens: number; slot: string }) {
+function TokenFigure({
+  tokens,
+  slot,
+  className,
+}: {
+  tokens: number;
+  slot: string;
+  className?: string;
+}) {
   const { value, unit } = splitNum(tokens);
   return (
     <span
       data-slot={slot}
-      className="inline-flex w-[5.5ch] shrink-0 justify-end"
+      className={cx('inline-flex w-[5.5ch] shrink-0 justify-end', className)}
     >
       <span className="text-text">{value}</span>
-      <span className="w-[1.5ch] shrink-0 text-left text-text-muted">
+      <span className="w-[1.5ch] shrink-0 text-left text-text-muted @min-[42rem]/events:@max-[59rem]/events:w-[1ch]">
         {unit}
       </span>
     </span>
@@ -57,15 +67,19 @@ function TokenFigure({ tokens, slot }: { tokens: number; slot: string }) {
  */
 export function TokenCell({
   event,
-  isPartial,
   className,
 }: {
   event: RequestEventWithPhase;
-  isPartial?: boolean;
   className?: string;
 }) {
   const b = tokenBreakdown(event);
-  const prompt = b.cache_read + b.cache_create_5m + b.cache_create_1h + b.input;
+  const nativeWrite = event.cache_write_input_tokens ?? 0;
+  const prompt =
+    b.cache_read +
+    b.cache_create_5m +
+    b.cache_create_1h +
+    nativeWrite +
+    b.input;
   const hit = cacheHitPercent(b, prompt);
   const rows = USAGE_CATEGORIES.map((category) => ({
     label: category.label,
@@ -93,21 +107,28 @@ export function TokenCell({
       }, show breakdown`}
       popover={popover}
       segments={rows}
-      pulse={isPartial}
     >
       <span className="inline-flex items-baseline">
-        <TokenFigure tokens={prompt} slot="in" />
+        <TokenFigure
+          tokens={prompt}
+          slot="in"
+          className="@min-[42rem]/events:@max-[59rem]/events:w-[4.75ch]"
+        />
         <span
           aria-hidden="true"
-          className="w-[2ch] shrink-0 text-center text-text-faint"
+          className="w-[2ch] shrink-0 text-center text-text-faint @min-[42rem]/events:@max-[59rem]/events:w-[1.5ch]"
         >
           →
         </span>
-        <TokenFigure tokens={b.output} slot="out" />
+        <TokenFigure
+          tokens={b.output}
+          slot="out"
+          className="@min-[42rem]/events:@max-[59rem]/events:w-[4.25ch]"
+        />
         <span
           data-slot="hit"
           className={cx(
-            'ml-2 w-[4.5ch] shrink-0 text-right',
+            'ml-2 w-[4.5ch] shrink-0 text-right @min-[42rem]/events:@max-[59rem]/events:ml-1 @min-[42rem]/events:@max-[59rem]/events:w-[3.5ch]',
             hit == null ? 'text-text-faint' : 'text-text',
           )}
         >
@@ -115,7 +136,7 @@ export function TokenCell({
         </span>
         <span
           className={cx(
-            'ml-1 text-caption text-text-faint',
+            'ml-1 text-caption text-text-faint @min-[42rem]/events:@max-[59rem]/events:hidden',
             hit == null ? 'invisible' : '',
           )}
         >

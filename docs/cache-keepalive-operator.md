@@ -1,10 +1,10 @@
 # Prompt-cache keep-alive operator guide
 
-Feature-gated per principal. When enabled, cc-lb tracks sessions that carry
-an Anthropic prompt-cache `cache_control` breakpoint, classifies whether the
-agent is still executing or waiting for the user, and enqueues durable
-`CacheKeepaliveJob` work through Apalis to fire a synthetic `max_tokens: 0`
-request before the cache TTL expires.
+Feature-gated per principal. cc-lb enqueues durable `CacheKeepaliveJob` work
+through Apalis before an eligible cache prefix expires. Anthropic requests
+use cache-control breakpoints and turn classification with zero-output
+renewals. Opted-in OpenAI Responses requests use their native cache lifetime
+and usage evidence with a bounded output budget.
 
 Design references:
 - [RFC-0003](./rfc/0003-prompt-cache-keepalive.md) — full architecture.
@@ -12,20 +12,51 @@ Design references:
 
 ## Scope and provider gating
 
-Keep-alive fires only against **direct Anthropic OAuth upstreams**.
-`AnthropicApiKey` is unsupported; downstream proxy keys are never replayed
-to Anthropic. An existing, enabled upstream of any unsupported kind terminates
-the session with `terminal_reason=unsupported_provider`.
+Keep-alive fires against direct Anthropic OAuth upstreams and opted-in
+OpenAI Responses requests for GPT-5.6 and later. Anthropic API-key upstreams
+remain unsupported; downstream proxy keys are never replayed to Anthropic.
+An existing, enabled upstream of any unsupported kind terminates the session
+with `terminal_reason=unsupported_provider`.
+
+OpenAI Responses uses the documented `prompt_cache_options.ttl` field. It
+accepts `"30m"` and `"12h"`; when the field is omitted, a supported request
+defaults to `"30m"`. A `prompt_cache_breakpoint.ttl` overrides that default
+for the selected breakpoint, while a breakpoint without `ttl` inherits the
+request lifetime. Supported explicit blocks include `input_text`, `input_image`,
+and `input_file` in `function_call_output.output` and
+`custom_tool_call_output.output` arrays, as well as message content. Explicit
+mode without a real input breakpoint is not eligible. Keys embedded in metadata,
+tool schemas, or JSON text inside tool results do not declare a lifetime.
+Keep-alive selects the last supported explicit content breakpoint, or the latest
+eligible implicit message ending when no explicit breakpoint exists. It retains
+that boundary's lifetime and provenance and replays the full captured input.
+This does not model every mixed-lifetime boundary or identify which prefix
+produced the provider's aggregate cached-token count.
+
+Enable both `cache_keepalive.enabled` and
+`cache_keepalive.classifier.openai_responses_enabled` on the principal.
+Positive native cached-token evidence must meet the 1,024-token minimum.
+Renewals also require a refresh budget that meets the existing cost threshold
+(at least 13 refreshes for GPT-5.6 with 30m lifetime). A selected `"12h"`
+prefix records a not-tracked decision without a renewal job: reads must not
+restart its 12-hour clock.
+
+Legacy models keep their separate `prompt_cache_retention` semantics
+(`"in_memory"` or `"24h"`). That maximum-retention policy does not select a
+modern minimum TTL. `"30m"` in the legacy field is invalid provider syntax.
+Responses renewals retain the cache options and prefix and use
+`max_output_tokens: 16` with `stream: false`. They can consume paid output
+tokens and do not guarantee a cache hit or cost saving.
 
 A missing, disabled, or deleted upstream instead produces
 `terminal_reason=dispatch_error` with `error="upstream gone"`.
 
-For an enabled cache-keepalive principal, no snapshot or schedule is created
-for requests with no `cache_control` breakpoint, except that a
-response-derived compaction boundary may retire an already-active matching
-generation without creating a new snapshot or schedule. Disabled or unset
-principals remain entirely out of keep-alive processing. Ordinary
-no-breakpoint responses remain outside keep-alive completion sequencing.
+For an enabled Anthropic principal, no snapshot or schedule is created for
+requests with no `cache_control` breakpoint, except that a response-derived
+compaction boundary may retire an already-active matching generation without
+creating a new snapshot or schedule. Disabled or unset principals remain
+entirely out of keep-alive processing. Ordinary no-breakpoint Anthropic
+responses remain outside keep-alive completion sequencing.
 
 ## Response compaction boundaries
 
@@ -227,10 +258,10 @@ defaults; every field is optional except `enabled`.
 
 The built-in wait-for-user tool allow-list matches Claude Code, Oh My Pi,
 Cline, Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
-`AskUserQuestion`, `ExitPlanMode`, `ask`, `ask_followup_question`,
-`ask_question`, `cursor_ask_question`, `question`, `attempt_completion`,
-`submit_and_exit`, `finish`, `plan_mode_respond`, `act_mode_respond`,
-`report_bug`.
+`AskUserQuestion`, `ExitPlanMode`, `StructuredOutput`, `ask`,
+`ask_followup_question`, `ask_question`, `cursor_ask_question`,
+`question`, `attempt_completion`, `submit_and_exit`, `finish`,
+`plan_mode_respond`, `act_mode_respond`, `report_bug`.
 
 Tool-name matching is case-sensitive and uses the client-facing response after
 any public response transform, in both SSE and buffered JSON paths. Provider
@@ -354,7 +385,7 @@ when it eventually runs. `CacheKeepaliveJob` rows are enqueued with
 unsupported provider, and dispatch error are recorded as terminal/noop results
 rather than retried by Apalis.
 
-## Runbook: session isn't being kept warm
+## Runbook: Anthropic session isn't being kept warm
 
 Symptom: operator expects prefix cache reads for a specific principal +
 thread, but every request re-writes the prefix.
@@ -422,3 +453,17 @@ Checks, in order:
 
 If none of the above explains it, capture a request and response body
 alongside the admin-config output and file an issue.
+
+## OpenAI regression checks
+
+The strict loopback suite covers the Responses HTTP listener, native cached-token
+evidence, encrypted SQLite snapshots, admin scheduling, streaming completion,
+and a scheduler renewal. Run it after building the server:
+
+```sh
+cargo test -p cc-lb-server --test integration openai_cache_keepalive::
+CC_LB_BIN="$PWD/target/release/cc-lb" uv run tests/real-client/openai_keepalive_sdk.py
+```
+
+The SDK check uses the pinned OpenAI Python client with a local provider fixture.
+It does not call OpenAI or establish live cache hits, machine locality, or savings.

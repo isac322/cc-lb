@@ -23,6 +23,7 @@ pub enum CacheKeepaliveSessionFilter {
     All,
     Renewed,
     Scheduled,
+    Tracked,
     Capped,
     Expired,
     NotTracked,
@@ -35,6 +36,7 @@ impl CacheKeepaliveSessionFilter {
             Self::All => "all",
             Self::Renewed => "renewed",
             Self::Scheduled => "scheduled",
+            Self::Tracked => "tracked",
             Self::Capped => "capped",
             Self::Expired => "expired",
             Self::NotTracked => "not_tracked",
@@ -112,6 +114,8 @@ pub struct CacheKeepaliveSessionListItem {
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,
     pub decision: Option<String>,
     pub reason: String,
+    #[serde(default)]
+    pub display_reason: Option<String>,
     pub error: Option<String>,
     pub config_snapshot: Option<CacheKeepaliveConfigSnapshot>,
 }
@@ -149,7 +153,8 @@ pub struct CacheKeepaliveTurnRecord {
     pub cache_creation_input_tokens_5m: u64,
     pub cache_creation_input_tokens_1h: u64,
     pub cache_read_input_tokens: u64,
-    pub cost_micros: i64,
+    /// Actual cost when available; renewal facts remain present when this is `None`.
+    pub cost_micros: Option<i64>,
     pub hit_miss: String,
     pub ts: u64,
 }
@@ -283,5 +288,19 @@ pub trait CacheKeepaliveSessionReadStore: Send + Sync {
         &self,
         principal_id: &str,
         cutoff_ms: u64,
-    ) -> StorageResult<CacheKeepaliveSummaryAggregate>;
+    ) -> StorageResult<CacheKeepaliveSummaryAggregate> {
+        self.read_cache_keepalive_summary_aggregate_for_horizon(principal_id, cutoff_ms, None)
+            .await
+    }
+
+    async fn read_cache_keepalive_summary_aggregate_for_horizon(
+        &self,
+        principal_id: &str,
+        cutoff_ms: u64,
+        horizon_start_ms: Option<u64>,
+    ) -> StorageResult<CacheKeepaliveSummaryAggregate> {
+        let _ = horizon_start_ms;
+        self.read_cache_keepalive_summary_aggregate(principal_id, cutoff_ms)
+            .await
+    }
 }

@@ -154,6 +154,9 @@ struct CostBreakdownOptions {
     cache_creation_5m: Option<i64>,
     cache_creation_1h: Option<i64>,
     cache_read: Option<i64>,
+    cache_write: Option<i64>,
+    cache_write_30m: Option<i64>,
+    cache_write_12h: Option<i64>,
 }
 
 #[derive(Default)]
@@ -181,6 +184,7 @@ struct Partial {
     cache_state: Option<RequestCacheState>,
     thinking_budget_tokens: Option<u64>,
     reasoning_effort: Option<String>,
+    thinking_level: Option<String>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     termination: Option<TerminationInfo>,
 
@@ -221,13 +225,16 @@ struct Partial {
     stream_first_content_delta_ms: Option<u64>,
     stream_last_content_delta_ms: Option<u64>,
     stream_message_stop_ms: Option<u64>,
+    stream_first_output_ms: Option<u64>,
     stream_last_chunk_ms: Option<u64>,
     stream_total_ms: Option<u64>,
     stream_content_delta_count: Option<u64>,
     stream_ping_count: Option<u64>,
+    stream_inter_output_avg_ms: Option<u64>,
+    provider_session_id: Option<String>,
+    provider_connection_id: Option<String>,
     stream_inter_token_avg_ms: Option<u64>,
 }
-
 struct TerminationInfo {
     reason: TerminationReason,
     client_status: u16,
@@ -365,6 +372,9 @@ impl Partial {
             cache_read_input_tokens: self
                 .usage_seen
                 .then_some(self.usage.cache_read_input_tokens),
+            cache_write_input_tokens: self.usage.cache_write_input_tokens,
+            cache_write_input_tokens_30m: self.usage.cache_write_input_tokens_30m,
+            cache_write_input_tokens_12h: self.usage.cache_write_input_tokens_12h,
             thinking_tokens: (self.usage_seen && self.usage.thinking_tokens > 0)
                 .then_some(self.usage.thinking_tokens),
             service_tier: self.usage.service_tier.clone(),
@@ -374,8 +384,12 @@ impl Partial {
             cost_cache_creation_5m_micros: cost.cache_creation_5m,
             cost_cache_creation_1h_micros: cost.cache_creation_1h,
             cost_cache_read_micros: cost.cache_read,
+            cost_cache_write_micros: cost.cache_write,
+            cost_cache_write_30m_micros: cost.cache_write_30m,
+            cost_cache_write_12h_micros: cost.cache_write_12h,
             thinking_budget_tokens: self.thinking_budget_tokens,
             reasoning_effort: self.reasoning_effort.clone(),
+            thinking_level: self.thinking_level.clone(),
             request_body_read_ms: self.request_body_read_ms,
             request_body_bytes: self.request_body_bytes,
             request_body_first_chunk_ms: self.io_timings.request_body_first_chunk_ms,
@@ -428,6 +442,9 @@ impl Partial {
                 cache_creation_5m: cost.cache_creation_5m_micros,
                 cache_creation_1h: cost.cache_creation_1h_micros,
                 cache_read: cost.cache_read_micros,
+                cache_write: cost.cache_write_micros,
+                cache_write_30m: cost.cache_write_30m_micros,
+                cache_write_12h: cost.cache_write_12h_micros,
             };
         }
         self.estimated_cost_options().unwrap_or_default()
@@ -438,14 +455,19 @@ impl Partial {
     // reconciliation, which must stay driven solely by the real `Priced` event.
     fn estimated_cost_options(&self) -> Option<CostBreakdownOptions> {
         self.estimated_cost_options_with(|model, usage| {
-            cc_lb_pricing::virtual_cost_micros_full_with_context(
+            cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
                 model,
                 usage.input_tokens,
                 usage.output_tokens,
+                0,
+                0,
                 usage.cache_creation_input_tokens,
                 usage.cache_creation_input_tokens_5m,
                 usage.cache_creation_input_tokens_1h,
                 usage.cache_read_input_tokens,
+                usage.cache_write_input_tokens,
+                usage.cache_write_input_tokens_30m,
+                usage.cache_write_input_tokens_12h,
                 usage.service_tier.as_deref(),
             )
             .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown)
@@ -527,6 +549,9 @@ impl From<LifecycleCostBreakdown> for CostBreakdownOptions {
             cache_creation_5m: cost.cache_creation_5m_micros,
             cache_creation_1h: cost.cache_creation_1h_micros,
             cache_read: cost.cache_read_micros,
+            cache_write: cost.cache_write_micros,
+            cache_write_30m: cost.cache_write_30m_micros,
+            cache_write_12h: cost.cache_write_12h_micros,
         }
     }
 }
@@ -861,7 +886,7 @@ fn follow_up_evidence(row: &RequestEvent) -> Vec<CacheKeepaliveEvidenceRow> {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let mut prefix_hashes = Vec::new();
-    for breakpoint in &row.cache_breakpoints {
+    for breakpoint in row.cache_breakpoints.iter().rev() {
         if prefix_hashes.len() >= MAX_FOLLOW_UP_PREFIX_HASHES {
             break;
         }
@@ -1264,6 +1289,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             }
             partial.thinking_budget_tokens = info.thinking_budget_tokens;
             partial.reasoning_effort = info.reasoning_effort.clone();
+            partial.thinking_level = info.thinking_level.clone();
             partial.cache_breakpoints = info.cache_breakpoints.clone();
             partial.parse = Some(info);
         }
@@ -1367,15 +1393,40 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_first_content_delta_ms = success.stream_first_content_delta_ms;
                 partial.stream_last_content_delta_ms = success.stream_last_content_delta_ms;
                 partial.stream_message_stop_ms = success.stream_message_stop_ms;
+                partial.stream_first_output_ms = success.first_body_chunk_ms;
                 partial.stream_last_chunk_ms = success.stream_last_chunk_ms;
                 partial.stream_total_ms = success.stream_total_ms;
                 partial.stream_content_delta_count = success.content_delta_count;
                 partial.stream_ping_count = success.ping_count;
+                partial.stream_inter_output_avg_ms = success.stream_inter_output_avg_ms;
+                partial.provider_session_id = success.provider_session_id;
+                partial.provider_connection_id = success.provider_connection_id;
                 partial.stream_inter_token_avg_ms = success.inter_token_avg_ms;
             }
             Err(error) => {
                 partial.stream_error_type = Some(error.error_type);
                 partial.stream_error_message = Some(error.error_message);
+                // Preserve provider-neutral fields collected before an
+                // abnormal termination. Do not replace an earlier value with
+                // an empty error payload.
+                partial.stream_body_bytes = partial.stream_body_bytes.or(error.body_bytes);
+                partial.stream_body_chunk_count =
+                    partial.stream_body_chunk_count.or(error.body_chunk_count);
+                partial.stream_first_output_ms =
+                    partial.stream_first_output_ms.or(error.first_body_chunk_ms);
+                partial.stream_last_chunk_ms =
+                    partial.stream_last_chunk_ms.or(error.stream_last_chunk_ms);
+                partial.stream_total_ms = partial.stream_total_ms.or(error.stream_total_ms);
+                partial.stream_ping_count = partial.stream_ping_count.or(error.ping_count);
+                partial.stream_inter_output_avg_ms = partial
+                    .stream_inter_output_avg_ms
+                    .or(error.stream_inter_output_avg_ms);
+                if let Some(value) = error.provider_session_id {
+                    partial.provider_session_id.get_or_insert(value);
+                }
+                if let Some(value) = error.provider_connection_id {
+                    partial.provider_connection_id.get_or_insert(value);
+                }
             }
         },
         LifecycleEvent::RequestLogUpstreamErrorObserved {
@@ -1406,6 +1457,40 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         // `AuthCompleted`; this variant is metrics-only.
         LifecycleEvent::AuthenticationCompleted { .. } => {}
     }
+}
+
+fn native_cache_with_usage(
+    partial: &Partial,
+) -> Option<cc_lb_request_log::RequestNativeCacheObservation> {
+    let mut native = partial
+        .parse
+        .as_ref()
+        .and_then(|parse| parse.native_cache.clone())?;
+    let (evidence, cached_tokens, write_tokens) = crate::provider_cache::project_usage(
+        &native,
+        partial.usage.cache_read_evidence.unwrap_or_default(),
+        partial.usage.cache_read_input_tokens,
+        partial.usage.cache_write_evidence.unwrap_or_default(),
+        partial.usage.cache_write_input_tokens,
+    );
+    native.evidence = evidence;
+    native.cached_tokens = cached_tokens
+        .filter(|_| partial.usage_seen)
+        .map(|cached_tokens| {
+            let model = partial
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.model.as_deref());
+            let tokens = crate::provider_cache::normalize_cached_tokens(model, cached_tokens);
+            // Older OpenAI contracts round down, but affirmative reads remain positive.
+            if evidence == cc_lb_request_log::RequestCacheEvidence::Positive && cached_tokens > 0 {
+                tokens.max(1)
+            } else {
+                tokens
+            }
+        });
+    native.write_tokens = write_tokens.filter(|_| partial.usage_seen);
+    Some(native)
 }
 
 fn finalize_base(
@@ -1530,9 +1615,14 @@ fn finalize_base(
         cache_read_input_tokens: partial
             .usage_seen
             .then_some(partial.usage.cache_read_input_tokens),
+        cache_write_input_tokens: partial.usage.cache_write_input_tokens,
+        cache_write_input_tokens_30m: partial.usage.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: partial.usage.cache_write_input_tokens_12h,
         thinking_budget_tokens: partial.thinking_budget_tokens,
         reasoning_effort: partial.reasoning_effort.clone(),
+        thinking_level: partial.thinking_level.clone(),
         cache_breakpoints: partial.cache_breakpoints.clone(),
+        native_cache: native_cache_with_usage(partial),
         token_estimate_source,
         cost_usd_micros: cost.total,
         cost_input_micros: cost.input,
@@ -1540,6 +1630,9 @@ fn finalize_base(
         cost_cache_creation_5m_micros: cost.cache_creation_5m,
         cost_cache_creation_1h_micros: cost.cache_creation_1h,
         cost_cache_read_micros: cost.cache_read,
+        cost_cache_write_micros: cost.cache_write,
+        cost_cache_write_30m_micros: cost.cache_write_30m,
+        cost_cache_write_12h_micros: cost.cache_write_12h,
         thinking_tokens: (partial.usage.thinking_tokens > 0)
             .then_some(partial.usage.thinking_tokens),
         service_tier: partial.usage.service_tier.clone(),
@@ -1596,10 +1689,14 @@ fn finalize_base(
         stream_message_stop_ms: partial
             .stream_message_stop_ms
             .or_else(|| diagnostics.and_then(|d| d.message_stop_ms)),
+        stream_first_output_ms: partial.stream_first_output_ms,
         stream_last_chunk_ms: partial.stream_last_chunk_ms,
         stream_total_ms: partial.stream_total_ms,
         content_delta_count: partial.stream_content_delta_count,
         ping_count: partial.stream_ping_count,
+        stream_inter_output_avg_ms: partial.stream_inter_output_avg_ms,
+        provider_session_id: partial.provider_session_id.clone(),
+        provider_connection_id: partial.provider_connection_id.clone(),
         inter_token_avg_ms: partial.stream_inter_token_avg_ms,
         routing_trace,
         internal_errors: partial.internal_errors.clone(),
@@ -1968,6 +2065,15 @@ mod tests {
                 result: Err(StreamError {
                     error_type: "client_closed_request".to_owned(),
                     error_message: "downstream disconnected".to_owned(),
+                    body_bytes: Some(123),
+                    body_chunk_count: Some(7),
+                    first_body_chunk_ms: Some(12),
+                    stream_last_chunk_ms: Some(34),
+                    stream_total_ms: Some(56),
+                    ping_count: Some(2),
+                    stream_inter_output_avg_ms: Some(11),
+                    provider_session_id: Some("session-before-cancel".to_owned()),
+                    provider_connection_id: Some("connection-before-cancel".to_owned()),
                 }),
             },
         );
@@ -1992,7 +2098,7 @@ mod tests {
         assert_eq!(event.request_body_bytes, Some(917_567));
         assert_eq!(event.upstream_body_ms, Some(41));
         assert_eq!(event.finalize_ms, Some(4));
-        assert_eq!(event.stream_total_ms, None);
+        assert_eq!(event.stream_total_ms, Some(56));
         assert_eq!(event.request_body_first_chunk_ms, Some(0.0));
         assert_eq!(event.request_body_receive_ms, Some(2.25));
         assert_eq!(event.request_body_wait_ms, Some(7.5));
@@ -2002,6 +2108,21 @@ mod tests {
         assert_eq!(event.response_body_process_ms, Some(0.625));
         assert_eq!(event.response_body_downstream_poll_gap_ms, Some(12.75));
         assert_eq!(event.retry_overhead_ms, None);
+        assert_eq!(event.body_bytes, Some(123));
+        assert_eq!(event.body_chunk_count, Some(7));
+        assert_eq!(event.stream_first_output_ms, Some(12));
+        assert_eq!(event.stream_last_chunk_ms, Some(34));
+        assert_eq!(event.stream_total_ms, Some(56));
+        assert_eq!(event.ping_count, Some(2));
+        assert_eq!(event.stream_inter_output_avg_ms, Some(11));
+        assert_eq!(
+            event.provider_session_id.as_deref(),
+            Some("session-before-cancel")
+        );
+        assert_eq!(
+            event.provider_connection_id.as_deref(),
+            Some("connection-before-cancel")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2662,6 +2783,7 @@ mod tests {
             result: Err(StreamError {
                 error_type: "overloaded_error".into(),
                 error_message: "please retry".into(),
+                ..Default::default()
             }),
         })
         .await
@@ -2834,6 +2956,7 @@ mod tests {
             result: Err(StreamError {
                 error_type: "upstream_response_body_error".into(),
                 error_message: "upstream response body failed".into(),
+                ..Default::default()
             }),
         })
         .await
@@ -2985,6 +3108,62 @@ mod tests {
         assert_eq!(row.upstream_body_bytes, None);
         assert_eq!(row.upstream_http_version, None);
         assert_eq!(row.upstream_stream_warning_type, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn websocket_neutral_timing_and_provider_identity_persist_in_request_row() {
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("websocket-neutral-fields");
+
+        tx.send(diagnostics_started(
+            event_id.clone(),
+            "req-websocket-neutral",
+        ))
+        .await
+        .expect("request starts");
+        tx.send(LifecycleEvent::StreamCompleted {
+            event_id: event_id.clone(),
+            result: Ok(StreamSuccess {
+                body_bytes: Some(12),
+                body_chunk_count: Some(3),
+                first_body_chunk_ms: Some(4),
+                stream_last_chunk_ms: Some(9),
+                stream_total_ms: Some(11),
+                stream_inter_output_avg_ms: Some(2),
+                provider_session_id: Some("provider-session".to_owned()),
+                provider_connection_id: Some("provider-connection".to_owned()),
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect("stream completion arrives");
+        tx.send(diagnostics_terminated(
+            event_id,
+            TerminationReason::Success,
+            101,
+        ))
+        .await
+        .expect("request terminates");
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.status, 101);
+        assert_eq!(row.body_bytes, Some(12));
+        assert_eq!(row.body_chunk_count, Some(3));
+        assert_eq!(row.stream_first_output_ms, Some(4));
+        assert_eq!(row.stream_last_chunk_ms, Some(9));
+        assert_eq!(row.stream_total_ms, Some(11));
+        assert_eq!(row.stream_inter_output_avg_ms, Some(2));
+        assert_eq!(row.provider_session_id.as_deref(), Some("provider-session"));
+        assert_eq!(
+            row.provider_connection_id.as_deref(),
+            Some("provider-connection")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3715,12 +3894,21 @@ mod tests {
                 r#"{"model":"claude-sonnet-4-5-20250929","messages":[],"thinking":{"type":"enabled","budget_tokens":18000},"output_config":{"effort":"max"}}"#,
                 Some(18_000),
                 Some("max"),
+                None,
             ),
             (
                 "thinking-budget-absent",
                 r#"{"model":"claude-sonnet-4-5-20250929","messages":[]}"#,
                 None,
                 None,
+                None,
+            ),
+            (
+                "gemini-thinking-level",
+                r#"{"model":"gemini-test","generationConfig":{"thinkingConfig":{"thinkingLevel":"LOW","thinkingBudget":1024,"includeThoughts":true}}}"#,
+                Some(1024),
+                None,
+                Some("LOW"),
             ),
         ];
         let (tx, rx) = mpsc::channel(16);
@@ -3735,7 +3923,7 @@ mod tests {
         );
 
         // When each fixture is parsed, assembled, and terminated.
-        for (event_id, body, _, _) in cases {
+        for (event_id, body, _, _, _) in cases {
             let value: serde_json::Value = sonic_rs::from_str(body).expect("valid request fixture");
             let thinking_budget_tokens = value
                 .get("thinking")
@@ -3743,10 +3931,19 @@ mod tests {
                     thinking.get("type").and_then(serde_json::Value::as_str) == Some("enabled")
                 })
                 .and_then(|thinking| thinking.get("budget_tokens"))
-                .and_then(serde_json::Value::as_u64);
+                .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    value
+                        .pointer("/generationConfig/thinkingConfig/thinkingBudget")
+                        .and_then(serde_json::Value::as_u64)
+                });
             let reasoning_effort = value
                 .get("output_config")
                 .and_then(|output_config| output_config.get("effort"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let thinking_level = value
+                .pointer("/generationConfig/thinkingConfig/thinkingLevel")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
             let event_id = eid(event_id);
@@ -3774,6 +3971,7 @@ mod tests {
                     body_bytes: u64::try_from(body.len()).expect("fixture body length fits u64"),
                     thinking_budget_tokens,
                     reasoning_effort,
+                    thinking_level,
                     ..ParseInfo::default()
                 }),
             })
@@ -3810,7 +4008,7 @@ mod tests {
         while let Ok(update) = broadcast_rx.try_recv() {
             updates.push(update);
         }
-        for (event_id, _, expected_budget, expected_effort) in cases {
+        for (event_id, _, expected_budget, expected_effort, expected_level) in cases {
             let parse_partial = updates
                 .iter()
                 .filter_map(|update| match update {
@@ -3837,6 +4035,8 @@ mod tests {
             assert_eq!(final_event.thinking_budget_tokens, expected_budget);
             assert_eq!(parse_partial.reasoning_effort.as_deref(), expected_effort);
             assert_eq!(final_event.reasoning_effort.as_deref(), expected_effort);
+            assert_eq!(parse_partial.thinking_level.as_deref(), expected_level);
+            assert_eq!(final_event.thinking_level.as_deref(), expected_level);
         }
     }
 
@@ -4384,6 +4584,9 @@ mod tests {
                             cache_creation_5m_micros: None,
                             cache_creation_1h_micros: None,
                             cache_read_micros: None,
+                            cache_write_micros: None,
+                            cache_write_30m_micros: None,
+                            cache_write_12h_micros: None,
                         },
                     });
                     break;
@@ -5394,6 +5597,242 @@ mod tests {
             *sink.shutdowns.lock().expect("shutdowns lock"),
             [2],
             "sink shutdown runs once, after every offer"
+        );
+    }
+    #[test]
+    fn positive_older_openai_cached_tokens_never_serialize_zero() {
+        let mut partial = Partial {
+            parse: Some(ParseInfo {
+                model: Some("gpt-5".to_owned()),
+                native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                    provider: "openai".to_owned(),
+                    mode: "implicit".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            usage_seen: true,
+            ..Default::default()
+        };
+        partial.usage.cache_read_input_tokens = 64;
+        partial.usage.cache_read_evidence = Some(cc_lb_request_log::RequestCacheEvidence::Positive);
+
+        let native = native_cache_with_usage(&partial).expect("native cache observation");
+        assert_eq!(native.cached_tokens, Some(1));
+        assert_eq!(
+            native.evidence,
+            cc_lb_request_log::RequestCacheEvidence::Positive
+        );
+    }
+    #[test]
+    fn native_cache_write_uses_provider_write_not_anthropic_creation() {
+        let mut partial = Partial {
+            parse: Some(ParseInfo {
+                model: Some("gpt-5".to_owned()),
+                native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                    provider: "openai".to_owned(),
+                    mode: "implicit".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            usage_seen: true,
+            ..Default::default()
+        };
+        let mut usage = serde_json::to_value(UsageSnapshot {
+            cache_read_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Zero),
+            cache_creation_input_tokens: 50,
+            cache_creation_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Positive),
+            cache_write_input_tokens: Some(300),
+            ..Default::default()
+        })
+        .expect("usage snapshot serializes");
+        usage["cache_write_evidence"] = serde_json::json!("positive");
+        partial.usage = serde_json::from_value(usage.clone()).expect("usage snapshot deserializes");
+
+        let row = finalize_base(&partial, &TerminationReason::Success, 200, 1, false);
+        let native = row.native_cache.expect("native cache observation");
+        assert_eq!(row.cache_write_input_tokens, Some(300));
+        assert_eq!(native.write_tokens, Some(300));
+
+        usage["cache_write_input_tokens"] = serde_json::json!(0);
+        usage["cache_write_evidence"] = serde_json::json!("zero");
+        partial.usage = serde_json::from_value(usage).expect("zero usage snapshot deserializes");
+        let zero = finalize_base(&partial, &TerminationReason::Success, 200, 1, false);
+        assert_eq!(
+            zero.native_cache
+                .expect("native cache observation")
+                .write_tokens,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn native_cache_write_none_does_not_fallback_to_anthropic_creation() {
+        let mut partial = Partial {
+            parse: Some(ParseInfo {
+                model: Some("gpt-5".to_owned()),
+                native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                    provider: "openai".to_owned(),
+                    mode: "implicit".to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            usage_seen: true,
+            ..Default::default()
+        };
+        let mut usage = serde_json::to_value(UsageSnapshot {
+            cache_read_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Zero),
+            cache_creation_input_tokens: 50,
+            cache_creation_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Positive),
+            ..Default::default()
+        })
+        .expect("usage snapshot serializes");
+        usage["cache_write_evidence"] = serde_json::json!("unreported");
+        partial.usage = serde_json::from_value(usage).expect("usage snapshot deserializes");
+
+        let row = finalize_base(&partial, &TerminationReason::Success, 200, 1, false);
+        let native = row.native_cache.expect("native cache observation");
+        assert_eq!(native.write_tokens, None);
+    }
+
+    #[test]
+    fn follow_up_evidence_prioritizes_trailing_message_breakpoint_and_keeps_fingerprint() {
+        let make_lookbacks = |tag: &str| {
+            (0..20)
+                .map(|idx| cc_lb_request_log::RequestCacheLookbackPrefix {
+                    prefix_hash: format!("{tag}-lookback-{idx}"),
+                    content_block_index: idx,
+                    lookback_distance: idx + 1,
+                })
+                .collect::<Vec<_>>()
+        };
+        let row = RequestEvent {
+            ts: 1_700_000_000,
+            ts_ms: Some(1_700_000_000_000),
+            request_id: "req-multi-bp".to_owned(),
+            event_id: Some("ev-multi-bp".to_owned()),
+            principal_id: Some("principal-1".to_owned()),
+            upstream_id: Some(Uuid::from_u128(1)),
+            model: Some("claude-sonnet-5-5".to_owned()),
+            cache_read_input_tokens: Some(276_269),
+            cost_usd_micros: Some(27_634),
+            cache_breakpoints: vec![
+                RequestCacheBreakpoint {
+                    block_index: 20,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::Tools,
+                    path: "tools[20]".to_owned(),
+                    message_index: None,
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "tools-bp".to_owned(),
+                    prefix_token_count: 5_000,
+                    lookback_prefixes: make_lookbacks("tools"),
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+                RequestCacheBreakpoint {
+                    block_index: 22,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+                    path: "system[1]".to_owned(),
+                    message_index: None,
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "system-bp".to_owned(),
+                    prefix_token_count: 10_000,
+                    lookback_prefixes: make_lookbacks("system"),
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+                RequestCacheBreakpoint {
+                    block_index: 50,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::Message,
+                    path: "messages[12].content[0]".to_owned(),
+                    message_index: Some(12),
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "messages-bp".to_owned(),
+                    prefix_token_count: 276_269,
+                    lookback_prefixes: make_lookbacks("messages"),
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+            ],
+            ..RequestEvent::default()
+        };
+
+        let evidence = follow_up_evidence(&row);
+        let hashes: Vec<&str> = evidence
+            .iter()
+            .filter_map(|item| item.prefix_hash.as_deref())
+            .collect();
+        assert_eq!(hashes.first().copied(), Some("messages-bp"));
+        assert!(
+            hashes.contains(&"messages-lookback-0"),
+            "trailing message breakpoint lookbacks must be prioritized: {hashes:?}"
+        );
+        assert_eq!(evidence.len(), 32);
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.ttl == cc_lb_storage_api::CacheTtl::Ttl5m)
+        );
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.prefix_fingerprint.as_deref()
+                    == Some("40152992d9929a43afbeed9a0c7baee5c7e0ebd3ba782e7dd40c255610887c2f"))
+        );
+    }
+    #[test]
+    fn follow_up_evidence_keeps_first_owner_ttl_for_shared_lookback_hash() {
+        let shared_lookback = cc_lb_request_log::RequestCacheLookbackPrefix {
+            prefix_hash: "shared-lookback".to_owned(),
+            content_block_index: 0,
+            lookback_distance: 1,
+        };
+        let row = RequestEvent {
+            ts: 1_700_000_000,
+            ts_ms: Some(1_700_000_000_000),
+            request_id: "req-shared-lookback".to_owned(),
+            event_id: Some("ev-shared-lookback".to_owned()),
+            principal_id: Some("principal-1".to_owned()),
+            upstream_id: Some(Uuid::from_u128(1)),
+            model: Some("claude-sonnet-5-5".to_owned()),
+            cache_read_input_tokens: Some(100),
+            cache_breakpoints: vec![
+                RequestCacheBreakpoint {
+                    block_index: 1,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::Tools,
+                    path: "tools[1]".to_owned(),
+                    message_index: None,
+                    ttl: Some("1h".to_owned()),
+                    prefix_hash: "tools".to_owned(),
+                    prefix_token_count: 10,
+                    lookback_prefixes: vec![shared_lookback.clone()],
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+                RequestCacheBreakpoint {
+                    block_index: 2,
+                    source: cc_lb_request_log::RequestCacheBreakpointSource::Message,
+                    path: "messages[1].content[0]".to_owned(),
+                    message_index: Some(1),
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "messages".to_owned(),
+                    prefix_token_count: 100,
+                    lookback_prefixes: vec![shared_lookback],
+                    token_estimate_source: Some("bytes".to_owned()),
+                },
+            ],
+            ..RequestEvent::default()
+        };
+
+        let evidence = follow_up_evidence(&row);
+        let shared = evidence
+            .iter()
+            .find(|item| item.prefix_hash.as_deref() == Some("shared-lookback"))
+            .expect("shared lookback evidence");
+        assert_eq!(shared.ttl, cc_lb_storage_api::CacheTtl::Ttl1h);
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item.prefix_fingerprint.as_deref()
+                    == Some("2f17cbc300efb947b8e8e27d65053030b35d33ff4eae4841e6b9a7ba8f8f8cb2"))
         );
     }
 }

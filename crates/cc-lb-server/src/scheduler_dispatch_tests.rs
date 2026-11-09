@@ -29,6 +29,7 @@ use serde_json::Value;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::field::{Field, Visit};
+use tracing::instrument::WithSubscriber as _;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt as _};
 
@@ -1297,6 +1298,7 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
         .fetch_one(fixture.storage.pool())
         .await
         .expect("count turn projections");
+    // Measured renewal facts remain visible even when actual cost is unknown.
     assert_eq!(turn_count, 1);
     let key_store = KeyStore::new(fixture.storage.clone());
     let key = key_store
@@ -1322,7 +1324,9 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
 #[tokio::test]
 async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     // Given
+    install_test_pricing();
     let fixture = Fixture::new().await;
+    fixture.http.return_cache_hit_usage(10, 40, 10);
     let key_store = KeyStore::new(fixture.storage.clone());
     let (_key, secret) = key_store
         .create(
@@ -1375,7 +1379,10 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     assert_eq!(event.key_id.as_deref(), Some(key_id.as_str()));
     assert_eq!(event.upstream_id, Some(fixture.upstream_id));
     assert_eq!(event.model.as_deref(), Some("claude-test"));
-    assert!(event.cost_usd_micros.is_some());
+    assert_eq!(event.cost_input_micros, Some(20));
+    assert_eq!(event.cost_output_micros, Some(120));
+    assert_eq!(event.cost_cache_read_micros, Some(0));
+    assert_eq!(event.cost_usd_micros, Some(140));
     let turn_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_turns")
         .fetch_one(fixture.storage.pool())
         .await
@@ -1701,6 +1708,7 @@ fn install_test_pricing() {
     models.insert(
         "claude-test".to_owned(),
         Pricing {
+            native: None,
             model: "claude-test".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(2),
             output_per_million_usd: UsdPerMillion::from_whole_usd(3),
@@ -1842,8 +1850,11 @@ async fn assert_renewal_cadence(
         cc_lb_storage_api::CacheTtl::Ttl5m => {
             request.config_snapshot.refresh_lead_time_5m_secs = lead_secs
         }
-        cc_lb_storage_api::CacheTtl::Ttl1h => {
+        cc_lb_storage_api::CacheTtl::Ttl1h | cc_lb_storage_api::CacheTtl::Ttl12h => {
             request.config_snapshot.refresh_lead_time_1h_secs = lead_secs
+        }
+        cc_lb_storage_api::CacheTtl::Ttl30m => {
+            request.config_snapshot.refresh_lead_time_5m_secs = lead_secs
         }
     }
     fixture
@@ -2784,11 +2795,11 @@ async fn cache_keepalive_dispatch_error_persists_message_and_logs_warning() {
     let job = fixture.pending_keepalive_job(1).await;
     let capture = CacheKeepaliveWarnCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
-    let _guard = tracing::subscriber::set_default(subscriber);
 
     let outcome = fixture
         .dispatch(pusher)
         .dispatch_cache_keepalive(job)
+        .with_subscriber(subscriber)
         .await
         .expect("dispatch cache keepalive job");
 

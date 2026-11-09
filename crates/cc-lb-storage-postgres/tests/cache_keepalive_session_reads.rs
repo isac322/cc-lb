@@ -227,6 +227,138 @@ fn list_evidence_uses_renewal_ttl_upper_bound() {
         list_evidence_uses_renewal_ttl_upper_bound_case(&url).await
     });
 }
+#[test]
+fn append_filtered_evidence_uses_bounded_cycle_window() {
+    run_postgres_case("bounded keepalive evidence filter", |url| async move {
+        append_filtered_evidence_uses_bounded_cycle_window_case(&url).await
+    });
+}
+
+async fn append_filtered_evidence_uses_bounded_cycle_window_case(url: &str) -> Result<()> {
+    let (fixture, storage) = initialized_storage(url).await?;
+    let mut no_recent = follow_up_evidence("postgres-no-recent", 5_000, "claude-sonnet-4-5");
+    no_recent.request_start_ms = 5_000_000;
+    storage
+        .append_request_event_with_evidence(&event("postgres-no-recent", 5_000), &[no_recent])
+        .await?;
+    let no_recent_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence WHERE evidence_id = 'follow-up-postgres-no-recent'",
+    )
+    .fetch_one(storage.pool())
+    .await?;
+    assert_eq!(
+        no_recent_count, 0,
+        "unrelated historical rows are fast-rejected"
+    );
+
+    let cycle_id = Uuid::from_u128(0x0011_4901);
+    let mut old_renewal = economics_projection("postgres-old-renewal", Some(cycle_id), 0, "hit", 1);
+    old_renewal.evidence[0].prefix_hash = Some("retained-prefix-hash".to_owned());
+    storage
+        .append_request_event_with_projections(&event("postgres-old-renewal", 0), &old_renewal)
+        .await?;
+    let mut first_follow_up = follow_up_evidence("postgres-old-follow-up", 0, "claude-sonnet-4-5");
+    first_follow_up.request_start_ms = 1_000;
+    storage
+        .append_request_event_with_evidence(&event("postgres-old-follow-up", 0), &[first_follow_up])
+        .await?;
+    let mut recent_renewal =
+        economics_projection("postgres-recent-renewal", Some(cycle_id), 4_000, "hit", 1);
+    recent_renewal.evidence[0].prefix_hash = Some("retained-prefix-hash".to_owned());
+    storage
+        .append_request_event_with_projections(
+            &event("postgres-recent-renewal", 4_000),
+            &recent_renewal,
+        )
+        .await?;
+    let mut blocked_follow_up =
+        follow_up_evidence("postgres-blocked-follow-up", 4_000, "claude-sonnet-4-5");
+    blocked_follow_up.request_start_ms = 4_000_001;
+    storage
+        .append_request_event_with_evidence(
+            &event("postgres-blocked-follow-up", 4_000),
+            &[blocked_follow_up],
+        )
+        .await?;
+    let blocked_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence WHERE evidence_id = 'follow-up-postgres-blocked-follow-up'",
+    )
+    .fetch_one(storage.pool())
+    .await?;
+    assert_eq!(
+        blocked_count, 0,
+        "a follow-up older than one hour still blocks through same-cycle sibling renewals"
+    );
+
+    let boundary_cycle = Uuid::from_u128(0x0011_4902);
+    let mut boundary_renewal = economics_projection(
+        "postgres-boundary-renewal",
+        Some(boundary_cycle),
+        10_000,
+        "hit",
+        1,
+    );
+    boundary_renewal.evidence[0].ttl = CacheTtl::Ttl1h;
+    storage
+        .append_request_event_with_projections(
+            &event("postgres-boundary-renewal", 10_000),
+            &boundary_renewal,
+        )
+        .await?;
+    let mut boundary_follow_up =
+        follow_up_evidence("postgres-boundary-follow-up", 10_000, "claude-sonnet-4-5");
+    boundary_follow_up.request_start_ms = 10_000_000 + 3_600_000;
+    storage
+        .append_request_event_with_evidence(
+            &event("postgres-boundary-follow-up", 10_000),
+            &[boundary_follow_up],
+        )
+        .await?;
+    let boundary_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence WHERE evidence_id = 'follow-up-postgres-boundary-follow-up'",
+    )
+    .fetch_one(storage.pool())
+    .await?;
+    assert_eq!(
+        boundary_count, 1,
+        "the one-hour TTL boundary remains inclusive"
+    );
+
+    storage
+        .replace_from_real_request(&request("postgres-running", 20_000, "running"))
+        .await?;
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions
+         SET status = 'active', enqueue_state = 'running'
+         WHERE session_key_hash = 'postgres-running'",
+    )
+    .execute(storage.pool())
+    .await?;
+    let mut wrong_pair = follow_up_evidence("postgres-wrong-pair", 20_000, "claude-sonnet-4-5");
+    wrong_pair.principal_id = "principal-other".to_owned();
+    wrong_pair.request_start_ms = 20_000_001;
+    let mut running_pair = follow_up_evidence("postgres-running-pair", 20_000, "claude-sonnet-4-5");
+    running_pair.request_start_ms = 20_000_002;
+    storage
+        .append_request_event_with_evidence(
+            &event("postgres-pair", 20_000),
+            &[wrong_pair, running_pair],
+        )
+        .await?;
+    let pair_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id FROM cache_keepalive_evidence
+         WHERE evidence_id IN ('follow-up-postgres-wrong-pair', 'follow-up-postgres-running-pair')
+         ORDER BY evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await?;
+    assert_eq!(
+        pair_ids,
+        vec!["follow-up-postgres-running-pair"],
+        "running allowance must remain scoped to the exact principal/upstream pair"
+    );
+    fixture.drop_schema().await
+}
 
 async fn list_evidence_uses_renewal_ttl_upper_bound_case(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
@@ -1411,7 +1543,7 @@ fn turn_record(
         cache_creation_input_tokens_5m: u64::from(seed) + 4,
         cache_creation_input_tokens_1h: u64::from(seed) + 5,
         cache_read_input_tokens: u64::from(seed) + 6,
-        cost_micros: -i64::from(seed),
+        cost_micros: Some(-i64::from(seed)),
         hit_miss: format!("hit-miss-{seed}"),
         ts,
     }
@@ -1550,7 +1682,7 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
             cache_creation_input_tokens_5m: 0,
             cache_creation_input_tokens_1h: 0,
             cache_read_input_tokens: 100,
-            cost_micros: 123,
+            cost_micros: Some(123),
             hit_miss: "hit".to_owned(),
             ts,
         }),
@@ -1583,7 +1715,7 @@ fn economics_projection(
     let turn = projection.turn.as_mut().expect("renewal turn");
     turn.cycle_id = cycle_id;
     turn.hit_miss = hit_miss.to_owned();
-    turn.cost_micros = cost_micros;
+    turn.cost_micros = Some(cost_micros);
     turn.cache_read_input_tokens = if hit_miss.eq_ignore_ascii_case("hit") {
         20_000
     } else {

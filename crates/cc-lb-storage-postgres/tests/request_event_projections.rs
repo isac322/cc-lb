@@ -66,6 +66,7 @@ fn event(event_id: &str, source_ref_id: &str) -> RequestEvent {
         response_body_process_ms: None,
         response_body_downstream_poll_gap_ms: None,
         retry_overhead_ms: None,
+        upstream_body_error_h2_reason: Some("h2-protocol-error".to_owned()),
         ..Default::default()
     }
 }
@@ -86,7 +87,7 @@ fn projections(source_ref_id: &str) -> RequestEventProjections {
             cache_creation_input_tokens_5m: 10,
             cache_creation_input_tokens_1h: 0,
             cache_read_input_tokens: 70,
-            cost_micros: 123_456,
+            cost_micros: Some(123_456),
             hit_miss: "hit".to_owned(),
             ts: 1_800_000_000,
         }),
@@ -133,6 +134,12 @@ async fn append_with_projections_commits_all_rows_when_valid(
 
     assert_eq!(cursor, 1);
     assert_eq!(row_counts(storage).await?, (1, 1, 1));
+    let h2_reason = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT upstream_body_error_h2_reason FROM request_events_v1 WHERE event_id = 'renewal-event-success'",
+    )
+    .fetch_one(storage.pool())
+    .await?;
+    assert_eq!(h2_reason.as_deref(), Some("h2-protocol-error"));
     Ok(())
 }
 

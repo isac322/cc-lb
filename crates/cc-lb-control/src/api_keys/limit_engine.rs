@@ -22,7 +22,7 @@ use crate::api_keys::concurrent_guard::{
 use crate::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use crate::api_keys::types::{Limit, LimitKind};
 use cc_lb_clock::{ClockHandle, unix_secs};
-
+use cc_lb_domain::Provider;
 /// Stable identifier for a live [`Reservation`].
 ///
 /// The engine stores reservation state by this ID so out-of-band consumers
@@ -108,7 +108,16 @@ impl ApiKeyUsageHandle {
 }
 
 impl DurableApiKeyUsage {
-    fn record(&self, key_id: &str, bucket_widths: &[u64], usage: ApiKeyUsage, now_sec: u64) {
+    /// `None` leaves the monetary accumulator unchanged while retaining
+    /// measured request/token usage. It does not assert a known zero price.
+    fn record(
+        &self,
+        key_id: &str,
+        bucket_widths: &[u64],
+        usage: ApiKeyUsage,
+        cost_liability_micros: Option<i64>,
+        now_sec: u64,
+    ) {
         let mut pending = self.pending.lock();
         for bucket_width_secs in bucket_widths {
             let bucket_start_unix_secs = now_sec - now_sec % bucket_width_secs;
@@ -117,7 +126,13 @@ impl DurableApiKeyUsage {
                 bucket_width_secs: *bucket_width_secs,
                 bucket_start_unix_secs,
             };
-            add_usage(pending.entry(key).or_default(), usage);
+            let aggregate = pending.entry(key).or_default();
+            let cost = aggregate.cost_usd_micros;
+            add_usage(aggregate, usage);
+            aggregate.cost_usd_micros = match cost_liability_micros {
+                Some(liability) => cost.saturating_add(liability),
+                None => cost,
+            };
         }
         bound_pending_usage(&mut pending, now_sec);
     }
@@ -187,6 +202,8 @@ impl Reservation {
 struct ReservationRecord {
     key_id: String,
     reserved: Vec<ReservedAmount>,
+    /// One request's admitted estimate, independent of its per-window holds.
+    admitted_cost_estimate_micros: Option<i64>,
     durable_bucket_widths: Vec<u64>,
     /// Held until refund/reconcile removes the record, or an explicit response
     /// handoff releases concurrency while retaining token/cost liability.
@@ -651,6 +668,7 @@ impl LimitEngine {
             ReservationRecord {
                 key_id: key_id.clone(),
                 reserved,
+                admitted_cost_estimate_micros: cost_estimate_micros,
                 durable_bucket_widths,
                 concurrent_guards,
                 created_at: Instant::now(),
@@ -707,7 +725,7 @@ impl LimitEngine {
         reservation: Reservation,
         actual_input: u64,
         actual_output: u64,
-        actual_cost_micros: i64,
+        actual_cost_micros: Option<i64>,
     ) {
         self.reconcile_by_id(
             &reservation.id,
@@ -724,27 +742,29 @@ impl LimitEngine {
     /// and reconciled, `false` if the ID is unknown (already reconciled,
     /// refunded, TTL-evicted, or never issued).
     ///
-    /// Semantics match the handler-driven [`Self::reconcile`]: subtract the
-    /// difference between reserved and actual for each `ReservedAmount`,
-    /// then delete the record so `Drop` on the handle is a no-op.
+    /// A known cost (including zero) settles actual usage. An unknown cost
+    /// retains the admitted estimate as liability without claiming an actual
+    /// request price. If neither exists, measured request/token usage still
+    /// settles, and the monetary liability is explicitly unavailable.
     pub fn reconcile_by_id(
         &self,
         id: &str,
         actual_input: u64,
         actual_output: u64,
-        actual_cost_micros: i64,
+        actual_cost_micros: Option<i64>,
     ) -> bool {
         let Some(record) = self.inner.reservations.lock().remove(id) else {
             return false;
         };
         let now_sec = unix_secs(self.inner.clock.now());
+        let cost_liability_micros = actual_cost_micros.or(record.admitted_cost_estimate_micros);
         refund_difference(
             &self.inner,
             &record.key_id,
             &record.reserved,
             actual_input,
             actual_output,
-            actual_cost_micros,
+            cost_liability_micros,
             now_sec,
         );
         if let Some(state) = self.inner.durable_usage.read().as_ref() {
@@ -755,8 +775,9 @@ impl LimitEngine {
                     requests: 1,
                     input_tokens: u64_to_i64_saturating(actual_input),
                     output_tokens: u64_to_i64_saturating(actual_output),
-                    cost_usd_micros: actual_cost_micros,
+                    ..Default::default()
                 },
+                cost_liability_micros,
                 now_sec,
             );
         }
@@ -785,7 +806,16 @@ impl LimitEngine {
         true
     }
 
-    pub fn headers_for(&self, key_id: &str, principal_id: &str) -> Vec<(String, String)> {
+    /// Format the local request/token windows for a provider's response.
+    ///
+    /// Gemini deliberately uses a neutral `x-cc-lb-ratelimit-*` namespace:
+    /// these values describe proxy-enforced limits, not a provider contract.
+    pub fn headers_for_provider(
+        &self,
+        provider: Provider,
+        key_id: &str,
+        principal_id: &str,
+    ) -> Vec<(String, String)> {
         let Some(limits) = self
             .inner
             .effective_limits
@@ -796,6 +826,31 @@ impl LimitEngine {
             return Vec::new();
         };
 
+        self.format_provider_headers(provider, key_id, &limits)
+    }
+
+    /// Format local request/token windows from the current record and defaults.
+    ///
+    /// Unlike [`Self::headers_for_provider`], this does not consult or update the
+    /// successful-admission cache, so rejected reservations can be formatted
+    /// without changing the limits reported for an admitted request.
+    pub fn headers_for_provider_record(
+        &self,
+        provider: Provider,
+        key_id: &str,
+        record: &StoredApiKeyRecord,
+        default_limits: &[Limit],
+    ) -> Vec<(String, String)> {
+        let limits = effective_limits(record, default_limits);
+        self.format_provider_headers(provider, key_id, &limits)
+    }
+
+    fn format_provider_headers(
+        &self,
+        provider: Provider,
+        key_id: &str,
+        limits: &[Limit],
+    ) -> Vec<(String, String)> {
         let now_sec = unix_secs(self.inner.clock.now());
         let mut headers = Vec::new();
         let mut emitted_requests = false;
@@ -806,14 +861,14 @@ impl LimitEngine {
                 break;
             }
 
-            let prefix = match limit.kind {
+            let kind_name = match limit.kind {
                 LimitKind::Requests if !emitted_requests => {
                     emitted_requests = true;
-                    "anthropic-ratelimit-requests"
+                    "requests"
                 }
                 LimitKind::TotalTokens if !emitted_tokens => {
                     emitted_tokens = true;
-                    "anthropic-ratelimit-tokens"
+                    "tokens"
                 }
                 _ => continue,
             };
@@ -823,12 +878,39 @@ impl LimitEngine {
                 self.current_total_and_oldest(key_id, limit.kind, window_sec, now_sec);
             let remaining = limit.cap_micros.saturating_sub(total).max(0);
             let reset_sec = oldest.unwrap_or(now_sec).saturating_add(window_sec);
-            headers.push((format!("{prefix}-remaining"), remaining.to_string()));
-            headers.push((format!("{prefix}-limit"), limit.cap_micros.to_string()));
-            headers.push((format!("{prefix}-reset"), unix_to_iso8601(reset_sec)));
+            match provider {
+                Provider::Anthropic => {
+                    let prefix = format!("anthropic-ratelimit-{kind_name}");
+                    headers.push((format!("{prefix}-remaining"), remaining.to_string()));
+                    headers.push((format!("{prefix}-limit"), limit.cap_micros.to_string()));
+                    headers.push((format!("{prefix}-reset"), unix_to_iso8601(reset_sec)));
+                }
+                Provider::Openai | Provider::Gemini => {
+                    let prefix = match provider {
+                        Provider::Openai => "x-ratelimit",
+                        Provider::Gemini => "x-cc-lb-ratelimit",
+                        Provider::Anthropic => unreachable!(),
+                    };
+                    let reset = format!("{}s", reset_sec.saturating_sub(now_sec));
+                    headers.push((
+                        format!("{prefix}-remaining-{kind_name}"),
+                        remaining.to_string(),
+                    ));
+                    headers.push((
+                        format!("{prefix}-limit-{kind_name}"),
+                        limit.cap_micros.to_string(),
+                    ));
+                    headers.push((format!("{prefix}-reset-{kind_name}"), reset));
+                }
+            }
         }
 
         headers
+    }
+
+    /// Backward-compatible Anthropic formatter for non-HTTP accounting probes.
+    pub fn headers_for(&self, key_id: &str, principal_id: &str) -> Vec<(String, String)> {
+        self.headers_for_provider(Provider::Anthropic, key_id, principal_id)
     }
 }
 
@@ -1436,7 +1518,7 @@ fn refund_difference(
     reserved: &[ReservedAmount],
     actual_input: u64,
     actual_output: u64,
-    actual_cost_micros: i64,
+    actual_cost_micros: Option<i64>,
     now_sec: u64,
 ) {
     for amount in reserved {
@@ -1445,7 +1527,10 @@ fn refund_difference(
             LimitKind::InputTokens => actual_input as i64,
             LimitKind::OutputTokens => actual_output as i64,
             LimitKind::TotalTokens => actual_input.saturating_add(actual_output) as i64,
-            LimitKind::CostUsd => actual_cost_micros,
+            LimitKind::CostUsd => match actual_cost_micros {
+                Some(cost) => cost,
+                None => continue,
+            },
             LimitKind::Concurrent => continue,
         };
         let delta = actual.saturating_sub(amount.amount);
@@ -1665,6 +1750,397 @@ mod tests {
 
         assert_eq!(header("anthropic-ratelimit-requests-limit"), Some("10"));
         assert_eq!(header("anthropic-ratelimit-requests-remaining"), Some("7"));
+    }
+    fn formatter_fixture(limits: Vec<Limit>) -> (Arc<LimitEngine>, Arc<cc_lb_clock::TestClock>) {
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000));
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        engine
+            .inner
+            .effective_limits
+            .write()
+            .insert(("key-a".to_owned(), "principal-a".to_owned()), limits);
+        (engine, clock)
+    }
+
+    fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn provider_formatter_uses_anthropic_iso_contract() {
+        let (engine, _) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 120,
+                cap_micros: 20,
+            },
+        ]);
+
+        let headers = engine.headers_for_provider(Provider::Anthropic, "key-a", "principal-a");
+
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-requests-reset"),
+            Some("2023-11-14T22:14:20Z")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-requests-limit"),
+            Some("10")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-tokens-limit"),
+            Some("20")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-tokens-reset"),
+            Some("2023-11-14T22:15:20Z")
+        );
+        assert!(headers.iter().all(|(name, _)| !name.starts_with("x-")));
+    }
+
+    #[test]
+    fn provider_formatter_reports_anthropic_remaining_and_oldest_bucket_reset() {
+        let (engine, clock) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 120,
+                cap_micros: 20,
+            },
+        ]);
+        let now = unix_secs(clock.now());
+        engine.record_amount("key-a", LimitKind::Requests, 60, 3, now);
+        engine.record_amount("key-a", LimitKind::TotalTokens, 120, 5, now);
+        clock.advance_secs(10);
+
+        let headers = engine.headers_for_provider(Provider::Anthropic, "key-a", "principal-a");
+
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-requests-remaining"),
+            Some("7")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-tokens-remaining"),
+            Some("15")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-requests-reset"),
+            Some("2023-11-14T22:14:20Z")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-ratelimit-tokens-reset"),
+            Some("2023-11-14T22:15:00Z")
+        );
+    }
+
+    #[test]
+    fn provider_formatter_emits_only_requests_tokens_or_nothing() {
+        let (engine, _) = formatter_fixture(vec![Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 10,
+        }]);
+
+        let anthropic = engine.headers_for_provider(Provider::Anthropic, "key-a", "principal-a");
+        assert_eq!(anthropic.len(), 3);
+        assert!(
+            anthropic
+                .iter()
+                .all(|(name, _)| name.starts_with("anthropic-ratelimit-requests-"))
+        );
+        let openai = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(openai.len(), 3);
+        assert!(
+            openai
+                .iter()
+                .all(|(name, _)| name.starts_with("x-ratelimit-") && name.ends_with("-requests"))
+        );
+        let gemini = engine.headers_for_provider(Provider::Gemini, "key-a", "principal-a");
+        assert_eq!(gemini.len(), 3);
+        assert!(gemini.iter().all(|(name, _)| {
+            name.starts_with("x-cc-lb-ratelimit-") && name.ends_with("-requests")
+        }));
+
+        let (engine, _) = formatter_fixture(vec![Limit {
+            kind: LimitKind::TotalTokens,
+            window_secs: 60,
+            cap_micros: 20,
+        }]);
+        let anthropic = engine.headers_for_provider(Provider::Anthropic, "key-a", "principal-a");
+        assert_eq!(anthropic.len(), 3);
+        assert!(
+            anthropic
+                .iter()
+                .all(|(name, _)| name.starts_with("anthropic-ratelimit-tokens-"))
+        );
+        let openai = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(openai.len(), 3);
+        assert!(
+            openai
+                .iter()
+                .all(|(name, _)| name.starts_with("x-ratelimit-") && name.ends_with("-tokens"))
+        );
+        let gemini = engine.headers_for_provider(Provider::Gemini, "key-a", "principal-a");
+        assert_eq!(gemini.len(), 3);
+        assert!(gemini.iter().all(|(name, _)| {
+            name.starts_with("x-cc-lb-ratelimit-") && name.ends_with("-tokens")
+        }));
+
+        let (engine, _) = formatter_fixture(Vec::new());
+        assert!(
+            engine
+                .headers_for_provider(Provider::Anthropic, "key-a", "principal-a")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .headers_for_provider(Provider::Openai, "key-a", "principal-a")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .headers_for_provider(Provider::Gemini, "key-a", "principal-a")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn provider_formatter_uses_openai_and_gemini_duration_contracts() {
+        let (engine, clock) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 120,
+                cap_micros: 20,
+            },
+        ]);
+        let now = unix_secs(clock.now());
+        engine.record_amount("key-a", LimitKind::Requests, 60, 15, now);
+        engine.record_amount("key-a", LimitKind::TotalTokens, 120, 5, now);
+        clock.advance_secs(10);
+
+        let openai = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-remaining-requests"),
+            Some("0")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-limit-tokens"),
+            Some("20")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-reset-requests"),
+            Some("50s")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-reset-tokens"),
+            Some("90s")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-remaining-tokens"),
+            Some("15")
+        );
+        assert!(
+            openai
+                .iter()
+                .all(|(name, _)| !name.starts_with("anthropic-"))
+        );
+
+        let gemini = engine.headers_for_provider(Provider::Gemini, "key-a", "principal-a");
+        assert_eq!(
+            header_value(&gemini, "x-cc-lb-ratelimit-reset-requests"),
+            Some("50s")
+        );
+        assert_eq!(
+            header_value(&gemini, "x-cc-lb-ratelimit-reset-tokens"),
+            Some("90s")
+        );
+        assert!(
+            gemini
+                .iter()
+                .all(|(name, _)| !name.starts_with("anthropic-"))
+        );
+    }
+
+    #[test]
+    fn provider_formatter_clamps_reset_at_now_and_omits_unsupported_duplicates() {
+        let (engine, _) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::CostUsd,
+                window_secs: 60,
+                cap_micros: 100,
+            },
+            Limit {
+                kind: LimitKind::InputTokens,
+                window_secs: 60,
+                cap_micros: 100,
+            },
+            Limit {
+                kind: LimitKind::OutputTokens,
+                window_secs: 60,
+                cap_micros: 100,
+            },
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 100,
+            },
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 0,
+                cap_micros: 10,
+            },
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 20,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 30,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 120,
+                cap_micros: 40,
+            },
+        ]);
+
+        let openai = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-reset-requests"),
+            Some("0s")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-limit-requests"),
+            Some("10")
+        );
+        assert_eq!(
+            header_value(&openai, "x-ratelimit-limit-tokens"),
+            Some("30")
+        );
+        assert_eq!(openai.len(), 6);
+        assert!(openai.iter().all(|(name, _)| {
+            !name.starts_with("anthropic-")
+                && !name.starts_with("x-cc-lb-ratelimit-")
+                && !name.contains("input")
+                && !name.contains("output")
+                && !name.contains("concurrent")
+                && !name.contains("cost")
+        }));
+
+        let headers = engine.headers_for_provider(Provider::Gemini, "key-a", "principal-a");
+
+        assert_eq!(
+            header_value(&headers, "x-cc-lb-ratelimit-reset-requests"),
+            Some("0s")
+        );
+        assert_eq!(
+            header_value(&headers, "x-cc-lb-ratelimit-limit-requests"),
+            Some("10")
+        );
+        assert_eq!(
+            header_value(&headers, "x-cc-lb-ratelimit-limit-tokens"),
+            Some("30")
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|(name, _)| name.ends_with("-limit-requests"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|(name, _)| name.ends_with("-limit-tokens"))
+                .count(),
+            1
+        );
+        assert_eq!(headers.len(), 6);
+        assert!(
+            headers
+                .iter()
+                .all(|(name, _)| !name.starts_with("anthropic-")
+                    && !name.starts_with("x-ratelimit-")
+                    && !name.contains("input")
+                    && !name.contains("output")
+                    && !name.contains("concurrent")
+                    && !name.contains("cost"))
+        );
+    }
+
+    #[test]
+    fn provider_record_formatter_does_not_mutate_cached_effective_limits() {
+        let (engine, _) = formatter_fixture(vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 20,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 40,
+            },
+        ]);
+        let record = StoredApiKeyRecord {
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 7,
+            }],
+            ..StoredApiKeyRecord::default()
+        };
+        let defaults = vec![
+            Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 12,
+            },
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 14,
+            },
+        ];
+
+        let rejection_headers =
+            engine.headers_for_provider_record(Provider::Openai, "key-a", &record, &defaults);
+        assert_eq!(
+            header_value(&rejection_headers, "x-ratelimit-limit-requests"),
+            Some("7")
+        );
+        assert_eq!(
+            header_value(&rejection_headers, "x-ratelimit-limit-tokens"),
+            Some("14")
+        );
+
+        let cached_headers = engine.headers_for_provider(Provider::Openai, "key-a", "principal-a");
+        assert_eq!(
+            header_value(&cached_headers, "x-ratelimit-limit-requests"),
+            Some("20")
+        );
+        assert_eq!(
+            header_value(&cached_headers, "x-ratelimit-limit-tokens"),
+            Some("40")
+        );
     }
 
     fn engine_with_output_token_limit(
@@ -1962,7 +2438,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(concurrency.current(&record.key_hash_b64), 1);
-        assert!(engine.reconcile_by_id(&first_id, 0, 40, 0));
+        assert!(engine.reconcile_by_id(&first_id, 0, 40, Some(0)));
         assert_eq!(
             concurrency.current(&record.key_hash_b64),
             1,
@@ -2030,14 +2506,14 @@ mod tests {
         let id = res.id().to_owned();
         std::mem::forget(res); // ensure Drop does not interfere with the refund path we assert
 
-        assert!(engine.reconcile_by_id(&id, 0, 40, 0));
+        assert!(engine.reconcile_by_id(&id, 0, 40, Some(0)));
         assert_eq!(
             engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
             40,
             "reserved 100, actual output 40 → 60 refunded → 40 remaining",
         );
         assert!(
-            !engine.reconcile_by_id(&id, 0, 0, 0),
+            !engine.reconcile_by_id(&id, 0, 0, Some(0)),
             "second call is idempotent no-op"
         );
     }
@@ -2061,7 +2537,7 @@ mod tests {
         let id = res.id().to_owned();
         std::mem::forget(res);
 
-        assert!(engine.reconcile_by_id(&id, 0, 250, 0));
+        assert!(engine.reconcile_by_id(&id, 0, 250, Some(0)));
         assert_eq!(
             engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
             250,
@@ -2262,7 +2738,7 @@ mod tests {
     fn complete_reserved_request(engine: &Arc<LimitEngine>, reservation: Reservation) {
         let id = reservation.id().to_owned();
         reservation.forget();
-        assert!(engine.reconcile_by_id(&id, 0, 0, 0));
+        assert!(engine.reconcile_by_id(&id, 0, 0, Some(0)));
     }
 
     #[tokio::test]
@@ -2597,6 +3073,258 @@ mod tests {
                 .sum::<i64>(),
             10,
         );
+    }
+
+    #[tokio::test]
+    async fn durable_cost_reload_keeps_each_window_separate() {
+        for (actual_cost, cost_limited, expected_cost) in [
+            (Some(25), true, 50),
+            (Some(0), true, 25),
+            (None, true, 125),
+            (None, false, 25),
+        ] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let database_url = format!(
+                "sqlite://{}",
+                directory.path().join("cost-reload.sqlite").display()
+            );
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+            let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+                .await
+                .expect("open sqlite");
+            storage_impl.initialize().await.expect("migrate sqlite");
+            let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+            let mut limits = Vec::new();
+            for window_secs in [60, 3_600] {
+                for kind in [
+                    LimitKind::Requests,
+                    LimitKind::InputTokens,
+                    LimitKind::OutputTokens,
+                    LimitKind::TotalTokens,
+                ] {
+                    limits.push(Limit {
+                        kind,
+                        window_secs,
+                        cap_micros: 1_000,
+                    });
+                }
+                if cost_limited {
+                    limits.push(Limit {
+                        kind: LimitKind::CostUsd,
+                        window_secs,
+                        cap_micros: 1_000,
+                    });
+                }
+            }
+            limits.push(Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            });
+            let view = PrincipalView::for_tests(
+                "cost-reload-principal",
+                true,
+                vec!["gpt-test".to_owned()],
+                limits.clone(),
+                HashMap::new(),
+            );
+            let record = StoredApiKeyRecord {
+                key_hash_b64: "cost-reload-key".to_owned(),
+                ..Default::default()
+            };
+            let key_id = key_id_for(&record);
+            let now_sec = unix_secs(clock.now());
+            let concurrency = Arc::new(KeyConcurrencyManager::new());
+            let engine_a = LimitEngine::new(concurrency.clone(), clock.clone());
+            let handle_a = engine_a
+                .start_durable_usage_sync(storage.clone())
+                .await
+                .expect("start durable usage");
+            let state_a = engine_a
+                .inner
+                .durable_usage
+                .read()
+                .clone()
+                .expect("engine A durable state");
+            state_a.record_key_limits(key_id.clone(), limits.clone());
+            // Load the empty durable snapshot before admission so the fixture
+            // uses full capacity, not the intentionally smaller cold allowance.
+            refresh_remote_api_key_usage(&engine_a, &state_a, now_sec)
+                .await
+                .expect("initialize durable admission capacity");
+
+            // Keep an existing monetary balance so unknown-without-estimate
+            // must preserve it, rather than merely writing another zero.
+            let seed = engine_a
+                .reserve(
+                    &view,
+                    &record,
+                    "cost-reload-principal",
+                    "gpt-test",
+                    Some(100),
+                    100,
+                    Some(25),
+                )
+                .expect("reserve initial measured cost");
+            engine_a.reconcile(seed, 7, 11, Some(25));
+            assert_eq!(concurrency.current(&key_id), 0);
+
+            let reservation = engine_a
+                .reserve(
+                    &view,
+                    &record,
+                    "cost-reload-principal",
+                    "gpt-test",
+                    Some(100),
+                    100,
+                    cost_limited.then_some(100),
+                )
+                .expect("reserve estimated cost");
+            let reservation_id = reservation.id().to_owned();
+            reservation.forget();
+            assert_eq!(concurrency.current(&key_id), 1);
+            if cost_limited {
+                for window in [60, 3_600] {
+                    assert_eq!(
+                        engine_a.current_total(&key_id, LimitKind::CostUsd, window, now_sec),
+                        125
+                    );
+                }
+            }
+            assert!(engine_a.reconcile_by_id(&reservation_id, 13, 17, actual_cost));
+            assert_eq!(concurrency.current(&key_id), 0);
+            assert!(
+                !engine_a
+                    .inner
+                    .reservations
+                    .lock()
+                    .contains_key(&reservation_id)
+            );
+            sweep_expired(&engine_a, Duration::ZERO);
+            assert!(!engine_a.refund_by_id(&reservation_id));
+            assert!(!engine_a.reconcile_by_id(&reservation_id, 99, 99, Some(999)));
+            assert!(!engine_a.reconcile_by_id(&reservation_id, 0, 0, Some(0)));
+            assert_eq!(concurrency.current(&key_id), 0);
+            for window in [60, 3_600] {
+                for (kind, expected) in [
+                    (LimitKind::Requests, 2),
+                    (LimitKind::InputTokens, 20),
+                    (LimitKind::OutputTokens, 28),
+                    (LimitKind::TotalTokens, 48),
+                ] {
+                    assert_eq!(
+                        engine_a.current_total(&key_id, kind, window, now_sec),
+                        expected
+                    );
+                }
+                if cost_limited {
+                    assert_eq!(
+                        engine_a.current_total(&key_id, LimitKind::CostUsd, window, now_sec),
+                        expected_cost,
+                        "each window retains one liability, not the sum of all windows"
+                    );
+                }
+            }
+
+            flush_durable_api_key_usage(&engine_a, &state_a, now_sec)
+                .await
+                .expect("flush settled usage");
+            handle_a.shutdown().await;
+
+            let concurrency_b = Arc::new(KeyConcurrencyManager::new());
+            let engine_b = LimitEngine::new(concurrency_b.clone(), clock);
+            let handle_b = engine_b
+                .start_durable_usage_sync(storage.clone())
+                .await
+                .expect("restart durable usage");
+            let state_b = engine_b
+                .inner
+                .durable_usage
+                .read()
+                .clone()
+                .expect("engine B durable state");
+            state_b.record_key_limits(key_id.clone(), limits);
+            refresh_remote_api_key_usage(&engine_b, &state_b, now_sec)
+                .await
+                .expect("reload durable cost");
+            for window in [60, 3_600] {
+                for (kind, expected) in [
+                    (LimitKind::Requests, 2),
+                    (LimitKind::InputTokens, 20),
+                    (LimitKind::OutputTokens, 28),
+                    (LimitKind::TotalTokens, 48),
+                ] {
+                    assert_eq!(
+                        engine_b.current_total(&key_id, kind, window, now_sec),
+                        expected
+                    );
+                }
+                if cost_limited {
+                    assert_eq!(
+                        engine_b.current_total(&key_id, LimitKind::CostUsd, window, now_sec),
+                        expected_cost
+                    );
+                }
+            }
+            if cost_limited {
+                let probe = engine_b.reserve(
+                    &view,
+                    &record,
+                    "cost-reload-principal",
+                    "gpt-test",
+                    Some(0),
+                    0,
+                    Some(1_001 - expected_cost),
+                );
+                assert!(matches!(probe, Err(RejectReason::CostRateLimit)));
+                let probe = engine_b
+                    .reserve(
+                        &view,
+                        &record,
+                        "cost-reload-principal",
+                        "gpt-test",
+                        Some(0),
+                        0,
+                        Some(1_000 - expected_cost),
+                    )
+                    .expect("the exact remaining monetary budget is admissible");
+                assert_eq!(concurrency_b.current(&key_id), 1);
+                drop(probe);
+                assert_eq!(concurrency_b.current(&key_id), 0);
+            }
+            let buckets = storage
+                .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+                    key_ids: vec![key_id.clone()],
+                    since_unix_secs: now_sec.saturating_sub(3_600),
+                    until_unix_secs: now_sec,
+                    exclude_writer_epoch: Uuid::nil(),
+                })
+                .await
+                .expect("query persisted usage");
+            let mut usage_by_width = buckets
+                .into_iter()
+                .map(|bucket| {
+                    (
+                        bucket.key.bucket_width_secs,
+                        bucket.usage.requests,
+                        bucket.usage.input_tokens,
+                        bucket.usage.output_tokens,
+                        bucket.usage.cost_usd_micros,
+                    )
+                })
+                .collect::<Vec<_>>();
+            usage_by_width.sort_unstable();
+            // The 60-second and 3,600-second limit windows persist in
+            // 1-second and 60-second buckets, respectively.
+            assert_eq!(
+                usage_by_width,
+                vec![
+                    (1, 2, 20, 28, expected_cost),
+                    (60, 2, 20, 28, expected_cost)
+                ]
+            );
+            handle_b.shutdown().await;
+        }
     }
 
     /// In-memory stand-in for `api_key_concurrency_holds_v1` implementing the

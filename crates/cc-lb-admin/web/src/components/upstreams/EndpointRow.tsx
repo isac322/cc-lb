@@ -1,16 +1,17 @@
-// Show the effective provider endpoint (defaults included), with one inline editor.
+// Where an upstream sends requests, as one settings row shared by both kinds:
+// Access row 1 on API-key panes, the Credential footer on OAuth panes. The
+// effective endpoint is always shown — `Provider (default)` or the custom
+// URL — with a quiet `Change` that swaps the row into its inline editor.
+// Each provider's official base URL is the default and is never stored as a
+// custom value.
 
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import {
-  isDefaultProviderEndpoint,
-  PROVIDER_LABELS,
-  providerOf,
-} from '../../lib/providers';
 import { type Upstream, useUpdateUpstream } from '../../lib/queries';
 import { undoToast } from '../../lib/undoToast';
 import { DetailRow } from '../ui/DetailPane';
 import { Button, cx, INPUT_SM_CLASS } from '../ui/primitives';
+import { isAnthropicBaseUrl } from './connect/apiKeyCopy';
 import { QUIET_LINK_CLASS } from './connect/parts';
 import { errorMessage } from './connect/useOAuthConnectSession';
 import { isStaleRevision, STALE_EDITOR_MESSAGE } from './staleRevision';
@@ -18,6 +19,59 @@ import { isStaleRevision, STALE_EDITOR_MESSAGE } from './staleRevision';
 const CLEAR_UNCONFIRMED =
   'Server did not confirm the switch to the default endpoint; the custom URL may still be set.';
 
+const DEFAULT_ENDPOINTS = {
+  anthropic_api_key: {
+    label: 'Anthropic',
+    baseUrl: 'https://api.anthropic.com/',
+  },
+  anthropic_oauth: {
+    label: 'Anthropic',
+    baseUrl: 'https://api.anthropic.com/',
+  },
+  openai_api_key: {
+    label: 'OpenAI',
+    baseUrl: 'https://api.openai.com/',
+  },
+  openai_oauth: {
+    label: 'OpenAI',
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+  },
+  gemini_api_key: {
+    label: 'Gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/',
+  },
+  gemini_oauth: {
+    label: 'Gemini',
+    baseUrl: 'https://cloudcode-pa.googleapis.com/v1internal',
+  },
+} satisfies Record<Upstream['kind'], { label: string; baseUrl: string }>;
+
+function isDefaultBaseUrl(baseUrl: string, defaultBaseUrl: string) {
+  if (defaultBaseUrl === DEFAULT_ENDPOINTS.anthropic_api_key.baseUrl) {
+    return isAnthropicBaseUrl(baseUrl);
+  }
+
+  const trimmed = baseUrl.trim();
+  if (trimmed === '') return true;
+  // URL drops empty query/hash markers, but those are not the bare provider
+  // root and must remain editable custom URLs.
+  if (trimmed.includes('?') || trimmed.includes('#')) return false;
+
+  try {
+    const actual = new URL(trimmed);
+    const expected = new URL(defaultBaseUrl);
+    return (
+      actual.protocol === expected.protocol &&
+      actual.hostname === expected.hostname &&
+      actual.port === expected.port &&
+      actual.pathname === expected.pathname &&
+      actual.username === '' &&
+      actual.password === ''
+    );
+  } catch {
+    return false;
+  }
+}
 export function EndpointRow({
   upstream,
   kind,
@@ -34,19 +88,19 @@ export function EndpointRow({
   onEditingChange?: (editing: boolean) => void;
 }) {
   const [ownEditing, setOwnEditing] = useState(false);
-  const provider = PROVIDER_LABELS[providerOf(upstream.kind)];
-  const hint =
-    kind === 'api_key'
-      ? `Requests and key checks go here instead of ${provider}.`
-      : `Requests go here instead of ${provider}.`;
   const editing = editingProp ?? ownEditing;
   const setEditing = (next: boolean) => {
     setOwnEditing(next);
     onEditingChange?.(next);
   };
+  const endpoint = DEFAULT_ENDPOINTS[upstream.kind];
+  const hint =
+    kind === 'api_key'
+      ? `Requests and key checks go here instead of ${endpoint.label}.`
+      : `Requests go here instead of ${endpoint.label}.`;
   const custom =
     upstream.base_url != null &&
-    !isDefaultProviderEndpoint(upstream.kind, upstream.base_url);
+    !isDefaultBaseUrl(upstream.base_url, endpoint.baseUrl);
   const customUrl = custom ? (upstream.base_url ?? '') : '';
   const [baseUrl, setBaseUrl] = useState(customUrl);
   // Value and revision captured when editing began. Save intent is judged
@@ -123,8 +177,8 @@ export function EndpointRow({
 
   const save = () => {
     if (trimmed === '' || unchanged || update.isPending) return;
-    // A provider's own endpoint is a default, never stored as a custom value.
-    if (isDefaultProviderEndpoint(upstream.kind, trimmed)) {
+    // A provider's own URL is the default, never stored as a custom value.
+    if (isDefaultBaseUrl(trimmed, endpoint.baseUrl)) {
       switchToDefault();
       return;
     }
@@ -237,10 +291,10 @@ export function EndpointRow({
           </span>
         </>
       ) : (
-        <span>
-          {provider}
+        <>
+          {endpoint.label}
           <span className="text-text-muted"> (default)</span>
-        </span>
+        </>
       )}
     </DetailRow>
   );

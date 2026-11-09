@@ -91,6 +91,8 @@ gemini_model = "gemini-2.5-flash-lite"
 
 Cache keepalive is configured per principal. The principal object controls whether the feature is enabled, its lead times, maximum refresh count, maximum duration, snapshot size, and classifier options.
 
+For GPT-5.6+ Responses, enable both `cache_keepalive.enabled` and `cache_keepalive.classifier.openai_responses_enabled`. The documented `prompt_cache_options.ttl` is `"30m"` by default or `"12h"`; a supported input breakpoint may override that lifetime. Only eligible 30-minute prefixes with sufficient native cached-token evidence and refresh budget schedule renewals. A selected 12-hour prefix records a not-tracked decision because reads do not restart its clock. Legacy `prompt_cache_retention` is a separate policy. See the [keep-alive operator guide](https://github.com/isac322/cc-lb/blob/master/docs/cache-keepalive-operator.md) for limits and renewal costs.
+
 ## Scheduler storage
 
 Use SQLite for local or bounded single-node operation. Use Postgres when multiple replicas must share durable job claims, idempotency keys, and cache-keepalive fences.
@@ -122,9 +124,9 @@ ttl_days = 7
 
 ## Request diagnostics
 
-Request events store all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so event reads have zero TOAST overhead. The five deep diagnostic fields are `cache_breakpoints` (with `lookback_prefixes` omitted from diagnostics lines), `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`.
+Request events store all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so event reads have zero TOAST overhead. The deep diagnostic fields are `cache_breakpoints` (with `lookback_prefixes` omitted from diagnostics lines), `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`, plus the optional `native_cache` object, which is omitted when no native cache analysis is recorded.
 
-The optional startup setting below emits one `cc_lb.request_diagnostics.v1` JSON line to stdout after each stored request event commits. The line also carries `thread_id`, `observed_session_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `duration_ms`, and `upstream_ttfb_ms`.
+The optional startup setting below emits one `cc_lb.request_diagnostics.v1` JSON line to stdout after each stored request event commits. The line also carries `thread_id`, `observed_session_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `duration_ms`, and `upstream_ttfb_ms`. The optional `cache_write_input_tokens`, `cache_write_input_tokens_30m`, and `cache_write_input_tokens_12h` integers are omitted when unreported or when the write component is invalid; a valid reported `0` is kept.
 
 | Key | Default | Environment variable | Effect |
 | --- | --- | --- | --- |

@@ -41,7 +41,7 @@ function renderCost(event: RequestEventWithPhase) {
 }
 
 describe('CostCell breakdown', () => {
-  it('omits absent and zero categories while keeping positive amounts', () => {
+  it('keeps reported zero categories and omits unavailable categories', () => {
     renderCost({
       ...baseEvent,
       cost_usd_micros: 6_000,
@@ -54,8 +54,54 @@ describe('CostCell breakdown', () => {
     expect(screen.getByText('Input')).toBeDefined();
     expect(screen.getByText('Output')).toBeDefined();
     expect(screen.getByText('Cache read')).toBeDefined();
-    expect(screen.queryByText('Cache create 5m')).toBeNull();
+    expect(screen.getByText('Cache create 5m')).toBeDefined();
     expect(screen.queryByText('Cache create 1h')).toBeNull();
+  });
+
+  it('labels OpenAI cache writes by their reported lifetime', () => {
+    renderCost({
+      ...baseEvent,
+      cost_usd_micros: 9_000,
+      cost_cache_write_micros: 8_000,
+      cost_cache_write_30m_micros: 2_000,
+      cost_cache_write_12h_micros: 6_000,
+    });
+
+    expect(screen.getByText('Cache write 30m')).toBeDefined();
+    expect(screen.getByText('Cache write 12h')).toBeDefined();
+    expect(screen.getByText('$0.0020')).toBeDefined();
+    expect(screen.getByText('$0.0060')).toBeDefined();
+  });
+
+  it('keeps an unknown-lifetime write in the authoritative total', () => {
+    renderCost({
+      ...baseEvent,
+      cost_usd_micros: 4_000,
+      cost_cache_write_micros: 4_000,
+    });
+
+    expect(
+      screen.getByRole('button', {
+        name: 'Cost $0.0040, show breakdown',
+      }),
+    ).toBeDefined();
+    expect(screen.queryByText('Cache write 30m')).toBeNull();
+    expect(screen.queryByText('Cache write 12h')).toBeNull();
+    expect(screen.getByText('Total')).toBeDefined();
+    expect(screen.getByText('$0.0040')).toBeDefined();
+  });
+
+  it('labels Gemini cached-content usage as a cache read', () => {
+    renderCost({
+      ...baseEvent,
+      model: 'gemini-2.5-pro',
+      cost_usd_micros: 2_000,
+      cost_cache_read_micros: 2_000,
+    });
+
+    expect(screen.getByText('Cache read')).toBeDefined();
+    expect(screen.queryByText('Cache create 5m')).toBeNull();
+    expect(screen.queryByText('Cache write 30m')).toBeNull();
   });
 
   it('shows a positive one-hour cache cost with its authoritative amount', () => {

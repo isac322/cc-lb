@@ -35,6 +35,7 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         session_id_source: row.session_id_source,
         model: row.model,
         reasoning_effort: row.reasoning_effort,
+        thinking_level: row.thinking_level,
         thinking_budget_tokens: row
             .thinking_budget_tokens
             .map(|value| i64_to_u64(value, "request event list thinking_budget_tokens"))
@@ -175,12 +176,27 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .cache_read_input_tokens
             .map(|value| i64_to_u64(value, "request event list cache_read_input_tokens"))
             .transpose()?,
+        cache_write_input_tokens: row
+            .cache_write_input_tokens
+            .map(|value| i64_to_u64(value, "request event list cache_write_input_tokens"))
+            .transpose()?,
+        cache_write_input_tokens_30m: row
+            .cache_write_input_tokens_30m
+            .map(|value| i64_to_u64(value, "request event list cache_write_input_tokens_30m"))
+            .transpose()?,
+        cache_write_input_tokens_12h: row
+            .cache_write_input_tokens_12h
+            .map(|value| i64_to_u64(value, "request event list cache_write_input_tokens_12h"))
+            .transpose()?,
         cost_usd_micros: row.cost_usd_micros,
         cost_input_micros: row.cost_input_micros,
         cost_output_micros: row.cost_output_micros,
         cost_cache_creation_5m_micros: row.cost_cache_creation_5m_micros,
         cost_cache_creation_1h_micros: row.cost_cache_creation_1h_micros,
         cost_cache_read_micros: row.cost_cache_read_micros,
+        cost_cache_write_micros: row.cost_cache_write_micros,
+        cost_cache_write_30m_micros: row.cost_cache_write_30m_micros,
+        cost_cache_write_12h_micros: row.cost_cache_write_12h_micros,
     })
 }
 

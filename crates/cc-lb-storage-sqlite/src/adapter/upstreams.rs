@@ -354,6 +354,9 @@ async fn update_split(
         || update.warmup_dialect_plugin.is_some()
         || update.workspace_id.is_some()
         || update.api_key_ciphertext.is_some();
+    let api_key_changed = update.api_key_ciphertext.is_some();
+    let oauth_changed = update.oauth_tokens.is_some();
+    let oauth_generation_changed = update.oauth_token_generation.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
     let oauth_tokens = update.oauth_tokens.take();
     let oauth_token_generation = update.oauth_token_generation.take();
@@ -362,11 +365,12 @@ async fn update_split(
     // Spec, api-key, OAuth credentials, generation, and details updates share
     // one transaction so a partial update can never commit independently.
     let mut tx = storage.begin_immediate().await?;
-    if has_spec_update {
-        update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
+    let base_url_changed = if has_spec_update {
+        update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?
     } else {
         ensure_split_spec_revision_in_tx(&mut tx, id, expected_revision).await?;
-    }
+        false
+    };
     if let Some(ciphertext) = api_key_ciphertext {
         update_split_api_key_secret_in_tx(&mut tx, id, Some(ciphertext)).await?;
     }
@@ -376,7 +380,7 @@ async fn update_split(
     if let Some(generation) = oauth_token_generation {
         update_split_oauth_token_generation_in_tx(&mut tx, id, generation).await?;
     }
-    write_split_details_in_tx(
+    let access_identity_changed = write_split_details_in_tx(
         storage,
         &mut tx,
         id,
@@ -384,6 +388,11 @@ async fn update_split(
         reset_api_key_poll_state,
     )
     .await?;
+    let identity_changed =
+        api_key_changed || oauth_changed || oauth_generation_changed || access_identity_changed;
+    if identity_changed && !base_url_changed {
+        bump_split_owner_epoch_in_tx(&mut tx, id).await?;
+    }
     let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
@@ -401,8 +410,8 @@ async fn update_split_spec(
     let api_key_access = update.api_key_access.take();
     let reset_api_key_poll_state = std::mem::take(&mut update.reset_api_key_poll_state);
     let mut tx = storage.begin_immediate().await?;
-    update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
-    write_split_details_in_tx(
+    let base_url_changed = update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
+    let access_identity_changed = write_split_details_in_tx(
         storage,
         &mut tx,
         id,
@@ -410,6 +419,9 @@ async fn update_split_spec(
         reset_api_key_poll_state,
     )
     .await?;
+    if access_identity_changed && !base_url_changed {
+        bump_split_owner_epoch_in_tx(&mut tx, id).await?;
+    }
     let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
@@ -423,18 +435,20 @@ async fn write_split_details_in_tx(
     id: Uuid,
     access: Option<&cc_lb_storage_api::ApiKeyAccessWrite>,
     reset_api_key_poll_state: bool,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     if access.is_none() && !reset_api_key_poll_state {
-        return Ok(());
+        return Ok(false);
     }
     let now = now_unix_secs_u64(storage.clock())?;
-    if let Some(access) = access {
-        write_api_key_access_in_tx(tx, id, access, now).await?;
-    }
+    let access_identity_changed = if let Some(access) = access {
+        write_api_key_access_in_tx(tx, id, access, now).await?
+    } else {
+        false
+    };
     if reset_api_key_poll_state {
         reset_api_key_poll_state_in_tx(tx, id, now).await?;
     }
-    Ok(())
+    Ok(access_identity_changed)
 }
 
 async fn update_split_spec_in_tx(
@@ -442,7 +456,7 @@ async fn update_split_spec_in_tx(
     id: Uuid,
     expected_revision: u64,
     update: UpstreamUpdate,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     let warmup_dialect_plugin = json_string(update.warmup_dialect_plugin.as_ref())?;
     let base_url_present = update.base_url.is_some();
     let base_url = update
@@ -450,6 +464,19 @@ async fn update_split_spec_in_tx(
         .as_ref()
         .and_then(Option::as_ref)
         .map(url::Url::as_str);
+    let base_url_changed = if base_url_present {
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT base_url FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlite_error)?
+        .flatten();
+        current != base_url.map(str::to_owned)
+    } else {
+        false
+    };
     let workspace_id_present = update.workspace_id.is_some();
     let workspace_id = update.workspace_id.as_ref().and_then(Option::as_deref);
     let row = sqlx::query(
@@ -460,6 +487,7 @@ async fn update_split_spec_in_tx(
                warmup_enabled = COALESCE(?, warmup_enabled),
                warmup_dialect_plugin = COALESCE(?, warmup_dialect_plugin),
                workspace_id = CASE WHEN ? THEN ? ELSE workspace_id END,
+               owner_epoch = owner_epoch + CASE WHEN ? AND kind = 'gemini_api_key' THEN 1 ELSE 0 END,
                spec_revision = spec_revision + 1,
                updated_at = unixepoch()
          WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL
@@ -473,6 +501,7 @@ async fn update_split_spec_in_tx(
     .bind(warmup_dialect_plugin)
     .bind(workspace_id_present)
     .bind(workspace_id)
+    .bind(base_url_changed)
     .bind(id.to_string())
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
     .fetch_optional(&mut **tx)
@@ -481,7 +510,7 @@ async fn update_split_spec_in_tx(
     if row.is_none() {
         return Err(conflict("stale upstream revision"));
     }
-    Ok(())
+    Ok(base_url_changed)
 }
 
 async fn update_split_api_key_secret(
@@ -492,6 +521,7 @@ async fn update_split_api_key_secret(
     let mut tx = storage.begin_immediate().await?;
     update_split_api_key_secret_in_tx(&mut tx, id, api_key_ciphertext).await?;
     bump_split_spec_revision_in_tx(&mut tx, id).await?;
+    bump_split_owner_epoch_in_tx(&mut tx, id).await?;
     let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
@@ -540,6 +570,7 @@ async fn update_split_oauth_token(
         },
     )
     .await?;
+    bump_split_owner_epoch_in_tx(&mut tx, id).await?;
     let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
@@ -610,6 +641,7 @@ async fn complete_split_refresh(
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
+    bump_split_owner_epoch_in_tx(&mut tx, id).await?;
     clear_split_apply_error_in_tx(&mut tx, id).await?;
     let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
@@ -663,6 +695,27 @@ async fn bump_split_spec_revision_in_tx(
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
            SET spec_revision = spec_revision + 1, updated_at = unixepoch()
+         WHERE id = ? AND deleted_at IS NULL
+         RETURNING id",
+    )
+    .bind(id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlite_error)?;
+    if row.is_none() {
+        return Err(conflict("upstream not found"));
+    }
+    Ok(())
+}
+
+async fn bump_split_owner_epoch_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+) -> StorageResult<()> {
+    let row = sqlx::query(
+        "UPDATE upstream_spec_v1
+           SET owner_epoch = owner_epoch + CASE WHEN kind = 'gemini_api_key' THEN 1 ELSE 0 END,
+               updated_at = unixepoch()
          WHERE id = ? AND deleted_at IS NULL
          RETURNING id",
     )

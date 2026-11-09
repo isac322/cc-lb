@@ -1,9 +1,10 @@
 #[path = "realtime_websocket_lifecycle.rs"]
 mod realtime_websocket_lifecycle;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::convert::Infallible;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,7 +18,9 @@ use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheBreakpoint, CacheBreakpointSource,
     CacheLookbackPrefix, CachePricingSummary, CacheScore, CredentialKind, InternalError,
-    InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace,
+    InternalErrorKind, InternalErrorStage, NativeCachePricing, NativeCachePricingComponent,
+    NativeCachePricingLifetime, NativeCachePricingProvider, NativeCachePricingRate,
+    NativeCachePricingStatus, PrefixBytes, Principal, PrincipalKind, Provider, RoutingTrace,
     StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
     UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
@@ -33,8 +36,8 @@ use cc_lb_request_log::{
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision};
 use cc_lb_storage_api::{
     PrincipalKind as DbPrincipalKind, PrincipalKindLite, PromptCacheObservationRecord,
-    StoredApiKeyRecord, UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityStore,
-    UpstreamRateLimitObservationRecord, UpstreamRecord,
+    ProviderPromptCacheObservationRecord, StoredApiKeyRecord, UpstreamAffinityBinding,
+    UpstreamAffinityKey, UpstreamAffinityStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
 };
 #[cfg(test)]
@@ -55,6 +58,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::Instrument as _;
 use url::Url;
@@ -69,8 +73,10 @@ use crate::completion_observer::{CompletionObserver, StreamCompletionLog, Stream
 use crate::downstream_stream_drop_guard::{
     DownstreamStreamDropGuard, StreamTerminationAttribution,
 };
+#[cfg(test)]
+use crate::error_format::anthropic_error_body;
 use crate::error_format::{
-    anthropic_error_body, anthropic_error_response, provider_error_body_with_retry_after,
+    anthropic_error_response, provider_error_body, provider_error_body_with_retry_after,
     provider_error_response, provider_error_response_with_retry_after,
 };
 use crate::hop_by_hop::strip_hop_by_hop;
@@ -83,17 +89,23 @@ use crate::prompt_cache_simulator::{
     PromptCachePolicy, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
     analyze_v3_prompt_cache,
 };
+use crate::provider_cache;
 use crate::provider_capability::{
     ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
-use crate::request_classification::classify_client_request_kind_with_class;
+use crate::provider_input_estimate::estimate_provider_input;
+use crate::request_classification::{
+    classify_client_request_kind_with_class, is_thread_sticky_subagent_seed,
+};
 use crate::request_context::{ProviderScope, RequestContext};
 use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
 use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
     WebSocketPluginRequest,
 };
-use crate::sse_error_frame::{make_error_frame, make_provider_error_frame};
+use crate::sse_error_frame::{
+    ResponsesSseErrorContext, make_provider_error_frame, make_responses_failed_frame,
+};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamErrorClassification, StreamTerminationCause,
@@ -102,7 +114,8 @@ use crate::terminal_observer::{
 };
 use crate::upstream_affinity::{
     UpstreamAffinityExtractionError, extract_request_affinity_keys, extract_response_affinity_keys,
-    extract_response_affinity_keys_from_sse_event, request_observes_response_affinity,
+    extract_response_affinity_keys_from_sse_event, gemini_cached_content_expiry,
+    request_observes_response_affinity,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 #[cfg(test)]
@@ -117,7 +130,7 @@ use cc_lb_control::api_keys::limit_engine::{
 use cc_lb_control::api_keys::principal_view::{
     PrincipalSpecCached, PrincipalView, RouterPipelineCache,
 };
-use cc_lb_control::api_keys::types::LimitKind;
+use cc_lb_control::api_keys::types::{Limit, LimitKind};
 use cc_lb_control::dynamic_view::{DynamicView, DynamicViewHolder};
 use cc_lb_control::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use cc_lb_control::{
@@ -133,7 +146,7 @@ pub type Body = AxumBody;
 /// Version 6 excludes the official Anthropic billing-header system block from
 /// effective cache identity while preserving literal custom-upstream identity.
 /// The version filter cold-starts older persisted observations.
-pub const HASH_SCHEMA_VERSION: u8 = 6;
+pub use cc_lb_domain::HASH_SCHEMA_VERSION;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
@@ -335,17 +348,25 @@ impl SseDownstreamBoundaryTracker {
 
 fn make_stream_error_frame(
     capability: ProviderCapability,
+    context: &ResponsesSseErrorContext,
     error_type: &str,
     message: &str,
     separate_from_partial_event: bool,
 ) -> Bytes {
-    let frame = make_provider_error_frame(
+    let frame = if matches!(
         capability,
-        StatusCode::BAD_GATEWAY,
-        error_type,
-        message,
-        None,
-    );
+        ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact
+    ) {
+        make_responses_failed_frame(context, error_type, message)
+    } else {
+        make_provider_error_frame(
+            capability,
+            StatusCode::BAD_GATEWAY,
+            error_type,
+            message,
+            None,
+        )
+    };
     if !separate_from_partial_event {
         return frame;
     }
@@ -467,6 +488,7 @@ pub enum RequestKind {
     AnthropicMessages,
     OpenaiResponses,
     GeminiGenerateContent,
+    GeminiCachedContentsCreate,
     GeminiCountTokens,
     AnthropicModels,
     AnthropicComplete,
@@ -523,6 +545,7 @@ impl RequestKind {
             Self::AnthropicMessages => ProviderCapability::AnthropicMessages,
             Self::OpenaiResponses => ProviderCapability::OpenaiResponses,
             Self::GeminiGenerateContent => ProviderCapability::GeminiGenerateContent,
+            Self::GeminiCachedContentsCreate => ProviderCapability::GeminiCachedContentsCreate,
             Self::GeminiCountTokens => ProviderCapability::GeminiCountTokens,
             Self::AnthropicModels => ProviderCapability::AnthropicModels,
             Self::AnthropicComplete => ProviderCapability::AnthropicComplete,
@@ -558,6 +581,7 @@ impl From<ProviderCapability> for RequestKind {
             ProviderCapability::AnthropicMessages => Self::AnthropicMessages,
             ProviderCapability::AnthropicCountTokens => Self::AnthropicMessages,
             ProviderCapability::GeminiGenerateContent => Self::GeminiGenerateContent,
+            ProviderCapability::GeminiCachedContentsCreate => Self::GeminiCachedContentsCreate,
             ProviderCapability::GeminiCountTokens => Self::GeminiCountTokens,
             ProviderCapability::AnthropicModels => Self::AnthropicModels,
             ProviderCapability::AnthropicComplete => Self::AnthropicComplete,
@@ -609,6 +633,10 @@ pub struct PreviewRouteInput {
     pub request_id: Option<String>,
     pub headers: HeaderMap,
     pub body_bytes: Bytes,
+    /// Provider scope selected by the admin caller.
+    pub provider: Option<cc_lb_domain::Provider>,
+    /// Provider-native path used to classify the request capability.
+    pub path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -624,6 +652,8 @@ pub enum PreviewRouteError {
     PrincipalNotFound(String),
     #[error("router pipeline instantiation error: {0}")]
     PipelineInstantiationError(String),
+    #[error("operation not supported for preview: {method} {path}")]
+    UnsupportedOperation { method: String, path: String },
 }
 
 #[derive(Clone, Debug)]
@@ -779,6 +809,192 @@ async fn fetch_prompt_cache_warm_entries_for_bundles(
     }
     warm_entries
 }
+/// Fetch provider-native cache observations for a request's eligible upstreams.
+///
+/// The storage API is keyed by one upstream at a time, so this performs one
+/// bounded lookup per eligible candidate, before `route_guard` is entered.
+/// Invalid request metadata and lookup failures both produce a neutral result.
+async fn fetch_provider_native_cache_scores(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    canonical_model: &str,
+    native_cache: Option<&cc_lb_request_log::RequestNativeCacheObservation>,
+    clock: &dyn Clock,
+) -> HashMap<Uuid, CacheScore> {
+    let Some((provider, mode, scope, identity_hash, retention_secs)) =
+        provider_native_lookup_params(native_cache, canonical_model, request_kind)
+    else {
+        return HashMap::new();
+    };
+    let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
+        return HashMap::new();
+    };
+    let Some(store) = view.prompt_cache_observation_store_opt() else {
+        return HashMap::new();
+    };
+    let now_unix_secs = unix_secs(clock.now());
+    let upstream_ids: Vec<Uuid> = view
+        .upstreams_snapshot()
+        .iter()
+        .filter(|upstream| upstream.enabled)
+        .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
+        .filter(|upstream| request_kind.matches_upstream(upstream.kind))
+        .filter(|upstream| allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id))
+        .filter(|upstream| upstream_credentials_routable(view, upstream))
+        .map(|upstream| upstream.id)
+        .collect();
+
+    let lookup_span = tracing::info_span!(
+        "proxy.provider_prompt_cache_observation_lookup",
+        otel.status_code = tracing::field::Empty,
+    );
+    let records = store
+        .list_active_provider_observations_for_candidates(
+            &upstream_ids,
+            provider,
+            canonical_model,
+            mode,
+            scope,
+            identity_hash,
+            Some(retention_secs),
+            now_unix_secs,
+        )
+        .instrument(lookup_span.clone())
+        .await;
+    let records = match records {
+        Ok(records) => records,
+        Err(error) => {
+            lookup_span.record("otel.status_code", "ERROR");
+            cc_lb_observability::inc_cache_observation_read_failed();
+            tracing::warn!(
+                %error,
+                "provider prompt-cache observation lookup failed; routing without native cache preference"
+            );
+            return HashMap::new();
+        }
+    };
+    let mut scores: HashMap<Uuid, CacheScore> = HashMap::new();
+    for record in records {
+        if !upstream_ids.contains(&record.upstream_id)
+            || record.provider != provider
+            || record.canonical_model_id != canonical_model
+            || record.mode != mode
+            || record.isolation_scope != scope
+            || record.identity_hash != identity_hash
+            || record.retention_secs != Some(retention_secs)
+            || !record
+                .expires_at_unix_secs
+                .is_some_and(|expires| expires > now_unix_secs)
+            || !record
+                .observed_cached_tokens
+                .is_some_and(|tokens| tokens > 0)
+        {
+            continue;
+        }
+        scores
+            .entry(record.upstream_id)
+            .and_modify(|score| {
+                if record.observed_cached_tokens.unwrap_or_default()
+                    > score.predicted_cache_read_tokens.into()
+                {
+                    *score = native_cache_score_from_record(&record);
+                }
+            })
+            .or_insert_with(|| native_cache_score_from_record(&record));
+    }
+    scores
+}
+
+fn native_cache_scope(scope: Option<&str>) -> Option<&str> {
+    let scope = scope?;
+    let (organization, region) = scope.strip_prefix("org=")?.split_once(";region=")?;
+    (!organization.is_empty()
+        && !organization.contains(';')
+        && !region.is_empty()
+        && !region.contains(';'))
+    .then_some(scope)
+}
+fn provider_native_lookup_params<'a>(
+    native_cache: Option<&'a cc_lb_request_log::RequestNativeCacheObservation>,
+    canonical_model: &str,
+    request_kind: RequestKind,
+) -> Option<(&'a str, &'a str, &'a str, &'a str, u64)> {
+    let native = native_cache?;
+    if native.provider == "openai" && provider_cache::supports_modern_openai_cache(canonical_model)
+    {
+        return None;
+    }
+    let scope = native_cache_scope(native.scope.as_deref())?;
+    let identity_hash = native
+        .identity_hash
+        .as_deref()
+        .filter(|identity| is_provider_native_identity(identity))?;
+    let retention_secs = native.retention_secs?;
+    (native.provider == "openai"
+        && !native.mode.is_empty()
+        && !canonical_model.is_empty()
+        && (request_kind.matches_upstream(StorageUpstreamKind::OpenaiApiKey)
+            || request_kind.matches_upstream(StorageUpstreamKind::OpenaiOauth)))
+    .then_some((
+        native.provider.as_str(),
+        native.mode.as_str(),
+        scope,
+        identity_hash,
+        retention_secs,
+    ))
+}
+
+fn is_provider_native_identity(identity_hash: &str) -> bool {
+    let Some(digest) = identity_hash.strip_prefix("sha256:") else {
+        return false;
+    };
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn native_cache_score_from_record(record: &ProviderPromptCacheObservationRecord) -> CacheScore {
+    CacheScore {
+        predicted_cache_read_tokens: record
+            .observed_cached_tokens
+            .unwrap_or_default()
+            .min(u64::from(u32::MAX)) as u32,
+        predicted_cache_creation_tokens_5m: 0,
+        predicted_cache_creation_tokens_1h: 0,
+        predicted_uncached_input_tokens: 0,
+        predicted_expires_at_unix_secs: record.expires_at_unix_secs,
+        matched_breakpoint_index: None,
+        confidence: 1.0,
+        ambiguity_reason: Some("provider_native_observation".to_owned()),
+        matched_v3_cache_key: None,
+        breakpoint_content_block_index: None,
+        matched_content_block_index: None,
+        lookback_distance: None,
+        token_estimate_source: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_candidates_with_native_cache_for_bundles(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    request_breakpoints: &[CacheBreakpoint],
+    warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
+    bundles: Option<&PromptCacheBundles>,
+    native_cache_scores: &HashMap<Uuid, CacheScore>,
+    clock: &dyn Clock,
+) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
+    build_candidates_with_matches_for_bundles_and_native(
+        view,
+        principal_id,
+        request_kind,
+        request_breakpoints,
+        warm_entries,
+        bundles,
+        Some(native_cache_scores),
+        clock,
+    )
+}
 
 pub fn build_candidates(
     view: &DynamicView,
@@ -807,6 +1023,29 @@ pub(crate) fn build_candidates_with_matches_for_bundles(
     request_breakpoints: &[CacheBreakpoint],
     warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
     bundles: Option<&PromptCacheBundles>,
+    clock: &dyn Clock,
+) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
+    build_candidates_with_matches_for_bundles_and_native(
+        view,
+        principal_id,
+        request_kind,
+        request_breakpoints,
+        warm_entries,
+        bundles,
+        None,
+        clock,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_candidates_with_matches_for_bundles_and_native(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    request_breakpoints: &[CacheBreakpoint],
+    warm_entries: &HashMap<Uuid, Vec<WarmCacheEntry>>,
+    bundles: Option<&PromptCacheBundles>,
+    native_cache_scores: Option<&HashMap<Uuid, CacheScore>>,
     clock: &dyn Clock,
 ) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
@@ -842,25 +1081,30 @@ pub(crate) fn build_candidates_with_matches_for_bundles(
             let bundle_breakpoints = bundles
                 .map(|bundles| bundles.for_upstream(upstream).cache_breakpoints.as_slice())
                 .unwrap_or(request_breakpoints);
-            let cache_score = warm_entries.get(&upstream.id).and_then(|entries| {
-                let matched =
-                    resolve_longest_warm_match(entries, bundle_breakpoints, now_unix_secs);
-                let score = build_cache_score_from_match(bundle_breakpoints, matched.as_ref());
-                if score.is_some()
-                    && let Some(matched) = matched.as_ref()
-                {
-                    selected_matches.insert(
-                        upstream.id,
-                        SelectedCacheMatch {
-                            prefix_hash: matched.prefix_hash.clone(),
-                            content_block_index: matched.content_block_index,
-                            ttl_class: matched.entry.ttl_class,
-                            estimated_prefix_bytes: matched.entry.estimated_prefix_bytes,
-                        },
-                    );
-                }
-                score
-            });
+            let cache_score = native_cache_scores
+                .and_then(|scores| scores.get(&upstream.id).cloned())
+                .or_else(|| {
+                    warm_entries.get(&upstream.id).and_then(|entries| {
+                        let matched =
+                            resolve_longest_warm_match(entries, bundle_breakpoints, now_unix_secs);
+                        let score =
+                            build_cache_score_from_match(bundle_breakpoints, matched.as_ref());
+                        if score.is_some()
+                            && let Some(matched) = matched.as_ref()
+                        {
+                            selected_matches.insert(
+                                upstream.id,
+                                SelectedCacheMatch {
+                                    prefix_hash: matched.prefix_hash.clone(),
+                                    content_block_index: matched.content_block_index,
+                                    ttl_class: matched.entry.ttl_class,
+                                    estimated_prefix_bytes: matched.entry.estimated_prefix_bytes,
+                                },
+                            );
+                        }
+                        score
+                    })
+                });
 
             let plan_info = view.plan_info_by_upstream.get(&upstream.id);
             candidates.push(UpstreamCandidate {
@@ -1124,7 +1368,8 @@ mod cache_score_tests {
         WarmCacheEntry,
     };
     use cc_lb_pricing::{
-        CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, TierRate, UsdPerMillion,
+        CatalogSnapshot, CatalogStatus, NativePricingLifetime, NativePricingProvider,
+        NativePricingRate, PriceCatalog, Pricing, ProviderNativePricing, TierRate, UsdPerMillion,
     };
     use proptest::prelude::*;
 
@@ -1320,6 +1565,7 @@ mod cache_score_tests {
         snapshot.models.insert(
             "tier-model".to_owned(),
             Pricing {
+                native: None,
                 model: "tier-model".to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: UsdPerMillion::from_whole_usd(8),
@@ -1365,6 +1611,144 @@ mod cache_score_tests {
             Some(6_000_000)
         );
         assert_eq!(pricing.cache_read_micros_per_million, Some(2_000_000));
+        for alias in ["service_tier", "serviceTier"] {
+            let request = serde_json::json!({(alias): "priority"});
+            let metadata = super::request_cache_metadata_from_value_with_analysis_for_capability(
+                &http::HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(super::ProviderCapability::GeminiGenerateContent),
+                None,
+            );
+            let gemini_pricing = cache_pricing_summary_for_model(
+                &catalog,
+                "tier-model",
+                metadata.requested_service_tier.as_deref(),
+            );
+            assert_eq!(gemini_pricing.input_micros_per_million, Some(3_000_000));
+            assert_eq!(
+                gemini_pricing.cache_read_micros_per_million,
+                Some(2_000_000)
+            );
+        }
+    }
+    #[test]
+    fn native_cache_pricing_context_maps_rates_without_legacy_fallback() {
+        let catalog = PriceCatalog::new_empty();
+        let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = CatalogStatus::Ok;
+        snapshot.models.insert(
+            "gpt-native".to_owned(),
+            Pricing {
+                native: Some(ProviderNativePricing {
+                    provider: NativePricingProvider::OpenAi,
+                    ordinary_input: NativePricingRate::known(UsdPerMillion::from_whole_usd(2)),
+                    cached_input_read: NativePricingRate::known(UsdPerMillion::from_micros_usd(
+                        100_000,
+                    )),
+                    cached_input_read_by_tier: BTreeMap::new(),
+                    cached_input_read_above_tokens: BTreeMap::new(),
+                    total_write: BTreeMap::from([(
+                        NativePricingLifetime::ThirtyMinutes,
+                        NativePricingRate::known(UsdPerMillion::from_whole_usd(3)),
+                    )]),
+                    explicit_resource: Default::default(),
+                }),
+                model: "gpt-native".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        snapshot
+            .cache_creation_per_million_usd
+            .insert("gpt-native".to_owned(), UsdPerMillion::from_whole_usd(3));
+        snapshot
+            .cache_read_per_million_usd
+            .insert("gpt-native".to_owned(), UsdPerMillion::from_whole_usd(1));
+        catalog.install_snapshot(snapshot);
+
+        let pricing = cache_pricing_summary_for_model(&catalog, "gpt-native", None);
+
+        assert_eq!(pricing.status, "unknown");
+        assert_eq!(pricing.input_micros_per_million, None);
+        assert_eq!(pricing.cache_read_micros_per_million, None);
+        assert_eq!(pricing.cache_creation_5m_micros_per_million, None);
+        assert_eq!(pricing.cache_creation_1h_micros_per_million, None);
+        let native = pricing.native.expect("native pricing context");
+        assert_eq!(native.version, 1);
+        assert_eq!(
+            native.provider,
+            cc_lb_domain::NativeCachePricingProvider::OpenAi
+        );
+        let ordinary = native
+            .rates
+            .iter()
+            .find(|rate| rate.component == cc_lb_domain::NativeCachePricingComponent::OrdinaryInput)
+            .expect("ordinary input rate");
+        assert_eq!(
+            ordinary.status,
+            cc_lb_domain::NativeCachePricingStatus::Known
+        );
+        assert_eq!(ordinary.micros_per_million, Some(2_000_000));
+        let total_write = native
+            .rates
+            .iter()
+            .find(|rate| {
+                rate.component == cc_lb_domain::NativeCachePricingComponent::TotalWrite
+                    && rate.lifetime
+                        == Some(cc_lb_domain::NativeCachePricingLifetime::ThirtyMinutes)
+            })
+            .expect("total write rate");
+        assert_eq!(
+            total_write.status,
+            cc_lb_domain::NativeCachePricingStatus::Known
+        );
+        assert_eq!(total_write.micros_per_million, Some(3_000_000));
+    }
+
+    #[test]
+    fn native_zero_rate_is_not_emitted_as_known_zero() {
+        let catalog = PriceCatalog::new_empty();
+        let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = CatalogStatus::Ok;
+        snapshot.models.insert(
+            "gpt-zero-native".to_owned(),
+            Pricing {
+                native: Some(ProviderNativePricing {
+                    provider: NativePricingProvider::OpenAi,
+                    ordinary_input: NativePricingRate::known(UsdPerMillion::from_micros_usd(0)),
+                    cached_input_read: NativePricingRate::unknown(),
+                    cached_input_read_by_tier: BTreeMap::new(),
+                    cached_input_read_above_tokens: BTreeMap::new(),
+                    total_write: BTreeMap::new(),
+                    explicit_resource: Default::default(),
+                }),
+                model: "gpt-zero-native".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                input_image_per_million_usd: None,
+                output_image_per_million_usd: None,
+                by_tier: BTreeMap::new(),
+            },
+        );
+        catalog.install_snapshot(snapshot);
+
+        let pricing = cache_pricing_summary_for_model(&catalog, "gpt-zero-native", None);
+        let ordinary = pricing
+            .native
+            .expect("native pricing context")
+            .rates
+            .into_iter()
+            .find(|rate| rate.component == cc_lb_domain::NativeCachePricingComponent::OrdinaryInput)
+            .expect("ordinary input rate");
+        assert_eq!(
+            ordinary.status,
+            cc_lb_domain::NativeCachePricingStatus::Unknown
+        );
+        assert_eq!(ordinary.micros_per_million, None);
     }
 
     #[test]
@@ -1752,6 +2136,231 @@ mod cache_score_tests {
     }
 }
 
+#[cfg(test)]
+mod provider_native_cache_tests {
+    use super::{
+        RequestKind, extract_request_affinity_keys, native_cache_score_from_record,
+        provider_native_lookup_params,
+    };
+    use cc_lb_request_log::{RequestCacheEvidence, RequestNativeCacheObservation};
+    use cc_lb_storage_api::ProviderPromptCacheObservationRecord;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn native(
+        provider: &str,
+        mode: &str,
+        scope: Option<&str>,
+        identity_hash: Option<&str>,
+        retention_secs: Option<u64>,
+    ) -> RequestNativeCacheObservation {
+        RequestNativeCacheObservation {
+            provider: provider.to_owned(),
+            mode: mode.to_owned(),
+            scope: scope.map(str::to_owned),
+            identity_hash: identity_hash.map(str::to_owned),
+            retention_secs,
+            evidence: RequestCacheEvidence::Unreported,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn native_lookup_requires_complete_scope_hashed_key_and_matching_request() {
+        let valid = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(86_400),
+        );
+        assert!(
+            provider_native_lookup_params(Some(&valid), "gpt-5", RequestKind::OpenaiResponses,)
+                .is_some()
+        );
+
+        for invalid in [
+            native(
+                "openai",
+                "implicit",
+                Some("org=acme;region="),
+                Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Some(86_400),
+            ),
+            native(
+                "openai",
+                "implicit",
+                Some("org=acme"),
+                Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Some(86_400),
+            ),
+            native(
+                "openai",
+                "implicit",
+                Some("org=acme;region=us"),
+                None,
+                Some(86_400),
+            ),
+            native(
+                "openai",
+                "implicit",
+                Some("org=acme;region=us"),
+                Some("v3:local-anthropic-prefix"),
+                Some(86_400),
+            ),
+            native(
+                "gemini",
+                "implicit",
+                Some("org=acme;region=us"),
+                Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Some(86_400),
+            ),
+        ] {
+            assert!(
+                provider_native_lookup_params(
+                    Some(&invalid),
+                    "gpt-5",
+                    RequestKind::OpenaiResponses,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn native_lookup_includes_api_key_only_openai_candidates() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(86_400),
+        );
+        assert_eq!(
+            provider_native_lookup_params(
+                Some(&request),
+                "gpt-5",
+                RequestKind::OpenaiResponsesInputTokens,
+            )
+            .map(|(_, _, _, _, retention_secs)| retention_secs),
+            Some(86_400)
+        );
+    }
+
+    #[test]
+    fn native_lookup_rejects_missing_retention() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            None,
+        );
+        assert!(
+            provider_native_lookup_params(Some(&request), "gpt-4o", RequestKind::OpenaiResponses,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_lookup_preserves_zero_in_memory_retention() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(0),
+        );
+        assert_eq!(
+            provider_native_lookup_params(Some(&request), "gpt-4o", RequestKind::OpenaiResponses,)
+                .map(|(_, _, _, _, retention_secs)| retention_secs),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn missing_key_has_no_native_score_even_for_modern_openai() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            None,
+            Some(1_800),
+        );
+        assert!(
+            provider_native_lookup_params(Some(&request), "gpt-5.6", RequestKind::OpenaiResponses,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn present_key_has_no_native_score_for_modern_openai() {
+        let request = native(
+            "openai",
+            "implicit",
+            Some("org=acme;region=us"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(1_800),
+        );
+        assert!(
+            provider_native_lookup_params(Some(&request), "gpt-5.6", RequestKind::OpenaiResponses,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gemini_native_evidence_never_becomes_soft_score_but_cached_content_stays_affine() {
+        for mode in ["implicit", "explicit"] {
+            let request = native(
+                "gemini",
+                mode,
+                Some("project"),
+                Some("sha256:cached-content"),
+                Some(1_800),
+            );
+            assert!(
+                provider_native_lookup_params(
+                    Some(&request),
+                    "gemini-2.5-pro",
+                    RequestKind::GeminiGenerateContent,
+                )
+                .is_none()
+            );
+        }
+
+        let keys = extract_request_affinity_keys(
+            RequestKind::GeminiGenerateContent.capability(),
+            &json!({"cachedContent": "projects/acme/locations/us/cachedContents/1"}),
+            "principal",
+        )
+        .expect("cachedContent affinity extraction");
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn native_score_exposes_observed_tokens_without_anthropic_cache_key() {
+        let record = ProviderPromptCacheObservationRecord {
+            upstream_id: Uuid::from_u128(1),
+            provider: "openai".to_owned(),
+            canonical_model_id: "gpt-5".to_owned(),
+            mode: "implicit".to_owned(),
+            isolation_scope: "org=acme;region=us".to_owned(),
+            identity_hash: "sha256:key".to_owned(),
+            boundary: "provider".to_owned(),
+            evidence_source: "provider_usage_metadata".to_owned(),
+            observed_cached_tokens: Some(u64::from(u32::MAX) + 1),
+            observed_write_tokens: None,
+            retention_secs: Some(86_400),
+            expires_at_unix_secs: Some(1_800_000_000),
+            last_observed_at_unix_secs: 1_799_999_000,
+        };
+        let score = native_cache_score_from_record(&record);
+        assert_eq!(score.predicted_cache_read_tokens, u32::MAX);
+        assert_eq!(score.predicted_expires_at_unix_secs, Some(1_800_000_000));
+        assert!(score.matched_v3_cache_key.is_none());
+    }
+}
+
 fn cache_pricing_summary_for_model(
     catalog: &cc_lb_pricing::PriceCatalog,
     model: &str,
@@ -1759,6 +2368,7 @@ fn cache_pricing_summary_for_model(
 ) -> CachePricingSummary {
     if model.is_empty() {
         return CachePricingSummary {
+            native: None,
             status: "unknown".to_owned(),
             input_micros_per_million: None,
             cache_creation_5m_micros_per_million: None,
@@ -1768,6 +2378,18 @@ fn cache_pricing_summary_for_model(
     }
 
     let normalized = cc_lb_pricing::normalize_model_id(model);
+    let native = catalog
+        .native_pricing(model, service_tier)
+        .map(native_cache_pricing_from_catalog);
+    if matches!(
+        native.as_ref().map(|pricing| pricing.provider),
+        Some(NativeCachePricingProvider::OpenAi | NativeCachePricingProvider::Gemini)
+    ) {
+        return CachePricingSummary {
+            native,
+            ..CachePricingSummary::default()
+        };
+    }
     let pricing = catalog.routing_cache_pricing(model, service_tier);
     let input = pricing.map(|rates| rates.input_per_million_usd.as_micros_usd());
     let cache_creation_5m = pricing.and_then(|rates| {
@@ -1788,13 +2410,15 @@ fn cache_pricing_summary_for_model(
     let status = if input.is_some() && cache_creation_5m.is_some() && cache_read.is_some() {
         "known"
     } else {
-        if let Some(fallback) = anthropic_family_cache_pricing_summary(&normalized) {
+        if let Some(mut fallback) = anthropic_family_cache_pricing_summary(&normalized) {
+            fallback.native = native;
             return fallback;
         }
         "unknown"
     };
 
     CachePricingSummary {
+        native,
         status: status.to_owned(),
         input_micros_per_million: input,
         cache_creation_5m_micros_per_million: cache_creation_5m,
@@ -1803,9 +2427,119 @@ fn cache_pricing_summary_for_model(
     }
 }
 
+fn native_cache_pricing_from_catalog(
+    pricing: cc_lb_pricing::ProviderNativePricing,
+) -> NativeCachePricing {
+    let mut rates = Vec::with_capacity(5 + pricing.total_write.len());
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::OrdinaryInput,
+        None,
+        pricing.ordinary_input,
+    ));
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::CachedInputRead,
+        None,
+        pricing.cached_input_read,
+    ));
+    for (lifetime, rate) in pricing.total_write {
+        rates.push(native_cache_pricing_rate(
+            NativeCachePricingComponent::TotalWrite,
+            Some(native_cache_pricing_lifetime(lifetime)),
+            rate,
+        ));
+    }
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::ExplicitResourceToken,
+        None,
+        pricing.explicit_resource.token,
+    ));
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::ExplicitResourceStorage,
+        Some(NativeCachePricingLifetime::ExplicitResourceTtl),
+        pricing.explicit_resource.storage,
+    ));
+    rates.push(native_cache_pricing_rate(
+        NativeCachePricingComponent::ExplicitResourceTtl,
+        Some(NativeCachePricingLifetime::ExplicitResourceTtl),
+        pricing.explicit_resource.ttl,
+    ));
+    NativeCachePricing {
+        version: 1,
+        provider: native_cache_pricing_provider(pricing.provider),
+        rates,
+    }
+}
+
+fn native_cache_pricing_provider(
+    provider: cc_lb_pricing::NativePricingProvider,
+) -> NativeCachePricingProvider {
+    match provider {
+        cc_lb_pricing::NativePricingProvider::Anthropic => NativeCachePricingProvider::Anthropic,
+        cc_lb_pricing::NativePricingProvider::OpenAi => NativeCachePricingProvider::OpenAi,
+        cc_lb_pricing::NativePricingProvider::Gemini => NativeCachePricingProvider::Gemini,
+        cc_lb_pricing::NativePricingProvider::Unknown => NativeCachePricingProvider::Unknown,
+    }
+}
+
+fn native_cache_pricing_lifetime(
+    lifetime: cc_lb_pricing::NativePricingLifetime,
+) -> NativeCachePricingLifetime {
+    match lifetime {
+        cc_lb_pricing::NativePricingLifetime::ModelRetention => {
+            NativeCachePricingLifetime::ModelRetention
+        }
+        cc_lb_pricing::NativePricingLifetime::ThirtyMinutes => {
+            NativeCachePricingLifetime::ThirtyMinutes
+        }
+        cc_lb_pricing::NativePricingLifetime::OneHour => NativeCachePricingLifetime::OneHour,
+        cc_lb_pricing::NativePricingLifetime::TwelveHours => {
+            NativeCachePricingLifetime::TwelveHours
+        }
+        cc_lb_pricing::NativePricingLifetime::ExplicitResourceTtl => {
+            NativeCachePricingLifetime::ExplicitResourceTtl
+        }
+    }
+}
+
+fn native_cache_pricing_rate(
+    component: NativeCachePricingComponent,
+    lifetime: Option<NativeCachePricingLifetime>,
+    rate: cc_lb_pricing::NativePricingRate,
+) -> NativeCachePricingRate {
+    let status = match rate.status {
+        cc_lb_pricing::NativePricingStatus::Known
+            if rate
+                .price_per_million_usd
+                .map(|price| price.as_micros_usd())
+                != Some(0) =>
+        {
+            NativeCachePricingStatus::Known
+        }
+        cc_lb_pricing::NativePricingStatus::NotApplicable => {
+            NativeCachePricingStatus::NotApplicable
+        }
+        cc_lb_pricing::NativePricingStatus::Known | cc_lb_pricing::NativePricingStatus::Unknown => {
+            NativeCachePricingStatus::Unknown
+        }
+    };
+    let micros_per_million = if status == NativeCachePricingStatus::Known {
+        rate.price_per_million_usd
+            .map(|price| price.as_micros_usd())
+    } else {
+        None
+    };
+    NativeCachePricingRate {
+        component,
+        lifetime,
+        status,
+        micros_per_million,
+    }
+}
+
 fn anthropic_family_cache_pricing_summary(model: &str) -> Option<CachePricingSummary> {
     let input_micros_per_million = anthropic_family_input_micros_per_million(model)?;
     Some(CachePricingSummary {
+        native: None,
         status: "known".to_owned(),
         input_micros_per_million: Some(input_micros_per_million),
         cache_creation_5m_micros_per_million: Some(cache_creation_5m_micros_from_input(
@@ -1896,6 +2630,7 @@ pub struct PromptCacheObservationContext {
     pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
     pub(crate) cacheable_breakpoint_prefix_keys: HashSet<String>,
     pub(crate) selected_match: Option<SelectedCacheMatch>,
+    pub(crate) native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
     /// Direct non-blocking publication port for decoded observations.
     /// Replaces the old lifecycle-bus hop: enqueue failures are reported
     /// and never fail the request.
@@ -1909,6 +2644,9 @@ pub struct PromptCacheObservationContext {
 pub(crate) struct PromptCacheUsage {
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_read_input_tokens: u64,
+    pub(crate) cache_read_evidence: cc_lb_request_log::RequestCacheEvidence,
+    pub(crate) cache_write_input_tokens: Option<u64>,
+    pub(crate) cache_write_evidence: cc_lb_request_log::RequestCacheEvidence,
     /// True only for present valid positive reads and complete numeric zero
     /// creation evidence, never from accounting counters' zero defaults.
     pub(crate) read_only_evidence: bool,
@@ -1919,7 +2657,27 @@ impl From<&UsageCounts> for PromptCacheUsage {
         Self {
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_read_evidence: request_cache_evidence(usage.cache_read_evidence),
+            cache_write_input_tokens: usage.cache_write_input_tokens,
+            cache_write_evidence: request_cache_evidence(usage.cache_write_evidence),
             read_only_evidence: usage.has_affirmative_read_only_cache_usage(),
+        }
+    }
+}
+
+fn request_cache_evidence(
+    evidence: usage_parser::CacheTokenEvidence,
+) -> cc_lb_request_log::RequestCacheEvidence {
+    match evidence {
+        usage_parser::CacheTokenEvidence::Unreported => {
+            cc_lb_request_log::RequestCacheEvidence::Unreported
+        }
+        usage_parser::CacheTokenEvidence::Zero => cc_lb_request_log::RequestCacheEvidence::Zero,
+        usage_parser::CacheTokenEvidence::Positive => {
+            cc_lb_request_log::RequestCacheEvidence::Positive
+        }
+        usage_parser::CacheTokenEvidence::Invalid => {
+            cc_lb_request_log::RequestCacheEvidence::Invalid
         }
     }
 }
@@ -1953,8 +2711,9 @@ pub(crate) fn prompt_cache_observation_context(
     cache_breakpoints: &[CacheBreakpoint],
     cacheable_breakpoint_prefix_keys: &HashSet<String>,
     selected_match: Option<SelectedCacheMatch>,
+    native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
 ) -> Option<PromptCacheObservationContext> {
-    if canonical_model_id.is_empty() || cache_breakpoints.is_empty() {
+    if canonical_model_id.is_empty() || (cache_breakpoints.is_empty() && native_cache.is_none()) {
         return None;
     }
     let sink = Arc::clone(&view.prompt_cache_observation_sink);
@@ -1964,6 +2723,7 @@ pub(crate) fn prompt_cache_observation_context(
         cache_breakpoints: cache_breakpoints.to_vec(),
         cacheable_breakpoint_prefix_keys: cacheable_breakpoint_prefix_keys.clone(),
         selected_match,
+        native_cache,
         sink,
         grace_margin_secs: view.prompt_cache_grace_margin_secs,
     })
@@ -2097,6 +2857,60 @@ pub(crate) fn publish_prompt_cache_observations(
                 PromptCacheObservationEnqueueError::ChannelClosed => {
                     tracing::warn!("prompt cache observation sink is closed");
                 }
+            }
+        }
+    }
+}
+
+pub(crate) fn publish_prompt_cache_observations_with_usage(
+    context: &PromptCacheObservationContext,
+    decode: &PromptCacheObservationDecodeResult,
+    usage: PromptCacheUsage,
+    now_unix_secs: u64,
+) {
+    publish_prompt_cache_observations(context, decode, now_unix_secs);
+    publish_provider_cache_observation(context, usage, now_unix_secs);
+}
+
+fn publish_provider_cache_observation(
+    context: &PromptCacheObservationContext,
+    usage: PromptCacheUsage,
+    now_unix_secs: u64,
+) {
+    let Some(native) = context.native_cache.as_ref() else {
+        return;
+    };
+    let (_, observed_cached_tokens, observed_write_tokens) = provider_cache::project_usage(
+        native,
+        usage.cache_read_evidence,
+        usage.cache_read_input_tokens,
+        usage.cache_write_evidence,
+        usage.cache_write_input_tokens,
+    );
+    let record = ProviderPromptCacheObservationRecord {
+        upstream_id: context.upstream_id,
+        provider: native.provider.clone(),
+        canonical_model_id: context.canonical_model_id.clone(),
+        mode: native.mode.clone(),
+        isolation_scope: native.scope.clone().unwrap_or_default(),
+        identity_hash: native.identity_hash.clone().unwrap_or_default(),
+        boundary: native.boundary.clone().unwrap_or_default(),
+        evidence_source: native.evidence_source.clone().unwrap_or_default(),
+        observed_cached_tokens,
+        observed_write_tokens,
+        retention_secs: native.retention_secs,
+        expires_at_unix_secs: native.expires_at_unix_secs.or_else(|| {
+            native
+                .retention_secs
+                .map(|ttl| now_unix_secs.saturating_add(ttl))
+        }),
+        last_observed_at_unix_secs: now_unix_secs,
+    };
+    if let Err(error) = context.sink.enqueue_provider(record) {
+        match error {
+            PromptCacheObservationEnqueueError::ChannelFull => {}
+            PromptCacheObservationEnqueueError::ChannelClosed => {
+                tracing::warn!("provider prompt cache observation sink is closed");
             }
         }
     }
@@ -2430,6 +3244,7 @@ struct LimitRejectionErr {
 
 struct RequestAffinityResolution {
     target_upstream_id: Uuid,
+    owner_epoch: u64,
     pending_keys: Vec<UpstreamAffinityKey>,
 }
 
@@ -2455,6 +3270,7 @@ struct ResponseAffinityContext {
     upstream_id: Uuid,
     pending_request_keys: Vec<UpstreamAffinityKey>,
     observe_response_keys: bool,
+    owner_epoch: Option<u64>,
     ttl_secs: u64,
 }
 
@@ -2462,6 +3278,7 @@ async fn bind_upstream_affinity_keys(
     context: &ResponseAffinityContext,
     keys: &[UpstreamAffinityKey],
     now_unix_secs: u64,
+    expires_at_unix_secs: Option<u64>,
 ) -> Result<(), ()> {
     if keys.is_empty() {
         return Ok(());
@@ -2469,6 +3286,7 @@ async fn bind_upstream_affinity_keys(
     let Some(store) = context.store.as_ref() else {
         return Err(());
     };
+    let owner_epoch = context.owner_epoch.ok_or(())?;
     let mut seen = HashSet::with_capacity(keys.len());
     let mut bindings = Vec::with_capacity(keys.len());
     for key in keys {
@@ -2476,8 +3294,9 @@ async fn bind_upstream_affinity_keys(
             bindings.push(UpstreamAffinityBinding {
                 key: key.clone(),
                 upstream_id: context.upstream_id,
+                owner_epoch,
                 observed_at_unix_secs: now_unix_secs,
-                expires_at_unix_secs: None,
+                expires_at_unix_secs,
             });
         }
     }
@@ -2491,6 +3310,7 @@ fn affinity_stream_error() -> cc_lb_lifecycle::StreamError {
     cc_lb_lifecycle::StreamError {
         error_type: UPSTREAM_AFFINITY_ERROR_TYPE.to_owned(),
         error_message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned(),
+        ..Default::default()
     }
 }
 
@@ -2618,7 +3438,7 @@ fn is_semantic_content_frame(
 /// before which request-referenced provider state still pending a binding must
 /// be persisted. Gemini streams carry no terminal event, so their pending keys
 /// are bound once the upstream stream completes cleanly.
-fn sse_event_completes_response(
+pub(crate) fn sse_event_completes_response(
     capability: ProviderCapability,
     event: &usage_parser::ParsedSseEvent<'_>,
     _anthropic_message_stop: bool,
@@ -2658,19 +3478,6 @@ fn sse_event_completes_response(
         | crate::provider_capability::UsageShape::OpenaiImages
         | crate::provider_capability::UsageShape::None => false,
     }
-}
-
-/// Transforms can drop or rewrite the upstream terminal event. Only their
-/// complete emitted terminal frames authorize successful downstream closure.
-fn transformed_sse_completes_response(capability: ProviderCapability, mut bytes: &[u8]) -> bool {
-    while let Some(end) = usage_parser::find_sse_event_end(bytes) {
-        let event = parse_sse_event(&bytes[..end]);
-        if sse_event_completes_response(capability, &event, false) {
-            return true;
-        }
-        bytes = &bytes[end..];
-    }
-    false
 }
 
 /// JSON `type` of the provider's terminal success SSE event, used by the #663
@@ -2792,6 +3599,102 @@ impl UpstreamDispatch for HyperDispatcher {
     }
 }
 
+const THREAD_STICKY_SUBAGENT_SHARD_COUNT: usize = 16;
+const MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD: usize = 512;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ThreadStickySubagentKey {
+    principal_id: String,
+    observed_session_id: String,
+}
+
+#[derive(Clone)]
+struct ThreadStickySubagentLatch {
+    next_sequence: Arc<AtomicU64>,
+    shards: Arc<[Mutex<HashMap<ThreadStickySubagentKey, u64>>; THREAD_STICKY_SUBAGENT_SHARD_COUNT]>,
+}
+
+impl ThreadStickySubagentLatch {
+    fn new() -> Self {
+        Self {
+            next_sequence: Arc::new(AtomicU64::new(0)),
+            shards: Arc::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
+        }
+    }
+
+    fn shard_index(key: &ThreadStickySubagentKey) -> usize {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % THREAD_STICKY_SUBAGENT_SHARD_COUNT
+    }
+
+    fn observe(&self, key: ThreadStickySubagentKey, seed: bool) -> bool {
+        let shard = &self.shards[Self::shard_index(&key)];
+        let mut shard = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if seed {
+            let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+            if !shard.contains_key(&key)
+                && shard.len() >= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD
+                && let Some(oldest_key) = shard
+                    .iter()
+                    .min_by_key(|(_, sequence)| **sequence)
+                    .map(|(key, _)| key.clone())
+            {
+                shard.remove(&oldest_key);
+            }
+            shard.insert(key, sequence);
+            true
+        } else {
+            shard.contains_key(&key)
+        }
+    }
+}
+
+impl Default for ThreadStickySubagentLatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn apply_thread_sticky_subagent_latch(
+    latch: &ThreadStickySubagentLatch,
+    principal_id: &str,
+    value: Option<&Value>,
+    metadata: &mut RequestCacheMetadata,
+) {
+    if metadata.claude_agent_id.is_some() || metadata.explicit_request_class.is_some() {
+        return;
+    }
+    let Some(observed_session_id) = metadata
+        .observed_session_id
+        .as_deref()
+        .or(metadata.thread_id.as_deref())
+    else {
+        return;
+    };
+    let key = ThreadStickySubagentKey {
+        principal_id: principal_id.to_owned(),
+        observed_session_id: observed_session_id.to_owned(),
+    };
+    if metadata.request_kind.as_deref() == Some("subagent")
+        && value.is_some_and(|value| {
+            is_thread_sticky_subagent_seed(
+                value,
+                Some(observed_session_id),
+                metadata.parent_session_id.as_deref(),
+            )
+        })
+    {
+        latch.observe(key, true);
+    } else if matches!(metadata.request_kind.as_deref(), Some("main" | "unknown"))
+        && latch.observe(key, false)
+    {
+        metadata.request_kind = Some("subagent".to_owned());
+    }
+}
+
 pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
     dynamic_view: Arc<DynamicViewHolder>,
@@ -2807,6 +3710,7 @@ pub struct Lifecycle {
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     cache_keepalive_enqueuer: Option<Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>>,
     cache_keepalive: crate::cache_keepalive::LifecycleKeepalive,
+    thread_sticky_subagent_latch: ThreadStickySubagentLatch,
     prompt_cache_analysis_executor: PromptCacheAnalysisExecutor,
     completion_observer: Arc<CompletionObserver>,
     clock: ClockHandle,
@@ -2838,6 +3742,7 @@ impl Lifecycle {
                 None,
                 Arc::clone(&dynamic_view),
             ),
+            thread_sticky_subagent_latch: ThreadStickySubagentLatch::default(),
             cache_keepalive_enqueuer: None,
             prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
             completion_observer: Arc::new(CompletionObserver::new()),
@@ -2982,8 +3887,46 @@ impl Lifecycle {
         }
 
         let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
-        let cache_metadata = request_cache_metadata_from_value(&input.headers, body_value.as_ref());
+        let method = http::Method::POST;
+        let request_capability = classify_provider_capability(&method, &input.path, input.provider)
+            .ok_or_else(|| PreviewRouteError::UnsupportedOperation {
+                method: method.to_string(),
+                path: input.path.clone(),
+            })?;
+        let request_kind = RequestKind::from(request_capability);
+        let path_model = gemini_model_from_path(&input.path);
+        let prompt_cache_analysis = match (request_capability, body_value.as_ref()) {
+            (ProviderCapability::AnthropicMessages, Some(_))
+            | (ProviderCapability::AnthropicMessages, None) => None,
+            (_, Some(_)) => Some(PromptCacheAnalysisOutput {
+                analysis: V3PromptCacheAnalysis {
+                    blocks: Vec::new(),
+                    breakpoints: Vec::new(),
+                    literal_breakpoints: Vec::new(),
+                },
+                cacheable_breakpoint_prefix_keys: Vec::new(),
+                literal_cacheable_breakpoint_prefix_keys: Vec::new(),
+                timings: PromptCacheAnalysisTimings::default(),
+            }),
+            (_, None) => None,
+        };
+        let mut cache_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &input.headers,
+            body_value.as_ref(),
+            prompt_cache_analysis,
+            Some(request_capability),
+            path_model.as_deref(),
+        );
         let cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
+        let canonical_model = if request_capability == ProviderCapability::GeminiGenerateContent {
+            std::mem::take(&mut cache_metadata.canonical_model_id)
+        } else {
+            path_model
+                .as_deref()
+                .map(canonical_model_id)
+                .unwrap_or(&cache_metadata.canonical_model_id)
+                .to_owned()
+        };
 
         let request_id = input
             .request_id
@@ -2993,16 +3936,17 @@ impl Lifecycle {
             .request_id(request_id)
             .thread_id(cache_metadata.thread_id.clone())
             .requested_service_tier(cache_metadata.requested_service_tier.clone())
+            .provider_scope(input.provider)
             .downstream_headers(input.headers)
-            .method(http::Method::POST)
-            .path("/v1/messages".to_owned())
+            .method(method)
+            .path(input.path)
             .query(None)
             .body_bytes(input.body_bytes)
             .cache_breakpoints(cache_breakpoints)
-            .canonical_model_id(cache_metadata.canonical_model_id.clone())
+            .canonical_model_id(canonical_model.clone())
             .cache_pricing(cache_pricing_summary_for_model(
                 cc_lb_pricing::global_catalog(),
-                &cache_metadata.canonical_model_id,
+                &canonical_model,
                 cache_metadata.requested_service_tier.as_deref(),
             ))
             .build();
@@ -3014,24 +3958,34 @@ impl Lifecycle {
         let warm_entries = fetch_prompt_cache_warm_entries_for_bundles(
             &view,
             &principal.id,
-            RequestKind::AnthropicMessages,
+            request_kind,
             &ctx.canonical_model_id,
             &cache_metadata.bundles,
             &*self.clock,
         )
         .await;
-        let candidates = build_candidates_with_matches_for_bundles(
+        let native_cache_scores = fetch_provider_native_cache_scores(
             &view,
             &principal.id,
-            RequestKind::AnthropicMessages,
+            request_kind,
+            &ctx.canonical_model_id,
+            cache_metadata.native_cache.as_ref(),
+            &*self.clock,
+        )
+        .await;
+        let candidates = build_candidates_with_native_cache_for_bundles(
+            &view,
+            &principal.id,
+            request_kind,
             &ctx.cache_breakpoints,
             &warm_entries,
             Some(&cache_metadata.bundles),
+            &native_cache_scores,
             &*self.clock,
         )
         .0;
         let pipeline_result = execute_filter_pipeline(
-            resolved_pipeline.filters_for(cc_lb_domain::Provider::Anthropic),
+            resolved_pipeline.filters_for(request_capability.provider()),
             &ctx,
             &principal,
             candidates,
@@ -3093,6 +4047,7 @@ impl Lifecycle {
         let requested_keys = keys.iter().collect::<HashSet<_>>();
         let mut matched_keys = HashSet::with_capacity(bindings.len().min(keys.len()));
         let mut target_upstream_id = None;
+        let mut owner_epoch = None;
         for binding in &bindings {
             if !requested_keys.contains(&binding.key) {
                 continue;
@@ -3109,6 +4064,16 @@ impl Lifecycle {
                 Some(_) => {}
                 None => target_upstream_id = Some(binding.upstream_id),
             }
+            if binding.key.provider == "gemini"
+                && owner_epoch.is_some_and(|epoch| epoch != binding.owner_epoch)
+            {
+                return Err(RequestAffinityFailure {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_type: "api_error",
+                    message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                });
+            }
+            owner_epoch = Some(binding.owner_epoch);
         }
         let Some(target_upstream_id) = target_upstream_id else {
             return Err(RequestAffinityFailure {
@@ -3124,6 +4089,7 @@ impl Lifecycle {
             .collect();
         Ok(Some(RequestAffinityResolution {
             target_upstream_id,
+            owner_epoch: owner_epoch.expect("resolved affinity has a matching binding"),
             pending_keys,
         }))
     }
@@ -3218,11 +4184,38 @@ impl Lifecycle {
         error: &BuiltinAuthError,
         path: &str,
     ) -> Response<Body> {
+        self.reject_responses_websocket_authentication_for_provider(error, path, None)
+    }
+
+    pub fn reject_responses_websocket_authentication_for_provider(
+        &self,
+        error: &BuiltinAuthError,
+        path: &str,
+        provider: Option<cc_lb_domain::Provider>,
+    ) -> Response<Body> {
         let (observer, _) = self.websocket_observer(path);
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
-        crate::authn_rail::reject_unauthenticated(error, observer.as_ref())
+        crate::authn_rail::reject_unauthenticated_for_route(
+            error,
+            &http::Method::GET,
+            path,
+            provider,
+            observer.as_ref(),
+        )
+    }
+
+    pub(crate) fn publish_websocket_provider_cache_observation(
+        &self,
+        context: &PromptCacheObservationContext,
+        usage: &UsageCounts,
+    ) {
+        publish_provider_cache_observation(
+            context,
+            PromptCacheUsage::from(usage),
+            unix_secs(self.clock.now()),
+        );
     }
 
     /// Route and reserve one logical create; never dispatch an HTTP request.
@@ -3249,9 +4242,41 @@ impl Lifecycle {
             http.request.method = "GET",
             url.path = "/v1/responses",
         );
+        let stream_span = tracing::info_span!(
+            "proxy.response_stream",
+            cc_lb.request.id = request_id,
+            cc_lb.event.id = observer.as_ref().map(|observer| observer.event_id()),
+            cc_lb.responses.stream_id = tracing::field::Empty,
+            cc_lb.responses.connection_id = tracing::field::Empty,
+            cc_lb.upstream.id = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
+            gen_ai.request.stream = true,
+            transport = "websocket",
+            otel.status_code = tracing::field::Empty,
+            http.response.status_code = tracing::field::Empty,
+            cc_lb.request.outcome = tracing::field::Empty,
+            cc_lb.request.duration_ms = tracing::field::Empty,
+            cc_lb.request.finalize_ms = tracing::field::Empty,
+            cc_lb.request.unaccounted_ms = tracing::field::Empty,
+            stream.outcome = tracing::field::Empty,
+            error.cause = tracing::field::Empty,
+            error.chain = tracing::field::Empty,
+            error.io.kind = tracing::field::Empty,
+            error.io.os_error = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            stream_first_output_ms = tracing::field::Empty,
+            stream_last_output_ms = tracing::field::Empty,
+            stream_event_count = tracing::field::Empty,
+            stream_total_ms = tracing::field::Empty,
+            stream_inter_output_avg_ms = tracing::field::Empty,
+            provider_session_id = tracing::field::Empty,
+            provider_connection_id = tracing::field::Empty,
+            total_bytes = tracing::field::Empty,
+        );
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
             observer.set_request_span(span.clone());
+            observer.set_response_stream_span(stream_span.clone());
             observer.emit_request_started(true);
         }
         let result = async {
@@ -3282,6 +4307,7 @@ impl Lifecycle {
                             .pointer("/reasoning/effort")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
+                        thinking_level: None,
                         cache_breakpoints: Vec::new(),
                         cache_prefix_hash: None,
                         thread_id: identity.thread_id.clone(),
@@ -3296,6 +4322,14 @@ impl Lifecycle {
                         message_index: None,
                         message_count: None,
                         cache_control_message_indices: Vec::new(),
+                        native_cache: provider_cache::analyze(
+                            ProviderCapability::OpenaiResponses,
+                            body.as_ref(),
+                            body.get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            ingress.headers,
+                        ),
                     }),
                 });
             }
@@ -3369,6 +4403,20 @@ impl Lifecycle {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            let prompt_cache_observation_context = prompt_cache_observation_context(
+                &view,
+                selected_id,
+                &ctx.canonical_model_id,
+                &[],
+                &HashSet::new(),
+                None,
+                provider_cache::analyze(
+                    ProviderCapability::OpenaiResponses,
+                    body.as_ref(),
+                    &ctx.canonical_model_id,
+                    ingress.headers,
+                ),
+            );
             span.record("gen_ai.request.model", model.as_str());
             span.record("cc_lb.upstream.id", tracing::field::display(selected_id));
             let route_info = route_info_for_routed(&routed, Some(&model));
@@ -3462,6 +4510,8 @@ impl Lifecycle {
                 candidates,
                 route_info,
                 observer: observer.clone(),
+                completion_observer: Arc::clone(&self.completion_observer),
+                prompt_cache_observation_context,
                 reservation: active_limit
                     .as_mut()
                     .and_then(|limit| limit.reservation.take()),
@@ -3470,7 +4520,7 @@ impl Lifecycle {
                 key_id: auth.key_id().to_owned(),
                 model,
                 store: body.get("store").and_then(Value::as_bool).unwrap_or(true),
-                span: span.clone(),
+                span: stream_span.clone(),
                 request_id: request_id.to_owned(),
             })
         }
@@ -3648,14 +4698,32 @@ impl Lifecycle {
             id: auth.principal_id().to_owned(),
             kind: PrincipalKind::InternalKey,
         };
-        let mut candidates = build_candidates(
+        let native_cache = provider_cache::analyze(
+            ProviderCapability::OpenaiResponses,
+            body,
+            &canonical_model,
+            ingress.headers,
+        );
+        let native_cache_scores = fetch_provider_native_cache_scores(
+            view,
+            &principal.id,
+            RequestKind::OpenaiResponses,
+            &canonical_model,
+            native_cache.as_ref(),
+            &*self.clock,
+        )
+        .await;
+        let mut candidates = build_candidates_with_native_cache_for_bundles(
             view,
             auth.principal_id(),
             RequestKind::OpenaiResponses,
             &[],
             &HashMap::new(),
+            None,
+            &native_cache_scores,
             &*self.clock,
-        );
+        )
+        .0;
         if let Some(target) = target {
             candidates.retain(|candidate| candidate.upstream_id == target);
         }
@@ -3887,9 +4955,10 @@ impl Lifecycle {
             upstream_id,
             pending_request_keys: Vec::new(),
             observe_response_keys: true,
+            owner_epoch: Some(0),
             ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
         };
-        bind_upstream_affinity_keys(&context, &keys, unix_secs(self.clock.now()))
+        bind_upstream_affinity_keys(&context, &keys, unix_secs(self.clock.now()), None)
             .await
             .map_err(|_| {
                 WebSocketError::new(
@@ -4041,10 +5110,23 @@ impl Lifecycle {
         handle_span.record("cc_lb.principal.id", principal_id.as_str());
         let Some(cached) = principal_view.get(&principal_id) else {
             tracing::error!(%principal_id, "authenticated principal missing from principal view");
-            let response = anthropic_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "api_error",
-                "authenticated principal is unavailable",
+            let response = request_capability.map_or_else(
+                || {
+                    anthropic_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "api_error",
+                        "authenticated principal is unavailable",
+                    )
+                },
+                |capability| {
+                    provider_error_response(
+                        capability,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "api_error",
+                        "authenticated principal is unavailable",
+                        None,
+                    )
+                },
             );
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
@@ -4099,10 +5181,12 @@ impl Lifecycle {
             .value()
             .is_some_and(|body| !body_is_consistency_safe(request_capability, body))
         {
-            let response = anthropic_error_response(
+            let response = provider_error_response(
+                request_capability,
                 StatusCode::NOT_FOUND,
                 "operation_not_supported",
                 "operation is not supported by the consistency-safe proxy boundary",
+                None,
             );
             if let Some(o) = observer.as_ref() {
                 o.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
@@ -4198,6 +5282,18 @@ impl Lifecycle {
             body_view.value(),
             prompt_cache_analysis,
             Some(request_capability),
+            path_model.as_deref(),
+        );
+        if request_capability == ProviderCapability::GeminiCachedContentsCreate
+            && let Some(model) = cache_metadata.canonical_model_id.strip_prefix("models/")
+        {
+            cache_metadata.canonical_model_id = model.to_owned();
+        }
+        apply_thread_sticky_subagent_latch(
+            &self.thread_sticky_subagent_latch,
+            &principal.id,
+            body_view.value(),
+            &mut cache_metadata,
         );
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
@@ -4211,6 +5307,7 @@ impl Lifecycle {
                     cache_control_block_count: cache_metadata.cache_control_block_count,
                     thinking_budget_tokens: cache_metadata.thinking_budget_tokens,
                     reasoning_effort: cache_metadata.reasoning_effort.clone(),
+                    thinking_level: cache_metadata.thinking_level.clone(),
                     cache_breakpoints: cache_metadata.cache_breakpoints.clone(),
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                     thread_id: cache_metadata.thread_id.clone(),
@@ -4227,15 +5324,21 @@ impl Lifecycle {
                     cache_control_message_indices: cache_metadata
                         .cache_control_message_indices
                         .clone(),
+                    native_cache: cache_metadata.native_cache.clone(),
                 }),
             });
         }
         ctx.cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
-        ctx.canonical_model_id = path_model
-            .as_deref()
-            .map(canonical_model_id)
-            .unwrap_or(&cache_metadata.canonical_model_id)
-            .to_owned();
+        ctx.canonical_model_id = if request_capability == ProviderCapability::GeminiGenerateContent
+        {
+            std::mem::take(&mut cache_metadata.canonical_model_id)
+        } else {
+            path_model
+                .as_deref()
+                .map(canonical_model_id)
+                .unwrap_or(&cache_metadata.canonical_model_id)
+                .to_owned()
+        };
         ctx.thread_id = cache_metadata.thread_id.clone();
         ctx.requested_service_tier = cache_metadata.requested_service_tier.clone();
         ctx.cache_pricing = cache_pricing_summary_for_model(
@@ -4296,7 +5399,8 @@ impl Lifecycle {
         let keepalive_response_enabled =
             self.cache_keepalive_enqueuer.is_some() && cached.cache_keepalive().is_some();
         let track_keepalive_response = keepalive_response_enabled
-            && (!cache_metadata.bundles.official.cache_breakpoints.is_empty()
+            && (cache_metadata.cache_keepalive_surface.is_some()
+                || !cache_metadata.bundles.official.cache_breakpoints.is_empty()
                 || !cache_metadata.bundles.literal.cache_breakpoints.is_empty());
         if track_keepalive_response {
             cache_metadata.request_json = body_view.value().cloned();
@@ -4344,6 +5448,15 @@ impl Lifecycle {
             &*self.clock,
         )
         .await;
+        let native_cache_scores = fetch_provider_native_cache_scores(
+            &view,
+            &principal.id,
+            request_kind,
+            &ctx.canonical_model_id,
+            cache_metadata.native_cache.as_ref(),
+            &*self.clock,
+        )
+        .await;
         // Synchronous routing region: no .await is permitted while `route_guard` is held.
         let route_span = tracing::info_span!(
             "proxy.route",
@@ -4355,13 +5468,14 @@ impl Lifecycle {
         );
         let route_guard = route_span.enter();
         let (mut candidates, mut selected_cache_matches) =
-            build_candidates_with_matches_for_bundles(
+            build_candidates_with_native_cache_for_bundles(
                 &view,
                 &principal.id,
                 request_kind,
                 &ctx.cache_breakpoints,
                 &warm_entries,
                 Some(&cache_metadata.bundles),
+                &native_cache_scores,
                 &*self.clock,
             );
         if let Some(affinity) = request_affinity.as_ref() {
@@ -4572,6 +5686,11 @@ impl Lifecycle {
         let mut attempt_timings = AttemptTimings::default();
         let mut keepalive_shaped_body = None;
         let mut keepalive_request_dispatched_at = None;
+        let affinity_owner_epoch_required = request_capability
+            == ProviderCapability::GeminiCachedContentsCreate
+            || (request_capability.provider() == cc_lb_domain::Provider::Gemini
+                && request_affinity.is_some());
+        let mut routed_owner_epoch;
         let (mut response, dispatch_started, dispatch_unix_secs, signer) = loop {
             // A failed-over upstream is announced before its signer is built,
             // so a terminal failure here never reports the previous upstream's
@@ -4587,6 +5706,44 @@ impl Lifecycle {
                 );
                 emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
             }
+            routed_owner_epoch = if affinity_owner_epoch_required {
+                let owner_epoch = match self.upstream_affinity_store.as_ref() {
+                    None => None,
+                    Some(store) => store
+                        .read_upstream_owner_epoch(routed.route.upstream_id, routed.record.revision)
+                        .await
+                        .ok()
+                        .flatten(),
+                };
+                let owner_epoch = owner_epoch.filter(|epoch| {
+                    request_affinity
+                        .as_ref()
+                        .is_none_or(|affinity| affinity.owner_epoch == *epoch)
+                });
+                if owner_epoch.is_none() {
+                    if let Some(o) = observer.as_ref() {
+                        o.terminate_failure(InternalFailure {
+                            status: StatusCode::SERVICE_UNAVAILABLE,
+                            error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                            error: InternalError {
+                                stage: InternalErrorStage::Storage,
+                                kind: InternalErrorKind::Unavailable,
+                                message: Some(UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned()),
+                            },
+                        });
+                    }
+                    return Ok(provider_error_response(
+                        request_capability,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                        UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                        None,
+                    ));
+                }
+                owner_epoch
+            } else {
+                Some(0)
+            };
             let replacement_request = active_limit.as_ref().and_then(|limit| {
                 let request = body_view.limit_request(
                     &ctx.canonical_model_id,
@@ -4714,7 +5871,11 @@ impl Lifecycle {
                         "failed to prepare upstream credentials",
                         None,
                     );
-                    self.attach_limit_headers(&mut response, active_limit.as_ref());
+                    self.attach_limit_headers(
+                        &mut response,
+                        active_limit.as_ref(),
+                        request_capability.provider(),
+                    );
                     if let Some(o) = observer.as_ref() {
                         o.terminate_failure(InternalFailure {
                             status: StatusCode::BAD_GATEWAY,
@@ -4773,6 +5934,7 @@ impl Lifecycle {
                         active_limit.as_ref(),
                         observer.as_ref(),
                         &attempt_timings,
+                        request_capability.provider(),
                     ));
                 }
             };
@@ -4801,8 +5963,13 @@ impl Lifecycle {
                     if unauthorized.body.is_none() {
                         // A proxy-generated body is not an upstream response:
                         // do not pass it through the custom response hook.
-                        let mut response = response_from_collected(unauthorized);
-                        self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        let mut response =
+                            response_from_collected(unauthorized, request_capability);
+                        self.attach_limit_headers(
+                            &mut response,
+                            active_limit.as_ref(),
+                            request_capability.provider(),
+                        );
                         if let Some(o) = observer.as_ref() {
                             o.set_upstream_error(response.status(), UpstreamErrorCode::Upstream5xx);
                             o.finish();
@@ -4810,7 +5977,7 @@ impl Lifecycle {
                         return Ok(response);
                     }
                     break (
-                        response_from_collected(unauthorized),
+                        response_from_collected(unauthorized, request_capability),
                         dispatch_started,
                         dispatch_unix_secs,
                         signer,
@@ -4853,6 +6020,7 @@ impl Lifecycle {
                             active_limit.as_ref(),
                             observer.as_ref(),
                             &attempt_timings,
+                            request_capability.provider(),
                         ));
                     }
                 };
@@ -4874,15 +6042,20 @@ impl Lifecycle {
                     // or forward a body that could not be collected completely.
                     let unauthorized = collect_error_response(response).await;
                     if unauthorized.body.is_none() {
-                        let mut response = response_from_collected(unauthorized);
-                        self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        let mut response =
+                            response_from_collected(unauthorized, request_capability);
+                        self.attach_limit_headers(
+                            &mut response,
+                            active_limit.as_ref(),
+                            request_capability.provider(),
+                        );
                         if let Some(o) = observer.as_ref() {
                             o.set_upstream_error(response.status(), UpstreamErrorCode::Upstream5xx);
                             o.finish();
                         }
                         return Ok(response);
                     }
-                    response = response_from_collected(unauthorized);
+                    response = response_from_collected(unauthorized, request_capability);
                 }
             }
 
@@ -4907,6 +6080,7 @@ impl Lifecycle {
             &routed.cache_bundle.cache_breakpoints,
             &routed.cache_bundle.cacheable_breakpoint_prefix_keys,
             routed.selected_cache_match.take(),
+            cache_metadata.native_cache.clone(),
         );
         cache_metadata.cache_control_message_indices = routed
             .cache_bundle
@@ -4947,6 +6121,7 @@ impl Lifecycle {
             observe_response_keys: body_view
                 .value()
                 .is_some_and(|value| request_observes_response_affinity(request_capability, value)),
+            owner_epoch: routed_owner_epoch,
             ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
         };
         response = self
@@ -5077,23 +6252,26 @@ impl Lifecycle {
                 }
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
                 let reason_label = "limit_rejected".to_owned();
+                let capability = crate::provider_capability::classify(
+                    &ctx.method,
+                    &ctx.path,
+                    ctx.provider_scope,
+                )
+                .unwrap_or(ProviderCapability::AnthropicMessages);
                 let mut response = limit_rejection_response(
-                    crate::provider_capability::classify(
-                        &ctx.method,
-                        &ctx.path,
-                        ctx.provider_scope,
-                    )
-                    .unwrap_or(ProviderCapability::AnthropicMessages),
+                    capability,
                     reason,
                     &limit_request.model,
                     &subject.principal_id,
                     retry_after_seconds,
                 );
-                attach_limit_headers_from_engine(
+                attach_limit_headers_from_record(
                     response.headers_mut(),
                     limit_engine.as_ref(),
+                    capability.provider(),
                     &subject.key_id,
-                    &subject.principal_id,
+                    &subject.record,
+                    view.default_limits(&subject.principal_id),
                 );
                 let info = LimitRejectionInfo {
                     subject: cc_lb_lifecycle::LimitSubject {
@@ -5163,12 +6341,16 @@ impl Lifecycle {
         let stream_response = stream_requested || audio_stream;
         let buffered_transform_required =
             transform_ctx.gemini_oauth || transform_ctx.dialect.response_transform_hook().is_some();
-        if is_sse_response(
-            response.headers(),
-            stream_requested,
-            response_affinity_context.capability,
-        ) || (stream_response && !buffered_transform_required)
+        let force_buffered_response =
+            response_affinity_context.capability == ProviderCapability::GeminiCachedContentsCreate;
+        if !force_buffered_response
+            && (is_sse_response(
+                response.headers(),
+                stream_requested,
+                response_affinity_context.capability,
+            ) || (stream_response && !buffered_transform_required))
         {
+            let provider = response_affinity_context.capability.provider();
             let response_status = response.status();
             let mut response = self.relay_response(
                 response,
@@ -5185,7 +6367,7 @@ impl Lifecycle {
                 dispatch_started,
                 dispatch_unix_secs,
             );
-            self.attach_limit_headers(&mut response, None);
+            self.attach_limit_headers(&mut response, None, provider);
             return response;
         }
 
@@ -5351,13 +6533,25 @@ impl Lifecycle {
             None => None,
         };
         let mut downstream_body = if body_collect_failed {
-            parts.status = StatusCode::BAD_GATEWAY;
+            parts.status = if response_affinity_context.capability
+                == ProviderCapability::GeminiCachedContentsCreate
+            {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
             parts.headers.clear();
             parts.headers.insert(
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/json; charset=utf-8"),
             );
-            anthropic_error_body("api_error", UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE)
+            provider_error_body(
+                response_affinity_context.capability,
+                parts.status,
+                "api_error",
+                UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE,
+                None,
+            )
         } else {
             body
         };
@@ -5427,6 +6621,17 @@ impl Lifecycle {
             // Do not gate this scan on request tools: a successful buffered response can
             // introduce unsolicited provider state (e.g. an Anthropic web-search result or
             // an OpenAI response id) that later requests must pin.
+            let now_unix_secs = unix_secs(self.clock.now());
+            let response_expiry = if response_affinity_context.capability
+                == ProviderCapability::GeminiCachedContentsCreate
+            {
+                response_body_json
+                    .as_ref()
+                    .and_then(|response_json| gemini_cached_content_expiry(response_json).ok())
+                    .filter(|expiry| *expiry > now_unix_secs)
+            } else {
+                None
+            };
             let extraction_failed = if let Some(response_json) = response_body_json.as_ref() {
                 match extract_response_affinity_keys(
                     response_affinity_context.capability,
@@ -5435,18 +6640,22 @@ impl Lifecycle {
                 ) {
                     Ok(response_keys) => {
                         affinity_keys.extend(response_keys);
-                        false
+                        response_affinity_context.capability
+                            == ProviderCapability::GeminiCachedContentsCreate
+                            && response_expiry.is_none()
                     }
                     Err(_) => true,
                 }
             } else {
-                false
+                response_affinity_context.capability
+                    == ProviderCapability::GeminiCachedContentsCreate
             };
             if extraction_failed
                 || bind_upstream_affinity_keys(
                     &response_affinity_context,
                     &affinity_keys,
-                    unix_secs(self.clock.now()),
+                    now_unix_secs,
+                    response_expiry,
                 )
                 .await
                 .is_err()
@@ -5459,8 +6668,13 @@ impl Lifecycle {
                     CONTENT_TYPE,
                     HeaderValue::from_static("application/json; charset=utf-8"),
                 );
-                downstream_body =
-                    anthropic_error_body("api_error", UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE);
+                downstream_body = provider_error_body(
+                    response_affinity_context.capability,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "api_error",
+                    UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                    None,
+                );
             }
         }
         let client_status = parts.status;
@@ -5490,29 +6704,39 @@ impl Lifecycle {
                     .saturating_add(usage.cache_creation_input_tokens),
             );
         }
-        if usage.has_billable_usage()
-            && status == StatusCode::OK
+        if status.is_success()
             && let Some(context) = prompt_cache_observation_context.as_ref()
         {
             let now_unix_secs = unix_secs(self.clock.now());
-            let decode = decode_prompt_cache_observations_pure(
-                context,
-                PromptCacheUsage::from(&usage),
-                dispatch_unix_secs,
-            );
-            publish_prompt_cache_observations(context, &decode, now_unix_secs);
+            let prompt_cache_usage = PromptCacheUsage::from(&usage);
+            if usage.has_billable_usage() {
+                let decode = decode_prompt_cache_observations_pure(
+                    context,
+                    prompt_cache_usage,
+                    dispatch_unix_secs,
+                );
+                publish_prompt_cache_observations_with_usage(
+                    context,
+                    &decode,
+                    prompt_cache_usage,
+                    now_unix_secs,
+                );
+            } else {
+                publish_provider_cache_observation(context, prompt_cache_usage, now_unix_secs);
+            }
         }
         // Hand the reservation to the reconcile subscriber for every buffered outcome:
         // it reconciles a measured success and refunds errors on `RequestTerminated`.
-        if let (Some(limit_engine), Some(active_limit), Some(response_accounting_guard)) = (
-            self.limit_engine.as_ref(),
-            active_limit.as_ref(),
-            response_accounting_guard,
-        ) {
+        if let Some(response_accounting_guard) = response_accounting_guard {
             response_accounting_guard.forget();
+        }
+        if let (Some(limit_engine), Some(active_limit)) =
+            (self.limit_engine.as_ref(), active_limit.as_ref())
+        {
             attach_limit_headers_from_engine(
                 &mut parts.headers,
                 limit_engine.as_ref(),
+                response_affinity_context.capability.provider(),
                 &active_limit.subject.key_id,
                 &active_limit.subject.principal_id,
             );
@@ -5533,6 +6757,7 @@ impl Lifecycle {
                 Err(cc_lb_lifecycle::StreamError {
                     error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
                     error_message: UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE.to_owned(),
+                    ..Default::default()
                 })
             } else if affinity_bind_failed {
                 Err(affinity_stream_error())
@@ -5540,6 +6765,7 @@ impl Lifecycle {
                 Err(cc_lb_lifecycle::StreamError {
                     error_type: "response_transform_error".to_owned(),
                     error_message: error.to_string(),
+                    ..Default::default()
                 })
             } else if non_error_status_response_failed {
                 Err(cc_lb_lifecycle::StreamError {
@@ -5549,6 +6775,7 @@ impl Lifecycle {
                     error_message: upstream_error_message
                         .clone()
                         .unwrap_or_else(|| "The provider response failed".to_owned()),
+                    ..Default::default()
                 })
             } else {
                 Ok(cc_lb_lifecycle::StreamSuccess {
@@ -5601,7 +6828,7 @@ impl Lifecycle {
                 };
                 o.set_upstream_error(status, code);
             } else if body_collect_failed {
-                o.set_upstream_error(StatusCode::BAD_GATEWAY, UpstreamErrorCode::StreamError);
+                o.set_upstream_error(client_status, UpstreamErrorCode::StreamError);
             } else if affinity_bind_failed {
                 o.set_failure(InternalFailure {
                     status: StatusCode::SERVICE_UNAVAILABLE,
@@ -5720,9 +6947,10 @@ impl Lifecycle {
         active_limit: Option<&ActiveLimit>,
         observer: Option<&LifecycleContext>,
         attempt_timings: &AttemptTimings,
+        provider: Provider,
     ) -> Response<Body> {
         let (mut response, failure) = failure.into_response_and_failure(capability);
-        self.attach_limit_headers(&mut response, active_limit);
+        self.attach_limit_headers(&mut response, active_limit, provider);
         if let Some(o) = observer {
             o.set_attempt_timings(
                 attempt_timings.shape_ms,
@@ -5768,6 +6996,7 @@ impl Lifecycle {
         &self,
         response: &mut Response<Body>,
         active_limit: Option<&ActiveLimit>,
+        provider: Provider,
     ) {
         let (Some(limit_engine), Some(active_limit)) = (self.limit_engine.as_ref(), active_limit)
         else {
@@ -5776,6 +7005,7 @@ impl Lifecycle {
         attach_limit_headers_from_engine(
             response.headers_mut(),
             limit_engine.as_ref(),
+            provider,
             &active_limit.subject.key_id,
             &active_limit.subject.principal_id,
         );
@@ -6081,6 +7311,7 @@ impl Lifecycle {
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
+        let upstream_has_content_length = parts.headers.contains_key(CONTENT_LENGTH);
         let upstream_diagnostics = UpstreamBodyDiagnostics::from_parts(&parts);
         strip_hop_by_hop(&mut parts.headers);
         let decompression_output_budget_bytes =
@@ -6130,6 +7361,13 @@ impl Lifecycle {
         {
             sanitize_downstream_stream_headers(&mut parts.headers);
         }
+        if upstream_is_sse {
+            // SSE inspection can replace, append, or suppress bytes even when
+            // no transform hook is active. The upstream length is therefore
+            // not a downstream framing contract. Preserve Content-Encoding
+            // unless the decode/transform path above already removed it.
+            parts.headers.remove(CONTENT_LENGTH);
+        }
         if let Some(encoding) = usage_decoder.unsupported_encoding() {
             tracing::warn!(
                 request_id = %event_ctx.request_id,
@@ -6141,7 +7379,6 @@ impl Lifecycle {
         let keepalive = self.cache_keepalive.clone();
         let affinity_clock = self.clock.clone();
         let upstream_error_status = status.is_client_error() || status.is_server_error();
-        let response_has_content_length = parts.headers.contains_key(CONTENT_LENGTH);
         if upstream_error_status && let Some(o) = observer.as_ref() {
             let code = if status.is_client_error() {
                 UpstreamErrorCode::Upstream4xx
@@ -6249,6 +7486,7 @@ impl Lifecycle {
             let mut batch_index = 0_u64;
             let mut buffer = BytesMut::new();
             let mut usage = UsageCounts::default();
+            let mut responses_error_context = ResponsesSseErrorContext::default();
             let mut first_chunk_at: Option<Instant> = None;
             let mut last_chunk_at: Option<Instant> = None;
             let mut message_start_at: Option<Instant> = None;
@@ -6261,6 +7499,7 @@ impl Lifecycle {
             let mut prompt_cache_observations_published = false;
             let mut semantic_message_stop_seen = false;
             let mut semantic_completion_observed = false;
+            let mut semantic_completion_emitted = false;
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
@@ -6276,6 +7515,10 @@ impl Lifecycle {
             let mut stream_upstream_error_frame_emitted = false;
             let mut downstream_sse_boundary = SseDownstreamBoundaryTracker::default();
             let mut stream_provider_error_seen = false;
+            // Observation precedes affinity inspection and transformation; only
+            // a validated terminal sent downstream or committed to the deferred
+            // Content-Length flush takes precedence over local errors.
+            let mut stream_provider_error_forwarded = false;
             let mut last_partial_at: Option<Instant> = None;
             let mut last_partial_output_tokens: u64 = 0;
             let mut upstream_error_body: Vec<u8> = Vec::new();
@@ -6284,11 +7527,10 @@ impl Lifecycle {
             let mut parse_sse_events_active = parse_sse_events;
             let mut raw_before_transform_output: Vec<Bytes> = Vec::new();
             let mut keepalive_raw_passthrough_active = false;
-            // Downstream bytes produced from the final upstream frame of a
-            // Content-Length body. A client stops polling once the declared
-            // length is satisfied, so these bytes are yielded only after the
-            // lifecycle finalization below; yielding them earlier lets the drop
-            // guard record a completed response as a client cancellation.
+            // Defer bytes produced from the final upstream Content-Length frame
+            // until lifecycle finalization. Keep this upstream EOF bookkeeping
+            // independent of the downstream framing, which permits rewritten
+            // SSE bytes and no longer advertises the upstream length.
             let mut deferred_terminal_chunks: Vec<Bytes> = Vec::new();
             // Dynamic unsolicited hold: `unsolicited_hold_pending` is set while
             // the unforwarded buffered bytes may carry provider state, and
@@ -6310,9 +7552,10 @@ impl Lifecycle {
                     Ok(frame) => {
                         if let Ok(data) = frame.into_data() {
                             let defer_terminal_raw_chunk =
-                                response_has_content_length && body.is_end_stream();
+                                upstream_has_content_length && body.is_end_stream();
                             let mut raw_passthrough_current_chunk = false;
                             let mut raw_chunk_completes_response = false;
+                            let mut provider_error_in_chunk = false;
                             let now = Instant::now();
                             if first_chunk_at.is_none() {
                                 first_chunk_at = Some(now);
@@ -6330,10 +7573,14 @@ impl Lifecycle {
                                 stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                                     error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
                                     error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                    ..Default::default()
                                 });
-                                let frame = make_error_frame(
+                                let frame = make_stream_error_frame(
+                                    response_affinity_context.capability,
+                                    &responses_error_context,
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                    false,
                                 );
                                 if let Some(o) = observer.as_ref() {
                                     o.set_upstream_error(
@@ -6397,7 +7644,13 @@ impl Lifecycle {
                                         && (success_sse_affinity_gate || sse_transform_active)
                                         && upstream_end_after_message_stop_is_acceptable(
                                             status,
-                                            semantic_message_stop_seen,
+                                            if response_affinity_context.capability.usage_shape()
+                                                == crate::provider_capability::UsageShape::OpenaiResponses
+                                            {
+                                                semantic_completion_emitted
+                                            } else {
+                                                semantic_message_stop_seen
+                                            },
                                             stream_upstream_error.is_some()
                                                 || stream_transform_error.is_some()
                                                 || stream_affinity_error.is_some(),
@@ -6428,18 +7681,27 @@ impl Lifecycle {
                                     upstream_error_body_decode_failed = true;
                                     parse_sse_events_active = false;
                                     buffer.clear();
+                                    if stream_provider_error_forwarded {
+                                        break 'upstream;
+                                    }
                                     if success_sse_affinity_gate {
-                                        stream_upstream_error =
-                                            Some(cc_lb_lifecycle::StreamError {
-                                                error_type:
-                                                    UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
-                                                error_message:
-                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
-                                                        .to_owned(),
-                                            });
-                                        let frame = make_error_frame(
+                                        if !stream_provider_error_seen {
+                                            stream_upstream_error =
+                                                Some(cc_lb_lifecycle::StreamError {
+                                                    error_type:
+                                                        UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
+                                                    error_message:
+                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                            .to_owned(),
+                                                    ..Default::default()
+                                                });
+                                        }
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
+                                            &responses_error_context,
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         if let Some(o) = observer.as_ref() {
                                             o.set_upstream_error(
@@ -6447,35 +7709,37 @@ impl Lifecycle {
                                                 UpstreamErrorCode::StreamError,
                                             );
                                         }
-                                        downstream_drop_guard.mark_upstream_error(
-                                            StreamTerminationCause::DecodeError,
-                                            None,
-                                        );
+                                        if !stream_provider_error_seen {
+                                            downstream_drop_guard.mark_upstream_error(
+                                                StreamTerminationCause::DecodeError,
+                                                None,
+                                            );
+                                        }
+                                        stream_upstream_error_frame_emitted = true;
                                         yield Ok::<Bytes, Infallible>(frame);
                                         break 'upstream;
                                     }
                                     if upstream_decode_failed && sse_transform_active {
-                                        if stream_provider_error_seen {
-                                            downstream_drop_guard.mark_upstream_error(
-                                                StreamTerminationCause::ProviderError,
-                                                None,
-                                            );
-                                            break 'upstream;
-                                        }
                                         let error_message =
                                             format!("upstream response decoding failed: {error}");
-                                        stream_upstream_error =
-                                            Some(cc_lb_lifecycle::StreamError {
-                                                error_type:
-                                                    UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
-                                                error_message: error_message.clone(),
-                                            });
+                                        if !stream_provider_error_seen {
+                                            stream_upstream_error =
+                                                Some(cc_lb_lifecycle::StreamError {
+                                                    error_type:
+                                                        UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
+                                                    error_message: error_message.clone(),
+                                                    ..Default::default()
+                                                });
+                                        }
                                         if transformed_output_started
                                             || !downstream_stream_is_identity
                                         {
-                                            let frame = make_error_frame(
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
+                                                &responses_error_context,
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 &error_message,
+                                                false,
                                             );
                                             stream_upstream_error_frame_emitted = true;
                                             if let Some(o) = observer.as_ref()
@@ -6486,10 +7750,12 @@ impl Lifecycle {
                                                     UpstreamErrorCode::StreamError,
                                                 );
                                             }
-                                            downstream_drop_guard.mark_upstream_error(
-                                                StreamTerminationCause::DecodeError,
-                                                None,
-                                            );
+                                            if !stream_provider_error_seen {
+                                                downstream_drop_guard.mark_upstream_error(
+                                                    StreamTerminationCause::DecodeError,
+                                                    None,
+                                                );
+                                            }
                                             yield Ok::<Bytes, Infallible>(frame);
                                             break 'upstream;
                                         }
@@ -6511,7 +7777,11 @@ impl Lifecycle {
                                                     },
                                                 };
                                             let frame =
-                                                make_response_transform_error_frame(&transform_error);
+                                                make_response_transform_error_frame(
+                                                    response_affinity_context.capability,
+                                                    &responses_error_context,
+                                                    &transform_error,
+                                                );
                                             stream_transform_error = Some(transform_error);
                                             if let Some(o) = observer.as_ref()
                                                 && !upstream_error_status
@@ -6542,6 +7812,15 @@ impl Lifecycle {
                                     };
                                 let raw = split_sse_event(&mut buffer, end);
                                 let parsed_event = parse_sse_event(&raw);
+                                if matches!(
+                                    response_affinity_context.capability,
+                                    ProviderCapability::OpenaiResponses
+                                        | ProviderCapability::OpenaiResponsesCompact
+                                ) {
+                                    responses_error_context.observe(
+                                        parsed_event.value().ok().flatten(),
+                                    );
+                                }
                                 let usage_update = usage_parser::accumulate_sse_usage_for_shape(
                                     &parsed_event,
                                     &mut usage,
@@ -6552,9 +7831,12 @@ impl Lifecycle {
                                         .cache_read_input_tokens
                                         .saturating_add(usage.cache_creation_input_tokens),
                                 );
+                                let mut provider_error_in_event = false;
                                 if let Some(err) =
                                     usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                                 {
+                                    provider_error_in_event = true;
+                                    provider_error_in_chunk = true;
                                     stream_provider_error_seen = true;
                                     downstream_drop_guard.mark_upstream_error(
                                         StreamTerminationCause::ProviderError,
@@ -6567,6 +7849,7 @@ impl Lifecycle {
                                                 .error_message
                                                 .clone()
                                                 .unwrap_or_default(),
+                                            ..Default::default()
                                         };
                                         o.emit_lifecycle(
                                             cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
@@ -6607,37 +7890,47 @@ impl Lifecycle {
                                                 parent: &stream_span,
                                                 "failed to inspect upstream affinity in SSE event"
                                             );
-                                            stream_upstream_error =
-                                                Some(cc_lb_lifecycle::StreamError {
-                                                    error_type:
-                                                        UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
-                                                            .to_owned(),
-                                                    error_message:
-                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
-                                                            .to_owned(),
-                                                });
+                                            if !stream_provider_error_forwarded {
+                                                stream_upstream_error =
+                                                    Some(cc_lb_lifecycle::StreamError {
+                                                        error_type:
+                                                            UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
+                                                                .to_owned(),
+                                                        error_message:
+                                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                                .to_owned(),
+                                                        ..Default::default()
+                                                    });
+                                            }
                                             parse_sse_events_active = false;
                                             buffer.clear();
                                             raw_before_transform_output.clear();
-                                            let frame = make_error_frame(
-                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                            );
-                                            batch_index = batch_index.saturating_add(1);
-                                            if let Some(o) = observer.as_ref() {
-                                                o.set_upstream_error(
-                                                    StatusCode::OK,
-                                                    UpstreamErrorCode::StreamError,
+                                            if !stream_provider_error_forwarded {
+                                                let frame = make_stream_error_frame(
+                                                    response_affinity_context.capability,
+                                                    &responses_error_context,
+                                                    UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                    false,
                                                 );
+                                                batch_index = batch_index.saturating_add(1);
+                                                if let Some(o) = observer.as_ref() {
+                                                    o.set_upstream_error(
+                                                        StatusCode::OK,
+                                                        UpstreamErrorCode::StreamError,
+                                                    );
+                                                }
+                                                downstream_drop_guard.mark_upstream_error(
+                                                    StreamTerminationCause::FramingError,
+                                                    None,
+                                                );
+                                                for chunk in
+                                                    std::mem::take(&mut deferred_terminal_chunks)
+                                                {
+                                                    yield Ok::<Bytes, Infallible>(chunk);
+                                                }
+                                                yield Ok::<Bytes, Infallible>(frame);
                                             }
-                                            downstream_drop_guard.mark_upstream_error(
-                                                StreamTerminationCause::FramingError,
-                                                None,
-                                            );
-                                            for chunk in std::mem::take(&mut deferred_terminal_chunks) {
-                                                yield Ok::<Bytes, Infallible>(chunk);
-                                            }
-                                            yield Ok::<Bytes, Infallible>(frame);
                                             break 'upstream;
                                         }
                                     };
@@ -6682,6 +7975,7 @@ impl Lifecycle {
                                         &response_affinity_context,
                                         &affinity_keys,
                                         unix_secs(affinity_clock.now()),
+                                        None,
                                     )
                                     .await
                                     .is_err()
@@ -6699,17 +7993,23 @@ impl Lifecycle {
                                         parent: &stream_span,
                                         "failed to persist upstream affinity before SSE event"
                                     );
-                                    stream_affinity_error = Some(affinity_stream_error());
+                                    if !stream_provider_error_forwarded {
+                                        stream_affinity_error = Some(affinity_stream_error());
+                                    }
                                     parse_sse_events_active = false;
                                     buffer.clear();
                                     raw_before_transform_output.clear();
-                                    if success_sse_affinity_gate
-                                        || sse_transform_active
-                                        || downstream_stream_is_identity
+                                    if !stream_provider_error_forwarded
+                                        && (success_sse_affinity_gate
+                                            || sse_transform_active
+                                            || downstream_stream_is_identity)
                                     {
-                                        let frame = make_error_frame(
-                                            "api_error",
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
+                                            &responses_error_context,
+                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                            false,
                                         );
                                         batch_index = batch_index.saturating_add(1);
                                         for chunk in std::mem::take(&mut deferred_terminal_chunks) {
@@ -6717,15 +8017,17 @@ impl Lifecycle {
                                         }
                                         yield Ok::<Bytes, Infallible>(frame);
                                     }
-                                    if let Some(o) = observer.as_ref() {
-                                        o.set_upstream_error(
-                                            StatusCode::OK,
-                                            UpstreamErrorCode::StreamError,
+                                    if !stream_provider_error_forwarded {
+                                        if let Some(o) = observer.as_ref() {
+                                            o.set_upstream_error(
+                                                StatusCode::OK,
+                                                UpstreamErrorCode::StreamError,
+                                            );
+                                        }
+                                        downstream_drop_guard.mark_proxy_error(
+                                            StreamTerminationCause::AffinityError,
                                         );
                                     }
-                                    downstream_drop_guard.mark_proxy_error(
-                                        StreamTerminationCause::AffinityError,
-                                    );
                                     break 'upstream;
                                 }
                                 if !sse_transform_active
@@ -6881,6 +8183,8 @@ impl Lifecycle {
                                     }
                                 }
                                 if sse_transform_active {
+                                    let mut outgoing_provider_error = provider_error_in_event;
+                                    let mut outgoing_completes_response = event_completes_response;
                                     let outgoing = if let Some(response_headers) = response_headers.as_ref() {
                                         match transform_sse_event_bytes(
                                             sse_transform_hook,
@@ -6890,7 +8194,24 @@ impl Lifecycle {
                                             response_headers,
                                             raw.clone(),
                                         ) {
-                                            SseTransformOutcome::Emit(bytes) => {
+                                            outcome @ (SseTransformOutcome::Emit(_)
+                                            | SseTransformOutcome::EmitTransformed(_)) => {
+                                                let transformed =
+                                                    matches!(&outcome, SseTransformOutcome::EmitTransformed(_));
+                                                let bytes = match outcome {
+                                                    SseTransformOutcome::Emit(bytes)
+                                                    | SseTransformOutcome::EmitTransformed(bytes) => bytes,
+                                                    _ => unreachable!("matched emit outcome"),
+                                                };
+                                                if transformed {
+                                                    let output = responses_error_context
+                                                        .observe_transformed_output(
+                                                            &bytes,
+                                                            response_affinity_context.capability,
+                                                        );
+                                                    outgoing_provider_error = output.emitted_error;
+                                                    outgoing_completes_response = output.completes_response;
+                                                }
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
                                                 if downstream_drop_guard.has_keepalive_completion() {
@@ -6908,6 +8229,12 @@ impl Lifecycle {
                                                 continue;
                                             }
                                             SseTransformOutcome::FailOpen => {
+                                                if stream_provider_error_forwarded {
+                                                    parse_sse_events_active = false;
+                                                    buffer.clear();
+                                                    raw_before_transform_output.clear();
+                                                    break 'upstream;
+                                                }
                                                 if success_sse_affinity_gate
                                                     || transformed_output_started
                                                     || !downstream_stream_is_identity
@@ -6920,7 +8247,11 @@ impl Lifecycle {
                                                         },
                                                     };
                                                     let frame =
-                                                        make_response_transform_error_frame(&error);
+                                                        make_response_transform_error_frame(
+                                                            response_affinity_context.capability,
+                                                            &responses_error_context,
+                                                            &error,
+                                                        );
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
                                                         && !upstream_error_status
@@ -6959,17 +8290,32 @@ impl Lifecycle {
                                                     %error,
                                                     "sse response transform failed"
                                                 );
+                                                if stream_provider_error_forwarded {
+                                                    parse_sse_events_active = false;
+                                                    buffer.clear();
+                                                    raw_before_transform_output.clear();
+                                                    break 'upstream;
+                                                }
                                                 if success_sse_affinity_gate
                                                     || transformed_output_started
                                                     || !downstream_stream_is_identity
                                                 {
                                                     let frame = if success_sse_affinity_gate {
-                                                        make_error_frame(
+                                                        // The affinity gate must not expose transform
+                                                        // hook details to the client.
+                                                        make_stream_error_frame(
+                                                            response_affinity_context.capability,
+                                                            &responses_error_context,
                                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                            false,
                                                         )
                                                     } else {
-                                                        make_response_transform_error_frame(&error)
+                                                        make_response_transform_error_frame(
+                                                            response_affinity_context.capability,
+                                                            &responses_error_context,
+                                                            &error,
+                                                        )
                                                     };
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
@@ -7003,7 +8349,9 @@ impl Lifecycle {
                                                 Bytes::new()
                                             }
                                         }
-                                    } else if success_sse_affinity_gate {
+                                    } else if success_sse_affinity_gate
+                                        && !stream_provider_error_forwarded
+                                    {
                                         stream_upstream_error =
                                             Some(cc_lb_lifecycle::StreamError {
                                                 error_type:
@@ -7011,10 +8359,14 @@ impl Lifecycle {
                                                 error_message:
                                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
                                                         .to_owned(),
+                                                ..Default::default()
                                             });
-                                        let frame = make_error_frame(
-                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                        let frame = make_stream_error_frame(
+                                            response_affinity_context.capability,
+                                        &responses_error_context,
+                                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            false,
                                         );
                                         yield Ok::<Bytes, Infallible>(frame);
                                         break 'upstream;
@@ -7028,23 +8380,32 @@ impl Lifecycle {
                                         break;
                                     }
                                     batch_index = batch_index.saturating_add(1);
-                                    if event_completes_response
-                                        && transformed_sse_completes_response(
-                                            response_affinity_context.capability,
-                                            &outgoing,
-                                        )
-                                    {
+                                    if outgoing_completes_response {
+                                        semantic_completion_emitted = true;
                                         downstream_drop_guard.mark_semantic_completion();
+                                    }
+                                    if outgoing_provider_error && !outgoing.is_empty() {
+                                        stream_provider_error_forwarded = true;
                                     }
                                     yield Ok::<Bytes, Infallible>(outgoing);
                                 } else if success_sse_affinity_gate {
                                     downstream_sse_boundary.observe(&raw);
                                     batch_index = batch_index.saturating_add(1);
                                     if defer_terminal_raw_chunk {
+                                        if event_completes_response {
+                                            semantic_completion_emitted = true;
+                                        }
                                         deferred_terminal_chunks.push(raw);
+                                        if provider_error_in_event {
+                                            stream_provider_error_forwarded = true;
+                                        }
                                     } else {
                                         if event_completes_response {
+                                            semantic_completion_emitted = true;
                                             downstream_drop_guard.mark_semantic_completion();
+                                        }
+                                        if provider_error_in_event {
+                                            stream_provider_error_forwarded = true;
                                         }
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
@@ -7058,10 +8419,20 @@ impl Lifecycle {
                                         downstream_sse_boundary.observe(&outgoing);
                                         batch_index = batch_index.saturating_add(1);
                                         if defer_terminal_raw_chunk {
+                                            if event_completes_response {
+                                                semantic_completion_emitted = true;
+                                            }
                                             deferred_terminal_chunks.push(outgoing);
+                                            if provider_error_in_event {
+                                                stream_provider_error_forwarded = true;
+                                            }
                                         } else {
                                             if event_completes_response {
+                                                semantic_completion_emitted = true;
                                                 downstream_drop_guard.mark_semantic_completion();
+                                            }
+                                            if provider_error_in_event {
+                                                stream_provider_error_forwarded = true;
                                             }
                                             yield Ok::<Bytes, Infallible>(outgoing);
                                         }
@@ -7103,6 +8474,9 @@ impl Lifecycle {
                                 parse_sse_events_active = false;
                                 buffer.clear();
                                 unsolicited_forwarded_bytes = 0;
+                                if stream_provider_error_forwarded {
+                                    break 'upstream;
+                                }
                                 if success_sse_affinity_gate || unsolicited_hold_pending {
                                     stream_upstream_error =
                                         Some(cc_lb_lifecycle::StreamError {
@@ -7110,10 +8484,14 @@ impl Lifecycle {
                                                 UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
                                             error_message:
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                            ..Default::default()
                                         });
-                                    let frame = make_error_frame(
+                                    let frame = make_stream_error_frame(
+                                        response_affinity_context.capability,
+                                        &responses_error_context,
                                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                         UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                        false,
                                     );
                                     if let Some(o) = observer.as_ref() {
                                         o.set_upstream_error(
@@ -7132,8 +8510,9 @@ impl Lifecycle {
                                     break 'upstream;
                                 }
                                 if sse_transform_active {
-                                    if transformed_output_started
-                                        || !downstream_stream_is_identity
+                                    if !stream_provider_error_forwarded
+                                        && (transformed_output_started
+                                            || !downstream_stream_is_identity)
                                     {
                                         let error = ResponseTransformError::Runtime {
                                             reason: if transformed_output_started {
@@ -7146,7 +8525,11 @@ impl Lifecycle {
                                                 )
                                             },
                                         };
-                                        let frame = make_response_transform_error_frame(&error);
+                                        let frame = make_response_transform_error_frame(
+                                            response_affinity_context.capability,
+                                            &responses_error_context,
+                                            &error,
+                                        );
                                         stream_transform_error = Some(error);
                                         if let Some(o) = observer.as_ref()
                                             && !upstream_error_status
@@ -7190,11 +8573,21 @@ impl Lifecycle {
                                     }
                                     batch_index = batch_index.saturating_add(1);
                                     if defer_terminal_raw_chunk {
+                                        if raw_chunk_completes_response {
+                                            semantic_completion_emitted = true;
+                                        }
                                         debug_assert!(deferred_terminal_chunks.is_empty());
                                         deferred_terminal_chunks.push(data);
+                                        if provider_error_in_chunk {
+                                            stream_provider_error_forwarded = true;
+                                        }
                                     } else {
                                         if raw_chunk_completes_response {
+                                            semantic_completion_emitted = true;
                                             downstream_drop_guard.mark_semantic_completion();
+                                        }
+                                        if provider_error_in_chunk {
+                                            stream_provider_error_forwarded = true;
                                         }
                                         yield Ok::<Bytes, Infallible>(data);
                                     }
@@ -7231,7 +8624,13 @@ impl Lifecycle {
                                     && !downstream_sse_boundary.partial_event_pending()))
                             && upstream_end_after_message_stop_is_acceptable(
                                 status,
-                                semantic_message_stop_seen,
+                                if response_affinity_context.capability.usage_shape()
+                                    == crate::provider_capability::UsageShape::OpenaiResponses
+                                {
+                                    semantic_completion_emitted
+                                } else {
+                                    semantic_message_stop_seen
+                                },
                                 stream_upstream_error.is_some()
                                     || stream_transform_error.is_some()
                                     || stream_affinity_error.is_some(),
@@ -7263,13 +8662,15 @@ impl Lifecycle {
                             stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                                 error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
                                 error_message: classification.redacted_message.clone(),
+                                ..Default::default()
                             });
                             downstream_drop_guard.mark_upstream_error(
                                 classification.cause,
                                 Some(&classification),
                             );
                         }
-                        if body_error_is_primary
+                        if !stream_provider_error_forwarded
+                            && !stream_upstream_error_frame_emitted
                             && upstream_is_sse
                             && (success_sse_affinity_gate
                                 || sse_transform_active
@@ -7282,6 +8683,7 @@ impl Lifecycle {
                             };
                             let frame = make_stream_error_frame(
                                 response_affinity_context.capability,
+                                &responses_error_context,
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 client_error_message,
                                 !success_sse_affinity_gate
@@ -7315,6 +8717,14 @@ impl Lifecycle {
                         while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
+                            if matches!(
+                                response_affinity_context.capability,
+                                ProviderCapability::OpenaiResponses
+                                    | ProviderCapability::OpenaiResponsesCompact
+                            ) {
+                                responses_error_context
+                                    .observe(parsed_event.value().ok().flatten());
+                            }
                             let usage_update = usage_parser::accumulate_sse_usage_for_shape(
                                 &parsed_event,
                                 &mut usage,
@@ -7340,27 +8750,38 @@ impl Lifecycle {
                                             parent: &stream_span,
                                             "failed to inspect upstream affinity in final SSE event"
                                         );
-                                        stream_upstream_error =
-                                            Some(cc_lb_lifecycle::StreamError {
-                                                error_type:
-                                                    UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
-                                                error_message:
-                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
-                                                        .to_owned(),
-                                            });
-                                        downstream_drop_guard.mark_upstream_error(
-                                            StreamTerminationCause::FramingError,
-                                            None,
-                                        );
+                                        if !stream_provider_error_forwarded {
+                                            stream_upstream_error =
+                                                Some(cc_lb_lifecycle::StreamError {
+                                                    error_type:
+                                                        UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
+                                                            .to_owned(),
+                                                    error_message:
+                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                            .to_owned(),
+                                                    ..Default::default()
+                                                });
+                                        }
+                                        if !stream_provider_error_forwarded {
+                                            downstream_drop_guard.mark_upstream_error(
+                                                StreamTerminationCause::FramingError,
+                                                None,
+                                            );
+                                        }
                                         parse_sse_events_active = false;
                                         buffer.clear();
                                         raw_before_transform_output.clear();
-                                        let frame = make_error_frame(
-                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                        );
-                                        batch_index = batch_index.saturating_add(1);
-                                        yield Ok::<Bytes, Infallible>(frame);
+                                        if !stream_provider_error_forwarded {
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
+                                                &responses_error_context,
+                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                false,
+                                            );
+                                            batch_index = batch_index.saturating_add(1);
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                        }
                                         break;
                                     }
                                 };
@@ -7403,6 +8824,7 @@ impl Lifecycle {
                                     &response_affinity_context,
                                     &affinity_keys,
                                     unix_secs(affinity_clock.now()),
+                                    None,
                                 )
                                 .await
                                 .is_err()
@@ -7420,20 +8842,26 @@ impl Lifecycle {
                                     parent: &stream_span,
                                     "failed to persist upstream affinity before final SSE event"
                                 );
-                                stream_affinity_error = Some(affinity_stream_error());
-                                downstream_drop_guard.mark_proxy_error(
-                                    StreamTerminationCause::AffinityError,
-                                );
+                                if !stream_provider_error_forwarded {
+                                    stream_affinity_error = Some(affinity_stream_error());
+                                    downstream_drop_guard.mark_proxy_error(
+                                        StreamTerminationCause::AffinityError,
+                                    );
+                                }
                                 parse_sse_events_active = false;
                                 buffer.clear();
                                 raw_before_transform_output.clear();
-                                if success_sse_affinity_gate
-                                    || sse_transform_active
-                                    || downstream_stream_is_identity
+                                if !stream_provider_error_forwarded
+                                    && (success_sse_affinity_gate
+                                        || sse_transform_active
+                                        || downstream_stream_is_identity)
                                 {
-                                    let frame = make_error_frame(
-                                        "api_error",
+                                    let frame = make_stream_error_frame(
+                                        response_affinity_context.capability,
+                                        &responses_error_context,
+                                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                        false,
                                     );
                                     batch_index = batch_index.saturating_add(1);
                                     yield Ok::<Bytes, Infallible>(frame);
@@ -7445,9 +8873,11 @@ impl Lifecycle {
                             {
                                 downstream_drop_guard.observe_keepalive(&parsed_event);
                             }
+                            let mut provider_error_in_event = false;
                             if let Some(err) =
                                 usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                             {
+                                provider_error_in_event = true;
                                 stream_provider_error_seen = true;
                                 downstream_drop_guard.mark_upstream_error(
                                     StreamTerminationCause::ProviderError,
@@ -7460,6 +8890,7 @@ impl Lifecycle {
                                             .error_message
                                             .clone()
                                             .unwrap_or_default(),
+                                        ..Default::default()
                                     };
                                     o.emit_lifecycle(
                                         cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
@@ -7516,26 +8947,35 @@ impl Lifecycle {
                             }
                             sse_event_count = sse_event_count.saturating_add(1);
                             if success_sse_affinity_gate || unsolicited_hold_pending {
+                                let mut outgoing_provider_error = provider_error_in_event;
+                                let mut outgoing_completes_response = event_completes_response;
                                 let outgoing = if sse_transform_active {
                                     let Some(response_headers) = response_headers.as_ref() else {
-                                        stream_upstream_error =
-                                            Some(cc_lb_lifecycle::StreamError {
-                                                error_type:
-                                                    UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
-                                                error_message:
-                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
-                                                        .to_owned(),
-                                            });
-                                        downstream_drop_guard.mark_upstream_error(
-                                            StreamTerminationCause::FramingError,
-                                            None,
-                                        );
-                                        let frame = make_error_frame(
-                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                        );
-                                        batch_index = batch_index.saturating_add(1);
-                                        yield Ok::<Bytes, Infallible>(frame);
+                                        if !stream_provider_error_forwarded {
+                                            stream_upstream_error =
+                                                Some(cc_lb_lifecycle::StreamError {
+                                                    error_type:
+                                                        UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
+                                                            .to_owned(),
+                                                    error_message:
+                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                            .to_owned(),
+                                                    ..Default::default()
+                                                });
+                                            downstream_drop_guard.mark_upstream_error(
+                                                StreamTerminationCause::FramingError,
+                                                None,
+                                            );
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
+                                                &responses_error_context,
+                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                false,
+                                            );
+                                            batch_index = batch_index.saturating_add(1);
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                        }
                                         break;
                                     };
                                     match transform_sse_event_bytes(
@@ -7546,7 +8986,24 @@ impl Lifecycle {
                                         response_headers,
                                         raw.clone(),
                                     ) {
-                                        SseTransformOutcome::Emit(bytes) => {
+                                        outcome @ (SseTransformOutcome::Emit(_)
+                                        | SseTransformOutcome::EmitTransformed(_)) => {
+                                            let transformed =
+                                                matches!(&outcome, SseTransformOutcome::EmitTransformed(_));
+                                            let bytes = match outcome {
+                                                SseTransformOutcome::Emit(bytes)
+                                                | SseTransformOutcome::EmitTransformed(bytes) => bytes,
+                                                _ => unreachable!("matched emit outcome"),
+                                            };
+                                            if transformed {
+                                                let output = responses_error_context
+                                                    .observe_transformed_output(
+                                                        &bytes,
+                                                        response_affinity_context.capability,
+                                                    );
+                                                outgoing_provider_error = output.emitted_error;
+                                                outgoing_completes_response = output.completes_response;
+                                            }
                                             if downstream_drop_guard.has_keepalive_completion() {
                                                 downstream_drop_guard
                                                     .observe_keepalive_emitted(
@@ -7559,21 +9016,26 @@ impl Lifecycle {
                                         SseTransformOutcome::Drop => continue,
                                         SseTransformOutcome::FailOpen
                                         | SseTransformOutcome::Error(_) => {
-                                            stream_transform_error =
-                                                Some(ResponseTransformError::Runtime {
-                                                    reason:
-                                                        "failed to safely transform SSE event"
-                                                            .to_owned(),
-                                                });
-                                            downstream_drop_guard.mark_proxy_error(
-                                                StreamTerminationCause::TransformError,
-                                            );
-                                            let frame = make_error_frame(
-                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                            );
-                                            batch_index = batch_index.saturating_add(1);
-                                            yield Ok::<Bytes, Infallible>(frame);
+                                            if !stream_provider_error_forwarded {
+                                                stream_transform_error =
+                                                    Some(ResponseTransformError::Runtime {
+                                                        reason:
+                                                            "failed to safely transform SSE event"
+                                                                .to_owned(),
+                                                    });
+                                                downstream_drop_guard.mark_proxy_error(
+                                                    StreamTerminationCause::TransformError,
+                                                );
+                                                let frame = make_stream_error_frame(
+                                                    response_affinity_context.capability,
+                                                    &responses_error_context,
+                                                    UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                    false,
+                                                );
+                                                batch_index = batch_index.saturating_add(1);
+                                                yield Ok::<Bytes, Infallible>(frame);
+                                            }
                                             break;
                                         }
                                     }
@@ -7590,14 +9052,12 @@ impl Lifecycle {
                                 };
                                 downstream_sse_boundary.observe(&outgoing);
                                 batch_index = batch_index.saturating_add(1);
-                                if event_completes_response
-                                    && (!sse_transform_active
-                                        || transformed_sse_completes_response(
-                                            response_affinity_context.capability,
-                                            &outgoing,
-                                        ))
-                                {
+                                if outgoing_completes_response {
+                                    semantic_completion_emitted = true;
                                     downstream_drop_guard.mark_semantic_completion();
+                                }
+                                if outgoing_provider_error && !outgoing.is_empty() {
+                                    stream_provider_error_forwarded = true;
                                 }
                                 yield Ok::<Bytes, Infallible>(outgoing);
                             }
@@ -7611,24 +9071,33 @@ impl Lifecycle {
                                 "stopping SSE parsing: final incomplete event exceeds configured body-derived budget"
                             );
                             buffer.clear();
-                            if success_sse_affinity_gate || unsolicited_hold_pending {
+                            if !stream_provider_error_forwarded
+                                && (success_sse_affinity_gate || unsolicited_hold_pending)
+                            {
                                 stream_upstream_error =
                                     Some(cc_lb_lifecycle::StreamError {
                                         error_type:
                                             UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
                                         error_message:
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                        ..Default::default()
                                     });
                                 downstream_drop_guard.mark_upstream_error(
                                     StreamTerminationCause::FramingError,
                                     None,
                                 );
-                                let frame = make_error_frame(
+                                let frame = make_stream_error_frame(
+                                    response_affinity_context.capability,
+                                    &responses_error_context,
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                    false,
                                 );
                                 yield Ok::<Bytes, Infallible>(frame);
-                            } else if sse_transform_active && stream_transform_error.is_none() {
+                            } else if !stream_provider_error_forwarded
+                                && sse_transform_active
+                                && stream_transform_error.is_none()
+                            {
                                 if transformed_output_started
                                     || !downstream_stream_is_identity
                                 {
@@ -7643,7 +9112,11 @@ impl Lifecycle {
                                             )
                                         },
                                     };
-                                    let frame = make_response_transform_error_frame(&error);
+                                    let frame = make_response_transform_error_frame(
+                                        response_affinity_context.capability,
+                                        &responses_error_context,
+                                        &error,
+                                    );
                                     stream_transform_error = Some(error);
                                     downstream_drop_guard.mark_proxy_error(
                                         StreamTerminationCause::TransformError,
@@ -7699,7 +9172,13 @@ impl Lifecycle {
                         && (success_sse_affinity_gate || sse_transform_active)
                         && upstream_end_after_message_stop_is_acceptable(
                             status,
-                            semantic_message_stop_seen,
+                            if response_affinity_context.capability.usage_shape()
+                                == crate::provider_capability::UsageShape::OpenaiResponses
+                            {
+                                semantic_completion_emitted
+                            } else {
+                                semantic_message_stop_seen
+                            },
                             stream_upstream_error.is_some()
                                 || stream_transform_error.is_some()
                                 || stream_affinity_error.is_some(),
@@ -7724,22 +9203,31 @@ impl Lifecycle {
                             truncate_reason(&format!("upstream response decoding failed: {error}")),
                         );
                     } else if success_sse_affinity_gate
+                        && !stream_provider_error_forwarded
+                        && !stream_upstream_error_frame_emitted
                         && stream_transform_error.is_none()
                         && stream_affinity_error.is_none()
                         && stream_upstream_error.is_none()
                     {
-                        stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
-                            error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
-                            error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
-                        });
-                        downstream_drop_guard.mark_upstream_error(
-                            StreamTerminationCause::DecodeError,
-                            None,
-                        );
-                        let frame = make_error_frame(
+                        if !stream_provider_error_seen {
+                            stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                                error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
+                                error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                ..Default::default()
+                            });
+                            downstream_drop_guard.mark_upstream_error(
+                                StreamTerminationCause::DecodeError,
+                                None,
+                            );
+                        }
+                        let frame = make_stream_error_frame(
+                            response_affinity_context.capability,
+                            &responses_error_context,
                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                            false,
                         );
+                        stream_upstream_error_frame_emitted = true;
                         yield Ok::<Bytes, Infallible>(frame);
                     } else if upstream_is_sse
                         && upstream_decode_failed
@@ -7754,6 +9242,7 @@ impl Lifecycle {
                                 error_message: format!(
                                     "upstream response decoding failed: {error}"
                                 ),
+                                ..Default::default()
                             });
                         }
                         if decode_error_is_primary {
@@ -7762,28 +9251,37 @@ impl Lifecycle {
                                 None,
                             );
                         }
-                        if decode_error_is_primary
+                        if !stream_provider_error_forwarded
                             && sse_transform_active
                             && !stream_upstream_error_frame_emitted
                         {
                             let error_message = stream_upstream_error
                                 .as_ref()
-                                .expect("upstream stream error set above")
-                                .error_message
-                                .clone();
-                            let frame = make_error_frame(
+                                .map(|error| std::borrow::Cow::Borrowed(error.error_message.as_str()))
+                                .unwrap_or_else(|| {
+                                    std::borrow::Cow::Owned(format!(
+                                        "upstream response decoding failed: {error}"
+                                    ))
+                                });
+                            let frame = make_stream_error_frame(
+                                response_affinity_context.capability,
+                                &responses_error_context,
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 &error_message,
+                                false,
                             );
                             if let Some(o) = observer.as_ref()
                                 && !upstream_error_status
                             {
                                 o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                             }
+                            stream_upstream_error_frame_emitted = true;
                             yield Ok::<Bytes, Infallible>(frame);
                         }
                     }
                     else if sse_transform_active
+                        && !stream_provider_error_forwarded
+                        && !stream_upstream_error_frame_emitted
                         && stream_transform_error.is_none()
                         && stream_affinity_error.is_none()
                     {
@@ -7799,7 +9297,11 @@ impl Lifecycle {
                                     )
                                 },
                             };
-                            let frame = make_response_transform_error_frame(&transform_error);
+                            let frame = make_response_transform_error_frame(
+                                response_affinity_context.capability,
+                                &responses_error_context,
+                                &transform_error,
+                            );
                             stream_transform_error = Some(transform_error);
                             downstream_drop_guard.mark_proxy_error(
                                 StreamTerminationCause::TransformError,
@@ -7818,7 +9320,8 @@ impl Lifecycle {
                     .iter()
                     .any(|byte| !matches!(byte, b'\r' | b'\n'))
                 && stream_upstream_error.is_none()
-                && !stream_provider_error_seen
+                && !stream_provider_error_forwarded
+                && !stream_upstream_error_frame_emitted
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
             {
@@ -7829,23 +9332,24 @@ impl Lifecycle {
                     "upstream SSE response ended with an incomplete event before transform output"
                         .to_owned()
                 };
-                stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
-                    error_type: UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
-                    error_message: error_message.clone(),
-                });
-                downstream_drop_guard.mark_upstream_error(
-                    StreamTerminationCause::FramingError,
-                    None,
-                );
-                // A retained Content-Length cannot carry an extra error frame.
-                // Keep the original final bytes and record the failure below.
-                if deferred_terminal_chunks.is_empty()
-                    && (success_sse_affinity_gate
-                        || sse_transform_active
-                        || downstream_stream_is_identity)
+                if !stream_provider_error_seen {
+                    stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                        error_type: UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
+                        error_message: error_message.clone(),
+                        ..Default::default()
+                    });
+                    downstream_drop_guard.mark_upstream_error(
+                        StreamTerminationCause::FramingError,
+                        None,
+                    );
+                }
+                if success_sse_affinity_gate
+                    || sse_transform_active
+                    || downstream_stream_is_identity
                 {
                     let frame = make_stream_error_frame(
                         response_affinity_context.capability,
+                        &responses_error_context,
                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                         &error_message,
                         downstream_stream_is_identity
@@ -7857,7 +9361,13 @@ impl Lifecycle {
                     {
                         o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                     }
-                    yield Ok::<Bytes, Infallible>(frame);
+                    if deferred_terminal_chunks.is_empty() {
+                        yield Ok::<Bytes, Infallible>(frame);
+                    } else {
+                        // Preserve byte order while retaining final-frame
+                        // lifecycle bookkeeping, not the upstream byte length.
+                        deferred_terminal_chunks.push(frame);
+                    }
                 }
                 buffer.clear();
             }
@@ -7865,12 +9375,12 @@ impl Lifecycle {
                 && status.is_success()
                 && parse_sse_events_active
                 && transform_decode_supported
-                && semantic_terminal_event_type(response_affinity_context.capability)
-                    == Some("message_stop")
-                && !semantic_message_stop_seen
+                && semantic_terminal_event_type(response_affinity_context.capability).is_some()
+                && !semantic_completion_emitted
                 && sse_buffer_is_blank(&buffer)
                 && !downstream_drop_guard.has_abnormal_stop()
                 && !stream_provider_error_seen
+                && !stream_provider_error_forwarded
                 && stream_upstream_error.is_none()
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
@@ -7884,15 +9394,45 @@ impl Lifecycle {
                         source: cc_lb_lifecycle::UsageSource::MessageDelta,
                     });
                 }
+                let incomplete_message = if matches!(
+                    response_affinity_context.capability,
+                    ProviderCapability::OpenaiResponses
+                        | ProviderCapability::OpenaiResponsesCompact
+                ) {
+                    "upstream SSE response ended before a terminal Responses event"
+                } else {
+                    "upstream SSE response ended before message_stop"
+                };
                 stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                     error_type: UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE.to_owned(),
-                    error_message:
-                        "upstream SSE response ended before message_stop".to_owned(),
+                    error_message: incomplete_message.to_owned(),
+                    ..Default::default()
                 });
                 downstream_drop_guard.mark_upstream_error(
                     StreamTerminationCause::Unknown,
                     None,
                 );
+                if matches!(
+                    response_affinity_context.capability,
+                    ProviderCapability::OpenaiResponses
+                        | ProviderCapability::OpenaiResponsesCompact
+                ) {
+                    if let Some(o) = observer.as_ref() {
+                        o.set_upstream_error(status, UpstreamErrorCode::StreamError);
+                    }
+                    let frame = make_stream_error_frame(
+                        response_affinity_context.capability,
+                        &responses_error_context,
+                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                        incomplete_message,
+                        false,
+                    );
+                    batch_index = batch_index.saturating_add(1);
+                    for chunk in std::mem::take(&mut deferred_terminal_chunks) {
+                        yield Ok::<Bytes, Infallible>(chunk);
+                    }
+                    yield Ok::<Bytes, Infallible>(frame);
+                }
             }
             if stream_affinity_error.is_none()
                 && stream_upstream_error.is_none()
@@ -7904,6 +9444,7 @@ impl Lifecycle {
                     &response_affinity_context,
                     &pending_request_affinity_keys,
                     unix_secs(affinity_clock.now()),
+                    None,
                 )
                 .await
                 .is_err()
@@ -7921,9 +9462,12 @@ impl Lifecycle {
                         || sse_transform_active
                         || downstream_stream_is_identity)
                 {
-                    let frame = make_error_frame(
-                        "api_error",
+                    let frame = make_stream_error_frame(
+                        response_affinity_context.capability,
+                        &responses_error_context,
+                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                        false,
                     );
                     batch_index = batch_index.saturating_add(1);
                     yield Ok::<Bytes, Infallible>(frame);
@@ -7966,6 +9510,20 @@ impl Lifecycle {
             } else if stream_transform_error.is_some() {
                 downstream_drop_guard.mark_proxy_error(StreamTerminationCause::TransformError);
             }
+            if status.is_success()
+                && stream_affinity_error.is_none()
+                && stream_upstream_error.is_none()
+                && stream_transform_error.is_none()
+                && !stream_provider_error_seen
+                && let Some(context) = prompt_cache_observation_context.as_ref()
+            {
+                publish_provider_cache_observation(
+                    context,
+                    PromptCacheUsage::from(&usage),
+                    unix_secs(affinity_clock.now()),
+                );
+            }
+
             let finalize_ms = if let Some(o) = observer.as_ref() {
                 if usage.has_billable_usage() {
                     o.set_usage_counts(&usage, message_stop_at.is_some());
@@ -8002,6 +9560,7 @@ impl Lifecycle {
                         result: Err(cc_lb_lifecycle::StreamError {
                             error_type: "response_transform_error".to_owned(),
                             error_message: error.to_string(),
+                            ..Default::default()
                         }),
                     });
                 } else {
@@ -8023,6 +9582,9 @@ impl Lifecycle {
                             stream_total_ms: Some(stream_total_ms),
                             content_delta_count: Some(content_delta_count),
                             ping_count: Some(ping_count),
+                            stream_inter_output_avg_ms: None,
+                            provider_session_id: None,
+                            provider_connection_id: None,
                             inter_token_avg_ms,
                         }),
                     });
@@ -8103,6 +9665,12 @@ impl Lifecycle {
                 stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
                 stream_message_stop_ms: elapsed_ms(message_stop_at),
                 stream_last_chunk_ms: elapsed_ms(last_chunk_at),
+                stream_first_output_ms: None,
+                stream_last_output_ms: None,
+                stream_event_count: 0,
+                stream_inter_output_avg_ms: None,
+                provider_session_id: None,
+                provider_connection_id: None,
                 stream_total_ms,
                 sse_event_count,
                 content_delta_count,
@@ -8439,15 +10007,20 @@ async fn collect_error_response(response: Response<Body>) -> CollectedResponse {
     }
 }
 
-fn response_from_collected(collected: CollectedResponse) -> Response<Body> {
+fn response_from_collected(
+    collected: CollectedResponse,
+    capability: ProviderCapability,
+) -> Response<Body> {
     let Some(body) = collected.body else {
         // A stalled, truncated, or failed upstream body is never relayed in
         // part; the relayed status stays honest instead of echoing the
         // upstream code next to proxy-generated bytes.
-        return anthropic_error_response(
+        return provider_error_response(
+            capability,
             StatusCode::BAD_GATEWAY,
             "api_error",
             UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE,
+            None,
         );
     };
     let mut response = Response::new(Body::from(body));
@@ -8776,7 +10349,7 @@ struct LimitRequest {
     service_tier: Option<String>,
 }
 impl LimitRequest {
-    /// Native Gemini operations use the path's canonical model. Other
+    /// Native Gemini operations use the normalized canonical model. Other
     /// operations prefer the body's model and use the canonical fallback only
     /// when that field is absent. Catalog/default-moderation operations have no
     /// model; required-model operations retain the existing `unknown` sentinel.
@@ -8799,6 +10372,7 @@ impl LimitRequest {
             Some(
                 ProviderCapability::GeminiGenerateContent
                     | ProviderCapability::GeminiCountTokens
+                    | ProviderCapability::GeminiCachedContentsCreate
                     | ProviderCapability::GeminiEmbedContent
                     | ProviderCapability::GeminiPredict
             )
@@ -8860,6 +10434,9 @@ impl LimitRequest {
                         .saturating_add(input.cache_prefix_1h_tokens);
                     i64::try_from(whole).unwrap_or(i64::MAX)
                 })
+                .or_else(|| {
+                    value.and_then(|value| estimate_provider_input(value, model, capability))
+                })
                 .or_else(|| value.map(estimate_input_tokens))
                 .unwrap_or(if model_optional {
                     0
@@ -8880,9 +10457,8 @@ impl LimitRequest {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             service_tier: value
-                .and_then(|v| v.get("service_tier"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
+                .and_then(|value| request_service_tier(value, capability))
+                .map(str::to_owned),
         }
     }
 }
@@ -9473,6 +11049,7 @@ mod prompt_cache_policy_tests {
                 Some(&request),
                 Some(output),
                 None,
+                None,
             );
             assert_eq!(metadata.bundles.official.cache_breakpoints.len(), 1);
             assert_eq!(metadata.bundles.literal.cache_breakpoints.len(), 1);
@@ -9517,6 +11094,7 @@ mod prompt_cache_policy_tests {
             Some(&request),
             Some(output),
             None,
+            None,
         );
         assert!(metadata.bundles.official.cache_breakpoints.is_empty());
         let literal = &metadata.bundles.literal;
@@ -9535,6 +11113,7 @@ mod prompt_cache_policy_tests {
             cache_breakpoints: literal.cache_breakpoints.clone(),
             cacheable_breakpoint_prefix_keys: literal.cacheable_breakpoint_prefix_keys.clone(),
             selected_match: None,
+            native_cache: None,
             sink: Arc::new(NoopPromptCacheObservationSink),
             grace_margin_secs: 0,
         };
@@ -9544,6 +11123,7 @@ mod prompt_cache_policy_tests {
                 cache_creation_input_tokens: 8_192,
                 cache_read_input_tokens: 0,
                 read_only_evidence: false,
+                ..PromptCacheUsage::default()
             },
             1_800_000_000,
         );
@@ -9644,12 +11224,17 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) thread_id: Option<String>,
     pub(crate) observed_session_id: Option<String>,
     pub(crate) request_kind: Option<String>,
+    pub(crate) explicit_request_class: Option<String>,
     pub(crate) explicit_auxiliary: bool,
     pub(crate) claude_agent_id: Option<String>,
     pub(crate) claude_parent_agent_id: Option<String>,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) client_app: Option<String>,
     pub(crate) session_id_source: Option<String>,
+    pub(crate) cache_keepalive_surface: Option<String>,
+    pub(crate) cache_keepalive_ttl: Option<cc_lb_storage_api::CacheTtl>,
+    pub(crate) openai_selected_boundary: Option<String>,
+    pub(crate) openai_replay_identity: Option<String>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
@@ -9657,10 +11242,12 @@ pub(crate) struct RequestCacheMetadata {
     cache_control_block_count: Option<u64>,
     thinking_budget_tokens: Option<u64>,
     reasoning_effort: Option<String>,
+    thinking_level: Option<String>,
     cache_control_message_indices: Vec<u64>,
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub(crate) cache_prefix_hash: Option<String>,
     pub(crate) bundles: PromptCacheBundles,
+    pub(crate) native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
     canonical_model_id: String,
 }
 
@@ -9943,7 +11530,9 @@ fn request_cache_metadata_from_value(
             timings: PromptCacheAnalysisTimings::default(),
         }
     });
-    request_cache_metadata_from_value_with_analysis_for_capability(headers, value, analysis, None)
+    request_cache_metadata_from_value_with_analysis_for_capability(
+        headers, value, analysis, None, None,
+    )
 }
 
 fn request_reasoning_metadata(
@@ -9996,7 +11585,11 @@ fn request_reasoning_metadata(
             value
                 .get("generationConfig")
                 .and_then(|config| config.get("thinkingConfig"))
-                .and_then(|thinking| thinking.get("thinkingBudget"))
+                .and_then(|thinking| {
+                    thinking
+                        .get("thinkingBudget")
+                        .or_else(|| thinking.get("thinking_budget"))
+                })
                 .and_then(Value::as_u64)
                 .filter(|budget| *budget <= 9_007_199_254_740_991),
             None,
@@ -10005,16 +11598,166 @@ fn request_reasoning_metadata(
     }
 }
 
+/// Normalize field names only. Keep the requested value, including unknown
+/// casing, visible to routing and admission rather than treating it as absent.
+fn request_service_tier(value: &Value, capability: Option<ProviderCapability>) -> Option<&str> {
+    let tier = value.get("service_tier").or_else(|| {
+        (capability == Some(ProviderCapability::GeminiGenerateContent))
+            .then(|| value.get("serviceTier"))
+            .flatten()
+    })?;
+    let tier = tier.as_str()?;
+    if capability == Some(ProviderCapability::GeminiGenerateContent) && tier.trim().is_empty() {
+        return None;
+    }
+    Some(tier)
+}
+
+fn request_thinking_level(value: &Value, capability: Option<ProviderCapability>) -> Option<String> {
+    if capability != Some(ProviderCapability::GeminiGenerateContent) {
+        return None;
+    }
+    value
+        .get("generationConfig")
+        .and_then(|config| config.get("thinkingConfig"))
+        .and_then(|thinking| {
+            thinking
+                .get("thinkingLevel")
+                .or_else(|| thinking.get("thinking_level"))
+        })
+        .and_then(Value::as_str)
+        .filter(|level| !level.is_empty() && level.len() <= 64)
+        .map(str::to_owned)
+}
+
+fn bounded_openai_replay_component(raw: &str) -> String {
+    let digest = Sha256::digest(raw.as_bytes());
+    format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+fn openai_input_digest_and_visible_tokens(value: &Value) -> (String, u64) {
+    let Some(input) = value.get("input") else {
+        return (String::new(), 0);
+    };
+    let Ok(input_bytes) = sonic_rs::to_vec(input) else {
+        return (String::new(), 0);
+    };
+    let visible_tokens = (input_bytes.len() as u64 / 4).min(10_000_000);
+    let digest = Sha256::digest(&input_bytes);
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    (digest, visible_tokens)
+}
+
+#[cfg(test)]
+pub(crate) fn openai_replay_identity(
+    value: &Value,
+    headers: &HeaderMap,
+    model: &str,
+    ttl: Option<cc_lb_storage_api::CacheTtl>,
+    prefix_hash: Option<&str>,
+) -> Option<String> {
+    let (input_digest, _) = openai_input_digest_and_visible_tokens(value);
+    openai_replay_identity_with_boundary(
+        value,
+        headers,
+        model,
+        ttl,
+        prefix_hash,
+        None,
+        &input_digest,
+    )
+}
+
+fn openai_replay_identity_with_boundary(
+    value: &Value,
+    headers: &HeaderMap,
+    model: &str,
+    ttl: Option<cc_lb_storage_api::CacheTtl>,
+    prefix_hash: Option<&str>,
+    selected_boundary: Option<&str>,
+    input_digest: &str,
+) -> Option<String> {
+    let prompt_cache_key = value
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let conversation_identity = match value.get("conversation") {
+        Some(Value::String(id)) => format!("string:{id}"),
+        Some(Value::Object(object)) => object
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| format!("object:{id}"))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let organization = value
+        .get("organization")
+        .or_else(|| value.get("organization_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            headers
+                .get("openai-organization")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    let processing_region = value
+        .get("processing_region")
+        .or_else(|| value.get("inference_geo"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            headers
+                .get("openai-processing-region")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    let lifetime = ttl.map(|ttl| match ttl {
+        cc_lb_storage_api::CacheTtl::Ttl30m => "30m",
+        cc_lb_storage_api::CacheTtl::Ttl12h => "12h",
+        cc_lb_storage_api::CacheTtl::Ttl5m => "5m",
+        cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
+    });
+    let namespace = format!(
+        "openai-replay-v2|model={}|lifetime={}|prefix={}|boundary={}|organization={}|region={}|prompt_cache_key={}|conversation={}|input={}",
+        bounded_openai_replay_component(model),
+        bounded_openai_replay_component(lifetime.unwrap_or("unknown")),
+        bounded_openai_replay_component(prefix_hash.unwrap_or("")),
+        bounded_openai_replay_component(selected_boundary.unwrap_or("unknown")),
+        bounded_openai_replay_component(organization),
+        bounded_openai_replay_component(processing_region),
+        bounded_openai_replay_component(prompt_cache_key),
+        bounded_openai_replay_component(&conversation_identity),
+        bounded_openai_replay_component(input_digest),
+    );
+    let digest = Sha256::digest(namespace.as_bytes());
+    Some(format!(
+        "openai-replay-v2:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
 fn request_cache_metadata_from_value_with_analysis_for_capability(
     headers: &HeaderMap,
     value: Option<&Value>,
     analysis: Option<PromptCacheAnalysisOutput>,
     capability: Option<ProviderCapability>,
+    path_model: Option<&str>,
 ) -> RequestCacheMetadata {
     let identity = request_identity_metadata(headers, value);
     let thread_id = identity.thread_id.clone();
     let observed_session_id = identity.observed_session_id.clone();
     let request_kind = identity.request_kind.clone();
+    let explicit_request_class = identity.explicit_request_class.clone();
     let explicit_auxiliary = identity.explicit_auxiliary;
     let claude_agent_id = identity.claude_agent_id.clone();
     let claude_parent_agent_id = identity.claude_parent_agent_id.clone();
@@ -10027,6 +11770,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             thread_id,
             observed_session_id,
             request_kind,
+            explicit_request_class,
             explicit_auxiliary,
             claude_agent_id,
             claude_parent_agent_id,
@@ -10036,16 +11780,29 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             ..Default::default()
         };
     };
-    let canonical_model_id = value
-        .get("model")
-        .and_then(Value::as_str)
-        .map(canonical_model_id)
-        .unwrap_or_default()
-        .to_owned();
-    let requested_service_tier = value
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
+    let model = if capability == Some(ProviderCapability::GeminiGenerateContent) {
+        path_model
+    } else {
+        value.get("model").and_then(Value::as_str)
+    };
+    let canonical_model_id = model.map(canonical_model_id).unwrap_or_default().to_owned();
+    let modern_openai_interpretation = if capability == Some(ProviderCapability::OpenaiResponses)
+        && crate::cache_keepalive::openai::is_gpt56_or_newer(&canonical_model_id)
+    {
+        Some(crate::cache_keepalive::openai::interpret_modern(value))
+    } else {
+        None
+    };
+    let native_cache = capability.and_then(|capability| {
+        provider_cache::analyze_with_openai_interpretation(
+            capability,
+            value,
+            &canonical_model_id,
+            headers,
+            modern_openai_interpretation.as_ref().map(Option::as_ref),
+        )
+    });
+    let requested_service_tier = request_service_tier(value, capability).map(str::to_owned);
 
     let messages = value.get("messages").and_then(Value::as_array);
     let message_count = messages.map(|items| items.len() as u64);
@@ -10101,23 +11858,75 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     cache_control_message_indices.sort_unstable();
     cache_control_message_indices.dedup();
     let cache_control_block_count = raw_cache_breakpoints.len() as u64;
-
     let (thinking_budget_tokens, reasoning_effort) = request_reasoning_metadata(value, capability);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
-
+    let (openai_input_digest, openai_visible_prefix_tokens) =
+        if capability == Some(ProviderCapability::OpenaiResponses) {
+            openai_input_digest_and_visible_tokens(value)
+        } else {
+            (String::new(), 0)
+        };
+    let (cache_keepalive_surface, cache_keepalive_ttl, openai_selected_boundary) =
+        if capability == Some(ProviderCapability::OpenaiResponses) {
+            let interpretation = modern_openai_interpretation.flatten();
+            let lifetime = interpretation.as_ref().and_then(|value| value.lifetime);
+            let eligible = lifetime.is_some_and(|lifetime| {
+                crate::cache_keepalive::openai::eligible_prefix(
+                    &canonical_model_id,
+                    openai_visible_prefix_tokens,
+                    Some(lifetime),
+                )
+            });
+            if eligible {
+                (
+                    Some("responses".to_owned()),
+                    lifetime.map(|lifetime| match lifetime {
+                        crate::cache_keepalive::openai::Lifetime::ThirtyMinutes => {
+                            cc_lb_storage_api::CacheTtl::Ttl30m
+                        }
+                        crate::cache_keepalive::openai::Lifetime::TwelveHours => {
+                            cc_lb_storage_api::CacheTtl::Ttl12h
+                        }
+                    }),
+                    interpretation.and_then(|value| value.selected_boundary),
+                )
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+    let replay_identity = (capability == Some(ProviderCapability::OpenaiResponses))
+        .then(|| {
+            openai_replay_identity_with_boundary(
+                value,
+                headers,
+                &canonical_model_id,
+                cache_keepalive_ttl,
+                cache_prefix_hash.as_deref(),
+                openai_selected_boundary.as_deref(),
+                &openai_input_digest,
+            )
+        })
+        .flatten();
     RequestCacheMetadata {
         request_json: None,
         thread_id,
         observed_session_id,
         request_kind,
+        explicit_request_class,
         explicit_auxiliary,
         claude_agent_id,
         claude_parent_agent_id,
         parent_session_id,
         client_app,
         session_id_source,
+        cache_keepalive_surface,
+        cache_keepalive_ttl,
+        openai_selected_boundary,
+        openai_replay_identity: replay_identity,
         requested_service_tier,
         message_id,
         message_index,
@@ -10125,6 +11934,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         cache_control_block_count: Some(cache_control_block_count),
         thinking_budget_tokens,
         reasoning_effort,
+        thinking_level: request_thinking_level(value, capability),
         cache_control_message_indices,
         cache_breakpoints,
         cache_prefix_hash,
@@ -10132,6 +11942,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             official: official_bundle,
             literal: literal_bundle,
         },
+        native_cache,
         canonical_model_id,
     }
 }
@@ -10151,6 +11962,7 @@ struct RequestIdentityMetadata {
     thread_id: Option<String>,
     observed_session_id: Option<String>,
     request_kind: Option<String>,
+    explicit_request_class: Option<String>,
     explicit_auxiliary: bool,
     claude_agent_id: Option<String>,
     claude_parent_agent_id: Option<String>,
@@ -10312,6 +12124,7 @@ fn request_identity_metadata(
         })
         .filter(|parent| observed_session_id.as_deref() != Some(parent.as_str()));
     let claude_request_class = header_identity(headers, "x-claude-code-request-class");
+    let explicit_request_class = claude_request_class.clone();
     let explicit_auxiliary = claude_request_class
         .as_deref()
         .is_some_and(|class| class.trim().eq_ignore_ascii_case("auxiliary"));
@@ -10328,6 +12141,7 @@ fn request_identity_metadata(
         thread_id: observed_session_id.clone(),
         observed_session_id,
         request_kind,
+        explicit_request_class,
         explicit_auxiliary,
         claude_agent_id,
         claude_parent_agent_id,
@@ -10397,10 +12211,31 @@ fn duration_to_us(duration: Duration) -> u64 {
 fn attach_limit_headers_from_engine(
     headers: &mut HeaderMap,
     limit_engine: &LimitEngine,
+    provider: Provider,
     key_id: &str,
     principal_id: &str,
 ) {
-    for (name, value) in limit_engine.headers_for(key_id, principal_id) {
+    for (name, value) in limit_engine.headers_for_provider(provider, key_id, principal_id) {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+}
+
+fn attach_limit_headers_from_record(
+    headers: &mut HeaderMap,
+    limit_engine: &LimitEngine,
+    provider: Provider,
+    key_id: &str,
+    record: &StoredApiKeyRecord,
+    default_limits: &[Limit],
+) {
+    for (name, value) in
+        limit_engine.headers_for_provider_record(provider, key_id, record, default_limits)
+    {
         if let (Ok(name), Ok(value)) = (
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(&value),
@@ -11054,7 +12889,38 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_creation_input_tokens_5m: u.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: u.cache_creation_input_tokens_1h,
+        cache_read_evidence: match u.cache_read_evidence {
+            usage_parser::CacheTokenEvidence::Unreported => None,
+            usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
+        cache_creation_evidence: match u.cache_creation_evidence {
+            usage_parser::CacheTokenEvidence::Unreported => None,
+            usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
         cache_read_input_tokens: u.cache_read_input_tokens,
+        cache_write_input_tokens: u.cache_write_input_tokens,
+        cache_write_evidence: match u.cache_write_evidence {
+            usage_parser::CacheTokenEvidence::Unreported => None,
+            evidence => Some(request_cache_evidence(evidence)),
+        },
+        cache_write_input_tokens_30m: u.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: u.cache_write_input_tokens_12h,
         thinking_tokens: u.thinking_tokens,
         web_search_requests: u.web_search_requests,
         web_fetch_requests: u.web_fetch_requests,
@@ -11095,6 +12961,546 @@ mod tests {
 
     use super::*;
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
+    #[test]
+    fn native_cache_gemini_url_model_is_authoritative() {
+        for action in ["generateContent", "streamGenerateContent"] {
+            for body_model in [None, Some("gemini-1.0-pro")] {
+                for resource in [
+                    None,
+                    Some("projects/example/locations/us/cachedContents/cache-a"),
+                ] {
+                    let mut body = json!({"contents": [{"parts": [{"text": "synthetic"}]}]});
+                    if let Some(model) = body_model {
+                        body["model"] = json!(model);
+                    }
+                    if let Some(resource) = resource {
+                        body["cachedContent"] = json!(resource);
+                    }
+                    let path = format!("/v1beta/models/gemini-2.5-flash:{action}");
+                    let path_model = gemini_model_from_path(&path);
+                    let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                        &HeaderMap::new(),
+                        Some(&body),
+                        None,
+                        Some(ProviderCapability::GeminiGenerateContent),
+                        path_model.as_deref(),
+                    );
+                    assert_eq!(metadata.canonical_model_id, "gemini-2.5-flash");
+                    let native = metadata.native_cache.expect("Gemini cache analysis");
+                    assert_eq!(native.provider, "gemini");
+                    assert_eq!(native.retention_secs, None);
+                    assert_eq!(native.expires_at_unix_secs, None);
+                    if resource.is_some() {
+                        assert_eq!(native.mode, "explicit");
+                        assert_eq!(native.scope.as_deref(), Some("example"));
+                        let identity = native.identity_hash.expect("bounded cache identity");
+                        assert!(identity.starts_with("sha256:"));
+                        assert_eq!(identity.len(), 71);
+                        assert_eq!(
+                            native.evidence_source.as_deref(),
+                            Some("request.cachedContent")
+                        );
+                    } else {
+                        assert_eq!(native.mode, "implicit");
+                        assert_eq!(native.identity_hash, None);
+                        assert_eq!(native.scope, None);
+                        assert_eq!(
+                            native.boundary.as_deref(),
+                            Some("minimum_input_tokens=2048")
+                        );
+                        assert_eq!(
+                            native.evidence_source.as_deref(),
+                            Some("provider_usage_metadata")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_cache_gemini_missing_model_and_other_apis_stay_unknown() {
+        let body = json!({"model": "gemini-2.5-flash", "contents": []});
+        for path_model in [None, Some("gemini-1.0-pro")] {
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&body),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+                path_model,
+            );
+            let native = metadata
+                .native_cache
+                .expect("unsupported Gemini observation");
+            assert_eq!(
+                native.evidence_source.as_deref(),
+                Some("unsupported_model_or_api")
+            );
+            assert_eq!(
+                native.evidence,
+                cc_lb_request_log::RequestCacheEvidence::Unreported
+            );
+            assert_eq!(native.identity_hash, None);
+        }
+        for capability in [
+            ProviderCapability::GeminiCountTokens,
+            ProviderCapability::GeminiEmbedContent,
+            ProviderCapability::GeminiPredict,
+        ] {
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&body),
+                None,
+                Some(capability),
+                Some("gemini-2.5-flash"),
+            );
+            assert!(metadata.native_cache.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_cache_gemini_url_model_reaches_lifecycle_observations() {
+        for streaming in [false, true] {
+            for conflicting_body_model in [false, true] {
+                let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+                let mut events = subscribe_lifecycle(&bus);
+                let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+                let view = DynamicViewBuilder::new(0)
+                    .signer_factory(Arc::new(TestSignerFactory))
+                    .principal_view(failure_principal_view(
+                        "principal-test",
+                        default_artifacts(),
+                    ))
+                    .upstream_records(vec![upstream_record_with_kind(
+                        StorageRecordKind::GeminiApiKey,
+                    )])
+                    .prompt_cache_observation_sink(sink.clone())
+                    .build();
+                let json = br#"{"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1200,"cachedContentTokenCount":64,"candidatesTokenCount":1,"totalTokenCount":1201}}"#;
+                let provider_body = if streaming {
+                    Bytes::from(format!("data: {}\n\n", String::from_utf8_lossy(json)))
+                } else {
+                    Bytes::from_static(json)
+                };
+                let mut upstream = Response::new(Body::from(provider_body.clone()));
+                upstream.headers_mut().insert(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static(if streaming {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    }),
+                );
+                let lifecycle = provenance_lifecycle(
+                    view,
+                    Arc::new(QueueDispatch::new(vec![Ok(upstream)])),
+                    &bus,
+                );
+                let mut body = json!({"contents": [{"parts": [{"text": "synthetic"}]}]});
+                if conflicting_body_model {
+                    body["model"] = json!("gemini-1.0-pro");
+                }
+                let mut request = failure_request(Bytes::from(serde_json::to_vec(&body).unwrap()));
+                let action = if streaming {
+                    "streamGenerateContent"
+                } else {
+                    "generateContent"
+                };
+                *request.uri_mut() = format!("/v1beta/models/gemini-2.5-flash:{action}")
+                    .parse()
+                    .unwrap();
+                request
+                    .extensions_mut()
+                    .insert(crate::request_context::ProviderScope(
+                        cc_lb_domain::Provider::Gemini,
+                    ));
+                let auth = lifecycle.authenticate(request.headers()).await.unwrap();
+                let response = lifecycle.handle(request, &auth).await.unwrap();
+                let (status, response_body) = collect_response_body(response).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(
+                    response_body, provider_body,
+                    "provider response remains unchanged"
+                );
+                lifecycle.shutdown().await;
+                let events = drain_events(&mut events);
+                let parsed = events
+                    .iter()
+                    .find_map(|event| match event {
+                        cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
+                            result: Ok(info),
+                            ..
+                        } => Some(info),
+                        _ => None,
+                    })
+                    .expect("request reached analysis");
+                assert_eq!(parsed.model.as_deref(), Some("gemini-2.5-flash"));
+                let native = parsed.native_cache.as_ref().expect("native analysis");
+                assert_eq!(
+                    native.evidence_source.as_deref(),
+                    Some("provider_usage_metadata")
+                );
+                assert_eq!(
+                    native.boundary.as_deref(),
+                    Some("minimum_input_tokens=2048")
+                );
+                let records = sink.provider_upserts();
+                let record = records.last().expect("provider observation published");
+                assert_eq!(record.provider, "gemini");
+                assert_eq!(record.canonical_model_id, "gemini-2.5-flash");
+                assert_eq!(record.evidence_source, "provider_usage_metadata");
+                assert_eq!(record.observed_cached_tokens, Some(64));
+                assert_eq!(record.observed_write_tokens, None);
+                assert!(record.identity_hash.is_empty());
+                assert_eq!(record.expires_at_unix_secs, None);
+            }
+        }
+    }
+
+    #[test]
+    fn openai_replay_identity_namespaces_scope_dimensions() {
+        let value = serde_json::json!({
+            "model": "gpt-5.6",
+            "input": [{"role": "user", "content": "prompt"}],
+            "prompt_cache_key": "key-a",
+            "conversation": {"id": "conversation-a"},
+            "organization": "org-a",
+            "processing_region": "us-east"
+        });
+        let headers = HeaderMap::new();
+        let identity = super::openai_replay_identity(
+            &value,
+            &headers,
+            "gpt-5.6",
+            Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+            Some("prefix-a"),
+        )
+        .expect("identity");
+        for (model, ttl, prefix, organization, region, key, conversation) in [
+            (
+                "gpt-5.7",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl12h),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-b"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-b",
+                "us-east",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "eu-west",
+                "key-a",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-b",
+                "conversation-a",
+            ),
+            (
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+                "org-a",
+                "us-east",
+                "key-a",
+                "conversation-b",
+            ),
+        ] {
+            let mut scoped = value.clone();
+            scoped["organization"] = serde_json::Value::String(organization.to_owned());
+            scoped["processing_region"] = serde_json::Value::String(region.to_owned());
+            scoped["prompt_cache_key"] = serde_json::Value::String(key.to_owned());
+            scoped["conversation"]["id"] = serde_json::Value::String(conversation.to_owned());
+            let candidate = super::openai_replay_identity(&scoped, &headers, model, ttl, prefix)
+                .expect("scoped identity");
+            assert_ne!(identity, candidate);
+        }
+        let mut delimiter_left = value.clone();
+        delimiter_left["organization"] = serde_json::Value::String("acme|region=us".to_owned());
+        delimiter_left["processing_region"] = serde_json::Value::String("eu".to_owned());
+        let mut delimiter_right = value.clone();
+        delimiter_right["organization"] = serde_json::Value::String("acme".to_owned());
+        delimiter_right["processing_region"] = serde_json::Value::String("us|region=eu".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &delimiter_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &delimiter_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut prefix_left = value.clone();
+        prefix_left["organization"] = serde_json::Value::String("tail".to_owned());
+        let mut prefix_right = value.clone();
+        prefix_right["organization"] =
+            serde_json::Value::String("org-a|organization=tail".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &prefix_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a|organization=org-a"),
+            ),
+            super::openai_replay_identity(
+                &prefix_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut region_left = value.clone();
+        region_left["processing_region"] =
+            serde_json::Value::String("us|prompt_cache_key=key-a".to_owned());
+        let mut region_right = value.clone();
+        region_right["processing_region"] = serde_json::Value::String("us".to_owned());
+        region_right["prompt_cache_key"] =
+            serde_json::Value::String("key-a|prompt_cache_key=tail".to_owned());
+        region_left["prompt_cache_key"] = serde_json::Value::String("tail".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &region_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &region_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut key_left = value.clone();
+        key_left["prompt_cache_key"] =
+            serde_json::Value::String("key-a|conversation=left".to_owned());
+        key_left["conversation"]["id"] = serde_json::Value::String("right".to_owned());
+        let mut key_right = value.clone();
+        key_right["prompt_cache_key"] = serde_json::Value::String("key-a".to_owned());
+        key_right["conversation"]["id"] =
+            serde_json::Value::String("left|conversation=right".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &key_left,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &key_right,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut string_conversation = value.clone();
+        string_conversation["conversation"] = serde_json::Value::String("conv-a".to_owned());
+        let mut string_conversation_other = value.clone();
+        string_conversation_other["conversation"] = serde_json::Value::String("conv-b".to_owned());
+        assert_ne!(
+            super::openai_replay_identity(
+                &string_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &string_conversation_other,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+        let mut object_conversation = value.clone();
+        object_conversation["conversation"] = serde_json::json!({"id": "conv-a"});
+        assert_ne!(
+            super::openai_replay_identity(
+                &string_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            ),
+            super::openai_replay_identity(
+                &object_conversation,
+                &headers,
+                "gpt-5.6",
+                Some(cc_lb_storage_api::CacheTtl::Ttl30m),
+                Some("prefix-a"),
+            )
+        );
+    }
+
+    #[test]
+    fn request_cache_metadata_uses_openai_responses_ttl_contract_for_keepalive() {
+        use cc_lb_storage_api::CacheTtl;
+        let input = vec![serde_json::json!({
+            "role": "user",
+            "content": "x".repeat(5_000)
+        })];
+        let metadata = |mut body: serde_json::Value| {
+            body["model"] = serde_json::Value::String("gpt-5.6".to_owned());
+            request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&body),
+                None,
+                Some(ProviderCapability::OpenaiResponses),
+                None,
+            )
+        };
+
+        for (name, options, expected) in [
+            ("omitted", serde_json::json!({}), CacheTtl::Ttl30m),
+            (
+                "empty options",
+                serde_json::json!({"prompt_cache_options": {}}),
+                CacheTtl::Ttl30m,
+            ),
+            (
+                "explicit 30m",
+                serde_json::json!({"prompt_cache_options": {"ttl": "30m"}}),
+                CacheTtl::Ttl30m,
+            ),
+            (
+                "explicit 12h",
+                serde_json::json!({"prompt_cache_options": {"ttl": "12h"}}),
+                CacheTtl::Ttl12h,
+            ),
+        ] {
+            let mut body = options;
+            body["input"] = serde_json::Value::Array(input.clone());
+            let result = metadata(body);
+            assert_eq!(
+                result.cache_keepalive_surface.as_deref(),
+                Some("responses"),
+                "{name} must enable Responses keep-alive"
+            );
+            assert_eq!(result.cache_keepalive_ttl, Some(expected), "{name}");
+        }
+
+        let mut breakpoint_override = serde_json::json!({
+            "prompt_cache_options": {"ttl": "30m"},
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "x".repeat(5_000),
+                    "prompt_cache_breakpoint": {"ttl": "12h"}
+                }]
+            }]
+        });
+        let result = metadata(std::mem::take(&mut breakpoint_override));
+        assert_eq!(result.cache_keepalive_ttl, Some(CacheTtl::Ttl12h));
+
+        let mut inherited_breakpoint = serde_json::json!({
+            "prompt_cache_options": {"ttl": "12h"},
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "x".repeat(5_000),
+                    "prompt_cache_breakpoint": {}
+                }]
+            }]
+        });
+        let result = metadata(std::mem::take(&mut inherited_breakpoint));
+        assert_eq!(result.cache_keepalive_ttl, Some(CacheTtl::Ttl12h));
+        let result = metadata(serde_json::json!({
+            "metadata": {"prompt_cache_breakpoint": {"ttl": "12h"}},
+            "tools": [{"input_schema": {"prompt_cache_breakpoint": {"ttl": "12h"}}}],
+            "input": input.clone()
+        }));
+        assert_eq!(result.cache_keepalive_surface.as_deref(), Some("responses"));
+        assert_eq!(result.cache_keepalive_ttl, Some(CacheTtl::Ttl30m));
+
+        for mut body in [
+            serde_json::json!({
+                "prompt_cache_options": {"mode": "explicit"},
+                "input": input.clone()
+            }),
+            serde_json::json!({
+                "prompt_cache_options": {"ttl": "forever"},
+                "input": input.clone()
+            }),
+            serde_json::json!({
+                "prompt_cache_options": {"ttl": "30m"},
+                "input": [{
+                    "prompt_cache_breakpoint": {"ttl": "forever"},
+                    "content": "x".repeat(5_000)
+                }]
+            }),
+            serde_json::json!({
+                "prompt_cache_retention": "30m",
+                "input": input.clone()
+            }),
+        ] {
+            let result = metadata(std::mem::take(&mut body));
+            assert_eq!(result.cache_keepalive_surface, None);
+            assert_eq!(result.cache_keepalive_ttl, None);
+        }
+
+        let mut unsupported = serde_json::json!({"input": input});
+        unsupported["model"] = serde_json::Value::String("gpt-5.5".to_owned());
+        let result = request_cache_metadata_from_value_with_analysis_for_capability(
+            &HeaderMap::new(),
+            Some(&unsupported),
+            None,
+            Some(ProviderCapability::OpenaiResponses),
+            None,
+        );
+        assert_eq!(result.cache_keepalive_surface, None);
+        assert_eq!(result.cache_keepalive_ttl, None);
+    }
 
     #[test]
     fn operations_filter_subscription_and_api_key_credentials() {
@@ -11626,6 +14032,7 @@ mod tests {
                         cache_breakpoints: vec![cache_breakpoint(3, "cached", 2_400, ttl)],
                         cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["cached"]),
                         selected_match: is_hit.then(|| selected_match_hit("cached", 3, ttl, 2_400)),
+                        native_cache: None,
                         sink: Arc::new(RecordingPromptCacheObservationSink::new(Vec::new())),
                         grace_margin_secs: config.grace_margin_secs,
                     };
@@ -11635,6 +14042,7 @@ mod tests {
                             cache_creation_input_tokens: if is_hit { 0 } else { 2_400 },
                             cache_read_input_tokens: if is_hit { 2_400 } else { 0 },
                             read_only_evidence: false,
+                            ..PromptCacheUsage::default()
                         },
                         dispatch,
                     );
@@ -11699,6 +14107,7 @@ mod tests {
             ],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["write"]),
             selected_match: Some(selected_match_hit("hit", 1, TtlClass::Ephemeral1h, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -11725,6 +14134,129 @@ mod tests {
     }
 
     #[test]
+    fn native_cache_write_publication_preserves_provider_total() {
+        let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1_164),
+            canonical_model_id: "gpt-5.6".to_owned(),
+            cache_breakpoints: Vec::new(),
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: None,
+            native_cache: provider_cache::analyze(
+                ProviderCapability::OpenaiResponses,
+                &json!({"input": [{"role": "user", "content": "synthetic"}]}),
+                "gpt-5.6",
+                &HeaderMap::new(),
+            ),
+            sink: sink.clone(),
+            grace_margin_secs: 0,
+        };
+        for (write, expected) in [
+            (json!(300), Some(300)),
+            (json!(0), Some(0)),
+            (json!("300"), None),
+            (Value::Null, None),
+        ] {
+            let mut usage = UsageCounts::default();
+            let zero = write.as_u64() == Some(0);
+            usage_parser::merge_usage_value_for_shape(
+                &mut usage,
+                &json!({
+                    "input_tokens": 1200,
+                    "input_tokens_details": {
+                        "cached_tokens": 0,
+                        "cache_write_tokens": write,
+                        "cache_write_tokens_details": {
+                            "ttl_30m_tokens": if zero { 0 } else { 200 },
+                            "ttl_12h_tokens": if zero { 0 } else { 100 }
+                        }
+                    }
+                }),
+                Some(crate::provider_capability::UsageShape::OpenaiResponses),
+            );
+            publish_provider_cache_observation(
+                &context,
+                PromptCacheUsage::from(&usage),
+                1_800_000_000,
+            );
+            let records = sink.provider_upserts();
+            let record = records.last().expect("provider observation published");
+            assert_eq!(record.observed_write_tokens, expected);
+            assert_eq!(record.provider, "openai");
+            assert_eq!(record.canonical_model_id, "gpt-5.6");
+            assert_eq!(record.retention_secs, Some(1800));
+            assert_eq!(record.expires_at_unix_secs, Some(1_800_001_800));
+        }
+    }
+
+    #[test]
+    fn provider_observation_without_lifetime_keeps_expiry_unknown() {
+        let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1_126),
+            canonical_model_id: "gpt-5.6".to_owned(),
+            cache_breakpoints: Vec::new(),
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: None,
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                evidence: cc_lb_request_log::RequestCacheEvidence::Positive,
+                cached_tokens: Some(128),
+                ..Default::default()
+            }),
+            sink: sink.clone(),
+            grace_margin_secs: 0,
+        };
+
+        publish_provider_cache_observation(&context, PromptCacheUsage::default(), 1_800_000_000);
+
+        let records = sink.provider_upserts();
+        let [record] = records.as_slice() else {
+            panic!("expected one provider observation");
+        };
+        assert_eq!(record.retention_secs, None);
+        assert_eq!(record.expires_at_unix_secs, None);
+    }
+
+    #[test]
+    fn websocket_native_observation_publication_uses_lifecycle_clock() {
+        let sink = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
+        let lifecycle =
+            read_inference_lifecycle(upstream_response(StatusCode::OK, b""), sink.clone(), None);
+        let context = PromptCacheObservationContext {
+            upstream_id: Uuid::from_u128(1_126),
+            canonical_model_id: "gpt-5.6".to_owned(),
+            cache_breakpoints: Vec::new(),
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: None,
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "openai".to_owned(),
+                mode: "implicit".to_owned(),
+                ..Default::default()
+            }),
+            sink: sink.clone(),
+            grace_margin_secs: 0,
+        };
+        let usage = UsageCounts {
+            cache_read_input_tokens: 128,
+            cache_read_evidence: usage_parser::CacheTokenEvidence::Positive,
+            ..UsageCounts::default()
+        };
+
+        lifecycle.publish_websocket_provider_cache_observation(&context, &usage);
+
+        let records = sink.provider_upserts();
+        let [record] = records.as_slice() else {
+            panic!("expected one provider observation");
+        };
+        assert_eq!(record.upstream_id, context.upstream_id);
+        assert_eq!(record.canonical_model_id, context.canonical_model_id);
+        assert_eq!(record.observed_cached_tokens, Some(128));
+        assert_eq!(record.last_observed_at_unix_secs, 1_800_000_000);
+    }
+
+    #[test]
     fn hit_observation_uses_sliding_ttl_from_now() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000224").unwrap();
         let now = 1_800_000_000;
@@ -11744,6 +14276,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -11800,6 +14333,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -11843,6 +14377,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 1_200, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -11872,6 +14407,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "tiny", 1_023, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -11913,6 +14449,7 @@ mod tests {
             ],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 1, TtlClass::Ephemeral1h, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -11947,6 +14484,7 @@ mod tests {
             ],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["write"]),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral1h, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -11983,6 +14521,7 @@ mod tests {
                 ttl_class: TtlClass::Ephemeral5m,
                 estimated_prefix_bytes: PrefixBytes::new(2_000),
             }),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12020,6 +14559,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(2, "owner", 5_000, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("nk", 0, TtlClass::Ephemeral5m, 2_000)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12063,6 +14603,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["hit"]),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12104,6 +14645,7 @@ mod tests {
             )],
             cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12142,6 +14684,7 @@ mod tests {
             ],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["b0", "b1", "b2", "b3"]),
             selected_match: Some(selected_match_hit("b1", 1, TtlClass::Ephemeral5m, 2_500)),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12197,6 +14740,7 @@ mod tests {
                 ttl_class: TtlClass::Ephemeral5m,
                 estimated_prefix_bytes: PrefixBytes::new(2_400),
             }),
+            native_cache: None,
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
         };
@@ -12244,6 +14788,7 @@ mod tests {
                 "shallow-eligible",
             ]),
             selected_match: None,
+            native_cache: None,
             grace_margin_secs: 30,
             sink: cache,
         }
@@ -12530,6 +15075,7 @@ mod tests {
                 Some(&request),
                 Some(output),
                 None,
+                None,
             );
             let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
             let context = PromptCacheObservationContext {
@@ -12541,6 +15087,7 @@ mod tests {
                     .official
                     .cacheable_breakpoint_prefix_keys,
                 selected_match: None,
+                native_cache: None,
                 sink: cache.clone(),
                 grace_margin_secs: 30,
             };
@@ -12595,6 +15142,7 @@ mod tests {
                 Some(&request),
                 Some(output),
                 None,
+                None,
             );
             let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
             let mut context = PromptCacheObservationContext {
@@ -12606,6 +15154,7 @@ mod tests {
                     .official
                     .cacheable_breakpoint_prefix_keys,
                 selected_match: None,
+                native_cache: None,
                 sink: cache.clone(),
                 grace_margin_secs: 30,
             };
@@ -12873,6 +15422,7 @@ mod tests {
             cache_breakpoints: vec![cache_breakpoint(3, "cached", 2_400, TtlClass::Ephemeral5m)],
             cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["cached"]),
             selected_match: None,
+            native_cache: None,
             sink: sink.clone(),
             grace_margin_secs: 0,
         };
@@ -12912,6 +15462,7 @@ mod tests {
             upstream_id,
             pending_request_keys: Vec::new(),
             observe_response_keys: false,
+            owner_epoch: None,
             ttl_secs: 3_600,
         };
         let response = lifecycle.relay_response(
@@ -13142,6 +15693,294 @@ mod tests {
     }
 
     #[test]
+    fn gemini_request_aliases_preserve_tier_and_bounded_thinking_metadata() {
+        for alias in ["service_tier", "serviceTier"] {
+            for tier in ["flex", "priority", "FLEX", "future-tier"] {
+                let request = json!({
+                    (alias): tier,
+                    "generationConfig": {"thinkingConfig": {
+                        "thinkingLevel": "LOW",
+                        "thinkingBudget": 1024,
+                        "includeThoughts": true
+                    }},
+                    "reasoning_effort": "wrong-provider"
+                });
+                let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                    &HeaderMap::new(),
+                    Some(&request),
+                    None,
+                    Some(ProviderCapability::GeminiGenerateContent),
+                    None,
+                );
+                let limit = LimitRequest::from_value(
+                    Some(&request),
+                    "gemini-test",
+                    Some(ProviderCapability::GeminiGenerateContent),
+                    &[],
+                    false,
+                );
+                assert_eq!(metadata.requested_service_tier.as_deref(), Some(tier));
+                assert_eq!(limit.service_tier.as_deref(), Some(tier));
+                assert_eq!(metadata.thinking_level.as_deref(), Some("LOW"));
+                assert_eq!(metadata.thinking_budget_tokens, Some(1024));
+                assert_eq!(metadata.reasoning_effort, None);
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_service_tier_alias_precedence_and_malformed_fields_are_conservative() {
+        for (request, expected) in [
+            (
+                json!({"service_tier":"priority","serviceTier":"flex"}),
+                Some("priority"),
+            ),
+            (json!({"service_tier":null,"serviceTier":"flex"}), None),
+            (json!({"serviceTier":null}), None),
+            (json!({"serviceTier":42}), None),
+            (json!({"servicetier":"flex"}), None),
+        ] {
+            let capability = Some(ProviderCapability::GeminiGenerateContent);
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                capability,
+                None,
+            );
+            let limit =
+                LimitRequest::from_value(Some(&request), "gemini-test", capability, &[], false);
+            assert_eq!(metadata.requested_service_tier.as_deref(), expected);
+            assert_eq!(limit.service_tier.as_deref(), expected);
+        }
+    }
+    #[test]
+    fn review_1166_gemini_native_snake_case_thinking_aliases_preserve_metadata() {
+        let request = json!({
+            "generationConfig": {
+                "thinkingConfig": {
+                    "thinking_level": "LOW",
+                    "thinking_budget": 1024
+                }
+            }
+        });
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &HeaderMap::new(),
+            Some(&request),
+            None,
+            Some(ProviderCapability::GeminiGenerateContent),
+            None,
+        );
+        assert_eq!(metadata.thinking_level.as_deref(), Some("LOW"));
+        assert_eq!(metadata.thinking_budget_tokens, Some(1024));
+        assert_eq!(metadata.reasoning_effort, None);
+    }
+
+    #[test]
+    fn review_1166_gemini_thinking_alias_bounds_and_camel_precedence_are_conservative() {
+        let valid_snake = json!({
+            "generationConfig": {
+                "thinkingConfig": {
+                    "thinking_level": "snake",
+                    "thinking_budget": 2048
+                }
+            }
+        });
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &HeaderMap::new(),
+            Some(&valid_snake),
+            None,
+            Some(ProviderCapability::GeminiGenerateContent),
+            None,
+        );
+        assert_eq!(metadata.thinking_level.as_deref(), Some("snake"));
+        assert_eq!(metadata.thinking_budget_tokens, Some(2048));
+
+        for (camel_level, snake_level, expected_level) in [
+            ("CAMEL", "snake", Some("CAMEL")),
+            ("", "snake", None),
+            (&"x".repeat(65), "snake", None),
+        ] {
+            let request = json!({
+                "generationConfig": {"thinkingConfig": {
+                    "thinkingLevel": camel_level,
+                    "thinking_level": snake_level,
+                    "thinking_budget": 0
+                }}
+            });
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+                None,
+            );
+            assert_eq!(metadata.thinking_level.as_deref(), expected_level);
+            assert_eq!(metadata.thinking_budget_tokens, Some(0));
+        }
+
+        for (camel_budget, snake_budget, expected_budget) in [
+            (json!(0), json!(2048), Some(0)),
+            (json!(-1), json!(2048), None),
+            (json!("2048"), json!(2048), None),
+            (json!(9_007_199_254_740_992_u64), json!(2048), None),
+            (
+                json!(9_007_199_254_740_991_u64),
+                json!(2048),
+                Some(9_007_199_254_740_991),
+            ),
+        ] {
+            let request = json!({
+                "generationConfig": {"thinkingConfig": {
+                    "thinking_budget": snake_budget,
+                    "thinkingBudget": camel_budget
+                }}
+            });
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+                None,
+            );
+            assert_eq!(metadata.thinking_budget_tokens, expected_budget);
+        }
+    }
+
+    #[test]
+    fn review_1166_gemini_blank_tiers_are_absent_but_nonblank_raw_values_are_preserved() {
+        for request in [
+            json!({"serviceTier": ""}),
+            json!({"serviceTier": " \t "}),
+            json!({"service_tier": null, "serviceTier": "priority"}),
+            json!({"service_tier": " \n ", "serviceTier": "priority"}),
+            json!({"service_tier": 42, "serviceTier": "priority"}),
+        ] {
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+                None,
+            );
+            let limit = LimitRequest::from_value(
+                Some(&request),
+                "gemini-test",
+                Some(ProviderCapability::GeminiGenerateContent),
+                &[],
+                false,
+            );
+            assert_eq!(metadata.requested_service_tier, None);
+            assert_eq!(limit.service_tier, None);
+        }
+
+        for raw in [" flex ", "Priority-Raw"] {
+            let request = json!({"serviceTier": raw});
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+                None,
+            );
+            let limit = LimitRequest::from_value(
+                Some(&request),
+                "gemini-test",
+                Some(ProviderCapability::GeminiGenerateContent),
+                &[],
+                false,
+            );
+            assert_eq!(metadata.requested_service_tier.as_deref(), Some(raw));
+            assert_eq!(limit.service_tier.as_deref(), Some(raw));
+        }
+    }
+
+    #[test]
+    fn review_1166_non_gemini_metadata_stays_provider_scoped() {
+        let request = json!({
+            "service_tier": "",
+            "serviceTier": "priority",
+            "generationConfig": {"thinkingConfig": {
+                "thinking_level": "LOW",
+                "thinking_budget": 1024
+            }},
+            "reasoning_effort": "medium"
+        });
+        let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &HeaderMap::new(),
+            Some(&request),
+            None,
+            Some(ProviderCapability::OpenaiChatCompletions),
+            None,
+        );
+        assert_eq!(metadata.requested_service_tier.as_deref(), Some(""));
+        assert_eq!(metadata.thinking_level, None);
+        assert_eq!(metadata.thinking_budget_tokens, None);
+        assert_eq!(metadata.reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn gemini_thinking_level_ignores_malformed_and_unbounded_values() {
+        for level in [
+            json!(null),
+            json!(false),
+            json!(3),
+            json!(""),
+            json!("x".repeat(65)),
+        ] {
+            let request = json!({"generationConfig": {"thinkingConfig": {
+                "thinkingLevel": level, "thinkingBudget": 9007199254740992_u64
+            }}});
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+                None,
+            );
+            assert_eq!(metadata.thinking_level, None);
+            assert_eq!(metadata.thinking_budget_tokens, None);
+        }
+        for level in [
+            "LOW".to_owned(),
+            "low".to_owned(),
+            "future-level".to_owned(),
+            "x".repeat(64),
+        ] {
+            let request = json!({"generationConfig": {"thinkingConfig": {"thinkingLevel": level}}});
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+                None,
+            );
+            assert_eq!(metadata.thinking_level.as_deref(), Some(level.as_str()));
+            assert_eq!(metadata.reasoning_effort, None);
+        }
+        for capability in [
+            ProviderCapability::AnthropicMessages,
+            ProviderCapability::OpenaiChatCompletions,
+            ProviderCapability::OpenaiResponses,
+            ProviderCapability::GeminiOpenaiChatCompletions,
+        ] {
+            let request = json!({
+                "serviceTier": "priority",
+                "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}
+            });
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(capability),
+                None,
+            );
+            assert_eq!(metadata.thinking_level, None);
+            assert_eq!(metadata.requested_service_tier, None);
+        }
+    }
+
+    #[test]
     fn request_cache_metadata_preserves_enabled_thinking_budgets_across_badge_boundaries() {
         // Given
         let headers = HeaderMap::new();
@@ -13313,6 +16152,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(capability),
+                None,
             );
             assert_eq!(
                 metadata.thinking_budget_tokens, expected_budget,
@@ -13392,6 +16232,7 @@ mod tests {
                 Some(&request),
                 None,
                 Some(capability),
+                None,
             );
             assert_eq!(metadata.thinking_budget_tokens, None, "{case} budget");
             assert_eq!(metadata.reasoning_effort, None, "{case} effort");
@@ -13410,6 +16251,7 @@ mod tests {
         let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
             &HeaderMap::new(),
             Some(&request),
+            None,
             None,
             None,
         );
@@ -14396,6 +17238,7 @@ mod tests {
 
     struct RecordingPromptCacheObservationSink {
         records: Mutex<Vec<PromptCacheObservationRecord>>,
+        provider_records: Mutex<Vec<ProviderPromptCacheObservationRecord>>,
         clock_now: u64,
         grace_secs: u64,
     }
@@ -14403,6 +17246,7 @@ mod tests {
         fn new(_entries: Vec<WarmCacheEntry>) -> Self {
             Self {
                 records: Mutex::new(Vec::new()),
+                provider_records: Mutex::new(Vec::new()),
                 clock_now: 0,
                 grace_secs: 30,
             }
@@ -14418,6 +17262,12 @@ mod tests {
         fn upserts(&self) -> Vec<PromptCacheObservationRecord> {
             self.records.lock().expect("records lock").clone()
         }
+        fn provider_upserts(&self) -> Vec<ProviderPromptCacheObservationRecord> {
+            self.provider_records
+                .lock()
+                .expect("provider records lock")
+                .clone()
+        }
         fn clock_now_unix_secs(&self) -> u64 {
             self.clock_now
         }
@@ -14431,6 +17281,16 @@ mod tests {
             record: PromptCacheObservationRecord,
         ) -> Result<(), PromptCacheObservationEnqueueError> {
             self.records.lock().expect("records lock").push(record);
+            Ok(())
+        }
+        fn enqueue_provider(
+            &self,
+            record: ProviderPromptCacheObservationRecord,
+        ) -> Result<(), PromptCacheObservationEnqueueError> {
+            self.provider_records
+                .lock()
+                .expect("provider records lock")
+                .push(record);
             Ok(())
         }
     }
@@ -15583,6 +18443,15 @@ mod tests {
                 message: "affinity store down".to_owned(),
             })
         }
+        async fn read_upstream_owner_epoch(
+            &self,
+            _upstream_id: cc_lb_storage_api::UpstreamRecordId,
+            _expected_spec_revision: u64,
+        ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+            Err(cc_lb_storage_api::StorageError::Unavailable {
+                message: "affinity store down".to_owned(),
+            })
+        }
 
         async fn bind_upstream_affinities(
             &self,
@@ -15804,7 +18673,7 @@ mod tests {
         for (provider, path) in [
             (Provider::Anthropic, "/v1/files"),
             (Provider::Openai, "/v1/responses/resp_1/cancel"),
-            (Provider::Gemini, "/v1beta/cachedContents"),
+            (Provider::Gemini, "/v1beta/cachedContents/unknown"),
             (Provider::Anthropic, "/v1/responses"),
         ] {
             let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
@@ -16396,6 +19265,54 @@ mod tests {
     }
 
     #[test]
+    fn proxy_generated_stream_error_frames_use_selected_provider_envelope() {
+        for capability in [
+            ProviderCapability::AnthropicMessages,
+            ProviderCapability::OpenaiResponses,
+            ProviderCapability::OpenaiResponsesCompact,
+            ProviderCapability::GeminiGenerateContent,
+        ] {
+            let frame = make_stream_error_frame(
+                capability,
+                &ResponsesSseErrorContext::default(),
+                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                "synthetic relay failure",
+                false,
+            );
+            let text = std::str::from_utf8(&frame).expect("SSE frame is UTF-8");
+            assert!(text.ends_with("\n\n"));
+            if matches!(
+                capability,
+                ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact
+            ) {
+                assert!(text.starts_with("event: response.failed\ndata: "));
+                let payload = text
+                    .strip_prefix("event: response.failed\ndata: ")
+                    .and_then(|value| value.strip_suffix("\n\n"))
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                    .expect("Responses failure data is JSON");
+                assert_eq!(payload["type"], "response.failed");
+                assert_eq!(payload["sequence_number"], 0);
+                assert_eq!(payload["response"]["status"], "failed");
+                assert_eq!(
+                    payload["response"]["error"]["message"],
+                    "synthetic relay failure"
+                );
+                assert!(payload.get("error").is_none(), "{payload}");
+            } else {
+                assert!(text.starts_with("event: error\ndata: "));
+                assert!(
+                    text.contains("\"message\":\"synthetic relay failure\""),
+                    "{text}"
+                );
+                if capability == ProviderCapability::AnthropicMessages {
+                    assert!(!text.contains("\"code\""), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn usage_shape_completion_keeps_provider_and_payload_boundaries() {
         let done = parse_sse_event(b"data: [DONE]\n\n");
         let finished =
@@ -16414,18 +19331,18 @@ mod tests {
                 &unfinished,
                 false
             ));
-            assert!(transformed_sse_completes_response(
-                capability,
-                b"data: [DONE]\n\n",
-            ));
-            assert!(!transformed_sse_completes_response(
-                capability,
-                b"data: [DONE]",
-            ));
-            assert!(!transformed_sse_completes_response(
-                capability,
-                b"data: {\"choices\":[{\"finish_reason\":null}]}\n\n",
-            ));
+            for (bytes, completes_response) in [
+                (b"data: [DONE]\n\n".as_slice(), true),
+                (b"data: [DONE]".as_slice(), false),
+                (
+                    b"data: {\"choices\":[{\"finish_reason\":null}]}\n\n".as_slice(),
+                    false,
+                ),
+            ] {
+                let output = ResponsesSseErrorContext::default()
+                    .observe_transformed_output(bytes, capability);
+                assert_eq!(output.completes_response, completes_response);
+            }
         }
         for capability in [
             ProviderCapability::AnthropicMessages,
@@ -17881,5 +20798,193 @@ mod tests {
         assert!(sse_bytes_may_carry_anthropic_provider_state(
             &buffer[probe_start..]
         ));
+    }
+    fn sticky_metadata(
+        session_id: &str,
+        request_kind: &str,
+        claude_agent_id: Option<&str>,
+    ) -> RequestCacheMetadata {
+        RequestCacheMetadata {
+            thread_id: Some(session_id.to_owned()),
+            observed_session_id: Some(session_id.to_owned()),
+            request_kind: Some(request_kind.to_owned()),
+            claude_agent_id: claude_agent_id.map(ToOwned::to_owned),
+            ..RequestCacheMetadata::default()
+        }
+    }
+
+    #[test]
+    fn thread_sticky_subagent_latch_seeds_omp_and_senpi_and_rewrites_main() {
+        let latch = ThreadStickySubagentLatch::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-session-affinity"),
+            HeaderValue::from_static("sticky-thread"),
+        );
+        let omp = json!({
+            "system": "You are omp's trusted coding assistant.",
+            "messages": [{"role": "user", "content": "Complete assignment thoroughly:\n\n# Target"}]
+        });
+        let mut omp_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            Some(&omp),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(omp_metadata.request_kind.as_deref(), Some("subagent"));
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", Some(&omp), &mut omp_metadata);
+
+        let senpi = json!({
+            "system": "You are senpi, a coding agent.",
+            "messages": [{"role": "user", "content": "Task: Review the auth change"}]
+        });
+        let mut senpi_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            Some(&senpi),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(senpi_metadata.request_kind.as_deref(), Some("subagent"));
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-b",
+            Some(&senpi),
+            &mut senpi_metadata,
+        );
+
+        let ordinary = json!({
+            "system": "You are omp's trusted coding assistant.",
+            "messages": [{"role": "user", "content": "continue"}]
+        });
+        let mut ordinary_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            Some(&ordinary),
+            None,
+            None,
+            None,
+        );
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&ordinary),
+            &mut ordinary_metadata,
+        );
+        assert_eq!(ordinary_metadata.request_kind.as_deref(), Some("subagent"));
+
+        let mut isolated_metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+            &headers,
+            Some(&ordinary),
+            None,
+            None,
+            None,
+        );
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-c",
+            Some(&ordinary),
+            &mut isolated_metadata,
+        );
+        assert_eq!(isolated_metadata.request_kind.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn thread_sticky_subagent_latch_preserves_one_shot_and_exclusion_results() {
+        let latch = ThreadStickySubagentLatch::default();
+        let seed = json!({
+            "messages": [{"role": "user", "content": "Complete assignment thoroughly:\n\n# Target"}]
+        });
+        let mut seed_metadata = sticky_metadata("sticky-thread", "subagent", None);
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", Some(&seed), &mut seed_metadata);
+        for request_kind in [
+            "compaction",
+            "recap",
+            "session_title",
+            "auto_thinking",
+            "side",
+            "advisor",
+            "notification",
+            "look_at",
+        ] {
+            let mut metadata = sticky_metadata("sticky-thread", request_kind, None);
+            apply_thread_sticky_subagent_latch(&latch, "principal-a", None, &mut metadata);
+            assert_eq!(metadata.request_kind.as_deref(), Some(request_kind));
+        }
+        let mut explicit_main = sticky_metadata("sticky-thread", "main", None);
+        explicit_main.explicit_request_class = Some("main".to_owned());
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", None, &mut explicit_main);
+        assert_eq!(explicit_main.request_kind.as_deref(), Some("main"));
+
+        let hermes = json!({
+            "system": "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
+            "messages": [{"role": "user", "content": "Review the conversation above and consider saving to memory if appropriate."}]
+        });
+        let mut hermes_metadata = sticky_metadata("hermes-thread", "subagent", None);
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&hermes),
+            &mut hermes_metadata,
+        );
+        let mut hermes_ordinary = sticky_metadata("hermes-thread", "main", None);
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&hermes),
+            &mut hermes_ordinary,
+        );
+        assert_eq!(hermes_ordinary.request_kind.as_deref(), Some("main"));
+
+        let mut claude_seed = sticky_metadata("claude-thread", "subagent", Some("agent-1"));
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", Some(&seed), &mut claude_seed);
+        let mut claude_ordinary = sticky_metadata("claude-thread", "main", None);
+        apply_thread_sticky_subagent_latch(
+            &latch,
+            "principal-a",
+            Some(&seed),
+            &mut claude_ordinary,
+        );
+        assert_eq!(claude_ordinary.request_kind.as_deref(), Some("main"));
+
+        let mut no_thread = RequestCacheMetadata {
+            request_kind: Some("subagent".to_owned()),
+            ..RequestCacheMetadata::default()
+        };
+        apply_thread_sticky_subagent_latch(&latch, "principal-a", Some(&seed), &mut no_thread);
+        assert!(!latch.observe(
+            ThreadStickySubagentKey {
+                principal_id: "principal-a".to_owned(),
+                observed_session_id: "no-thread".to_owned(),
+            },
+            false,
+        ));
+    }
+
+    #[test]
+    fn thread_sticky_subagent_latch_evicts_oldest_entry_per_shard() {
+        let latch = ThreadStickySubagentLatch::default();
+        let first = ThreadStickySubagentKey {
+            principal_id: "principal".to_owned(),
+            observed_session_id: "thread-0".to_owned(),
+        };
+        let shard = ThreadStickySubagentLatch::shard_index(&first);
+        let mut keys = vec![first];
+        let mut index = 1;
+        while keys.len() <= MAX_THREAD_STICKY_SUBAGENTS_PER_SHARD {
+            let key = ThreadStickySubagentKey {
+                principal_id: "principal".to_owned(),
+                observed_session_id: format!("thread-{index}"),
+            };
+            index += 1;
+            if ThreadStickySubagentLatch::shard_index(&key) == shard {
+                keys.push(key);
+            }
+        }
+        for key in &keys {
+            assert!(latch.observe(key.clone(), true));
+        }
+        assert!(!latch.observe(keys[0].clone(), false));
+        assert!(latch.observe(keys[1].clone(), false));
     }
 }

@@ -38,8 +38,8 @@ use cc_lb_control::{
     spawn_audit_writer,
 };
 use cc_lb_engine::realtime_websocket::{
-    RealtimeUsage, RealtimeWebSocketKind, RealtimeWebSocketSession, RealtimeWebSocketTarget,
-    gemini_setup_model,
+    RealtimeStreamMetrics, RealtimeUsage, RealtimeWebSocketKind, RealtimeWebSocketSession,
+    RealtimeWebSocketTarget, RealtimeWebSocketTermination, gemini_setup_model,
 };
 use cc_lb_engine::responses_websocket::{
     ResponsesWebSocketGateway, WebSocketDispatch, WebSocketError,
@@ -2411,6 +2411,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_clock::Clock) -> cc_lb_pricing::Cat
         models.insert(
             (*name).to_owned(),
             Pricing {
+                native: None,
                 model: (*name).to_owned(),
                 input_per_million_usd: UsdPerMillion::from_micros_usd(*input),
                 output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
@@ -2545,13 +2546,31 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             "/openai",
             Router::new()
                 .route("/v1/responses", get(responses_websocket_handler))
-                .route("/v1/realtime", get(openai_realtime_websocket_handler))
+                .route(
+                    "/v1/realtime",
+                    get(openai_realtime_websocket_handler).layer(
+                        cc_lb_observability::trace_layer().make_span_with(
+                            cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                proxy_route_template,
+                            ),
+                        ),
+                    ),
+                )
                 .layer(Extension(ProviderScope(cc_lb_domain::Provider::Openai))),
         )
         .nest(
             "/gemini",
             Router::new()
-                .route("/ws/{*path}", get(gemini_live_websocket_handler))
+                .route(
+                    "/ws/{*path}",
+                    get(gemini_live_websocket_handler).layer(
+                        cc_lb_observability::trace_layer().make_span_with(
+                            cc_lb_observability::ProxyMakeSpan::with_route_template(
+                                proxy_route_template,
+                            ),
+                        ),
+                    ),
+                )
                 .layer(Extension(ProviderScope(cc_lb_domain::Provider::Gemini))),
         )
         .with_state(state.clone());
@@ -2758,7 +2777,12 @@ fn readiness(state: &ProxyState) -> Readiness {
     }
     let oauth_credentials_broken = view.upstreams_snapshot().iter().any(|upstream| {
         upstream_live(upstream)
-            && upstream.kind == UpstreamKind::AnthropicOauth
+            && matches!(
+                upstream.kind,
+                UpstreamKind::AnthropicOauth
+                    | UpstreamKind::OpenaiOauth
+                    | UpstreamKind::GeminiOauth
+            )
             && !oauth_credentials_decryptable(aead, upstream)
     });
 
@@ -2831,6 +2855,7 @@ async fn responses_websocket_handler(
     State(state): State<ProxyState>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    provider_scope: Option<Extension<ProviderScope>>,
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
     // WebSocket routes intentionally bypass the normal drain middleware.
@@ -2852,7 +2877,11 @@ async fn responses_websocket_handler(
         Err(error) => {
             return state
                 .lifecycle
-                .reject_responses_websocket_authentication(&error, "/v1/responses");
+                .reject_responses_websocket_authentication_for_provider(
+                    &error,
+                    uri.path(),
+                    provider_scope.as_ref().map(|scope| scope.0.0),
+                );
         }
     };
     let slots: usize = state
@@ -2867,6 +2896,7 @@ async fn responses_websocket_handler(
         state.body_caps.messages,
         slots,
     )
+    .with_provider(provider_scope.as_ref().map(|scope| scope.0.0))
     .with_downstream_query(uri.query().and_then(|query| {
         let scrubbed = scrub_query_api_key(query);
         (!scrubbed.is_empty()).then_some(scrubbed.into_owned())
@@ -2936,6 +2966,7 @@ async fn connect_provider_websocket(
 ) -> Result<
     (
         WebSocketStream<MaybeTlsStream<TcpStream>>,
+        HeaderMap,
         cc_lb_engine::OwnedBulkheadGuard,
     ),
     WebSocketError,
@@ -2962,9 +2993,10 @@ async fn connect_provider_websocket(
     )
     .await;
     match result {
-        Ok(Ok((stream, _response))) => {
+        Ok(Ok((stream, response))) => {
+            let (response_parts, _) = response.into_parts();
             permit.record_success();
-            Ok((stream, bulkhead_guard))
+            Ok((stream, response_parts.headers, bulkhead_guard))
         }
         Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
             let error = provider_websocket_error_from_http(*response);
@@ -3025,7 +3057,7 @@ async fn start_responses_provider(
         bulkhead_guard,
         events,
     } = params;
-    let (upstream, bulkhead_guard) =
+    let (upstream, _response_headers, bulkhead_guard) =
         connect_provider_websocket(state, upstream_id, request, bulkhead_guard).await?;
     let (sink, mut stream) = upstream.split();
     let task = tokio::spawn(async move {
@@ -3581,7 +3613,14 @@ async fn lifecycle_handler(
     let auth = match state.lifecycle.authenticate(&parts.headers).await {
         Ok(auth) => auth,
         Err(error) => {
-            return cc_lb_engine::reject_unauthenticated(&error, observer.as_ref());
+            let provider = parts.extensions.get::<ProviderScope>().map(|scope| scope.0);
+            return cc_lb_engine::reject_unauthenticated_for_route(
+                &error,
+                &parts.method,
+                parts.uri.path(),
+                provider,
+                observer.as_ref(),
+            );
         }
     };
     // Record the authenticated principal before the body is read: requests
@@ -4155,6 +4194,7 @@ mod tests {
         snapshot.models.insert(
             TIER_PRICING_TEST_MODEL.to_owned(),
             cc_lb_pricing::Pricing {
+                native: None,
                 model: TIER_PRICING_TEST_MODEL.to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
@@ -4845,6 +4885,116 @@ mod tests {
         assert_admin_state(router, "ready").await;
     }
 
+    #[tokio::test]
+    async fn readiness_reports_undecryptable_openai_and_gemini_oauth_as_degraded_when_api_key_is_ready()
+     {
+        for kind in [
+            cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth,
+            cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth,
+        ] {
+            let api_key = websocket_upstream(
+                401,
+                "ready-api-key",
+                Url::parse("http://api-key.example").expect("api-key URL"),
+            );
+            let mut oauth = websocket_upstream(
+                402,
+                "broken-oauth",
+                Url::parse("http://oauth.example").expect("oauth URL"),
+            );
+            oauth.kind = kind;
+            let statuses = cc_lb_control::UpstreamStatusSnapshot {
+                entries: HashMap::from([
+                    (
+                        api_key.name.clone(),
+                        cc_lb_control::UpstreamStatusEntry {
+                            status: cc_lb_control::ApplyStatus::Active,
+                            last_apply_error: None,
+                            last_apply_at_unix_secs: 0,
+                        },
+                    ),
+                    (
+                        oauth.name.clone(),
+                        cc_lb_control::UpstreamStatusEntry {
+                            status: cc_lb_control::ApplyStatus::Active,
+                            last_apply_error: None,
+                            last_apply_at_unix_secs: 0,
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            };
+            let state = websocket_test_state(
+                vec![api_key, oauth],
+                TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(WebSocketTestSignerFactory),
+                Arc::new(FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+            state.server_state.transition_to_ready();
+            let view = state.dynamic_view.load();
+            state.dynamic_view.store(
+                cc_lb_control::DynamicViewBuilder::from_view(&view)
+                    .upstream_status_snapshot(Arc::new(statuses))
+                    .build(),
+            );
+            assert!(matches!(
+                readiness(&state),
+                Readiness::Ready {
+                    degraded: Some("oauth_credentials_not_decryptable")
+                }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_blocks_when_only_openai_or_gemini_oauth_is_undecryptable() {
+        for kind in [
+            cc_lb_storage_api::upstream::UpstreamKind::OpenaiOauth,
+            cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth,
+        ] {
+            let mut oauth = websocket_upstream(
+                403,
+                "only-broken-oauth",
+                Url::parse("http://oauth.example").expect("oauth URL"),
+            );
+            oauth.kind = kind;
+            let statuses = cc_lb_control::UpstreamStatusSnapshot {
+                entries: HashMap::from([(
+                    oauth.name.clone(),
+                    cc_lb_control::UpstreamStatusEntry {
+                        status: cc_lb_control::ApplyStatus::Active,
+                        last_apply_error: None,
+                        last_apply_at_unix_secs: 0,
+                    },
+                )]),
+                ..Default::default()
+            };
+            let state = websocket_test_state(
+                vec![oauth],
+                TerminalStrategy::FirstPick,
+                DrainController::new(),
+                Arc::new(WebSocketTestSignerFactory),
+                Arc::new(FixtureKeyStore),
+                vec!["*".to_owned()],
+            )
+            .await;
+            state.server_state.transition_to_ready();
+            let view = state.dynamic_view.load();
+            state.dynamic_view.store(
+                cc_lb_control::DynamicViewBuilder::from_view(&view)
+                    .upstream_status_snapshot(Arc::new(statuses))
+                    .build(),
+            );
+            assert!(matches!(
+                readiness(&state),
+                Readiness::NotReady("no_ready_upstream")
+            ));
+        }
+    }
+
     #[test]
     fn default_fallback_populates_empty_catalog() {
         let catalog = cc_lb_pricing::PriceCatalog::new_empty();
@@ -5050,6 +5200,7 @@ mod tests {
         models.insert(
             "operator-model-a".to_owned(),
             cc_lb_pricing::Pricing {
+                native: None,
                 model: "operator-model-a".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
@@ -5873,7 +6024,7 @@ mod tests {
             );
             assert_eq!(reservation_ids.len(), 1);
             assert!(!engine.refund_by_id(&reservation_ids[0]));
-            assert!(!engine.reconcile_by_id(&reservation_ids[0], 0, 0, 0));
+            assert!(!engine.reconcile_by_id(&reservation_ids[0], 0, 0, Some(0)));
             let headers = engine.headers_for(&record.key_hash_b64, TEST_PRINCIPAL);
             assert!(
                 headers.iter().any(|(name, value)| {

@@ -23,6 +23,7 @@ impl Lifecycle {
         }
         RealtimeWebSocketObservation {
             observer,
+            completion_observer: Arc::clone(&self.completion_observer),
             request_id,
         }
     }
@@ -40,8 +41,25 @@ impl Lifecycle {
         let RealtimeWebSocketTarget { path, query, model } = target;
         let RealtimeWebSocketObservation {
             observer,
+            completion_observer,
             request_id,
         } = observation;
+        // Realtime setup frames are provider control payloads, not the
+        // request-body formats handled by the shared metadata fallbacks.
+        // Header identity is still parsed after authentication, with the
+        // canonical twelve-header precedence and 512-byte bounds.
+        let identity = request_identity_metadata(headers, None);
+        let thread_id = identity.thread_id.clone();
+        let observed_session_id = identity.observed_session_id.clone();
+        let client_app = identity.client_app.clone();
+        let session_id_source = identity.session_id_source.clone();
+        let request_kind = Some(
+            match kind {
+                RealtimeWebSocketKind::Openai => "realtime",
+                RealtimeWebSocketKind::Gemini => "live",
+            }
+            .to_owned(),
+        );
         if let Some(observer) = observer.as_ref() {
             observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: observer.event_id().to_owned(),
@@ -54,20 +72,25 @@ impl Lifecycle {
                     cache_control_block_count: None,
                     thinking_budget_tokens: None,
                     reasoning_effort: None,
+                    thinking_level: None,
                     cache_breakpoints: Vec::new(),
                     cache_prefix_hash: None,
-                    thread_id: None,
-                    observed_session_id: None,
-                    request_kind: None,
+                    thread_id: thread_id.clone(),
+                    observed_session_id,
+                    request_kind,
+                    // These fields describe Claude's request ancestry. Live
+                    // protocols must not inherit values from similarly named
+                    // headers supplied by a non-Claude client.
                     claude_agent_id: None,
                     claude_parent_agent_id: None,
                     parent_session_id: None,
-                    client_app: None,
-                    session_id_source: None,
+                    client_app,
+                    session_id_source,
                     message_id: None,
                     message_index: None,
                     message_count: None,
                     cache_control_message_indices: Vec::new(),
+                    native_cache: None,
                 }),
             });
         }
@@ -128,6 +151,7 @@ impl Lifecycle {
                 .map(|query| query.into_owned());
             let ctx = RequestContext::builder()
                 .request_id(request_id)
+                .thread_id(thread_id)
                 .downstream_headers(clean_headers)
                 .method(http::Method::GET)
                 .path(path.to_owned())
@@ -214,7 +238,7 @@ impl Lifecycle {
                 parsed: Ok(body),
                 json_parse_ms: 0.0,
             };
-            let mut limit = self
+            let mut limit = match self
                 .reserve_limit(
                     &view.principal_view,
                     &ctx,
@@ -237,13 +261,28 @@ impl Lifecycle {
                     },
                 )
                 .await
-                .map_err(|error| {
-                    WebSocketError::new(
-                        error.response.status().as_u16(),
+            {
+                Ok(limit) => limit,
+                Err(LimitRejectionErr { response, info }) => {
+                    if let Some(observer) = observer.as_ref() {
+                        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                            event_id: observer.event_id().to_owned(),
+                            decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                                reason: info.reason_label.clone(),
+                                subject: info.subject,
+                                request_summary: info.request_summary,
+                                route_summary: info.route_summary,
+                                limit_violation: info.limit_violation,
+                            },
+                        });
+                    }
+                    return Err(WebSocketError::new(
+                        response.status().as_u16(),
                         error_codes::LIMIT_REJECTED,
-                        error.info.reason_label,
-                    )
-                })?;
+                        info.reason_label,
+                    ));
+                }
+            };
             if let Some(observer) = observer.as_ref() {
                 observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                     event_id: observer.event_id().to_owned(),
@@ -317,9 +356,46 @@ impl Lifecycle {
                 url,
                 headers: signed_headers,
                 observer: observer.clone(),
+                completion_observer: Arc::clone(&completion_observer),
+                stream_span: tracing::info_span!(
+                    "proxy.realtime_stream",
+                    upstream_id = %id,
+                    upstream_name = %record.name,
+                    provider = ?kind.provider(),
+                    principal_id = %principal.id,
+                    model = %model.unwrap_or_default(),
+                    otel.status_code = tracing::field::Empty,
+                    http.response.status_code = tracing::field::Empty,
+                    cc_lb.request.outcome = tracing::field::Empty,
+                    cc_lb.request.duration_ms = tracing::field::Empty,
+                    cc_lb.request.finalize_ms = tracing::field::Empty,
+                    cc_lb.request.unaccounted_ms = tracing::field::Empty,
+                    stream.outcome = tracing::field::Empty,
+                    error.cause = tracing::field::Empty,
+                    error.chain = tracing::field::Empty,
+                    error.io.kind = tracing::field::Empty,
+                    error.io.os_error = tracing::field::Empty,
+                    error.type = tracing::field::Empty,
+                    stream_first_output_ms = tracing::field::Empty,
+                    stream_last_output_ms = tracing::field::Empty,
+                    stream_event_count = tracing::field::Empty,
+                    stream_total_ms = tracing::field::Empty,
+                    ping_count = tracing::field::Empty,
+                    total_bytes = tracing::field::Empty,
+                    stream_inter_output_avg_ms = tracing::field::Empty,
+                    provider_session_id = tracing::field::Empty,
+                    provider_connection_id = tracing::field::Empty,
+                    websocket.close.code = tracing::field::Empty,
+                    websocket.close.reason = tracing::field::Empty,
+                ),
                 reservation: limit.as_mut().and_then(|limit| limit.reservation.take()),
                 limit_engine: self.limit_engine.clone(),
                 model: model.unwrap_or_default().to_owned(),
+                principal: principal.clone(),
+                upstream: routed.route.upstream.clone(),
+                path: path.to_owned(),
+                dialect: routed.route.dialect.clone(),
+                provider_request_id: None,
             })
         }
         .await;
@@ -350,5 +426,39 @@ mod tests {
     fn realtime_admission_uses_image_rates_only_for_openai() {
         assert!(realtime_use_image_rates(RealtimeWebSocketKind::Openai));
         assert!(!realtime_use_image_rates(RealtimeWebSocketKind::Gemini));
+    }
+
+    #[test]
+    fn realtime_identity_uses_shared_bounded_header_precedence() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", HeaderValue::from_static("fallback"));
+        headers.insert("x-opencode-session", HeaderValue::from_static("opencode"));
+        headers.insert("x-claude-session-id", HeaderValue::from_static("claude"));
+        headers.insert("x-app", HeaderValue::from_static("voice-client"));
+        headers.insert(
+            "x-claude-code-agent-id",
+            HeaderValue::from_static("not-claude"),
+        );
+
+        let identity = request_identity_metadata(&headers, None);
+        assert_eq!(identity.thread_id.as_deref(), Some("claude"));
+        assert_eq!(identity.observed_session_id.as_deref(), Some("claude"));
+        assert_eq!(
+            identity.session_id_source.as_deref(),
+            Some("x-claude-session-id")
+        );
+        assert_eq!(identity.client_app.as_deref(), Some("voice-client"));
+        assert_eq!(identity.claude_agent_id.as_deref(), Some("not-claude"));
+
+        headers.insert(
+            "x-claude-session-id",
+            HeaderValue::from_str(&"x".repeat(MAX_IDENTITY_VALUE_BYTES + 1)).unwrap(),
+        );
+        let identity = request_identity_metadata(&headers, None);
+        assert_eq!(identity.thread_id.as_deref(), Some("opencode"));
+        assert_eq!(
+            identity.session_id_source.as_deref(),
+            Some("x-opencode-session")
+        );
     }
 }

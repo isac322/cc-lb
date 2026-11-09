@@ -25,7 +25,6 @@ import { PrincipalProviderTable } from './PrincipalProviderTable';
 import { ProviderPoolCard } from './ProviderPoolCard';
 import { mergePrincipalProviderUsage } from './principalMerge';
 
-const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
 function LiveRequestsSection({
   principalNameMap,
   providers,
@@ -67,8 +66,6 @@ function LiveRequestsSection({
       <RequestEventsFeed
         feed={feed}
         principalNameMap={principalNameMap}
-        columns={OVERVIEW_TABLE_COLUMNS}
-        minWidthClass="min-w-[1080px]"
         emptyTitle="No recent requests"
         tableContainerClassName="relative min-w-0 max-md:-mx-4 md:glass md:rounded-md min-h-48 h-96 max-h-[60vh] overflow-auto"
       />

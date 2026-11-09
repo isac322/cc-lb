@@ -92,8 +92,13 @@ pub struct RequestEventPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
     pub service_tier: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,11 +113,18 @@ pub struct RequestEventPartial {
     pub cost_cache_creation_1h_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_cache_read_micros: Option<i64>,
-
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_30m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_12h_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_read_ms: Option<u64>,
@@ -321,5 +333,28 @@ mod tests {
         let legacy: RequestEventPartial =
             serde_json::from_value(legacy).expect("deserialize legacy partial");
         assert_eq!(legacy.tool_use_prompt_tokens, None);
+    }
+
+    #[test]
+    fn request_event_partial_thinking_tokens_roundtrip_and_legacy_default() {
+        let partial = RequestEventPartial {
+            thinking_tokens: Some(123),
+            ..RequestEventPartial::default()
+        };
+        let json = serde_json::to_value(&partial).expect("serialize thinking usage");
+        assert_eq!(json["thinking_tokens"], 123);
+        let restored: RequestEventPartial =
+            serde_json::from_value(json).expect("deserialize thinking usage");
+        assert_eq!(restored.thinking_tokens, Some(123));
+
+        let mut legacy =
+            serde_json::to_value(RequestEventPartial::default()).expect("serialize legacy partial");
+        legacy
+            .as_object_mut()
+            .expect("request event partial serializes as an object")
+            .remove("thinking_tokens");
+        let legacy: RequestEventPartial =
+            serde_json::from_value(legacy).expect("deserialize legacy partial");
+        assert_eq!(legacy.thinking_tokens, None);
     }
 }

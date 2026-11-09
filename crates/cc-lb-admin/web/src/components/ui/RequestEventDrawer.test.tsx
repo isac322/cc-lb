@@ -92,7 +92,7 @@ describe('RequestEventDrawer', () => {
     expect(screen.getAllByText('150 ms').length).toBeGreaterThan(0);
   });
 
-  it('keeps same-request timeline data visible until final detail arrives', async () => {
+  it('keeps same-request timeline and thinking level visible until final detail arrives', async () => {
     let resolveDetail: ((response: Response) => void) | undefined;
     vi.stubGlobal(
       'fetch',
@@ -112,6 +112,8 @@ describe('RequestEventDrawer', () => {
       auth_ms: 10,
       route_ms: 5,
       upstream_ttfb_ms: 80,
+      thinking_level: 'low',
+      thinking_budget_tokens: 18000,
       _phase: 'partial',
     } satisfies RequestEventWithPhase;
     const { rerender } = render(
@@ -148,6 +150,9 @@ describe('RequestEventDrawer', () => {
     expect(pendingTimeline.querySelectorAll('.skeleton')).toHaveLength(0);
     expect(screen.getByText('Internal pre')).toBeDefined();
     expect(pendingTimeline.textContent).toContain('Upstream');
+    expect(
+      screen.getByText('Thinking level').parentElement?.textContent,
+    ).toContain('low');
 
     await waitFor(() => expect(resolveDetail).toBeDefined());
     const resolvePendingDetail = resolveDetail;
@@ -162,6 +167,9 @@ describe('RequestEventDrawer', () => {
           upstream_ttfb_ms: 90,
           upstream_body_ms: 40,
           body_bytes: 2048,
+          thinking_level: 'high',
+          thinking_tokens: 8200,
+          service_tier: 'priority',
         }),
       );
       await Promise.resolve();
@@ -177,6 +185,15 @@ describe('RequestEventDrawer', () => {
     const bodyRow = screen.getByText('Body bytes').parentElement;
     expect(bodyRow?.querySelectorAll('.skeleton')).toHaveLength(0);
     expect(bodyRow?.textContent).toContain('2.0 KB');
+    expect(
+      screen.getByText('Thinking level').parentElement?.textContent,
+    ).toContain('high');
+    expect(screen.getByText('Reasoning').parentElement?.textContent).toContain(
+      'high · 8.2k',
+    );
+    expect(
+      screen.getByText('Service tier').parentElement?.textContent,
+    ).toContain('priority');
   });
 
   it('does not speculate upstream failure while detail-only fields are pending', () => {
@@ -847,6 +864,75 @@ describe('RequestEventDrawer', () => {
 
       expect(screen.getByText('high · 8.2k')).toBeDefined();
     });
+    it('renders Gemini thinking level separately from budget and observed service tier', () => {
+      const event = {
+        event_id: 'evt_gemini_metadata',
+        request_id: 'req_gemini_metadata',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 200,
+        duration_ms: 100,
+        model: 'gemini-2.5-pro',
+        thinking_level: 'high',
+        thinking_budget_tokens: 18000,
+        thinking_tokens: 8200,
+        service_tier: 'priority',
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      render(
+        <RequestEventDrawer
+          event={event}
+          principalName={null}
+          onClose={() => {}}
+        />,
+      );
+
+      expect(
+        screen.getByText('Thinking level').parentElement?.textContent,
+      ).toContain('high');
+      expect(
+        screen.getByText('Reasoning').parentElement?.textContent,
+      ).toContain('high · 8.2k');
+      expect(
+        screen.getByText('Service tier').parentElement?.textContent,
+      ).toContain('priority');
+    });
+    it.each([
+      ['claude-sonnet-4-5', 'max', undefined],
+      ['gpt-5', 'high', undefined],
+      ['gemini-2.5-pro', undefined, null],
+    ] as const)(
+      'keeps existing reasoning for %s without inventing a thinking level',
+      (model, reasoningEffort, thinkingLevel) => {
+        const event = {
+          event_id: 'evt_no_level',
+          request_id: 'req_no_level',
+          ts: 1718553120,
+          status: 200,
+          duration_ms: 100,
+          model,
+          thinking_level: thinkingLevel,
+          reasoning_effort: reasoningEffort,
+          thinking_budget_tokens: 18000,
+          thinking_tokens: 8200,
+          _phase: 'final',
+        } satisfies RequestEventWithPhase;
+
+        render(
+          <RequestEventDrawer
+            event={event}
+            principalName={null}
+            onClose={() => {}}
+          />,
+        );
+
+        expect(screen.queryByText('Thinking level')).toBeNull();
+        expect(
+          screen.getByText('Reasoning').parentElement?.textContent,
+        ).toContain(`${reasoningEffort ?? 'high'} · 8.2k`);
+      },
+    );
 
     it('renders no reasoning badge when thinking_budget_tokens, reasoning_effort, and thinking_tokens are omitted', () => {
       const event = {
@@ -897,7 +983,7 @@ describe('RequestEventDrawer', () => {
       expect(screen.getByText('priority')).toBeDefined();
     });
 
-    it('renders standard as a field when service_tier is standard', () => {
+    it('does not render a badge when service_tier is standard', () => {
       const event = {
         event_id: 'evt_standard',
         request_id: 'req_standard',
@@ -918,7 +1004,7 @@ describe('RequestEventDrawer', () => {
         />,
       );
 
-      expect(screen.getByText('standard')).toBeDefined();
+      expect(screen.queryByText('standard')).toBeNull();
       expect(screen.queryByText('priority')).toBeNull();
     });
 

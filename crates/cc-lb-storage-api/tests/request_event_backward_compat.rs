@@ -122,3 +122,28 @@ fn request_event_reasoning_effort_roundtrip() {
 
     assert_eq!(parsed.reasoning_effort.as_deref(), Some("max"));
 }
+
+#[test]
+fn request_event_thinking_level_roundtrip_and_legacy_default() {
+    let original = RequestEvent {
+        thinking_level: Some("LOW".to_owned()),
+        thinking_budget_tokens: Some(1024),
+        service_tier: Some("flex".to_owned()),
+        ..Default::default()
+    };
+    let encoded = serde_json::to_vec(&original).expect("serialize");
+    let decoded: RequestEvent = serde_json::from_slice(&encoded).expect("deserialize");
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.reasoning_effort, None);
+
+    let legacy: RequestEvent =
+        serde_json::from_str(r#"{"request_id":"legacy","status":200,"duration_ms":0}"#)
+            .expect("legacy request event");
+    assert_eq!(legacy.thinking_level, None);
+    assert!(
+        serde_json::to_value(legacy)
+            .expect("serialize legacy")
+            .get("thinking_level")
+            .is_none()
+    );
+}

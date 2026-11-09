@@ -237,6 +237,7 @@ fn evaluate(
         .flat_map(|bucket| {
             let max_cache_value_micros =
                 max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
+            let native_read_baseline_tokens = native_observation_baseline_tokens(bucket);
             bucket.iter().map(move |a| {
                 let cache_tokens = candidate_cache_read_tokens(a);
                 let cache_value_micros =
@@ -244,9 +245,12 @@ fn evaluate(
                 let cache_ratio =
                     cache_value_ratio_within_bucket(cache_value_micros, max_cache_value_micros);
                 let tier_urgency = a.tier_urgency();
-                let estimated_input_cost_micros =
-                    estimate_candidate_input_cost_micros(a.candidate, &ctx.cache_pricing)
-                        .unwrap_or(0);
+                let estimated_input_cost_micros = estimate_candidate_input_cost_micros(
+                    a.candidate,
+                    &ctx.cache_pricing,
+                    native_read_baseline_tokens,
+                )
+                .unwrap_or(0);
                 let cache_savings_ratio = cache_read_savings_ratio(a.candidate, &ctx.cache_pricing);
                 cc_lb_domain::CandidateUrgency {
                     upstream_id: a.candidate.upstream_id,
@@ -944,10 +948,15 @@ fn pick_within_tier<'a, 'b>(
         return TierSelection { winner: &bucket[0] };
     }
 
+    let native_read_baseline_tokens = native_observation_baseline_tokens(bucket);
     let min_cost = bucket
         .iter()
         .filter_map(|assessment| {
-            estimate_candidate_input_cost_micros(assessment.candidate, pricing)
+            estimate_candidate_input_cost_micros(
+                assessment.candidate,
+                pricing,
+                native_read_baseline_tokens,
+            )
         })
         .min();
 
@@ -960,9 +969,11 @@ fn pick_within_tier<'a, 'b>(
         Some(min_cost) => {
             let mut found_near_cost_candidate = false;
             for assessment in bucket {
-                let Some(cost) =
-                    estimate_candidate_input_cost_micros(assessment.candidate, pricing)
-                else {
+                let Some(cost) = estimate_candidate_input_cost_micros(
+                    assessment.candidate,
+                    pricing,
+                    native_read_baseline_tokens,
+                ) else {
                     continue;
                 };
                 if u128::from(cost) * 100 > u128::from(min_cost) * 105 {
@@ -1093,11 +1104,32 @@ fn cache_value_ratio_within_bucket(
     }
 }
 
+fn native_observation_baseline_tokens(bucket: &[Assessment<'_>]) -> u32 {
+    bucket
+        .iter()
+        .filter_map(|assessment| assessment.candidate.cache_score.as_ref())
+        .filter(|score| is_native_observation(score))
+        .map(|score| score.predicted_cache_read_tokens)
+        .max()
+        .unwrap_or(0)
+}
+
 fn estimate_candidate_input_cost_micros(
     candidate: &UpstreamCandidate,
     pricing: &CachePricingSummary,
+    native_read_baseline_tokens: u32,
 ) -> Option<u64> {
     let score = candidate.cache_score.as_ref()?;
+    if is_native_observation(score) {
+        let (input_price, cache_read_price) = native_observation_rates(pricing)?;
+        let baseline_cost = micros_for_tokens(native_read_baseline_tokens, input_price);
+        let read_savings = micros_for_tokens(
+            score.predicted_cache_read_tokens,
+            input_price.saturating_sub(cache_read_price),
+        );
+        return Some(baseline_cost.saturating_sub(read_savings));
+    }
+
     let input_price = pricing.input_micros_per_million?;
     let cache_creation_5m_price = pricing.cache_creation_5m_micros_per_million?;
     let cache_creation_1h_price = pricing.cache_creation_1h_micros_per_million?;
@@ -1119,15 +1151,52 @@ fn estimate_candidate_input_cost_micros(
     )
 }
 
+fn is_native_observation(score: &cc_lb_domain::CacheScore) -> bool {
+    score.ambiguity_reason.as_deref() == Some("provider_native_observation")
+}
+
+fn native_observation_rates(pricing: &CachePricingSummary) -> Option<(u64, u64)> {
+    let native = pricing.native.as_ref()?;
+    let input_price = native_rate_micros(
+        native,
+        cc_lb_domain::NativeCachePricingComponent::OrdinaryInput,
+    )?;
+    let cache_read_price = native_rate_micros(
+        native,
+        cc_lb_domain::NativeCachePricingComponent::CachedInputRead,
+    )?;
+    Some((input_price, cache_read_price))
+}
+
+fn native_rate_micros(
+    pricing: &cc_lb_domain::NativeCachePricing,
+    component: cc_lb_domain::NativeCachePricingComponent,
+) -> Option<u64> {
+    pricing.rates.iter().find_map(|rate| {
+        (rate.component == component
+            && rate.status == cc_lb_domain::NativeCachePricingStatus::Known)
+            .then_some(rate.micros_per_million)
+            .flatten()
+    })
+}
+
 fn cache_read_savings_ratio(candidate: &UpstreamCandidate, pricing: &CachePricingSummary) -> f64 {
     let Some(score) = candidate.cache_score.as_ref() else {
         return 0.0;
     };
-    let Some(input_price) = pricing.input_micros_per_million else {
-        return 0.0;
-    };
-    let Some(read_price) = pricing.cache_read_micros_per_million else {
-        return 0.0;
+    let (input_price, read_price) = if is_native_observation(score) {
+        let Some(rates) = native_observation_rates(pricing) else {
+            return 0.0;
+        };
+        rates
+    } else {
+        let Some(input_price) = pricing.input_micros_per_million else {
+            return 0.0;
+        };
+        let Some(read_price) = pricing.cache_read_micros_per_million else {
+            return 0.0;
+        };
+        (input_price, read_price)
     };
     let cold_cost = micros_for_tokens(score.predicted_cache_read_tokens, input_price);
     if cold_cost == 0 {
@@ -1142,14 +1211,24 @@ fn candidate_cache_value_micros(
     pricing: &CachePricingSummary,
 ) -> Option<i64> {
     let score = candidate.cache_score.as_ref()?;
-    let input_price = pricing.input_micros_per_million?;
-    let cache_creation_5m_price = pricing.cache_creation_5m_micros_per_million?;
-    let cache_creation_1h_price = pricing.cache_creation_1h_micros_per_million?;
-    let cache_read_price = pricing.cache_read_micros_per_million?;
+    let (input_price, cache_read_price) = if is_native_observation(score) {
+        native_observation_rates(pricing)?
+    } else {
+        (
+            pricing.input_micros_per_million?,
+            pricing.cache_read_micros_per_million?,
+        )
+    };
 
     let cold_read_cost = micros_for_tokens(score.predicted_cache_read_tokens, input_price);
     let cached_read_cost = micros_for_tokens(score.predicted_cache_read_tokens, cache_read_price);
     let read_savings = cold_read_cost.saturating_sub(cached_read_cost);
+    if is_native_observation(score) {
+        return Some(saturating_i128_to_i64(i128::from(read_savings)));
+    }
+
+    let cache_creation_5m_price = pricing.cache_creation_5m_micros_per_million?;
+    let cache_creation_1h_price = pricing.cache_creation_1h_micros_per_million?;
     let create_cost = micros_for_tokens(
         score.predicted_cache_creation_tokens_5m,
         cache_creation_5m_price,

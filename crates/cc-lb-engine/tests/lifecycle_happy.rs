@@ -675,6 +675,351 @@ async fn openai_image_multipart_admission_uses_image_rate_floor() {
 }
 
 #[tokio::test]
+async fn gemini_camel_case_tier_reaches_limit_estimator_without_rewriting_body() {
+    for tier in ["flex", "priority", "FLEX", "future-tier"] {
+        let state = TestState::default();
+        let estimator = Arc::new(RecordingLimitCostEstimator::default());
+        let dispatch = CapturingSignedDispatch::default();
+        let lifecycle = limited_lifecycle(
+            StorageUpstreamKind::GeminiApiKey,
+            Vec::new(),
+            &state,
+            Some(Arc::new(dispatch.clone())),
+        )
+        .with_limit_cost_estimator(estimator.clone());
+        let body = Bytes::from(format!(
+            "{{ \"serviceTier\": \"{tier}\", \"contents\": [], \"generationConfig\": {{ \"maxOutputTokens\": 16 }} }}"
+        ));
+        let response = handle(
+            &lifecycle,
+            provider_post_request(
+                &format!("/v1beta/models/{PRICED_GEMINI_MODEL}:generateContent"),
+                body.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.expect("response body");
+        assert_eq!(
+            *estimator.service_tiers.lock().expect("recorded tiers"),
+            vec![Some(tier.to_owned())],
+        );
+        assert_eq!(
+            dispatch.bodies.lock().expect("forwarded body").as_slice(),
+            &[body]
+        );
+    }
+}
+
+#[tokio::test]
+async fn review_1166_gemini_blank_tier_is_omitted_from_limit_reservation() {
+    for raw_tier in ["", " \t "] {
+        let state = TestState::default();
+        let estimator = Arc::new(RecordingLimitCostEstimator::default());
+        let lifecycle =
+            limited_lifecycle(StorageUpstreamKind::GeminiApiKey, Vec::new(), &state, None)
+                .with_limit_cost_estimator(estimator.clone());
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "serviceTier": raw_tier,
+                "contents": [],
+                "generationConfig": {"maxOutputTokens": 16}
+            }))
+            .expect("Gemini request JSON"),
+        );
+        let response = handle(
+            &lifecycle,
+            provider_post_request(
+                &format!("/v1beta/models/{PRICED_GEMINI_MODEL}:generateContent"),
+                body,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.expect("response body");
+        assert_eq!(
+            *estimator.service_tiers.lock().expect("recorded tiers"),
+            vec![None],
+            "blank Gemini tier must not reach pricing reservation"
+        );
+    }
+}
+
+#[tokio::test]
+async fn gemini_tier_aliases_use_matching_pre_dispatch_prices_and_preserve_wire_bytes() {
+    let catalog = priced_catalog();
+    let mut snapshot = (*catalog.current()).clone();
+    snapshot
+        .models
+        .get_mut(PRICED_GEMINI_MODEL)
+        .expect("Gemini model")
+        .by_tier = BTreeMap::from([
+        (
+            "flex".to_owned(),
+            cc_lb_pricing::TierRate {
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(5),
+            },
+        ),
+        (
+            "priority".to_owned(),
+            cc_lb_pricing::TierRate {
+                input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(20),
+            },
+        ),
+    ]);
+    catalog.install_snapshot(snapshot);
+    for alias in ["service_tier", "serviceTier"] {
+        for (tier, expected_reservation) in
+            [("flex", 18_000), ("priority", 52_000), ("FLEX", 18_000)]
+        {
+            for (cap, admitted) in [
+                (expected_reservation - 1, false),
+                (expected_reservation, true),
+            ] {
+                let state = TestState::default();
+                let dispatch = CapturingSignedDispatch::default();
+                let lifecycle = limited_lifecycle(
+                    StorageUpstreamKind::GeminiApiKey,
+                    vec![Limit {
+                        kind: LimitKind::CostUsd,
+                        window_secs: 60,
+                        cap_micros: cap,
+                    }],
+                    &state,
+                    Some(Arc::new(dispatch.clone())),
+                )
+                .with_limit_cost_estimator(Arc::new(CatalogLimitCostEstimator {
+                    catalog: catalog.clone(),
+                }));
+                let body = Bytes::from(format!(
+                    "{{ \"{alias}\": \"{tier}\", \"contents\": [], \"generationConfig\": {{ \"maxOutputTokens\": 2000, \"thinkingConfig\": {{ \"thinkingLevel\": \"LOW\", \"thinkingBudget\": 1024, \"includeThoughts\": true }} }} }}"
+                ));
+                let request = provider_post_request(
+                    &format!("/v1beta/models/{PRICED_GEMINI_MODEL}:generateContent"),
+                    body.clone(),
+                );
+                let response = handle(&lifecycle, request).await;
+                if admitted {
+                    assert_eq!(response.status(), StatusCode::OK);
+                    response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("response collected");
+                    assert_eq!(
+                        dispatch.bodies.lock().expect("captured body").as_slice(),
+                        &[body]
+                    );
+                } else {
+                    assert_cost_rate_limited(response).await;
+                    assert!(dispatch.bodies.lock().expect("no dispatch").is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct GeminiMetadataDispatch {
+    payload: Bytes,
+    streaming: bool,
+}
+
+#[async_trait]
+impl UpstreamDispatch for GeminiMetadataDispatch {
+    async fn dispatch(
+        &self,
+        _request: SignedRequest,
+    ) -> Result<http::Response<Body>, DispatchError> {
+        Ok(http::Response::builder()
+            .header(
+                http::header::CONTENT_TYPE,
+                if self.streaming {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+            )
+            .body(Body::from(self.payload.clone()))
+            .expect("Gemini fixture response"))
+    }
+}
+
+#[tokio::test]
+async fn gemini_observed_tiers_and_requested_thinking_reach_durable_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage_for_lifecycle_happy(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    for alias in ["serviceTier", "service_tier"] {
+        for observed in [Some("flex"), Some("priority"), None] {
+            for streaming in [false, true] {
+                for wrapped in [false, true] {
+                    let mut usage = serde_json::json!({
+                        "promptTokenCount": 100, "cachedContentTokenCount": 20,
+                        "candidatesTokenCount": 6, "thoughtsTokenCount": 4
+                    });
+                    if let Some(tier) = observed {
+                        usage[alias] = serde_json::json!(tier);
+                    }
+                    let response = serde_json::json!({
+                        "candidates": [{"content": {"role": "model", "parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                        "usageMetadata": usage
+                    });
+                    let response = if wrapped {
+                        serde_json::json!({"response": response})
+                    } else {
+                        response
+                    };
+                    let payload = if streaming {
+                        format!("data: {response}\n\n")
+                    } else {
+                        response.to_string()
+                    };
+                    let state = TestState::default();
+                    let lifecycle = limited_lifecycle(
+                        StorageUpstreamKind::GeminiApiKey,
+                        Vec::new(),
+                        &state,
+                        Some(Arc::new(GeminiMetadataDispatch {
+                            payload: Bytes::from(payload),
+                            streaming,
+                        })),
+                    )
+                    .with_event_bus(test_bus.bus_arc());
+                    let operation = if streaming {
+                        "streamGenerateContent"
+                    } else {
+                        "generateContent"
+                    };
+                    let body = Bytes::from_static(br#"{"serviceTier":"priority","contents":[],"generationConfig":{"maxOutputTokens":16,"thinkingConfig":{"thinkingLevel":"LOW","thinkingBudget":1024,"includeThoughts":true}}}"#);
+                    let response = handle(
+                        &lifecycle,
+                        provider_post_request(
+                            &format!("/v1beta/models/{PRICED_GEMINI_MODEL}:{operation}"),
+                            body,
+                        ),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                    response.into_body().collect().await?;
+                    let (event, parsed_partial, observed_partial) =
+                        timeout(Duration::from_secs(3), async {
+                            let mut parsed_partial = false;
+                            let mut observed_partial = false;
+                            loop {
+                                match updates.recv().await.expect("event bus") {
+                                    cc_lb_request_log::RequestEventUpdate::Partial(partial) => {
+                                        if partial.thinking_level.as_deref() == Some("LOW") {
+                                            parsed_partial = true;
+                                            assert_eq!(partial.thinking_budget_tokens, Some(1024));
+                                            assert_eq!(partial.reasoning_effort, None);
+                                        }
+                                        if partial.thinking_tokens == Some(4) {
+                                            observed_partial = true;
+                                            assert_eq!(partial.service_tier.as_deref(), observed);
+                                        }
+                                    }
+                                    cc_lb_request_log::RequestEventUpdate::Final(update) => {
+                                        break (update.event, parsed_partial, observed_partial);
+                                    }
+                                }
+                            }
+                        })
+                        .await
+                        .expect("final persisted event");
+                    assert!(
+                        parsed_partial,
+                        "requested thinking level appears before finalization"
+                    );
+                    assert!(
+                        observed_partial,
+                        "observed tier appears before finalization"
+                    );
+                    assert_eq!(event.service_tier.as_deref(), observed);
+                    assert_eq!(event.thinking_level.as_deref(), Some("LOW"));
+                    assert_eq!(event.thinking_budget_tokens, Some(1024));
+                    assert_eq!(event.reasoning_effort, None);
+                    assert_eq!(event.thinking_tokens, Some(4));
+                    assert_eq!(event.output_tokens, Some(10));
+                    let persisted = cc_lb_storage_api::RequestEventStore::get_request_event(
+                        storage.as_ref(),
+                        event.event_id.as_deref().expect("event id"),
+                    )
+                    .await?
+                    .expect("history row");
+                    assert_eq!(persisted.service_tier, event.service_tier);
+                    assert_eq!(persisted.thinking_level, event.thinking_level);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_1166_gemini_native_snake_thinking_reaches_durable_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage_for_lifecycle_happy(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = test_bus.bus.subscribe();
+    let state = TestState::default();
+    let lifecycle = limited_lifecycle(
+        StorageUpstreamKind::GeminiApiKey,
+        Vec::new(),
+        &state,
+        Some(Arc::new(GeminiMetadataDispatch {
+            payload: Bytes::from_static(
+                br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"thoughtsTokenCount":2}}"#,
+            ),
+            streaming: false,
+        })),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let body = Bytes::from_static(
+        br#"{"contents":[],"generationConfig":{"thinkingConfig":{"thinking_level":"LOW","thinking_budget":1024}}}"#,
+    );
+    let response = handle(
+        &lifecycle,
+        provider_post_request(
+            &format!("/v1beta/models/{PRICED_GEMINI_MODEL}:generateContent"),
+            body,
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await?;
+
+    let event = timeout(Duration::from_secs(3), async {
+        loop {
+            if let cc_lb_request_log::RequestEventUpdate::Final(update) =
+                updates.recv().await.expect("event bus")
+            {
+                break update.event;
+            }
+        }
+    })
+    .await
+    .expect("final persisted event");
+    assert_eq!(event.thinking_level.as_deref(), Some("LOW"));
+    assert_eq!(event.thinking_budget_tokens, Some(1024));
+    assert_eq!(event.thinking_tokens, Some(2));
+    let persisted = cc_lb_storage_api::RequestEventStore::get_request_event(
+        storage.as_ref(),
+        event.event_id.as_deref().expect("event id"),
+    )
+    .await?
+    .expect("history row");
+    assert_eq!(persisted.thinking_level.as_deref(), Some("LOW"));
+    assert_eq!(persisted.thinking_budget_tokens, Some(1024));
+    Ok(())
+}
+
+#[tokio::test]
 async fn gemini_url_model_with_nested_output_cap_is_admitted_under_usd_limit() {
     // Given a USD cap that covers a 2,000-token Gemini output reservation.
     let state = TestState::default();
@@ -1067,6 +1412,219 @@ async fn provider_output_cap_accepts_exact_native_caps_and_rejects_larger_caps()
         }
     }
 }
+fn assert_provider_local_limit_headers(
+    headers: &http::HeaderMap,
+    case: ProviderOutputCase,
+    name: &str,
+) {
+    let expected: [&str; 6] = match case {
+        ProviderOutputCase::AnthropicMessages => [
+            "anthropic-ratelimit-requests-remaining",
+            "anthropic-ratelimit-requests-limit",
+            "anthropic-ratelimit-requests-reset",
+            "anthropic-ratelimit-tokens-remaining",
+            "anthropic-ratelimit-tokens-limit",
+            "anthropic-ratelimit-tokens-reset",
+        ],
+        ProviderOutputCase::Responses => [
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-remaining-tokens",
+            "x-ratelimit-limit-tokens",
+            "x-ratelimit-reset-tokens",
+        ],
+        ProviderOutputCase::Gemini => [
+            "x-cc-lb-ratelimit-remaining-requests",
+            "x-cc-lb-ratelimit-limit-requests",
+            "x-cc-lb-ratelimit-reset-requests",
+            "x-cc-lb-ratelimit-remaining-tokens",
+            "x-cc-lb-ratelimit-limit-tokens",
+            "x-cc-lb-ratelimit-reset-tokens",
+        ],
+    };
+    for header in expected {
+        assert!(
+            headers.contains_key(header),
+            "{name}: missing provider-local header {header}"
+        );
+    }
+
+    let reset_names = match case {
+        ProviderOutputCase::AnthropicMessages => [
+            "anthropic-ratelimit-requests-reset",
+            "anthropic-ratelimit-tokens-reset",
+        ],
+        ProviderOutputCase::Responses => ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"],
+        ProviderOutputCase::Gemini => [
+            "x-cc-lb-ratelimit-reset-requests",
+            "x-cc-lb-ratelimit-reset-tokens",
+        ],
+    };
+    for reset_name in reset_names {
+        let value = headers
+            .get(reset_name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| panic!("{name}: invalid reset header {reset_name}"));
+        match case {
+            ProviderOutputCase::AnthropicMessages => {
+                let bytes = value.as_bytes();
+                assert!(
+                    bytes.len() == 20
+                        && bytes[4] == b'-'
+                        && bytes[7] == b'-'
+                        && bytes[10] == b'T'
+                        && bytes[13] == b':'
+                        && bytes[16] == b':'
+                        && bytes[19] == b'Z'
+                        && value[..4].chars().all(|c| c.is_ascii_digit())
+                        && value[5..7].chars().all(|c| c.is_ascii_digit())
+                        && value[8..10].chars().all(|c| c.is_ascii_digit())
+                        && value[11..13].chars().all(|c| c.is_ascii_digit())
+                        && value[14..16].chars().all(|c| c.is_ascii_digit())
+                        && value[17..19].chars().all(|c| c.is_ascii_digit()),
+                    "{name}: Anthropic reset is not an ISO-8601 UTC timestamp: {value}"
+                );
+            }
+            ProviderOutputCase::Responses | ProviderOutputCase::Gemini => {
+                let seconds = value
+                    .strip_suffix('s')
+                    .and_then(|value| value.parse::<u64>().ok());
+                assert!(
+                    seconds.is_some(),
+                    "{name}: provider reset is not a duration in seconds: {value}"
+                );
+            }
+        }
+    }
+
+    let forbidden_prefixes: &[&str] = match case {
+        ProviderOutputCase::AnthropicMessages => &["x-ratelimit-", "x-cc-lb-ratelimit-"],
+        ProviderOutputCase::Responses => &["anthropic-ratelimit-", "x-cc-lb-ratelimit-"],
+        ProviderOutputCase::Gemini => &["anthropic-ratelimit-", "x-ratelimit-"],
+    };
+    for prefix in forbidden_prefixes {
+        assert!(
+            !headers
+                .keys()
+                .any(|header| header.as_str().starts_with(prefix)),
+            "{name}: response contains stray provider-local headers with prefix {prefix}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn buffered_responses_and_local_rejections_emit_provider_correct_limit_headers() {
+    for (case, name) in [
+        (ProviderOutputCase::AnthropicMessages, "anthropic"),
+        (ProviderOutputCase::Responses, "openai"),
+        (ProviderOutputCase::Gemini, "gemini"),
+    ] {
+        let state = TestState::default();
+        let (kind, request) = provider_output_request(case, 1);
+        let lifecycle = limited_lifecycle(
+            kind,
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 1,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 10_000,
+                },
+            ],
+            &state,
+            None,
+        );
+        let response = handle(&lifecycle, request).await;
+        let (status, headers, body) = collect_body(response).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body:?}");
+        assert!(!body.is_empty(), "{name}: buffered response body is empty");
+        assert_provider_local_limit_headers(&headers, case, name);
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            1,
+            "{name}: allowed request did not dispatch once"
+        );
+
+        let state = TestState::default();
+        let (kind, request) = provider_output_request(case, 1);
+        let lifecycle = limited_lifecycle(
+            kind,
+            vec![
+                Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 0,
+                },
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 10_000,
+                },
+            ],
+            &state,
+            None,
+        );
+        let response = handle(&lifecycle, request).await;
+        let (status, headers, body) = collect_body(response).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{name}: {body:?}");
+        assert_provider_local_limit_headers(&headers, case, name);
+        assert_eq!(
+            headers
+                .get("x-should-retry")
+                .and_then(|value| value.to_str().ok()),
+            Some("false"),
+            "{name}: unsatisfiable local rejection must not be retried"
+        );
+        assert!(
+            !headers.contains_key(http::header::RETRY_AFTER),
+            "{name}: unsatisfiable local rejection must not advertise retry-after"
+        );
+        let actual_error: serde_json::Value =
+            serde_json::from_slice(&body).expect("local rejection is JSON");
+        let expected_error = match case {
+            ProviderOutputCase::AnthropicMessages => serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": "requested requests reservation 1 cannot fit configured cap 0",
+                    "limit_kind": "requests"
+                }
+            }),
+            ProviderOutputCase::Responses => serde_json::json!({
+                "error": {
+                    "message": "requested requests reservation 1 cannot fit configured cap 0",
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_error",
+                    "param": null,
+                    "limit_kind": "requests"
+                }
+            }),
+            ProviderOutputCase::Gemini => serde_json::json!({
+                "error": {
+                    "code": 429,
+                    "message": "requested requests reservation 1 cannot fit configured cap 0",
+                    "status": "RESOURCE_EXHAUSTED",
+                    "type": "rate_limit_error",
+                    "limit_kind": "requests"
+                }
+            }),
+        };
+        assert_eq!(
+            actual_error, expected_error,
+            "{name}: provider error changed"
+        );
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            0,
+            "{name}: locally rejected request dispatched upstream"
+        );
+    }
+}
 
 #[tokio::test]
 async fn uncapped_output_total_token_admission_remains_input_only() {
@@ -1343,6 +1901,7 @@ fn priced_catalog() -> Arc<PriceCatalog> {
         (
             model.to_owned(),
             Pricing {
+                native: None,
                 model: model.to_owned(),
                 input_per_million_usd: UsdPerMillion::from_whole_usd(if image_rate.is_some() {
                     5

@@ -35,6 +35,7 @@ pub async fn assert_stream_error(
         StreamError {
             error_type: expected_type.to_owned(),
             error_message: expected_message.to_owned(),
+            ..Default::default()
         }
     );
 }

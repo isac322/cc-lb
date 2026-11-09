@@ -5,7 +5,7 @@ use super::parse_event_kind;
 use crate::{adapter::i64_to_u64, error_map::map_sqlx_error};
 
 macro_rules! event_select {
-    () => { "SELECT seq, EXTRACT(EPOCH FROM ts)::bigint AS ts_secs, request_id, source_kind, source_ref_id, event_kind, list_ts_ms, principal_id, key_id, principal_kind, upstream_id, upstream_name, model, list_status, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, thread_id, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, thinking_budget_tokens, reasoning_effort, token_estimate_source, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, auth_ms, route_ms, limit_reserve_ms, json_parse_ms, cache_structure_ms, cache_token_key_ms, cache_count_lookup_ms, cache_tokenizer_queue_ms, cache_serialize_ms, cache_tokenize_ms, prepare_signer_ms, bulkhead_wait_ms, dns_ms, connect_ms, connection_reused, request_body_read_ms, request_body_first_chunk_ms, request_body_receive_ms, request_body_wait_ms, request_body_process_ms, request_body_chunk_count, request_body_bytes, duration_ms, proxy_setup_ms, shape_ms, sign_ms, upstream_ttfb_ms, upstream_body_ms, response_body_wait_ms, response_body_process_ms, response_body_downstream_poll_gap_ms, retry_overhead_ms, finalize_ms, body_chunk_count, body_bytes, stream_message_start_ms, stream_content_block_start_ms, stream_first_content_delta_ms, stream_last_content_delta_ms, stream_message_stop_ms, stream_last_chunk_ms, stream_total_ms, sse_event_count, content_delta_count, ping_count, inter_token_avg_ms, error_code, event_id, thinking_tokens, tool_use_prompt_tokens, service_tier, upstream_error_type, upstream_error_message, upstream_http_version, upstream_request_id, upstream_content_encoding, upstream_content_length, upstream_body_bytes, upstream_body_end, upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, upstream_stream_warning_type, upstream_stream_warning_message FROM request_events_v1 " };
+    () => { "SELECT seq, EXTRACT(EPOCH FROM ts)::bigint AS ts_secs, request_id, source_kind, source_ref_id, event_kind, list_ts_ms, principal_id, key_id, principal_kind, upstream_id, upstream_name, model, list_status, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cache_write_input_tokens, cache_write_input_tokens_30m, cache_write_input_tokens_12h, thread_id, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, thinking_budget_tokens, reasoning_effort, thinking_level, token_estimate_source, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, list_cost_cache_write_micros, list_cost_cache_write_30m_micros, list_cost_cache_write_12h_micros, auth_ms, route_ms, limit_reserve_ms, json_parse_ms, cache_structure_ms, cache_token_key_ms, cache_count_lookup_ms, cache_tokenizer_queue_ms, cache_serialize_ms, cache_tokenize_ms, prepare_signer_ms, bulkhead_wait_ms, dns_ms, connect_ms, connection_reused, request_body_read_ms, request_body_first_chunk_ms, request_body_receive_ms, request_body_wait_ms, request_body_process_ms, request_body_chunk_count, request_body_bytes, duration_ms, proxy_setup_ms, shape_ms, sign_ms, upstream_ttfb_ms, upstream_body_ms, response_body_wait_ms, response_body_process_ms, response_body_downstream_poll_gap_ms, retry_overhead_ms, finalize_ms, body_chunk_count, body_bytes, stream_message_start_ms, stream_content_block_start_ms, stream_first_content_delta_ms, stream_last_content_delta_ms, stream_message_stop_ms, stream_first_output_ms, stream_last_chunk_ms, stream_total_ms, sse_event_count, content_delta_count, ping_count, stream_inter_output_avg_ms, provider_session_id, provider_connection_id, inter_token_avg_ms, error_code, event_id, thinking_tokens, tool_use_prompt_tokens, service_tier, upstream_error_type, upstream_error_message, upstream_http_version, upstream_request_id, upstream_content_encoding, upstream_content_length, upstream_body_bytes, upstream_body_end, upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, upstream_stream_warning_type, upstream_stream_warning_message FROM request_events_v1 " };
 }
 
 pub(super) const CURSOR_SQL_PREFIX: &str = concat!(event_select!(), "WHERE seq > ");
@@ -81,6 +81,21 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "request event cache_read_input_tokens"))
             .transpose()?,
+        cache_write_input_tokens: row
+            .try_get::<Option<i64>, _>("cache_write_input_tokens")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "request event cache_write_input_tokens"))
+            .transpose()?,
+        cache_write_input_tokens_30m: row
+            .try_get::<Option<i64>, _>("cache_write_input_tokens_30m")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "request event cache_write_input_tokens_30m"))
+            .transpose()?,
+        cache_write_input_tokens_12h: row
+            .try_get::<Option<i64>, _>("cache_write_input_tokens_12h")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "request event cache_write_input_tokens_12h"))
+            .transpose()?,
         thread_id: row.try_get("thread_id").map_err(map_sqlx_error)?,
         observed_session_id: row.try_get("observed_session_id").map_err(map_sqlx_error)?,
         request_kind: row.try_get("request_kind").map_err(map_sqlx_error)?,
@@ -97,6 +112,7 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .map(|value| i64_to_u64(value, "request event thinking_budget_tokens"))
             .transpose()?,
         reasoning_effort: row.try_get("reasoning_effort").map_err(map_sqlx_error)?,
+        thinking_level: row.try_get("thinking_level").map_err(map_sqlx_error)?,
         token_estimate_source: row
             .try_get("token_estimate_source")
             .map_err(map_sqlx_error)?,
@@ -117,6 +133,15 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .map_err(map_sqlx_error)?,
         cost_cache_read_micros: row
             .try_get("list_cost_cache_read_micros")
+            .map_err(map_sqlx_error)?,
+        cost_cache_write_micros: row
+            .try_get("list_cost_cache_write_micros")
+            .map_err(map_sqlx_error)?,
+        cost_cache_write_30m_micros: row
+            .try_get("list_cost_cache_write_30m_micros")
+            .map_err(map_sqlx_error)?,
+        cost_cache_write_12h_micros: row
+            .try_get("list_cost_cache_write_12h_micros")
             .map_err(map_sqlx_error)?,
         auth_ms: row
             .try_get::<Option<i64>, _>("auth_ms")
@@ -267,6 +292,11 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "request event stream_message_stop_ms"))
             .transpose()?,
+        stream_first_output_ms: row
+            .try_get::<Option<i64>, _>("stream_first_output_ms")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "request event stream_first_output_ms"))
+            .transpose()?,
         stream_last_chunk_ms: row
             .try_get::<Option<i64>, _>("stream_last_chunk_ms")
             .map_err(map_sqlx_error)?
@@ -292,6 +322,15 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .map_err(map_sqlx_error)?
             .map(|value| i64_to_u64(value, "request event ping_count"))
             .transpose()?,
+        stream_inter_output_avg_ms: row
+            .try_get::<Option<i64>, _>("stream_inter_output_avg_ms")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "request event stream_inter_output_avg_ms"))
+            .transpose()?,
+        provider_session_id: row.try_get("provider_session_id").map_err(map_sqlx_error)?,
+        provider_connection_id: row
+            .try_get("provider_connection_id")
+            .map_err(map_sqlx_error)?,
         inter_token_avg_ms: row
             .try_get::<Option<i64>, _>("inter_token_avg_ms")
             .map_err(map_sqlx_error)?
@@ -348,6 +387,7 @@ pub(crate) fn from_row(row: &PgRow) -> StorageResult<RequestEvent> {
             .try_get("upstream_stream_warning_message")
             .map_err(map_sqlx_error)?,
         cache_breakpoints: Vec::new(),
+        native_cache: None,
         cache_control_message_indices: Vec::new(),
         routing_trace: None,
         iterations: None,

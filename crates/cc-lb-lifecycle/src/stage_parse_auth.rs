@@ -22,10 +22,16 @@ pub struct ParseInfo {
     pub thinking_budget_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Requested provider-native thinking level, distinct from reasoning effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_breakpoints: Vec<cc_lb_request_log::RequestCacheBreakpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
+    /// Provider-native cache analysis, when this request shape is supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

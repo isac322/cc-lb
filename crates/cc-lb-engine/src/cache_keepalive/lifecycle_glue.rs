@@ -16,12 +16,14 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{CacheKeepaliveConfigSnapshot, CacheTtl};
 
 use crate::lifecycle::RequestCacheMetadata;
 use crate::usage_parser::ParsedSseEvent;
 
 use super::display_reason::CacheKeepaliveDisplayReason;
+use super::session_key::SessionId;
 use super::{CancelReason, HeuristicClassifier, RequestSnapshot, SessionKey};
 
 #[derive(Clone)]
@@ -122,6 +124,12 @@ pub(crate) struct LifecycleKeepalive {
     next_completion_seq: Arc<AtomicU64>,
     issued_shards: Arc<[std::sync::Mutex<HashMap<SessionKey, u64>>; SESSION_SHARD_COUNT]>,
     session_shards: Arc<[tokio::sync::Mutex<HashMap<SessionKey, u64>>; SESSION_SHARD_COUNT]>,
+}
+
+fn allows_sibling_backstop(cache_metadata: &RequestCacheMetadata) -> bool {
+    cache_metadata.claude_agent_id.is_none()
+        && !cache_metadata.explicit_auxiliary
+        && cache_metadata.explicit_request_class.is_none()
 }
 
 impl LifecycleKeepalive {
@@ -230,16 +238,22 @@ impl LifecycleKeepalive {
         };
         if cache_metadata.explicit_auxiliary
             || !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref())
-            || cache_metadata.cache_breakpoints.is_empty()
+            || (cache_metadata.cache_breakpoints.is_empty()
+                && cache_metadata.cache_keepalive_surface.is_none())
         {
             return;
         }
         let view = self.dynamic_view.load();
-        if !view
+        let Some(config) = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
-            .is_some_and(|config| config.enabled)
+            .filter(|config| config.enabled)
+        else {
+            return;
+        };
+        if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+            && !config.classifier.openai_responses_enabled
         {
             return;
         }
@@ -273,6 +287,7 @@ impl LifecycleKeepalive {
             CancelReason::NewRequest,
             expected_generation,
             Duration::ZERO,
+            allows_sibling_backstop(cache_metadata),
         )
         .await;
     }
@@ -304,7 +319,7 @@ impl LifecycleKeepalive {
             return;
         }
         let view = self.dynamic_view.load();
-        let Some(_config) = view
+        let Some(config) = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
@@ -312,9 +327,17 @@ impl LifecycleKeepalive {
         else {
             return;
         };
+        if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+            && !config.classifier.openai_responses_enabled
+        {
+            return;
+        }
         let compaction_boundary =
             super::classifier::HeuristicClassifier::is_compaction_boundary(response_body_json);
-        if cache_metadata.cache_breakpoints.is_empty() && !compaction_boundary {
+        if cache_metadata.cache_breakpoints.is_empty()
+            && !compaction_boundary
+            && cache_metadata.cache_keepalive_surface.is_none()
+        {
             return;
         }
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
@@ -375,11 +398,15 @@ impl LifecycleKeepalive {
         let Some(config) = cached.cache_keepalive().filter(|config| config.enabled) else {
             return;
         };
+        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
+            return;
+        };
+        let allow_sibling_backstop = allows_sibling_backstop(cache_metadata);
         let compaction_boundary = HeuristicClassifier::is_compaction_boundary(response_body_json);
-        if compaction_boundary && cache_metadata.cache_breakpoints.is_empty() {
-            let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-                return;
-            };
+        if compaction_boundary
+            && cache_metadata.cache_breakpoints.is_empty()
+            && cache_metadata.cache_keepalive_surface.is_none()
+        {
             let principal_name: Arc<str> = Arc::from(principal.id.as_str());
             let session_key_hash = session_key.to_string();
             let mut shard = self.session_shard(&session_key).lock().await;
@@ -406,6 +433,7 @@ impl LifecycleKeepalive {
                     CancelReason::UserTurnDetected,
                     expected_generation,
                     cache_anchor_age,
+                    allow_sibling_backstop,
                 )
                 .await;
                 super::record_cancelled(&principal_name, CancelReason::UserTurnDetected);
@@ -415,13 +443,13 @@ impl LifecycleKeepalive {
         let Some(request_json) = cache_metadata.request_json.as_ref() else {
             return;
         };
-        let Some(first_breakpoint) = cache_metadata.cache_breakpoints.first() else {
-            return;
-        };
-        let ttl = CacheTtl::from_ttl_str(first_breakpoint.ttl.as_deref());
-        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
-            return;
-        };
+        let ttl = cache_metadata.cache_keepalive_ttl.unwrap_or_else(|| {
+            cache_metadata
+                .cache_breakpoints
+                .first()
+                .map(|breakpoint| CacheTtl::from_ttl_str(breakpoint.ttl.as_deref()))
+                .unwrap_or(CacheTtl::Ttl5m)
+        });
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
         let session_key_hash = session_key.to_string();
         let mut shard = self.session_shard(&session_key).lock().await;
@@ -452,7 +480,9 @@ impl LifecycleKeepalive {
                     return;
                 }
             };
-        if let Some(reason) = zero_token_renewal_unsupported_reason(&renewal_request_json) {
+        if cache_metadata.cache_keepalive_surface.is_none()
+            && let Some(reason) = zero_token_renewal_unsupported_reason(&renewal_request_json)
+        {
             self.record_not_tracked(
                 &session_key,
                 principal,
@@ -469,23 +499,49 @@ impl LifecycleKeepalive {
                     CancelReason::ZeroTokenRenewalUnsupported,
                     expected_generation,
                     cache_anchor_age,
+                    allow_sibling_backstop,
                 )
                 .await;
                 super::record_cancelled(&principal_name, CancelReason::ZeroTokenRenewalUnsupported);
             }
             return;
         }
-        let url =
-            Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
-        let snapshot = match RequestSnapshot::capture(
-            url,
-            http::Method::POST,
-            keepalive_forward_headers(downstream_headers),
-            shaped_body,
-            upstream_id,
-            ttl,
-            config.snapshot_max_bytes as usize,
-        ) {
+        let snapshot_url = if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+        {
+            KEEPALIVE_OPENAI_SNAPSHOT_URL
+        } else {
+            KEEPALIVE_SNAPSHOT_URL
+        };
+        let url = Url::parse(snapshot_url).expect("cache keep-alive snapshot URL is valid");
+        let snapshot_result =
+            if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses") {
+                RequestSnapshot::capture_openai(
+                    url,
+                    http::Method::POST,
+                    keepalive_forward_headers(
+                        downstream_headers,
+                        view.upstreams_snapshot()
+                            .iter()
+                            .find(|upstream| upstream.id == upstream_id)
+                            .map(|upstream| upstream.kind),
+                    ),
+                    shaped_body,
+                    upstream_id,
+                    ttl,
+                    config.snapshot_max_bytes as usize,
+                )
+            } else {
+                RequestSnapshot::capture(
+                    url,
+                    http::Method::POST,
+                    keepalive_forward_headers(downstream_headers, None),
+                    shaped_body,
+                    upstream_id,
+                    ttl,
+                    config.snapshot_max_bytes as usize,
+                )
+            };
+        let snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
             Err(super::SnapshotError::TooLarge { actual, max }) => {
                 tracing::warn!(
@@ -511,6 +567,7 @@ impl LifecycleKeepalive {
                         CancelReason::SnapshotTooLarge,
                         expected_generation,
                         cache_anchor_age,
+                        allow_sibling_backstop,
                     )
                     .await;
                     super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
@@ -529,13 +586,22 @@ impl LifecycleKeepalive {
         };
         let (fingerprint, hash, policy, schema) = cache_prefix_evidence(cache_metadata);
         let snapshot = snapshot.with_prefix_evidence(fingerprint, hash, policy, schema);
-        let classifier = HeuristicClassifier::new(&config.classifier);
-        match classifier.classify(request_json, response_body_json) {
+        let decision = if cache_metadata.cache_keepalive_surface.is_some() {
+            super::TurnDecision::AgentInTurn
+        } else {
+            HeuristicClassifier::new(&config.classifier).classify(request_json, response_body_json)
+        };
+        match decision {
             super::TurnDecision::AgentInTurn => {
-                if cached_tokens < config.min_cache_tokens {
+                let min_cache_tokens = if cache_metadata.cache_keepalive_surface.is_some() {
+                    super::openai::MIN_PREFIX_TOKENS
+                } else {
+                    config.min_cache_tokens
+                };
+                if cached_tokens < min_cache_tokens {
                     let reason = CacheKeepaliveDisplayReason::CachedPrefixTooSmall {
                         cached_tokens,
-                        min_cache_tokens: config.min_cache_tokens,
+                        min_cache_tokens,
                     }
                     .to_string();
                     self.record_not_tracked(
@@ -554,6 +620,7 @@ impl LifecycleKeepalive {
                             CancelReason::CachedPrefixTooSmall,
                             expected_generation,
                             cache_anchor_age,
+                            allow_sibling_backstop,
                         )
                         .await;
                         super::record_cancelled(
@@ -564,6 +631,40 @@ impl LifecycleKeepalive {
                     return;
                 }
                 if !is_latest {
+                    return;
+                }
+                if ttl == CacheTtl::Ttl12h {
+                    self.record_not_tracked(
+                        &session_key,
+                        principal,
+                        upstream_id,
+                        ttl,
+                        config,
+                        "openai 12h retention is recorded without read re-anchoring",
+                    )
+                    .await;
+                    return;
+                }
+                if cache_metadata.cache_keepalive_surface.is_some()
+                    && !super::openai::should_schedule_refresh(
+                        snapshot.keepalive_model(),
+                        match ttl {
+                            CacheTtl::Ttl30m => super::openai::Lifetime::ThirtyMinutes,
+                            CacheTtl::Ttl12h => super::openai::Lifetime::TwelveHours,
+                            _ => super::openai::Lifetime::ThirtyMinutes,
+                        },
+                        config.max_refreshes_per_session,
+                    )
+                {
+                    self.record_not_tracked(
+                        &session_key,
+                        principal,
+                        upstream_id,
+                        ttl,
+                        config,
+                        "refresh expected value is unknown or non-positive",
+                    )
+                    .await;
                     return;
                 }
                 let params =
@@ -617,6 +718,7 @@ impl LifecycleKeepalive {
                         CancelReason::UserTurnDetected,
                         expected_generation,
                         cache_anchor_age,
+                        allow_sibling_backstop,
                     )
                     .await;
                 }
@@ -638,6 +740,7 @@ impl LifecycleKeepalive {
                         CancelReason::UserTurnDetected,
                         expected_generation,
                         cache_anchor_age,
+                        allow_sibling_backstop,
                     )
                     .await;
                 }
@@ -652,16 +755,19 @@ impl LifecycleKeepalive {
         reason: CancelReason,
         expected_generation: Option<u64>,
         cache_anchor_age: Duration,
+        allow_sibling_backstop: bool,
     ) {
-        if let Some(enqueuer) = self.enqueuer.as_ref()
-            && let Err(error) = enqueuer
-                .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
-                    session_key_hash: session_key.to_string(),
-                    reason,
-                    expected_generation,
-                    cache_anchor_age,
-                })
-                .await
+        let Some(enqueuer) = self.enqueuer.as_ref() else {
+            return;
+        };
+        if let Err(error) = enqueuer
+            .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                session_key_hash: session_key.to_string(),
+                reason,
+                expected_generation,
+                cache_anchor_age,
+            })
+            .await
         {
             tracing::warn!(
                 target: "cache_keepalive",
@@ -669,6 +775,55 @@ impl LifecycleKeepalive {
                 reason = reason.as_str(),
                 %error,
                 "durable cache keep-alive cancellation failed"
+            );
+        }
+        if !allow_sibling_backstop {
+            return;
+        }
+        let SessionKey {
+            principal_id,
+            session_id: SessionId::ThreadId(thread_id),
+            agent_scope: None,
+        } = session_key
+        else {
+            return;
+        };
+        let sibling_key =
+            SessionKey::from_thread_and_agent(*principal_id, thread_id.clone(), "subagent");
+        let sibling_generation = match enqueuer
+            .observe_session_generation(&sibling_key.to_string())
+            .await
+        {
+            Ok(generation) => generation,
+            Err(error) => {
+                tracing::warn!(
+                    target: "cache_keepalive",
+                    principal_id = principal.id.as_str(),
+                    reason = reason.as_str(),
+                    %error,
+                    "durable subagent cache keep-alive generation lookup failed"
+                );
+                None
+            }
+        };
+        let Some(sibling_generation) = sibling_generation else {
+            return;
+        };
+        if let Err(error) = enqueuer
+            .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                session_key_hash: sibling_key.to_string(),
+                reason,
+                expected_generation: Some(sibling_generation),
+                cache_anchor_age,
+            })
+            .await
+        {
+            tracing::warn!(
+                target: "cache_keepalive",
+                principal_id = principal.id.as_str(),
+                reason = reason.as_str(),
+                %error,
+                "durable subagent cache keep-alive cancellation failed"
             );
         }
     }
@@ -715,6 +870,7 @@ impl LifecycleKeepalive {
 #[derive(Default)]
 pub(crate) struct StreamingKeepaliveResponse {
     message: Option<Value>,
+    openai_response: Option<Value>,
     content_blocks: Vec<Value>,
     stop_reason: Option<String>,
     pending_sse_bytes: Vec<u8>,
@@ -768,7 +924,17 @@ impl StreamingKeepaliveResponse {
         let Ok(Some(value)) = event.value() else {
             return;
         };
+        if matches!(
+            value.get("type").and_then(Value::as_str),
+            Some("response.completed" | "response.incomplete")
+        ) {
+            self.openai_response = value.get("response").cloned();
+            return;
+        }
         match event.event_name() {
+            Some(b"response.completed" | b"response.incomplete") => {
+                self.openai_response = value.get("response").cloned();
+            }
             Some(b"message_start") => {
                 if let Some(message) = value.get("message") {
                     self.message = Some(message.clone());
@@ -808,6 +974,9 @@ impl StreamingKeepaliveResponse {
     }
 
     pub(crate) fn into_value(self) -> Option<Value> {
+        if self.openai_response.is_some() {
+            return self.openai_response;
+        }
         let mut value = self.message?;
         let map = value.as_object_mut()?;
         if !self.content_blocks.is_empty() {
@@ -821,10 +990,25 @@ impl StreamingKeepaliveResponse {
 }
 
 const KEEPALIVE_FORWARD_HEADERS: &[&str] = &["anthropic-version", "anthropic-beta"];
+const OPENAI_API_KEY_KEEPALIVE_FORWARD_HEADERS: &[&str] = &[
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-organization",
+    "openai-project",
+    "openai-processing-region",
+];
 
-fn keepalive_forward_headers(headers: &HeaderMap) -> HeaderMap {
+fn keepalive_forward_headers(
+    headers: &HeaderMap,
+    responses_upstream_kind: Option<UpstreamKind>,
+) -> HeaderMap {
+    let names = if responses_upstream_kind == Some(UpstreamKind::OpenaiApiKey) {
+        OPENAI_API_KEY_KEEPALIVE_FORWARD_HEADERS
+    } else {
+        KEEPALIVE_FORWARD_HEADERS
+    };
     let mut out = HeaderMap::new();
-    for name in KEEPALIVE_FORWARD_HEADERS {
+    for name in names {
         if let Some(value) = headers.get(*name)
             && let Ok(name) = http::HeaderName::from_bytes(name.as_bytes())
         {
@@ -905,7 +1089,15 @@ fn cache_prefix_evidence(
     Option<String>,
 ) {
     if metadata.cache_breakpoints.is_empty() {
-        return (None, None, None, None);
+        let Some(boundary) = metadata.openai_selected_boundary.as_deref() else {
+            return (None, None, None, None);
+        };
+        return (
+            Some(openai_prefix_fingerprint(metadata, boundary)),
+            metadata.cache_prefix_hash.clone(),
+            Some(CACHE_PREFIX_POLICY_VERSION.to_owned()),
+            Some(CACHE_PREFIX_SCHEMA_VERSION.to_owned()),
+        );
     }
     let mut hasher = Sha256::new();
     hasher.update(CACHE_PREFIX_SCHEMA_VERSION.as_bytes());
@@ -930,6 +1122,34 @@ fn cache_prefix_evidence(
     )
 }
 
+fn openai_prefix_fingerprint(metadata: &RequestCacheMetadata, boundary: &str) -> String {
+    let ttl = match metadata.cache_keepalive_ttl {
+        Some(cc_lb_storage_api::CacheTtl::Ttl30m) => "30m",
+        Some(cc_lb_storage_api::CacheTtl::Ttl12h) => "12h",
+        Some(cc_lb_storage_api::CacheTtl::Ttl5m) => "5m",
+        Some(cc_lb_storage_api::CacheTtl::Ttl1h) => "1h",
+        None => "unknown",
+    };
+    let identity = metadata
+        .openai_replay_identity
+        .as_deref()
+        .unwrap_or("unknown");
+    let provenance = format!(
+        "policy=openai-responses-prompt-cache-v1;schema={CACHE_PREFIX_SCHEMA_VERSION};selected={};ttl={ttl};identity={identity}",
+        truncate_evidence_component(boundary, 128),
+    );
+    let digest = Sha256::digest(provenance.as_bytes());
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{provenance};sha256={digest}")
+}
+
+fn truncate_evidence_component(value: &str, max_bytes: usize) -> &str {
+    value.get(..max_bytes).unwrap_or(value)
+}
+
 fn cache_keepalive_session_key(
     principal: &Principal,
     cache_metadata: &RequestCacheMetadata,
@@ -943,7 +1163,16 @@ fn cache_keepalive_session_key(
     };
     if let Some(thread_id) = cache_metadata.thread_id.clone() {
         return Some(
-            SessionKey::from_thread_id(principal_id, thread_id).with_agent_scope(agent_scope),
+            SessionKey::from_thread_id(principal_id, thread_id)
+                .with_agent_scope(agent_scope.clone()),
+        );
+    }
+    if cache_metadata.cache_keepalive_surface.as_deref() == Some("responses")
+        && let Some(identity) = cache_metadata.openai_replay_identity.clone()
+    {
+        return Some(
+            SessionKey::from_cache_prefix_hash(principal_id, format!("openai-replay:{identity}"))
+                .with_agent_scope(agent_scope.clone()),
         );
     }
     cache_metadata.cache_prefix_hash.clone().map(|prefix_hash| {
@@ -959,6 +1188,7 @@ fn cache_keepalive_principal_uuid(principal_id: &str) -> Uuid {
 }
 
 const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
+const KEEPALIVE_OPENAI_SNAPSHOT_URL: &str = "https://api.openai.com/v1/responses";
 
 #[cfg(test)]
 mod tests {
@@ -1037,6 +1267,224 @@ mod tests {
                 .expect("not-tracked receiver");
             Ok(())
         }
+    }
+    #[derive(Default)]
+    struct BackstopState {
+        generations: std::sync::Mutex<HashMap<String, Option<u64>>>,
+        cancellations: std::sync::Mutex<Vec<(String, Option<u64>)>>,
+        fail_primary: bool,
+    }
+
+    struct BackstopEnqueuer {
+        state: Arc<BackstopState>,
+    }
+
+    #[async_trait]
+    impl CacheKeepaliveEnqueuer for BackstopEnqueuer {
+        async fn enqueue_cache_keepalive(
+            &self,
+            _request: CacheKeepaliveEnqueueRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            Ok(())
+        }
+
+        async fn cancel_cache_keepalive(
+            &self,
+            request: CacheKeepaliveCancelRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            let is_primary = !request.session_key_hash.ends_with("/agent:subagent");
+            self.state
+                .cancellations
+                .lock()
+                .expect("cancellation state")
+                .push((
+                    request.session_key_hash.clone(),
+                    request.expected_generation,
+                ));
+            if self.state.fail_primary && is_primary {
+                Err(CacheKeepaliveEnqueueError(
+                    "primary cancellation failed".to_owned(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn record_cache_keepalive_not_tracked(
+            &self,
+            _request: CacheKeepaliveNotTrackedRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            Ok(())
+        }
+
+        async fn observe_session_generation(
+            &self,
+            session_key_hash: &str,
+        ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+            Ok(self
+                .state
+                .generations
+                .lock()
+                .expect("generation state")
+                .get(session_key_hash)
+                .copied()
+                .flatten())
+        }
+    }
+
+    fn backstop_keepalive(state: Arc<BackstopState>) -> LifecycleKeepalive {
+        let view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .principal_view(Arc::new(PrincipalView::from_db(&[], HashMap::new())))
+            .build();
+        LifecycleKeepalive::new(
+            Some(Arc::new(BackstopEnqueuer { state })),
+            Arc::new(DynamicViewHolder::new(view)),
+        )
+    }
+
+    #[tokio::test]
+    async fn unscoped_cancel_backstops_durable_subagent_with_own_generation() {
+        let state = Arc::new(BackstopState {
+            fail_primary: true,
+            ..BackstopState::default()
+        });
+        let principal_id = cache_keepalive_principal_uuid("principal-test");
+        let primary = SessionKey::from_thread_id(principal_id, "thread-1");
+        let sibling = SessionKey::from_thread_and_agent(principal_id, "thread-1", "subagent");
+        state
+            .generations
+            .lock()
+            .expect("generation state")
+            .insert(sibling.to_string(), Some(9));
+        let keepalive = backstop_keepalive(Arc::clone(&state));
+        keepalive
+            .cancel_session(
+                &primary,
+                &Principal {
+                    id: "principal-test".to_owned(),
+                    kind: cc_lb_domain::PrincipalKind::InternalKey,
+                },
+                CancelReason::UserTurnDetected,
+                Some(3),
+                Duration::ZERO,
+                true,
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellation state"),
+            vec![
+                (primary.to_string(), Some(3)),
+                (sibling.to_string(), Some(9))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_backstop_skips_inactive_and_scoped_sessions_and_is_restart_safe() {
+        let state = Arc::new(BackstopState::default());
+        let principal_id = cache_keepalive_principal_uuid("principal-test");
+        let primary = SessionKey::from_thread_id(principal_id, "thread-2");
+        let sibling = SessionKey::from_thread_and_agent(principal_id, "thread-2", "subagent");
+        let keepalive = backstop_keepalive(Arc::clone(&state));
+        keepalive
+            .cancel_session(
+                &primary,
+                &Principal {
+                    id: "principal-test".to_owned(),
+                    kind: cc_lb_domain::PrincipalKind::InternalKey,
+                },
+                CancelReason::NewRequest,
+                None,
+                Duration::ZERO,
+                true,
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellation state"),
+            vec![(primary.to_string(), None)]
+        );
+
+        state
+            .generations
+            .lock()
+            .expect("generation state")
+            .insert(sibling.to_string(), Some(12));
+        let scoped = SessionKey::from_thread_and_agent(principal_id, "thread-2", "advisor");
+        backstop_keepalive(Arc::clone(&state))
+            .cancel_session(
+                &scoped,
+                &Principal {
+                    id: "principal-test".to_owned(),
+                    kind: cc_lb_domain::PrincipalKind::InternalKey,
+                },
+                CancelReason::NewRequest,
+                Some(4),
+                Duration::ZERO,
+                true,
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellation state"),
+            vec![(primary.to_string(), None), (scoped.to_string(), Some(4)),]
+        );
+
+        let restarted = backstop_keepalive(Arc::clone(&state));
+        restarted
+            .cancel_session(
+                &primary,
+                &Principal {
+                    id: "principal-test".to_owned(),
+                    kind: cc_lb_domain::PrincipalKind::InternalKey,
+                },
+                CancelReason::NewRequest,
+                Some(5),
+                Duration::ZERO,
+                true,
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellation state"),
+            vec![
+                (primary.to_string(), None),
+                (scoped.to_string(), Some(4)),
+                (primary.to_string(), Some(5)),
+                (sibling.to_string(), Some(12)),
+            ]
+        );
+    }
+    #[tokio::test]
+    async fn claude_main_agent_id_does_not_cancel_subagent_sibling() {
+        let state = Arc::new(BackstopState::default());
+        let principal_id = cache_keepalive_principal_uuid("principal-test");
+        let primary = SessionKey::from_thread_id(principal_id, "thread-claude-main");
+        let sibling =
+            SessionKey::from_thread_and_agent(principal_id, "thread-claude-main", "subagent");
+        state
+            .generations
+            .lock()
+            .expect("generation state")
+            .insert(sibling.to_string(), Some(7));
+        let keepalive = backstop_keepalive(Arc::clone(&state));
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.claude_agent_id = Some("main".to_owned());
+        keepalive
+            .cancel_session(
+                &primary,
+                &Principal {
+                    id: "principal-test".to_owned(),
+                    kind: cc_lb_domain::PrincipalKind::InternalKey,
+                },
+                CancelReason::NewRequest,
+                Some(4),
+                Duration::ZERO,
+                allows_sibling_backstop(&metadata),
+            )
+            .await;
+        assert_eq!(
+            *state.cancellations.lock().expect("cancellation state"),
+            vec![(primary.to_string(), Some(4))]
+        );
     }
 
     impl LifecycleKeepalive {
@@ -1147,7 +1595,7 @@ mod tests {
                 vec![
                     OrderedCompletion::Observe(expected_key.clone()),
                     OrderedCompletion::NotTracked(expected_key.clone()),
-                    OrderedCompletion::Cancel(expected_key, Some(41)),
+                    OrderedCompletion::Cancel(expected_key.clone(), Some(41)),
                 ]
             } else {
                 vec![
@@ -1311,7 +1759,7 @@ mod tests {
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         headers.insert("anthropic-beta", HeaderValue::from_static("prompt-caching"));
 
-        let forwarded = keepalive_forward_headers(&headers);
+        let forwarded = keepalive_forward_headers(&headers, None);
 
         assert!(forwarded.get("x-api-key").is_none());
         assert!(forwarded.get("authorization").is_none());
@@ -1323,6 +1771,58 @@ mod tests {
             forwarded.get("anthropic-beta"),
             Some(&HeaderValue::from_static("prompt-caching"))
         );
+    }
+
+    #[test]
+    fn keepalive_scope_headers_are_api_key_responses_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "openai-organization",
+            HeaderValue::from_static("org-client"),
+        );
+        headers.insert("openai-project", HeaderValue::from_static("proj-client"));
+        headers.insert("openai-processing-region", HeaderValue::from_static("us"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer client-secret"),
+        );
+        headers.insert("x-api-key", HeaderValue::from_static("client-key"));
+        headers.insert(
+            "x-goog-api-key",
+            HeaderValue::from_static("client-google-key"),
+        );
+        headers.insert("api-key", HeaderValue::from_static("client-api-key"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        for kind in [
+            None,
+            Some(UpstreamKind::OpenaiApiKey),
+            Some(UpstreamKind::OpenaiOauth),
+            Some(UpstreamKind::AnthropicApiKey),
+            Some(UpstreamKind::AnthropicOauth),
+            Some(UpstreamKind::GeminiApiKey),
+            Some(UpstreamKind::GeminiOauth),
+        ] {
+            let forwarded = keepalive_forward_headers(&headers, kind);
+            for name in [
+                "openai-organization",
+                "openai-project",
+                "openai-processing-region",
+            ] {
+                assert_eq!(
+                    forwarded.get(name),
+                    (kind == Some(UpstreamKind::OpenaiApiKey)).then(|| headers.get(name).unwrap()),
+                    "scope selector {name} for {kind:?}",
+                );
+            }
+            for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+                assert!(
+                    !forwarded.contains_key(name),
+                    "credential {name} for {kind:?}"
+                );
+            }
+            assert_eq!(forwarded["anthropic-version"], headers["anthropic-version"]);
+        }
     }
 
     #[test]
@@ -1356,6 +1856,41 @@ mod tests {
             Some(3)
         );
     }
+
+    #[test]
+    fn streaming_openai_response_completed_becomes_response_body_for_keepalive() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe(&crate::usage_parser::parse_sse_event(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":16,\"input_tokens_details\":{\"cached_tokens\":1100}}}}\n\n",
+        ));
+        let value = response.into_value().expect("response.completed captured");
+        assert_eq!(value["model"], "gpt-5.6");
+        assert_eq!(
+            value["usage"]["input_tokens_details"]["cached_tokens"],
+            1100
+        );
+    }
+
+    #[test]
+    fn streaming_openai_data_only_terminals_become_response_bodies() {
+        for event in [
+            br#"data: {"type":"response.completed","response":{"model":"gpt-5.6","usage":{"input_tokens":10}}}"# as &[u8],
+            br#"data: {"type":"response.incomplete","response":{"model":"gpt-5.6","usage":{"input_tokens":11}}}"#,
+        ] {
+            let mut response = StreamingKeepaliveResponse::default();
+            response.observe(&crate::usage_parser::parse_sse_event(event));
+            assert_eq!(response.into_value().unwrap()["model"], "gpt-5.6");
+        }
+    }
+    #[test]
+    fn streaming_named_incomplete_without_type_becomes_response_body() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe(&crate::usage_parser::parse_sse_event(
+            b"event: response.incomplete\ndata: {\"response\":{\"model\":\"gpt-5.6\",\"usage\":{\"input_tokens\":12}}}\n\n",
+        ));
+        assert_eq!(response.into_value().unwrap()["model"], "gpt-5.6");
+    }
+
     #[test]
     fn emitted_sse_batch_observes_every_transformed_content_block() {
         let mut response = StreamingKeepaliveResponse::default();
@@ -1464,6 +1999,50 @@ mod tests {
                 "{}/thread:thread-1",
                 cache_keepalive_principal_uuid("principal-test")
             )
+        );
+    }
+
+    #[test]
+    fn openai_responses_without_headers_use_replay_identity() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.cache_keepalive_surface = Some("responses".to_owned());
+        metadata.openai_replay_identity = Some("prompt-cache-key:stable".to_owned());
+        let key = cache_keepalive_session_key(&principal, &metadata)
+            .expect("OpenAI replay identity should create a session key")
+            .to_string();
+        assert!(key.contains("openai-replay:prompt-cache-key:stable"));
+        metadata.openai_replay_identity = Some("conversation:conv-1".to_owned());
+        assert_ne!(
+            key,
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn openai_replay_identity_does_not_override_stable_thread_identity() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut first = RequestCacheMetadata::default();
+        first.cache_keepalive_surface = Some("responses".to_owned());
+        first.thread_id = Some("session-1".to_owned());
+        first.openai_replay_identity = Some("input-sha256:first".to_owned());
+        let mut next = first.clone();
+        next.openai_replay_identity = Some("input-sha256:next".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &first)
+                .unwrap()
+                .to_string(),
+            cache_keepalive_session_key(&principal, &next)
+                .unwrap()
+                .to_string()
         );
     }
 
@@ -1647,15 +2226,20 @@ mod tests {
     }
     #[tokio::test]
     async fn superseded_request_still_fences_before_dispatch_boundary() {
-        assert_superseded_request_fences(false).await;
+        assert_superseded_request_fences(false, false).await;
     }
 
     #[tokio::test]
     async fn dropped_newer_request_cannot_remove_older_request_fence() {
-        assert_superseded_request_fences(true).await;
+        assert_superseded_request_fences(true, false).await;
     }
 
-    async fn assert_superseded_request_fences(drop_newer: bool) {
+    #[tokio::test]
+    async fn openai_headerless_turns_cancel_previous_generation() {
+        assert_superseded_request_fences(false, true).await;
+    }
+
+    async fn assert_superseded_request_fences(drop_newer: bool, openai: bool) {
         struct RequestFenceEnqueuer {
             ordered: OrderedCompletionEnqueuer,
             active_generation: std::sync::atomic::AtomicBool,
@@ -1714,6 +2298,10 @@ mod tests {
             .initialize()
             .await
             .expect("request fence auth schema");
+        let classifier = ClassifierConfig {
+            openai_responses_enabled: openai,
+            ..ClassifierConfig::default()
+        };
         let principal_record = cc_lb_storage_api::PrincipalStore::create(
             storage.as_ref(),
             cc_lb_storage_api::principal::PrincipalCreate {
@@ -1730,7 +2318,7 @@ mod tests {
                     max_total_duration_secs: 14_400,
                     snapshot_max_bytes: 524_288,
                     min_cache_tokens: 10_000,
-                    classifier: ClassifierConfig::default(),
+                    classifier,
                 }),
             },
             cc_lb_clock::unix_secs(clock.now()),
@@ -1784,17 +2372,22 @@ mod tests {
         };
         let mut metadata = RequestCacheMetadata::default();
         metadata.thread_id = Some("superseded-request".to_owned());
-        metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
-            block_index: 0,
-            source: cc_lb_request_log::RequestCacheBreakpointSource::System,
-            path: "system[0]".to_owned(),
-            message_index: None,
-            ttl: Some("5m".to_owned()),
-            prefix_hash: "request-fence-prefix".to_owned(),
-            prefix_token_count: 12_000,
-            lookback_prefixes: Vec::new(),
-            token_estimate_source: None,
-        }];
+        if openai {
+            metadata.cache_keepalive_surface = Some("responses".to_owned());
+            metadata.openai_replay_identity = Some("input-sha256:first".to_owned());
+        } else {
+            metadata.cache_breakpoints = vec![cc_lb_request_log::RequestCacheBreakpoint {
+                block_index: 0,
+                source: cc_lb_request_log::RequestCacheBreakpointSource::System,
+                path: "system[0]".to_owned(),
+                message_index: None,
+                ttl: Some("5m".to_owned()),
+                prefix_hash: "request-fence-prefix".to_owned(),
+                prefix_token_count: 12_000,
+                lookback_prefixes: Vec::new(),
+                token_estimate_source: None,
+            }];
+        }
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
         let enqueuer = Arc::new(RequestFenceEnqueuer {
             ordered: OrderedCompletionEnqueuer { events },
@@ -1814,11 +2407,14 @@ mod tests {
         })
         .await;
         let first_sequence = keepalive.latest_issued_seq(&key);
-        assert_eq!(first_sequence, 1);
+        let mut next_metadata = metadata.clone();
+        if openai {
+            next_metadata.openai_replay_identity = Some("input-sha256:next".to_owned());
+        }
         let mut newer = Some(Box::pin(keepalive.on_request_started(
             &authenticated,
             &principal,
-            &metadata,
+            &next_metadata,
         )));
         std::future::poll_fn(|cx| {
             assert!(

@@ -69,7 +69,7 @@ jobs:
           sha=$(git rev-parse HEAD)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
-          echo "CACHE_KEY=docker-mounts-thin-${{ matrix.key }}-$sha" >> "$GITHUB_ENV"
+          echo "CACHE_KEY=docker-mounts-off-${{ matrix.key }}-$sha" >> "$GITHUB_ENV"
 
       - name: Restore BuildKit cache mounts
         id: cache-restore
@@ -78,6 +78,7 @@ jobs:
           path: ${{ runner.temp }}/docker-mounts.tar
           key: ${{ env.CACHE_KEY }}
           restore-keys: |
+            docker-mounts-off-${{ matrix.key }}-
             docker-mounts-thin-${{ matrix.key }}-
 
       - uses: docker/setup-buildx-action@v4
@@ -123,7 +124,8 @@ jobs:
           outputs: type=cacheonly
           build-args: |
             CARGO_BUILD_JOBS=4
-            CARGO_PROFILE_RELEASE_LTO=thin
+            CARGO_PROFILE_RELEASE_LTO=off
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
             SCCACHE_LOCAL_MOUNT=1
             REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}
@@ -140,7 +142,8 @@ jobs:
           outputs: type=cacheonly
           build-args: |
             CARGO_BUILD_JOBS=4
-            CARGO_PROFILE_RELEASE_LTO=thin
+            CARGO_PROFILE_RELEASE_LTO=off
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
             SCCACHE_LOCAL_MOUNT=1
             REQUIRE_SCCACHE=1
             GIT_SHA=${{ steps.source.outputs.sha }}

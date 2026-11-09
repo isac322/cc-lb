@@ -154,6 +154,12 @@ impl StreamCompletionLog {
                 stream_last_content_delta_ms = ?latency.stream_last_content_delta_ms,
                 stream_message_stop_ms = ?latency.stream_message_stop_ms,
                 stream_last_chunk_ms = ?latency.stream_last_chunk_ms,
+                stream_first_output_ms = ?latency.stream_first_output_ms,
+                stream_last_output_ms = ?latency.stream_last_output_ms,
+                stream_event_count = latency.stream_event_count,
+                stream_inter_output_avg_ms = ?latency.stream_inter_output_avg_ms,
+                provider_session_id = ?latency.provider_session_id,
+                provider_connection_id = ?latency.provider_connection_id,
                 stream_total_ms = latency.stream_total_ms,
                 sse_event_count = latency.sse_event_count,
                 content_delta_count = latency.content_delta_count,
@@ -175,6 +181,14 @@ pub(crate) struct StreamLatency {
     pub(crate) stream_last_content_delta_ms: Option<u64>,
     pub(crate) stream_message_stop_ms: Option<u64>,
     pub(crate) stream_last_chunk_ms: Option<u64>,
+    /// Provider-neutral output timing. The existing SSE/content fields below
+    /// retain their Anthropic semantics for HTTP streams.
+    pub(crate) stream_first_output_ms: Option<u64>,
+    pub(crate) stream_last_output_ms: Option<u64>,
+    pub(crate) stream_event_count: u64,
+    pub(crate) stream_inter_output_avg_ms: Option<u64>,
+    pub(crate) provider_session_id: Option<String>,
+    pub(crate) provider_connection_id: Option<String>,
     pub(crate) stream_total_ms: u64,
     pub(crate) sse_event_count: u64,
     pub(crate) content_delta_count: u64,
@@ -208,6 +222,27 @@ impl StreamLatency {
         );
         record_optional(span, "stream_message_stop_ms", self.stream_message_stop_ms);
         record_optional(span, "stream_last_chunk_ms", self.stream_last_chunk_ms);
+        record_optional(span, "stream_first_output_ms", self.stream_first_output_ms);
+        record_optional(span, "stream_last_output_ms", self.stream_last_output_ms);
+        span.record(
+            "stream_event_count",
+            numeric_attribute(Some(self.stream_event_count)).as_value(),
+        );
+        record_optional(
+            span,
+            "stream_inter_output_avg_ms",
+            self.stream_inter_output_avg_ms,
+        );
+        record_optional_string(
+            span,
+            "provider_session_id",
+            self.provider_session_id.as_deref(),
+        );
+        record_optional_string(
+            span,
+            "provider_connection_id",
+            self.provider_connection_id.as_deref(),
+        );
         span.record(
             "stream_total_ms",
             numeric_attribute(Some(self.stream_total_ms)).as_value(),
@@ -235,6 +270,12 @@ impl StreamLatency {
 fn record_optional(span: &Span, field: &'static str, value: Option<u64>) {
     if let Some(value) = value {
         span.record(field, numeric_attribute(Some(value)).as_value());
+    }
+}
+
+fn record_optional_string(span: &Span, field: &'static str, value: Option<&str>) {
+    if let Some(value) = value {
+        span.record(field, value);
     }
 }
 
@@ -390,11 +431,17 @@ mod tests {
                 stream_last_content_delta_ms: Some(5),
                 stream_message_stop_ms: Some(6),
                 stream_last_chunk_ms: Some(7),
-                stream_total_ms: 8,
-                sse_event_count: 9,
-                content_delta_count: 10,
-                ping_count: 11,
-                inter_token_avg_ms: Some(12),
+                stream_first_output_ms: Some(8),
+                stream_last_output_ms: Some(9),
+                stream_event_count: 10,
+                stream_inter_output_avg_ms: Some(11),
+                provider_session_id: Some("session".to_owned()),
+                provider_connection_id: Some("connection".to_owned()),
+                stream_total_ms: 12,
+                sse_event_count: 13,
+                content_delta_count: 14,
+                ping_count: 15,
+                inter_token_avg_ms: Some(16),
                 total_bytes: 13,
             },
             Dispatch::new(ProbeSubscriber(Arc::clone(probe))),
@@ -453,6 +500,39 @@ mod tests {
         observer.shutdown().await;
 
         assert_eq!(probe.request_ids(), ["req-1", "req-2", "req-3"]);
+        assert!(TEST_DROPS.lock().expect("test drop lock").is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn websocket_terminal_paths_enqueue_without_waiting_for_export() {
+        let _serial = SERIAL.lock().await;
+        TEST_DROPS.lock().expect("test drop lock").clear();
+        let probe = Arc::new(LogProbe::default());
+        let observer = CompletionObserver::with_capacity_and_recorder(4, test_record_drop);
+
+        for request_id in [
+            "responses-completed",
+            "realtime-provider-error",
+            "realtime-proxy-error",
+            "live-client-cancelled",
+        ] {
+            assert_eq!(
+                observer.enqueue(log(request_id, &probe)),
+                Ok(()),
+                "{request_id} terminal telemetry is non-blocking"
+            );
+        }
+        observer.shutdown().await;
+
+        assert_eq!(
+            probe.request_ids(),
+            [
+                "responses-completed",
+                "realtime-provider-error",
+                "realtime-proxy-error",
+                "live-client-cancelled"
+            ]
+        );
         assert!(TEST_DROPS.lock().expect("test drop lock").is_empty());
     }
 

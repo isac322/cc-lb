@@ -14,7 +14,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   ApiError,
   type ApiKeyAccess,
+  type KeyUsageProvenance,
   type PreflightResponse,
+  type ProviderReportState,
 } from '../../lib/api';
 import type {
   UpdateUpstreamRequest,
@@ -32,6 +34,7 @@ import {
   successQuery,
 } from '../../lib/test-utils/hook-results';
 import { ApiKeyAccessSection } from './ApiKeyAccessSection';
+import { ApiUsageCard } from './ApiUsageCard';
 
 vi.mock('../../lib/queries', async () => {
   const actual = (await vi.importActual('../../lib/queries')) as typeof queries;
@@ -984,5 +987,226 @@ describe('UI-AC-17 endpoint change outcomes', () => {
     const usage = screen.getByTestId('api-key-usage-mode');
     expect(usage.textContent).toContain('Reported');
     expect(screen.getByText('Production')).toBeDefined();
+  });
+});
+
+describe('ApiKeyAccessSection provider-native access', () => {
+  function renderProvider(
+    kind: 'openai_api_key' | 'gemini_api_key',
+    access: Partial<ApiKeyAccess> = {},
+  ) {
+    render(
+      <ApiKeyAccessSection
+        upstream={{
+          ...upstreamWith({
+            ...FULL,
+            provider: kind === 'openai_api_key' ? 'openai' : 'gemini',
+            project_id:
+              kind === 'openai_api_key'
+                ? 'proj-production'
+                : 'gemini-production',
+            project_source: 'configured',
+            provider_report_state:
+              kind === 'openai_api_key' ? 'not_configured' : 'not_applicable',
+            ...access,
+          }),
+          kind,
+        }}
+        onReplace={onReplace}
+        workspaceEditing
+      />,
+    );
+    return screen.getByTestId('api-key-access');
+  }
+
+  test('rendersOpenAIProjectAndAdminScope', () => {
+    const section = renderProvider('openai_api_key', {
+      provider_report_state: 'reported',
+      project_source: 'admin_resolved',
+    });
+    expect(within(section).getByText('proj-production')).toBeDefined();
+    expect(
+      within(section).getByText('Resolved by the administrator API'),
+    ).toBeDefined();
+    expect(within(section).getByRole('status').textContent).toBe(
+      'Key accepted',
+    );
+    expect(section.textContent).toContain('OpenAI serving key');
+    expect(section.textContent).toContain(
+      'Text-generation usage and costs from the organization administrator API, scoped to this project.',
+    );
+    expect(
+      within(section).getByTestId('api-key-usage-mode').textContent,
+    ).toContain('Reported');
+    expect(section.textContent).not.toContain('Anthropic');
+    expect(within(section).queryByText('Workspace')).toBeNull();
+    expect(
+      within(section).queryByRole('button', { name: /workspace/i }),
+    ).toBeNull();
+    expect(queries.useUpstreamWorkspaces).not.toHaveBeenCalled();
+    fireEvent.click(within(section).getByRole('button', { name: 'Re-check' }));
+    expect(recheckMutate).toHaveBeenCalledWith('upstream-api-key');
+    fireEvent.click(
+      within(section).getByRole('button', { name: 'Replace key' }),
+    );
+    expect(onReplace).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps serving-key verification separate from unconfigured administrator reporting', () => {
+    const section = renderProvider('openai_api_key');
+    expect(within(section).getByRole('status').textContent).toBe(
+      'Key accepted',
+    );
+    expect(
+      within(section).getByText(
+        'Configured project ID · not verified by the serving-key check',
+      ),
+    ).toBeDefined();
+    expect(section.textContent).toContain(
+      'Configure the deployment’s OpenAI organization-admin credential',
+    );
+    expect(section.textContent).toContain(
+      'The serving key alone cannot authorize reports.',
+    );
+    expect(
+      within(section).getByTestId('api-key-usage-mode').textContent,
+    ).toContain('Estimated');
+  });
+
+  test('rendersGeminiProjectIdAndUnavailableReport', () => {
+    const section = renderProvider('gemini_api_key', {
+      provider_report_state: 'unavailable',
+    });
+    expect(within(section).getByText('gemini-production')).toBeDefined();
+    expect(section.textContent).toContain('Gemini (default)');
+    expect(within(section).getByText('Unavailable')).toBeDefined();
+    expect(section.textContent).toContain(
+      'Proxy estimates cover cc-lb traffic only, not organization totals.',
+    );
+    expect(
+      within(section).getByTestId('api-key-usage-mode').textContent,
+    ).toContain('Estimated');
+    expect(within(section).queryByText('Workspace')).toBeNull();
+    expect(
+      within(section).queryByRole('button', { name: /workspace/i }),
+    ).toBeNull();
+    expect(queries.useUpstreamWorkspaces).not.toHaveBeenCalled();
+    fireEvent.click(within(section).getByRole('button', { name: 'Re-check' }));
+    fireEvent.click(
+      within(section).getByRole('button', { name: 'Replace key' }),
+    );
+    expect(recheckMutate).toHaveBeenCalledWith('upstream-api-key');
+    expect(onReplace).toHaveBeenCalledTimes(1);
+  });
+
+  test('defaults Gemini reporting to not applicable and leaves provenance unverified', () => {
+    const section = renderProvider('gemini_api_key', {
+      project_source: undefined,
+      provider_report_state: undefined,
+      provider_report_status_metadata:
+        '{"upstream_url":"https://private.example","raw_headers":"redacted"}',
+    });
+    expect(within(section).getByText('Unknown')).toBeDefined();
+    expect(
+      within(section).getByText('Project provenance unknown'),
+    ).toBeDefined();
+    expect(section.textContent).not.toContain('private.example');
+    expect(section.textContent).not.toContain('raw_headers');
+    expect(section.textContent).not.toContain('Anthropic');
+  });
+
+  test.each(['openai_api_key', 'gemini_api_key'] as const)(
+    '%s keeps Re-check and Replace available when the serving key is rejected',
+    (kind) => {
+      const section = renderProvider(kind, { inference: 'denied' });
+      expect(within(section).getByRole('status').textContent).toBe(
+        'Key rejected',
+      );
+      fireEvent.click(
+        within(section).getByRole('button', { name: 'Re-check' }),
+      );
+      fireEvent.click(
+        within(section).getByRole('button', { name: 'Replace key' }),
+      );
+      expect(recheckMutate).toHaveBeenCalledWith('upstream-api-key');
+      expect(onReplace).toHaveBeenCalledTimes(1);
+    },
+  );
+});
+
+describe('ApiUsageCard provider reporting states', () => {
+  function renderUsage(state: ProviderReportState) {
+    const provenance: KeyUsageProvenance = {
+      provider: 'openai',
+      project_id: 'proj-production',
+      provider_report_state: state,
+      source:
+        state === 'reported' || state === 'stale' ? 'reported' : 'estimated',
+      stale: state === 'stale',
+      stopped: false,
+      last_reported_unix_secs: null,
+      pending_first_report: false,
+      attribution: 'api_key',
+      workspace: null,
+      verified: true,
+      key_class: 'unknown',
+      fix: null,
+    };
+    render(
+      <ApiUsageCard
+        data={undefined}
+        isLoading={false}
+        range="24h"
+        onRangeChange={vi.fn()}
+        metric="tokens"
+        onMetricChange={vi.fn()}
+        provenance={provenance}
+      />,
+    );
+    return screen.getByTestId('api-usage-card');
+  }
+
+  test('distinguishesReportedEstimatedUnavailable', () => {
+    const reported = renderUsage('reported');
+    expect(within(reported).getByText('Reported')).toBeDefined();
+    expect(reported.textContent).toContain('Figures reported by OpenAI');
+    expect(reported.textContent).toContain(
+      'Reported figures for project proj-production.',
+    );
+    expect(reported.textContent).not.toContain("all of this key's usage");
+    expect(reported.textContent).not.toContain('Anthropic');
+    cleanup();
+
+    const estimated = renderUsage('estimated');
+    expect(within(estimated).getByText('Estimated')).toBeDefined();
+    expect(estimated.textContent).toContain('Estimated from cc-lb traffic');
+    expect(estimated.textContent).not.toContain('Unavailable');
+    cleanup();
+
+    const unavailable = renderUsage('unavailable');
+    expect(within(unavailable).getByText('Unavailable')).toBeDefined();
+    expect(within(unavailable).getByText('Estimated')).toBeDefined();
+    expect(unavailable.textContent).toContain('provider reporting unavailable');
+    expect(unavailable.textContent).toContain('not organization totals');
+    expect(
+      within(unavailable).queryByRole('link', { name: 'Billing' }),
+    ).toBeNull();
+  });
+
+  test.each([
+    ['not_configured', 'Not configured'],
+    ['not_applicable', 'Not applicable'],
+    ['denied', 'Denied'],
+    ['stale', 'Stale'],
+    ['failed', 'Failed'],
+  ] as const)('shows distinct %s report state', (state, label) => {
+    const card = renderUsage(state);
+    expect(within(card).getByText(label)).toBeDefined();
+    if (state === 'stale') {
+      expect(within(card).getByText('Last report')).toBeDefined();
+      expect(within(card).queryByText('Estimated')).toBeNull();
+    } else {
+      expect(within(card).getByText('Estimated')).toBeDefined();
+    }
   });
 });

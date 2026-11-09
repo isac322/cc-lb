@@ -105,6 +105,7 @@ fn install_renewal_pricing() {
     models.insert(
         "claude-renewal".to_owned(),
         Pricing {
+            native: None,
             model: "claude-renewal".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(2),
             output_per_million_usd: UsdPerMillion::from_whole_usd(3),

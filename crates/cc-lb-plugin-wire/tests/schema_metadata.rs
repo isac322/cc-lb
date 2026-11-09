@@ -45,6 +45,8 @@ fn root_schema_exports_describe_supported_hooks() {
     ));
     assert!(schema::host_supports(HookKind::Filter, WireVersion::V1));
     assert!(schema::host_supports(HookKind::Filter, WireVersion::V2));
+    assert!(schema::host_supports(HookKind::Filter, WireVersion::V3));
+    assert!(!schema::host_supports(HookKind::Shape, WireVersion::V3));
     assert_eq!(
         HookKind::parse_entrypoint("shape_envelope_gemini"),
         Some((
@@ -52,6 +54,29 @@ fn root_schema_exports_describe_supported_hooks() {
             Some(schema::ProviderFamily::Gemini)
         ))
     );
+}
+
+#[test]
+fn realtime_frame_contract_is_provider_qualified_and_v2_only() {
+    assert_eq!(
+        HookKind::TransformRealtimeFrame.qualified_export_name(schema::ProviderFamily::Openai),
+        "cc_lb_transform_realtime_frame_openai"
+    );
+    assert_eq!(
+        HookKind::parse_entrypoint("transform_realtime_frame_gemini"),
+        Some((
+            HookKind::TransformRealtimeFrame,
+            Some(schema::ProviderFamily::Gemini)
+        ))
+    );
+    assert!(schema::host_supports(
+        HookKind::TransformRealtimeFrame,
+        WireVersion::V2
+    ));
+    assert!(!schema::host_supports(
+        HookKind::TransformRealtimeFrame,
+        WireVersion::V1
+    ));
 }
 
 #[cfg(feature = "std")]

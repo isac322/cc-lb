@@ -50,6 +50,7 @@ struct Partial {
     cache_control_block_count: Option<u64>,
     usage: UsageSnapshot,
     usage_seen: bool,
+    native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
 }
 
 impl Partial {
@@ -144,8 +145,10 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(info), ..
         } => {
             partial.cache_control_block_count = info.cache_control_block_count;
+            partial.native_cache = info.native_cache;
         }
         LifecycleEvent::UsageObserved { usage, .. } => {
+            apply_native_usage(&mut partial.native_cache, &usage);
             partial.usage = usage;
             partial.usage_seen = true;
         }
@@ -156,6 +159,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             if !success.usage_present {
                 return;
             }
+            apply_native_usage(&mut partial.native_cache, &success.usage);
             partial.usage = success.usage;
             partial.usage_seen = true;
         }
@@ -163,7 +167,49 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
     }
 }
 
+fn apply_native_usage(
+    native: &mut Option<cc_lb_request_log::RequestNativeCacheObservation>,
+    usage: &UsageSnapshot,
+) {
+    let Some(native) = native.as_mut() else {
+        return;
+    };
+    let (evidence, cached_tokens, write_tokens) = crate::provider_cache::project_usage(
+        native,
+        usage.cache_read_evidence.unwrap_or_default(),
+        usage.cache_read_input_tokens,
+        usage.cache_write_evidence.unwrap_or_default(),
+        usage.cache_write_input_tokens,
+    );
+    native.evidence = evidence;
+    native.cached_tokens = cached_tokens;
+    native.write_tokens = write_tokens;
+}
+
 fn derive_cache_state(partial: &Partial) -> RequestCacheState {
+    if let Some(native) = partial.native_cache.as_ref() {
+        if native.mode == "unknown"
+            || native.evidence_source.as_deref() == Some("unsupported_model_or_api")
+        {
+            return RequestCacheState::Unknown;
+        }
+        if native.provider == "gemini"
+            && native.mode == "explicit"
+            && native.evidence != cc_lb_request_log::RequestCacheEvidence::Positive
+        {
+            return RequestCacheState::Unknown;
+        }
+        return match (native.evidence, native.write_tokens.unwrap_or_default() > 0) {
+            (cc_lb_request_log::RequestCacheEvidence::Positive, true) => RequestCacheState::Refresh,
+            (cc_lb_request_log::RequestCacheEvidence::Positive, false) => RequestCacheState::Hit,
+            (cc_lb_request_log::RequestCacheEvidence::Zero, true) => RequestCacheState::Write,
+            (cc_lb_request_log::RequestCacheEvidence::Zero, false) => RequestCacheState::Miss,
+            (cc_lb_request_log::RequestCacheEvidence::Invalid, _)
+            | (cc_lb_request_log::RequestCacheEvidence::Unreported, _) => {
+                RequestCacheState::Unknown
+            }
+        };
+    }
     let cache_read = partial.usage.cache_read_input_tokens > 0;
     let cache_write = partial.usage.cache_creation_input_tokens > 0;
     let has_breakpoints = partial.cache_control_block_count.unwrap_or(0) > 0;
@@ -392,5 +438,246 @@ mod tests {
             }
         }
         assert!(!observed_any);
+    }
+    fn native_parse(event_id: &str, provider: &str, mode: &str) -> LifecycleEvent {
+        LifecycleEvent::ParseCompleted {
+            event_id: eid(event_id),
+            result: Ok(ParseInfo {
+                native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                    provider: provider.into(),
+                    mode: mode.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn native_usage(
+        event_id: &str,
+        read: u64,
+        read_evidence: &str,
+        write: Option<u64>,
+        write_evidence: &str,
+    ) -> LifecycleEvent {
+        let mut value = serde_json::to_value(UsageSnapshot {
+            cache_read_input_tokens: read,
+            cache_creation_input_tokens: 50,
+            cache_write_input_tokens: write,
+            ..Default::default()
+        })
+        .expect("usage snapshot serializes");
+        value["cache_read_evidence"] = serde_json::json!(read_evidence);
+        value["cache_write_evidence"] = serde_json::json!(write_evidence);
+        let usage = serde_json::from_value(value).expect("usage snapshot deserializes");
+        LifecycleEvent::UsageObserved {
+            event_id: eid(event_id),
+            usage,
+            source: cc_lb_lifecycle::UsageSource::NonStreamBody,
+        }
+    }
+
+    fn terminated(event_id: &str) -> LifecycleEvent {
+        LifecycleEvent::RequestTerminated {
+            event_id: eid(event_id),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 1,
+            first_body_chunk_ms: None,
+            first_content_delta_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            internal_errors: Vec::new(),
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            upstream_body_ms: None,
+            event_kind: None,
+        }
+    }
+
+    async fn observe_native_state(
+        event_id: &str,
+        provider: &str,
+        mode: &str,
+        read: u64,
+        read_evidence: &str,
+        write: Option<u64>,
+        write_evidence: &str,
+    ) -> RequestCacheState {
+        let bus = Arc::new(InMemoryBus::new());
+        let (tx, rx) = mpsc::channel(16);
+        let mut sub_rx = bus.subscribe_lifecycle();
+        let handle = spawn_lifecycle_cache_observation_subscriber(rx, bus.clone());
+        tx.send(native_parse(event_id, provider, mode))
+            .await
+            .expect("subscriber is running");
+        tx.send(native_usage(
+            event_id,
+            read,
+            read_evidence,
+            write,
+            write_evidence,
+        ))
+        .await
+        .expect("subscriber is running");
+        tx.send(terminated(event_id))
+            .await
+            .expect("subscriber is running");
+        drop(tx);
+        handle.shutdown().await;
+
+        while let Ok(event) = sub_rx.try_recv() {
+            if let LifecycleEvent::CacheObserved { cache_state, .. } = event {
+                return cache_state;
+            }
+        }
+        panic!("native cache observation was not published");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_cache_write_states_cover_write_refresh_healthy_miss_and_invalid_unknown() {
+        for (name, read, read_evidence, write, write_evidence, expected) in [
+            (
+                "native-write",
+                0,
+                "zero",
+                Some(300),
+                "positive",
+                RequestCacheState::Write,
+            ),
+            (
+                "native-refresh",
+                100,
+                "positive",
+                Some(300),
+                "positive",
+                RequestCacheState::Refresh,
+            ),
+            (
+                "native-healthy-miss",
+                0,
+                "zero",
+                Some(0),
+                "zero",
+                RequestCacheState::Miss,
+            ),
+            (
+                "native-invalid",
+                0,
+                "zero",
+                None,
+                "invalid",
+                RequestCacheState::Unknown,
+            ),
+            (
+                "native-absent-write",
+                0,
+                "zero",
+                None,
+                "unreported",
+                RequestCacheState::Miss,
+            ),
+            (
+                "native-invalid-positive-read",
+                100,
+                "positive",
+                None,
+                "invalid",
+                RequestCacheState::Unknown,
+            ),
+        ] {
+            assert_eq!(
+                observe_native_state(
+                    name,
+                    "openai",
+                    "implicit",
+                    read,
+                    read_evidence,
+                    write,
+                    write_evidence,
+                )
+                .await,
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_cache_unsupported_gemini_is_unknown_even_with_positive_write() {
+        assert_eq!(
+            observe_native_state(
+                "native-unsupported-gemini",
+                "gemini",
+                "explicit",
+                0,
+                "zero",
+                Some(300),
+                "positive",
+            )
+            .await,
+            RequestCacheState::Unknown
+        );
+    }
+
+    #[test]
+    fn native_cache_unsupported_source_and_unknown_mode_publish_unknown() {
+        for (mode, source) in [
+            ("implicit", Some("unsupported_model_or_api")),
+            ("unknown", None),
+        ] {
+            let bus = InMemoryBus::new();
+            let mut events = bus.subscribe_lifecycle();
+            let mut partials = std::collections::HashMap::new();
+            let parse = LifecycleEvent::ParseCompleted {
+                event_id: eid("unsupported"),
+                result: Ok(ParseInfo {
+                    native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                        provider: "gemini".into(),
+                        mode: mode.into(),
+                        evidence_source: source.map(str::to_owned),
+                        evidence: cc_lb_request_log::RequestCacheEvidence::Zero,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            };
+            for event in [
+                parse,
+                native_usage("unsupported", 0, "zero", Some(300), "positive"),
+                terminated("unsupported"),
+            ] {
+                super::handle_event(&bus, &mut partials, 16, event);
+            }
+            assert!(matches!(
+                events.try_recv(),
+                Ok(LifecycleEvent::CacheObserved {
+                    cache_state: RequestCacheState::Unknown,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn gemini_explicit_zero_evidence_is_unknown() {
+        let partial = super::Partial {
+            native_cache: Some(cc_lb_request_log::RequestNativeCacheObservation {
+                provider: "gemini".into(),
+                mode: "explicit".into(),
+                evidence: cc_lb_request_log::RequestCacheEvidence::Zero,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::derive_cache_state(&partial),
+            RequestCacheState::Unknown
+        );
     }
 }

@@ -84,16 +84,18 @@ async fn list_cache_keepalive(
             Err(error) => return storage_error(error),
         }
     };
-    let aggregate = match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_aggregate(
-        storage,
-        &principal_id,
-        now_ms.saturating_sub(FIVE_MINUTES_MS),
-    )
-    .await
-    {
-        Ok(aggregate) => aggregate,
-        Err(error) => return storage_error(error),
-    };
+    let aggregate =
+        match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_aggregate_for_horizon(
+            storage,
+            &principal_id,
+            now_ms.saturating_sub(FIVE_MINUTES_MS),
+            query.storage.horizon_start_ms,
+        )
+        .await
+        {
+            Ok(aggregate) => aggregate,
+            Err(error) => return storage_error(error),
+        };
     let mut avoided_micros = 0_i64;
     let mut pricing_complete = true;
     for group in &aggregate.groups {
@@ -112,9 +114,17 @@ async fn list_cache_keepalive(
         avoided_micros = avoided_micros.saturating_add(group_avoided);
     }
     let economics_complete = pricing_complete && aggregate.evidence_status == "observed";
+    let resolved_complete = pricing_complete
+        && aggregate.unknown_cycles == 0
+        && (aggregate.evidence_status == "observed"
+            || (aggregate.evidence_status == "pending" && aggregate.successful_hits > 0));
     let total_spent = aggregate.total_spent_micros as f64 / 1_000_000.0;
     let total_avoided = economics_complete.then(|| avoided_micros as f64 / 1_000_000.0);
     let cost_saved = economics_complete.then(|| {
+        (avoided_micros.saturating_sub(aggregate.total_spent_micros)) as f64 / 1_000_000.0
+    });
+    let resolved_total_avoided = resolved_complete.then(|| avoided_micros as f64 / 1_000_000.0);
+    let resolved_cost_saved = resolved_complete.then(|| {
         (avoided_micros.saturating_sub(aggregate.total_spent_micros)) as f64 / 1_000_000.0
     });
     let summary = view::CacheKeepaliveSummaryResponse {
@@ -123,8 +133,10 @@ async fn list_cache_keepalive(
         renewals_fired: aggregate.successful_hits,
         retained_successful_hits: aggregate.successful_hits,
         cost_saved,
+        resolved_cost_saved,
         total_spent,
         total_avoided,
+        resolved_total_avoided,
         evidence_status: aggregate.evidence_status,
         unknown_cycles: aggregate.unknown_cycles,
         retained_from_ms: aggregate.retained_from_ms,

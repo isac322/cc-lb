@@ -72,6 +72,7 @@ struct Partial {
     cache_read_input_tokens: u64,
     usage_seen: bool,
     predicted_cache_read_tokens: Option<u32>,
+    native_cache: Option<cc_lb_request_log::RequestNativeCacheObservation>,
 }
 
 impl Partial {
@@ -157,6 +158,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.model = info.model;
             }
             partial.has_cache_breakpoints = !info.cache_breakpoints.is_empty();
+            partial.native_cache = info.native_cache;
         }
         LifecycleEvent::RouteCompleted {
             result: Ok(info), ..
@@ -172,6 +174,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         LifecycleEvent::UsageObserved { usage, .. } => {
             partial.cache_read_input_tokens = usage.cache_read_input_tokens;
+            apply_native_usage(&mut partial.native_cache, &usage);
             partial.usage_seen = true;
         }
         LifecycleEvent::StreamCompleted {
@@ -182,14 +185,91 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 return;
             }
             partial.cache_read_input_tokens = success.usage.cache_read_input_tokens;
+            apply_native_usage(&mut partial.native_cache, &success.usage);
             partial.usage_seen = true;
         }
         _ => {}
     }
 }
 
+fn apply_native_usage(
+    native: &mut Option<cc_lb_request_log::RequestNativeCacheObservation>,
+    usage: &cc_lb_lifecycle::UsageSnapshot,
+) {
+    let Some(native) = native.as_mut() else {
+        return;
+    };
+    let (evidence, cached_tokens, write_tokens) = crate::provider_cache::project_usage(
+        native,
+        usage.cache_read_evidence.unwrap_or_default(),
+        usage.cache_read_input_tokens,
+        usage.cache_write_evidence.unwrap_or_default(),
+        usage.cache_write_input_tokens,
+    );
+    native.evidence = evidence;
+    native.cached_tokens = cached_tokens;
+    native.write_tokens = write_tokens;
+}
+
 fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: u16) {
     if status != 200 {
+        return;
+    }
+    if let Some(native) = partial.native_cache.as_ref() {
+        let provider = match native.provider.as_str() {
+            "openai" => "openai",
+            "gemini" => "gemini",
+            _ => "unknown",
+        };
+        let mode = match native.mode.as_str() {
+            "explicit" => "explicit",
+            "implicit" => "implicit",
+            _ => "unknown",
+        };
+        let native_outcome = if native.mode == "unknown"
+            || native.evidence_source.as_deref() == Some("unsupported_model_or_api")
+            || (native.provider == "gemini"
+                && native.mode == "explicit"
+                && native.evidence != cc_lb_request_log::RequestCacheEvidence::Positive)
+        {
+            "unknown"
+        } else {
+            match (native.evidence, native.write_tokens.unwrap_or_default() > 0) {
+                (cc_lb_request_log::RequestCacheEvidence::Positive, true) => "refresh",
+                (cc_lb_request_log::RequestCacheEvidence::Positive, false) => "hit",
+                (cc_lb_request_log::RequestCacheEvidence::Zero, true) => "write",
+                (cc_lb_request_log::RequestCacheEvidence::Zero, false) => "miss",
+                (cc_lb_request_log::RequestCacheEvidence::Invalid, _)
+                | (cc_lb_request_log::RequestCacheEvidence::Unreported, _) => "unknown",
+            }
+        };
+        metrics_hook.record_native_cache_outcome(provider, mode, native_outcome);
+        match native_outcome {
+            "hit" | "refresh" => metrics_hook.record_native_cache_hit(provider, mode),
+            "miss" | "write" => metrics_hook.record_native_cache_miss(provider, mode),
+            "unknown" => {}
+            _ => unreachable!("native cache outcome is bounded above"),
+        }
+        if native.boundary.is_some() {
+            let actual = match native.evidence {
+                cc_lb_request_log::RequestCacheEvidence::Positive => Some(true),
+                cc_lb_request_log::RequestCacheEvidence::Zero => Some(false),
+                cc_lb_request_log::RequestCacheEvidence::Invalid
+                | cc_lb_request_log::RequestCacheEvidence::Unreported => None,
+            };
+            if let (Some(predicted), Some(actual)) = (
+                partial.predicted_cache_read_tokens.map(|tokens| tokens > 0),
+                actual,
+            ) {
+                let outcome = match (predicted, actual) {
+                    (true, true) => PREDICTED_HIT_ACTUAL_HIT,
+                    (false, true) => UNPREDICTED_HIT,
+                    (false, false) => PREDICTED_MISS_ACTUAL_MISS,
+                    (true, false) => PREDICTED_HIT_ACTUAL_MISS,
+                };
+                metrics_hook.record_native_cache_prediction(provider, mode, outcome);
+            }
+        }
         return;
     }
     if !partial.has_cache_breakpoints {
@@ -261,13 +341,17 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use cc_lb_lifecycle::{
         ParseFailure, ParseInfo, RouteFailure, RouteInfo, StreamError, StreamSuccess,
         TerminationReason, UsageSnapshot, UsageSource,
     };
     use cc_lb_observability::MetricsCrateHook;
-    use cc_lb_request_log::{RequestCacheBreakpoint, RequestCacheBreakpointSource};
+    use cc_lb_request_log::{
+        RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestNativeCacheObservation,
+    };
     use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
     use uuid::Uuid;
 
@@ -286,6 +370,44 @@ mod tests {
             prefix_token_count: 1_200,
             lookback_prefixes: Vec::new(),
             token_estimate_source: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct NativeMetricsHook {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl EngineMetricsHook for NativeMetricsHook {
+        fn record_cache_hit(&self, _upstream: &str, _model: &str) {}
+        fn record_cache_miss(&self, _upstream: &str, _model: &str) {}
+        fn record_native_cache_outcome(&self, provider: &str, mode: &str, outcome: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("outcome:{provider}:{mode}:{outcome}"));
+        }
+        fn record_native_cache_hit(&self, provider: &str, mode: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("hit:{provider}:{mode}"));
+        }
+        fn record_native_cache_miss(&self, provider: &str, mode: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("miss:{provider}:{mode}"));
+        }
+        fn record_native_cache_prediction(&self, provider: &str, mode: &str, outcome: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("prediction:{provider}:{mode}:{outcome}"));
+        }
+        fn record_cache_observation_dropped(&self, _reason: &str) {}
+        fn record_dropped_events_by(&self, _reason: &str, _count: u64) {}
+        fn record_routing_tier_selection(&self, _tier: &str, _upstream: &str, _principal_id: &str) {
         }
     }
 
@@ -425,6 +547,7 @@ mod tests {
                 .map_err(|()| StreamError {
                     error_type: "upstream_error".into(),
                     error_message: "stream failed after usage".into(),
+                    ..Default::default()
                 }),
         }
     }
@@ -539,6 +662,155 @@ mod tests {
         })
         .await?;
         Ok(())
+    }
+
+    #[test]
+    fn native_metrics_bound_provider_and_mode_and_skip_missing_boundary_prediction() {
+        let hook = NativeMetricsHook::default();
+        let partial = Partial {
+            native_cache: Some(RequestNativeCacheObservation {
+                provider: "untrusted-provider".into(),
+                mode: "future-mode".into(),
+                boundary: None,
+                evidence: cc_lb_request_log::RequestCacheEvidence::Positive,
+                ..Default::default()
+            }),
+            predicted_cache_read_tokens: Some(100),
+            ..Default::default()
+        };
+        emit_metric(&hook, &partial, 200);
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![
+                "outcome:unknown:unknown:hit".to_owned(),
+                "hit:unknown:unknown".to_owned(),
+            ]
+        );
+    }
+    #[test]
+    fn native_cache_write_metrics_cover_write_refresh_miss_and_invalid_unknown() {
+        for (name, read, write, write_evidence, expected) in [
+            (
+                "write",
+                0,
+                Some(300),
+                "positive",
+                vec!["outcome:openai:implicit:write", "miss:openai:implicit"],
+            ),
+            (
+                "refresh",
+                100,
+                Some(300),
+                "positive",
+                vec!["outcome:openai:implicit:refresh", "hit:openai:implicit"],
+            ),
+            (
+                "zero",
+                0,
+                Some(0),
+                "zero",
+                vec!["outcome:openai:implicit:miss", "miss:openai:implicit"],
+            ),
+            (
+                "absent",
+                0,
+                None,
+                "unreported",
+                vec!["outcome:openai:implicit:miss", "miss:openai:implicit"],
+            ),
+            (
+                "invalid",
+                0,
+                None,
+                "invalid",
+                vec!["outcome:openai:implicit:unknown"],
+            ),
+            (
+                "invalid-positive-read",
+                100,
+                None,
+                "invalid",
+                vec!["outcome:openai:implicit:unknown"],
+            ),
+        ] {
+            let hook = NativeMetricsHook::default();
+            let mut partials = HashMap::new();
+            let mut value = serde_json::to_value(UsageSnapshot {
+                cache_read_input_tokens: read,
+                cache_creation_input_tokens: 50,
+                cache_write_input_tokens: write,
+                ..Default::default()
+            })
+            .expect("usage snapshot serializes");
+            value["cache_read_evidence"] =
+                serde_json::json!(if read == 0 { "zero" } else { "positive" });
+            value["cache_write_evidence"] = serde_json::json!(write_evidence);
+            let usage = serde_json::from_value(value).expect("usage snapshot deserializes");
+            for event in [
+                LifecycleEvent::ParseCompleted {
+                    event_id: eid(name),
+                    result: Ok(ParseInfo {
+                        native_cache: Some(RequestNativeCacheObservation {
+                            provider: "openai".into(),
+                            mode: "implicit".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                },
+                LifecycleEvent::UsageObserved {
+                    event_id: eid(name),
+                    usage,
+                    source: UsageSource::NonStreamBody,
+                },
+                terminated(name, 200, TerminationReason::Success),
+            ] {
+                handle_event(&hook, &mut partials, 16, event);
+            }
+            assert_eq!(*hook.events.lock().unwrap(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn native_cache_unsupported_source_and_unknown_mode_emit_only_unknown() {
+        for (mode, source) in [
+            ("implicit", Some("unsupported_model_or_api")),
+            ("unknown", None),
+        ] {
+            let hook = NativeMetricsHook::default();
+            let mut partials = HashMap::new();
+            for event in [
+                LifecycleEvent::ParseCompleted {
+                    event_id: eid("unsupported"),
+                    result: Ok(ParseInfo {
+                        native_cache: Some(RequestNativeCacheObservation {
+                            provider: "gemini".into(),
+                            mode: mode.into(),
+                            evidence_source: source.map(str::to_owned),
+                            evidence: cc_lb_request_log::RequestCacheEvidence::Zero,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                },
+                LifecycleEvent::UsageObserved {
+                    event_id: eid("unsupported"),
+                    usage: UsageSnapshot {
+                        cache_read_evidence: Some(cc_lb_request_log::RequestCacheEvidence::Zero),
+                        cache_write_input_tokens: Some(300),
+                        ..Default::default()
+                    },
+                    source: UsageSource::NonStreamBody,
+                },
+                terminated("unsupported", 200, TerminationReason::Success),
+            ] {
+                handle_event(&hook, &mut partials, 16, event);
+            }
+            assert_eq!(
+                *hook.events.lock().unwrap(),
+                vec![format!("outcome:gemini:{mode}:unknown")],
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

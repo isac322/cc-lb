@@ -3,15 +3,19 @@ use crate::common;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bytes::Bytes;
-use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
-use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
-use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
+use cc_lb_control::api_keys::principal_view::{
+    DialectCache, PrincipalView, ProviderFilterChains, RouterPipelineCache,
+};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, RequestEventBus};
+use cc_lb_domain::{Principal, Provider, TerminalStrategy, UpstreamCandidate};
+use cc_lb_engine::realtime_websocket::{RealtimeWebSocketKind, RealtimeWebSocketTarget};
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use http::StatusCode;
+use http::{HeaderValue, StatusCode};
 use parking_lot::Mutex as ParkingMutex;
 use url::Url;
 use uuid::Uuid;
@@ -167,6 +171,159 @@ async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
     Ok(())
 }
 
+#[tokio::test]
+async fn realtime_provider_filters_see_bounded_precedence_identity_without_claude_ancestry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let openai_id = Uuid::from_u128(2);
+    let gemini_id = Uuid::from_u128(3);
+    let openai_threads = Arc::new(Mutex::new(Vec::new()));
+    let gemini_threads = Arc::new(Mutex::new(Vec::new()));
+    let openai_filter = Arc::new(RecordingIdentityFilter {
+        name: "openai-identity",
+        threads: Arc::clone(&openai_threads),
+        kept_upstream_ids: vec![openai_id],
+    });
+    let gemini_filter = Arc::new(RecordingIdentityFilter {
+        name: "gemini-identity",
+        threads: Arc::clone(&gemini_threads),
+        kept_upstream_ids: vec![gemini_id],
+    });
+    let principal_view =
+        principal_view_with_provider_filters(vec![openai_filter], vec![gemini_filter]);
+    let authn = TestAuthn::with_principal_view(TestState::default(), principal_view.clone());
+    let test_bus = common::TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(principal_view)
+        .upstream_records(vec![
+            provider_upstream_record(
+                openai_id,
+                "openai-realtime",
+                StorageUpstreamKind::OpenaiApiKey,
+            ),
+            provider_upstream_record(gemini_id, "gemini-live", StorageUpstreamKind::GeminiApiKey),
+        ])
+        .build();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(MockDispatch {
+            state: authn.state.clone(),
+            mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
+        }),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(test_bus.bus_arc());
+    let request = messages_request(Bytes::new());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("websocket setup authenticates");
+    let oversized = "x".repeat(513);
+
+    for (kind, path, model, expected_provider, expected_threads) in [
+        (
+            RealtimeWebSocketKind::Openai,
+            "/v1/realtime",
+            "gpt-realtime",
+            Provider::Openai,
+            vec!["openai-top".to_owned(), "openai-fallback".to_owned()],
+        ),
+        (
+            RealtimeWebSocketKind::Gemini,
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+            "gemini-live",
+            Provider::Gemini,
+            vec!["gemini-top".to_owned(), "gemini-fallback".to_owned()],
+        ),
+    ] {
+        for (top, fallback, expected_thread) in [
+            (
+                expected_threads[0].clone(),
+                "lower-priority-session".to_owned(),
+                expected_threads[0].clone(),
+            ),
+            (
+                oversized.clone(),
+                expected_threads[1].clone(),
+                expected_threads[1].clone(),
+            ),
+        ] {
+            let mut headers = request.headers().clone();
+            headers.insert(
+                "x-claude-code-session-id",
+                HeaderValue::from_str(&top).expect("identity header"),
+            );
+            headers.insert(
+                "x-claude-session-id",
+                HeaderValue::from_str(&fallback).expect("fallback identity header"),
+            );
+            headers.insert(
+                "x-session-affinity",
+                HeaderValue::from_static("lower-priority-affinity"),
+            );
+            headers.insert("x-session-id", HeaderValue::from_static("lowest-priority"));
+            headers.insert(
+                "x-claude-code-agent-id",
+                HeaderValue::from_static("must-not-become-live-ancestry"),
+            );
+            headers.insert(
+                "x-claude-code-parent-agent-id",
+                HeaderValue::from_static("must-not-become-live-parent"),
+            );
+
+            let observation = lifecycle.begin_realtime_websocket(&auth, path);
+            let result = lifecycle
+                .prepare_realtime_websocket(
+                    &auth,
+                    observation,
+                    kind,
+                    &headers,
+                    RealtimeWebSocketTarget {
+                        path,
+                        query: None,
+                        model: Some(model),
+                    },
+                    Bytes::from_static(br#"{"setup":{"type":"realtime"}}"#),
+                )
+                .await;
+            assert!(
+                result.is_ok(),
+                "{expected_provider:?} setup should route after filtering"
+            );
+
+            let parse = loop {
+                let event = tokio::time::timeout(Duration::from_secs(1), lifecycle_events.recv())
+                    .await
+                    .expect("setup lifecycle event arrives")
+                    .expect("lifecycle event stream remains open");
+                if let cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
+                    result: Ok(info), ..
+                } = event
+                {
+                    break info;
+                }
+            };
+            assert_eq!(parse.thread_id.as_deref(), Some(expected_thread.as_str()));
+            assert_eq!(parse.claude_agent_id, None);
+            assert_eq!(parse.claude_parent_agent_id, None);
+            assert_eq!(parse.parent_session_id, None);
+        }
+    }
+
+    assert_eq!(
+        openai_threads.lock().unwrap().as_slice(),
+        ["openai-top", "openai-fallback"]
+    );
+    assert_eq!(
+        gemini_threads.lock().unwrap().as_slice(),
+        ["gemini-top", "gemini-fallback"]
+    );
+    Ok(())
+}
+
 fn lifecycle_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>, state: TestState) -> Lifecycle {
     let principal_view = principal_view(filters);
     let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
@@ -209,6 +366,47 @@ fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
     ))
 }
 
+fn principal_view_with_provider_filters(
+    openai: Vec<Arc<dyn FilterPlugin>>,
+    gemini: Vec<Arc<dyn FilterPlugin>>,
+) -> Arc<PrincipalView> {
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: Vec::new(),
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+        provider_filters: Some(ProviderFilterChains {
+            anthropic: Vec::new(),
+            openai,
+            gemini,
+        }),
+    });
+    let mut chains = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (Some(pipeline), DialectCache::Inherit),
+    );
+    Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ))
+}
+
+fn provider_upstream_record(id: Uuid, name: &str, kind: StorageUpstreamKind) -> UpstreamRecord {
+    UpstreamRecord {
+        id,
+        name: name.to_owned(),
+        kind,
+        base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+        enabled: true,
+        api_key_ciphertext: Some(Vec::new()),
+        revision: 1,
+        ..UpstreamRecord::default()
+    }
+}
+
 fn test_upstream_record() -> UpstreamRecord {
     UpstreamRecord {
         id: default_upstream_id(),
@@ -235,6 +433,41 @@ fn test_upstream_record() -> UpstreamRecord {
 
 fn default_upstream_id() -> Uuid {
     Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("default upstream id parses")
+}
+
+struct RecordingIdentityFilter {
+    name: &'static str,
+    threads: Arc<Mutex<Vec<String>>>,
+    kept_upstream_ids: Vec<Uuid>,
+}
+
+impl FilterPlugin for RecordingIdentityFilter {
+    fn filter(
+        &self,
+        ctx: &cc_lb_routing::RoutingContext,
+        _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        self.threads.lock().unwrap().push(
+            ctx.thread_id
+                .clone()
+                .expect("thread identity reaches filter"),
+        );
+        Ok(FilterOutput {
+            kept_upstream_ids: self.kept_upstream_ids.clone(),
+            reason: format!("{} kept identity", self.name),
+            per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+        })
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        Uuid::nil()
+    }
+
+    fn plugin_name(&self) -> &str {
+        self.name
+    }
 }
 
 struct RecordingFilter {

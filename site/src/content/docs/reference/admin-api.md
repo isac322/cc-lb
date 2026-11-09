@@ -41,7 +41,7 @@ Creating an upstream from a completed draft stores the provider-specific credent
 
 ## Warm-up
 
-`warmup_enabled` is accepted for OAuth upstreams of kind `anthropic_oauth`, `openai_oauth`, and `gemini_oauth`. OAuth sign-in creates these upstreams with warm-up enabled by default. API-key upstreams reject the field. Warm-up requires stored OAuth credentials; it does not send requests for disabled or credential-less upstreams.
+`warmup_enabled` is accepted for OAuth upstreams of kind `anthropic_oauth`, `openai_oauth`, and `gemini_oauth`. `POST /admin/v1/upstreams` and OAuth sign-in create these upstreams with warm-up enabled by default. API-key upstreams reject the field. Warm-up requires stored OAuth credentials; it does not send requests for disabled or credential-less upstreams.
 
 The admin upstream detail exposes the Warm-up toggle, status, manual **Fire now** action, and history for supported OAuth upstreams. `warmup_dialect_plugin` remains available only for `anthropic_oauth`.
 
@@ -86,4 +86,4 @@ The filter applies to recent rows, histogram buckets, delta pages, SSE backfill,
 
 Request events are stored in `request_events_v1` with all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so `GET /admin/v1/events/detail?id=<encoded ID>`, `GET /admin/v1/events/delta`, and final updates on `GET /admin/v1/events/stream` read the committed relational representation directly with zero TOAST overhead.
 
-The optional `observability.request_diagnostics_log` setting additionally emits a `cc_lb.request_diagnostics.v1` stdout line after the row commits. Each line carries five deep diagnostic fields — `cache_breakpoints` without `lookback_prefixes`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors` — plus eight self-contained outcome and session-correlation fields: `thread_id`, `observed_session_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `duration_ms`, and `upstream_ttfb_ms`.
+The optional `observability.request_diagnostics_log` setting additionally emits a `cc_lb.request_diagnostics.v1` stdout line after the row commits. Each line carries the deep diagnostic fields `cache_breakpoints` (without `lookback_prefixes`), `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`, plus the outcome and session-correlation fields `thread_id`, `observed_session_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `duration_ms`, and `upstream_ttfb_ms`. Optional fields are omitted when absent: `native_cache` when no native cache analysis is recorded. `cache_write_input_tokens`, `cache_write_input_tokens_30m`, and `cache_write_input_tokens_12h` are omitted when unreported or when the write component is invalid; a valid reported `0` is emitted as `0`.

@@ -2505,6 +2505,7 @@ fn ctx_with_unknown_cache_pricing(canonical_model: &str, request_id: &str) -> Ro
 
 fn test_cache_pricing() -> cc_lb_domain::CachePricingSummary {
     cc_lb_domain::CachePricingSummary {
+        native: None,
         status: "known".to_owned(),
         input_micros_per_million: Some(5_000_000),
         cache_creation_5m_micros_per_million: Some(6_250_000),

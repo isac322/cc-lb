@@ -398,6 +398,9 @@ async fn seed_usage_buckets(
             &ApiKeyUsagePollOutcome {
                 attempted_at_unix_secs: DAY_20,
                 usage_report_state: None,
+                provider: None,
+                provider_report_state: None,
+                provider_report_status_metadata: None,
                 access_revision_seen: 0,
                 consecutive_failures: 0,
                 next_poll_after_unix_secs: None,

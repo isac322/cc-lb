@@ -22,9 +22,11 @@ pub use retry::RetryDecision;
 pub use scrub::scrub_secret;
 pub use traits::{ApiKeyAwareSignerFactory, Signer, SignerFactory, UpstreamDialect};
 pub use transform::{
-    GeminiEnvelopeHook, GeminiEnvelopeRequest, GeminiEnvelopeResult, ResponseTransformHook,
-    SseEvent, SseEventTransformHook, TransformResponseRequest, TransformResponseResult,
-    TransformSseEventRequest, TransformSseEventResult,
+    GeminiEnvelopeHook, GeminiEnvelopeRequest, GeminiEnvelopeResult, RealtimeFrameDirection,
+    RealtimeFrameKind, RealtimeFrameTransformHook, ResponseTransformHook, SseEvent,
+    SseEventTransformHook, TransformRealtimeFrameRequest, TransformRealtimeFrameResult,
+    TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+    TransformSseEventResult,
 };
 pub use url::{scrub_query_api_key, scrub_url_query_api_key, upstream_request_url};
 

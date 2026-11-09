@@ -265,11 +265,7 @@ function PrincipalDetailLoadingShell() {
               events={[]}
               principalNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
               loading
-              columns={{
-                principal: false,
-                cost: true,
-                tokens: true,
-              }}
+              columns={{ principal: false }}
             />
           </div>
         </DetailSection>
@@ -769,11 +765,7 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
       <RequestEventsFeed
         feed={feed}
         principalNameMap={principalNameMap}
-        columns={{
-          principal: false,
-          cost: true,
-          tokens: true,
-        }}
+        columns={{ principal: false }}
         tableContainerClassName={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}
         emptyTitle="No recent requests for this principal"
       />

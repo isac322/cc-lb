@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-#[tokio::test]
 async fn registry_list_paginates() {
     let (_dir, storage) = temp_storage().await;
     seed_registry(&storage, 1, "plugin-page-a").await;
@@ -29,7 +28,6 @@ async fn registry_list_paginates() {
     assert_eq!(body["entries"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
 async fn registry_list_exposes_builtin_subscription_preference() {
     let (_dir, storage) = temp_storage().await;
     let uploaded = seed_registry(&storage, 24, "plugin-metadata-null").await;
@@ -66,7 +64,6 @@ async fn registry_list_exposes_builtin_subscription_preference() {
     assert!(uploaded_entry.get("metadata").is_none_or(Value::is_null));
 }
 
-#[tokio::test]
 async fn legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropic_upstreams() {
     use cc_lb_plugin_wire::metadata::{HookMetadata, HookMode};
     use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
@@ -163,7 +160,6 @@ async fn legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropi
     assert!(body["warnings"].as_array().expect("warnings").is_empty());
 }
 
-#[tokio::test]
 async fn builtin_registry_update_and_delete_return_409() {
     let (_dir, storage) = temp_storage().await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -191,7 +187,6 @@ async fn builtin_registry_update_and_delete_return_409() {
     assert_eq!(delete_body["error"], "builtin_plugin_immutable");
 }
 
-#[tokio::test]
 async fn registry_get_returns_etag_with_revision() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 3, "plugin-get").await;
@@ -211,7 +206,6 @@ async fn registry_get_returns_etag_with_revision() {
     assert_eq!(body["revision"], 0);
 }
 
-#[tokio::test]
 async fn registry_patch_label_with_if_match_bumps_revision() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 4, "plugin-label").await;
@@ -232,7 +226,6 @@ async fn registry_patch_label_with_if_match_bumps_revision() {
     assert_eq!(body["revision"], 1);
 }
 
-#[tokio::test]
 async fn registry_patch_label_stale_if_match_returns_409() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 5, "plugin-label-stale").await;
@@ -251,7 +244,6 @@ async fn registry_patch_label_stale_if_match_returns_409() {
     assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
-#[tokio::test]
 async fn registry_delete_when_unreferenced_deletes_blob_and_cache_file() {
     let (dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 6, "plugin-delete-registry").await;
@@ -284,7 +276,6 @@ async fn registry_delete_when_unreferenced_deletes_blob_and_cache_file() {
     assert!(!cache_path.exists());
 }
 
-#[tokio::test]
 async fn registry_delete_cascade_blocks_when_chain_references_it() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-cascade").await;
@@ -313,7 +304,6 @@ async fn registry_delete_cascade_blocks_when_chain_references_it() {
     );
 }
 
-#[tokio::test]
 async fn registry_references_endpoint_lists_chain_and_cascade_delete_removes_it() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-reference-preview").await;
@@ -369,7 +359,6 @@ async fn registry_references_endpoint_lists_chain_and_cascade_delete_removes_it(
     );
 }
 
-#[tokio::test]
 async fn registry_cascade_delete_rejects_stale_reference_fingerprint() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-stale-fingerprint").await;
@@ -405,7 +394,6 @@ async fn registry_cascade_delete_rejects_stale_reference_fingerprint() {
     );
 }
 
-#[tokio::test]
 async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 14, "plugin-delete-stale").await;
@@ -424,7 +412,6 @@ async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
     assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
-#[tokio::test]
 async fn chain_insert_position_last_uses_next_after() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-last").await;
@@ -451,7 +438,6 @@ async fn chain_insert_position_last_uses_next_after() {
     assert_eq!(second["order"], sparse_order::STEP * 2);
 }
 
-#[tokio::test]
 async fn chain_insert_position_before_uses_sparse_between() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-before").await;
@@ -476,7 +462,6 @@ async fn chain_insert_position_before_uses_sparse_between() {
     assert_eq!(inserted["order"], 1500);
 }
 
-#[tokio::test]
 async fn chain_insert_position_before_seeded_builtin_uses_sparse_order() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-before-seeded-builtin").await;
@@ -506,7 +491,6 @@ async fn chain_insert_position_before_seeded_builtin_uses_sparse_order() {
     assert_eq!(inserted["order"], -sparse_order::STEP);
 }
 
-#[tokio::test]
 async fn chain_insert_position_first_uses_min_minus_step() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-first").await;
@@ -529,7 +513,6 @@ async fn chain_insert_position_first_uses_min_minus_step() {
     assert_eq!(inserted["order"], -sparse_order::STEP);
 }
 
-#[tokio::test]
 async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-builtin-subscription-preference").await;
@@ -568,7 +551,6 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
         && entry["wasm_registry_id"] == BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string()));
 }
 
-#[tokio::test]
 async fn plugin_chain_rejects_non_canonical_slot_names() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-slot-aliases").await;
@@ -587,7 +569,6 @@ async fn plugin_chain_rejects_non_canonical_slot_names() {
     }
 }
 
-#[tokio::test]
 async fn chain_insert_unknown_principal_returns_400() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 19, "plugin-unknown-principal").await;
@@ -607,7 +588,6 @@ async fn chain_insert_unknown_principal_returns_400() {
     assert_eq!(body["id"], unknown_principal.to_string());
 }
 
-#[tokio::test]
 async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-unsupported-slot").await;
@@ -634,7 +614,6 @@ async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
     assert_eq!(body["slot"], "router");
 }
 
-#[tokio::test]
 async fn chain_insert_rejects_builtin_subscription_preference_in_shape_slot() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-builtin-shape").await;
@@ -667,7 +646,6 @@ async fn chain_insert_rejects_builtin_subscription_preference_in_shape_slot() {
     assert!(chain["entries"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
 async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-router-singleton").await;
@@ -723,7 +701,6 @@ async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
     );
 }
 
-#[tokio::test]
 async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-shape-singleton").await;
@@ -751,7 +728,6 @@ async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
     assert_eq!(body["existing_entry_id"], first.id.to_string());
 }
 
-#[tokio::test]
 async fn chain_update_empty_body_rejected_400() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-empty-update").await;
@@ -772,7 +748,6 @@ async fn chain_update_empty_body_rejected_400() {
     assert_eq!(body["error"], "empty_update");
 }
 
-#[tokio::test]
 async fn chain_update_stale_if_match_returns_412_with_current_revision() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-update-stale").await;
@@ -793,7 +768,6 @@ async fn chain_update_stale_if_match_returns_412_with_current_revision() {
     assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
-#[tokio::test]
 async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-delete-chain").await;
@@ -823,7 +797,6 @@ async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
     );
 }
 
-#[tokio::test]
 async fn chain_delete_stale_if_match_returns_412_with_current_revision() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-delete-stale").await;
@@ -844,7 +817,6 @@ async fn chain_delete_stale_if_match_returns_412_with_current_revision() {
     assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
-#[tokio::test]
 async fn chain_delete_malformed_if_match_returns_400() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-delete-malformed").await;
@@ -865,7 +837,6 @@ async fn chain_delete_malformed_if_match_returns_400() {
     assert_eq!(body["error"], "invalid_if_match");
 }
 
-#[tokio::test]
 async fn chain_reorder_then_needs_rebalance_returns_409() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-reorder").await;
@@ -889,7 +860,6 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
     assert_eq!(body["error"], "needs_rebalance");
 }
 
-#[tokio::test]
 async fn reorder_invalid_order_after_stage_returns_409() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-reorder-invalid-order").await;
@@ -914,7 +884,6 @@ async fn reorder_invalid_order_after_stage_returns_409() {
     assert_eq!(body["error"], "invalid_order");
 }
 
-#[tokio::test]
 async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-rebalance").await;
@@ -936,7 +905,6 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     assert_eq!(body["entries"][1]["order"], 2000);
 }
 
-#[tokio::test]
 async fn chain_rebalance_emits_chain_audit() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-rebalance-audit").await;
@@ -1139,4 +1107,52 @@ async fn seed_chain_with_slot(
 
 fn hex_sha256(sha256: [u8; 32]) -> String {
     sha256.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[tokio::test]
+async fn v1_plugins_suite_part_1() {
+    registry_list_paginates().await;
+    registry_list_exposes_builtin_subscription_preference().await;
+    legacy_plugin_warning_is_nonblocking_and_scoped_to_enabled_non_anthropic_upstreams().await;
+    builtin_registry_update_and_delete_return_409().await;
+    registry_get_returns_etag_with_revision().await;
+    registry_patch_label_with_if_match_bumps_revision().await;
+    registry_patch_label_stale_if_match_returns_409().await;
+    registry_delete_when_unreferenced_deletes_blob_and_cache_file().await;
+}
+
+#[tokio::test]
+async fn v1_plugins_suite_part_2() {
+    registry_delete_cascade_blocks_when_chain_references_it().await;
+    registry_references_endpoint_lists_chain_and_cascade_delete_removes_it().await;
+    registry_cascade_delete_rejects_stale_reference_fingerprint().await;
+    registry_delete_stale_if_match_returns_412_with_current_revision().await;
+    chain_insert_position_last_uses_next_after().await;
+    chain_insert_position_before_uses_sparse_between().await;
+    chain_insert_position_before_seeded_builtin_uses_sparse_order().await;
+    chain_insert_position_first_uses_min_minus_step().await;
+}
+
+#[tokio::test]
+async fn v1_plugins_suite_part_3() {
+    chain_insert_accepts_builtin_subscription_preference_registry_id().await;
+    plugin_chain_rejects_non_canonical_slot_names().await;
+    chain_insert_unknown_principal_returns_400().await;
+    chain_insert_rejects_plugin_not_advertising_target_slot().await;
+    chain_insert_rejects_builtin_subscription_preference_in_shape_slot().await;
+    insert_chain_duplicate_router_returns_201_and_lists_both_entries().await;
+    insert_chain_duplicate_shape_returns_409_slot_singleton().await;
+    chain_update_empty_body_rejected_400().await;
+}
+
+#[tokio::test]
+async fn v1_plugins_suite_part_4() {
+    chain_update_stale_if_match_returns_412_with_current_revision().await;
+    chain_delete_forwards_if_match_to_storage_and_returns_204().await;
+    chain_delete_stale_if_match_returns_412_with_current_revision().await;
+    chain_delete_malformed_if_match_returns_400().await;
+    chain_reorder_then_needs_rebalance_returns_409().await;
+    reorder_invalid_order_after_stage_returns_409().await;
+    chain_rebalance_evens_spacing_and_returns_new_orders().await;
+    chain_rebalance_emits_chain_audit().await;
 }

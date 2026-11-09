@@ -129,9 +129,16 @@ describe('CacheKeepaliveRowSchema malformed input', () => {
     );
   });
 
-  it('rejects a row with an out-of-domain ttl', () => {
-    const bad: unknown = { ...validRow, ttl: '30m' };
-    expect(CacheKeepaliveRowSchema.safeParse(bad).success).toBe(false);
+  it('accepts OpenAI retention TTLs and rejects unknown values', () => {
+    expect(
+      CacheKeepaliveRowSchema.safeParse({ ...validRow, ttl: '30m' }).success,
+    ).toBe(true);
+    expect(
+      CacheKeepaliveRowSchema.safeParse({ ...validRow, ttl: '12h' }).success,
+    ).toBe(true);
+    expect(
+      CacheKeepaliveRowSchema.safeParse({ ...validRow, ttl: '24h' }).success,
+    ).toBe(false);
   });
 
   it('accepts a null ttl for a decision-backed row', () => {
@@ -343,6 +350,17 @@ describe('cacheKeepaliveSessionsPath', () => {
     );
   });
 
+  it('encodes the tracked-only default status filter', () => {
+    expect(
+      cacheKeepaliveSessionsPath('p1', {
+        horizon: '24h',
+        status: 'tracked',
+      }),
+    ).toBe(
+      '/admin/v1/principals/p1/cache-keepalive?horizon=24h&status=tracked',
+    );
+  });
+
   it('throws at the request boundary on an invalid horizon', () => {
     const params: CacheKeepaliveSessionsParams = JSON.parse(
       '{"horizon":"banana"}',
@@ -360,7 +378,7 @@ describe('cacheKeepaliveSessionsPath', () => {
 
 describe('cache keepalive filter enums', () => {
   it('accepts every valid horizon value', () => {
-    for (const horizon of ['24h', '7d', 'all']) {
+    for (const horizon of ['1h', '6h', '24h', '7d', 'all']) {
       expect(CacheKeepaliveHorizonSchema.safeParse(horizon).success).toBe(true);
     }
   });
@@ -369,9 +387,10 @@ describe('cache keepalive filter enums', () => {
     expect(CacheKeepaliveHorizonSchema.safeParse('banana').success).toBe(false);
   });
 
-  it('accepts all, every base state, and error as status filters', () => {
+  it('accepts all, tracked, every base state, and error as status filters', () => {
     for (const status of [
       'all',
+      'tracked',
       'renewed',
       'scheduled',
       'capped',

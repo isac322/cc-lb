@@ -6,6 +6,7 @@ pub mod cache_keepalive_sessions;
 pub mod error;
 pub mod limits;
 pub mod oauth_pkce;
+pub mod openai_reporting;
 pub mod organization_metadata;
 pub mod plan_tiers;
 pub mod plugin_registry;
@@ -43,13 +44,16 @@ pub use cache_keepalive_sessions::*;
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use limits::*;
 pub use oauth_pkce::{OAuthPkceStore, StoredOAuthPkceFlow};
+pub use openai_reporting::*;
 pub use organization_metadata::*;
 pub use plan_tiers::*;
 pub use plugin_registry::*;
 pub use plugin_slot_kind::*;
 pub use pool_quota_history::*;
 pub use principal::*;
-pub use prompt_cache_observation::{PromptCacheObservationRecord, PromptCacheObservationStore};
+pub use prompt_cache_observation::{
+    PromptCacheObservationRecord, PromptCacheObservationStore, ProviderPromptCacheObservationRecord,
+};
 pub use request_event_list::*;
 pub use request_event_projections::*;
 pub use runtime_change_notifier::*;

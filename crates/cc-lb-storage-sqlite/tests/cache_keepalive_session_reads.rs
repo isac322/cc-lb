@@ -119,7 +119,7 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
             cache_creation_input_tokens_5m: 0,
             cache_creation_input_tokens_1h: 0,
             cache_read_input_tokens: 100,
-            cost_micros: 123,
+            cost_micros: Some(123),
             hit_miss: "hit".to_owned(),
             ts,
         }),
@@ -162,7 +162,7 @@ fn batched_turn_projection(
             cache_creation_input_tokens_5m: 29,
             cache_creation_input_tokens_1h: 18,
             cache_read_input_tokens: 89,
-            cost_micros: 12_345,
+            cost_micros: Some(12_345),
             hit_miss: "miss".to_owned(),
             ts,
         }),
@@ -184,6 +184,145 @@ fn batched_turn_projection(
     }
 }
 
+#[tokio::test]
+async fn append_filtered_evidence_uses_bounded_cycle_window() {
+    let (_temp_dir, storage) = storage().await;
+    let mut no_recent = follow_up_evidence("sqlite-no-recent", 5_000, "claude-sonnet-4-5");
+    no_recent.request_start_ms = 5_000_000;
+    storage
+        .append_request_event_with_evidence(&event("sqlite-no-recent", 5_000), &[no_recent])
+        .await
+        .expect("append no-recent candidate");
+    let no_recent_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence WHERE evidence_id = 'follow-up-sqlite-no-recent'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .expect("count no-recent evidence");
+    assert_eq!(
+        no_recent_count, 0,
+        "unrelated historical rows are fast-rejected"
+    );
+
+    let cycle_id = Uuid::from_u128(0x0011_4901);
+    let mut old_renewal = economics_projection("sqlite-old-renewal", Some(cycle_id), 0, "hit", 1);
+    old_renewal.evidence[0].prefix_hash = Some("retained-prefix-hash".to_owned());
+    storage
+        .append_request_event_with_projections(&event("sqlite-old-renewal", 0), &old_renewal)
+        .await
+        .expect("append old renewal");
+    let mut first_follow_up = follow_up_evidence("sqlite-old-follow-up", 0, "claude-sonnet-4-5");
+    first_follow_up.request_start_ms = 1_000;
+    storage
+        .append_request_event_with_evidence(&event("sqlite-old-follow-up", 0), &[first_follow_up])
+        .await
+        .expect("append old follow-up");
+    let mut recent_renewal =
+        economics_projection("sqlite-recent-renewal", Some(cycle_id), 4_000, "hit", 1);
+    recent_renewal.evidence[0].prefix_hash = Some("retained-prefix-hash".to_owned());
+    storage
+        .append_request_event_with_projections(
+            &event("sqlite-recent-renewal", 4_000),
+            &recent_renewal,
+        )
+        .await
+        .expect("append recent renewal");
+    let mut blocked_follow_up =
+        follow_up_evidence("sqlite-blocked-follow-up", 4_000, "claude-sonnet-4-5");
+    blocked_follow_up.request_start_ms = 4_000_001;
+    storage
+        .append_request_event_with_evidence(
+            &event("sqlite-blocked-follow-up", 4_000),
+            &[blocked_follow_up],
+        )
+        .await
+        .expect("append blocked follow-up");
+    let blocked_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence WHERE evidence_id = 'follow-up-sqlite-blocked-follow-up'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .expect("count blocked evidence");
+    assert_eq!(
+        blocked_count, 0,
+        "a follow-up older than one hour still blocks through same-cycle sibling renewals"
+    );
+
+    let boundary_cycle = Uuid::from_u128(0x0011_4902);
+    let mut boundary_renewal = economics_projection(
+        "sqlite-boundary-renewal",
+        Some(boundary_cycle),
+        10_000,
+        "hit",
+        1,
+    );
+    boundary_renewal.evidence[0].ttl = CacheTtl::Ttl1h;
+    storage
+        .append_request_event_with_projections(
+            &event("sqlite-boundary-renewal", 10_000),
+            &boundary_renewal,
+        )
+        .await
+        .expect("append boundary renewal");
+    let mut boundary_follow_up =
+        follow_up_evidence("sqlite-boundary-follow-up", 10_000, "claude-sonnet-4-5");
+    boundary_follow_up.request_start_ms = 10_000_000 + 3_600_000;
+    storage
+        .append_request_event_with_evidence(
+            &event("sqlite-boundary-follow-up", 10_000),
+            &[boundary_follow_up],
+        )
+        .await
+        .expect("append boundary follow-up");
+    let boundary_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_evidence WHERE evidence_id = 'follow-up-sqlite-boundary-follow-up'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .expect("count boundary evidence");
+    assert_eq!(
+        boundary_count, 1,
+        "the one-hour TTL boundary remains inclusive"
+    );
+
+    storage
+        .replace_from_real_request(&request("sqlite-running", 20_000, "running"))
+        .await
+        .expect("create running session");
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions
+         SET status = 'active', enqueue_state = 'running'
+         WHERE session_key_hash = 'sqlite-running'",
+    )
+    .execute(storage.pool())
+    .await
+    .expect("mark running session");
+    let mut wrong_pair = follow_up_evidence("sqlite-wrong-pair", 20_000, "claude-sonnet-4-5");
+    wrong_pair.principal_id = "principal-other".to_owned();
+    wrong_pair.request_start_ms = 20_000_001;
+    let mut running_pair = follow_up_evidence("sqlite-running-pair", 20_000, "claude-sonnet-4-5");
+    running_pair.request_start_ms = 20_000_002;
+    storage
+        .append_request_event_with_evidence(
+            &event("sqlite-pair", 20_000),
+            &[wrong_pair, running_pair],
+        )
+        .await
+        .expect("append pair candidates");
+    let pair_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT evidence_id FROM cache_keepalive_evidence
+         WHERE evidence_id IN ('follow-up-sqlite-wrong-pair', 'follow-up-sqlite-running-pair')
+         ORDER BY evidence_id",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("read pair candidates");
+    assert_eq!(
+        pair_ids,
+        vec!["follow-up-sqlite-running-pair"],
+        "running allowance must remain scoped to the exact principal/upstream pair"
+    );
+}
 #[tokio::test]
 async fn lists_frozen_session_and_decision_projection_rows() {
     // Given: sessions in every storage state and a decision-only not-tracked row.
@@ -649,7 +788,7 @@ async fn batches_turn_reads_with_deduplication_principal_isolation_and_canonical
             cache_creation_input_tokens_5m: 29,
             cache_creation_input_tokens_1h: 18,
             cache_read_input_tokens: 89,
-            cost_micros: 12_345,
+            cost_micros: Some(12_345),
             hit_miss: "miss".to_owned(),
             ts: 10,
         }
@@ -1232,7 +1371,7 @@ fn economics_projection(
     let turn = projection.turn.as_mut().expect("renewal turn");
     turn.cycle_id = cycle_id;
     turn.hit_miss = hit_miss.to_owned();
-    turn.cost_micros = cost_micros;
+    turn.cost_micros = Some(cost_micros);
     turn.cache_read_input_tokens = if hit_miss.eq_ignore_ascii_case("hit") {
         20_000
     } else {
@@ -1939,4 +2078,45 @@ async fn scalar_session_reads_project_current_cycle_and_null_decision_cycle() {
         };
         assert_eq!(value.get("cycle_id"), Some(&expected), "{}", row.id);
     }
+}
+
+#[tokio::test]
+async fn reconstructed_purged_session_scopes_refresh_count_and_reason_to_selected_cycle() {
+    let (_temp_dir, storage) = storage().await;
+    let old_cycle = Uuid::from_u128(2_001);
+    let new_cycle = Uuid::from_u128(2_002);
+
+    for index in 0..12_u64 {
+        let source_ref = format!("purged-old-{index}");
+        let mut proj =
+            economics_projection(&source_ref, Some(old_cycle), 1_000 + index, "hit", 6_000);
+        proj.turn.as_mut().expect("turn").session_key_hash = "purged-multi-cycle".to_owned();
+        proj.decision.session_key_hash = Some("purged-multi-cycle".to_owned());
+        storage
+            .append_request_event_with_projections(&event(&source_ref, 1_000 + index), &proj)
+            .await
+            .expect("append old cycle turn");
+    }
+
+    let mut newest_proj =
+        economics_projection("purged-new-0", Some(new_cycle), 2_000, "hit", 6_000);
+    newest_proj.turn.as_mut().expect("turn").session_key_hash = "purged-multi-cycle".to_owned();
+    newest_proj.decision.session_key_hash = Some("purged-multi-cycle".to_owned());
+    storage
+        .append_request_event_with_projections(&event("purged-new-0", 2_000), &newest_proj)
+        .await
+        .expect("append new cycle turn");
+
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "purged-multi-cycle")
+        .await
+        .expect("lookup reconstructed session")
+        .expect("reconstructed session exists");
+    assert_eq!(item.cycle_id, Some(new_cycle));
+    assert_eq!(item.refresh_count, Some(1));
+    assert_eq!(
+        item.terminal_reason,
+        Some(cc_lb_storage_api::CacheKeepaliveTerminalReason::Expired)
+    );
+    assert_eq!(item.reason, "TTL expired before follow-up");
 }

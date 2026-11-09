@@ -1,0 +1,11 @@
+[profile.default]
+slow-timeout = { period = "60s" }
+
+[[profile.default.overrides]]
+filter = 'test(authn_rail_typestate_contracts)'
+threads-required = 2
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'test(/crash_recovery::|storage_roundtrips_postgres::|upstream_store_postgres|principal_store_postgres/)'
+priority = 90

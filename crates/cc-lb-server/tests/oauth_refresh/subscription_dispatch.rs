@@ -558,6 +558,135 @@ async fn fresh_401_refreshes_once_then_retries_with_preserved_account_and_projec
 }
 
 #[tokio::test]
+async fn access_only_401_persists_status_with_rejected_token_generation_without_retry() {
+    for (kind, profile) in [
+        (
+            UpstreamKind::OpenaiOauth,
+            cc_lb_aead::GeminiOAuthProfile::GeminiCli,
+        ),
+        (
+            UpstreamKind::GeminiOauth,
+            cc_lb_aead::GeminiOAuthProfile::Antigravity,
+        ),
+    ] {
+        let fixture = Fixture::new_without_scheduler(AppConfig::default()).await;
+        let journal = ProviderJournal::spawn([StatusCode::UNAUTHORIZED]).await;
+        let upstream_id = create_subscription_upstream(
+            &fixture,
+            &journal,
+            kind,
+            subscription_bundle(
+                profile,
+                "access-only-rejected-token",
+                now_secs(fixture.clock.as_ref()) + 3600,
+                true,
+            ),
+        )
+        .await;
+        let rejected_generation = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+            .await
+            .expect("upstream read")
+            .expect("upstream exists")
+            .oauth_token_generation;
+        let (key_store, key) = make_key(&fixture, upstream_id).await;
+        let handle = Arc::new(StatefulRefreshHandle {
+            storage: fixture.storage.clone(),
+            aead: fixture.aead.clone(),
+            replacement_access_token: "must-not-be-used".to_owned(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            clock: fixture.clock.clone(),
+            terminal: false,
+        });
+        let lifecycle = make_lifecycle(&fixture, key_store, handle.clone()).await;
+
+        let (status, _) = dispatch(&lifecycle, request_for(kind, &key)).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(handle.calls(), 0);
+        assert_eq!(journal.requests().len(), 1);
+        let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+            .await
+            .expect("upstream read")
+            .expect("upstream exists");
+        assert_eq!(record.last_apply_error.as_deref(), Some("status_401"));
+        assert_eq!(record.oauth_token_generation, rejected_generation);
+    }
+}
+
+#[tokio::test]
+async fn access_only_401_cannot_overwrite_replacement_status_generation() {
+    for (kind, profile) in [
+        (
+            UpstreamKind::OpenaiOauth,
+            cc_lb_aead::GeminiOAuthProfile::GeminiCli,
+        ),
+        (
+            UpstreamKind::GeminiOauth,
+            cc_lb_aead::GeminiOAuthProfile::Antigravity,
+        ),
+    ] {
+        let fixture = Fixture::new_without_scheduler(AppConfig::default()).await;
+        let journal = ProviderJournal::spawn([StatusCode::UNAUTHORIZED]).await;
+        let upstream_id = create_subscription_upstream(
+            &fixture,
+            &journal,
+            kind,
+            subscription_bundle(
+                profile,
+                "stale-access-only-token",
+                now_secs(fixture.clock.as_ref()) + 3600,
+                true,
+            ),
+        )
+        .await;
+        let (key_store, key) = make_key(&fixture, upstream_id).await;
+        let handle = Arc::new(StatefulRefreshHandle {
+            storage: fixture.storage.clone(),
+            aead: fixture.aead.clone(),
+            replacement_access_token: "must-not-be-used".to_owned(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            clock: fixture.clock.clone(),
+            terminal: false,
+        });
+        let lifecycle = make_lifecycle(&fixture, key_store, handle).await;
+        let before_replacement = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+            .await
+            .expect("upstream read")
+            .expect("upstream exists");
+        let replacement = subscription_bundle(
+            profile,
+            "replacement-access-only-token",
+            now_secs(fixture.clock.as_ref()) + 3600,
+            true,
+        );
+        UpstreamStore::store_oauth_tokens(
+            fixture.storage.as_ref(),
+            upstream_id,
+            before_replacement.revision,
+            encrypted_tokens(fixture.aead.as_ref(), upstream_id, &replacement),
+            true,
+        )
+        .await
+        .expect("replacement credentials stored");
+
+        let (status, _) = dispatch(&lifecycle, request_for(kind, &key)).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(journal.requests().len(), 1);
+        assert_eq!(
+            journal.requests()[0].authorization.as_deref(),
+            Some("Bearer stale-access-only-token")
+        );
+        let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+            .await
+            .expect("upstream read")
+            .expect("upstream exists");
+        assert!(record.oauth_token_generation > before_replacement.oauth_token_generation);
+        assert_ne!(record.last_apply_error.as_deref(), Some("status_401"));
+    }
+}
+
+#[tokio::test]
 async fn repeated_401_is_bounded_to_one_refresh_and_two_provider_attempts() {
     let fixture = Fixture::new_without_scheduler(AppConfig::default()).await;
     let journal =

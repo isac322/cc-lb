@@ -18,6 +18,31 @@ pub(crate) fn lock() -> File {
     lock_file
 }
 
+pub(crate) fn run_with_unified_rustflags(test_name: &str, f: impl FnOnce()) {
+    if env::var_os("CC_LB_TRYBUILD_UNIFIED").is_none() {
+        let exe = env::current_exe().expect("resolve current test executable");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env("CC_LB_TRYBUILD_UNIFIED", "1")
+            .env_remove("RUSTFLAGS")
+            .env(
+                "CARGO_ENCODED_RUSTFLAGS",
+                "--cfg\x1ftrybuild\x1f--verbose\x1f-A\x1fdead_code\x1f--diagnostic-width=140",
+            );
+        let status = cmd.status().expect("spawn unified trybuild subprocess");
+        assert!(
+            status.success(),
+            "unified trybuild subprocess failed: {status}"
+        );
+        return;
+    }
+
+    let _lock = lock();
+    f();
+}
+
 fn target_dir() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert!(

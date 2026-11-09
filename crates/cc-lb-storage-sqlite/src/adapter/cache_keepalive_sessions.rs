@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
+const TERMINAL_SESSION_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+
 #[async_trait]
 impl CacheKeepaliveSessionStore for SqliteStorage {
     async fn prune_cache_keepalive_history_before(
@@ -447,13 +449,18 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
         let error = error.map(cc_lb_storage_api::truncate_cache_keepalive_error);
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = ?,
-             running_since_unix_secs = NULL, encrypted_payload = X'', updated_at = ?
+             running_since_unix_secs = NULL, encrypted_payload = X'', expires_at = MAX(expires_at, ?), updated_at = ?
              WHERE session_key_hash = ? AND generation = ? AND status = 'active'",
         )
         .bind(reason.as_str())
         .bind(error)
+        .bind(retained_expires_at)
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
         .bind(u64_to_i64(generation, "cache keepalive generation")?)
@@ -501,14 +508,21 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             cancel_anchor_at_unix_secs,
             "cache keepalive cancel_anchor_at",
         )?;
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = X'', updated_at = ?,
+             encrypted_payload = X'',
+             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN MAX(expires_at, ?) ELSE expires_at END,
+             updated_at = ?,
              first_scheduled_at = CASE WHEN ? THEN ? ELSE first_scheduled_at END
              WHERE session_key_hash = ? AND status = 'active'
                AND (CASE WHEN ? THEN first_scheduled_at ELSE cache_anchor_at END) <= ?",
         )
         .bind(reason.as_str())
+        .bind(retained_expires_at)
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(expected_ticket.is_some())
         .bind(cancel_anchor)
@@ -533,12 +547,19 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         reason: CacheKeepaliveTerminalReason,
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
+        let retained_expires_at = u64_to_i64(
+            now_unix_secs.saturating_add(TERMINAL_SESSION_RETENTION_SECS),
+            "cache keepalive terminal expires_at",
+        )?;
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = ?, error = NULL, running_since_unix_secs = NULL,
-             encrypted_payload = X'', updated_at = ?
+             encrypted_payload = X'',
+             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN MAX(expires_at, ?) ELSE expires_at END,
+             updated_at = ?
              WHERE session_key_hash = ? AND status = 'active'",
         )
         .bind(reason.as_str())
+        .bind(retained_expires_at)
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
         .bind(session_key_hash)
         .execute(self.pool())
@@ -585,6 +606,69 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         sqlx::query(
             "DELETE FROM meta_v1 WHERE key LIKE 'keepalive_order:%'
              AND substr(key, 17) NOT IN (SELECT session_key_hash FROM cache_keepalive_sessions)",
+        )
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        sqlx::query(
+            "DELETE FROM cache_keepalive_evidence AS f
+             WHERE f.evidence_kind = 'follow_up'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM cache_keepalive_sessions AS s
+                   WHERE s.principal_id = f.principal_id
+                     AND s.upstream_id = f.upstream_id
+                     AND s.status = 'active'
+                     AND s.enqueue_state = 'running'
+               )
+               AND (
+                   f.cache_read_input_tokens IS NULL
+                   OR f.cache_read_input_tokens <= 0
+                   OR f.prefix_hash IS NULL
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM cache_keepalive_evidence AS r
+                       WHERE r.evidence_kind = 'renewal'
+                         AND r.cycle_id IS NOT NULL
+                         AND r.prefix_policy_version IS NOT NULL
+                         AND r.prefix_schema_version IS NOT NULL
+                         AND r.principal_id = f.principal_id
+                         AND r.upstream_id = f.upstream_id
+                         AND r.model = f.model
+                         AND r.prefix_hash = f.prefix_hash
+                         AND f.request_start_ms > r.request_start_ms
+                         AND f.request_start_ms <= r.request_start_ms +
+                             CASE r.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM cache_keepalive_evidence AS e
+                             WHERE e.evidence_kind = 'follow_up'
+                               AND e.cache_read_input_tokens > 0
+                               AND e.prefix_hash IS NOT NULL
+                               AND e.principal_id = r.principal_id
+                               AND e.upstream_id = r.upstream_id
+                               AND e.model = r.model
+                               AND (e.request_start_ms < f.request_start_ms OR
+                                    (e.request_start_ms = f.request_start_ms AND e.evidence_id < f.evidence_id))
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM cache_keepalive_evidence AS r2
+                                   WHERE r2.evidence_kind = 'renewal'
+                                     AND r2.cycle_id = r.cycle_id
+                                     AND r2.cycle_id IS NOT NULL
+                                     AND r2.prefix_policy_version IS NOT NULL
+                                     AND r2.prefix_schema_version IS NOT NULL
+                                     AND r2.principal_id = r.principal_id
+                                     AND r2.upstream_id = r.upstream_id
+                                     AND r2.model = r.model
+                                     AND r2.prefix_hash = e.prefix_hash
+                                     AND e.request_start_ms > r2.request_start_ms
+                                     AND e.request_start_ms <= r2.request_start_ms +
+                                         CASE r2.ttl WHEN '1h' THEN 3600000 ELSE 300000 END
+                               )
+                         )
+                   )
+             )",
         )
         .execute(self.pool())
         .await
@@ -705,6 +789,8 @@ fn ttl_to_db(ttl: CacheTtl) -> &'static str {
     match ttl {
         CacheTtl::Ttl5m => "5m",
         CacheTtl::Ttl1h => "1h",
+        CacheTtl::Ttl30m => "30m",
+        CacheTtl::Ttl12h => "12h",
     }
 }
 
@@ -712,6 +798,8 @@ fn ttl_from_db(value: &str) -> StorageResult<CacheTtl> {
     match value {
         "5m" => Ok(CacheTtl::Ttl5m),
         "1h" => Ok(CacheTtl::Ttl1h),
+        "30m" => Ok(CacheTtl::Ttl30m),
+        "12h" => Ok(CacheTtl::Ttl12h),
         value => Err(StorageError::Corrupted {
             message: format!("invalid cache keepalive ttl {value}"),
         }),

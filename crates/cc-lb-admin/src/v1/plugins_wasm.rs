@@ -763,6 +763,7 @@ fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginS
             HookKind::Shape
             | HookKind::TransformResponse
             | HookKind::TransformSseEvent
+            | HookKind::TransformRealtimeFrame
             | HookKind::ShapeEnvelopeGemini => {
                 slots.insert(PluginSlotKind::Shape);
             }

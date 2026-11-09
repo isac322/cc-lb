@@ -81,6 +81,9 @@ tower.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+trybuild = "1"
+
+[target.'cfg(not(trybuild))'.dev-dependencies]
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
@@ -94,7 +97,6 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 tower = { workspace = true, features = ["util"] }
-trybuild = "1"
 syn = { version = "3.0.9", features = ["full", "visit"] }
 
 [target.'cfg(loom)'.dependencies]
@@ -106,4 +108,4 @@ serde_json.workspace = true
 url.workspace = true
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(trybuild)'] }

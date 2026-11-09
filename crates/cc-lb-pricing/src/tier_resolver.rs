@@ -1,6 +1,65 @@
 use std::collections::BTreeMap;
 
+use crate::{NativePricingLifetime, NativePricingRate, NativePricingStatus, ProviderNativePricing};
 use crate::{Pricing, ThresholdBand, TierRate, UsdPerMillion};
+
+pub(crate) fn resolve_native_rate(
+    pricing: &ProviderNativePricing,
+    lifetime: NativePricingLifetime,
+) -> NativePricingRate {
+    pricing
+        .total_write
+        .get(&lifetime)
+        .cloned()
+        .unwrap_or_else(|| {
+            if lifetime == NativePricingLifetime::ModelRetention
+                && pricing.cached_input_read.status == NativePricingStatus::NotApplicable
+            {
+                NativePricingRate::not_applicable()
+            } else {
+                NativePricingRate::unknown()
+            }
+        })
+}
+
+pub(crate) fn resolve_native_cached_read_rate(
+    pricing: &ProviderNativePricing,
+    gross_input_tokens: u64,
+    tier: Option<&str>,
+) -> NativePricingRate {
+    let mut rate = tier
+        .and_then(|name| pricing.cached_input_read_by_tier.get(name))
+        .cloned()
+        .unwrap_or_else(|| fallback_native_rate(pricing.cached_input_read.clone(), tier));
+
+    for (threshold, band) in &pricing.cached_input_read_above_tokens {
+        if gross_input_tokens <= *threshold {
+            break;
+        }
+        let tier_rate = tier.and_then(|name| band.by_tier.get(name));
+        if let Some(price) = tier_rate
+            .and_then(|threshold| threshold.cache_read_per_million_usd)
+            .or_else(|| {
+                band.default
+                    .cache_read_per_million_usd
+                    .map(|price| fallback_price(price, tier))
+            })
+        {
+            rate = NativePricingRate::known(price);
+        }
+    }
+    rate
+}
+
+fn fallback_native_rate(base: NativePricingRate, tier: Option<&str>) -> NativePricingRate {
+    if tier == Some("batch")
+        && base.status == NativePricingStatus::Known
+        && let Some(price) = base.price_per_million_usd
+    {
+        return NativePricingRate::known(UsdPerMillion::from_micros_usd(price.as_micros_usd() / 2));
+    }
+    base
+}
 
 pub(crate) fn resolve_tier_rate(pricing: &Pricing, tier: Option<&str>) -> TierRate {
     if let Some(rate) = tier.and_then(|name| pricing.by_tier.get(name)) {

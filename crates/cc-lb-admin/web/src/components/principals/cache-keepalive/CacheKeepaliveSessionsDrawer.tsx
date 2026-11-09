@@ -1,10 +1,8 @@
-import { AlertCircle } from 'lucide-react';
-import React, { useEffect, useMemo, useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   CacheKeepaliveHorizon,
   CacheKeepaliveRow,
-  CacheKeepaliveState,
-  CacheKeepaliveStatusFilter,
   CacheKeepaliveSummary,
 } from '../../../lib/cacheKeepaliveApi';
 import {
@@ -12,7 +10,6 @@ import {
   useCacheKeepaliveSessions,
 } from '../../../lib/queries';
 import {
-  Badge,
   Button,
   cx,
   Drawer,
@@ -22,18 +19,12 @@ import {
   Skeleton,
   Spinner,
 } from '../../ui/primitives';
-import { RelativeTime } from '../../ui/RelativeTime';
-import { Select, type SelectOption } from '../../ui/Select';
-import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { mergeLiveSessions } from './liveMergeSessions';
-
-import { SessionDetailPane } from './SessionDetailPane';
-
-declare global {
-  interface Window {
-    PAUSE_ANIMATIONS?: boolean;
-  }
-}
+import {
+  fmtUsdPlain,
+  fmtUsdSigned,
+  SessionDetailPane,
+} from './SessionDetailPane';
 
 interface Props {
   open: boolean;
@@ -42,60 +33,219 @@ interface Props {
 }
 
 const HORIZON_OPTIONS: SegmentedOption<CacheKeepaliveHorizon>[] = [
+  { value: '1h', label: '1h' },
+  { value: '6h', label: '6h' },
   { value: '24h', label: '24h' },
   { value: '7d', label: '7d' },
   { value: 'all', label: 'All' },
 ];
 
-/** Status filter items; the `''` "All statuses" item comes from `allLabel`. */
-const STATUS_OPTIONS: SelectOption[] = [
-  { value: 'renewed', label: 'Renewed' },
-  { value: 'scheduled', label: 'Scheduled' },
-  { value: 'capped', label: 'Capped' },
-  { value: 'expired', label: 'Expired' },
-  { value: 'not_tracked', label: 'Not tracked' },
-  { value: 'error', label: 'Error' },
-];
+const TRIGGER_ORDER = [
+  'Bash',
+  'Write',
+  'Edit',
+  'Read',
+  '_advise',
+  'Agent in-turn',
+] as const;
 
-function isStatusFilter(value: string): value is CacheKeepaliveStatusFilter {
+function normalizeToolTrigger(raw: string): string {
+  const trimmed = raw.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === 'bash') return 'Bash';
+  if (lower === 'write' || lower === 'write_file') return 'Write';
+  if (lower === 'edit' || lower === 'edit_file') return 'Edit';
+  if (lower === 'read' || lower === 'read_file') return 'Read';
+  const match = TRIGGER_ORDER.find((known) => known.toLowerCase() === lower);
+  return match ?? trimmed;
+}
+
+export function extractTriggerLabel(row: CacheKeepaliveRow): string {
+  const sourceText =
+    row.display_reason && row.display_reason !== row.reason
+      ? `${row.display_reason} · ${row.reason}`
+      : (row.display_reason ?? row.reason);
+  const backtickToolMatch = sourceText.match(/tool_use:\s*`([^`]+)`/i);
+  if (backtickToolMatch?.[1]) return normalizeToolTrigger(backtickToolMatch[1]);
+  const toolMatch = sourceText.match(/tool_use:\s*([A-Za-z0-9_.:/-]+)/i);
+  if (toolMatch?.[1]) return normalizeToolTrigger(toolMatch[1]);
+  const stopMatch = sourceText.match(/stop_reason=([A-Za-z0-9_:-]+)/i);
+  if (stopMatch?.[1]) return `stop_reason=${stopMatch[1]}`;
+  const unsupportedMatch = sourceText.match(
+    /zero-token renewal unsupported:\s*([^—·\n]+)/i,
+  );
+  if (unsupportedMatch?.[1])
+    return `Unsupported: ${unsupportedMatch[1].trim()}`;
+  if (/cached prefix too small/i.test(sourceText)) return 'Prefix < min tokens';
+  if (/snapshot too large/i.test(sourceText)) return 'Snapshot too large';
+  if (/ambiguous turn/i.test(sourceText)) return 'Ambiguous turn';
+  if (/agent-in-turn/i.test(sourceText)) return 'Agent in-turn';
+  if (row.state !== 'not_tracked') return 'Agent in-turn';
+  return 'Other';
+}
+
+export interface SplitUsdParts {
+  intPart: string;
+  fracDigits: string;
+  hasDot: boolean;
+}
+
+/**
+ * Formats a USD amount without trailing zero padding, splitting at the decimal point `.`
+ * so all rows in the same alignment scope align their `.` at the exact same X coordinate.
+ */
+export function splitUsdNoTrailingZeros(
+  val: number | null,
+  signed: boolean,
+): SplitUsdParts {
+  if (val === null) {
+    return { intPart: '—', fracDigits: '', hasDot: false };
+  }
+  if (Math.abs(val) < 0.00005) {
+    return { intPart: '$0', fracDigits: '', hasDot: false };
+  }
+  const sign = val > 0 ? (signed ? '+' : '') : '−';
+  const abs = Math.abs(val);
+  const precision = abs >= 0.1 ? 2 : 4;
+  const fixed = abs.toFixed(precision).replace(/0+$/, '').replace(/\.$/, '');
+  const dotIdx = fixed.indexOf('.');
+  if (dotIdx === -1) {
+    return { intPart: `${sign}$${fixed}`, fracDigits: '', hasDot: false };
+  }
+  return {
+    intPart: `${sign}$${fixed.slice(0, dotIdx)}`,
+    fracDigits: fixed.slice(dotIdx + 1),
+    hasDot: true,
+  };
+}
+
+function pnlTone(value: number | null): string {
+  if (value == null) return 'text-text-muted';
+  if (value > 0) return 'text-traffic-success-text';
+  if (value < 0) return 'text-warn-text';
+  return 'text-text-muted';
+}
+
+export function DecimalAlignedUsd({
+  value,
+  signed = true,
+  maxFracDigits,
+  scope,
+  className,
+}: {
+  value: number | null;
+  signed?: boolean;
+  maxFracDigits: number;
+  scope: 'group' | 'item';
+  className?: string;
+}) {
+  const { intPart, fracDigits, hasDot } = splitUsdNoTrailingZeros(
+    value,
+    signed,
+  );
+  const fullText = hasDot ? `${intPart}.${fracDigits}` : intPart;
+  const padRightCh =
+    maxFracDigits <= 0
+      ? 0
+      : hasDot
+        ? Math.max(0, maxFracDigits - fracDigits.length)
+        : maxFracDigits + 1;
+
   return (
-    value === 'all' || STATUS_OPTIONS.some((option) => option.value === value)
+    <span
+      data-decimal-scope={scope}
+      style={padRightCh > 0 ? { paddingRight: `${padRightCh}ch` } : undefined}
+      className={cx(
+        'inline-flex shrink-0 items-baseline justify-end font-mono text-data tabular-nums',
+        pnlTone(value),
+        className,
+      )}
+    >
+      {fullText}
+      {hasDot ? (
+        <span data-decimal-dot={scope} aria-hidden="true" className="hidden" />
+      ) : null}
+    </span>
   );
 }
 
-const STATE_TONE: Record<
-  CacheKeepaliveState,
-  'ok' | 'warn' | 'danger' | 'neutral' | 'accent'
-> = {
-  renewed: 'ok',
-  scheduled: 'accent',
-  capped: 'neutral',
-  expired: 'warn',
-  not_tracked: 'neutral',
-};
-
-const STATE_LABEL: Record<CacheKeepaliveState, string> = {
-  renewed: 'Renewed',
-  scheduled: 'Scheduled',
-  capped: 'Capped',
-  expired: 'Expired',
-  not_tracked: 'Not tracked',
-};
-
-function formatMoney(val: number) {
-  if (val < 0) return `−$${Math.abs(val).toFixed(2)}`;
-  return `$${val.toFixed(2)}`;
+function sessionDotTone(row: CacheKeepaliveRow): string {
+  if (row.error != null) return 'danger';
+  if (row.state === 'scheduled') return 'live';
+  if (row.state === 'renewed' || (row.net_pnl != null && row.net_pnl > 0)) {
+    return 'ok';
+  }
+  return 'neutral';
 }
 
-function formatNetPnl(val: number) {
-  if (val === 0) return '$0.00';
-  const sign = val > 0 ? '+' : '−';
-  const abs = Math.abs(val);
-  const str = abs.toFixed(4);
-  return `${sign}$${str.replace(/0$/, '')}`;
+function shortId8(id: string): string {
+  const threadIdx = id.indexOf('thread:');
+  if (threadIdx >= 0) {
+    return id.slice(threadIdx + 'thread:'.length).slice(0, 8);
+  }
+  const slashIdx = id.lastIndexOf('/');
+  const tail = slashIdx >= 0 ? id.slice(slashIdx + 1) : id;
+  return tail.slice(0, 8);
 }
 
-function OverviewStrip({
+function SessionMasterRow({
+  row,
+  selected,
+  maxItemFracDigits,
+  onSelect,
+}: {
+  row: CacheKeepaliveRow;
+  selected: boolean;
+  maxItemFracDigits: number;
+  onSelect: () => void;
+}) {
+  const renewals = row.retained_renewals ?? row.attempts ?? 0;
+  const renewalLabel =
+    renewals === 0
+      ? row.state === 'scheduled'
+        ? 'scheduled'
+        : '0×'
+      : `${renewals}×`;
+
+  return (
+    <button
+      type="button"
+      data-session-id={row.id}
+      title={row.id}
+      className={cx(
+        'flex w-full items-center justify-between gap-2 rounded-sm pl-5 pr-3.5 py-1.5 text-left transition-colors',
+        selected
+          ? 'bg-selected text-text'
+          : 'text-text-muted hover:bg-overlay-2 hover:text-text',
+        'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-[-2px]',
+      )}
+      aria-current={selected ? 'true' : undefined}
+      onClick={onSelect}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <span
+          aria-hidden="true"
+          className={cx('status-dot shrink-0', sessionDotTone(row))}
+        />
+        <span className="truncate font-mono text-data text-text">
+          {shortId8(row.id)}
+        </span>
+        <span className="shrink-0 text-caption text-text-faint tabular-nums">
+          {renewalLabel}
+        </span>
+      </span>
+      <DecimalAlignedUsd
+        value={row.net_pnl}
+        signed={row.net_pnl !== null && Math.abs(row.net_pnl) >= 0.00005}
+        maxFracDigits={maxItemFracDigits}
+        scope="item"
+        className="font-medium"
+      />
+    </button>
+  );
+}
+
+function SheetSummaryHeader({
   horizon,
   summary,
   isLoading,
@@ -108,35 +258,34 @@ function OverviewStrip({
   onHorizonChange: (h: CacheKeepaliveHorizon) => void;
   showHorizon: boolean;
 }) {
+  const effectiveCostSaved =
+    summary?.cost_saved ?? summary?.resolved_cost_saved ?? null;
+  const effectiveTotalAvoided =
+    summary?.total_avoided ?? summary?.resolved_total_avoided ?? null;
+
   return (
-    <div className="px-4 pt-3 pb-2 shrink-0 flex items-center justify-between gap-3 flex-wrap">
-      <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap min-w-0">
-        <span className="text-caption text-text-muted">Retained history:</span>
+    <header
+      className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-subtle px-4 py-2.5"
+      data-testid="cache-keepalive-pnl-equation"
+    >
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-body-sm tabular-nums">
         {isLoading ? (
-          <>
-            <Skeleton className="h-5 w-32" />
-            <Skeleton className="h-4 w-52" />
-          </>
+          <Skeleton className="h-5 w-52" />
         ) : summary ? (
           <>
-            <span className="text-body font-medium text-text tabular-nums">
-              {summary.retained_successful_hits.toLocaleString('en-US')} renewal
-              {summary.retained_successful_hits === 1 ? '' : 's'} fired
+            <span className={cx('font-medium', pnlTone(effectiveCostSaved))}>
+              Net {fmtUsdSigned(effectiveCostSaved)}
             </span>
-            <span className="text-caption text-text-faint tabular-nums max-sm:basis-full">
-              <span aria-hidden="true" className="max-sm:hidden">
-                ·{' '}
+            <span className="text-caption text-text-faint">
+              (Saved {fmtUsdPlain(effectiveTotalAvoided)} − Spent{' '}
+              {fmtUsdPlain(summary.total_spent)})
+            </span>
+            {effectiveCostSaved === null ||
+            summary.evidence_status !== 'observed' ? (
+              <span className="text-caption text-text-faint">
+                · Evidence {summary.evidence_status}
               </span>
-              {summary.cost_saved === null
-                ? 'net saved —'
-                : `${formatMoney(summary.cost_saved)} net saved`}{' '}
-              · spent {formatMoney(summary.total_spent)} · avoided{' '}
-              {summary.total_avoided === null
-                ? '—'
-                : formatMoney(summary.total_avoided)}{' '}
-              · {summary.sessions_last_5m.toLocaleString('en-US')} session
-              {summary.sessions_last_5m === 1 ? '' : 's'} (last 5m)
-            </span>
+            ) : null}
           </>
         ) : (
           <span className="text-caption text-text-faint">
@@ -144,6 +293,7 @@ function OverviewStrip({
           </span>
         )}
       </div>
+
       {showHorizon ? (
         <SegmentedControl
           ariaLabel="Time range"
@@ -153,229 +303,25 @@ function OverviewStrip({
           options={HORIZON_OPTIONS}
         />
       ) : null}
-    </div>
-  );
-}
-
-function SessionListRow({
-  row,
-  isSelected,
-  onSelect,
-}: {
-  row: CacheKeepaliveRow;
-  isSelected: boolean;
-  onSelect: () => void;
-}) {
-  const isError = row.error != null;
-  const showTicks =
-    row.is_active && row.state !== 'scheduled' && row.state !== 'not_tracked';
-  // Attempt ticks are a small meter: brand fill for a renewed session, ink
-  // for any other state (the state badge carries the meaning).
-  const tickColor = row.state === 'renewed' ? 'bg-accent' : 'bg-text-muted';
-
-  const reasonText =
-    isError && row.error === row.reason
-      ? row.error
-      : isError
-        ? `${row.error} · ${row.reason}`
-        : row.reason;
-
-  return (
-    <li data-key={row.id}>
-      <button
-        type="button"
-        onClick={onSelect}
-        aria-current={isSelected || undefined}
-        className={cx(
-          'w-full min-h-[68px] text-left rounded-sm border-b px-4 py-3 transition-colors',
-          'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
-          isSelected
-            ? 'bg-selected border-subtle'
-            : isError
-              ? 'bg-danger/5 border-subtle hover:bg-danger/10'
-              : 'border-subtle hover:bg-overlay-2',
-        )}
-      >
-        {/* Phones: ID and P&L lead the first line, state badges and time the
-            second. From sm the four sit on one line as before. */}
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 leading-tight sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
-          <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-2">
-            {isError && (
-              <AlertCircle
-                className="w-3.5 h-3.5 shrink-0 text-danger-text"
-                aria-hidden="true"
-              />
-            )}
-            <span
-              className={cx(
-                'truncate font-mono text-data text-text',
-                isSelected && 'font-medium',
-              )}
-            >
-              {row.id}
-            </span>
-          </div>
-          <div className="col-start-1 row-start-2 flex min-w-0 items-center gap-2 sm:col-start-2 sm:row-start-1">
-            <Badge tone={STATE_TONE[row.state]}>{STATE_LABEL[row.state]}</Badge>
-            {isError && <Badge tone="danger">Error</Badge>}
-          </div>
-          <span
-            className={cx(
-              'col-start-2 row-start-1 justify-self-end text-caption tabular-nums sm:col-start-3',
-              row.net_pnl === null
-                ? 'text-text-faint'
-                : row.net_pnl > 0
-                  ? 'text-success-text'
-                  : row.net_pnl < 0
-                    ? 'text-danger-text'
-                    : 'text-text-muted',
-            )}
-          >
-            {row.net_pnl === null ? '—' : formatNetPnl(row.net_pnl)}
-          </span>
-          <span className="col-start-2 row-start-2 justify-self-end text-caption tabular-nums text-text-muted sm:col-start-4 sm:row-start-1">
-            {row.relative_time ? (
-              row.relative_time
-            ) : (
-              <RelativeTime ts={row.last_message_at_ms} compact />
-            )}
-          </span>
-        </div>
-        <div className="flex items-center justify-between mt-2">
-          <p
-            className={cx(
-              'text-caption truncate',
-              isError ? 'text-danger-text' : 'text-text-muted',
-            )}
-          >
-            {reasonText}
-          </p>
-          {showTicks && row.attempts != null && (
-            <div className="flex items-center gap-px shrink-0 ml-2">
-              {Array.from({ length: row.max_attempts }).map((_, i) => (
-                <div
-                  key={i}
-                  className={cx(
-                    'w-1 h-2 rounded-xs',
-                    i < row.attempts! ? tickColor : 'bg-overlay-4',
-                  )}
-                />
-              ))}
-              <span className="text-caption text-text-faint ml-1.5 tabular-nums">
-                {row.attempts}/{row.max_attempts}
-              </span>
-            </div>
-          )}
-        </div>
-      </button>
-    </li>
+    </header>
   );
 }
 
 function SessionListSkeleton() {
   return (
-    <ul className="flex flex-col" aria-hidden="true">
+    <div className="divide-y divide-row px-2 py-2" aria-hidden="true">
       {Array.from({ length: 5 }).map((_, i) => (
-        <li
+        <div
           key={i}
           data-testid="cache-keepalive-session-skeleton-row"
-          className="w-full min-h-[68px] rounded-sm border-b border-subtle px-4 py-3"
+          className="flex items-center justify-between gap-2 px-2 py-2"
         >
-          <div className="flex items-center justify-between gap-2 flex-wrap leading-tight">
-            <div className="flex items-center gap-2">
-              <Skeleton className="h-5 w-36" />
-              <Skeleton className="h-5 w-16" />
-            </div>
-            <div className="flex items-center gap-2">
-              <Skeleton className="h-4 w-14" />
-              <Skeleton className="h-4 w-12" />
-            </div>
-          </div>
-          <div className="flex items-center justify-between mt-2">
-            <Skeleton className="h-4 w-48" />
-            <Skeleton className="h-2 w-24 shrink-0 ml-2" />
-          </div>
-        </li>
+          <Skeleton className="h-4 w-28" />
+          <Skeleton className="h-4 w-14" />
+        </div>
       ))}
-    </ul>
+    </div>
   );
-}
-
-function useFlipReorder(
-  listElement: HTMLUListElement | null,
-  items: unknown[],
-) {
-  const oldRects = React.useRef<Record<string, DOMRect>>({});
-  const seenIds = React.useRef<Set<string>>(new Set());
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: items is the trigger
-  React.useLayoutEffect(() => {
-    if (!listElement) return;
-    if (window.PAUSE_ANIMATIONS) return;
-
-    const children = Array.from(listElement.children) as HTMLElement[];
-    const previousRects = oldRects.current;
-    const nextRects: Record<string, DOMRect> = {};
-    const measurements: {
-      child: HTMLElement;
-      key: string;
-      rect: DOMRect;
-    }[] = [];
-
-    // FLIP's geometry phase must finish before any transform/style write.
-    for (const child of children) {
-      const key = child.dataset.key;
-      if (!key) continue;
-
-      const rect = child.getBoundingClientRect();
-      nextRects[key] = rect;
-      measurements.push({ child, key, rect });
-    }
-    oldRects.current = nextRects;
-
-    for (const { child, key, rect } of measurements) {
-      const oldRect = previousRects[key];
-
-      if (oldRect) {
-        const deltaY = oldRect.top - rect.top;
-        if (deltaY !== 0) {
-          child.style.transform = `translateY(${deltaY}px)`;
-          child.style.transition = 'none';
-          child.style.position = 'relative';
-          child.style.zIndex = '10';
-          child.style.backgroundColor = 'var(--color-bg-sub)';
-
-          requestAnimationFrame(() => {
-            child.style.transform = '';
-            child.style.transition =
-              cacheKeepaliveAnimationContract.riseTransition;
-          });
-
-          const clearLift = () => {
-            child.style.position = '';
-            child.style.zIndex = '';
-            child.style.backgroundColor = '';
-            child.removeEventListener('transitionend', clearLift);
-          };
-          child.addEventListener('transitionend', clearLift);
-        }
-      } else if (!seenIds.current.has(key)) {
-        child.style.opacity = '0';
-        child.style.transform = 'translateY(10px)';
-        child.style.transition = 'none';
-        requestAnimationFrame(() => {
-          child.style.opacity = '1';
-          child.style.transform = '';
-          child.style.transition =
-            cacheKeepaliveAnimationContract.newSessionTransition;
-        });
-      }
-    }
-
-    for (const { key } of measurements) {
-      seenIds.current.add(key);
-    }
-  }, [items, listElement]);
 }
 
 export function CacheKeepaliveSessionsDrawer({
@@ -383,50 +329,109 @@ export function CacheKeepaliveSessionsDrawer({
   onOpenChange,
   principal,
 }: Props) {
-  const [filterChoice, setFilter] = useState<CacheKeepaliveStatusFilter>('all');
+  const [collapsedTriggers, setCollapsedTriggers] = useState<
+    Record<string, boolean>
+  >({});
   const [horizon, setHorizon] = useState<CacheKeepaliveHorizon>('24h');
-  const [selected, setSelected] = useState<CacheKeepaliveRow | null>(null);
-  const [listElement, setListElement] = useState<HTMLUListElement | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    null,
+  );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset local drawer state when the principal identity changes
   useEffect(() => {
-    setSelected(null);
-    setFilter('all');
+    setSelectedSessionId(null);
+    setCollapsedTriggers({});
     setHorizon('24h');
   }, [principal.id]);
 
   const enabled = principal.cache_keepalive?.enabled ?? false;
-  // The status filter is hidden while keepalive is off, so a stale choice
-  // must not keep narrowing the list the operator can no longer see filtered.
-  const filter: CacheKeepaliveStatusFilter = enabled ? filterChoice : 'all';
-
   const query = useCacheKeepaliveSessions(
     principal.id,
     {
       horizon,
-      status:
-        filter === 'all' ? undefined : filter === 'error' ? undefined : filter,
-      error: filter === 'error' ? true : undefined,
+      status: enabled ? 'tracked' : undefined,
     },
     open,
   );
 
-  const allRows = useMemo(() => {
+  const visibleRows = useMemo(() => {
     const rawRows = query.data?.pages.flatMap((p) => p.rows ?? []) ?? [];
     const maxRows = Math.max(
       100,
       query.data?.pages.length ? query.data.pages.length * 100 : 100,
     );
-    return mergeLiveSessions(rawRows, maxRows);
-  }, [query.data]);
+    return mergeLiveSessions(rawRows, maxRows).filter(
+      (row) => !enabled || row.state !== 'not_tracked' || row.error != null,
+    );
+  }, [enabled, query.data]);
 
-  useFlipReorder(listElement, allRows);
+  const groups = useMemo(() => {
+    const grouped = new Map<string, CacheKeepaliveRow[]>();
+    for (const row of visibleRows) {
+      const trigger = extractTriggerLabel(row);
+      const current = grouped.get(trigger) ?? [];
+      current.push(row);
+      grouped.set(trigger, current);
+    }
+    const orderedTriggers = [
+      ...TRIGGER_ORDER,
+      ...Array.from(grouped.keys()).filter(
+        (t) =>
+          !TRIGGER_ORDER.some(
+            (known) => known.toLowerCase() === t.toLowerCase(),
+          ),
+      ),
+    ];
+    return orderedTriggers
+      .map((trigger) => {
+        const sessions = grouped.get(trigger) ?? [];
+        const pnlValues = sessions
+          .map((s) => s.net_pnl)
+          .filter((v): v is number => v !== null);
+        const groupNet =
+          pnlValues.length > 0
+            ? pnlValues.reduce((acc, v) => acc + v, 0)
+            : null;
+        return { trigger, sessions, groupNet };
+      })
+      .filter((group) => group.sessions.length > 0);
+  }, [visibleRows]);
 
+  // 1. Group titles align their '.' with each other across all groups.
+  const maxGroupFracDigits = useMemo(
+    () =>
+      groups.reduce((max, g) => {
+        const { fracDigits } = splitUsdNoTrailingZeros(
+          g.groupNet,
+          g.groupNet !== null && Math.abs(g.groupNet) >= 0.00005,
+        );
+        return Math.max(max, fracDigits.length);
+      }, 0),
+    [groups],
+  );
+
+  // 2. Session items align their '.' with each other across all groups.
+  const maxItemFracDigits = useMemo(
+    () =>
+      visibleRows.reduce((max, s) => {
+        const { fracDigits } = splitUsdNoTrailingZeros(
+          s.net_pnl,
+          s.net_pnl !== null && Math.abs(s.net_pnl) >= 0.00005,
+        );
+        return Math.max(max, fracDigits.length);
+      }, 0),
+    [visibleRows],
+  );
+
+  const selectedSession = visibleRows.find((s) => s.id === selectedSessionId);
+  const desktopSession = selectedSession ?? visibleRows[0] ?? null;
+  const showMobileDetail =
+    selectedSession !== undefined && selectedSession !== null;
   const summary = query.data?.pages[0]?.summary;
 
-  const handleOpenChange = (o: boolean) => {
-    if (!o) setSelected(null);
-    onOpenChange(o);
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) setSelectedSessionId(null);
+    onOpenChange(nextOpen);
   };
 
   return (
@@ -438,16 +443,17 @@ export function CacheKeepaliveSessionsDrawer({
       width="xl"
     >
       <div
-        className="h-full flex flex-col min-h-0"
+        className="flex h-full min-h-0 flex-col"
         data-testid="cache-keepalive-sessions-body"
       >
-        <OverviewStrip
+        <SheetSummaryHeader
           horizon={horizon}
           summary={summary}
           isLoading={query.isLoading}
           onHorizonChange={setHorizon}
           showHorizon={enabled}
         />
+
         {query.isError && query.data ? (
           <div
             className="flex items-center justify-between gap-3 border-b border-subtle bg-danger/8 px-4 py-2 text-caption"
@@ -461,115 +467,155 @@ export function CacheKeepaliveSessionsDrawer({
             </Button>
           </div>
         ) : null}
-        {enabled ? (
-          <div className="px-4 pt-1 pb-3 border-b border-subtle shrink-0">
-            <Select
-              aria-label="Session status"
-              size="sm"
-              className="w-44"
-              allLabel="All statuses"
-              value={filter === 'all' ? '' : filter}
-              options={STATUS_OPTIONS}
-              onChange={(next) => {
-                const value = next === '' ? 'all' : next;
-                if (isStatusFilter(value)) setFilter(value);
-              }}
-            />
-          </div>
-        ) : (
+
+        {!enabled ? (
           <p
-            className="px-4 pt-1 pb-3 border-b border-subtle shrink-0 text-body text-text-muted"
+            className="shrink-0 border-b border-subtle px-4 py-2.5 text-body-sm text-text-muted"
             data-testid="cache-keepalive-sessions-off"
           >
             Cache keepalive is off for this principal, so no new sessions are
             tracked. Turn it on from the Cache keepalive section.
           </p>
-        )}
+        ) : null}
 
-        <div className="flex-1 flex min-h-0">
-          <div
-            className={cx(
-              'overflow-y-auto p-2',
-              selected
-                ? 'max-[960px]:hidden w-[440px] shrink-0 border-r border-subtle'
-                : 'flex-1',
-            )}
-          >
+        <div
+          className="min-h-0 flex-1 overflow-y-auto"
+          data-testid="cache-keepalive-session-list-region"
+          aria-busy={query.isLoading}
+        >
+          {query.isLoading ? (
+            <SessionListSkeleton />
+          ) : query.isError && !query.data ? (
             <div
-              data-testid="cache-keepalive-session-list-region"
-              aria-busy={query.isLoading}
-              className="min-h-[340px]"
+              className="flex min-h-[340px] flex-col items-center justify-center gap-3 px-4 text-center"
+              role="alert"
             >
-              {query.isLoading ? (
-                <SessionListSkeleton />
-              ) : query.isError && !query.data ? (
-                <div
-                  className="flex min-h-[340px] flex-col items-center justify-center gap-3 px-4 text-center"
-                  role="alert"
-                >
-                  <p className="text-body text-danger-text">
-                    Unable to load cache keepalive sessions.
-                  </p>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => query.refetch()}
-                  >
-                    Retry sessions
-                  </Button>
-                </div>
-              ) : !enabled && allRows.length === 0 ? (
-                <EmptyState title="No sessions recorded" />
-              ) : allRows.length === 0 ? (
-                <EmptyState
-                  title={
-                    filter === 'all' ? 'No sessions' : 'No matching sessions'
-                  }
-                  description={
-                    filter === 'all'
-                      ? 'No sessions recorded yet.'
-                      : 'Try a different filter.'
-                  }
-                />
-              ) : (
-                <ul ref={setListElement} className="flex flex-col">
-                  {allRows.map((r) => (
-                    <SessionListRow
-                      key={r.id}
-                      row={r}
-                      isSelected={selected?.id === r.id}
-                      onSelect={() => setSelected(r)}
-                    />
-                  ))}
-                </ul>
-              )}
+              <p className="text-body text-danger-text">
+                Unable to load cache keepalive sessions.
+              </p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => query.refetch()}
+              >
+                Retry sessions
+              </Button>
             </div>
-            {query.hasNextPage && (
-              <div className="flex justify-center pt-3 pb-4">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => query.fetchNextPage()}
-                  disabled={query.isFetchingNextPage}
-                  iconLeft={query.isFetchingNextPage ? <Spinner /> : undefined}
-                >
-                  Loading older sessions...
-                </Button>
-              </div>
-            )}
-            {!query.hasNextPage && allRows.length > 0 && (
-              <div className="text-center py-4 text-caption text-text-faint">
-                · No more sessions ·
-              </div>
-            )}
-          </div>
-
-          {selected && (
-            <SessionDetailPane
-              principalId={principal.id}
-              sessionId={selected.id}
-              onClose={() => setSelected(null)}
+          ) : !enabled && visibleRows.length === 0 ? (
+            <EmptyState title="No sessions recorded" />
+          ) : visibleRows.length === 0 ? (
+            <EmptyState
+              title="No sessions"
+              description="No sessions recorded in this horizon."
             />
+          ) : (
+            <div className="min-h-full md:grid md:grid-cols-[248px_minmax(0,1fr)] md:divide-x md:divide-subtle lg:grid-cols-[272px_minmax(0,1fr)]">
+              {/* Left Pane: Collapsible Trigger groups + Decimal-aligned USD columns */}
+              <div
+                className={cx(
+                  showMobileDetail ? 'hidden md:block' : 'block',
+                  'divide-y divide-row px-2 py-2',
+                )}
+              >
+                {groups.map((group) => {
+                  const isCollapsed = collapsedTriggers[group.trigger] ?? false;
+                  return (
+                    <div
+                      key={group.trigger}
+                      data-trigger-group={group.trigger}
+                      className="py-1.5 first:pt-0 last:pb-0"
+                    >
+                      <button
+                        type="button"
+                        aria-expanded={!isCollapsed}
+                        onClick={() =>
+                          setCollapsedTriggers((prev) => ({
+                            ...prev,
+                            [group.trigger]: !prev[group.trigger],
+                          }))
+                        }
+                        className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1 text-left transition-colors hover:bg-overlay-2 focus-visible:outline-2 focus-visible:outline-accent"
+                      >
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          {isCollapsed ? (
+                            <ChevronRight
+                              aria-hidden="true"
+                              className="h-3.5 w-3.5 shrink-0 text-text-faint"
+                            />
+                          ) : (
+                            <ChevronDown
+                              aria-hidden="true"
+                              className="h-3.5 w-3.5 shrink-0 text-text-faint"
+                            />
+                          )}
+                          <span className="truncate text-label text-text-muted">
+                            {group.trigger}
+                          </span>
+                          <span className="shrink-0 text-caption text-text-faint tabular-nums">
+                            ({group.sessions.length})
+                          </span>
+                        </span>
+                        <DecimalAlignedUsd
+                          value={group.groupNet}
+                          signed={
+                            group.groupNet !== null &&
+                            Math.abs(group.groupNet) >= 0.00005
+                          }
+                          maxFracDigits={maxGroupFracDigits}
+                          scope="group"
+                        />
+                      </button>
+
+                      {!isCollapsed ? (
+                        <div className="mt-0.5 space-y-0.5">
+                          {group.sessions.map((row) => (
+                            <SessionMasterRow
+                              key={row.id}
+                              row={row}
+                              selected={row.id === desktopSession?.id}
+                              maxItemFracDigits={maxItemFracDigits}
+                              onSelect={() => setSelectedSessionId(row.id)}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+
+                {query.hasNextPage ? (
+                  <div className="flex justify-center pt-3 pb-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => query.fetchNextPage()}
+                      disabled={query.isFetchingNextPage}
+                      iconLeft={
+                        query.isFetchingNextPage ? <Spinner /> : undefined
+                      }
+                    >
+                      Loading older sessions...
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Right Pane: Single compact context bar + D3 Proportional Time-Rail */}
+              <div
+                className={cx(
+                  showMobileDetail ? 'block' : 'hidden',
+                  'min-w-0 md:block',
+                )}
+              >
+                {desktopSession ? (
+                  <SessionDetailPane
+                    principalId={principal.id}
+                    sessionId={desktopSession.id}
+                    onClose={() => setSelectedSessionId(null)}
+                  />
+                ) : null}
+              </div>
+            </div>
           )}
         </div>
       </div>

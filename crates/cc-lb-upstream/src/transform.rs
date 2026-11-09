@@ -107,6 +107,75 @@ pub trait SseEventTransformHook: Send + Sync {
         request: TransformSseEventRequest,
     ) -> Result<TransformSseEventResult, ResponseTransformError>;
 }
+/// Direction of a provider realtime/live frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RealtimeFrameDirection {
+    /// Initial session configuration frame sent before media or events flow.
+    Setup,
+    /// Frame sent from the client toward the provider.
+    ClientToProvider,
+    /// Frame sent from the provider toward the client.
+    ProviderToClient,
+}
+
+/// Payload encoding of a provider realtime/live frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RealtimeFrameKind {
+    /// UTF-8 JSON payload.
+    Json,
+    /// UTF-8 text payload that is not JSON.
+    Text,
+    /// Opaque binary payload.
+    Binary,
+}
+
+/// Provider-qualified realtime/live frame transform input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransformRealtimeFrameRequest {
+    /// Proxy-assigned request identifier for logging and correlation.
+    pub request_id: String,
+    /// Authenticated principal that owns the realtime session.
+    pub principal: Principal,
+    /// Upstream the frame is exchanged with.
+    pub upstream: Upstream,
+    /// HTTP method of the original realtime handshake request.
+    pub request_method: Method,
+    /// Request path of the original realtime handshake.
+    pub request_path: String,
+    /// Canonical model identifier the session is bound to.
+    pub canonical_model_id: String,
+    /// Direction of this frame relative to the provider.
+    pub direction: RealtimeFrameDirection,
+    /// Payload encoding of `payload`.
+    pub kind: RealtimeFrameKind,
+    /// Raw frame payload bytes.
+    pub payload: Bytes,
+}
+
+/// Provider-qualified realtime/live frame transform output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TransformRealtimeFrameResult {
+    /// Forward the original frame unmodified.
+    Unchanged,
+    /// Forward a replacement frame with the given encoding and payload.
+    Replace {
+        /// Payload encoding of the replacement frame.
+        kind: RealtimeFrameKind,
+        /// Replacement payload bytes.
+        payload: Bytes,
+    },
+    /// Discard the frame without forwarding it.
+    Drop,
+}
+
+/// Provider-qualified realtime/live frame response transform boundary.
+pub trait RealtimeFrameTransformHook: Send + Sync {
+    /// Transforms one realtime frame, returning whether to keep, replace, or drop it.
+    fn transform_realtime_frame(
+        &self,
+        request: TransformRealtimeFrameRequest,
+    ) -> Result<TransformRealtimeFrameResult, ResponseTransformError>;
+}
 
 /// Final Code Assist envelope, before the signer applies stored credentials.
 #[derive(Clone, Copy, Debug)]

@@ -30,7 +30,7 @@ export const cacheKeepaliveDrawerCopy = {
   backDetail: 'Back',
   closeHistoryAriaLabel: 'Close history',
   closeSettingsAriaLabel: 'Close settings',
-  horizons: ['24h', '7d', 'All'],
+  horizons: ['1h', '6h', '24h', '7d', 'All'] as const,
   filters: [
     'All statuses',
     'Renewed',

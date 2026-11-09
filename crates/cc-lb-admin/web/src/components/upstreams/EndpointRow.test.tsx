@@ -104,6 +104,87 @@ describe('EndpointRow default', () => {
       }
     },
   );
+  test.each([
+    ['openai_api_key', 'https://api.openai.com/', 'OpenAI', 'api_key'],
+    [
+      'openai_oauth',
+      'https://chatgpt.com/backend-api/codex',
+      'OpenAI',
+      'oauth',
+    ],
+    [
+      'gemini_api_key',
+      'https://generativelanguage.googleapis.com/',
+      'Gemini',
+      'api_key',
+    ],
+    [
+      'gemini_oauth',
+      'https://cloudcode-pa.googleapis.com/v1internal',
+      'Gemini',
+      'oauth',
+    ],
+  ] as const)(
+    'recognizes the runtime default for %s',
+    (upstreamKind, baseUrl, label, kind) => {
+      render(
+        <EndpointRow
+          upstream={{ ...upstream, kind: upstreamKind, base_url: baseUrl }}
+          kind={kind}
+        />,
+      );
+      const row = screen.getByTestId('upstream-endpoint-row');
+      expect(row.textContent).toContain(`${label} (default)`);
+      expect(row.textContent).not.toContain(baseUrl);
+    },
+  );
+
+  test.each([
+    ['openai_oauth', 'https://api.openai.com/'],
+    ['openai_oauth', 'https://chatgpt.com/backend-api/codex/'],
+    ['openai_api_key', 'https://chatgpt.com/backend-api/codex'],
+    ['gemini_oauth', 'https://cloudcode-pa.googleapis.com/'],
+    ['gemini_oauth', 'https://cloudcode-pa.googleapis.com/v1internal/'],
+    ['gemini_api_key', 'https://cloudcode-pa.googleapis.com/v1internal'],
+  ] as const)(
+    'keeps a near-miss provider URL custom for %s',
+    (upstreamKind, baseUrl) => {
+      render(
+        <EndpointRow
+          upstream={{ ...upstream, kind: upstreamKind, base_url: baseUrl }}
+          kind={upstreamKind.endsWith('_oauth') ? 'oauth' : 'api_key'}
+        />,
+      );
+      const row = screen.getByTestId('upstream-endpoint-row');
+      expect(row.textContent).toContain(baseUrl);
+      expect(row.textContent).not.toContain(
+        upstreamKind.startsWith('openai')
+          ? 'OpenAI (default)'
+          : 'Gemini (default)',
+      );
+    },
+  );
+
+  test.each([
+    ['openai_oauth', 'https://chatgpt.com/backend-api/codex'],
+    ['gemini_oauth', 'https://cloudcode-pa.googleapis.com/v1internal'],
+  ] as const)(
+    'saving the runtime default clears %s instead of storing it',
+    (upstreamKind, baseUrl) => {
+      render(
+        <EndpointRow
+          upstream={{ ...upstream, kind: upstreamKind }}
+          kind="oauth"
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Change endpoint' }));
+      fireEvent.change(input(), { target: { value: baseUrl } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      expect(mutate).toHaveBeenCalledTimes(1);
+      expect(mutate.mock.calls[0][0].body).toEqual({ clear_base_url: true });
+    },
+  );
 
   test.each([
     ['openai_api_key', 'OpenAI', 'https://api.openai.com'],

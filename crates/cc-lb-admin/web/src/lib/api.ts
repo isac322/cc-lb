@@ -385,6 +385,9 @@ export interface UsageBucket {
   cost_cache_creation_5m_micros?: number | null;
   cost_cache_creation_1h_micros?: number | null;
   cost_cache_read_micros?: number | null;
+  cost_cache_write_micros?: number | null;
+  cost_cache_write_30m_micros?: number | null;
+  cost_cache_write_12h_micros?: number | null;
   latency_ms_sum: number;
   latency_count: number;
 }
@@ -529,8 +532,12 @@ export const RequestEventPartialSchema = z.looseObject({
   cache_creation_input_tokens_5m: z.number().nullable().optional(),
   cache_creation_input_tokens_1h: z.number().nullable().optional(),
   cache_read_input_tokens: z.number().nullable().optional(),
+  cache_write_input_tokens: z.number().nullable().optional(),
+  cache_write_input_tokens_30m: z.number().nullable().optional(),
+  cache_write_input_tokens_12h: z.number().nullable().optional(),
   thinking_tokens: z.number().nullable().optional(),
   thinking_budget_tokens: z.number().nullable().optional(),
+  thinking_level: z.string().nullable().optional(),
   reasoning_effort: z.string().nullable().optional(),
   service_tier: z.string().nullable().optional(),
   cost_usd_micros: z.number().nullable().optional(),
@@ -539,6 +546,9 @@ export const RequestEventPartialSchema = z.looseObject({
   cost_cache_creation_5m_micros: z.number().nullable().optional(),
   cost_cache_creation_1h_micros: z.number().nullable().optional(),
   cost_cache_read_micros: z.number().nullable().optional(),
+  cost_cache_write_micros: z.number().nullable().optional(),
+  cost_cache_write_30m_micros: z.number().nullable().optional(),
+  cost_cache_write_12h_micros: z.number().nullable().optional(),
   auth_ms: z.number().nullable().optional(),
   route_ms: z.number().nullable().optional(),
   limit_reserve_ms: z.number().nullable().optional(),
@@ -558,11 +568,15 @@ export const RequestEventPartialSchema = z.looseObject({
   stream_first_content_delta_ms: z.number().nullable().optional(),
   stream_last_content_delta_ms: z.number().nullable().optional(),
   stream_message_stop_ms: z.number().nullable().optional(),
+  stream_first_output_ms: z.number().nullable().optional(),
   stream_last_chunk_ms: z.number().nullable().optional(),
   stream_total_ms: z.number().nullable().optional(),
   sse_event_count: z.number().nullable().optional(),
   content_delta_count: z.number().nullable().optional(),
   ping_count: z.number().nullable().optional(),
+  stream_inter_output_avg_ms: z.number().nullable().optional(),
+  provider_session_id: z.string().nullable().optional(),
+  provider_connection_id: z.string().nullable().optional(),
   inter_token_avg_ms: z.number().nullable().optional(),
   error_code: z.string().nullable().optional(),
 });
@@ -573,6 +587,7 @@ export const FinalRequestEventUpdateSchema = z.object({
       ...requestSetupTimingFields,
       ...requestLifecycleTimingFields,
       ...requestIoTimingFields,
+      thinking_level: z.string().nullable().optional(),
     })
     .transform((event) => event as unknown as RequestEvent),
   cursor: z.number(),
@@ -594,6 +609,20 @@ export type FinalRequestEventUpdate = z.infer<
   typeof FinalRequestEventUpdateSchema
 >;
 export type RequestEventUpdate = z.infer<typeof RequestEventUpdateSchema>;
+export interface RequestNativeCacheObservation {
+  provider: string;
+  mode: string;
+  scope?: string;
+  identity_hash?: string;
+  boundary?: string;
+  evidence_source?: string;
+  cached_tokens?: number;
+  write_tokens?: number;
+  evidence: 'unreported' | 'zero' | 'positive' | 'invalid';
+  retention_secs?: number;
+  expires_at_unix_secs?: number;
+  analysis_ms?: number;
+}
 
 export interface RequestEvent {
   ts: number | null;
@@ -621,6 +650,7 @@ export interface RequestEvent {
   upstream_error_message?: string;
   thinking_tokens?: number;
   thinking_budget_tokens?: number;
+  thinking_level?: string | null;
   reasoning_effort?: string;
   service_tier?: string;
   input_tokens?: number;
@@ -628,14 +658,21 @@ export interface RequestEvent {
   cache_creation_input_tokens?: number;
   cache_creation_input_tokens_5m?: number;
   cache_creation_input_tokens_1h?: number;
+  cache_write_input_tokens?: number | null;
+  cache_write_input_tokens_30m?: number | null;
+  cache_write_input_tokens_12h?: number | null;
   tool_use_prompt_tokens?: number | null;
   cache_read_input_tokens?: number;
+  native_cache?: RequestNativeCacheObservation | null;
   cost_usd_micros?: number;
   cost_input_micros?: number;
   cost_output_micros?: number;
   cost_cache_creation_5m_micros?: number;
   cost_cache_creation_1h_micros?: number;
   cost_cache_read_micros?: number;
+  cost_cache_write_micros?: number | null;
+  cost_cache_write_30m_micros?: number | null;
+  cost_cache_write_12h_micros?: number | null;
   duration_ms: number;
   elapsed_ms?: number | null;
   request_body_read_ms?: number | null;
@@ -677,11 +714,15 @@ export interface RequestEvent {
   stream_first_content_delta_ms?: number;
   stream_last_content_delta_ms?: number;
   stream_message_stop_ms?: number;
+  stream_first_output_ms?: number | null;
   stream_last_chunk_ms?: number;
   stream_total_ms?: number;
   sse_event_count?: number;
   content_delta_count?: number;
   ping_count?: number;
+  stream_inter_output_avg_ms?: number | null;
+  provider_session_id?: string | null;
+  provider_connection_id?: string | null;
   inter_token_avg_ms?: number;
   error_code?: string;
 }
@@ -833,7 +874,7 @@ export interface ConfigHistoryResponse {
   entries: ConfigHistoryItem[];
 }
 
-// ─── Anthropic API-key access ────────────────────────────────────────────────
+// ─── Provider API-key access ────────────────────────────────────────────────
 // One contract for every API-key surface: the connect dialog's preflight,
 // the upstream pane's Access section and the usage card's provenance. The
 // backend implements these under `crates/cc-lb-admin/src/v1/upstreams.rs`.
@@ -877,7 +918,21 @@ export const ApiKeyWorkspaceSchema = z.object({
 });
 export type ApiKeyWorkspace = z.infer<typeof ApiKeyWorkspaceSchema>;
 
-/** Stored capability snapshot of an `anthropic_api_key` upstream. */
+export const ApiKeyProviderSchema = z.enum(['anthropic', 'openai', 'gemini']);
+export type ApiKeyProvider = z.infer<typeof ApiKeyProviderSchema>;
+export const ProviderReportStateSchema = z.enum([
+  'reported',
+  'estimated',
+  'not_configured',
+  'unavailable',
+  'denied',
+  'not_applicable',
+  'stale',
+  'failed',
+]);
+export type ProviderReportState = z.infer<typeof ProviderReportStateSchema>;
+
+/** Stored capability snapshot; Anthropic fields remain backward-compatible. */
 export const ApiKeyAccessSchema = z.object({
   /** False until a probe succeeds: migrated keys and "Save without checking". */
   verified: z.boolean(),
@@ -897,6 +952,15 @@ export const ApiKeyAccessSchema = z.object({
   key_type: z.enum(['personal', 'service_account', 'workspace']).nullable(),
   /** Last probe failure, already phrased for operators. */
   last_error: z.string().nullable(),
+  provider: ApiKeyProviderSchema.nullable().optional(),
+  project_id: z.string().nullable().optional(),
+  project_source: z
+    .enum(['configured', 'admin_resolved', 'unverified'])
+    .nullable()
+    .optional(),
+  provider_report_state: ProviderReportStateSchema.nullable().optional(),
+  /** Redacted backend metadata; never rendered as raw provider output. */
+  provider_report_status_metadata: z.string().nullable().optional(),
 });
 export type ApiKeyAccess = z.infer<typeof ApiKeyAccessSchema>;
 
@@ -1068,8 +1132,12 @@ export interface UpstreamWorkspacesResponse {
  * card's series for one API-key upstream.
  */
 export interface UpstreamKeyUsageResponse extends DashboardUsageResponse {
-  /** `real`: token counts from Anthropic's usage report; `estimated`: cc-lb's request log. */
-  source: 'real' | 'estimated';
+  /** `real` is the legacy spelling of provider-reported token counts. */
+  source: 'real' | ProviderReportState;
+  /** Absent/null on legacy responses; access snapshots may supply context. */
+  provider?: ApiKeyProvider | null;
+  provider_report_state?: ProviderReportState | null;
+  project_id?: string | null;
   /**
    * `api_key`: everything the key did, including traffic outside cc-lb.
    * `workspace`: the key could not be matched (`key_id_unresolved`), so the
@@ -1125,7 +1193,10 @@ export interface KeyUsageMonth {
 
 /** What the usage card needs to label its figures; see `keyUsageProvenance`. */
 export interface KeyUsageProvenance {
-  source: 'reported' | 'estimated';
+  source: ProviderReportState;
+  provider?: ApiKeyProvider;
+  provider_report_state?: ProviderReportState;
+  project_id?: string;
   /**
    * Reported figures are Anthropic's last snapshot, kept while reports
    * fail: still reported data, just not current.
@@ -1171,16 +1242,34 @@ export function keyUsageProvenance(
   usage: UpstreamKeyUsageResponse,
   access: ApiKeyAccess,
 ): KeyUsageProvenance {
-  const reported = usage.source === 'real';
+  const source: ProviderReportState =
+    usage.source === 'real' ? 'reported' : usage.source;
+  const reported = source === 'reported' || source === 'stale';
+  const provider = usage.provider ?? access.provider ?? undefined;
+  const reportState =
+    usage.provider_report_state ??
+    (usage.source !== 'real' &&
+    usage.source !== 'reported' &&
+    usage.source !== 'estimated'
+      ? usage.source
+      : (access.provider_report_state ?? undefined));
   const fix = usage.fix?.code ?? null;
   return {
-    source: reported ? 'reported' : 'estimated',
-    stale: reported && usage.stale,
+    source,
+    ...(provider ? { provider } : {}),
+    ...(reportState ? { provider_report_state: reportState } : {}),
+    ...((usage.project_id ?? access.project_id)
+      ? { project_id: usage.project_id ?? access.project_id ?? undefined }
+      : {}),
+    stale: reported && (usage.stale || reportState === 'stale'),
     // R2-2: only Anthropic's refusal stops reports; a 5xx streak is stale.
     stopped: fix === 'usage_poll_failed',
     last_reported_unix_secs: reported ? usage.last_reported_unix_secs : null,
     pending_first_report:
-      !reported && fix === null && access.usage_report === 'ok',
+      !reported &&
+      fix === null &&
+      access.usage_report === 'ok' &&
+      (provider === undefined || provider === 'anthropic'),
     attribution: usage.attribution,
     workspace: attributedWorkspace(usage, access),
     verified: access.verified,
@@ -1207,7 +1296,7 @@ export const UpstreamSchema = z.object({
 
   base_url: z.string().nullable(),
 
-  /** `anthropic_api_key` upstreams only; absent on rows never checked. */
+  /** All API-key upstream kinds; absent on rows never checked. */
   api_key_access: ApiKeyAccessSchema.nullable().optional(),
   warmup_enabled: z.boolean(),
   warmup_dialect_plugin: z
@@ -1260,8 +1349,14 @@ export const API_KEY_ACCESS_NOT_CHECKED: ApiKeyAccess = {
  * checked (unverified). `null` for OAuth upstreams.
  */
 export function apiKeyAccessOf(upstream: Upstream): ApiKeyAccess | null {
-  if (upstream.kind !== 'anthropic_api_key') return null;
-  return upstream.api_key_access ?? API_KEY_ACCESS_NOT_CHECKED;
+  switch (upstream.kind) {
+    case 'anthropic_api_key':
+    case 'openai_api_key':
+    case 'gemini_api_key':
+      return upstream.api_key_access ?? API_KEY_ACCESS_NOT_CHECKED;
+    default:
+      return null;
+  }
 }
 
 export type OAuthTokenMode = 'long_lived_365d' | 'refreshing';

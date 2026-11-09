@@ -1,4 +1,4 @@
-use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
+use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireVersion};
 use cc_lb_plugin_wire::v1::{FilterResponse, ShapeResponse};
 
 use crate::inspect::{expected_fingerprint, schema_section_name};
@@ -41,15 +41,27 @@ fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     );
     let mut wasm = wat::parse_str(wat).expect("valid WAT");
     for (hook, _) in declared_hooks {
-        let fingerprint = expected_fingerprint(*hook, WireVersion::V1)
-            .expect("all test hooks have a V1 fingerprint");
+        let wire_version = if *hook == HookKind::TransformRealtimeFrame {
+            WireVersion::V2
+        } else {
+            WireVersion::V1
+        };
+        let fingerprint = expected_fingerprint(*hook, wire_version).expect("test hook fingerprint");
         append_custom_section(
             &mut wasm,
-            &schema_section_name(*hook, WireVersion::V1),
+            &schema_section_name(*hook, wire_version),
             &fingerprint,
         );
     }
-    append_custom_section(&mut wasm, "cc_lb.plugin.v1", &metadata(declared_hooks));
+    let metadata_section = if declared_hooks
+        .iter()
+        .any(|(hook, _)| *hook == HookKind::TransformRealtimeFrame)
+    {
+        "cc_lb.plugin.v2"
+    } else {
+        "cc_lb.plugin.v1"
+    };
+    append_custom_section(&mut wasm, metadata_section, &metadata(declared_hooks));
     wasm
 }
 
@@ -76,6 +88,10 @@ fn hook_export(hook: HookKind, filter_packed: u64, shape_packed: u64) -> String 
             r#"(func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)"#
                 .to_owned()
         }
+        HookKind::TransformRealtimeFrame => format!(
+            r#"(func (export "{}") (param i32 i32) (result i64) i64.const 0)"#,
+            HookKind::TransformRealtimeFrame.qualified_export_name(ProviderFamily::Openai)
+        ),
         HookKind::ShapeEnvelopeGemini => {
             r#"(func (export "cc_lb_shape_envelope_gemini") (param i32 i32) (result i64) i64.const 0)"#
                 .to_owned()
@@ -87,13 +103,26 @@ fn metadata(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     let hooks = declared_hooks
         .iter()
         .map(|(hook, mode)| {
+            let wire_version = if *hook == HookKind::TransformRealtimeFrame {
+                2
+            } else {
+                1
+            };
             let hook_metadata = serde_json::json!({
-                "wire_version": 1,
+                "wire_version": wire_version,
                 "description": format!("{} hook", hook.as_str()),
                 "usage": format!("call {}", hook.as_str()),
                 "mode": mode,
             });
-            (hook.as_str().to_owned(), hook_metadata)
+            let hook_name = if *hook == HookKind::TransformRealtimeFrame {
+                HookKind::TransformRealtimeFrame
+                    .qualified_export_name(ProviderFamily::Openai)
+                    .strip_prefix("cc_lb_")
+                    .expect("qualified hook export has cc_lb prefix")
+            } else {
+                hook.as_str()
+            };
+            (hook_name.to_owned(), hook_metadata)
         })
         .collect::<serde_json::Map<_, _>>();
     serde_json::to_vec(&serde_json::json!({
@@ -138,6 +167,7 @@ fn agnostic_admission_accepts_filter_and_shape_hooks() {
         (HookKind::Shape, "active"),
         (HookKind::TransformResponse, "noop"),
         (HookKind::TransformSseEvent, "noop"),
+        (HookKind::TransformRealtimeFrame, "noop"),
     ]);
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
 
@@ -147,7 +177,7 @@ fn agnostic_admission_accepts_filter_and_shape_hooks() {
         .expect("multi-hook artifact admitted");
 
     // Then: every declared contract is retained by the inspection.
-    assert_eq!(inspection.hook_versions.len(), 4);
+    assert_eq!(inspection.hook_versions.len(), 5);
     assert_eq!(
         inspection.hook_versions.get(&HookKind::Filter),
         Some(&WireVersion::V1)

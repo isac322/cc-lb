@@ -29,17 +29,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::error::WasmtimeRuntimeError;
 use cc_lb_plugin_wire::metadata::PluginMetadata;
-use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema, WireVersion};
+use cc_lb_plugin_wire::schema::{HookKind, ProviderFamily, WireSchema, WireVersion, host_supports};
 use wasmparser::{ExternalKind, Parser, Payload};
 
 const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v1";
 const QUALIFIED_PLUGIN_META_SECTION: &str = "cc_lb.plugin.v2";
 const REQUIRED_MEMORY_EXPORT: &str = "memory";
 const ALWAYS_REQUIRED_FUNC_EXPORTS: &[&str] = &["cc_lb_alloc", "cc_lb_free"];
-const SHAPE_OWNED_HOOKS: [HookKind; 4] = [
+const SHAPE_OWNED_HOOKS: [HookKind; 5] = [
     HookKind::Shape,
     HookKind::TransformResponse,
     HookKind::TransformSseEvent,
+    HookKind::TransformRealtimeFrame,
     HookKind::ShapeEnvelopeGemini,
 ];
 
@@ -210,10 +211,19 @@ fn inspect_wasm_with_scope(
                 ),
             }
         })?;
-        if wire_version == WireVersion::V2 && provider.is_none() {
+        if !host_supports(hook, wire_version) {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
-                    "hook `{hook_name}` wire version 2 requires provider-qualified metadata"
+                    "host does not support hook `{hook_name}` wire version {}",
+                    wire_version.as_u8()
+                ),
+            });
+        }
+        if matches!(wire_version, WireVersion::V2 | WireVersion::V3) && provider.is_none() {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "hook `{hook_name}` wire version {} requires provider-qualified metadata",
+                    wire_version.as_u8()
                 ),
             });
         }
@@ -283,9 +293,9 @@ fn require_hooks_for_slot(
         require_declared_hook_contracts(metadata)
     } else {
         match kind {
-            HookKind::TransformResponse | HookKind::TransformSseEvent => {
-                reject_shape_owned_hook_as_slot(kind)
-            }
+            HookKind::TransformResponse
+            | HookKind::TransformSseEvent
+            | HookKind::TransformRealtimeFrame => reject_shape_owned_hook_as_slot(kind),
             _ => require_declared_hook(metadata, kind, "this slot"),
         }
     }
@@ -463,6 +473,9 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         (HookKind::Filter, WireVersion::V2) => {
             Some(<cc_lb_plugin_wire::v2::FilterRequest as WireSchema>::FINGERPRINT)
         }
+        (HookKind::Filter, WireVersion::V3) => {
+            Some(<cc_lb_plugin_wire::v3::FilterRequest as WireSchema>::FINGERPRINT)
+        }
         (HookKind::Shape, WireVersion::V2) => {
             Some(<cc_lb_plugin_wire::v2::ShapeRequest as WireSchema>::FINGERPRINT)
         }
@@ -471,6 +484,9 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         }
         (HookKind::TransformSseEvent, WireVersion::V2) => {
             Some(<cc_lb_plugin_wire::v2::TransformSseEventRequest as WireSchema>::FINGERPRINT)
+        }
+        (HookKind::TransformRealtimeFrame, WireVersion::V2) => {
+            Some(<cc_lb_plugin_wire::v2::TransformRealtimeFrameRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::ShapeEnvelopeGemini, WireVersion::V2) => {
             Some(<cc_lb_plugin_wire::v2::ShapeEnvelopeGeminiRequest as WireSchema>::FINGERPRINT)
@@ -518,6 +534,11 @@ mod tests {
             r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"{hook}":{{"wire_version":1,"description":"{hook} hook","usage":"call {hook}","mode":"active"}}}}}}"#
         )
         .into_bytes()
+    }
+
+    fn qualified_filter_v3_metadata_section() -> Vec<u8> {
+        br#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"filter_openai":{"wire_version":3,"description":"filter hook","usage":"call filter","mode":"active"}}}"#
+            .to_vec()
     }
 
     fn shape_owned_metadata_section(transform_response_mode: &str, sse_mode: &str) -> Vec<u8> {
@@ -583,6 +604,17 @@ mod tests {
         "#
     }
 
+    fn qualified_filter_v3_plugin_wat() -> &'static str {
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
+            (func (export "cc_lb_free") (param i32 i32 i32))
+            (func (export "cc_lb_filter_openai") (param i32 i32) (result i64) i64.const 0)
+        )
+        "#
+    }
+
     fn shape_plugin_wat() -> &'static str {
         r#"
         (module
@@ -623,6 +655,41 @@ mod tests {
         assert_eq!(inspection.metadata.name, "x");
         assert_eq!(inspection.hook_fingerprints.len(), 1);
         assert_eq!(inspection.hook_versions[&HookKind::Filter], WireVersion::V1);
+    }
+
+    #[test]
+    fn accepts_provider_qualified_filter_v3_plugin() {
+        let bytes = wat_with_custom_sections(
+            qualified_filter_v3_plugin_wat(),
+            &[
+                (
+                    &schema_section_name(HookKind::Filter, WireVersion::V3),
+                    &expected_fingerprint(HookKind::Filter, WireVersion::V3)
+                        .expect("filter V3 schema"),
+                ),
+                ("cc_lb.plugin.v2", &qualified_filter_v3_metadata_section()),
+            ],
+        );
+        let inspection = inspect_wasm(HookKind::Filter, &bytes).expect("filter V3 plugin OK");
+        assert_eq!(inspection.hook_versions[&HookKind::Filter], WireVersion::V3);
+    }
+
+    #[test]
+    fn rejects_bare_filter_v3_plugin_as_unqualified() {
+        let metadata = br#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"filter":{"wire_version":3,"description":"filter hook","usage":"call filter","mode":"active"}}}"#;
+        let bytes = wat_with_custom_sections(
+            filter_plugin_wat(),
+            &[
+                (
+                    &schema_section_name(HookKind::Filter, WireVersion::V3),
+                    &expected_fingerprint(HookKind::Filter, WireVersion::V3)
+                        .expect("filter V3 schema"),
+                ),
+                ("cc_lb.plugin.v1", metadata),
+            ],
+        );
+        let error = inspect_wasm(HookKind::Filter, &bytes).expect_err("bare V3 must reject");
+        assert!(format!("{error}").contains("requires provider-qualified metadata"));
     }
 
     #[test]

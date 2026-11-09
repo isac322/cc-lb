@@ -1,10 +1,13 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyOrgCapability,
-    ApiKeyUsagePollCandidate, ApiKeyUsagePollOutcome, ApiUsageAttribution, RemediationCode,
-    StorageError, StorageResult, UpstreamApiKeyDetailsRecord, UpstreamApiKeyStore,
-    UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord, UpstreamApiUsageBucketWrite,
-    UpstreamRequestOutcome,
+    ApiKeyUsagePollCandidate, ApiKeyUsagePollOutcome, ApiUsageAttribution,
+    OpenAiOrganizationReportingCredentialCiphertextRecord,
+    OpenAiOrganizationReportingCredentialRecord, OpenAiOrganizationReportingCredentialStatus,
+    OpenAiOrganizationReportingCredentialWrite, Provider, ProviderProjectSource,
+    ProviderReportState, RemediationCode, StorageError, StorageResult, UpstreamApiKeyDetailsRecord,
+    UpstreamApiKeyStore, UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord,
+    UpstreamApiUsageBucketWrite, UpstreamRequestOutcome,
 };
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
@@ -19,7 +22,7 @@ use crate::{SqliteStorage, map_sqlx_error};
 /// the poll-candidate join. `details_upstream_id IS NULL` means no row.
 macro_rules! details_columns {
     () => {
-        "d.upstream_id AS details_upstream_id, d.verified AS details_verified, d.key_class AS details_key_class, d.key_hint AS details_key_hint, d.api_key_id AS details_api_key_id, d.needs_workspace AS details_needs_workspace, d.capabilities_json AS details_capabilities_json, d.remediation_json AS details_remediation_json, d.usage_report_state AS details_usage_report_state, d.last_error AS details_last_error, d.checked_at_unix_secs AS details_checked_at_unix_secs, d.last_attempt_at_unix_secs AS details_last_attempt_at_unix_secs, d.access_revision AS details_access_revision, d.usage_poll_failures AS details_usage_poll_failures, d.usage_next_poll_after_unix_secs AS details_usage_next_poll_after_unix_secs, d.usage_last_success_at_unix_secs AS details_usage_last_success_at_unix_secs, d.usage_last_attempt_at_unix_secs AS details_usage_last_attempt_at_unix_secs, d.usage_poll_claim_token AS details_usage_poll_claim_token, d.usage_poll_claim_lease_until_unix_secs AS details_usage_poll_claim_lease_until_unix_secs, d.created_at_unix_secs AS details_created_at_unix_secs, d.updated_at_unix_secs AS details_updated_at_unix_secs"
+        "d.upstream_id AS details_upstream_id, d.verified AS details_verified, d.key_class AS details_key_class, d.key_hint AS details_key_hint, d.api_key_id AS details_api_key_id, d.needs_workspace AS details_needs_workspace, d.capabilities_json AS details_capabilities_json, d.remediation_json AS details_remediation_json, d.usage_report_state AS details_usage_report_state, d.provider AS details_provider, d.project_id AS details_project_id, d.project_source AS details_project_source, d.provider_report_state AS details_provider_report_state, d.provider_report_status_metadata_json AS details_provider_report_status_metadata_json, d.last_error AS details_last_error, d.checked_at_unix_secs AS details_checked_at_unix_secs, d.last_attempt_at_unix_secs AS details_last_attempt_at_unix_secs, d.access_revision AS details_access_revision, d.usage_poll_failures AS details_usage_poll_failures, d.usage_next_poll_after_unix_secs AS details_usage_next_poll_after_unix_secs, d.usage_last_success_at_unix_secs AS details_usage_last_success_at_unix_secs, d.usage_last_attempt_at_unix_secs AS details_usage_last_attempt_at_unix_secs, d.usage_poll_claim_token AS details_usage_poll_claim_token, d.usage_poll_claim_lease_until_unix_secs AS details_usage_poll_claim_lease_until_unix_secs, d.created_at_unix_secs AS details_created_at_unix_secs, d.updated_at_unix_secs AS details_updated_at_unix_secs"
     };
 }
 
@@ -44,6 +47,18 @@ macro_rules! poll_state_update_prefix {
                 usage_last_success_at_unix_secs = COALESCE(?3, usage_last_success_at_unix_secs), \
                 usage_last_attempt_at_unix_secs = ?4, \
                 updated_at_unix_secs = ?5"
+    };
+}
+/// Provider-neutral report columns of one completed poll. Each non-null
+/// candidate value is revision-fenced independently of the poll-state write.
+macro_rules! provider_report_update {
+    () => {
+        "UPDATE upstream_api_key_details_v1
+            SET provider = COALESCE(?2, provider),
+                provider_report_state = COALESCE(?3, provider_report_state),
+                provider_report_status_metadata_json =
+                    COALESCE(?4, provider_report_status_metadata_json)
+          WHERE upstream_id = ?1 AND access_revision = ?5"
     };
 }
 
@@ -91,6 +106,183 @@ impl UpstreamApiKeyStore for SqliteStorage {
         }
         Ok(records)
     }
+    async fn get_openai_org_reporting_credential(
+        &self,
+    ) -> StorageResult<Option<OpenAiOrganizationReportingCredentialRecord>> {
+        let row = sqlx::query(
+            "SELECT scope, redacted_hint, status, revision, updated_at_unix_secs
+             FROM openai_org_reporting_credential_v1
+             WHERE scope = 'deployment'",
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        credential_record_from_sqlite_row(row.as_ref())
+    }
+
+    async fn get_openai_org_reporting_credential_ciphertext(
+        &self,
+    ) -> StorageResult<Option<OpenAiOrganizationReportingCredentialCiphertextRecord>> {
+        let row = sqlx::query(
+            "SELECT encrypted_secret_ciphertext, status, revision
+             FROM openai_org_reporting_credential_v1
+             WHERE scope = 'deployment'",
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        credential_ciphertext_record_from_sqlite_row(row.as_ref())
+    }
+    async fn claim_openai_org_reporting_poll(
+        &self,
+        credential_revision: u64,
+        now_unix_secs: u64,
+        lease_until_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        let changed = sqlx::query(
+            "UPDATE openai_org_reporting_credential_v1
+                SET poll_claim_lease_until_unix_secs = ?1
+              WHERE scope = 'deployment'
+                AND status = 'configured'
+                AND revision = ?2
+                AND (poll_claim_lease_until_unix_secs IS NULL
+                     OR poll_claim_lease_until_unix_secs <= ?3)",
+        )
+        .bind(u64_to_i64(lease_until_unix_secs, "credential lease until")?)
+        .bind(u64_to_i64(credential_revision, "credential revision")?)
+        .bind(u64_to_i64(now_unix_secs, "credential lease now")?)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(changed.rows_affected() == 1)
+    }
+
+    async fn mark_openai_org_reporting_credential_denied(
+        &self,
+        expected_revision: u64,
+        updated_at_unix_secs: u64,
+    ) -> StorageResult<()> {
+        let changed = sqlx::query(
+            "UPDATE openai_org_reporting_credential_v1
+                SET status = 'denied',
+                    revision = revision + 1,
+                    updated_at_unix_secs = ?1,
+                    poll_claim_lease_until_unix_secs = NULL
+              WHERE scope = 'deployment' AND status = 'configured' AND revision = ?2",
+        )
+        .bind(u64_to_i64(
+            updated_at_unix_secs,
+            "credential denied updated_at_unix_secs",
+        )?)
+        .bind(u64_to_i64(expected_revision, "credential revision")?)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        if changed.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(conflict("OpenAI reporting credential revision changed"))
+        }
+    }
+
+    async fn replace_openai_org_reporting_credential(
+        &self,
+        write: &OpenAiOrganizationReportingCredentialWrite,
+    ) -> StorageResult<OpenAiOrganizationReportingCredentialRecord> {
+        let mut tx = self.begin_immediate().await?;
+        let result = if let Some(expected_revision) = write.expected_revision {
+            sqlx::query(
+                "UPDATE openai_org_reporting_credential_v1
+                    SET encrypted_secret_ciphertext = ?1,
+                        redacted_hint = ?2,
+                        status = ?3,
+                        revision = revision + 1,
+                        updated_at_unix_secs = ?4,
+                        poll_claim_lease_until_unix_secs = NULL
+                  WHERE scope = 'deployment' AND revision = ?5",
+            )
+            .bind(&write.encrypted_secret_ciphertext)
+            .bind(&write.redacted_hint)
+            .bind(write.status.as_str())
+            .bind(u64_to_i64(
+                write.updated_at_unix_secs,
+                "credential updated_at_unix_secs",
+            )?)
+            .bind(u64_to_i64(
+                expected_revision,
+                "credential expected revision",
+            )?)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?
+        } else {
+            sqlx::query(
+                "INSERT INTO openai_org_reporting_credential_v1 (
+                    scope, encrypted_secret_ciphertext, redacted_hint, status,
+                    revision, created_at_unix_secs, updated_at_unix_secs
+                 ) VALUES ('deployment', ?1, ?2, ?3, 1, ?4, ?4)
+                 ON CONFLICT (scope) DO NOTHING",
+            )
+            .bind(&write.encrypted_secret_ciphertext)
+            .bind(&write.redacted_hint)
+            .bind(write.status.as_str())
+            .bind(u64_to_i64(
+                write.updated_at_unix_secs,
+                "credential updated_at_unix_secs",
+            )?)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?
+        };
+        if result.rows_affected() != 1 {
+            return Err(conflict("stale or existing OpenAI reporting credential"));
+        }
+        if write.status == OpenAiOrganizationReportingCredentialStatus::Configured {
+            sqlx::query(
+                "UPDATE upstream_api_key_details_v1
+                    SET provider_report_state = NULL,
+                        provider_report_status_metadata_json = NULL,
+                        usage_poll_failures = 0,
+                        usage_next_poll_after_unix_secs = NULL,
+                        usage_poll_claim_token = NULL,
+                        usage_poll_claim_lease_until_unix_secs = NULL,
+                        updated_at_unix_secs = CASE
+                            WHEN updated_at_unix_secs >= ?1 THEN updated_at_unix_secs
+                            ELSE ?1
+                        END
+                  WHERE provider_report_state IN ('not_configured', 'denied')
+                    AND EXISTS (
+                        SELECT 1
+                          FROM upstream_spec_v1 spec
+                         WHERE spec.id = upstream_api_key_details_v1.upstream_id
+                           AND spec.kind = 'openai_api_key'
+                    )",
+            )
+            .bind(u64_to_i64(
+                write.updated_at_unix_secs,
+                "details updated_at_unix_secs",
+            )?)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        let row = sqlx::query(
+            "SELECT scope, redacted_hint, status, revision, updated_at_unix_secs
+             FROM openai_org_reporting_credential_v1
+             WHERE scope = 'deployment'",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        let record = credential_record_from_sqlite_row(Some(&row))?.ok_or_else(|| {
+            StorageError::Corrupted {
+                message: "OpenAI reporting credential row disappeared".to_owned(),
+            }
+        })?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(record)
+    }
 
     async fn write_api_key_access(
         &self,
@@ -101,7 +293,18 @@ impl UpstreamApiKeyStore for SqliteStorage {
         let now = now_unix_secs_u64(self.clock())?;
         let mut tx = self.begin_immediate().await?;
         ensure_live_spec_revision_in_tx(&mut tx, upstream_id, expected_spec_revision).await?;
-        write_api_key_access_in_tx(&mut tx, upstream_id, access, now).await?;
+        let project_changed = write_api_key_access_in_tx(&mut tx, upstream_id, access, now).await?;
+        if project_changed {
+            sqlx::query(
+                "UPDATE upstream_spec_v1
+                    SET owner_epoch = owner_epoch + 1, updated_at = unixepoch()
+                  WHERE id = ? AND kind = 'gemini_api_key' AND deleted_at IS NULL",
+            )
+            .bind(upstream_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
         tx.commit().await.map_err(map_sqlx_error)
     }
 
@@ -158,11 +361,17 @@ impl UpstreamApiKeyStore for SqliteStorage {
             "LEFT JOIN upstream_api_key_details_v1 d ON d.upstream_id = spec.id \
              WHERE spec.deleted_at IS NULL \
                AND spec.enabled = 1 \
-               AND spec.kind = 'anthropic_api_key' \
+               AND spec.kind IN ('anthropic_api_key', 'openai_api_key', 'gemini_api_key') \
                AND (?1 IS NULL OR spec.id = ?1) \
-               AND (d.upstream_id IS NULL \
-                    OR d.usage_report_state IS NULL \
-                    OR (d.usage_report_state = 'ok' AND d.key_class = 'org_scoped')) \
+               AND ( \
+                    (spec.kind = 'anthropic_api_key' \
+                     AND (d.upstream_id IS NULL \
+                          OR d.usage_report_state IS NULL \
+                          OR (d.usage_report_state = 'ok' AND d.key_class = 'org_scoped'))) \
+                    OR (spec.kind IN ('openai_api_key', 'gemini_api_key') \
+                        AND (d.provider_report_state IS NULL \
+                             OR d.provider_report_state IN ('unavailable', 'failed', 'stale'))) \
+               ) \
                AND (d.usage_next_poll_after_unix_secs IS NULL \
                     OR d.usage_next_poll_after_unix_secs <= ?2) \
                AND (d.usage_poll_claim_token IS NULL \
@@ -213,10 +422,20 @@ impl UpstreamApiKeyStore for SqliteStorage {
                     updated_at_unix_secs = excluded.updated_at_unix_secs
               WHERE (upstream_api_key_details_v1.usage_poll_claim_token IS NULL
                      OR upstream_api_key_details_v1.usage_poll_claim_lease_until_unix_secs <= ?7)
-                AND (upstream_api_key_details_v1.usage_report_state IS NULL
-                     OR (upstream_api_key_details_v1.usage_report_state = 'ok'
-                         AND upstream_api_key_details_v1.key_class = 'org_scoped'))
-                AND (upstream_api_key_details_v1.usage_next_poll_after_unix_secs IS NULL
+                AND ( \
+                     (EXISTS (SELECT 1 FROM upstream_spec_v1 spec \
+                              WHERE spec.id = upstream_api_key_details_v1.upstream_id \
+                                AND spec.kind = 'anthropic_api_key') \
+                      AND (upstream_api_key_details_v1.usage_report_state IS NULL \
+                           OR (upstream_api_key_details_v1.usage_report_state = 'ok' \
+                               AND upstream_api_key_details_v1.key_class = 'org_scoped'))) \
+                     OR (EXISTS (SELECT 1 FROM upstream_spec_v1 spec \
+                                 WHERE spec.id = upstream_api_key_details_v1.upstream_id \
+                                   AND spec.kind IN ('openai_api_key', 'gemini_api_key')) \
+                         AND (upstream_api_key_details_v1.provider_report_state IS NULL \
+                              OR upstream_api_key_details_v1.provider_report_state IN ('unavailable', 'failed', 'stale'))) \
+                ) \
+                AND (upstream_api_key_details_v1.usage_next_poll_after_unix_secs IS NULL \
                      OR upstream_api_key_details_v1.usage_next_poll_after_unix_secs <= ?7)",
         )
         .bind(upstream_id.to_string())
@@ -317,6 +536,25 @@ impl UpstreamApiKeyStore for SqliteStorage {
             .await
             .map_err(map_sqlx_error)?;
         }
+        if outcome.provider.is_some()
+            || outcome.provider_report_state.is_some()
+            || outcome.provider_report_status_metadata.is_some()
+        {
+            sqlx::query(provider_report_update!())
+                .bind(upstream_id.to_string())
+                .bind(outcome.provider.map(provider_as_str))
+                .bind(
+                    outcome
+                        .provider_report_state
+                        .map(ProviderReportState::as_str),
+                )
+                .bind(outcome.provider_report_status_metadata.as_deref())
+                .bind(u64_to_i64(outcome.access_revision_seen, "access_revision")?)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        }
+
         tx.commit().await.map_err(map_sqlx_error)
     }
 
@@ -494,8 +732,17 @@ pub(crate) async fn write_api_key_access_in_tx(
     upstream_id: Uuid,
     access: &ApiKeyAccessWrite,
     now_unix_secs: u64,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     insert_details_if_missing_in_tx(tx, upstream_id, &access.key_hint, now_unix_secs).await?;
+    let current_project_id: Option<String> = sqlx::query_scalar(
+        "SELECT project_id FROM upstream_api_key_details_v1 WHERE upstream_id = ?",
+    )
+    .bind(upstream_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?
+    .flatten();
+    let project_changed = current_project_id != access.project_id;
     sqlx::query(
         "UPDATE upstream_api_key_details_v1
             SET verified = ?,
@@ -506,6 +753,11 @@ pub(crate) async fn write_api_key_access_in_tx(
                 capabilities_json = ?,
                 remediation_json = ?,
                 usage_report_state = ?,
+                provider = ?,
+                project_id = ?,
+                project_source = ?,
+                provider_report_state = ?,
+                provider_report_status_metadata_json = ?,
                 last_error = ?,
                 checked_at_unix_secs = ?,
                 last_attempt_at_unix_secs = ?,
@@ -523,6 +775,15 @@ pub(crate) async fn write_api_key_access_in_tx(
     .bind(serde_json::to_string(&access.capabilities)?)
     .bind(serde_json::to_string(&access.remediation)?)
     .bind(access.usage_report_state.map(ApiKeyOrgCapability::as_str))
+    .bind(access.provider.map(provider_as_str))
+    .bind(&access.project_id)
+    .bind(access.project_source.map(ProviderProjectSource::as_str))
+    .bind(
+        access
+            .provider_report_state
+            .map(ProviderReportState::as_str),
+    )
+    .bind(access.provider_report_status_metadata.as_deref())
     .bind(access.last_error.as_deref())
     .bind(optional_u64_to_i64(
         access.checked_at_unix_secs,
@@ -537,7 +798,7 @@ pub(crate) async fn write_api_key_access_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
-    Ok(())
+    Ok(project_changed)
 }
 
 /// Zeroes poll failures and clears the poll schedule and success/attempt
@@ -633,6 +894,15 @@ fn details_from_row(row: &SqliteRow) -> StorageResult<Option<UpstreamApiKeyDetai
     let usage_report_state = row
         .try_get::<Option<String>, _>("details_usage_report_state")
         .map_err(map_sqlx_error)?;
+    let provider = row
+        .try_get::<Option<String>, _>("details_provider")
+        .map_err(map_sqlx_error)?;
+    let project_source = row
+        .try_get::<Option<String>, _>("details_project_source")
+        .map_err(map_sqlx_error)?;
+    let provider_report_state = row
+        .try_get::<Option<String>, _>("details_provider_report_state")
+        .map_err(map_sqlx_error)?;
     Ok(Some(UpstreamApiKeyDetailsRecord {
         upstream_id: Uuid::parse_str(&upstream_id).map_err(|error| StorageError::Corrupted {
             message: format!("invalid api-key details upstream id {upstream_id}: {error}"),
@@ -659,6 +929,34 @@ fn details_from_row(row: &SqliteRow) -> StorageResult<Option<UpstreamApiKeyDetai
                 })
             })
             .transpose()?,
+        provider: provider
+            .as_deref()
+            .map(|value| {
+                parse_provider(value).ok_or_else(|| StorageError::Corrupted {
+                    message: format!("invalid provider {value}"),
+                })
+            })
+            .transpose()?,
+        project_id: row.try_get("details_project_id").map_err(map_sqlx_error)?,
+        project_source: project_source
+            .as_deref()
+            .map(|value| {
+                ProviderProjectSource::parse(value).ok_or_else(|| StorageError::Corrupted {
+                    message: format!("invalid project_source {value}"),
+                })
+            })
+            .transpose()?,
+        provider_report_state: provider_report_state
+            .as_deref()
+            .map(|value| {
+                ProviderReportState::parse(value).ok_or_else(|| StorageError::Corrupted {
+                    message: format!("invalid provider_report_state {value}"),
+                })
+            })
+            .transpose()?,
+        provider_report_status_metadata: row
+            .try_get("details_provider_report_status_metadata_json")
+            .map_err(map_sqlx_error)?,
         last_error: row.try_get("details_last_error").map_err(map_sqlx_error)?,
         checked_at_unix_secs: optional_i64_to_u64(
             row.try_get("details_checked_at_unix_secs")
@@ -760,4 +1058,72 @@ fn i64_to_u32(value: i64, field: &str) -> StorageResult<u32> {
     u32::try_from(value).map_err(|_| StorageError::Corrupted {
         message: format!("{field} out of range"),
     })
+}
+fn provider_as_str(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "anthropic",
+        Provider::Openai => "openai",
+        Provider::Gemini => "gemini",
+    }
+}
+
+fn parse_provider(value: &str) -> Option<Provider> {
+    match value {
+        "anthropic" => Some(Provider::Anthropic),
+        "openai" => Some(Provider::Openai),
+        "gemini" => Some(Provider::Gemini),
+        _ => None,
+    }
+}
+
+fn credential_ciphertext_record_from_sqlite_row(
+    row: Option<&SqliteRow>,
+) -> StorageResult<Option<OpenAiOrganizationReportingCredentialCiphertextRecord>> {
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let status = row.try_get::<String, _>("status").map_err(map_sqlx_error)?;
+    Ok(Some(
+        OpenAiOrganizationReportingCredentialCiphertextRecord {
+            encrypted_secret_ciphertext: row
+                .try_get("encrypted_secret_ciphertext")
+                .map_err(map_sqlx_error)?,
+            status: OpenAiOrganizationReportingCredentialStatus::parse(&status).ok_or_else(
+                || StorageError::Corrupted {
+                    message: format!("invalid OpenAI reporting credential status {status}"),
+                },
+            )?,
+            revision: i64_to_u64(
+                row.try_get("revision").map_err(map_sqlx_error)?,
+                "credential revision",
+            )?,
+        },
+    ))
+}
+
+fn credential_record_from_sqlite_row(
+    row: Option<&SqliteRow>,
+) -> StorageResult<Option<OpenAiOrganizationReportingCredentialRecord>> {
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let status = row.try_get::<String, _>("status").map_err(map_sqlx_error)?;
+    Ok(Some(OpenAiOrganizationReportingCredentialRecord {
+        scope: row.try_get("scope").map_err(map_sqlx_error)?,
+        redacted_hint: row.try_get("redacted_hint").map_err(map_sqlx_error)?,
+        status: OpenAiOrganizationReportingCredentialStatus::parse(&status).ok_or_else(|| {
+            StorageError::Corrupted {
+                message: format!("invalid OpenAI reporting credential status {status}"),
+            }
+        })?,
+        revision: i64_to_u64(
+            row.try_get("revision").map_err(map_sqlx_error)?,
+            "credential revision",
+        )?,
+        updated_at_unix_secs: i64_to_u64(
+            row.try_get("updated_at_unix_secs")
+                .map_err(map_sqlx_error)?,
+            "credential updated_at_unix_secs",
+        )?,
+    }))
 }

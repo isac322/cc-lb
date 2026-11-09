@@ -138,6 +138,7 @@ where
         shape_fn,
         transform_response_fn,
         transform_sse_event_fn,
+        transform_realtime_frame_fn,
         shape_envelope_gemini_fn,
     } = wi;
 
@@ -146,6 +147,7 @@ where
         HookKind::Shape => shape_fn.as_ref(),
         HookKind::TransformResponse => transform_response_fn.as_ref(),
         HookKind::TransformSseEvent => transform_sse_event_fn.as_ref(),
+        HookKind::TransformRealtimeFrame => transform_realtime_frame_fn.as_ref(),
         HookKind::ShapeEnvelopeGemini => shape_envelope_gemini_fn.as_ref(),
     }
     .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {

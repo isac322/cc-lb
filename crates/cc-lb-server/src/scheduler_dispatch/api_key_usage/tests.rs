@@ -400,6 +400,11 @@ fn org_access(
         key_class: ApiKeyClass::OrgScoped,
         key_hint: "sk-ant-api03-...test".to_owned(),
         api_key_id: api_key_id.map(str::to_owned),
+        provider: None,
+        project_id: None,
+        project_source: None,
+        provider_report_state: None,
+        provider_report_status_metadata: None,
         needs_workspace: true,
         capabilities: ApiKeyCapabilities {
             inference: ApiKeyInference::Ok,
@@ -430,6 +435,7 @@ fn test_catalog() -> CatalogSnapshot {
     snapshot.models.insert(
         MODEL.to_owned(),
         Pricing {
+            native: None,
             model: MODEL.to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(3),
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),

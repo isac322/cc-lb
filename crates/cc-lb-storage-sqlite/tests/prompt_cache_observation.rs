@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use cc_lb_domain::TtlClass;
-use cc_lb_storage_api::{MetaStore, PromptCacheObservationRecord, PromptCacheObservationStore};
+use cc_lb_storage_api::{
+    MetaStore, PromptCacheObservationRecord, PromptCacheObservationStore,
+    ProviderPromptCacheObservationRecord,
+};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -115,4 +118,186 @@ async fn prompt_cache_v3_stale_upsert_does_not_regress_fresh_row() {
         .await
         .expect("list after stale upsert");
     assert_eq!(active, vec![fresh]);
+}
+
+#[tokio::test]
+async fn provider_cache_unknown_or_expired_rows_are_not_active_and_only_expired_are_purged() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir
+            .path()
+            .join("provider-prompt-cache-observation.sqlite")
+            .display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+    storage.initialize().await.expect("initialize sqlite");
+    let upstream_id = Uuid::from_u128(1);
+    let base = ProviderPromptCacheObservationRecord {
+        upstream_id,
+        provider: "gemini".to_owned(),
+        canonical_model_id: "gemini-2.5-pro".to_owned(),
+        mode: "explicit".to_owned(),
+        isolation_scope: "scope".to_owned(),
+        identity_hash: "sha256:identity".to_owned(),
+        boundary: "resource".to_owned(),
+        evidence_source: "provider_usage_metadata".to_owned(),
+        observed_cached_tokens: Some(256),
+        observed_write_tokens: None,
+        retention_secs: None,
+        expires_at_unix_secs: None,
+        last_observed_at_unix_secs: 100,
+    };
+    let mut expired = base.clone();
+    expired.boundary = "expired".to_owned();
+    expired.expires_at_unix_secs = Some(100);
+    let mut active = base.clone();
+    active.boundary = "active".to_owned();
+    active.expires_at_unix_secs = Some(300);
+    for record in [&base, &expired, &active] {
+        storage
+            .upsert_provider_observation(record)
+            .await
+            .expect("upsert provider observation");
+    }
+
+    let before_purge = storage
+        .list_active_provider_observations(
+            upstream_id,
+            "gemini",
+            "gemini-2.5-pro",
+            "explicit",
+            "scope",
+            "sha256:identity",
+            200,
+        )
+        .await
+        .expect("list active provider observations");
+    assert_eq!(before_purge.len(), 1);
+    assert_eq!(before_purge[0].boundary, "active");
+
+    assert_eq!(
+        storage
+            .purge_expired_before(200)
+            .await
+            .expect("purge provider observations"),
+        1
+    );
+    let after_purge = storage
+        .list_active_provider_observations(
+            upstream_id,
+            "gemini",
+            "gemini-2.5-pro",
+            "explicit",
+            "scope",
+            "sha256:identity",
+            200,
+        )
+        .await
+        .expect("list active provider observations after purge");
+    assert_eq!(after_purge, vec![active]);
+}
+
+#[tokio::test]
+async fn native_cache_openai_write_observation_roundtrips_and_filters_nulls() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir
+            .path()
+            .join("openai-native-cache-observation.sqlite")
+            .display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+    storage.initialize().await.expect("initialize sqlite");
+    let upstream_id = Uuid::from_u128(2);
+    let record = ProviderPromptCacheObservationRecord {
+        upstream_id,
+        provider: "openai".to_owned(),
+        canonical_model_id: "gpt-5".to_owned(),
+        mode: "responses".to_owned(),
+        isolation_scope: "account".to_owned(),
+        identity_hash: "sha256:openai-account".to_owned(),
+        boundary: "request".to_owned(),
+        evidence_source: "responses_usage".to_owned(),
+        observed_cached_tokens: None,
+        observed_write_tokens: Some(300),
+        retention_secs: Some(1_800),
+        expires_at_unix_secs: Some(2_800),
+        last_observed_at_unix_secs: 1_900,
+    };
+
+    storage
+        .upsert_provider_observation(&record)
+        .await
+        .expect("upsert OpenAI native cache observation");
+
+    let observed = storage
+        .list_active_provider_observations(
+            upstream_id,
+            "openai",
+            "gpt-5",
+            "responses",
+            "account",
+            "sha256:openai-account",
+            2_000,
+        )
+        .await
+        .expect("list OpenAI native cache observation");
+    assert_eq!(observed, vec![record.clone()]);
+    assert_eq!(observed[0].observed_cached_tokens, None);
+    assert_eq!(observed[0].observed_write_tokens, Some(300));
+    assert_eq!(observed[0].retention_secs, Some(1_800));
+    assert_eq!(observed[0].expires_at_unix_secs, Some(2_800));
+    assert_eq!(observed[0].evidence_source, "responses_usage");
+
+    let matching_retention = storage
+        .list_active_provider_observations_for_candidates(
+            &[upstream_id],
+            "openai",
+            "gpt-5",
+            "responses",
+            "account",
+            "sha256:openai-account",
+            Some(1_800),
+            2_000,
+        )
+        .await
+        .expect("filter OpenAI native cache observation by retention");
+    assert_eq!(matching_retention, vec![record.clone()]);
+
+    let null_retention = storage
+        .list_active_provider_observations_for_candidates(
+            &[upstream_id],
+            "openai",
+            "gpt-5",
+            "responses",
+            "account",
+            "sha256:openai-account",
+            None,
+            2_000,
+        )
+        .await
+        .expect("filter OpenAI native cache observation by null retention");
+    assert!(null_retention.is_empty());
+
+    let wrong_model = storage
+        .list_active_provider_observations(
+            upstream_id,
+            "openai",
+            "gpt-5-mini",
+            "responses",
+            "account",
+            "sha256:openai-account",
+            2_000,
+        )
+        .await
+        .expect("filter OpenAI native cache observation by model");
+    assert!(wrong_model.is_empty());
 }

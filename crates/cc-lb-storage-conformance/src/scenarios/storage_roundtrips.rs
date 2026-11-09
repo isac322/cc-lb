@@ -316,6 +316,7 @@ fn request_events() -> Vec<RequestEvent> {
             thread_id: Some("thread-roundtrip-a".to_owned()),
             thinking_budget_tokens: Some(18000),
             reasoning_effort: Some("max".to_owned()),
+            thinking_level: Some("LOW".to_owned()),
             observed_session_id: Some("session-roundtrip-a".to_owned()),
             request_kind: Some("subagent".to_owned()),
             claude_agent_id: Some("agent-roundtrip-a".to_owned()),

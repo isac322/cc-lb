@@ -17,11 +17,16 @@ use tracing::Span;
 use url::Url;
 use uuid::Uuid;
 
-use crate::authn_rail::{Authenticated, reject_unauthenticated};
-use crate::lifecycle::Lifecycle;
+use crate::authn_rail::Authenticated;
+use crate::completion_observer::{StreamCompletionLog, StreamLatency};
+use crate::downstream_stream_drop_guard::record_stream_termination_metric;
+use crate::lifecycle::{Lifecycle, PromptCacheObservationContext};
 use crate::response_transform::ResponseTransformContext;
-use crate::terminal_observer::{InternalFailure, LifecycleContext, UpstreamErrorCode};
-use crate::usage_parser::{UsageCounts, observe_non_stream_json_value};
+use crate::terminal_observer::{
+    InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
+    UpstreamErrorCode, record_websocket_terminal_span,
+};
+use crate::usage_parser::{UsageCounts, observe_non_stream_json_value_for_shape};
 use cc_lb_upstream::{SseEvent, TransformSseEventRequest, TransformSseEventResult};
 
 #[derive(Clone, Debug)]
@@ -147,6 +152,8 @@ pub(crate) struct WebSocketIngress<'a> {
 pub(crate) struct PreparedWebSocketTurn {
     pub candidates: Vec<WebSocketCandidate>,
     pub observer: Option<LifecycleContext>,
+    pub completion_observer: Arc<crate::completion_observer::CompletionObserver>,
+    pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
     pub reservation: Option<Reservation>,
     pub limit_engine: Option<Arc<LimitEngine>>,
     pub principal_id: String,
@@ -198,6 +205,78 @@ struct Lane {
     queued: VecDeque<u64>,
 }
 
+#[derive(Debug)]
+struct ResponsesStreamMetrics {
+    started: std::time::Instant,
+    first_output_ms: Option<u64>,
+    last_output_ms: Option<u64>,
+    event_count: u64,
+    total_bytes: u64,
+    provider_session_id: Option<String>,
+}
+
+impl ResponsesStreamMetrics {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            first_output_ms: None,
+            last_output_ms: None,
+            event_count: 0,
+            total_bytes: 0,
+            provider_session_id: None,
+        }
+    }
+
+    fn observe(&mut self, frame: &[u8]) {
+        let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.first_output_ms.get_or_insert(elapsed);
+        self.last_output_ms = Some(elapsed);
+        self.event_count = self.event_count.saturating_add(1);
+        self.total_bytes = self.total_bytes.saturating_add(frame.len() as u64);
+        if self.provider_session_id.is_none() {
+            let bounded = |value: Option<sonic_rs::LazyValue<'_>>| {
+                let value = value.and_then(|value| value.as_str().map(str::to_owned))?;
+                (!value.is_empty() && value.len() <= 512).then_some(value)
+            };
+            let response_id = sonic_rs::get_from_slice(frame, &["response", "id"]).ok();
+            let fallback_id = sonic_rs::get_from_slice(frame, &["response_id"]).ok();
+            self.provider_session_id = bounded(response_id).or_else(|| bounded(fallback_id));
+        }
+    }
+
+    fn latency(&self, status: u16) -> StreamLatency {
+        let stream_total_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let inter_output_avg_ms = match (self.first_output_ms, self.last_output_ms) {
+            (Some(first), Some(last)) if self.event_count > 1 => {
+                Some(last.saturating_sub(first) / (self.event_count - 1))
+            }
+            _ => None,
+        };
+        StreamLatency {
+            status,
+            stream_first_chunk_ms: self.first_output_ms,
+            stream_message_start_ms: None,
+            stream_content_block_start_ms: None,
+            stream_first_content_delta_ms: None,
+            stream_last_content_delta_ms: None,
+            stream_message_stop_ms: None,
+            stream_last_chunk_ms: self.last_output_ms,
+            stream_first_output_ms: self.first_output_ms,
+            stream_last_output_ms: self.last_output_ms,
+            stream_event_count: self.event_count,
+            stream_inter_output_avg_ms: inter_output_avg_ms,
+            provider_session_id: self.provider_session_id.clone(),
+            provider_connection_id: None,
+            stream_total_ms,
+            sse_event_count: 0,
+            content_delta_count: 0,
+            ping_count: 0,
+            inter_token_avg_ms: None,
+            total_bytes: self.total_bytes,
+        }
+    }
+}
+
 struct Turn {
     auth: Authenticated,
     prepared: PreparedWebSocketTurn,
@@ -219,6 +298,7 @@ struct Turn {
     usage: Option<UsageCounts>,
     usage_complete: bool,
     plugin_request: Option<(Uuid, WebSocketPluginRequest)>,
+    metrics: ResponsesStreamMetrics,
 }
 
 /// A session owns no authenticated proof until a fresh client check succeeds.
@@ -226,6 +306,7 @@ struct Turn {
 /// dispatches, not already admitted provider output.
 pub struct ResponsesWebSocketGateway {
     lifecycle: Arc<Lifecycle>,
+    provider: Option<cc_lb_domain::Provider>,
     headers: HeaderMap,
     query: Option<String>,
     byte_cap: usize,
@@ -240,7 +321,6 @@ pub struct ResponsesWebSocketGateway {
     connections: HashMap<u64, Uuid>,
     successors: HashMap<String, u64>,
 }
-
 impl ResponsesWebSocketGateway {
     pub fn new(
         lifecycle: Arc<Lifecycle>,
@@ -251,6 +331,7 @@ impl ResponsesWebSocketGateway {
     ) -> Self {
         Self {
             lifecycle,
+            provider: None,
             headers: original_headers,
             query: None,
             byte_cap: budget_bytes,
@@ -277,6 +358,11 @@ impl ResponsesWebSocketGateway {
         self
     }
 
+    pub fn with_provider(mut self, provider: Option<cc_lb_domain::Provider>) -> Self {
+        self.provider = provider;
+        self
+    }
+
     fn successor_for_parent(&self, parent: &str) -> Option<u64> {
         self.successors.get(parent).copied().or_else(|| {
             self.turns.iter().find_map(|(id, turn)| {
@@ -293,7 +379,13 @@ impl ResponsesWebSocketGateway {
         if let Some(observer) = observer.as_ref() {
             observer.mark_authn_reached();
         }
-        let _ = reject_unauthenticated(error, observer.as_ref());
+        let _ = crate::authn_rail::reject_unauthenticated_for_route(
+            error,
+            &http::Method::GET,
+            "/v1/responses",
+            self.provider,
+            observer.as_ref(),
+        );
         WebSocketError::new(
             error.http_status(),
             "authentication_error",
@@ -489,6 +581,7 @@ impl ResponsesWebSocketGateway {
                 usage: None,
                 usage_complete: false,
                 plugin_request: None,
+                metrics: ResponsesStreamMetrics::new(),
             },
         );
         if !self.lanes.contains_key(&lane) {
@@ -659,6 +752,7 @@ impl ResponsesWebSocketGateway {
                 usage: None,
                 usage_complete: false,
                 plugin_request: None,
+                metrics: ResponsesStreamMetrics::new(),
             },
         );
         let lane_state = self.lanes.entry(lane).or_default();
@@ -869,6 +963,9 @@ impl ResponsesWebSocketGateway {
         if let Some(turn) = self.turns.get_mut(&turn_id) {
             turn.connection_id = Some(connection_id);
             turn.upstream_id = Some(upstream_id);
+            if let Some(context) = turn.prepared.prompt_cache_observation_context.as_mut() {
+                context.upstream_id = upstream_id;
+            }
             turn.prepared
                 .span
                 .record("cc_lb.responses.connection_id", connection_id);
@@ -1032,11 +1129,100 @@ impl ResponsesWebSocketGateway {
         ready
     }
 
+    fn resolve_provider_turn_id(
+        &self,
+        connection_id: u64,
+        response_id: Option<&str>,
+        parent_response_id: Option<&str>,
+        lane: Option<&str>,
+        is_error: bool,
+    ) -> Option<u64> {
+        let mut turn_id = response_id
+            .and_then(|id| self.owners.get(id))
+            .map(|owner| owner.turn_id);
+        if turn_id.is_none() && !is_error {
+            let active = self
+                .lanes
+                .iter()
+                .find_map(|(candidate, lane_state)| {
+                    (candidate.as_deref() == lane).then_some(lane_state.active)
+                })
+                .flatten();
+            turn_id = parent_response_id
+                .and_then(|parent| self.successor_for_parent(parent))
+                .or_else(|| {
+                    active
+                        .and_then(|active| self.turns.get(&active))
+                        .and_then(|active| active.response_id.as_deref())
+                        .and_then(|parent| self.successor_for_parent(parent))
+                })
+                .or(active);
+        }
+        if is_error && turn_id.is_none() {
+            turn_id = self
+                .lanes
+                .iter()
+                .find_map(|(candidate, lane_state)| {
+                    (candidate.as_deref() == lane).then_some(lane_state.active)
+                })
+                .flatten()
+                .filter(|id| {
+                    self.turns
+                        .get(id)
+                        .is_some_and(|turn| turn.connection_id == Some(connection_id) && turn.sent)
+                });
+        }
+        turn_id
+    }
+
+    fn observe_provider_metrics(&mut self, connection_id: u64, frame: &Bytes) {
+        let bounded = |value: Option<sonic_rs::LazyValue<'_>>, max_len| {
+            value.and_then(|value| {
+                let value = value.as_str()?;
+                (!value.is_empty() && value.len() <= max_len).then(|| value.to_owned())
+            })
+        };
+        let lane = bounded(sonic_rs::get_from_slice(frame, &["stream_id"]).ok(), 256);
+        let response_id = bounded(
+            sonic_rs::get_from_slice(frame, &["response", "id"]).ok(),
+            512,
+        )
+        .or_else(|| bounded(sonic_rs::get_from_slice(frame, &["response_id"]).ok(), 512));
+        let parent_response_id = bounded(
+            sonic_rs::get_from_slice(frame, &["response", "previous_response_id"]).ok(),
+            512,
+        )
+        .or_else(|| {
+            bounded(
+                sonic_rs::get_from_slice(frame, &["steer", "previous_response_id"]).ok(),
+                512,
+            )
+        });
+        let is_error = sonic_rs::get_from_slice(frame, &["type"])
+            .is_ok_and(|value| value.as_str() == Some("error"));
+        let Some(turn_id) = self.resolve_provider_turn_id(
+            connection_id,
+            response_id.as_deref(),
+            parent_response_id.as_deref(),
+            lane.as_deref(),
+            is_error,
+        ) else {
+            return;
+        };
+        if let Some(turn) = self.turns.get_mut(&turn_id)
+            && turn.connection_id == Some(connection_id)
+            && turn.sent
+        {
+            turn.metrics.observe(frame);
+        }
+    }
+
     pub async fn provider_message(
         &mut self,
         connection_id: u64,
         frame: &Bytes,
     ) -> Result<WebSocketEventResult, WebSocketError> {
+        self.observe_provider_metrics(connection_id, frame);
         let transformed = self.transform_provider_frame(connection_id, frame);
         let mut result = self
             .observe_provider_message(connection_id, frame, transformed.as_ref().err())
@@ -1210,35 +1396,16 @@ impl ResponsesWebSocketGateway {
             )
             .with_stream(lane));
         }
-        let mut turn_id = response_id
-            .and_then(|id| self.owners.get(id))
-            .map(|owner| owner.turn_id);
-        if turn_id.is_none() && !matches!(kind, "error") {
-            let active = self.lanes.get(&lane).and_then(|lane| lane.active);
-            let parent = response
-                .and_then(|response| response.get("previous_response_id"))
-                .and_then(Value::as_str);
-            turn_id = parent
-                .and_then(|parent| self.successor_for_parent(parent))
-                .or_else(|| {
-                    active
-                        .and_then(|active| self.turns.get(&active))
-                        .and_then(|active| active.response_id.as_deref())
-                        .and_then(|parent| self.successor_for_parent(parent))
-                })
-                .or(active);
-        }
-        if kind == "error" && turn_id.is_none() {
-            turn_id = self
-                .lanes
-                .get(&lane)
-                .and_then(|lane| lane.active)
-                .filter(|id| {
-                    self.turns
-                        .get(id)
-                        .is_some_and(|turn| turn.connection_id == Some(connection_id) && turn.sent)
-                });
-        }
+        let parent_response_id = response
+            .and_then(|response| response.get("previous_response_id"))
+            .and_then(Value::as_str);
+        let turn_id = self.resolve_provider_turn_id(
+            connection_id,
+            response_id,
+            parent_response_id,
+            lane.as_deref(),
+            kind == "error",
+        );
         let Some(turn_id) = turn_id else {
             // Never open a second settlement from an unowned or replayed id.
             return Err(WebSocketError::new(
@@ -1550,38 +1717,162 @@ impl ResponsesWebSocketGateway {
             }
             lane.queued.retain(|id| *id != turn_id);
         }
+        let complete = error.is_none();
+        let (outcome, cause) = match error {
+            None => (
+                StreamTerminationOutcome::Completed,
+                StreamTerminationCause::None,
+            ),
+            Some(error) if error.code == "client_closed_request" => (
+                StreamTerminationOutcome::ClientCancelled,
+                StreamTerminationCause::None,
+            ),
+            Some(error)
+                if error.native_code.is_some() || error.code == "upstream_connection_closed" =>
+            {
+                (
+                    StreamTerminationOutcome::UpstreamError,
+                    StreamTerminationCause::ProviderError,
+                )
+            }
+            Some(_) => (
+                StreamTerminationOutcome::ProxyError,
+                StreamTerminationCause::TransportError,
+            ),
+        };
+        record_stream_termination_metric(
+            outcome,
+            cause,
+            turn.prepared
+                .candidates
+                .first()
+                .map(|candidate| candidate.upstream_name.as_str())
+                .unwrap_or("unknown"),
+            Some(&turn.prepared.model),
+        );
+        record_websocket_terminal_span(
+            &turn.prepared.span,
+            outcome,
+            cause,
+            error.map(|error| error.code),
+            error.map(|error| error.message.as_str()),
+        );
+        let latency = turn
+            .metrics
+            .latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        latency.record_on_span(&turn.prepared.span);
+        if let (Some(context), Some(usage)) = (
+            turn.prepared.prompt_cache_observation_context.take(),
+            turn.usage.as_ref(),
+        ) {
+            self.lifecycle
+                .publish_websocket_provider_cache_observation(&context, usage);
+        }
         if let Some(observer) = turn.prepared.observer.as_ref() {
-            if let Some(usage) = turn.usage.take() {
-                observer.set_usage_counts(&usage, error.is_none() && turn.usage_complete);
+            let usage = turn.usage.take();
+            if let Some(usage) = usage.as_ref() {
+                observer.set_usage_counts(usage, complete && turn.usage_complete);
                 observer.emit_lifecycle(LifecycleEvent::UsageObserved {
                     event_id: observer.event_id().to_owned(),
-                    usage: usage_snapshot(usage),
+                    usage: usage_snapshot(usage.clone()),
                     source: UsageSource::NonStreamBody,
                 });
             }
+            observer.emit_lifecycle(LifecycleEvent::StreamCompleted {
+                event_id: observer.event_id().to_owned(),
+                result: if complete {
+                    Ok(cc_lb_lifecycle::StreamSuccess {
+                        usage: usage
+                            .as_ref()
+                            .map(|usage| usage_snapshot(usage.clone()))
+                            .unwrap_or_default(),
+                        usage_present: usage.is_some(),
+                        sse_event_count: 0,
+                        body_bytes: Some(latency.total_bytes),
+                        body_chunk_count: Some(latency.stream_event_count),
+                        first_body_chunk_ms: latency.stream_first_output_ms,
+                        stream_last_chunk_ms: latency.stream_last_output_ms,
+                        stream_total_ms: Some(latency.stream_total_ms),
+                        stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
+                        provider_session_id: latency.provider_session_id.clone(),
+                        provider_connection_id: latency.provider_connection_id.clone(),
+                        ..Default::default()
+                    })
+                } else {
+                    Err(cc_lb_lifecycle::StreamError {
+                        error_type: error
+                            .map(|error| {
+                                error
+                                    .native_code
+                                    .as_deref()
+                                    .unwrap_or(error.code)
+                                    .to_owned()
+                            })
+                            .unwrap_or_else(|| "responses_stream_incomplete".to_owned()),
+                        error_message: error.map(|error| error.message.clone()).unwrap_or_else(
+                            || "Responses WebSocket stream ended before completion".to_owned(),
+                        ),
+                        body_bytes: Some(latency.total_bytes),
+                        body_chunk_count: Some(latency.stream_event_count),
+                        first_body_chunk_ms: latency.stream_first_output_ms,
+                        stream_last_chunk_ms: latency.stream_last_chunk_ms,
+                        stream_total_ms: Some(latency.stream_total_ms),
+                        stream_inter_output_avg_ms: latency.stream_inter_output_avg_ms,
+                        provider_session_id: latency.provider_session_id.clone(),
+                        provider_connection_id: latency.provider_connection_id.clone(),
+                        ..Default::default()
+                    })
+                },
+            });
             // The subscriber owns settlement from this point, including an
             // interrupted response with measured usage. Drop must not refund it.
             if let Some(reservation) = turn.prepared.reservation.take() {
                 reservation.handoff_after_response();
             }
-            if let Some(error) = error {
-                if let Some(native_code) = error.native_code.as_deref() {
-                    observer.emit_lifecycle(LifecycleEvent::StreamCompleted {
-                        event_id: observer.event_id().to_owned(),
-                        result: Err(cc_lb_lifecycle::StreamError {
-                            error_type: native_code.to_owned(),
-                            error_message: error.message.clone(),
-                        }),
-                    });
+            match (error, complete) {
+                (Some(error), _) if error.code == "client_closed_request" => {
+                    observer.set_client_closed(StatusCode::SWITCHING_PROTOCOLS);
+                }
+                (Some(error), _)
+                    if error.native_code.is_some()
+                        || error.code == "upstream_connection_closed" =>
+                {
                     observer.set_upstream_error(
-                        StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        StatusCode::SWITCHING_PROTOCOLS,
                         UpstreamErrorCode::StreamError,
                     );
                 }
-                terminate_error(observer, error);
-            } else {
-                observer.set_success_status(http::StatusCode::OK);
-                observer.finish();
+                (Some(_), _) => observer.set_failure(InternalFailure {
+                    status: StatusCode::SWITCHING_PROTOCOLS,
+                    error_code: UpstreamErrorCode::StreamError.as_str(),
+                    error: cc_lb_domain::InternalError {
+                        stage: cc_lb_domain::InternalErrorStage::Relay,
+                        kind: cc_lb_domain::InternalErrorKind::Unavailable,
+                        message: Some("Responses WebSocket relay failed".to_owned()),
+                    },
+                }),
+                (None, true) => observer.set_success_status(StatusCode::SWITCHING_PROTOCOLS),
+                (None, false) => observer.set_upstream_error(
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    UpstreamErrorCode::StreamError,
+                ),
+            }
+            observer.finish();
+            if let Some(dispatch) = tracing::enabled!(
+                target: "cc_lb_engine::lifecycle",
+                tracing::Level::INFO
+            )
+            .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()))
+            {
+                let _ = turn
+                    .prepared
+                    .completion_observer
+                    .enqueue(StreamCompletionLog::new(
+                        turn.prepared.request_id.clone(),
+                        &turn.prepared.span,
+                        latency,
+                        dispatch,
+                    ));
             }
         } else if let Some(reservation) = turn.prepared.reservation.take() {
             // No event bus exists for this embedded caller. Settle business
@@ -1589,27 +1880,31 @@ impl ResponsesWebSocketGateway {
             if let (Some(engine), Some(usage)) =
                 (turn.prepared.limit_engine.as_ref(), turn.usage.as_ref())
             {
-                let cost = cc_lb_pricing::virtual_cost_micros_full_with_context_and_images(
-                    &turn.prepared.model,
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.input_image_tokens.unwrap_or(0),
-                    usage.output_image_tokens.unwrap_or(0),
-                    usage.cache_creation_input_tokens,
-                    usage.cache_creation_input_tokens_5m,
-                    usage.cache_creation_input_tokens_1h,
-                    usage.cache_read_input_tokens,
-                    usage.service_tier.as_deref(),
-                )
-                .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown);
+                let cost =
+                    cc_lb_pricing::virtual_cost_micros_full_with_context_and_provider_writes(
+                        &turn.prepared.model,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.input_image_tokens.unwrap_or(0),
+                        usage.output_image_tokens.unwrap_or(0),
+                        usage.cache_creation_input_tokens,
+                        usage.cache_creation_input_tokens_5m,
+                        usage.cache_creation_input_tokens_1h,
+                        usage.cache_read_input_tokens,
+                        usage.cache_write_input_tokens,
+                        usage.cache_write_input_tokens_30m,
+                        usage.cache_write_input_tokens_12h,
+                        usage.service_tier.as_deref(),
+                    )
+                    .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown);
                 engine.reconcile(
                     reservation,
                     usage.input_tokens,
                     usage.output_tokens,
-                    cost.total_micros,
+                    (cost.pricing_status == cc_lb_pricing::PricingStatus::Known)
+                        .then_some(cost.total_micros),
                 );
             }
-            // Otherwise the reservation's existing RAII owner refunds it.
         }
         self.collect_owner(turn.previous_response_id.as_deref());
         self.collect_owner(turn.response_id.as_deref());
@@ -1895,6 +2190,45 @@ fn usage_snapshot(usage: UsageCounts) -> UsageSnapshot {
         cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
         cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
         cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        cache_write_evidence: match usage.cache_write_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
+        cache_write_input_tokens_30m: usage.cache_write_input_tokens_30m,
+        cache_write_input_tokens_12h: usage.cache_write_input_tokens_12h,
+        cache_read_evidence: match usage.cache_read_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
+        cache_creation_evidence: match usage.cache_creation_evidence {
+            crate::usage_parser::CacheTokenEvidence::Unreported => None,
+            crate::usage_parser::CacheTokenEvidence::Zero => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+            }
+            crate::usage_parser::CacheTokenEvidence::Positive => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+            }
+            crate::usage_parser::CacheTokenEvidence::Invalid => {
+                Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+            }
+        },
         thinking_tokens: usage.thinking_tokens,
         tool_use_prompt_tokens: usage.tool_use_prompt_tokens,
         web_search_requests: usage.web_search_requests,
@@ -1972,7 +2306,11 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
     if input.is_none() && output.is_none() {
         return None;
     }
-    let mut usage = observe_non_stream_json_value(response).usage;
+    let mut usage = observe_non_stream_json_value_for_shape(
+        response,
+        crate::provider_capability::UsageShape::OpenaiResponses,
+    )
+    .usage;
     if let Some(tier) = response
         .get("service_tier")
         .and_then(Value::as_str)
@@ -1989,8 +2327,435 @@ fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+    use cc_lb_control::api_keys::limit_engine::{ApiKeyUsageHandle, RejectReason};
+    use cc_lb_control::api_keys::principal_view::PrincipalView;
+    use cc_lb_storage_api::principal::{Limit, LimitKind};
+    use cc_lb_storage_api::{ApiKeyUsageBucketQuery, MetaStore, Storage, StoredApiKeyRecord};
+
+    pub(crate) static DIRECT_PRICING_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+    pub(crate) const DIRECT_PRINCIPAL: &str = "observerless-ws-principal";
+
+    pub(crate) fn install_direct_pricing() {
+        use cc_lb_pricing::{
+            CatalogSnapshot, CatalogStatus, NativePricingProvider, NativePricingRate, Pricing,
+            ProviderNativePricing, UsdPerMillion,
+        };
+
+        let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = CatalogStatus::Ok;
+        for (model, provider, read_rate) in [
+            (
+                "ws-openai-known",
+                NativePricingProvider::OpenAi,
+                Some(100_000),
+            ),
+            ("ws-openai-unknown", NativePricingProvider::OpenAi, None),
+            (
+                "ws-gemini-known",
+                NativePricingProvider::Gemini,
+                Some(100_000),
+            ),
+            ("ws-gemini-unknown", NativePricingProvider::Gemini, None),
+        ] {
+            let mut native = ProviderNativePricing::unknown(provider);
+            native.ordinary_input = NativePricingRate::known(UsdPerMillion::from_whole_usd(2));
+            native.cached_input_read = read_rate.map_or_else(NativePricingRate::unknown, |rate| {
+                NativePricingRate::known(UsdPerMillion::from_micros_usd(rate))
+            });
+            snapshot.models.insert(
+                model.to_owned(),
+                Pricing {
+                    model: model.to_owned(),
+                    input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                    output_per_million_usd: UsdPerMillion::from_whole_usd(10),
+                    input_image_per_million_usd: None,
+                    output_image_per_million_usd: None,
+                    by_tier: Default::default(),
+                    native: Some(native),
+                },
+            );
+        }
+        cc_lb_pricing::global_catalog().install_snapshot(snapshot);
+    }
+
+    struct UnusedSignerFactory;
+
+    impl cc_lb_upstream::ApiKeyAwareSignerFactory for UnusedSignerFactory {
+        fn with_router_choice(&self, _name: String) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+            unreachable!("settling an admitted turn does not sign requests")
+        }
+    }
+
+    pub(crate) struct DirectAccountingFixture {
+        pub(crate) engine: Arc<LimitEngine>,
+        pub(crate) view: Arc<PrincipalView>,
+        pub(crate) record: StoredApiKeyRecord,
+        pub(crate) concurrency: Arc<KeyConcurrencyManager>,
+        pub(crate) lifecycle: Arc<Lifecycle>,
+        pub(crate) auth: Authenticated,
+        storage: Arc<dyn Storage>,
+        usage_handle: ApiKeyUsageHandle,
+    }
+
+    impl DirectAccountingFixture {
+        pub(crate) async fn new() -> Self {
+            use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+            use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+            use cc_lb_control::dynamic_view::{DynamicViewBuilder, DynamicViewHolder};
+
+            let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+            let storage = Arc::new(
+                cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                    .await
+                    .expect("open in-memory websocket accounting database"),
+            );
+            storage
+                .initialize()
+                .await
+                .expect("migrate accounting database");
+            let keys = Arc::new(KeyStore::new(storage.clone()));
+            let (record, secret) = keys
+                .create(
+                    DIRECT_PRINCIPAL,
+                    CreateParams {
+                        label: "observerless-websocket".to_owned(),
+                        description: None,
+                        expires_at_unix_secs: None,
+                        limit_overrides: Vec::new(),
+                    },
+                )
+                .await
+                .expect("issue websocket fixture key");
+            let view = Arc::new(PrincipalView::for_tests(
+                DIRECT_PRINCIPAL,
+                true,
+                vec!["*".to_owned()],
+                vec![
+                    Limit {
+                        kind: LimitKind::CostUsd,
+                        window_secs: 60,
+                        cap_micros: 100_000,
+                    },
+                    Limit {
+                        kind: LimitKind::TotalTokens,
+                        window_secs: 60,
+                        cap_micros: 100_000,
+                    },
+                    Limit {
+                        kind: LimitKind::Concurrent,
+                        window_secs: 0,
+                        cap_micros: 1,
+                    },
+                ],
+                HashMap::new(),
+            ));
+            let authn = Arc::new(BuiltinAuthn::new(keys, clock.clone()));
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                secret.expose().parse().expect("fixture key header"),
+            );
+            let auth = crate::authenticate_first(&authn, &headers, &view)
+                .await
+                .expect("authenticate embedded websocket caller");
+            let dynamic = DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(UnusedSignerFactory))
+                .principal_view(view.clone())
+                .build();
+            let lifecycle = Arc::new(Lifecycle::new_with_dynamic_view(
+                authn,
+                Arc::new(DynamicViewHolder::new(dynamic)),
+                Arc::new(crate::HyperDispatcher::new()),
+                crate::LifecycleConfig::default(),
+                clock.clone(),
+            ));
+            let concurrency = Arc::new(KeyConcurrencyManager::new());
+            let engine = LimitEngine::new(concurrency.clone(), clock);
+            let usage_handle = engine
+                .start_durable_usage_sync(storage.clone())
+                .await
+                .expect("start durable embedded accounting");
+            Self {
+                engine,
+                view,
+                record,
+                concurrency,
+                lifecycle,
+                auth,
+                storage,
+                usage_handle,
+            }
+        }
+
+        pub(crate) fn reserve(&self, model: &str) -> Reservation {
+            let reservation = self
+                .engine
+                .reserve(
+                    &self.view,
+                    &self.record,
+                    DIRECT_PRINCIPAL,
+                    model,
+                    Some(1_000),
+                    1_000,
+                    Some(8_010),
+                )
+                .expect("admit original estimated websocket liability");
+            assert_eq!(self.concurrency.current(&self.record.key_hash_b64), 1);
+            reservation
+        }
+
+        pub(crate) async fn assert_settled(
+            self,
+            reservation_id: &str,
+            model: &str,
+            cost: i64,
+            input: u64,
+            output: u64,
+        ) {
+            assert_eq!(self.concurrency.current(&self.record.key_hash_b64), 0);
+            assert!(
+                !self.engine.refund_by_id(reservation_id),
+                "finish consumed the reservation"
+            );
+            assert!(!self.engine.reconcile_by_id(reservation_id, 0, 0, Some(0)));
+            // These current-thread tests do not yield between starting durable
+            // sync and this oracle, so admission still uses its documented 10%
+            // cold allowance. Settlement must preserve the exact balance there.
+            let remaining = 10_000 - cost;
+            assert!(
+                matches!(
+                    self.engine.reserve(
+                        &self.view,
+                        &self.record,
+                        DIRECT_PRINCIPAL,
+                        model,
+                        Some(0),
+                        0,
+                        Some(remaining + 1)
+                    ),
+                    Err(RejectReason::CostRateLimit)
+                ),
+                "one micro above the remaining monetary budget must be rejected"
+            );
+            let probe = self
+                .engine
+                .reserve(
+                    &self.view,
+                    &self.record,
+                    DIRECT_PRINCIPAL,
+                    model,
+                    Some(0),
+                    0,
+                    Some(remaining),
+                )
+                .expect("exact remaining budget must be admissible after concurrency release");
+            drop(probe);
+            let tokens = self
+                .engine
+                .headers_for(&self.record.key_hash_b64, DIRECT_PRINCIPAL)
+                .into_iter()
+                .find(|(name, _)| name == "anthropic-ratelimit-tokens-remaining")
+                .expect("measured token budget header");
+            assert_eq!(tokens.1, (100_000 - input - output).to_string());
+            self.usage_handle.shutdown().await;
+            let buckets = self
+                .storage
+                .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+                    key_ids: vec![self.record.key_hash_b64.clone()],
+                    since_unix_secs: 1_800_000_000,
+                    until_unix_secs: 1_800_000_001,
+                    exclude_writer_epoch: Uuid::nil(),
+                })
+                .await
+                .expect("read durably settled usage");
+            assert_eq!(buckets.len(), 1);
+            assert_eq!(buckets[0].usage.requests, 1, "finish settles exactly once");
+            assert_eq!(buckets[0].usage.input_tokens, input as i64);
+            assert_eq!(buckets[0].usage.output_tokens, output as i64);
+            assert_eq!(buckets[0].usage.cost_usd_micros, cost);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn observerless_finish_settles_native_cache_unknown_and_zero_cost() {
+        let _guard = DIRECT_PRICING_LOCK.lock().await;
+        install_direct_pricing();
+        for (model, response, expected_cost, expected_input, expected_output) in [
+            (
+                "ws-openai-known",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 21_000,
+                        "output_tokens": 1,
+                        "input_tokens_details": { "cached_tokens": 20_000 }
+                    }
+                }),
+                4_010,
+                1_000,
+                1,
+            ),
+            (
+                "ws-openai-unknown",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 21_000,
+                        "output_tokens": 1,
+                        "input_tokens_details": { "cached_tokens": 20_000 }
+                    }
+                }),
+                8_010,
+                1_000,
+                1,
+            ),
+            (
+                "ws-openai-known",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }),
+                0,
+                0,
+                0,
+            ),
+            (
+                "ws-openai-known",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 1_200,
+                        "output_tokens": 0,
+                        "input_tokens_details": {
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 300,
+                            "cache_write_tokens_details": {
+                                "ttl_30m_tokens": 200,
+                                "ttl_12h_tokens": 100
+                            }
+                        }
+                    }
+                }),
+                // 900*2 + 200*(2*5/4) + 100*(2*5/2).
+                2_800,
+                900,
+                0,
+            ),
+            (
+                "ws-openai-known",
+                serde_json::json!({
+                    "usage": {
+                        "input_tokens": 1_200,
+                        "output_tokens": 0,
+                        "input_tokens_details": {
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 300
+                        }
+                    }
+                }),
+                8_010,
+                900,
+                0,
+            ),
+        ] {
+            let fixture = DirectAccountingFixture::new().await;
+            let reservation = fixture.reserve(model);
+            let reservation_id = reservation.id().to_owned();
+            let (usage, usage_complete) = observed_response_usage(&response).unwrap();
+            let mut gateway = ResponsesWebSocketGateway::new(
+                fixture.lifecycle.clone(),
+                &fixture.auth,
+                HeaderMap::new(),
+                1_024,
+                1,
+            );
+            gateway.turns.insert(
+                1,
+                Turn {
+                    auth: fixture.auth.clone(),
+                    prepared: PreparedWebSocketTurn {
+                        candidates: Vec::new(),
+                        observer: None,
+                        completion_observer: Arc::new(
+                            crate::completion_observer::CompletionObserver::new(),
+                        ),
+                        prompt_cache_observation_context: None,
+                        reservation: Some(reservation),
+                        limit_engine: Some(fixture.engine.clone()),
+                        principal_id: DIRECT_PRINCIPAL.to_owned(),
+                        key_id: fixture.record.key_hash_b64.clone(),
+                        model: model.to_owned(),
+                        store: false,
+                        span: Span::none(),
+                        route_info: serde_json::from_value(serde_json::json!({
+                            "upstream_id": Uuid::nil(), "upstream_name": "embedded", "model": model
+                        }))
+                        .expect("fixture route info"),
+                        request_id: "embedded-turn".to_owned(),
+                    },
+                    body: Arc::new(serde_json::json!({})),
+                    frame: Bytes::new(),
+                    lane: None,
+                    connection_id: None,
+                    upstream_id: None,
+                    pinned: None,
+                    response_id: None,
+                    previous_response_id: None,
+                    steer_parent: None,
+                    steer_submissions: 0,
+                    accepted_steers: HashSet::new(),
+                    controls: VecDeque::new(),
+                    sent: true,
+                    attempted: true,
+                    charged_bytes: 0,
+                    usage: Some(usage),
+                    usage_complete,
+                    plugin_request: None,
+                    metrics: ResponsesStreamMetrics::new(),
+                },
+            );
+            gateway.finish_turn(1, None);
+            gateway.finish_turn(1, None);
+            assert!(gateway.turns.is_empty());
+            drop(gateway);
+            fixture
+                .assert_settled(
+                    &reservation_id,
+                    model,
+                    expected_cost,
+                    expected_input,
+                    expected_output,
+                )
+                .await;
+        }
+    }
+
+    #[test]
+    fn native_cache_write_response_usage_preserves_provider_fields() {
+        let (usage, complete) = observed_response_usage(&serde_json::json!({
+            "usage": {
+                "input_tokens": 1200, "output_tokens": 1,
+                "input_tokens_details": {
+                    "cached_tokens": 0,
+                    "cache_write_tokens": 300,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": 200, "ttl_12h_tokens": 100
+                    }
+                }
+            }
+        }))
+        .expect("complete provider usage");
+        assert!(complete);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_write_input_tokens, Some(300));
+        assert_eq!(usage.cache_write_input_tokens_30m, Some(200));
+        assert_eq!(usage.cache_write_input_tokens_12h, Some(100));
+        assert_eq!(usage.input_tokens, 900);
+    }
 
     #[test]
     fn absent_null_and_empty_usage_remain_unknown_not_zero() {
@@ -2192,5 +2957,62 @@ mod tests {
             assert_eq!(lane.active, Some(12));
             assert!(lane_id.is_none() || lane_id.as_deref() == Some("main"));
         }
+    }
+
+    #[test]
+    fn responses_metrics_keep_provider_neutral_timing_and_identity() {
+        let mut metrics = ResponsesStreamMetrics::new();
+        metrics.observe(br#"{"response":{"id":"resp_123"}}"#);
+        metrics.observe(br#"{"type":"response.output_text.delta","delta":"ok"}"#);
+        let latency = metrics.latency(101);
+        assert_eq!(latency.stream_event_count, 2);
+        assert!(latency.stream_first_output_ms.is_some());
+        assert!(latency.stream_last_output_ms.is_some());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("resp_123"));
+        assert_eq!(latency.sse_event_count, 0);
+        assert_eq!(latency.content_delta_count, 0);
+    }
+
+    #[test]
+    fn responses_metrics_bound_provider_response_ids() {
+        let oversized = "x".repeat(513);
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(r#"{{"response":{{"id":"{oversized}"}},"response_id":"fallback"}}"#);
+        metrics.observe(frame.as_bytes());
+        assert_eq!(
+            metrics.provider_session_id.as_deref(),
+            Some("fallback"),
+            "an oversized primary ID must not block a bounded fallback ID",
+        );
+
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(r#"{{"response_id":"{oversized}"}}"#);
+        metrics.observe(frame.as_bytes());
+        assert_eq!(metrics.provider_session_id, None);
+
+        let accepted = "y".repeat(512);
+        let mut metrics = ResponsesStreamMetrics::new();
+        let frame = format!(r#"{{"response":{{"id":"{accepted}"}}}}"#);
+        metrics.observe(frame.as_bytes());
+        assert_eq!(
+            metrics.provider_session_id.as_deref(),
+            Some(accepted.as_str())
+        );
+    }
+
+    #[test]
+    fn responses_timing_tracks_output_events_without_anthropic_counters() {
+        let mut metrics = ResponsesStreamMetrics::new();
+        metrics.observe(br#"{"type":"response.created","response":{"id":"resp-native"}}"#);
+        metrics.observe(br#"{"type":"response.output_text.delta","delta":"a"}"#);
+        metrics.observe(br#"{"type":"response.completed","response":{"id":"resp-native"}}"#);
+        let latency = metrics.latency(StatusCode::SWITCHING_PROTOCOLS.as_u16());
+        assert_eq!(latency.provider_session_id.as_deref(), Some("resp-native"));
+        assert_eq!(latency.stream_event_count, 3);
+        assert!(latency.stream_first_output_ms.is_some());
+        assert!(latency.stream_last_output_ms.is_some());
+        assert_eq!(latency.sse_event_count, 0);
+        assert_eq!(latency.content_delta_count, 0);
+        assert_eq!(latency.ping_count, 0);
     }
 }

@@ -32,6 +32,7 @@ pub struct RequestEventListItem {
     pub session_id_source: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub thinking_level: Option<String>,
     pub thinking_budget_tokens: Option<u64>,
     pub thinking_tokens: Option<u64>,
     pub service_tier: Option<String>,
@@ -90,12 +91,24 @@ pub struct RequestEventListItem {
     pub cache_creation_input_tokens_5m: Option<u64>,
     pub cache_creation_input_tokens_1h: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_30m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens_12h: Option<u64>,
     pub cost_usd_micros: Option<i64>,
     pub cost_input_micros: Option<i64>,
     pub cost_output_micros: Option<i64>,
     pub cost_cache_creation_5m_micros: Option<i64>,
     pub cost_cache_creation_1h_micros: Option<i64>,
     pub cost_cache_read_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_30m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_12h_micros: Option<i64>,
 }
 
 /// Cursor + limit + filter parameters for a request-event list page,
@@ -193,6 +206,7 @@ mod tests {
             session_id_source: None,
             model: None,
             reasoning_effort: None,
+            thinking_level: None,
             thinking_budget_tokens: None,
             thinking_tokens: None,
             service_tier: None,
@@ -242,12 +256,18 @@ mod tests {
             cache_creation_input_tokens_5m: None,
             cache_creation_input_tokens_1h: None,
             cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
+            cache_write_input_tokens_30m: None,
+            cache_write_input_tokens_12h: None,
             cost_usd_micros: None,
             cost_input_micros: None,
             cost_output_micros: None,
             cost_cache_creation_5m_micros: None,
             cost_cache_creation_1h_micros: None,
             cost_cache_read_micros: None,
+            cost_cache_write_micros: None,
+            cost_cache_write_30m_micros: None,
+            cost_cache_write_12h_micros: None,
         }
     }
 

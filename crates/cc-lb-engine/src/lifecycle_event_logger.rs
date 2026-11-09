@@ -25,6 +25,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::terminal_observer::error_codes;
 use cc_lb_lifecycle::{
     LifecycleEvent, LimitDecisionKind, RequestIoTimings, RouteFailure, TerminationReason,
 };
@@ -72,7 +73,13 @@ enum RequestOutcome {
 
 impl RequestOutcome {
     fn from_terminal(reason: &TerminationReason, client_status: u16) -> Self {
-        if client_status == 499 {
+        if client_status == 499
+            || matches!(
+                reason,
+                TerminationReason::ErrorCode(code)
+                    if code == error_codes::CLIENT_CLOSED_REQUEST
+            )
+        {
             Self::ClientCancelled
         } else if matches!(client_status, 408 | 504) {
             Self::Timeout
@@ -1367,6 +1374,39 @@ mod tests {
             ],
         );
         assert_histogram(response_body[0], &[25]);
+    }
+
+    #[test]
+    fn websocket_client_cancelled_101_keeps_cancellation_metric() {
+        let event_id = "websocket-cancelled";
+        let (_, samples) = capture_metrics([
+            started(event_id, Some("proxy")),
+            upstream_started(event_id, Some(5), Some(6), Some(7)),
+            stream_completed(event_id, 80),
+            terminated(
+                event_id,
+                TerminationReason::ErrorCode("client_closed_request".to_owned()),
+                101,
+                TerminalTiming {
+                    duration_ms: 80,
+                    upstream_body_ms: Some(25),
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let response_body = named(&samples, "cc_lb_request_stage_duration_seconds")
+            .into_iter()
+            .find(|sample| sample.labels.get("stage").map(String::as_str) == Some("response_body"))
+            .expect("websocket response-body metric");
+        assert_labels(
+            response_body,
+            &[
+                ("source_kind", "proxy"),
+                ("stage", "response_body"),
+                ("outcome", "client_cancelled"),
+            ],
+        );
     }
     #[test]
     fn terminal_metrics_use_final_attempt_and_observed_decisions() {

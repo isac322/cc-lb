@@ -48,6 +48,7 @@ pub(super) fn publish_renewal_lifecycle(
             cache_control_block_count: None,
             cache_breakpoints: Vec::new(),
             cache_prefix_hash: None,
+            native_cache: None,
             thread_id: input.thread_id,
             observed_session_id: None,
             request_kind: None,
@@ -62,6 +63,7 @@ pub(super) fn publish_renewal_lifecycle(
             cache_control_message_indices: Vec::new(),
             thinking_budget_tokens: None,
             reasoning_effort: None,
+            thinking_level: None,
         }),
     });
     event_bus.publish_lifecycle(LifecycleEvent::AuthCompleted {
@@ -129,6 +131,9 @@ pub(super) fn publish_renewal_lifecycle(
             stream_total_ms: None,
             content_delta_count: None,
             ping_count: None,
+            stream_inter_output_avg_ms: None,
+            provider_session_id: None,
+            provider_connection_id: None,
             inter_token_avg_ms: None,
         }),
     });

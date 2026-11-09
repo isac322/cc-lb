@@ -36,7 +36,10 @@ Provider-owned state referenced inside a supported HTTP generation request is fo
 - OpenAI HTTP Responses: response ids and stateless reasoning `encrypted_content` items observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
 - Gemini generateContent / countTokens: `cachedContent` references (including nested `generateContentRequest.cachedContent`). `thoughtSignature` is forwarded but is not treated as affinity state.
 
-A request whose durable state resolves to an upstream that is disabled, unhealthy, or removed by routing filters fails with `503 upstream_affinity_unavailable` instead of falling back to another upstream; cross-upstream failover is disabled for pinned requests. Prompt-cache analysis and cache-aware routing apply only to Anthropic Messages; OpenAI and Gemini requests carry neutral cache metadata.
+- Gemini cachedContents creation: the exact `POST /gemini/v1beta/cachedContents` operation is available only with Gemini API-key upstreams and explicit-caching Gemini 2.5 and Gemini 3 family models. Gemini 4+ explicit caching, other models, and non-create `cachedContents` API surfaces remain HTTP `404 operation_not_supported`. cc-lb forwards the request body unchanged and binds a successful canonical response `name` in the form `cachedContents/<id>` to the selected upstream before returning success; later `generateContent` and `countTokens` requests that reference that name remain pinned to its owner.
+
+  Provider `4xx` and `5xx` responses retain their original status and create no owner binding. An unbound reference returns HTTP `503` with `api_error`; an unavailable owner returns HTTP `503 upstream_affinity_unavailable`, without cross-credential failover. Each cached-content binding is checked against its owner upstream's identity epoch. Replacing the API key or changing the base URL or project invalidates it; re-saving the same URL or project and refreshing access metadata preserve it. API-key replacement conservatively invalidates bindings even when the same key is entered again. Later reuse of an invalidated binding fails closed with HTTP `503` until a new resource is created, and a stale create response cannot rebind after an owner identity change. Malformed, non-JSON, or noncanonical create responses, missing, invalid, or expired `expireTime`, and persistence failures return HTTP `503` without a success body.
+- Prompt-cache analysis and cache-aware routing apply to Anthropic breakpoints and scoped older-model OpenAI Responses observations. Native pricing is exposed when catalog data exists. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` remains hard affinity.
 
 Admin preflight is separate from client proxy routing: `GET /v1/models` and `POST /v1/messages/count_tokens` (Anthropic), `GET /v1/models` (OpenAI), and `GET /v1beta/models` (Gemini) run as direct upstream probes during key verification.
 
@@ -75,6 +78,7 @@ Not yet supported: files, uploads, batches, vector stores, conversations, contai
 | Method | Client path | Credentials |
 |---|---|---|
 | POST | `/gemini/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens` | API key, OAuth |
+| POST | `/gemini/v1beta/cachedContents` (create only) | API key |
 | POST | `/gemini/v1beta/models/{model}:embedContent`, `:batchEmbedContents`, `:predict` | API key |
 | GET | `/gemini/v1beta/models`, `/gemini/v1beta/models/{model}` (also `/gemini/v1/models` and `/gemini/v1/models/{model}`) | API key |
 | POST | `/gemini/v1beta/openai/chat/completions`, `/gemini/v1beta/openai/embeddings`, `/gemini/v1beta/openai/images/generations` | API key |
@@ -88,17 +92,33 @@ Realtime and Live WebSocket admission uses an upstream-scoped circuit breaker ke
 
 Gemini Live rejects the handshake with HTTP `503` when the principal has no eligible Gemini API-key upstream, before receiving a setup frame. With an eligible key, model-specific routing still runs after the setup frame supplies the model.
 
+Realtime and Live routing filters receive the parsed, bounded header session identity as `RequestContext.thread_id`, using the existing header precedence. No setup-frame metadata fallback or Claude ancestry fields are added. Principal-limit denials publish one rejected limit decision through the shared audit and metrics path before returning the existing protocol-appropriate error; rejected sessions do not contact the provider.
+
+Successful provider upgrades publish a provider-neutral response-started milestone. Active sessions publish cumulative usage snapshots from the provider usage frames, and final settlement uses the terminal cumulative usage without adding earlier snapshots again. Gemini Live snapshots retain reported thinking and tool-use prompt counts and distinguish absent, zero, positive, and invalid cache evidence. These observations do not reinterpret WebSocket frames as Anthropic SSE events or buffer the full media session.
+
+Terminal observations retain bounded, redacted native close code/reason and available relay I/O details, along with the provider handshake request ID from `x-request-id`, `request-id`, or `x-goog-request-id`. Close frames still reach the peer unchanged. Upgraded connections retain status `101`, including downstream cancellations; native diagnostics do not synthesize HTTP/2 fields or a new HTTP response. The connection emits one terminal completion.
+
+With OpenTelemetry tracing enabled, Realtime and Live provider handshakes receive the current proxy child span's W3C trace context after signing, without replacing host-owned credentials or destination details.
+
 OpenAI's `OpenAI-Beta` header is passed through. Gemini client-supplied `key=` query credentials are removed before the configured upstream key is applied. Usage accounting observes only provider usage frames: OpenAI `response.done` and Gemini frames containing `usageMetadata`.
 
 New tunnel handshakes during server drain receive HTTP `503` without upgrading. Existing tunnels stop relaying and send best-effort close frames, without an explicit close code or reason, to both peers. Idle Gemini connections waiting for a setup frame also close on drain. After an upgrade, drain cannot produce a new HTTP response.
 
-Not yet supported: file upload/download, cachedContents, batches, operations, predictLongRunning, fileSearchStores, interactions, agents, auth_tokens, and OpenAI-compatible files/batches. Code Assist account controls are not proxy operations: loadCodeAssist, onboardUser, retrieveUserQuota*, listExperiments, metrics, admin controls, and user settings are excluded.
+Not yet supported: cachedContents operations other than create, file upload/download, batches, operations, predictLongRunning, fileSearchStores, interactions, agents, auth_tokens, and OpenAI-compatible files/batches. Code Assist account controls are not proxy operations: loadCodeAssist, onboardUser, retrieveUserQuota*, listExperiments, metrics, admin controls, and user settings are excluded.
 
 #### Unsupported operations and body limits
 
 An unsupported operation under a provider prefix returns HTTP **404**, with a provider-shaped `operation_not_supported` error and the message `<method> <canonical-path> is not supported by cc-lb yet`. It produces one terminal request event after authentication, without selecting an upstream. Unprefixed unsupported paths retain their previous rejection behavior.
 
 Multipart audio transcription/translation and image edit/variation requests use `files_body_cap_bytes`; other supported HTTP operations use `messages_body_cap_bytes`. Bodies and provider-owned state are forwarded without rewriting. Model catalogs and model-less default moderation requests still pass through key/principal, rate, and concurrency admission rather than requiring a fabricated model id.
+
+#### OpenAI Responses streaming failures
+
+Before a streaming `POST /v1/responses` response starts, a proxy-generated failure returns the route's provider-shaped JSON error envelope with the matching error status (500, 502, or 503). After streaming has begun, the HTTP status remains `200`, and a proxy-generated failure is sent as a `response.failed` SSE event. Its payload includes `sequence_number` and a failed `response` with safe `error.code` and `error.message`, plus the observed response id when one is known.
+
+If an OpenAI Responses SSE body ends cleanly before `response.completed`, `response.incomplete`, `response.failed`, or another terminal event, cc-lb records `upstream_response_incomplete` and appends one `response.failed` event. Provider-reported usage remains authoritative, and existing provider errors retain precedence.
+
+An emitted provider failure keeps precedence over later upstream faults. Response transforms determine which terminal the client actually receives. SSE responses use streaming HTTP framing instead of forwarding an upstream `Content-Length`, so local failures or suppressed malformed suffixes cannot leave an incomplete fixed-length body. Passthrough payload bytes and their content encoding remain unchanged.
 
 ### Request events API
 
@@ -160,15 +180,52 @@ correlate turn events without new database fields.
 
 ### Generation usage accounting
 
-Gemini's normalized output count is `candidatesTokenCount + thoughtsTokenCount`.
+Gemini GenerateContent's normalized output count is `candidatesTokenCount + thoughtsTokenCount`.
 The reasoning count remains available as a subset of that normalized output;
-cost and limit accounting must not add it again. Repeated cumulative usage
-snapshots replace the previous counts instead of accumulating them. Missing or
-`null` fields retain the last reported component.
+cost and limit accounting must not add it again. Repeated cumulative GenerateContent
+usage snapshots replace the previous counts instead of accumulating them. The
+GenerateContent SSE accumulator retains the last component when a field is missing or `null`.
+
+Native Gemini generation requests accept both `service_tier` and `serviceTier`
+for routing and cost reservations; `service_tier` takes precedence when both
+appear. A blank selected tier is absent from Gemini metadata; a non-blank
+tier keeps its original bytes. The original request bytes are forwarded unchanged. Completed-request
+costs use the observed `usageMetadata.serviceTier` or `service_tier`, including
+wrapped `response.usageMetadata`; the requested tier never substitutes for a
+missing response tier.
+
+Request history recognizes both `generationConfig.thinkingConfig.thinkingLevel`
+and the native SDK spelling `generationConfig.thinkingConfig.thinking_level` as
+optional `thinking_level` metadata. It likewise recognizes `thinkingBudget` and
+`thinking_budget` as optional `thinking_budget_tokens` metadata. CamelCase takes
+precedence when both leaf aliases are present, including when that value is
+malformed. Non-empty levels up to 64 bytes retain their original casing.
+Thinking level does not affect routing or token accounting.
 
 The existing cache-input subtraction is unchanged: reported cache-read tokens
 are counted separately from uncached input. OpenAI and Anthropic output already
 includes reasoning or thinking tokens, so their output counts are unchanged.
+
+Completed request costs price uncached input, cached reads, and output as
+disjoint token sets. OpenAI and Gemini cached-read rates come from their native
+catalog entries, including published service-tier and context-threshold rates;
+they do not fall back to Anthropic cache rates. Positive cached usage without
+an applicable rate leaves actual request costs unknown. A published zero rate
+remains a known zero, and a request with no cached usage does not require a
+cached-read rate.
+
+When a completed request's actual cost is unknown, managed-key limit accounting
+finalizes its original admitted estimate as CostUsd liability. Request and token
+usage still settle once, and concurrency is released. The request's actual-cost
+fields remain empty. If no estimate was available and no CostUsd limit applied,
+only measured request/token usage is added; the monetary accumulator is unchanged.
+No unavailable cost is reported as a known zero, and finalized rows are not
+re-priced later.
+
+Keep-alive renewals retain their token usage, hit identity, and history when
+actual cost is unavailable; their monetary PNL stays unknown. An automatic
+storage upgrade records price availability separately from signed cost values
+and preserves existing renewal costs as known.
 
 Before dispatch, Anthropic Messages limit admission estimates text and metadata
 string bytes at one token per four bytes, plus 4,784 tokens per recognized native
@@ -191,11 +248,78 @@ The existing opaque-cache worst-case allowance applies only when no local
 breakpoint resolves, including the existing fallback for unresolved markers.
 Resolved local breakpoints keep precedence even when an opaque marker is present.
 
-The image allowance is an admission estimate, not a guarantee that it bounds all
-provider-billed tokens. It can over-reserve smaller images, and provider-specific
-overhead can exceed the estimate. Provider-reported usage reconciliation and
-actual accounting are unchanged. Documents and non-Anthropic requests retain
-their existing estimates; routing and forwarded request bodies are unchanged.
+Native OpenAI Responses `input_image`, Chat Completions `image_url`, and Gemini
+image `inlineData`/`fileData` parts use provider-specific image quantities
+independent of payload or reference length. Gemini OpenAI-compatible Chat uses
+Gemini quantities. Recognition follows native content positions; arbitrary
+tool arguments and non-image MIME parts keep their existing estimates. Only the
+recognized image's payload/reference strings are excluded; sibling metadata
+still counts.
+
+For inline Base64 images, cc-lb uses bounded 4,096-byte header inspection to
+read positive PNG, JPEG, GIF, or WebP dimensions. It does not decode pixels,
+fetch URLs or files, or make a provider call. Unsupported formats, malformed or
+truncated headers, and remote/file references use the unavailable-dimensions
+policy below. An image remains an image even when its dimensions are unavailable.
+
+OpenAI quantities follow the model-specific rules in
+[Images and vision](https://developers.openai.com/api/docs/guides/images-vision#calculating-costs):
+
+- Tile-based models use their own base and per-tile coefficients. `low` uses
+  only the base; `high` and `auto` resize within 2048 pixels, then reduce a
+  shortest side above 768 pixels before counting 512-pixel tiles. For `gpt-4.1`,
+  `low` contributes 85 tokens and a 1024x1024 image at `high` contributes 765.
+- Patch-based models use 32-pixel patches, the selected model/detail's
+  dimension and patch budgets, and its multiplier, rounded up. `low`, `high`,
+  `original`, and `auto` are model-specific; `low` need not be the cheapest,
+  and `auto` can select `original` sizing.
+- Only explicit known model and snapshot entries select these rules. Omitted
+  `detail` means `auto`. A known model with unsupported or malformed `detail`
+  uses the largest quantity among its supported details, or the largest
+  supported-detail ceiling when dimensions are unavailable. With a supported
+  detail but unavailable dimensions, its model/detail ceiling applies.
+  Unknown OpenAI models receive 73,800 admission tokens per image.
+
+Known Gemini 1.x and 2.x models use the rough crop rule from the
+[image token guide](https://ai.google.dev/gemini-api/docs/image-understanding#token-calculation).
+Images with both dimensions at most 384 pixels use 258 tokens. Otherwise, with
+positive width `w` and height `h`, the crop unit is `floor(min(w, h) * 2 / 3)`;
+the estimate is `ceil(w / crop) * ceil(h / crop) * 258`. A zero crop unit
+counts as unavailable dimensions. Unknown Gemini models and known pre-3 models
+without usable dimensions receive 65,536 admission tokens per image. This
+allowance does not cap quantities calculated from known dimensions.
+
+Known Gemini 3 and 4 models use the
+[media-resolution table](https://ai.google.dev/gemini-api/docs/media-resolution#token-counts)
+regardless of image dimensions:
+
+| Image resolution | Admission tokens per image |
+|---|---:|
+| Omitted or `unspecified` | 1,120 |
+| `low` | 280 |
+| `medium` | 560 |
+| `high` | 1,120 |
+| `ultra_high` | 2,240 |
+| Present but malformed or unsupported | 2,240 |
+
+A per-part resolution overrides the request's generation configuration.
+Resolution accepts a string or an object with `level`, using short names or
+`MEDIA_RESOLUTION_*` values.
+
+These are approximate pre-dispatch admission policies. The 73,800 and 65,536
+fallbacks are explicit local allowances, not exact billing quantities or global
+provider maxima. Image estimates can over-reserve, and provider-specific
+overhead can exceed an allowance. A single 4,000-token floor applies to the
+combined text, metadata, and image input for input-token and total-token
+admission; it is not applied per image. Reservations that cannot fit still
+reject before dispatch.
+
+Anthropic's 4,784-token allowance and cache-region accounting above are
+unchanged. Text, tools, documents, and other non-image content retain their
+existing estimates. Provider-reported usage remains authoritative for
+reconciliation and actual accounting. The existing conservative generic/image
+rate maximum for image-rate CostUsd admission is unchanged, as are actual
+image-rate pricing, routing, and forwarded request bytes.
 
 See [Overview](#overview) for local HTTP limit rejection and retry behavior.
 
@@ -289,7 +413,7 @@ Any upstream `base_url` must use `http` or `https` and must not contain userinfo
 }
 ```
 
-`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `warmup_enabled` defaults to `true` for `anthropic_oauth` upstreams and `false` for other kinds; see [docs/upstream-warmup.md](https://github.com/isac322/cc-lb/blob/master/docs/upstream-warmup.md).
+`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `warmup_enabled` defaults to `true` for `anthropic_oauth`, `openai_oauth`, and `gemini_oauth` upstreams created through `POST /admin/v1/upstreams` or the OAuth sign-in flow. For API-key upstreams, omitted or `false` remains disabled and explicit `true` is rejected; see [docs/upstream-warmup.md](https://github.com/isac322/cc-lb/blob/master/docs/upstream-warmup.md).
 
 `key_hint` and `api_key_access` appear only on `anthropic_api_key` upstreams that have been checked. `key_hint` is the key's `sk-ant-<family>-` prefix, plus `...` and the last four characters when the key is at least 20 characters long. `api_key_access` is the last stored capability snapshot. `verified` is `false` until a probe succeeds. `key_class` is `workspace_bound`, `org_scoped`, or `unknown`. `workspace.mode` is `bound` when a check found the key works without a workspace header (`id` is set when Anthropic named the workspace), `selected` when cc-lb sends a chosen workspace `id`, and `required` with no `id` otherwise: the key was never checked, was rejected locally or by the endpoint, was unreachable, or still needs a workspace. `workspace_list` and `usage_report` are `ok`, `denied`, `error`, or `not_applicable`. `key_type` is `personal`, `service_account`, `workspace`, or `null` when Anthropic did not say.
 
@@ -384,6 +508,14 @@ provider-gating rules are documented in
 [docs/cache-keepalive-operator.md](https://github.com/isac322/cc-lb/blob/master/docs/cache-keepalive-operator.md).
 `cache_keepalive.classifier.llm_judge` is reserved for a future release;
 create/update requests that set it return `unsupported_cache_keepalive_llm_judge`.
+
+For OpenAI Responses keep-alive with a selected `openai_api_key` upstream,
+snapshots preserve client-supplied `OpenAI-Organization`, `OpenAI-Project`, and
+`OpenAI-Processing-Region` selectors for renewals; absent selectors remain
+absent. Credentials remain signer-owned and are never captured in snapshots.
+OAuth behavior is unchanged. Historical snapshots lacking selector values need a
+fresh eligible real request to capture them; an upgrade cannot recover values
+that were not stored.
 
 #### PrincipalResponse
 
