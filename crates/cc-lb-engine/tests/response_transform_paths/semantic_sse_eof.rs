@@ -1379,6 +1379,202 @@ async fn responses_semantic_sse_eof_replaced_delta_is_terminal_success() -> Test
     Ok(())
 }
 
+fn responses_terminal_faults(
+    plaintext: &Bytes,
+) -> [(&'static str, &'static str, ScriptedDispatch); 3] {
+    let compressed = gzip_bytes(plaintext);
+    [
+        (
+            "upstream_response_body_error",
+            "transport_error",
+            ScriptedDispatch::identity_sse(
+                vec![plaintext.clone()],
+                Some(std::io::ErrorKind::ConnectionReset),
+            ),
+        ),
+        (
+            "upstream_response_decode_error",
+            "decode_error_mid_body",
+            // Sync-flush all terminal-containing plaintext before a separate
+            // DEFLATE block with reserved BTYPE=3 makes decoder.push fail.
+            ScriptedDispatch::gzip_sse(
+                vec![
+                    incomplete_gzip_prefix(plaintext),
+                    Bytes::from_static(b"\x07"),
+                ],
+                None,
+            ),
+        ),
+        (
+            "upstream_response_decode_error",
+            "decode_error_after_clean_end",
+            // Keep the complete DEFLATE payload so every SSE event is emitted;
+            // only the CRC32/ISIZE trailer is missing when decoder.finish runs.
+            ScriptedDispatch::gzip_sse(vec![compressed.slice(..compressed.len() - 8)], None),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_dropped_terminal_later_fault_stays_fatal() -> TestResult {
+    for (event, status) in [
+        ("response.completed", "completed"),
+        ("response.incomplete", "incomplete"),
+    ] {
+        let prefix = Bytes::from(format!("{RESPONSES_CREATED}{RESPONSES_DELTA}"));
+        // Usage occurs only in the dropped upstream terminal. Persisting it and
+        // advancing the failure sequence prove the terminal decoded before fault.
+        let plaintext = Bytes::from(format!(
+            "{RESPONSES_CREATED}{RESPONSES_DELTA}event: {event}\ndata: {{\"type\":\"{event}\",\"sequence_number\":10,\"response\":{{\"status\":\"{status}\",\"usage\":{{\"input_tokens\":13,\"output_tokens\":7,\"total_tokens\":20}}}}}}\n\n"
+        ));
+        for (error_type, body_end, dispatcher) in responses_terminal_faults(&plaintext) {
+            let observed = observe_with_sse_hook(
+                Arc::new(dispatcher),
+                Some(Arc::new(DropResponsesTerminalTransform)),
+                responses_eof_record(false),
+                responses_eof_request("/v1/responses")?,
+            )
+            .await?;
+
+            assert_eq!(observed.status, StatusCode::OK);
+            let error = observed
+                .completion()
+                .as_ref()
+                .expect_err("a dropped terminal cannot make a later fault acceptable");
+            assert_eq!(error.error_type, error_type, "{event}: {body_end}");
+            observed.assert_terminal(Some("upstream_stream_error"));
+            assert_eq!(
+                observed.row.upstream_error_type.as_deref(),
+                Some(error_type),
+                "{event}: {body_end}"
+            );
+            assert_eq!(
+                observed.row.upstream_error_message.as_deref(),
+                Some(error.error_message.as_str())
+            );
+            assert_eq!(
+                observed.row.upstream_body_end.as_deref(),
+                Some(body_end),
+                "{event}: {body_end}"
+            );
+            assert_eq!(
+                (observed.row.input_tokens, observed.row.output_tokens),
+                (Some(13), Some(7)),
+                "retain upstream terminal usage even when dropped: {body_end}"
+            );
+            assert_responses_eof_frame(&observed.body, &prefix, Some("resp_eof"), 11);
+            let body = std::str::from_utf8(&observed.body)?;
+            assert!(!body.contains(event), "never forward dropped {event}");
+            assert!(
+                !body.contains("event: response.completed"),
+                "a later fault must not become a synthetic success"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_replaced_terminal_later_fault_is_warning() -> TestResult {
+    for (event, status) in [
+        ("response.completed", "completed"),
+        ("response.incomplete", "incomplete"),
+    ] {
+        for measured in [false, true] {
+            let usage = if measured { RESPONSES_USAGE } else { "" };
+            let plaintext = Bytes::from(format!("{RESPONSES_CREATED}{usage}{RESPONSES_DELTA}"));
+            for (warning_type, body_end, dispatcher) in responses_terminal_faults(&plaintext) {
+                let observed = observe_with_sse_hook(
+                    Arc::new(dispatcher),
+                    Some(Arc::new(ReplaceResponsesDeltaWithTerminal {
+                        event,
+                        status,
+                    })),
+                    responses_eof_record(false),
+                    responses_eof_request("/v1/responses")?,
+                )
+                .await?;
+
+                assert_eq!(observed.status, StatusCode::OK);
+                let success = observed
+                    .completion()
+                    .as_ref()
+                    .expect("an emitted replacement terminal makes the later fault a warning");
+                assert_eq!(observed.row.error_code, None, "{event}: {body_end}");
+                assert_eq!(observed.row.upstream_error_type, None);
+                assert_eq!(observed.row.upstream_error_message, None);
+                assert_eq!(
+                    observed.row.upstream_stream_warning_type.as_deref(),
+                    Some(warning_type),
+                    "{event}: {body_end}"
+                );
+                assert!(
+                    observed
+                        .row
+                        .upstream_stream_warning_message
+                        .as_deref()
+                        .is_some_and(|message| !message.is_empty())
+                );
+                assert_eq!(
+                    observed.row.upstream_body_end.as_deref(),
+                    Some(body_end),
+                    "{event}: {body_end}"
+                );
+                let terminations = observed
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LifecycleEvent::RequestTerminated {
+                            reason,
+                            client_status,
+                            ..
+                        } => Some((reason, client_status)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(terminations.len(), 1);
+                assert_eq!(terminations[0].0, &TerminationReason::Success);
+                assert_eq!(*terminations[0].1, StatusCode::OK.as_u16());
+                assert_eq!(observed.row.status, StatusCode::OK.as_u16());
+                let expected_usage = if measured {
+                    (Some(13), Some(7))
+                } else {
+                    (None, None)
+                };
+                assert_eq!(
+                    (observed.row.input_tokens, observed.row.output_tokens),
+                    expected_usage,
+                    "replacement terminal usage must not become provider usage: {body_end}"
+                );
+                assert_eq!(
+                    (success.usage.input_tokens, success.usage.output_tokens),
+                    if measured { (13, 7) } else { (0, 0) }
+                );
+                if !measured {
+                    assert_eq!(observed.row.cost_usd_micros, None);
+                    assert!(observed.events.iter().all(|event| !matches!(
+                        event,
+                        LifecycleEvent::UsageObserved { .. } | LifecycleEvent::Priced { .. }
+                    )));
+                }
+                assert_eq!(success.stream_message_stop_ms, None);
+                assert_eq!(observed.row.stream_message_stop_ms, None);
+                let body = std::str::from_utf8(&observed.body)?;
+                assert_eq!(
+                    body.matches(&format!("event: {event}\n")).count(),
+                    1,
+                    "forward one replacement terminal before {body_end}"
+                );
+                assert!(!body.contains("event: response.output_text.delta"));
+                assert!(!body.contains("event: response.failed"));
+                assert!(!body.contains("event: error"));
+                assert!(body.ends_with("\n\n"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn responses_semantic_sse_eof_out_of_scope_controls() -> TestResult {
     let partial =

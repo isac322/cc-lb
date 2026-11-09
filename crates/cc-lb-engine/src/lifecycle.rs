@@ -7643,7 +7643,13 @@ impl Lifecycle {
                                         && (success_sse_affinity_gate || sse_transform_active)
                                         && upstream_end_after_message_stop_is_acceptable(
                                             status,
-                                            semantic_message_stop_seen,
+                                            if response_affinity_context.capability.usage_shape()
+                                                == crate::provider_capability::UsageShape::OpenaiResponses
+                                            {
+                                                semantic_completion_emitted
+                                            } else {
+                                                semantic_message_stop_seen
+                                            },
                                             stream_upstream_error.is_some()
                                                 || stream_transform_error.is_some()
                                                 || stream_affinity_error.is_some(),
@@ -8617,7 +8623,13 @@ impl Lifecycle {
                                     && !downstream_sse_boundary.partial_event_pending()))
                             && upstream_end_after_message_stop_is_acceptable(
                                 status,
-                                semantic_message_stop_seen,
+                                if response_affinity_context.capability.usage_shape()
+                                    == crate::provider_capability::UsageShape::OpenaiResponses
+                                {
+                                    semantic_completion_emitted
+                                } else {
+                                    semantic_message_stop_seen
+                                },
                                 stream_upstream_error.is_some()
                                     || stream_transform_error.is_some()
                                     || stream_affinity_error.is_some(),
@@ -9159,7 +9171,13 @@ impl Lifecycle {
                         && (success_sse_affinity_gate || sse_transform_active)
                         && upstream_end_after_message_stop_is_acceptable(
                             status,
-                            semantic_message_stop_seen,
+                            if response_affinity_context.capability.usage_shape()
+                                == crate::provider_capability::UsageShape::OpenaiResponses
+                            {
+                                semantic_completion_emitted
+                            } else {
+                                semantic_message_stop_seen
+                            },
                             stream_upstream_error.is_some()
                                 || stream_transform_error.is_some()
                                 || stream_affinity_error.is_some(),
