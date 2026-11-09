@@ -1,4 +1,8 @@
-use crate::common::{TestAuthn, TestState, collect_body, messages_request};
+use crate::common::{TestAuthn, TestLifecycleBus, TestState, collect_body, messages_request};
+use crate::lifecycle_client_disconnect::client_disconnect_support::{
+    assert_error_terminal, assert_one_final, assert_responses_failed, assert_stream_failure_once,
+    lifecycle_receiver, sqlite_storage,
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -11,7 +15,8 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_clock::TestClock;
 use cc_lb_control::{
-    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry, UpstreamStatusSnapshot,
+    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, RequestEventBus, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
 };
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProxyError, UpstreamDispatch};
 use cc_lb_storage_api::{
@@ -155,6 +160,9 @@ pub(super) struct MemoryAffinityStore {
 }
 
 impl MemoryAffinityStore {
+    pub(crate) fn fail_bind(&self, message: &str) {
+        *self.bind_failure.lock().expect("bind failure lock") = Some(message.to_owned());
+    }
     fn insert(&self, key: UpstreamAffinityKey, upstream_id: Uuid) {
         self.insert_binding(UpstreamAffinityBinding {
             key,
@@ -1073,6 +1081,356 @@ async fn sse_bind_failure_suppresses_the_encrypted_content_block() {
     assert!(!body.contains(ciphertext));
     assert!(!body.contains(&ciphertext[..10]));
     assert_eq!(dispatch.call_count(), 1);
+}
+
+fn provider_request(provider: cc_lb_domain::Provider, path: &str, body: Value) -> Request<Bytes> {
+    let mut request = Request::builder()
+        .method(http::Method::POST)
+        .uri(path)
+        .header("x-api-key", crate::common::managed_api_key())
+        .body(Bytes::from(body.to_string()))
+        .expect("provider request builds");
+    request
+        .extensions_mut()
+        .insert(cc_lb_engine::ProviderScope(provider));
+    request
+}
+
+#[tokio::test]
+async fn provider_affinity_store_failures_use_native_503() -> Result<(), Box<dyn std::error::Error>>
+{
+    let cases = [
+        (
+            cc_lb_domain::Provider::Anthropic,
+            upstream_record(Uuid::from_u128(2), "anthropic-owner", true),
+            "/v1/messages",
+            json!({"model":"claude-test","messages":[]}),
+            json!({"type":"message","container":{"id":"container-bind-failure"}}),
+            UpstreamAffinityKind::AnthropicContainerId,
+            "container-bind-failure",
+        ),
+        (
+            cc_lb_domain::Provider::Openai,
+            openai_upstream_record(Uuid::from_u128(2), "openai-owner", true),
+            "/v1/responses",
+            json!({"model":"gpt-test","input":[]}),
+            json!({"id":"resp-bind-failure","object":"response","status":"completed"}),
+            UpstreamAffinityKind::OpenaiResponseId,
+            "resp-bind-failure",
+        ),
+        (
+            cc_lb_domain::Provider::Gemini,
+            {
+                let mut record = upstream_record(Uuid::from_u128(2), "gemini-owner", true);
+                record.kind = cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey;
+                record
+            },
+            "/v1beta/models/gemini-test:generateContent",
+            json!({"contents":[],"cachedContent":"cachedContents/request-bind-failure"}),
+            json!({"candidates":[]}),
+            UpstreamAffinityKind::GeminiCachedContent,
+            "cachedContents/request-bind-failure",
+        ),
+    ];
+
+    for (provider, record, path, request_body, response_body, kind, raw_key) in cases {
+        let dir = tempfile::tempdir()?;
+        let storage = Arc::new(sqlite_storage(&dir).await?);
+        let bus = TestLifecycleBus::new()
+            .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
+        let mut events = lifecycle_receiver(&bus);
+        let mut updates = bus.bus.subscribe();
+        let store = Arc::new(MemoryAffinityStore::default());
+        if provider == cc_lb_domain::Provider::Gemini {
+            // Gemini learns no response keys. A valid cachedContent reference
+            // can fail at lookup, but cannot produce a buffered pending bind.
+            *store.resolve_failure.lock().expect("resolve failure lock") =
+                Some("forced affinity store failure".to_owned());
+        } else {
+            *store.bind_failure.lock().expect("bind failure lock") =
+                Some("forced affinity store failure".to_owned());
+        }
+        let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(response_body));
+        let lifecycle = lifecycle(vec![record], dispatch.clone(), Some(store.clone()))
+            .with_event_bus(bus.bus_arc());
+        let (status, _, body) = collect_body(
+            handle_authenticated(&lifecycle, provider_request(provider, path, request_body))
+                .await
+                .expect("provider affinity bind failure handled"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{provider:?}");
+        let body: Value = serde_json::from_slice(&body).expect("native affinity error JSON");
+        assert_eq!(
+            body["error"]["message"],
+            "upstream affinity is unavailable for opaque request content",
+        );
+        match provider {
+            cc_lb_domain::Provider::Anthropic => {
+                assert_eq!(body["type"], "error");
+                assert_eq!(body["error"]["type"], "api_error");
+            }
+            cc_lb_domain::Provider::Openai => {
+                assert!(body.get("type").is_none());
+                assert_eq!(body["error"]["type"], "api_error");
+                assert!(body["error"].get("param").is_some());
+                assert!(body["error"].get("code").is_some());
+            }
+            cc_lb_domain::Provider::Gemini => {
+                assert!(body.get("type").is_none());
+                assert_eq!(body["error"]["code"], 503);
+                assert_eq!(body["error"]["status"], "UNAVAILABLE");
+            }
+        }
+        assert_eq!(
+            dispatch.call_count(),
+            usize::from(provider != cc_lb_domain::Provider::Gemini),
+        );
+        assert_eq!(
+            store.upstream_for(&UpstreamAffinityKey {
+                principal_id: "principal-test".to_owned(),
+                provider: match provider {
+                    cc_lb_domain::Provider::Anthropic => "anthropic".to_owned(),
+                    cc_lb_domain::Provider::Openai => "openai".to_owned(),
+                    cc_lb_domain::Provider::Gemini => "gemini".to_owned(),
+                },
+                kind,
+                value_sha256: Sha256::digest(raw_key.as_bytes()).into(),
+            }),
+            None,
+            "{provider:?} failed bind must not persist affinity",
+        );
+        if provider == cc_lb_domain::Provider::Gemini {
+            assert_error_terminal(&mut events, 503, "upstream_affinity_unavailable").await;
+        } else {
+            assert_stream_failure_once(
+                &mut events,
+                "upstream_affinity_error",
+                503,
+                "upstream_affinity_unavailable",
+            )
+            .await;
+        }
+        assert_one_final(&mut updates).await;
+        let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, 503);
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("upstream_affinity_unavailable")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn buffered_response_affinity_extraction_failure_uses_native_503_and_one_final()
+-> Result<(), Box<dyn std::error::Error>> {
+    for provider in [
+        cc_lb_domain::Provider::Anthropic,
+        cc_lb_domain::Provider::Openai,
+    ] {
+        let dir = tempfile::tempdir()?;
+        let storage = Arc::new(sqlite_storage(&dir).await?);
+        let bus = TestLifecycleBus::new()
+            .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
+        let mut events = lifecycle_receiver(&bus);
+        let mut updates = bus.bus.subscribe();
+        let owner = Uuid::from_u128(2);
+        let (record, path, request, response) = match provider {
+            cc_lb_domain::Provider::Anthropic => (
+                upstream_record(owner, "anthropic-owner", true),
+                "/v1/messages",
+                json!({"model":"claude-test","messages":[]}),
+                json!({"type":"message","content":[{
+                    "type":"web_search_tool_result",
+                    "content": (0..1025).map(|i| json!({"encrypted_content":format!("private-state-{i}")})).collect::<Vec<_>>(),
+                }]}),
+            ),
+            cc_lb_domain::Provider::Openai => (
+                openai_upstream_record(owner, "openai-owner", true),
+                "/v1/responses",
+                json!({"model":"gpt-test","input":[]}),
+                json!({"id":"resp-too-many","object":"response","status":"completed",
+                    "output": (0..1025).map(|i| json!({"type":"reasoning","encrypted_content":format!("private-state-{i}")})).collect::<Vec<_>>(),
+                }),
+            ),
+            _ => unreachable!(),
+        };
+        let store = Arc::new(MemoryAffinityStore::default());
+        let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(response));
+        let lifecycle = lifecycle(vec![record], dispatch.clone(), Some(store.clone()))
+            .with_event_bus(bus.bus_arc());
+        let (status, _, body) = collect_body(
+            handle_authenticated(&lifecycle, provider_request(provider, path, request)).await?,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let value: Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            value["error"]["message"],
+            "upstream affinity is unavailable for opaque request content"
+        );
+        assert_eq!(value["error"]["type"], "api_error");
+        if provider == cc_lb_domain::Provider::Anthropic {
+            assert_eq!(value["type"], "error");
+        } else {
+            assert!(
+                value.get("type").is_none(),
+                "OpenAI has no Anthropic wrapper"
+            );
+            assert!(value["error"].get("code").is_some());
+            assert!(value["error"].get("param").is_some());
+        }
+        assert!(!String::from_utf8_lossy(&body).contains("private-state"));
+        assert_eq!(
+            store.len(),
+            0,
+            "failed extraction never binds response state"
+        );
+        assert_eq!(dispatch.call_count(), 1);
+        assert_stream_failure_once(
+            &mut events,
+            "upstream_affinity_error",
+            503,
+            "upstream_affinity_unavailable",
+        )
+        .await;
+        assert_one_final(&mut updates).await;
+        let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, 503);
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("upstream_affinity_unavailable")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_sse_bind_failure_emits_native_failed_without_binding_pending_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new()
+        .with_assembler(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>);
+    let mut events = lifecycle_receiver(&bus);
+    let mut updates = bus.bus.subscribe();
+    let owner = Uuid::from_u128(2);
+    let store = Arc::new(MemoryAffinityStore::default());
+    let known = UpstreamAffinityKey {
+        principal_id: "principal-test".to_owned(),
+        provider: "openai".to_owned(),
+        kind: UpstreamAffinityKind::OpenaiResponseId,
+        value_sha256: Sha256::digest(b"resp-known").into(),
+    };
+    store.insert(known, owner);
+    *store.bind_failure.lock().expect("bind failure lock") =
+        Some("private failed state".to_owned());
+    let first = Bytes::from_static(
+        b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"partial\"}\n\n",
+    );
+    let blocked = Bytes::from_static(
+        b"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":8,\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"private-response-state\"}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":9,\"response\":{\"status\":\"completed\"}}\n\n",
+    );
+    let dispatch =
+        RecordingDispatch::with_response(ResponseSpec::SseChunks(vec![first.clone(), blocked]));
+    let lifecycle = lifecycle(
+        vec![openai_upstream_record(owner, "openai-owner", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    )
+    .with_event_bus(bus.bus_arc());
+    let (status, _, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            responses_request(json!({
+                "model":"gpt-test","stream":true,"previous_response_id":"resp-known",
+                "input":[{"type":"reasoning","encrypted_content":"private-pending-state"}],
+            })),
+        )
+        .await?,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(&first));
+    let failure = assert_responses_failed(&body, None, 8);
+    assert_eq!(
+        failure["response"]["error"]["message"],
+        "upstream affinity is unavailable for opaque request content"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("private-"));
+    assert_eq!(
+        store.len(),
+        1,
+        "neither blocked response nor pending request key is bound"
+    );
+    assert_eq!(dispatch.call_count(), 1);
+    assert_stream_failure_once(
+        &mut events,
+        "upstream_affinity_error",
+        200,
+        "upstream_stream_error",
+    )
+    .await;
+    assert_one_final(&mut updates).await;
+    let rows = crate::common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn healthy_native_buffered_responses_preserve_bytes_and_cached_content_owner() {
+    let owner = Uuid::from_u128(2);
+    for provider in [
+        cc_lb_domain::Provider::Openai,
+        cc_lb_domain::Provider::Gemini,
+    ] {
+        let store = Arc::new(MemoryAffinityStore::default());
+        let (record, path, request, response) = if provider == cc_lb_domain::Provider::Openai {
+            (
+                openai_upstream_record(owner, "openai-owner", true),
+                "/v1/responses",
+                json!({"model":"gpt-test","input":[]}),
+                json!({"id":"resp-healthy","object":"response","status":"completed","output":[]}),
+            )
+        } else {
+            store.insert(
+                UpstreamAffinityKey {
+                    principal_id: "principal-test".to_owned(),
+                    provider: "gemini".to_owned(),
+                    kind: UpstreamAffinityKind::GeminiCachedContent,
+                    value_sha256: Sha256::digest(b"cachedContents/healthy").into(),
+                },
+                owner,
+            );
+            let mut record = upstream_record(owner, "gemini-owner", true);
+            record.kind = cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey;
+            (
+                record,
+                "/v1beta/models/gemini-test:generateContent",
+                json!({"contents":[],"cachedContent":"cachedContents/healthy"}),
+                json!({"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}),
+            )
+        };
+        let raw = Bytes::from(response.to_string());
+        let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(response));
+        let lifecycle = lifecycle(vec![record], dispatch.clone(), Some(store.clone()));
+        let (status, _, body) = collect_body(
+            handle_authenticated(&lifecycle, provider_request(provider, path, request))
+                .await
+                .expect("healthy native request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, raw, "healthy provider bytes stay unchanged");
+        assert_eq!(dispatch.call_count(), 1);
+        assert_eq!(store.len(), 1);
+    }
 }
 #[tokio::test]
 async fn ordinary_anthropic_sse_without_affinity_state_passes_through() {

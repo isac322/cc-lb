@@ -135,7 +135,161 @@ Stages an isolated working directory, starts the OTLP collector, runs the select
 - `CC_LB_BIN`: Path to `cc-lb` binary (defaults to `target/debug/cc-lb`)
 - `AGY_BIN`: Path to `agy` binary if not on `PATH`
 
-### 4. Manual Claude Code attribution-cache regression (release build)
+### 4. Offline provider-native local errors (#1165)
+
+`local-error-contract.py` starts an existing `CC_LB_BIN` with fresh SQLite state,
+synthetic credentials, and a loopback-only upstream. It uses the real
+`openai-python` Responses streaming/buffered clients and `google-genai`
+buffered `generateContent` client. SDK retries and environment proxy discovery
+are disabled; a transport guard rejects non-loopback SDK requests. No provider
+credentials or provider calls are needed.
+
+Dependencies: Python 3.12+, current stable `openai`, `google-genai`, and
+`httpx2`, installed in a separate environment. On 2026-11-09, the upstream
+[OpenAI package metadata](https://pypi.org/pypi/openai/json) reports `3.46.0`,
+[Google package metadata](https://pypi.org/pypi/google-genai/json) reports
+`3.0.0`, and [HTTPX2 metadata](https://pypi.org/pypi/httpx2/json) reports
+`2.16.0`. Both current SDKs accept the harness's native HTTPX2 client;
+Google's injection field remains named `HttpOptions.httpx_client`.
+The harness installs nothing and records actual SDK versions in `report.json`.
+It waits for health and provider-specific routing previews, rather than
+assuming a fixed startup or cache-settling delay.
+
+```bash
+# Regression gate: must fail against the old binary and pass against the fix.
+CC_LB_BIN=/absolute/path/to/old/cc-lb \
+  python3 tests/real-client/provider-e2e/local-error-contract.py --expect new
+CC_LB_BIN=/absolute/path/to/new/cc-lb \
+  python3 tests/real-client/provider-e2e/local-error-contract.py --expect new
+
+# Optional baseline proof: requires all three original defects and the new
+# framing defect, while retaining the original controls.
+CC_LB_BIN=/absolute/path/to/old/cc-lb \
+  python3 tests/real-client/provider-e2e/local-error-contract.py --expect old
+```
+
+Each run makes ten requests. The original nine cover healthy, injected-fault,
+and provider-failed responses for Responses SSE, buffered Responses, and
+buffered Gemini. Streaming faults close chunked transfer after
+`response.created` and a normal output delta, without the terminating chunk.
+Buffered faults send a truncated `Content-Length` body. The gate checks safe
+SDK-visible messages, native error metadata, HTTP status/content type, response
+identity and event sequence, byte-identical healthy/provider-failed passthrough,
+and exactly one committed failure per faulty request.
+
+The tenth request sends a Responses `response.failed` rate-limit event followed
+by a complete SSE event containing malformed JSON. The loopback upstream writes
+the entire body once and declares its exact original `Content-Length`, including
+the malformed suffix. The proxy must suppress that suffix without changing the
+provider prefix or retaining a stale downstream length. The real SDK consumes
+the response through its HTTP transport: it must observe one original
+`rate_limit_exceeded` failure and message, reach a clean body end, and receive
+neither an incomplete-framing error nor a synthetic local override. The report
+records response headers, captured body length, transport completion or actual
+exception, SDK events, and each wire-contract check. Both upstream and downstream
+SSE bodies are retained. `--expect new` requires every check to pass.
+`--expect old` requires the tenth wire contract to fail, without assuming an
+exception class. In the preserved pre-fix binary at `5656c6ae`, the observed
+response advertised `Content-Length: 1871` but delivered zero body bytes;
+HTTPX2 raised `RemoteProtocolError` and the SDK reported `APIConnectionError`
+with no provider message. The durable row still recorded HTTP 200,
+`upstream_stream_error`, and the original provider rate-limit details. This
+baseline justifies the framing-defect oracle; its exact exceptions are evidence,
+not hard-coded expectations.
+
+For every request, the proxy's canonical response `request-id`
+(or `x-request-id` if supplied instead) joins the selected upstream to both
+`/admin/v1/events/delta` and a read-only SQLite query. If neither header exists,
+the isolated, sequential harness requires exactly one new SQLite row since
+its pre-request cursor and joins that actual ID to admin evidence. The report
+records both observed headers and the correlation source; it never invents an
+ID. A final table-wide count checks that all ten requests have one durable row.
+SQLite evidence reads the current relational `request_id`, `upstream_id`,
+`error_code`, and `list_status` columns. Full event details come from the admin
+delta API; the harness does not depend on the legacy SQLite `payload` column.
+As in `qa-runtime.mjs::waitForRequestEvents`, admin projection visibility is
+polled to a 30-second deadline after the durable row appears. Cursor-ordered
+lifecycle updates are deduplicated by `request_id`, retaining the latest update.
+The selected event must agree with durable upstream, error code, and status;
+unexpected distinct request IDs fail the isolated-run correlation. Exactly-once
+accounting is asserted separately against SQLite rows, not raw delta updates.
+The harness neither assumes immediate visibility nor uses a cache-settling delay.
+Local SSE disconnects and truncated successful buffered bodies retain the exact
+durable code `upstream_stream_error`; this is separate from the client-visible
+native `api_error`. Correlation and the final row count are scoped by upstream:
+provider routers can generate the same `request-id` for different upstreams.
+
+
+
+
+Evidence stays in a fresh `cc-lb-1165-*` directory outside the repository:
+`report.json`, raw response bodies, `responses-fault.sse`, server logs, SQLite,
+and `cleanup-ledger.json`. Paths are printed, keys are not. The harness stops
+its server and upstream in `finally`; it retains evidence for inspection.
+Check ownership before following ledger cleanup commands. To choose a scratch
+parent, pass `--output-parent /existing/scratch/directory`.
+
+#### Replay through the actual pinned Codex parser
+
+The replay uses official Codex revision
+`4e4767ffa763ec0d0a19e04cf8ff0163a987297b`, specifically
+`codex-rs/codex-api/src/sse/responses.rs` and `responses_error.rs`.
+It does not copy the algorithm into a substitute parser or stub Codex types.
+Provide a local official Codex git repository containing that commit.
+`prepare.py` exports its committed tree with `git archive`, records source
+hashes, and appends only a test-module declaration to the official parser.
+The adapter calls the existing `process_sse` test entry point.
+The checkout need not contain full history: a depth-one fetch of the exact
+commit is sufficient. Source/dependency provisioning is separate from the
+offline run. Record any provisioned checkout in the task's cleanup ledger.
+Preparation computes the recursive normal/dev/build/target-specific path and
+workspace dependency closure of `codex-api`. It narrows root workspace members
+and inherited dependencies to that closure, then follows the official lockfile
+graph to remove unused root patches and lock entries. This excludes unrelated
+V8/Chromium and terminal-UI resolution without replacing any actual package.
+Package manifests and production source remain official and unchanged, apart
+from the recorded test-only module declaration. Cargo tests only `codex-api --lib`.
+
+
+```bash
+python3 tests/real-client/provider-e2e/codex-error-replay/prepare.py \
+  --codex-source /path/to/official/codex \
+  --sse /path/to/cc-lb-1165-run/responses-fault.sse \
+  --expect new
+```
+
+Preparation prints the scratch workspace, its cleanup ledger, and the exact
+`cargo test --offline ... local_error_contract_replay` command, plus a separate
+`cargo fetch` command for dependency provisioning if needed. Run them from the
+printed `codex-rs` directory with the upstream Rust toolchain and native build
+dependencies available. Fetching Cargo dependencies may use the network; neither
+command calls a provider. Preparation itself neither fetches nor builds.
+`--locked` is intentionally omitted: the narrowed lock retains official package
+blocks, versions, Git revisions, and checksums, but Cargo may canonicalize its
+reduced dependency graph. Original workspace/lock files, selected members,
+removed patches, and before/after hashes are recorded beside the replay evidence.
+The test command fails closed if its remaining offline dependencies are missing.
+For an old-mode capture, prepare with `--expect old`; the same parser must
+produce `stream closed before response.completed`, not the safe local message.
+
+The replay feeds the captured bytes in seven-byte fragments and requires the
+new failure to surface the exact local message once. Two always-on negative
+controls retain normal output first, then send either the old HTTP envelope
+or a generic `type: "error"`/`api_error` event. Both must produce generic EOF
+rather than the local message. `source-manifest.json` records the revision and
+input hashes; `replay-report.json` records the observed messages. Neither
+preparing the workspace nor passing the Python harness proves parser replay:
+the printed Cargo command must also pass.
+
+Limits: this harness covers transport-body failure and malformed post-terminal
+Responses SSE under explicit `Content-Length`, not private principal
+disappearance, affinity-store failures, decode/transform fault injection, or
+Anthropic/Gemini SSE. Those remain engine integration-test gates.
+It proves SDK HTTP handling and the official Codex SSE parser, not the Codex
+CLI's rendering, retry loop, or live-provider behavior. All documentation here
+describes runnable checks, not an assertion that they have already passed.
+
+### 5. Manual Claude Code attribution-cache regression (release build)
 
 This is a manual live-provider procedure, not one of the four automated profiles above. Run it only with a published/release `cc-lb` build and an isolated official Anthropic upstream configured with a valid API key or an access-only OAuth credential marked `never_refresh: true`. Install Claude Code through its documented public installation path and use only the command-line options shown by the installed binary's `--help`.
 

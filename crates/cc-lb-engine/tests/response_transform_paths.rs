@@ -1310,11 +1310,9 @@ async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() 
         headers.get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("gzip"))
     );
-    assert_eq!(
-        headers
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok()),
-        Some(compressed.len().to_string().as_str())
+    assert!(
+        headers.get(CONTENT_LENGTH).is_none(),
+        "SSE passthrough normalizes downstream framing while preserving upstream length internally",
     );
     assert_eq!(output, compressed);
     assert_client_rate_limit_headers(&headers, true);
@@ -1347,12 +1345,9 @@ async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_
     let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles content-length gzip passthrough");
-    assert_eq!(
-        response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok()),
-        Some(compressed.len().to_string().as_str())
+    assert!(
+        response.headers().get(CONTENT_LENGTH).is_none(),
+        "SSE passthrough normalizes downstream framing while preserving upstream length internally",
     );
     let mut body = response.into_body();
     let frame = body
@@ -1413,12 +1408,9 @@ async fn content_length_affinity_gated_sse_finalizes_success_before_final_bytes(
     let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles content-length affinity-gated SSE");
-    assert_eq!(
-        response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok()),
-        Some(body.len().to_string().as_str())
+    assert!(
+        response.headers().get(CONTENT_LENGTH).is_none(),
+        "SSE affinity-gated framing is normalized while the upstream length remains internal",
     );
     let mut downstream = response.into_body();
     let mut received = Vec::with_capacity(body.len());
