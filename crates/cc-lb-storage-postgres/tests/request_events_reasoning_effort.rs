@@ -211,7 +211,7 @@ impl Fixture {
             )))
             .execute(&admin_pool)
             .await?;
-            return Err(error.into());
+            return Err(error);
         }
 
         Ok(Some(Self {

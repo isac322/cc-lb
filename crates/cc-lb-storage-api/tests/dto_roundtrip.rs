@@ -647,6 +647,7 @@ fn batch_b_wire_snapshots_are_stable() {
         }],
         "event_id": "0193f76b-1ab2-7a4d-8a3c-44ab3c5e1f0a",
         "thinking_tokens": 64,
+        "thinking_level": "LOW",
         "service_tier": "priority",
         "upstream_error_type": "overloaded_error",
         "upstream_error_message": "upstream overloaded; retry",
