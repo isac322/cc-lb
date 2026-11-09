@@ -130,6 +130,7 @@ import {
 import { getWindowColor } from '../lib/colors';
 import { fmtChartTooltipTs, formatCount } from '../lib/format';
 import { useTimezone } from '../lib/locale';
+import { isGenerationRequestKind } from '../lib/logRows';
 import {
   classifyOAuthReconnect,
   isTerminalOAuthReconnectReason,
@@ -1298,7 +1299,7 @@ export function DetailView({
 
   const upstreamProvider = providerOf(upstream.kind);
   const generationKinds = requestEventKindsForProvider(upstreamProvider).filter(
-    (kind) => !kind.endsWith('count_tokens'),
+    isGenerationRequestKind,
   );
   const feed = useRequestEventsFeed({
     filters: {

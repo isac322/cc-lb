@@ -88,22 +88,32 @@ export function isMessagesRequestEvent(event: {
   return effectiveRequestEventKind(event) === 'messages';
 }
 
+export const GENERATION_REQUEST_EVENT_KINDS = [
+  'messages',
+  'openai_responses',
+  'gemini_generate_content',
+  'chat_completions',
+  'completions',
+  'audio',
+  'images',
+  'gemini_predict',
+] as const satisfies readonly RequestEventKind[];
+
+const GENERATION_REQUEST_EVENT_KIND_SET = new Set<RequestEventKind>(
+  GENERATION_REQUEST_EVENT_KINDS,
+);
+
+export function isGenerationRequestKind(kind: RequestEventKind): boolean {
+  return GENERATION_REQUEST_EVENT_KIND_SET.has(kind);
+}
+
 /** Whether a row is a user-visible model generation request. */
 export function isGenerationRequestEvent(event: {
   readonly source_kind?: string | null;
   readonly event_kind?: string | null;
 }): boolean {
   const kind = effectiveRequestEventKind(event);
-  return (
-    kind === 'messages' ||
-    kind === 'openai_responses' ||
-    kind === 'gemini_generate_content' ||
-    kind === 'chat_completions' ||
-    kind === 'completions' ||
-    kind === 'audio' ||
-    kind === 'images' ||
-    kind === 'gemini_predict'
-  );
+  return isGenerationRequestKind(kind);
 }
 
 type EventIdentity = {

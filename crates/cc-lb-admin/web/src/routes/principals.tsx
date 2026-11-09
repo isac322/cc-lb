@@ -74,6 +74,7 @@ import {
 } from '../components/ui/Table';
 import { useDesign } from '../designs/registry';
 import { formatCount } from '../lib/format';
+import { isGenerationRequestKind } from '../lib/logRows';
 import { useProviderScope } from '../lib/previewControls';
 import {
   capabilitiesOf,
@@ -130,7 +131,7 @@ const PRINCIPAL_GENERATION_EVENT_KINDS = [
   ...new Set(
     PROVIDER_FAMILIES.flatMap((provider) =>
       requestEventKindsForProvider(provider),
-    ).filter((kind) => !kind.endsWith('count_tokens')),
+    ).filter(isGenerationRequestKind),
   ),
 ] as const;
 type PrincipalFilter = (typeof PRINCIPAL_FILTERS)[number];
