@@ -9343,12 +9343,12 @@ impl Lifecycle {
                 && status.is_success()
                 && parse_sse_events_active
                 && transform_decode_supported
-                && semantic_terminal_event_type(response_affinity_context.capability)
-                    == Some("message_stop")
+                && semantic_terminal_event_type(response_affinity_context.capability).is_some()
                 && !semantic_message_stop_seen
                 && sse_buffer_is_blank(&buffer)
                 && !downstream_drop_guard.has_abnormal_stop()
                 && !stream_provider_error_seen
+                && !stream_provider_error_forwarded
                 && stream_upstream_error.is_none()
                 && stream_transform_error.is_none()
                 && stream_affinity_error.is_none()
@@ -9362,16 +9362,45 @@ impl Lifecycle {
                         source: cc_lb_lifecycle::UsageSource::MessageDelta,
                     });
                 }
+                let incomplete_message = if matches!(
+                    response_affinity_context.capability,
+                    ProviderCapability::OpenaiResponses
+                        | ProviderCapability::OpenaiResponsesCompact
+                ) {
+                    "upstream SSE response ended before a terminal Responses event"
+                } else {
+                    "upstream SSE response ended before message_stop"
+                };
                 stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                     error_type: UPSTREAM_RESPONSE_INCOMPLETE_ERROR_TYPE.to_owned(),
-                    error_message:
-                        "upstream SSE response ended before message_stop".to_owned(),
+                    error_message: incomplete_message.to_owned(),
                     ..Default::default()
                 });
                 downstream_drop_guard.mark_upstream_error(
                     StreamTerminationCause::Unknown,
                     None,
                 );
+                if matches!(
+                    response_affinity_context.capability,
+                    ProviderCapability::OpenaiResponses
+                        | ProviderCapability::OpenaiResponsesCompact
+                ) {
+                    if let Some(o) = observer.as_ref() {
+                        o.set_upstream_error(status, UpstreamErrorCode::StreamError);
+                    }
+                    let frame = make_stream_error_frame(
+                        response_affinity_context.capability,
+                        &responses_error_context,
+                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                        incomplete_message,
+                        false,
+                    );
+                    batch_index = batch_index.saturating_add(1);
+                    for chunk in std::mem::take(&mut deferred_terminal_chunks) {
+                        yield Ok::<Bytes, Infallible>(chunk);
+                    }
+                    yield Ok::<Bytes, Infallible>(frame);
+                }
             }
             if stream_affinity_error.is_none()
                 && stream_upstream_error.is_none()

@@ -23,3 +23,22 @@ The `pi` install pins `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, 
 | `agy` | `agy` | `1.4.4` | Google Gemini (`streamGenerateContent` SSE) | `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite-preview` | `./tests/real-client/run-provider-e2e.sh --run --case agy` |
 
 Run `./tests/real-client/run-provider-e2e.sh --self-test` for offline unit and OTLP receiver lifecycle verification, or `./tests/real-client/run-provider-e2e.sh --preflight --case all` to check binary and credential readiness without making provider calls.
+
+## Offline local-error and clean-EOF SDK contract
+
+`provider-e2e/local-error-contract.py` uses separately installed Python packages;
+it does not install dependencies or change the live campaign's `contract.json`.
+The documented setup pins `openai==3.46.0`, `google-genai==3.0.0`, and
+`httpx2==2.16.0`. Actual loaded versions appear in each run's `report.json`.
+Optional `--openai-js-module /scratch/node_modules/openai/index.mjs` coverage
+requires exactly `openai@7.53.0` in caller-owned scratch plus Node.js with native
+`fetch`; no repository dependency is added.
+
+The captured `responses-fault.sse` and `responses-clean-eof.sse` fixtures replay
+through official Codex revision `4e4767ffa763ec0d0a19e04cf8ff0163a987297b`
+(`codex-api::sse::responses::process_sse`). Its test adapter also accepts the
+optional `responses-clean-eof-js.sse` capture. `prepare.py` exports that committed
+source and prints a separate Cargo replay command; preparation alone does not
+execute it. These are runnable version requirements, not a claim that an SDK
+request or parser replay has passed. See `provider-e2e/README.md` for baseline
+and fixed-binary commands.
