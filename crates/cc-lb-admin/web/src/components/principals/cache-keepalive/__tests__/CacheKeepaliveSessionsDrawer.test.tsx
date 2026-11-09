@@ -693,6 +693,13 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         reason: 'ambiguous turn',
         display_reason: null,
       },
+      {
+        ...cacheKeepaliveApiRows[0]!,
+        id: 'custom-dotted-tool',
+        reason: 'max renewals reached',
+        display_reason:
+          'agent-in-turn (tool_use: `mcp.server/search docs`) — first renewal in 4m 7s',
+      },
     ];
     vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
       data: {
@@ -740,6 +747,9 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(groupHeaders.some((text) => text.includes('Ambiguous turn'))).toBe(
       true,
     );
+    expect(
+      groupHeaders.some((text) => text.includes('mcp.server/search docs')),
+    ).toBe(true);
     expect(groupHeaders.some((text) => text.includes('Other'))).toBe(false);
   });
 

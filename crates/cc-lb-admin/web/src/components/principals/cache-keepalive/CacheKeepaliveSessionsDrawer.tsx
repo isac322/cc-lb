@@ -64,7 +64,9 @@ const TRACKED_STATUS_KEYS = new Set<TrackedStatus>(
 
 function extractTriggerLabel(row: CacheKeepaliveRow): string {
   const sourceText = `${row.display_reason ?? ''} ${row.reason}`;
-  const toolMatch = sourceText.match(/tool_use:\s*`?([A-Za-z0-9_:-]+)`?/i);
+  const backtickToolMatch = sourceText.match(/tool_use:\s*`([^`]+)`/i);
+  if (backtickToolMatch?.[1]) return backtickToolMatch[1];
+  const toolMatch = sourceText.match(/tool_use:\s*([A-Za-z0-9_.:/-]+)/i);
   if (toolMatch?.[1]) return toolMatch[1];
   const stopMatch = sourceText.match(/stop_reason=([A-Za-z0-9_:-]+)/i);
   if (stopMatch?.[1]) return `stop_reason=${stopMatch[1]}`;
