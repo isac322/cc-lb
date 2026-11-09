@@ -1961,8 +1961,8 @@ export function ProviderOverviewPage({
 
   return (
     <PageContainer>
-      <OAuthReconnectSummary />
-      <UpstreamApplyFailureSummary />
+      <OAuthReconnectSummary provider={scopedProvider} />
+      <UpstreamApplyFailureSummary provider={scopedProvider} />
 
       {/* The checklist is the whole first-run state: it says what fills in
       once traffic flows, so nothing else renders until it lifts. */}

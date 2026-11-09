@@ -44,6 +44,7 @@ import {
   RequestEventKindSchema,
 } from '../lib/api';
 import {
+  GENERATION_REQUEST_EVENT_KINDS,
   LOG_STATUS_FILTER_VALUES,
   REQUEST_EVENT_KIND_LABELS,
   REQUEST_EVENT_KINDS,
@@ -89,7 +90,7 @@ type EffectiveEventKind =
   | typeof ALL_EVENT_KINDS
   | 'generation';
 /** The kind Logs lists when the URL names none: model traffic, `/v1/messages`. */
-export const DEFAULT_EVENT_KIND: RequestEventKind = 'messages';
+export const DEFAULT_EVENT_KIND = 'generation' as const;
 
 /**
  * The kind the list is filtered to: the URL's kind, the default kind when the
@@ -150,16 +151,22 @@ export const Route = createFileRoute('/logs')({
 export function buildHistoricalFilters(
   filters: z.infer<typeof logsSearchSchema>,
 ) {
+  const eventKind = effectiveEventKind(filters.event_kind);
   return buildRequestEventsHistoryFilters({
     ...filters,
-    event_kind: effectiveEventKind(filters.event_kind),
+    event_kind: eventKind === 'generation' ? undefined : eventKind,
+    event_kind_set:
+      eventKind === 'generation' ? GENERATION_REQUEST_EVENT_KINDS : undefined,
   });
 }
 
 export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
+  const eventKind = effectiveEventKind(filters.event_kind);
   return buildRequestEventsLiveFilters({
     ...filters,
-    event_kind: effectiveEventKind(filters.event_kind),
+    event_kind: eventKind === 'generation' ? undefined : eventKind,
+    event_kind_set:
+      eventKind === 'generation' ? GENERATION_REQUEST_EVENT_KINDS : undefined,
   });
 }
 
@@ -227,6 +234,7 @@ function LogsPage() {
   const { LogsScopeBar } = useDesign();
   const filters = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
+  const { session: sessionFilter } = filters;
   const upstreams = useUpstreams();
   const providerByUpstream = useMemo(
     () =>
@@ -238,10 +246,17 @@ function LogsPage() {
       ),
     [upstreams.data],
   );
-  const { session: sessionFilter } = filters;
   const eventKindFilter = effectiveEventKind(filters.event_kind);
   const feedFilters = useMemo(
-    () => ({ ...filters, event_kind: eventKindFilter }),
+    () => ({
+      ...filters,
+      event_kind:
+        eventKindFilter === 'generation' ? undefined : eventKindFilter,
+      event_kind_set:
+        eventKindFilter === 'generation'
+          ? GENERATION_REQUEST_EVENT_KINDS
+          : undefined,
+    }),
     [eventKindFilter, filters],
   );
   const [userRequestedTailing, setUserRequestedTailing] = useState(true);

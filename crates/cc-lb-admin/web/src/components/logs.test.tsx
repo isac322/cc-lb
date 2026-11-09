@@ -665,7 +665,10 @@ describe('LogsPage', () => {
       expect(rowIds(table)).toEqual(expectedRows(mockEvents.slice(49, 99))),
     );
     expect(queryMocks.fetchRecentEventsPage).toHaveBeenLastCalledWith(
-      { event_kind: 'messages' },
+      {
+        event_kind:
+          'messages,openai_responses,gemini_generate_content,chat_completions,completions,audio,images,gemini_predict',
+      },
       {
         kind: 'cursor',
         limit: 50,

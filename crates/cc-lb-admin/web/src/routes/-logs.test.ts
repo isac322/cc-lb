@@ -165,9 +165,13 @@ describe('buildHistoricalFilters', () => {
     expect(buildLiveFilters(filters)).not.toHaveProperty('session');
   });
 
-  it('lists messages when the URL names no kind and every kind for all', () => {
-    expect(buildHistoricalFilters({})).toEqual({ event_kind: 'messages' });
-    expect(buildLiveFilters({})).toEqual({ event_kind: 'messages' });
+  it('lists generation requests when the URL names no kind and every kind for all', () => {
+    const generationKinds =
+      'messages,openai_responses,gemini_generate_content,chat_completions,completions,audio,images,gemini_predict';
+    expect(buildHistoricalFilters({})).toEqual({
+      event_kind: generationKinds,
+    });
+    expect(buildLiveFilters({})).toEqual({ event_kind: generationKinds });
     expect(buildHistoricalFilters({ event_kind: 'all' })).toEqual({
       source_kind: 'all',
     });
