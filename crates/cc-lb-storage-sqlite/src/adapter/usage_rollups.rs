@@ -531,7 +531,7 @@ async fn reconcile_gemini_model_identity(
     .fetch_optional(storage.pool())
     .await
     .map_err(map_sqlx_error)?;
-    let Some((status, event_upper_bound, rollup_upper_bound)) = state else {
+    let Some((status, _, _)) = state else {
         return Ok(None);
     };
     if status == "complete" {
@@ -591,7 +591,7 @@ async fn reconcile_gemini_model_identity(
             "UPDATE usage_rollup_reconciliations_v1 \
              SET event_upper_bound = ?, rollup_upper_bound = ?, \
                  status = CASE WHEN ? <> 0 THEN 'rewriting' \
-                               WHEN ? <> 0 THEN 'pending' ELSE 'rewriting_nested' END \
+                               WHEN ? <> 0 THEN 'rewriting' ELSE 'rewriting_nested' END \
              WHERE id = ?",
         )
         .bind(event_upper_bound)
