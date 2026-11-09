@@ -1,6 +1,7 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 import { ApiError } from '../../../lib/api';
+import type { CacheKeepaliveGap } from '../../../lib/cacheKeepaliveApi';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
 import { Badge, Button, cx, Skeleton } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
@@ -173,6 +174,275 @@ function SessionDetailSkeleton({ onClose }: Pick<Props, 'onClose'>) {
     </SessionDetailFrame>
   );
 }
+function railTime(ms: number): string {
+  const date = new Date(ms);
+  return [date.getHours(), date.getMinutes(), date.getSeconds()]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':');
+}
+
+function deltaLabel(sec: number): string {
+  const value = Math.max(0, Math.round(sec));
+  if (value < 60) return `+${value}s`;
+  const minutes = Math.floor(value / 60);
+  const seconds = value % 60;
+  return seconds === 0
+    ? `+${minutes}m`
+    : `+${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+function compactTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
+  return String(tokens);
+}
+
+interface RailPoint {
+  id: string;
+  pct: number;
+  kind: 'start' | 'pulse' | 'end_hit' | 'end_waiting' | 'end_miss';
+  title: string;
+  badge: string;
+  timestamp: string;
+  sinceRequest: string;
+  sinceRenewal: string;
+}
+
+function buildRailPoints(
+  gap: CacheKeepaliveGap,
+  maxAttempts: number,
+): RailPoint[] {
+  const maxSec = Math.max(gap.total_duration_sec, 300);
+  const points: RailPoint[] = [
+    {
+      id: 'start',
+      pct: 0,
+      kind: 'start',
+      title: 'Message paused',
+      badge: `${compactTokens(gap.cached_tokens)} cached`,
+      timestamp: railTime(gap.pause_at_ms),
+      sinceRequest: '0s (paused)',
+      sinceRenewal: '— (before renewal)',
+    },
+  ];
+  for (const [index, pulse] of gap.pulses.entries()) {
+    const previous = gap.pulses[index - 1];
+    points.push({
+      id: `pulse-${pulse.pulse_number}`,
+      pct: Math.min(93, Math.max(7, (pulse.offset_sec / maxSec) * 100)),
+      kind: 'pulse',
+      title: `Renewal #${pulse.pulse_number}`,
+      badge:
+        pulse.spent_usd === null
+          ? '−$—'
+          : `−$${pulse.spent_usd.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`,
+      timestamp: railTime(pulse.time_ms),
+      sinceRequest: deltaLabel(pulse.offset_sec),
+      sinceRenewal: previous
+        ? `${deltaLabel(pulse.offset_sec - previous.offset_sec)} (after #${previous.pulse_number})`
+        : '— (first renewal)',
+    });
+  }
+  const lastPulse = gap.pulses[gap.pulses.length - 1];
+  const sinceLastRenewal = lastPulse
+    ? `${deltaLabel(gap.total_duration_sec - lastPulse.offset_sec)} (after #${lastPulse.pulse_number})`
+    : '— (no renewals)';
+  const kind =
+    gap.ending_kind === 'followup_hit'
+      ? 'end_hit'
+      : gap.ending_kind === 'scheduled_waiting'
+        ? 'end_waiting'
+        : 'end_miss';
+  const title =
+    gap.ending_kind === 'followup_hit'
+      ? 'Next message (cache hit)'
+      : gap.ending_kind === 'scheduled_waiting'
+        ? 'Waiting for next message'
+        : gap.ending_kind === 'capped_no_followup'
+          ? gap.pulses.length >= maxAttempts && maxAttempts > 0
+            ? `No follow-up (${gap.pulses.length}/${maxAttempts} cap)`
+            : 'No follow-up (capped)'
+          : 'No follow-up (TTL expired)';
+  const net = gap.net_pnl_usd;
+  points.push({
+    id: 'end',
+    pct: 100,
+    kind,
+    title,
+    badge:
+      gap.ending_kind === 'scheduled_waiting'
+        ? deltaLabel(gap.total_duration_sec)
+        : net === null
+          ? '$—'
+          : `${net >= 0 ? '+' : '−'}$${Math.abs(net).toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`,
+    timestamp: railTime(gap.ending_at_ms),
+    sinceRequest: deltaLabel(gap.total_duration_sec),
+    sinceRenewal: sinceLastRenewal,
+  });
+  return points;
+}
+
+function RailTooltip({ point, below }: { point: RailPoint; below: boolean }) {
+  return (
+    <div
+      role="tooltip"
+      className={cx(
+        'pointer-events-none absolute z-30 w-72 rounded-sm border border-subtle-strong bg-panel p-2.5 shadow-overlay tabular-nums',
+        below ? 'top-full mt-2' : 'bottom-full mb-2',
+        point.pct <= 20
+          ? 'left-0'
+          : point.pct >= 80
+            ? 'right-0'
+            : 'left-1/2 -translate-x-1/2',
+      )}
+      style={
+        point.pct > 20 && point.pct < 80 ? { left: `${point.pct}%` } : undefined
+      }
+    >
+      <div className="flex items-baseline justify-between gap-2 border-b border-row pb-1.5 text-caption">
+        <span className="font-medium text-text">{point.title}</span>
+        <span className="font-mono text-data text-text-muted">
+          {point.badge}
+        </span>
+      </div>
+      <dl className="mt-1.5 space-y-1 text-caption">
+        <div className="flex items-baseline justify-between gap-2">
+          <dt className="text-text-faint">Timestamp</dt>
+          <dd className="font-mono text-data text-text">{point.timestamp}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-2">
+          <dt className="text-text-faint">Since last request</dt>
+          <dd className="font-mono text-data text-text">
+            {point.sinceRequest}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-2">
+          <dt className="text-text-faint">Since last renewal</dt>
+          <dd className="font-mono text-data text-text">
+            {point.sinceRenewal}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function TimeRailGap({
+  gap,
+  maxAttempts,
+  placeTooltipBelow,
+}: {
+  gap: CacheKeepaliveGap;
+  maxAttempts: number;
+  placeTooltipBelow: boolean;
+}) {
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const points = buildRailPoints(gap, maxAttempts);
+  const activePoint = points.find((point) => point.id === activeId);
+  const net = gap.net_pnl_usd;
+  const netText =
+    net === null
+      ? '—'
+      : Math.abs(net) < 0.00005
+        ? '$0'
+        : `${net > 0 ? '+' : '−'}$${Math.abs(net).toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`;
+  const netTone =
+    net === null
+      ? 'text-text-muted'
+      : net > 0
+        ? 'text-success-text'
+        : net < 0
+          ? 'text-warn-text'
+          : 'text-text-muted';
+  return (
+    <div className="space-y-2 rounded-sm bg-overlay-2 px-3.5 py-3 tabular-nums">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 text-body-sm">
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono text-data text-text-muted">
+            {railTime(gap.pause_at_ms)}
+          </span>
+          <span className="font-medium text-text">Paused</span>
+          <span className="text-caption text-text-faint">
+            ({compactTokens(gap.cached_tokens)})
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {gap.ending_kind === 'followup_hit' ? (
+            <>
+              <span className="text-caption text-text-muted">
+                Next msg {railTime(gap.ending_at_ms)} (
+                {deltaLabel(gap.total_duration_sec)})
+              </span>
+              <span className={cx('font-mono text-data font-medium', netTone)}>
+                {netText}
+              </span>
+            </>
+          ) : gap.ending_kind === 'scheduled_waiting' ? (
+            <span className="text-caption text-text-muted">
+              Waiting · {deltaLabel(gap.total_duration_sec)}
+            </span>
+          ) : (
+            <>
+              <span className="text-caption text-text-faint">
+                No follow-up ({railTime(gap.ending_at_ms)})
+              </span>
+              <span className={cx('font-mono text-data font-medium', netTone)}>
+                {netText}
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+      <div className="relative flex h-6 items-center">
+        {activePoint ? (
+          <RailTooltip point={activePoint} below={placeTooltipBelow} />
+        ) : null}
+        <div className="h-1.5 w-full rounded-full bg-overlay-4" />
+        {points.map((point) => (
+          <button
+            key={point.id}
+            type="button"
+            data-rail-point={point.id}
+            aria-label={`${point.title}: Timestamp ${point.timestamp}, Since last request ${point.sinceRequest}, Since last renewal ${point.sinceRenewal}`}
+            style={{ left: `${point.pct}%` }}
+            onMouseEnter={() => setActiveId(point.id)}
+            onMouseLeave={() =>
+              setActiveId((current) => (current === point.id ? null : current))
+            }
+            onFocus={() => setActiveId(point.id)}
+            onBlur={() =>
+              setActiveId((current) => (current === point.id ? null : current))
+            }
+            className="group absolute flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            <span
+              className={cx(
+                point.kind === 'pulse'
+                  ? 'h-3.5 w-1.5 rounded-xs bg-accent'
+                  : 'h-3 w-3 rounded-full border-2',
+                point.kind === 'start'
+                  ? 'border-subtle-strong bg-panel'
+                  : point.kind === 'end_hit'
+                    ? 'border-success-text bg-success-text'
+                    : point.kind === 'end_waiting'
+                      ? 'border-accent bg-accent'
+                      : 'border-subtle-strong bg-bg',
+              )}
+            />
+          </button>
+        ))}
+      </div>
+      <div className="flex items-center justify-between text-caption text-text-faint">
+        <span>0s (pause)</span>
+        <span>
+          {gap.pulses.length} renewal{gap.pulses.length === 1 ? '' : 's'} · −$
+          {gap.spent_usd.toFixed(4)}
+        </span>
+        <span>{deltaLabel(gap.total_duration_sec)}</span>
+      </div>
+    </div>
+  );
+}
 
 export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const query = useCacheKeepaliveSessionDetail(principalId, sessionId);
@@ -277,6 +547,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
     expired: 'Expired',
     not_tracked: 'Not tracked',
   };
+  const railGaps = session.gaps ?? [];
 
   return (
     <SessionDetailFrame onClose={onClose} testId="session-detail-content">
@@ -302,6 +573,21 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
           </span>
         </div>
       )}
+      {railGaps.length > 0 ? (
+        <section
+          className="mt-3 space-y-2.5"
+          data-testid="session-detail-time-rail"
+        >
+          {railGaps.map((gap, index) => (
+            <TimeRailGap
+              key={gap.cycle_id ?? `${gap.pause_at_ms}-${index}`}
+              gap={gap}
+              maxAttempts={session.max_attempts}
+              placeTooltipBelow={index === 0}
+            />
+          ))}
+        </section>
+      ) : null}
 
       {/* Overview: readout, state and metadata on the pane ground. */}
       <div className="flex flex-col gap-3">

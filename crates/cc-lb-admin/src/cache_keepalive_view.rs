@@ -1,10 +1,13 @@
 pub mod economics;
 pub mod status;
 
+use std::collections::HashMap;
+
 use cc_lb_pricing::PriceCatalog;
 use cc_lb_storage_api::{
     CacheKeepaliveConfigSnapshot, CacheKeepaliveEvidenceRecord, CacheKeepaliveSessionEntrySource,
-    CacheKeepaliveSessionListItem, CacheKeepaliveSessionRecord, CacheKeepaliveTurnRecord, CacheTtl,
+    CacheKeepaliveSessionListItem, CacheKeepaliveSessionRecord, CacheKeepaliveTerminalReason,
+    CacheKeepaliveTurnRecord, CacheTtl,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -56,6 +59,7 @@ pub struct CacheKeepaliveActivityView {
     pub pnl: Option<CacheKeepaliveSessionPnl>,
     pub net_pnl_display: String,
     pub total_renewals: u32,
+    pub retained_renewals: u32,
     pub is_last_pending: bool,
     pub is_active: bool,
     pub total_spent_micros: i64,
@@ -63,6 +67,7 @@ pub struct CacheKeepaliveActivityView {
     pub evidence_status: String,
     pub unknown_cycles: u64,
     pub turns: Vec<CacheKeepaliveActivityTurn>,
+    pub gaps: Vec<CacheKeepaliveIdleGap>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CacheKeepaliveActivityTurn {
@@ -76,6 +81,31 @@ pub struct CacheKeepaliveActivityTurn {
     pub action: &'static str,
     pub pnl: Option<CacheKeepaliveTurnPnl>,
     pub pnl_display: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheKeepaliveIdleGap {
+    pub cycle_id: Option<Uuid>,
+    pub pause_at_ms: u64,
+    pub cached_tokens: u64,
+    pub pulses: Vec<CacheKeepaliveIdlePulse>,
+    pub ending_kind: &'static str,
+    pub ending_at_ms: u64,
+    pub total_duration_sec: u64,
+    pub since_last_renewal_sec: Option<u64>,
+    pub spent_micros: i64,
+    pub avoided_micros: Option<i64>,
+    pub net_pnl_micros: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheKeepaliveIdlePulse {
+    pub pulse_number: u32,
+    pub time_ms: u64,
+    pub offset_sec: u64,
+    pub since_prev_renewal_sec: Option<u64>,
+    pub spent_micros: Option<i64>,
+    pub hit: bool,
 }
 
 pub fn derive_activity_view(
@@ -201,6 +231,7 @@ pub fn derive_activity_view(
             source.now_ms,
         )
     });
+    let gaps = idle_gaps(&source, &retained_turns, cycle_id, is_active);
     CacheKeepaliveActivityView {
         id: source.item.id.clone(),
         source: source.item.source,
@@ -224,6 +255,9 @@ pub fn derive_activity_view(
         total_renewals: turns
             .iter()
             .fold(0_u32, |total, turn| total.saturating_add(turn.renewals)),
+        retained_renewals: retained_turns
+            .iter()
+            .fold(0_u32, |total, turn| total.saturating_add(turn.renewals)),
         is_last_pending: turns.first().is_some_and(|turn| turn.pending),
         is_active,
         total_spent_micros,
@@ -231,7 +265,194 @@ pub fn derive_activity_view(
         evidence_status,
         unknown_cycles,
         turns,
+        gaps,
     }
+}
+
+fn lead_window_ms(ttl: CacheTtl, config: Option<&CacheKeepaliveConfigSnapshot>) -> u64 {
+    let lead_secs = match ttl {
+        CacheTtl::Ttl5m | CacheTtl::Ttl30m => {
+            config.map_or(30, |config| config.refresh_lead_time_5m_secs)
+        }
+        CacheTtl::Ttl1h | CacheTtl::Ttl12h => {
+            config.map_or(300, |config| config.refresh_lead_time_1h_secs)
+        }
+    };
+    ttl.as_secs()
+        .saturating_sub(u64::from(lead_secs))
+        .saturating_mul(1_000)
+}
+
+fn pulse_time_ms(
+    turn: &CacheKeepaliveTurnRecord,
+    evidence: &[CacheKeepaliveEvidenceRecord],
+) -> u64 {
+    renewal_evidence_for_turn(turn, evidence).map_or_else(
+        || turn.ts.saturating_mul(1_000),
+        |renewal| renewal.request_start_ms,
+    )
+}
+
+fn idle_gaps(
+    source: &CacheKeepaliveActivitySource<'_>,
+    retained_turns: &[CacheKeepaliveActivityTurn],
+    current_cycle_id: Option<Uuid>,
+    is_active: bool,
+) -> Vec<CacheKeepaliveIdleGap> {
+    let mut ordered_turns = source.turns.iter().enumerate().collect::<Vec<_>>();
+    ordered_turns.sort_by(|(_, left), (_, right)| {
+        pulse_time_ms(left, source.evidence)
+            .cmp(&pulse_time_ms(right, source.evidence))
+            .then_with(|| left.ts.cmp(&right.ts))
+            .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
+    });
+    let mut cycle_indices = HashMap::new();
+    let mut cycles: Vec<(Option<Uuid>, Vec<usize>)> = Vec::new();
+    for (index, turn) in ordered_turns {
+        let cycle_id = turn.cycle_id.or_else(|| {
+            renewal_evidence_for_turn(turn, source.evidence).and_then(|renewal| renewal.cycle_id)
+        });
+        let cycle_index = *cycle_indices.entry(cycle_id).or_insert_with(|| {
+            cycles.push((cycle_id, Vec::new()));
+            cycles.len() - 1
+        });
+        cycles[cycle_index].1.push(index);
+    }
+    let config = source.item.config_snapshot.as_ref();
+    let max_attempts = config.map_or(12, |config| config.max_refreshes_per_session);
+    let has_current_cycle = cycle_indices.contains_key(&current_cycle_id);
+    let mut gaps = Vec::with_capacity(cycles.len() + usize::from(is_active && !has_current_cycle));
+    for (cycle_id, indices) in cycles {
+        let first_turn = &source.turns[indices[0]];
+        let first_evidence = renewal_evidence_for_turn(first_turn, source.evidence);
+        let ttl = first_evidence.map_or(source.item.ttl, |renewal| renewal.ttl);
+        let first_pulse_ms = first_evidence.map_or_else(
+            || first_turn.ts.saturating_mul(1_000),
+            |renewal| renewal.request_start_ms,
+        );
+        let pause_at_ms = first_pulse_ms.saturating_sub(lead_window_ms(ttl, config));
+        let mut previous_time_ms = None;
+        let pulses = indices
+            .iter()
+            .enumerate()
+            .map(|(index, &turn_index)| {
+                let turn = &source.turns[turn_index];
+                let time_ms = renewal_evidence_for_turn(turn, source.evidence).map_or_else(
+                    || turn.ts.saturating_mul(1_000),
+                    |renewal| renewal.request_start_ms,
+                );
+                let since_prev_renewal_sec =
+                    previous_time_ms.map(|previous| time_ms.saturating_sub(previous) / 1_000);
+                previous_time_ms = Some(time_ms);
+                CacheKeepaliveIdlePulse {
+                    pulse_number: u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX),
+                    time_ms,
+                    offset_sec: time_ms.saturating_sub(pause_at_ms) / 1_000,
+                    since_prev_renewal_sec,
+                    spent_micros: turn.cost_micros,
+                    hit: turn.hit_miss.eq_ignore_ascii_case("hit"),
+                }
+            })
+            .collect::<Vec<_>>();
+        let last_pulse_ms = previous_time_ms.unwrap_or(first_pulse_ms);
+        let follow_up = source
+            .evidence
+            .iter()
+            .filter(|candidate| candidate.evidence_kind == "follow_up")
+            .filter(|follow_up| {
+                source.evidence.iter().any(|renewal| {
+                    renewal.evidence_kind == "renewal"
+                        && renewal.cycle_id == cycle_id
+                        && renewal.principal_id == first_turn.principal_id
+                        && renewal.upstream_id == first_turn.upstream_id
+                        && renewal.model == first_turn.model
+                        && follow_up_matches(renewal, follow_up)
+                })
+            })
+            .min_by_key(|follow_up| (follow_up.request_start_ms, &follow_up.evidence_id));
+        let (ending_kind, ending_at_ms) = if let Some(follow_up) = follow_up {
+            ("followup_hit", follow_up.request_start_ms)
+        } else if is_active && cycle_id == current_cycle_id {
+            (
+                "scheduled_waiting",
+                source
+                    .session
+                    .map_or(last_pulse_ms, |session| {
+                        session.run_at_unix_secs.saturating_mul(1_000)
+                    })
+                    .max(last_pulse_ms),
+            )
+        } else if u32::try_from(pulses.len()).unwrap_or(u32::MAX) >= max_attempts
+            || matches!(
+                source.item.terminal_reason,
+                Some(
+                    CacheKeepaliveTerminalReason::MaxRefreshes
+                        | CacheKeepaliveTerminalReason::MaxDuration
+                )
+            )
+        {
+            ("capped_no_followup", last_pulse_ms)
+        } else {
+            ("ttl_expired_no_followup", last_pulse_ms)
+        };
+        let spent_micros = indices
+            .iter()
+            .filter_map(|&index| source.turns[index].cost_micros)
+            .fold(0_i64, i64::saturating_add);
+        let avoided_micros = indices.iter().try_fold(0_i64, |total, &index| {
+            let renewal = renewal_evidence_for_turn(&source.turns[index], source.evidence)?;
+            if !renewal_evidence_known(renewal) {
+                return None;
+            }
+            let pnl = retained_turns[index].pnl?;
+            Some(total.saturating_add(pnl.avoided_micros))
+        });
+        gaps.push(CacheKeepaliveIdleGap {
+            cycle_id,
+            pause_at_ms,
+            cached_tokens: indices
+                .iter()
+                .map(|&index| source.turns[index].cache_read_input_tokens)
+                .max()
+                .unwrap_or(0),
+            pulses,
+            ending_kind,
+            ending_at_ms,
+            total_duration_sec: ending_at_ms.saturating_sub(pause_at_ms) / 1_000,
+            since_last_renewal_sec: Some(ending_at_ms.saturating_sub(last_pulse_ms) / 1_000),
+            spent_micros,
+            avoided_micros,
+            net_pnl_micros: avoided_micros.map(|avoided| avoided.saturating_sub(spent_micros)),
+        });
+    }
+    if is_active && !has_current_cycle {
+        let pause_at_ms = source
+            .session
+            .map_or(source.item.last_message_at_ms, |session| {
+                session.cache_anchor_at_unix_secs.saturating_mul(1_000)
+            });
+        let ending_at_ms = source
+            .session
+            .map_or_else(
+                || pause_at_ms.saturating_add(lead_window_ms(source.item.ttl, config)),
+                |session| session.run_at_unix_secs.saturating_mul(1_000),
+            )
+            .max(pause_at_ms);
+        gaps.push(CacheKeepaliveIdleGap {
+            cycle_id: current_cycle_id,
+            pause_at_ms,
+            cached_tokens: 0,
+            pulses: Vec::new(),
+            ending_kind: "scheduled_waiting",
+            ending_at_ms,
+            total_duration_sec: ending_at_ms.saturating_sub(pause_at_ms) / 1_000,
+            since_last_renewal_sec: None,
+            spent_micros: 0,
+            avoided_micros: None,
+            net_pnl_micros: None,
+        });
+    }
+    gaps
 }
 
 fn evidence_status(
