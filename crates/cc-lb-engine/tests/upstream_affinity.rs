@@ -160,6 +160,9 @@ pub(crate) struct MemoryAffinityStore {
 }
 
 impl MemoryAffinityStore {
+    pub(crate) fn fail_bind(&self, message: &str) {
+        *self.bind_failure.lock().expect("bind failure lock") = Some(message.to_owned());
+    }
     fn insert(&self, key: UpstreamAffinityKey, upstream_id: Uuid) {
         self.insert_binding(UpstreamAffinityBinding {
             key,

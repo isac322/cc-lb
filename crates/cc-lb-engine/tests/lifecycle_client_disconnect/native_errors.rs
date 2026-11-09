@@ -9,6 +9,56 @@ use std::io::Write as _;
 const OUTPUT: &[u8] = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"partial\"}\n\n";
 const CREATED: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_proxy_test\",\"object\":\"response\",\"status\":\"in_progress\"}}\n\n";
 
+struct ContentLengthSseDispatch {
+    body: Bytes,
+}
+
+#[async_trait]
+impl cc_lb_engine::UpstreamDispatch for ContentLengthSseDispatch {
+    async fn dispatch(
+        &self,
+        _request: cc_lb_upstream::SignedRequest,
+    ) -> Result<http::Response<Body>, cc_lb_engine::DispatchError> {
+        let mut response = http::Response::new(Body::from(self.body.clone()));
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        response.headers_mut().insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_str(&self.body.len().to_string())
+                .expect("content length header"),
+        );
+        Ok(response)
+    }
+}
+
+fn content_length_lifecycle(body: Bytes, bus: &TestLifecycleBus) -> Lifecycle {
+    let authn = TestAuthn::new(TestState::default());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![UpstreamRecord {
+            id: uuid::Uuid::from_u128(1),
+            name: "test-upstream".to_owned(),
+            kind: StorageUpstreamKind::OpenaiApiKey,
+            base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            revision: 1,
+            ..UpstreamRecord::default()
+        }])
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(ContentLengthSseDispatch { body }),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .with_event_bus(bus.bus_arc())
+}
+
 fn responses_request() -> http::Request<Bytes> {
     native_request(cc_lb_domain::Provider::Openai, true)
 }
@@ -317,6 +367,291 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
     );
     assert!(rows[0].body_bytes.is_some());
     assert!(rows[0].body_chunk_count.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_provider_failed_before_malformed_complete_keeps_provider_terminal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let provider_failure = br#"event: response.failed
+data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy_test","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"provider rate limit"}}}
+
+"#;
+    let malformed_complete = b"event: response.completed\ndata: {invalid-json}\n\n";
+    let mut expected = CREATED.to_vec();
+    expected.extend_from_slice(OUTPUT);
+    expected.extend_from_slice(provider_failure);
+    let mut upstream_body = expected.clone();
+    upstream_body.extend_from_slice(malformed_complete);
+
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = bus.bus.subscribe();
+    let lifecycle = lifecycle_with_upstream_kind(
+        sse_dispatch(StatusCode::OK, Body::from(upstream_body.clone())),
+        &bus,
+        StorageUpstreamKind::OpenaiApiKey,
+    )
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
+    ));
+    let request = responses_request();
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+
+    assert_eq!(
+        body.as_ref(),
+        expected.as_slice(),
+        "malformed post-terminal event must not replace or append a local failure",
+    );
+    let failure = assert_responses_failed(&body, Some("resp_proxy_test"), 7);
+    assert_eq!(failure["type"], "response.failed");
+    assert_eq!(failure["response"]["error"]["code"], "rate_limit_exceeded");
+    assert_eq!(
+        failure["response"]["error"]["message"],
+        "provider rate limit"
+    );
+    let events_json = sse_json_events(&body);
+    assert_eq!(
+        events_json
+            .iter()
+            .filter(|(name, _)| name == "response.failed")
+            .count(),
+        1,
+    );
+    assert!(
+        events_json.iter().all(|(_, value)| {
+            value["error"]["type"] != "api_error"
+                && value["response"]["error"]["code"] != "api_error"
+        }),
+        "provider terminal must not gain a synthetic api_error: {events_json:?}",
+    );
+    assert_one_final(&mut updates).await;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some("provider rate limit"),
+    );
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("rate_limit_exceeded"),
+    );
+    assert!(rows[0].body_bytes.is_some());
+    assert!(rows[0].body_chunk_count.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_provider_failed_before_malformed_complete_with_content_length_keeps_terminal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let provider_failure = br#"event: response.failed
+data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy_test","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"provider rate limit"}}}
+
+"#;
+    let malformed_complete = b"event: response.completed\ndata: {invalid-json}\n\n";
+    let mut expected = CREATED.to_vec();
+    expected.extend_from_slice(OUTPUT);
+    expected.extend_from_slice(provider_failure);
+    let mut upstream_body = expected.clone();
+    upstream_body.extend_from_slice(malformed_complete);
+
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = bus.bus.subscribe();
+    let lifecycle = content_length_lifecycle(Bytes::from(upstream_body), &bus)
+        .with_upstream_affinity_store(Arc::new(
+            crate::upstream_affinity::MemoryAffinityStore::default(),
+        ));
+    let request = responses_request();
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+
+    assert_eq!(body.as_ref(), expected.as_slice());
+    let failure = assert_responses_failed(&body, Some("resp_proxy_test"), 7);
+    assert_eq!(failure["type"], "response.failed");
+    assert_eq!(failure["response"]["error"]["code"], "rate_limit_exceeded");
+    assert_eq!(
+        failure["response"]["error"]["message"],
+        "provider rate limit"
+    );
+    let events_json = sse_json_events(&body);
+    assert_eq!(
+        events_json
+            .iter()
+            .filter(|(name, _)| name == "response.failed")
+            .count(),
+        1,
+    );
+    assert!(events_json.iter().all(|(_, value)| {
+        value["error"]["type"] != "api_error" && value["response"]["error"]["code"] != "api_error"
+    }));
+    assert_one_final(&mut updates).await;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some("provider rate limit")
+    );
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("rate_limit_exceeded")
+    );
+    assert!(rows[0].body_bytes.is_some());
+    assert!(rows[0].body_chunk_count.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_provider_failed_before_later_gzip_push_failure_keeps_provider_terminal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let provider_failure = br#"event: response.failed
+data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy_test","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"provider rate limit"}}}
+
+"#;
+    let mut plaintext = CREATED.to_vec();
+    plaintext.extend_from_slice(OUTPUT);
+    plaintext.extend_from_slice(provider_failure);
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&plaintext)?;
+    let compressed = encoder.finish()?;
+    let split = compressed.len().saturating_sub(8);
+    let first = Bytes::copy_from_slice(&compressed[..split]);
+    let mut corrupt_trailer = compressed[split..].to_vec();
+    corrupt_trailer[0] ^= 0xff;
+    let mut upstream_body = first.to_vec();
+    upstream_body.extend_from_slice(&corrupt_trailer);
+    let second = Bytes::from(corrupt_trailer);
+    let body_stream = async_stream::stream! {
+        yield Ok::<Bytes, std::io::Error>(first);
+        yield Ok::<Bytes, std::io::Error>(second);
+    };
+
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = bus.bus.subscribe();
+    let lifecycle = lifecycle_with_upstream_kind(
+        encoded_sse_dispatch(StatusCode::OK, Body::from_stream(body_stream), "gzip"),
+        &bus,
+        StorageUpstreamKind::OpenaiApiKey,
+    )
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
+    ));
+    let request = responses_request();
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+
+    assert_eq!(
+        body.as_ref(),
+        plaintext.as_slice(),
+        "later compressed decode failure must not rewrite provider bytes",
+    );
+    let failure = assert_responses_failed(&body, Some("resp_proxy_test"), 7);
+    assert_eq!(failure["type"], "response.failed");
+    assert_eq!(failure["response"]["error"]["code"], "rate_limit_exceeded");
+    assert_eq!(
+        failure["response"]["error"]["message"],
+        "provider rate limit"
+    );
+    let events_json = sse_json_events(&body);
+    assert_eq!(
+        events_json
+            .iter()
+            .filter(|(name, _)| name == "response.failed")
+            .count(),
+        1,
+    );
+    assert!(
+        events_json.iter().all(|(_, value)| {
+            value["error"]["type"] != "api_error"
+                && value["response"]["error"]["code"] != "api_error"
+        }),
+        "provider terminal must not gain a synthetic api_error: {events_json:?}",
+    );
+    assert_one_final(&mut updates).await;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some("provider rate limit"),
+    );
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("rate_limit_exceeded"),
+    );
+    assert_eq!(rows[0].upstream_content_encoding.as_deref(), Some("gzip"));
+    assert_eq!(
+        rows[0].upstream_body_bytes,
+        Some(upstream_body.len() as u64),
+    );
+    assert!(rows[0].body_bytes.is_some());
+    assert!(rows[0].body_chunk_count.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_provider_failed_affinity_bind_failure_still_emits_safe_local_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let provider_failure = br#"event: response.failed
+data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy_test","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"provider rate limit"}}}
+
+"#;
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut updates = bus.bus.subscribe();
+    let store = Arc::new(crate::upstream_affinity::MemoryAffinityStore::default());
+    store.fail_bind("forced affinity store failure");
+    let mut upstream_body = CREATED.to_vec();
+    upstream_body.extend_from_slice(provider_failure);
+    let lifecycle = lifecycle_with_upstream_kind(
+        sse_dispatch(StatusCode::OK, Body::from(upstream_body)),
+        &bus,
+        StorageUpstreamKind::OpenaiApiKey,
+    )
+    .with_upstream_affinity_store(store);
+    let request = responses_request();
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+    let events_json = sse_json_events(&body);
+    assert!(
+        events_json.iter().any(|(_, value)| {
+            value["response"]["error"]["code"] == "api_error"
+                || value["error"]["type"] == "api_error"
+        }),
+        "affinity bind failure must remain a safe local api_error: {events_json:?}",
+    );
+    assert!(
+        !String::from_utf8_lossy(&body).contains("provider rate limit"),
+        "failed affinity bind must not forward provider terminal payload",
+    );
+    assert!(
+        !String::from_utf8_lossy(&body).contains("rate_limit_exceeded"),
+        "failed affinity bind must not forward provider error details",
+    );
+    assert_one_final(&mut updates).await;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_stream_error"));
     Ok(())
 }
 

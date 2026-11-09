@@ -7394,6 +7394,10 @@ impl Lifecycle {
             let mut stream_upstream_error_frame_emitted = false;
             let mut downstream_sse_boundary = SseDownstreamBoundaryTracker::default();
             let mut stream_provider_error_seen = false;
+            // Observation precedes affinity inspection and transformation; only
+            // a validated terminal sent downstream or committed to the deferred
+            // Content-Length flush takes precedence over local errors.
+            let mut stream_provider_error_forwarded = false;
             let mut last_partial_at: Option<Instant> = None;
             let mut last_partial_output_tokens: u64 = 0;
             let mut upstream_error_body: Vec<u8> = Vec::new();
@@ -7431,6 +7435,7 @@ impl Lifecycle {
                                 response_has_content_length && body.is_end_stream();
                             let mut raw_passthrough_current_chunk = false;
                             let mut raw_chunk_completes_response = false;
+                            let mut provider_error_in_chunk = false;
                             let now = Instant::now();
                             if first_chunk_at.is_none() {
                                 first_chunk_at = Some(now);
@@ -7550,6 +7555,9 @@ impl Lifecycle {
                                     upstream_error_body_decode_failed = true;
                                     parse_sse_events_active = false;
                                     buffer.clear();
+                                    if stream_provider_error_forwarded {
+                                        break 'upstream;
+                                    }
                                     if success_sse_affinity_gate {
                                         stream_upstream_error =
                                             Some(cc_lb_lifecycle::StreamError {
@@ -7581,13 +7589,6 @@ impl Lifecycle {
                                         break 'upstream;
                                     }
                                     if upstream_decode_failed && sse_transform_active {
-                                        if stream_provider_error_seen {
-                                            downstream_drop_guard.mark_upstream_error(
-                                                StreamTerminationCause::ProviderError,
-                                                None,
-                                            );
-                                            break 'upstream;
-                                        }
                                         let error_message =
                                             format!("upstream response decoding failed: {error}");
                                         stream_upstream_error =
@@ -7695,9 +7696,12 @@ impl Lifecycle {
                                         .cache_read_input_tokens
                                         .saturating_add(usage.cache_creation_input_tokens),
                                 );
+                                let mut provider_error_in_event = false;
                                 if let Some(err) =
                                     usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                                 {
+                                    provider_error_in_event = true;
+                                    provider_error_in_chunk = true;
                                     stream_provider_error_seen = true;
                                     downstream_drop_guard.mark_upstream_error(
                                         StreamTerminationCause::ProviderError,
@@ -7751,41 +7755,47 @@ impl Lifecycle {
                                                 parent: &stream_span,
                                                 "failed to inspect upstream affinity in SSE event"
                                             );
-                                            stream_upstream_error =
-                                                Some(cc_lb_lifecycle::StreamError {
-                                                    error_type:
-                                                        UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
-                                                            .to_owned(),
-                                                    error_message:
-                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
-                                                            .to_owned(),
-                                                    ..Default::default()
-                                                });
+                                            if !stream_provider_error_forwarded {
+                                                stream_upstream_error =
+                                                    Some(cc_lb_lifecycle::StreamError {
+                                                        error_type:
+                                                            UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
+                                                                .to_owned(),
+                                                        error_message:
+                                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                                .to_owned(),
+                                                        ..Default::default()
+                                                    });
+                                            }
                                             parse_sse_events_active = false;
                                             buffer.clear();
                                             raw_before_transform_output.clear();
-                                            let frame = make_stream_error_frame(
-                                                response_affinity_context.capability,
-                                            &responses_error_context,
-                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                                false,
-                                            );
-                                            batch_index = batch_index.saturating_add(1);
-                                            if let Some(o) = observer.as_ref() {
-                                                o.set_upstream_error(
-                                                    StatusCode::OK,
-                                                    UpstreamErrorCode::StreamError,
+                                            if !stream_provider_error_forwarded {
+                                                let frame = make_stream_error_frame(
+                                                    response_affinity_context.capability,
+                                                    &responses_error_context,
+                                                    UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                    false,
                                                 );
+                                                batch_index = batch_index.saturating_add(1);
+                                                if let Some(o) = observer.as_ref() {
+                                                    o.set_upstream_error(
+                                                        StatusCode::OK,
+                                                        UpstreamErrorCode::StreamError,
+                                                    );
+                                                }
+                                                downstream_drop_guard.mark_upstream_error(
+                                                    StreamTerminationCause::FramingError,
+                                                    None,
+                                                );
+                                                for chunk in
+                                                    std::mem::take(&mut deferred_terminal_chunks)
+                                                {
+                                                    yield Ok::<Bytes, Infallible>(chunk);
+                                                }
+                                                yield Ok::<Bytes, Infallible>(frame);
                                             }
-                                            downstream_drop_guard.mark_upstream_error(
-                                                StreamTerminationCause::FramingError,
-                                                None,
-                                            );
-                                            for chunk in std::mem::take(&mut deferred_terminal_chunks) {
-                                                yield Ok::<Bytes, Infallible>(chunk);
-                                            }
-                                            yield Ok::<Bytes, Infallible>(frame);
                                             break 'upstream;
                                         }
                                     };
@@ -7847,13 +7857,16 @@ impl Lifecycle {
                                         parent: &stream_span,
                                         "failed to persist upstream affinity before SSE event"
                                     );
-                                    stream_affinity_error = Some(affinity_stream_error());
+                                    if !stream_provider_error_forwarded {
+                                        stream_affinity_error = Some(affinity_stream_error());
+                                    }
                                     parse_sse_events_active = false;
                                     buffer.clear();
                                     raw_before_transform_output.clear();
-                                    if success_sse_affinity_gate
-                                        || sse_transform_active
-                                        || downstream_stream_is_identity
+                                    if !stream_provider_error_forwarded
+                                        && (success_sse_affinity_gate
+                                            || sse_transform_active
+                                            || downstream_stream_is_identity)
                                     {
                                         let frame = make_stream_error_frame(
                                             response_affinity_context.capability,
@@ -7868,15 +7881,17 @@ impl Lifecycle {
                                         }
                                         yield Ok::<Bytes, Infallible>(frame);
                                     }
-                                    if let Some(o) = observer.as_ref() {
-                                        o.set_upstream_error(
-                                            StatusCode::OK,
-                                            UpstreamErrorCode::StreamError,
+                                    if !stream_provider_error_forwarded {
+                                        if let Some(o) = observer.as_ref() {
+                                            o.set_upstream_error(
+                                                StatusCode::OK,
+                                                UpstreamErrorCode::StreamError,
+                                            );
+                                        }
+                                        downstream_drop_guard.mark_proxy_error(
+                                            StreamTerminationCause::AffinityError,
                                         );
                                     }
-                                    downstream_drop_guard.mark_proxy_error(
-                                        StreamTerminationCause::AffinityError,
-                                    );
                                     break 'upstream;
                                 }
                                 if !sse_transform_active
@@ -8077,6 +8092,12 @@ impl Lifecycle {
                                                 continue;
                                             }
                                             SseTransformOutcome::FailOpen => {
+                                                if stream_provider_error_forwarded {
+                                                    parse_sse_events_active = false;
+                                                    buffer.clear();
+                                                    raw_before_transform_output.clear();
+                                                    break 'upstream;
+                                                }
                                                 if success_sse_affinity_gate
                                                     || transformed_output_started
                                                     || !downstream_stream_is_identity
@@ -8132,6 +8153,12 @@ impl Lifecycle {
                                                     %error,
                                                     "sse response transform failed"
                                                 );
+                                                if stream_provider_error_forwarded {
+                                                    parse_sse_events_active = false;
+                                                    buffer.clear();
+                                                    raw_before_transform_output.clear();
+                                                    break 'upstream;
+                                                }
                                                 if success_sse_affinity_gate
                                                     || transformed_output_started
                                                     || !downstream_stream_is_identity
@@ -8185,7 +8212,9 @@ impl Lifecycle {
                                                 Bytes::new()
                                             }
                                         }
-                                    } else if success_sse_affinity_gate {
+                                    } else if success_sse_affinity_gate
+                                        && !stream_provider_error_forwarded
+                                    {
                                         stream_upstream_error =
                                             Some(cc_lb_lifecycle::StreamError {
                                                 error_type:
@@ -8222,15 +8251,24 @@ impl Lifecycle {
                                     {
                                         downstream_drop_guard.mark_semantic_completion();
                                     }
+                                    if provider_error_in_event && !outgoing.is_empty() {
+                                        stream_provider_error_forwarded = true;
+                                    }
                                     yield Ok::<Bytes, Infallible>(outgoing);
                                 } else if success_sse_affinity_gate {
                                     downstream_sse_boundary.observe(&raw);
                                     batch_index = batch_index.saturating_add(1);
                                     if defer_terminal_raw_chunk {
                                         deferred_terminal_chunks.push(raw);
+                                        if provider_error_in_event {
+                                            stream_provider_error_forwarded = true;
+                                        }
                                     } else {
                                         if event_completes_response {
                                             downstream_drop_guard.mark_semantic_completion();
+                                        }
+                                        if provider_error_in_event {
+                                            stream_provider_error_forwarded = true;
                                         }
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
@@ -8245,9 +8283,15 @@ impl Lifecycle {
                                         batch_index = batch_index.saturating_add(1);
                                         if defer_terminal_raw_chunk {
                                             deferred_terminal_chunks.push(outgoing);
+                                            if provider_error_in_event {
+                                                stream_provider_error_forwarded = true;
+                                            }
                                         } else {
                                             if event_completes_response {
                                                 downstream_drop_guard.mark_semantic_completion();
+                                            }
+                                            if provider_error_in_event {
+                                                stream_provider_error_forwarded = true;
                                             }
                                             yield Ok::<Bytes, Infallible>(outgoing);
                                         }
@@ -8289,6 +8333,9 @@ impl Lifecycle {
                                 parse_sse_events_active = false;
                                 buffer.clear();
                                 unsolicited_forwarded_bytes = 0;
+                                if stream_provider_error_forwarded {
+                                    break 'upstream;
+                                }
                                 if success_sse_affinity_gate || unsolicited_hold_pending {
                                     stream_upstream_error =
                                         Some(cc_lb_lifecycle::StreamError {
@@ -8322,8 +8369,9 @@ impl Lifecycle {
                                     break 'upstream;
                                 }
                                 if sse_transform_active {
-                                    if transformed_output_started
-                                        || !downstream_stream_is_identity
+                                    if !stream_provider_error_forwarded
+                                        && (transformed_output_started
+                                            || !downstream_stream_is_identity)
                                     {
                                         let error = ResponseTransformError::Runtime {
                                             reason: if transformed_output_started {
@@ -8386,9 +8434,15 @@ impl Lifecycle {
                                     if defer_terminal_raw_chunk {
                                         debug_assert!(deferred_terminal_chunks.is_empty());
                                         deferred_terminal_chunks.push(data);
+                                        if provider_error_in_chunk {
+                                            stream_provider_error_forwarded = true;
+                                        }
                                     } else {
                                         if raw_chunk_completes_response {
                                             downstream_drop_guard.mark_semantic_completion();
+                                        }
+                                        if provider_error_in_chunk {
+                                            stream_provider_error_forwarded = true;
                                         }
                                         yield Ok::<Bytes, Infallible>(data);
                                     }
@@ -8544,31 +8598,38 @@ impl Lifecycle {
                                             parent: &stream_span,
                                             "failed to inspect upstream affinity in final SSE event"
                                         );
-                                        stream_upstream_error =
-                                            Some(cc_lb_lifecycle::StreamError {
-                                                error_type:
-                                                    UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
-                                                error_message:
-                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
-                                                        .to_owned(),
-                                                ..Default::default()
-                                            });
-                                        downstream_drop_guard.mark_upstream_error(
-                                            StreamTerminationCause::FramingError,
-                                            None,
-                                        );
+                                        if !stream_provider_error_forwarded {
+                                            stream_upstream_error =
+                                                Some(cc_lb_lifecycle::StreamError {
+                                                    error_type:
+                                                        UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
+                                                            .to_owned(),
+                                                    error_message:
+                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                            .to_owned(),
+                                                    ..Default::default()
+                                                });
+                                        }
+                                        if !stream_provider_error_forwarded {
+                                            downstream_drop_guard.mark_upstream_error(
+                                                StreamTerminationCause::FramingError,
+                                                None,
+                                            );
+                                        }
                                         parse_sse_events_active = false;
                                         buffer.clear();
                                         raw_before_transform_output.clear();
-                                        let frame = make_stream_error_frame(
-                                            response_affinity_context.capability,
-                                            &responses_error_context,
-                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                            false,
-                                        );
-                                        batch_index = batch_index.saturating_add(1);
-                                        yield Ok::<Bytes, Infallible>(frame);
+                                        if !stream_provider_error_forwarded {
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
+                                                &responses_error_context,
+                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                false,
+                                            );
+                                            batch_index = batch_index.saturating_add(1);
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                        }
                                         break;
                                     }
                                 };
@@ -8628,16 +8689,19 @@ impl Lifecycle {
                                     parent: &stream_span,
                                     "failed to persist upstream affinity before final SSE event"
                                 );
-                                stream_affinity_error = Some(affinity_stream_error());
-                                downstream_drop_guard.mark_proxy_error(
-                                    StreamTerminationCause::AffinityError,
-                                );
+                                if !stream_provider_error_forwarded {
+                                    stream_affinity_error = Some(affinity_stream_error());
+                                    downstream_drop_guard.mark_proxy_error(
+                                        StreamTerminationCause::AffinityError,
+                                    );
+                                }
                                 parse_sse_events_active = false;
                                 buffer.clear();
                                 raw_before_transform_output.clear();
-                                if success_sse_affinity_gate
-                                    || sse_transform_active
-                                    || downstream_stream_is_identity
+                                if !stream_provider_error_forwarded
+                                    && (success_sse_affinity_gate
+                                        || sse_transform_active
+                                        || downstream_stream_is_identity)
                                 {
                                     let frame = make_stream_error_frame(
                                         response_affinity_context.capability,
@@ -8656,9 +8720,11 @@ impl Lifecycle {
                             {
                                 downstream_drop_guard.observe_keepalive(&parsed_event);
                             }
+                            let mut provider_error_in_event = false;
                             if let Some(err) =
                                 usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                             {
+                                provider_error_in_event = true;
                                 stream_provider_error_seen = true;
                                 downstream_drop_guard.mark_upstream_error(
                                     StreamTerminationCause::ProviderError,
@@ -8730,28 +8796,31 @@ impl Lifecycle {
                             if success_sse_affinity_gate || unsolicited_hold_pending {
                                 let outgoing = if sse_transform_active {
                                     let Some(response_headers) = response_headers.as_ref() else {
-                                        stream_upstream_error =
-                                            Some(cc_lb_lifecycle::StreamError {
-                                                error_type:
-                                                    UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
-                                                error_message:
-                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
-                                                        .to_owned(),
-                                                ..Default::default()
-                                            });
-                                        downstream_drop_guard.mark_upstream_error(
-                                            StreamTerminationCause::FramingError,
-                                            None,
-                                        );
-                                        let frame = make_stream_error_frame(
-                                            response_affinity_context.capability,
-                                            &responses_error_context,
-                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                            false,
-                                        );
-                                        batch_index = batch_index.saturating_add(1);
-                                        yield Ok::<Bytes, Infallible>(frame);
+                                        if !stream_provider_error_forwarded {
+                                            stream_upstream_error =
+                                                Some(cc_lb_lifecycle::StreamError {
+                                                    error_type:
+                                                        UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
+                                                            .to_owned(),
+                                                    error_message:
+                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                            .to_owned(),
+                                                    ..Default::default()
+                                                });
+                                            downstream_drop_guard.mark_upstream_error(
+                                                StreamTerminationCause::FramingError,
+                                                None,
+                                            );
+                                            let frame = make_stream_error_frame(
+                                                response_affinity_context.capability,
+                                                &responses_error_context,
+                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                false,
+                                            );
+                                            batch_index = batch_index.saturating_add(1);
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                        }
                                         break;
                                     };
                                     match transform_sse_event_bytes(
@@ -8793,24 +8862,26 @@ impl Lifecycle {
                                         SseTransformOutcome::Drop => continue,
                                         SseTransformOutcome::FailOpen
                                         | SseTransformOutcome::Error(_) => {
-                                            stream_transform_error =
-                                                Some(ResponseTransformError::Runtime {
-                                                    reason:
-                                                        "failed to safely transform SSE event"
-                                                            .to_owned(),
-                                                });
-                                            downstream_drop_guard.mark_proxy_error(
-                                                StreamTerminationCause::TransformError,
-                                            );
-                                            let frame = make_stream_error_frame(
-                                                response_affinity_context.capability,
-                                                &responses_error_context,
-                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
-                                                false,
-                                            );
-                                            batch_index = batch_index.saturating_add(1);
-                                            yield Ok::<Bytes, Infallible>(frame);
+                                            if !stream_provider_error_forwarded {
+                                                stream_transform_error =
+                                                    Some(ResponseTransformError::Runtime {
+                                                        reason:
+                                                            "failed to safely transform SSE event"
+                                                                .to_owned(),
+                                                    });
+                                                downstream_drop_guard.mark_proxy_error(
+                                                    StreamTerminationCause::TransformError,
+                                                );
+                                                let frame = make_stream_error_frame(
+                                                    response_affinity_context.capability,
+                                                    &responses_error_context,
+                                                    UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                    false,
+                                                );
+                                                batch_index = batch_index.saturating_add(1);
+                                                yield Ok::<Bytes, Infallible>(frame);
+                                            }
                                             break;
                                         }
                                     }
@@ -8836,6 +8907,9 @@ impl Lifecycle {
                                 {
                                     downstream_drop_guard.mark_semantic_completion();
                                 }
+                                if provider_error_in_event && !outgoing.is_empty() {
+                                    stream_provider_error_forwarded = true;
+                                }
                                 yield Ok::<Bytes, Infallible>(outgoing);
                             }
                         }
@@ -8848,7 +8922,9 @@ impl Lifecycle {
                                 "stopping SSE parsing: final incomplete event exceeds configured body-derived budget"
                             );
                             buffer.clear();
-                            if success_sse_affinity_gate || unsolicited_hold_pending {
+                            if !stream_provider_error_forwarded
+                                && (success_sse_affinity_gate || unsolicited_hold_pending)
+                            {
                                 stream_upstream_error =
                                     Some(cc_lb_lifecycle::StreamError {
                                         error_type:
@@ -8869,7 +8945,10 @@ impl Lifecycle {
                                     false,
                                 );
                                 yield Ok::<Bytes, Infallible>(frame);
-                            } else if sse_transform_active && stream_transform_error.is_none() {
+                            } else if !stream_provider_error_forwarded
+                                && sse_transform_active
+                                && stream_transform_error.is_none()
+                            {
                                 if transformed_output_started
                                     || !downstream_stream_is_identity
                                 {
@@ -9038,6 +9117,7 @@ impl Lifecycle {
                         }
                     }
                     else if sse_transform_active
+                        && !stream_provider_error_forwarded
                         && stream_transform_error.is_none()
                         && stream_affinity_error.is_none()
                     {
