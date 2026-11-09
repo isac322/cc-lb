@@ -1246,6 +1246,139 @@ async fn responses_semantic_sse_eof_forwarded_transform_failure_is_not_duplicate
     Ok(())
 }
 
+struct DropResponsesTerminalTransform;
+
+impl SseEventTransformHook for DropResponsesTerminalTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        if matches!(
+            request.event.event.as_str(),
+            "response.completed" | "response.incomplete"
+        ) {
+            Ok(TransformSseEventResult::Drop)
+        } else {
+            Ok(TransformSseEventResult::Unchanged)
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_dropped_terminal_becomes_native_failure() -> TestResult {
+    for (event, status) in [
+        ("response.completed", "completed"),
+        ("response.incomplete", "incomplete"),
+    ] {
+        let terminal = format!(
+            "event: {event}\ndata: {{\"type\":\"{event}\",\"sequence_number\":10,\"response\":{{\"status\":\"{status}\",\"usage\":{{\"input_tokens\":13,\"output_tokens\":7,\"total_tokens\":20}}}}}}\n\n"
+        );
+        let observed = observe_with_sse_hook(
+            Arc::new(ScriptedDispatch::identity_sse(
+                vec![Bytes::from(format!(
+                    "{RESPONSES_CREATED}{RESPONSES_DELTA}{RESPONSES_USAGE}{terminal}"
+                ))],
+                None,
+            )),
+            Some(Arc::new(DropResponsesTerminalTransform)),
+            responses_eof_record(false),
+            responses_eof_request("/v1/responses")?,
+        )
+        .await?;
+
+        observed.assert_incomplete_outcome();
+        let body = std::str::from_utf8(&observed.body)?;
+        let failures = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .filter(|data| data["type"] == "response.failed")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failures.len(),
+            1,
+            "clean EOF appends one native failure after dropped {event}"
+        );
+        assert_eq!(failures[0]["response"]["status"], "failed");
+        assert!(
+            !body.contains(event),
+            "dropped upstream terminal is not forwarded: {event}"
+        );
+        assert!(
+            !body.contains("event: response.completed"),
+            "dropped terminal must not become a successful completion"
+        );
+    }
+    Ok(())
+}
+
+struct ReplaceResponsesDeltaWithTerminal {
+    event: &'static str,
+    status: &'static str,
+}
+
+impl SseEventTransformHook for ReplaceResponsesDeltaWithTerminal {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        if request.event.event == "response.output_text.delta" {
+            Ok(TransformSseEventResult::Replace {
+                events: vec![SseEvent {
+                    event: self.event.to_owned(),
+                    data: Bytes::from(format!(
+                        r#"{{"type":"{}","sequence_number":10,"response":{{"status":"{}","usage":{{"input_tokens":13,"output_tokens":7,"total_tokens":20}}}}}}"#,
+                        self.event, self.status
+                    )),
+                }],
+            })
+        } else {
+            Ok(TransformSseEventResult::Unchanged)
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_semantic_sse_eof_replaced_delta_is_terminal_success() -> TestResult {
+    for (event, status) in [
+        ("response.completed", "completed"),
+        ("response.incomplete", "incomplete"),
+    ] {
+        let observed = observe_with_sse_hook(
+            Arc::new(ScriptedDispatch::identity_sse(
+                vec![Bytes::from(format!(
+                    "{RESPONSES_CREATED}{RESPONSES_USAGE}{RESPONSES_DELTA}"
+                ))],
+                None,
+            )),
+            Some(Arc::new(ReplaceResponsesDeltaWithTerminal {
+                event,
+                status,
+            })),
+            responses_eof_record(false),
+            responses_eof_request("/v1/responses")?,
+        )
+        .await?;
+
+        observed.assert_success(13, 7, false);
+        let body = std::str::from_utf8(&observed.body)?;
+        assert!(
+            body.contains(&format!("event: {event}\n")),
+            "transformed terminal is forwarded: {event}"
+        );
+        assert_eq!(
+            body.matches("event: response.failed").count(),
+            0,
+            "transformed terminal must not receive a synthetic failure"
+        );
+        assert_eq!(
+            observed.row.upstream_error_type, None,
+            "transformed {event} remains successful"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn responses_semantic_sse_eof_out_of_scope_controls() -> TestResult {
     let partial =

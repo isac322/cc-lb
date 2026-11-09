@@ -7498,6 +7498,7 @@ impl Lifecycle {
             let mut prompt_cache_observations_published = false;
             let mut semantic_message_stop_seen = false;
             let mut semantic_completion_observed = false;
+            let mut semantic_completion_emitted = false;
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
@@ -8202,8 +8203,7 @@ impl Lifecycle {
                                                             response_affinity_context.capability,
                                                         );
                                                     outgoing_provider_error = output.emitted_error;
-                                                    outgoing_completes_response =
-                                                        event_completes_response && output.completes_response;
+                                                    outgoing_completes_response = output.completes_response;
                                                 }
                                                 raw_before_transform_output.clear();
                                                 transformed_output_started = true;
@@ -8374,6 +8374,7 @@ impl Lifecycle {
                                     }
                                     batch_index = batch_index.saturating_add(1);
                                     if outgoing_completes_response {
+                                        semantic_completion_emitted = true;
                                         downstream_drop_guard.mark_semantic_completion();
                                     }
                                     if outgoing_provider_error && !outgoing.is_empty() {
@@ -8384,12 +8385,16 @@ impl Lifecycle {
                                     downstream_sse_boundary.observe(&raw);
                                     batch_index = batch_index.saturating_add(1);
                                     if defer_terminal_raw_chunk {
+                                        if event_completes_response {
+                                            semantic_completion_emitted = true;
+                                        }
                                         deferred_terminal_chunks.push(raw);
                                         if provider_error_in_event {
                                             stream_provider_error_forwarded = true;
                                         }
                                     } else {
                                         if event_completes_response {
+                                            semantic_completion_emitted = true;
                                             downstream_drop_guard.mark_semantic_completion();
                                         }
                                         if provider_error_in_event {
@@ -8407,12 +8412,16 @@ impl Lifecycle {
                                         downstream_sse_boundary.observe(&outgoing);
                                         batch_index = batch_index.saturating_add(1);
                                         if defer_terminal_raw_chunk {
+                                            if event_completes_response {
+                                                semantic_completion_emitted = true;
+                                            }
                                             deferred_terminal_chunks.push(outgoing);
                                             if provider_error_in_event {
                                                 stream_provider_error_forwarded = true;
                                             }
                                         } else {
                                             if event_completes_response {
+                                                semantic_completion_emitted = true;
                                                 downstream_drop_guard.mark_semantic_completion();
                                             }
                                             if provider_error_in_event {
@@ -8557,6 +8566,9 @@ impl Lifecycle {
                                     }
                                     batch_index = batch_index.saturating_add(1);
                                     if defer_terminal_raw_chunk {
+                                        if raw_chunk_completes_response {
+                                            semantic_completion_emitted = true;
+                                        }
                                         debug_assert!(deferred_terminal_chunks.is_empty());
                                         deferred_terminal_chunks.push(data);
                                         if provider_error_in_chunk {
@@ -8564,6 +8576,7 @@ impl Lifecycle {
                                         }
                                     } else {
                                         if raw_chunk_completes_response {
+                                            semantic_completion_emitted = true;
                                             downstream_drop_guard.mark_semantic_completion();
                                         }
                                         if provider_error_in_chunk {
@@ -8976,8 +8989,7 @@ impl Lifecycle {
                                                         response_affinity_context.capability,
                                                     );
                                                 outgoing_provider_error = output.emitted_error;
-                                                outgoing_completes_response =
-                                                    event_completes_response && output.completes_response;
+                                                outgoing_completes_response = output.completes_response;
                                             }
                                             if downstream_drop_guard.has_keepalive_completion() {
                                                 downstream_drop_guard
@@ -9028,6 +9040,7 @@ impl Lifecycle {
                                 downstream_sse_boundary.observe(&outgoing);
                                 batch_index = batch_index.saturating_add(1);
                                 if outgoing_completes_response {
+                                    semantic_completion_emitted = true;
                                     downstream_drop_guard.mark_semantic_completion();
                                 }
                                 if outgoing_provider_error && !outgoing.is_empty() {
@@ -9344,7 +9357,7 @@ impl Lifecycle {
                 && parse_sse_events_active
                 && transform_decode_supported
                 && semantic_terminal_event_type(response_affinity_context.capability).is_some()
-                && !semantic_message_stop_seen
+                && !semantic_completion_emitted
                 && sse_buffer_is_blank(&buffer)
                 && !downstream_drop_guard.has_abnormal_stop()
                 && !stream_provider_error_seen
