@@ -11877,7 +11877,9 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
             ..Default::default()
         };
     };
-    let model = if capability
+    let model = if capability == Some(ProviderCapability::GeminiGenerateContent) {
+        path_model
+    } else if capability
         .is_some_and(|capability| capability.provider() == cc_lb_domain::Provider::Gemini)
     {
         path_model.or_else(|| value.get("model").and_then(Value::as_str))
