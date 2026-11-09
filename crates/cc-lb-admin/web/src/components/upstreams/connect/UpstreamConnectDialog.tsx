@@ -380,7 +380,7 @@ function ConnectDialogBody({
           : isCreate
             ? 'Nothing is saved until you confirm the account.'
             : firstConnect
-              ? 'Sign in with the Claude account this upstream should use.'
+              ? `Sign in with the ${PROVIDER_LABELS[provider]} account this upstream should use.`
               : 'The current connection keeps working until you paste the new code.';
 
   // Back and Cancel are sibling actions: same variant and size.
@@ -760,7 +760,7 @@ function ConnectDialogBody({
         open={confirmDiscard}
         onOpenChange={setConfirmDiscard}
         title="Discard this connection?"
-        description="You already authorized a Claude account, but it has not been saved as an upstream yet. Closing now discards it."
+        description={`You already authorized a ${PROVIDER_LABELS[provider]} account, but it has not been saved as an upstream yet. Closing now discards it.`}
         confirmLabel="Discard"
         destructive
         onConfirm={onClose}
@@ -934,6 +934,7 @@ function GenericCredentialStep({
       </Field>
       <Field label="API key">
         <input
+          type="password"
           className={cx(
             INPUT_CLASS,
             PENDING_INPUT_CLASS,
@@ -941,6 +942,7 @@ function GenericCredentialStep({
           )}
           value={credential}
           onChange={(event) => onCredentialChange(event.target.value)}
+          autoComplete="off"
           spellCheck={false}
         />
       </Field>

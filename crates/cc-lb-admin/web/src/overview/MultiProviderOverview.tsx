@@ -11,6 +11,7 @@ import {
   RequestEventsFeed,
 } from '../components/ui/RequestEventsFeed';
 import type { DashboardUsageResponse } from '../lib/api';
+import { GENERATION_REQUEST_EVENT_KINDS } from '../lib/logRows';
 import {
   type ProviderFamily,
   providerOf,
@@ -39,7 +40,7 @@ function LiveRequestsSection({
   providerByUpstream: ReadonlyMap<string, ProviderFamily>;
 }) {
   const feed = useRequestEventsFeed({
-    filters: {},
+    filters: { event_kind_set: GENERATION_REQUEST_EVENT_KINDS },
     providers,
     mode: 'infinite',
     initialHistoryLimit: 500,
