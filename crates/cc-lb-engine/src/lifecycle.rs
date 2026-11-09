@@ -6819,7 +6819,7 @@ impl Lifecycle {
                 };
                 o.set_upstream_error(status, code);
             } else if body_collect_failed {
-                o.set_upstream_error(StatusCode::BAD_GATEWAY, UpstreamErrorCode::StreamError);
+                o.set_upstream_error(client_status, UpstreamErrorCode::StreamError);
             } else if affinity_bind_failed {
                 o.set_failure(InternalFailure {
                     status: StatusCode::SERVICE_UNAVAILABLE,
