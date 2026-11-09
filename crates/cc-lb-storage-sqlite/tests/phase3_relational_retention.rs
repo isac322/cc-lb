@@ -758,7 +758,7 @@ async fn canonicalize_gemini_rollup_only_history_merges_prefixed_rows() {
     }
     sqlx::query(
         "UPDATE usage_rollup_reconciliations_v1
-         SET status = 'pending', cursor = 0, upper_bound = 0
+         SET status = 'pending', cursor = 0, event_upper_bound = 0, rollup_upper_bound = 0
          WHERE id = 'canonicalize_gemini_model_identity'",
     )
     .execute(storage.pool())

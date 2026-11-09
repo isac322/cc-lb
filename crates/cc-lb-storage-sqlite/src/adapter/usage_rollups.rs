@@ -587,17 +587,45 @@ async fn reconcile_gemini_model_identity(
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        let has_nested_work = if has_event_work == 0 && has_rollup_work == 0 {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
+                 JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
+                 WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+                   AND events.id <= ? \
+                   AND events.model LIKE 'models/models/%' \
+                   AND events.model NOT LIKE 'models/models/tunedModels/%') \
+                 OR EXISTS(SELECT 1 FROM usage_rollups_v2 AS rollup \
+                 JOIN upstream_spec_v1 AS upstream ON upstream.id = rollup.upstream_id \
+                 WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+                   AND rollup.updated_at * 1000 <= ? \
+                   AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
+                   AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\')",
+            )
+            .bind(event_upper_bound)
+            .bind(rollup_upper_bound)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?
+        } else {
+            0
+        };
+        let no_reconciliation_work =
+            has_event_work == 0 && has_rollup_work == 0 && has_nested_work == 0;
         sqlx::query(
             "UPDATE usage_rollup_reconciliations_v1 \
              SET event_upper_bound = ?, rollup_upper_bound = ?, \
                  status = CASE WHEN ? <> 0 THEN 'rewriting' \
-                               WHEN ? <> 0 THEN 'rewriting' ELSE 'rewriting_nested' END \
+                               WHEN ? <> 0 THEN 'rewriting' \
+                               WHEN ? <> 0 THEN 'rewriting_nested' \
+                               ELSE 'complete' END \
              WHERE id = ?",
         )
         .bind(event_upper_bound)
         .bind(rollup_upper_bound)
         .bind(has_event_work)
         .bind(has_rollup_work)
+        .bind(has_nested_work)
         .bind(GEMINI_RECONCILIATION_ID)
         .execute(&mut *tx)
         .await
@@ -629,6 +657,9 @@ async fn reconcile_gemini_model_identity(
             }
         }
         tx.commit().await.map_err(map_sqlx_error)?;
+        if no_reconciliation_work {
+            return Ok(None);
+        }
         return Ok(Some(UsageRollupRun {
             processed_events: 0,
             updated_rollups: 0,
