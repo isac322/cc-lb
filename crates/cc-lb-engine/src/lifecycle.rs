@@ -13098,9 +13098,11 @@ mod tests {
         }
     }
 
+    type ResolverWarning = (String, Option<String>);
+
     #[derive(Clone)]
     struct ResolverWarningLayer {
-        warnings: Arc<Mutex<Vec<(String, Option<String>)>>>,
+        warnings: Arc<Mutex<Vec<ResolverWarning>>>,
     }
 
     impl<S> Layer<S> for ResolverWarningLayer
@@ -13123,9 +13125,7 @@ mod tests {
         }
     }
 
-    fn capture_resolver_warnings<R>(
-        operation: impl FnOnce() -> R,
-    ) -> (R, Vec<(String, Option<String>)>) {
+    fn capture_resolver_warnings<R>(operation: impl FnOnce() -> R) -> (R, Vec<ResolverWarning>) {
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let layer = ResolverWarningLayer {
             warnings: Arc::clone(&warnings),
@@ -13138,7 +13138,7 @@ mod tests {
         (result, warnings)
     }
 
-    fn alias_warnings(warnings: &[(String, Option<String>)]) -> Vec<&(String, Option<String>)> {
+    fn alias_warnings(warnings: &[ResolverWarning]) -> Vec<&ResolverWarning> {
         warnings
             .iter()
             .filter(|(message, _)| message == "unknown model alias, returning unchanged")
