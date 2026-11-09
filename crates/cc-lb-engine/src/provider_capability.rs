@@ -12,6 +12,7 @@ pub(crate) enum ProviderCapability {
     OpenaiResponses,
     GeminiGenerateContent,
     GeminiCountTokens,
+    GeminiCachedContentsCreate,
     AnthropicModels,
     AnthropicComplete,
     OpenaiResponsesInputTokens,
@@ -68,6 +69,7 @@ impl ProviderCapability {
             | Self::OpenaiCodexAuxiliary => Provider::Openai,
             Self::GeminiGenerateContent
             | Self::GeminiCountTokens
+            | Self::GeminiCachedContentsCreate
             | Self::GeminiEmbedContent
             | Self::GeminiPredict
             | Self::GeminiModels
@@ -99,6 +101,7 @@ impl ProviderCapability {
             | Self::OpenaiModels
             | Self::OpenaiCodexAuxiliary
             | Self::GeminiCountTokens
+            | Self::GeminiCachedContentsCreate
             | Self::GeminiPredict
             | Self::GeminiModels
             | Self::GeminiOpenaiImages
@@ -168,6 +171,7 @@ pub(crate) fn classify(
             _ => None,
         },
         Provider::Gemini => match (method, path) {
+            (&Method::POST, "/v1beta/cachedContents") => Some(C::GeminiCachedContentsCreate),
             (&Method::POST, path)
                 if gemini_action(path, "embedContent")
                     || gemini_action(path, "batchEmbedContents") =>
@@ -211,8 +215,25 @@ fn model_catalog(path: &str, root: &str, reject_colon: bool) -> bool {
 /// locally unhashable shapes: the provider, not cc-lb, classifies malformed
 /// input. Affinity extraction may yield no key for such references, but the
 /// supported operation is never refused here.
-pub(crate) fn body_is_consistency_safe(_capability: ProviderCapability, _body: &Value) -> bool {
-    true
+pub(crate) fn body_is_consistency_safe(capability: ProviderCapability, body: &Value) -> bool {
+    capability != ProviderCapability::GeminiCachedContentsCreate
+        || body
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(gemini_cached_contents_model_supported)
+}
+
+fn gemini_cached_contents_model_supported(model: &str) -> bool {
+    let Some(model) = model.strip_prefix("models/") else {
+        return false;
+    };
+    if let Some(suffix) = model.strip_prefix("gemini-2.5-") {
+        return !suffix.is_empty() && !suffix.contains('/');
+    }
+    model == "gemini-3"
+        || model.strip_prefix("gemini-3").is_some_and(|suffix| {
+            suffix.starts_with(['.', '-']) && suffix.len() > 1 && !suffix.contains('/')
+        })
 }
 
 fn gemini_action(path: &str, action: &str) -> bool {
@@ -313,6 +334,11 @@ mod tests {
                 Method::POST,
                 "/v1/memories/trace_summarize",
                 C::OpenaiCodexAuxiliary,
+            ),
+            (
+                Method::POST,
+                "/v1beta/cachedContents",
+                C::GeminiCachedContentsCreate,
             ),
             (
                 Method::POST,
@@ -467,7 +493,6 @@ mod tests {
             (Provider::Gemini, Method::POST, "/upload/v1beta/files"),
             (Provider::Gemini, Method::GET, "/v1beta/files"),
             (Provider::Gemini, Method::GET, "/download/v1beta/files/file"),
-            (Provider::Gemini, Method::POST, "/v1beta/cachedContents"),
             (Provider::Gemini, Method::POST, "/v1beta/batches"),
             (Provider::Gemini, Method::GET, "/v1beta/operations/id"),
             (
@@ -617,5 +642,32 @@ mod tests {
             ProviderCapability::GeminiGenerateContent,
             &json!({"contents": [{"parts": [{"text": "hello"}]}], "generationConfig": {"temperature": 0.2}, "systemInstruction": {"parts": [{"text": "be concise"}]}})
         ));
+    }
+    #[test]
+    fn cached_contents_accepts_only_supported_gemini_model_families() {
+        for model in [
+            "models/gemini-2.5-flash",
+            "models/gemini-2.5-pro",
+            "models/gemini-3",
+            "models/gemini-3.1-pro",
+            "models/gemini-3-flash",
+        ] {
+            assert!(body_is_consistency_safe(
+                ProviderCapability::GeminiCachedContentsCreate,
+                &json!({"model": model}),
+            ));
+        }
+        for model in [
+            "gemini-2.5-flash",
+            "models/gemini-4-pro",
+            "models/claude-3",
+            "models/gemini-2.5-flash/nested",
+            "models/gemini-3x",
+        ] {
+            assert!(!body_is_consistency_safe(
+                ProviderCapability::GeminiCachedContentsCreate,
+                &json!({"model": model}),
+            ));
+        }
     }
 }

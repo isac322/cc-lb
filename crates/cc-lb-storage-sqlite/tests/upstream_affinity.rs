@@ -1,13 +1,326 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    MetaStore, StorageError, UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityKind,
-    UpstreamAffinityStore, UpstreamCreate, UpstreamStore, upstream::UpstreamKind,
+    ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, MetaStore, StorageError,
+    UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityKind, UpstreamAffinityStore,
+    UpstreamCreate, UpstreamStore, UpstreamUpdate, upstream::UpstreamKind,
 };
 use sha2::{Digest, Sha256};
 
 const BIND_BATCH_SIZE: usize = 128;
 const TTL_SECS: u64 = 7_776_000;
+
+#[tokio::test]
+async fn upstream_affinity_gemini_owner_epoch_fences_identity_changes_only() {
+    let (_temp_dir, storage) = open_storage("owner-epoch").await;
+    let gemini = create_upstream_kind(&storage, "epoch-gemini", UpstreamKind::GeminiApiKey).await;
+    let initial = storage
+        .get_by_id(gemini)
+        .await
+        .expect("read gemini")
+        .expect("gemini");
+    let key = UpstreamAffinityKey {
+        principal_id: "principal-gemini".to_owned(),
+        provider: "gemini".to_owned(),
+        kind: UpstreamAffinityKind::GeminiCachedContent,
+        value_sha256: [31; 32],
+    };
+    let old = binding_with_kind(
+        key.clone(),
+        gemini,
+        UpstreamAffinityKind::GeminiCachedContent,
+        "gemini",
+        0,
+        10,
+        None,
+    );
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&old), 10, TTL_SECS)
+        .await
+        .expect("bind initial");
+    let renamed = storage
+        .update_spec(
+            gemini,
+            initial.revision,
+            UpstreamUpdate {
+                name: Some("epoch-gemini-renamed".to_owned()),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("rename");
+    let disabled = storage
+        .set_enabled(gemini, renamed.revision, false)
+        .await
+        .expect("disable");
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, disabled.revision)
+            .await
+            .expect("epoch"),
+        Some(0)
+    );
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&key), 10, TTL_SECS)
+            .await
+            .expect("resolve"),
+        vec![old.clone()]
+    );
+    let changed = storage
+        .update_spec(
+            gemini,
+            disabled.revision,
+            UpstreamUpdate {
+                base_url: Some(Some("https://gemini.example/v2".parse().expect("url"))),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("base url");
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, disabled.revision)
+            .await
+            .expect("stale"),
+        None
+    );
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, changed.revision)
+            .await
+            .expect("epoch"),
+        Some(1)
+    );
+    let same_url = storage
+        .update_spec(
+            gemini,
+            changed.revision,
+            UpstreamUpdate {
+                base_url: Some(Some("https://gemini.example/v2".parse().expect("url"))),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("same base url");
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, same_url.revision)
+            .await
+            .expect("same url epoch"),
+        Some(1)
+    );
+    assert!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&key), 10, TTL_SECS)
+            .await
+            .expect("stale resolve")
+            .is_empty()
+    );
+    let stale_key = gemini_affinity_key("principal-gemini-stale", [32; 32]);
+    let stale = binding_with_kind(
+        stale_key.clone(),
+        gemini,
+        UpstreamAffinityKind::GeminiCachedContent,
+        "gemini",
+        0,
+        11,
+        None,
+    );
+    assert!(matches!(
+        storage
+            .bind_upstream_affinities(std::slice::from_ref(&stale), 11, TTL_SECS)
+            .await,
+        Err(StorageError::Conflict { .. })
+    ));
+    assert!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&stale.key), 11, TTL_SECS)
+            .await
+            .expect("stale create")
+            .is_empty()
+    );
+    let mixed_valid = binding_with_kind(
+        gemini_affinity_key("principal-gemini-valid-batch", [36; 32]),
+        gemini,
+        UpstreamAffinityKind::GeminiCachedContent,
+        "gemini",
+        1,
+        11,
+        None,
+    );
+    let mixed_stale = binding_with_kind(
+        gemini_affinity_key("principal-gemini-stale-batch", [37; 32]),
+        gemini,
+        UpstreamAffinityKind::GeminiCachedContent,
+        "gemini",
+        0,
+        11,
+        None,
+    );
+    assert!(matches!(
+        storage
+            .bind_upstream_affinities(&[mixed_valid.clone(), mixed_stale.clone()], 11, TTL_SECS)
+            .await,
+        Err(StorageError::Conflict { .. })
+    ));
+    assert!(
+        storage
+            .resolve_upstream_affinities(
+                &[mixed_valid.key.clone(), mixed_stale.key.clone()],
+                11,
+                TTL_SECS,
+            )
+            .await
+            .expect("mixed stale batch rollback")
+            .is_empty()
+    );
+    let fresh_key = gemini_affinity_key("principal-gemini-fresh", [33; 32]);
+    let fresh = binding_with_kind(
+        fresh_key.clone(),
+        gemini,
+        UpstreamAffinityKind::GeminiCachedContent,
+        "gemini",
+        1,
+        12,
+        None,
+    );
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&fresh), 12, TTL_SECS)
+        .await
+        .expect("fresh bind");
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&fresh.key), 12, TTL_SECS)
+            .await
+            .expect("fresh resolve"),
+        vec![fresh]
+    );
+    let current = storage
+        .get_by_id(gemini)
+        .await
+        .expect("current")
+        .expect("current");
+    storage
+        .update_spec(
+            gemini,
+            current.revision,
+            UpstreamUpdate {
+                api_key_access: Some(api_key_access(Some("project-1"), 20)),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("set project");
+    let current = storage
+        .get_by_id(gemini)
+        .await
+        .expect("current")
+        .expect("current");
+    let project_binding = binding_with_kind(
+        gemini_affinity_key("principal-gemini-project", [35; 32]),
+        gemini,
+        UpstreamAffinityKind::GeminiCachedContent,
+        "gemini",
+        2,
+        20,
+        None,
+    );
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&project_binding), 20, TTL_SECS)
+        .await
+        .expect("bind project epoch");
+    let current = storage
+        .update_spec(
+            gemini,
+            current.revision,
+            UpstreamUpdate {
+                api_key_access: Some(api_key_access(Some("project-1"), 21)),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("unchanged project");
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, current.revision)
+            .await
+            .expect("epoch"),
+        Some(2)
+    );
+    let changed = storage
+        .update_spec(
+            gemini,
+            current.revision,
+            UpstreamUpdate {
+                api_key_access: Some(api_key_access(Some("project-2"), 22)),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("changed project");
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, changed.revision)
+            .await
+            .expect("epoch"),
+        Some(3)
+    );
+    assert!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&project_binding.key), 20, TTL_SECS)
+            .await
+            .expect("project stale")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn upstream_affinity_other_provider_credential_mutation_keeps_epoch_zero() {
+    let (_temp_dir, storage) = open_storage("owner-epoch-other").await;
+    let anthropic =
+        create_upstream_kind(&storage, "epoch-anthropic", UpstreamKind::AnthropicApiKey).await;
+    let key = affinity_key("principal-anthropic", [34; 32]);
+    let bound = binding(key.clone(), anthropic, 10, None);
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&bound), 10, TTL_SECS)
+        .await
+        .expect("bind");
+    let updated = storage
+        .update_api_key_secret(anthropic, Some(vec![9, 8, 7]))
+        .await
+        .expect("secret");
+    storage
+        .update_spec(
+            anthropic,
+            updated.revision,
+            UpstreamUpdate {
+                api_key_access: Some(api_key_access(Some("anthropic-project"), 22)),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("access");
+    let current = storage
+        .get_by_id(anthropic)
+        .await
+        .expect("current")
+        .expect("current");
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(anthropic, current.revision)
+            .await
+            .expect("epoch"),
+        Some(0)
+    );
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&key), 10, TTL_SECS)
+            .await
+            .expect("resolve"),
+        vec![bound]
+    );
+}
 
 #[tokio::test]
 async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware() {
@@ -466,14 +779,24 @@ async fn open_storage(file_name: &str) -> (tempfile::TempDir, cc_lb_storage_sqli
 }
 
 async fn create_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> uuid::Uuid {
+    create_upstream_kind(storage, name, UpstreamKind::AnthropicOauth).await
+}
+
+async fn create_upstream_kind(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    name: &str,
+    kind: UpstreamKind,
+) -> uuid::Uuid {
     UpstreamStore::create(
         storage,
         UpstreamCreate {
             id: uuid::Uuid::new_v4(),
             name: name.to_owned(),
-            kind: UpstreamKind::AnthropicOauth,
+            kind,
             base_url: None,
-            api_key_ciphertext: None,
+            api_key_ciphertext: (kind.credential_kind()
+                == cc_lb_storage_api::CredentialKind::ApiKey)
+                .then(|| vec![1, 2, 3]),
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
@@ -484,6 +807,58 @@ async fn create_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &s
     .await
     .expect("create upstream")
     .id
+}
+
+fn api_key_access(project_id: Option<&str>, attempted_at: u64) -> ApiKeyAccessWrite {
+    ApiKeyAccessWrite {
+        verified: true,
+        key_class: ApiKeyClass::Unknown,
+        key_hint: "test-key".to_owned(),
+        api_key_id: None,
+        needs_workspace: false,
+        capabilities: ApiKeyCapabilities::not_checked(),
+        remediation: Vec::new(),
+        usage_report_state: None,
+        provider: None,
+        project_id: project_id.map(str::to_owned),
+        project_source: None,
+        provider_report_state: None,
+        provider_report_status_metadata: None,
+        last_error: None,
+        checked_at_unix_secs: Some(attempted_at),
+        last_attempt_at_unix_secs: attempted_at,
+    }
+}
+
+fn binding_with_kind(
+    key: UpstreamAffinityKey,
+    upstream_id: uuid::Uuid,
+    kind: UpstreamAffinityKind,
+    provider: &str,
+    owner_epoch: u64,
+    observed_at_unix_secs: u64,
+    expires_at_unix_secs: Option<u64>,
+) -> UpstreamAffinityBinding {
+    UpstreamAffinityBinding {
+        key: UpstreamAffinityKey {
+            kind,
+            provider: provider.to_owned(),
+            ..key
+        },
+        upstream_id,
+        owner_epoch,
+        observed_at_unix_secs,
+        expires_at_unix_secs,
+    }
+}
+
+fn gemini_affinity_key(principal_id: &str, value_sha256: [u8; 32]) -> UpstreamAffinityKey {
+    UpstreamAffinityKey {
+        principal_id: principal_id.to_owned(),
+        provider: "gemini".to_owned(),
+        kind: UpstreamAffinityKind::GeminiCachedContent,
+        value_sha256,
+    }
 }
 
 fn affinity_key(principal_id: &str, value_sha256: [u8; 32]) -> UpstreamAffinityKey {
@@ -504,6 +879,7 @@ fn binding(
     UpstreamAffinityBinding {
         key,
         upstream_id,
+        owner_epoch: 0,
         observed_at_unix_secs,
         expires_at_unix_secs,
     }

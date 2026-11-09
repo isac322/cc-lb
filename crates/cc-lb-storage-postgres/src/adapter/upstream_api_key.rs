@@ -292,8 +292,23 @@ impl UpstreamApiKeyStore for PostgresStorage {
     ) -> StorageResult<()> {
         let now = unix_secs(self.clock.now());
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        ensure_live_spec_revision_in_tx(&mut tx, upstream_id, expected_spec_revision).await?;
+        ensure_live_spec_revision_for_access_in_tx(&mut tx, upstream_id, expected_spec_revision)
+            .await?;
+        let project_changed =
+            api_key_access_project_changed_in_tx(&mut tx, upstream_id, access).await?;
         write_api_key_access_in_tx(&mut tx, upstream_id, access, now).await?;
+        if project_changed {
+            sqlx::query(
+                "UPDATE upstream_spec_v1
+                    SET owner_epoch = owner_epoch + CASE WHEN kind = 'gemini_api_key' THEN 1 ELSE 0 END,
+                        updated_at = NOW()
+                  WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(upstream_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
         tx.commit().await.map_err(map_sqlx_error)
     }
 
@@ -666,6 +681,28 @@ async fn ensure_live_spec_revision_in_tx(
     }
     Ok(())
 }
+/// Access writes take the spec lock exclusively before locking the details row,
+/// avoiding a shared-to-exclusive upgrade deadlock with concurrent writers.
+async fn ensure_live_spec_revision_for_access_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    upstream_id: Uuid,
+    expected_revision: u64,
+) -> StorageResult<()> {
+    let row: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM upstream_spec_v1 \
+         WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL \
+         FOR UPDATE",
+    )
+    .bind(upstream_id)
+    .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if row.is_none() {
+        return Err(conflict("stale or deleted upstream"));
+    }
+    Ok(())
+}
 
 /// Poll guard: [`ensure_live_spec_revision_in_tx`] plus `enabled`, under the
 /// same `FOR SHARE` lock. Candidate selection only lists enabled upstreams; a
@@ -716,6 +753,26 @@ async fn insert_details_if_missing_in_tx(
     .await
     .map_err(map_sqlx_error)?;
     Ok(())
+}
+
+/// Returns whether the provider project identity changes. The details row is
+/// locked so the comparison and subsequent write share one transaction.
+pub(crate) async fn api_key_access_project_changed_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    upstream_id: Uuid,
+    access: &ApiKeyAccessWrite,
+) -> StorageResult<bool> {
+    let previous: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT project_id
+           FROM upstream_api_key_details_v1
+          WHERE upstream_id = $1
+          FOR UPDATE",
+    )
+    .bind(upstream_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(previous.flatten().as_deref() != access.project_id.as_deref())
 }
 
 /// Capability/access column write inside a transaction that already

@@ -23,6 +23,7 @@ pub(crate) const MAX_UPSTREAM_AFFINITY_KEYS_PER_REQUEST: usize = 1024;
 pub(crate) enum UpstreamAffinityExtractionError {
     TooManyKeys,
     InvalidSseData,
+    InvalidResponseAffinity,
 }
 
 /// Provider label stored with every affinity key derived for `capability`.
@@ -65,6 +66,7 @@ pub(crate) fn request_observes_response_affinity(
         // account (encrypted reasoning items are account-scoped), so the id
         // is observed regardless of `store`.
         ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact => true,
+        ProviderCapability::GeminiCachedContentsCreate => true,
         _ => false,
     }
 }
@@ -116,9 +118,32 @@ pub(crate) fn extract_response_affinity_keys(
         ProviderCapability::OpenaiResponses | ProviderCapability::OpenaiResponsesCompact => {
             collector.openai_response(value)?;
         }
+        ProviderCapability::GeminiCachedContentsCreate => {
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| {
+                    name.strip_prefix("cachedContents/")
+                        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+                })
+                .ok_or(UpstreamAffinityExtractionError::InvalidResponseAffinity)?;
+            collector.push(UpstreamAffinityKind::GeminiCachedContent, name)?;
+        }
         _ => {}
     }
     Ok(collector.keys)
+}
+
+/// CachedContent output timestamps are RFC 3339, with optional fractional seconds.
+pub(crate) fn gemini_cached_content_expiry(
+    value: &Value,
+) -> Result<u64, UpstreamAffinityExtractionError> {
+    value
+        .get("expireTime")
+        .and_then(Value::as_str)
+        .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+        .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
+        .ok_or(UpstreamAffinityExtractionError::InvalidResponseAffinity)
 }
 
 /// Extracts the provider-owned state a single successful SSE event creates.
@@ -940,6 +965,48 @@ mod tests {
         assert_eq!(
             extract_anthropic_web_search_affinity_keys(&over_cap, "principal-limit"),
             Err(UpstreamAffinityExtractionError::TooManyKeys)
+        );
+    }
+
+    #[test]
+    fn cached_contents_response_requires_canonical_name_and_expiry() {
+        let response = serde_json::json!({
+            "name": "cachedContents/abc",
+            "expireTime": "2026-11-09T00:00:00Z",
+        });
+        let keys = extract_response_affinity_keys(
+            ProviderCapability::GeminiCachedContentsCreate,
+            &response,
+            "principal-gemini",
+        )
+        .expect("canonical cached content response");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].kind, UpstreamAffinityKind::GeminiCachedContent);
+        assert_eq!(keys[0].value_sha256, digest("cachedContents/abc"));
+        assert_eq!(
+            gemini_cached_content_expiry(&response).expect("expiry"),
+            1_794_182_400
+        );
+
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"name": ""}),
+            serde_json::json!({"name": "cachedContents/"}),
+            serde_json::json!({"name": "cachedContents/a/b"}),
+            serde_json::json!({"name": 7}),
+        ] {
+            assert_eq!(
+                extract_response_affinity_keys(
+                    ProviderCapability::GeminiCachedContentsCreate,
+                    &invalid,
+                    "principal-gemini",
+                ),
+                Err(UpstreamAffinityExtractionError::InvalidResponseAffinity)
+            );
+        }
+        assert_eq!(
+            gemini_cached_content_expiry(&serde_json::json!({"name": "cachedContents/abc"})),
+            Err(UpstreamAffinityExtractionError::InvalidResponseAffinity)
         );
     }
 }

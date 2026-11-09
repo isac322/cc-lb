@@ -1284,6 +1284,14 @@ impl cc_lb_storage_api::UpstreamAffinityStore for HeldAffinityStore {
         Ok(Vec::new())
     }
 
+    async fn read_upstream_owner_epoch(
+        &self,
+        _upstream_id: cc_lb_storage_api::UpstreamRecordId,
+        _expected_spec_revision: u64,
+    ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+        Ok(Some(0))
+    }
+
     async fn bind_upstream_affinities(
         &self,
         bindings: &[cc_lb_storage_api::UpstreamAffinityBinding],
