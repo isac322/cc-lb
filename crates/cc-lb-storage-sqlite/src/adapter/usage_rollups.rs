@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Write as _,
-};
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
@@ -18,47 +15,14 @@ const CHECKPOINT_ID: &str = "high_water";
 const COST_BACKFILL_UPPER_ID: &str = "cost_components_backfill_upper";
 const COST_BACKFILL_CURSOR_ID: &str = "cost_components_backfill_cursor";
 const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
-const GEMINI_RECONCILIATION_MARKER_PREFIX: &str = "__cc_lb_gemini_reconciliation_source__:";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const TOKEN_INTERVAL_BATCH_SIZE: usize = 100;
-fn gemini_reconciliation_marker(
-    resolution: &str,
-    bucket_start: i64,
-    principal: &str,
-    upstream_id: &str,
-    model: &str,
-) -> String {
-    let identity = format!("{resolution}\0{bucket_start}\0{principal}\0{upstream_id}\0{model}");
-    let mut marker =
-        String::with_capacity(GEMINI_RECONCILIATION_MARKER_PREFIX.len() + identity.len() * 2);
-    marker.push_str(GEMINI_RECONCILIATION_MARKER_PREFIX);
-    for byte in identity.bytes() {
-        let _ = write!(marker, "{byte:02x}");
-    }
-    marker
-}
 
 async fn cleanup_gemini_reconciliation_markers(
     tx: &mut Transaction<'_, Sqlite>,
 ) -> StorageResult<()> {
-    sqlx::query(
-        "DELETE FROM usage_rollups_v2 \
-         WHERE rowid IN ( \
-             SELECT rollup.rowid \
-             FROM usage_rollups_v2 AS rollup \
-             JOIN usage_rollup_reconciliation_markers_v1 AS marker \
-               ON marker.resolution = rollup.resolution \
-              AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
-              AND marker.principal_id = rollup.principal_id \
-              AND marker.upstream_id = rollup.upstream_id \
-              AND marker.marker_model = rollup.model \
-         )",
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(map_sqlx_error)?;
     sqlx::query("DELETE FROM usage_rollup_reconciliation_markers_v1")
         .execute(&mut **tx)
         .await
@@ -293,14 +257,6 @@ impl UsageRollupStore for SqliteStorage {
               cost_components_event_count \
               FROM usage_rollups_v2 AS rollup \
               WHERE rollup.resolution = ? AND rollup.bucket_start_unix_secs >= ? AND rollup.bucket_start_unix_secs < ? \
-                AND NOT EXISTS ( \
-                    SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
-                    WHERE marker.resolution = rollup.resolution \
-                      AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
-                      AND marker.principal_id = rollup.principal_id \
-                      AND marker.upstream_id = rollup.upstream_id \
-                      AND marker.marker_model = rollup.model \
-                ) \
               ORDER BY bucket_start_unix_secs ASC",
         )
         .bind(resolution.as_str())
@@ -447,6 +403,14 @@ async fn merge_stale_gemini_rollups(
               AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
               AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\') \
            ) \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+             WHERE marker.resolution = rollup.resolution \
+               AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+               AND marker.principal_id = rollup.principal_id \
+               AND marker.upstream_id = rollup.upstream_id \
+               AND marker.marker_model = substr(rollup.model, 8) \
+           ) \
          ORDER BY rollup.resolution, rollup.bucket_start_unix_secs, rollup.principal_id, \
                   rollup.upstream_id, rollup.model \
          LIMIT ?",
@@ -467,13 +431,6 @@ async fn merge_stale_gemini_rollups(
         let principal: String = source.try_get("principal_id").map_err(map_sqlx_error)?;
         let upstream_id: String = source.try_get("upstream_id").map_err(map_sqlx_error)?;
         let model: String = source.try_get("model").map_err(map_sqlx_error)?;
-        let marker = gemini_reconciliation_marker(
-            &resolution,
-            bucket_start,
-            &principal,
-            &upstream_id,
-            &model,
-        );
 
         sqlx::query(
             "INSERT INTO usage_rollups_v2 \
@@ -565,11 +522,11 @@ async fn merge_stale_gemini_rollups(
         .map_err(map_sqlx_error)?;
 
         sqlx::query(
-            "UPDATE usage_rollups_v2 SET model = ? \
-             WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
-               AND upstream_id = ? AND model = ?",
+            "INSERT INTO usage_rollup_reconciliation_markers_v1 \
+             (resolution, bucket_start_unix_secs, principal_id, upstream_id, marker_model) \
+             VALUES (?, ?, ?, ?, substr(?, 8)) \
+             ON CONFLICT DO NOTHING",
         )
-        .bind(&marker)
         .bind(&resolution)
         .bind(bucket_start)
         .bind(&principal)
@@ -580,16 +537,15 @@ async fn merge_stale_gemini_rollups(
         .map_err(map_sqlx_error)?;
 
         sqlx::query(
-            "INSERT INTO usage_rollup_reconciliation_markers_v1 \
-             (resolution, bucket_start_unix_secs, principal_id, upstream_id, marker_model) \
-             VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT DO NOTHING",
+            "DELETE FROM usage_rollups_v2 \
+             WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
+               AND upstream_id = ? AND model = ?",
         )
         .bind(&resolution)
         .bind(bucket_start)
         .bind(&principal)
         .bind(&upstream_id)
-        .bind(&marker)
+        .bind(&model)
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -649,7 +605,15 @@ async fn reconcile_gemini_model_identity(
                AND length(rollup.model) > 7 \
                AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
                AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
-               AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\')",
+               AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\' \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                 WHERE marker.resolution = rollup.resolution \
+                   AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                   AND marker.principal_id = rollup.principal_id \
+                   AND marker.upstream_id = rollup.upstream_id \
+                   AND marker.marker_model = substr(rollup.model, 8) \
+               )",
         )
         .fetch_one(&mut *tx)
         .await
@@ -677,7 +641,15 @@ async fn reconcile_gemini_model_identity(
                  WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
                    AND rollup.rowid <= ? \
                    AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
-                   AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\')",
+                   AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\' \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                     WHERE marker.resolution = rollup.resolution \
+                       AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                       AND marker.principal_id = rollup.principal_id \
+                       AND marker.upstream_id = rollup.upstream_id \
+                       AND marker.marker_model = substr(rollup.model, 8) \
+                   )",
             )
             .bind(event_upper_bound)
             .bind(rollup_upper_bound)
@@ -716,7 +688,15 @@ async fn reconcile_gemini_model_identity(
                    AND rollup.rowid <= ? \
                    AND length(rollup.model) > 7 \
                    AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
-                   AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\')",
+                   AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\' \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                     WHERE marker.resolution = rollup.resolution \
+                       AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                       AND marker.principal_id = rollup.principal_id \
+                       AND marker.upstream_id = rollup.upstream_id \
+                       AND marker.marker_model = substr(rollup.model, 8) \
+                   )",
             )
             .bind(rollup_upper_bound)
             .fetch_one(&mut *tx)
@@ -804,7 +784,15 @@ async fn reconcile_gemini_model_identity(
              WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
                AND rollup.rowid <= ? \
                AND rollup.model LIKE 'models\\_models\\_%' ESCAPE '\\' \
-               AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\')",
+                   AND rollup.model NOT LIKE 'models\\_models\\_tunedModels\\_%' ESCAPE '\\' \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+                     WHERE marker.resolution = rollup.resolution \
+                       AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+                       AND marker.principal_id = rollup.principal_id \
+                       AND marker.upstream_id = rollup.upstream_id \
+                       AND marker.marker_model = substr(rollup.model, 8) \
+                   )",
         )
         .bind(nested_event_cursor)
         .bind(event_upper_bound)
@@ -886,7 +874,15 @@ async fn reconcile_gemini_model_identity(
            AND length(rollup.model) > 7 \
            AND rollup.model LIKE 'models\\_%' ESCAPE '\\' \
            AND rollup.model NOT LIKE 'models\\_models\\_%' ESCAPE '\\' \
-           AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\')",
+           AND rollup.model NOT LIKE 'models\\_tunedModels\\_%' ESCAPE '\\' \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM usage_rollup_reconciliation_markers_v1 AS marker \
+             WHERE marker.resolution = rollup.resolution \
+               AND marker.bucket_start_unix_secs = rollup.bucket_start_unix_secs \
+               AND marker.principal_id = rollup.principal_id \
+               AND marker.upstream_id = rollup.upstream_id \
+               AND marker.marker_model = substr(rollup.model, 8) \
+           )",
     )
     .bind(rollup_upper_bound)
     .fetch_one(&mut *tx)

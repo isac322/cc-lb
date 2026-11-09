@@ -16,6 +16,7 @@ INSERT INTO usage_rollup_reconciliations_v1 (
 VALUES ('canonicalize_gemini_model_identity', 'pending', 0, 0)
 ON CONFLICT (id) DO NOTHING;
 
+-- Track canonical target rollup identities; marker_model is retained for upgrade compatibility.
 CREATE TABLE IF NOT EXISTS usage_rollup_reconciliation_markers_v1 (
     resolution TEXT NOT NULL,
     bucket_start_unix_secs BIGINT NOT NULL,
