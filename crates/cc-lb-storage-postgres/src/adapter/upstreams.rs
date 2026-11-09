@@ -12,7 +12,10 @@ use sqlx::{Postgres, Row, Transaction};
 use url::Url;
 use uuid::Uuid;
 
-use super::upstream_api_key::{reset_api_key_poll_state_in_tx, write_api_key_access_in_tx};
+use super::upstream_api_key::{
+    api_key_access_project_changed_in_tx, reset_api_key_poll_state_in_tx,
+    write_api_key_access_in_tx,
+};
 use crate::{
     adapter::{
         PostgresStorage, conflict, datetime_to_unix_secs, i64_to_u64, u64_to_i64,
@@ -334,6 +337,7 @@ async fn update_split(
         || update.warmup_dialect_plugin.is_some()
         || update.workspace_id.is_some()
         || update.api_key_ciphertext.is_some();
+    let credential_changed = update.api_key_ciphertext.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
     let oauth_tokens = update.oauth_tokens.take();
     let oauth_token_generation = update.oauth_token_generation.take();
@@ -342,11 +346,12 @@ async fn update_split(
     // Spec, api-key, OAuth credentials, generation, and details updates share
     // one transaction so a partial update can never commit independently.
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
-    if has_spec_update {
-        update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
+    let base_url_changed = if has_spec_update {
+        update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?
     } else {
         ensure_split_spec_revision_in_tx(&mut tx, id, expected_revision).await?;
-    }
+        false
+    };
     let mut changed = has_spec_update;
     if let Some(ciphertext) = api_key_ciphertext {
         update_split_api_key_secret_in_tx(&mut tx, id, Some(ciphertext)).await?;
@@ -361,7 +366,7 @@ async fn update_split(
         changed = true;
     }
     // Details never affect routing, so they alone do not notify.
-    write_split_details_in_tx(
+    let project_changed = write_split_details_in_tx(
         storage,
         &mut tx,
         id,
@@ -369,6 +374,9 @@ async fn update_split(
         reset_api_key_poll_state,
     )
     .await?;
+    if base_url_changed || credential_changed || project_changed {
+        bump_split_owner_epoch_in_tx(&mut tx, id).await?;
+    }
     if changed {
         notify(&mut tx, id).await?;
     }
@@ -387,8 +395,8 @@ async fn update_split_spec(
     let api_key_access = update.api_key_access.take();
     let reset_api_key_poll_state = std::mem::take(&mut update.reset_api_key_poll_state);
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
-    update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
-    write_split_details_in_tx(
+    let base_url_changed = update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
+    let project_changed = write_split_details_in_tx(
         storage,
         &mut tx,
         id,
@@ -396,6 +404,9 @@ async fn update_split_spec(
         reset_api_key_poll_state,
     )
     .await?;
+    if base_url_changed || project_changed {
+        bump_split_owner_epoch_in_tx(&mut tx, id).await?;
+    }
     notify(&mut tx, id).await?;
     commit_with_record(tx, id).await
 }
@@ -408,18 +419,22 @@ async fn write_split_details_in_tx(
     id: Uuid,
     access: Option<&cc_lb_storage_api::ApiKeyAccessWrite>,
     reset_api_key_poll_state: bool,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     if access.is_none() && !reset_api_key_poll_state {
-        return Ok(());
+        return Ok(false);
     }
     let now = unix_secs(storage.clock.now());
-    if let Some(access) = access {
+    let project_changed = if let Some(access) = access {
+        let changed = api_key_access_project_changed_in_tx(tx, id, access).await?;
         write_api_key_access_in_tx(tx, id, access, now).await?;
-    }
+        changed
+    } else {
+        false
+    };
     if reset_api_key_poll_state {
         reset_api_key_poll_state_in_tx(tx, id, now).await?;
     }
-    Ok(())
+    Ok(project_changed)
 }
 
 async fn update_split_spec_in_tx(
@@ -427,13 +442,27 @@ async fn update_split_spec_in_tx(
     id: Uuid,
     expected_revision: u64,
     update: UpstreamUpdate,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     let base_url_present = update.base_url.is_some();
     let base_url = update
         .base_url
         .as_ref()
         .and_then(Option::as_ref)
         .map(Url::as_str);
+    let previous_base_url: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT base_url
+           FROM upstream_spec_v1
+          WHERE id = $1 AND deleted_at IS NULL
+          FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let Some(previous_base_url) = previous_base_url else {
+        return Err(conflict("upstream not found"));
+    };
+    let base_url_changed = base_url_present && previous_base_url.as_deref() != base_url;
     let workspace_id_present = update.workspace_id.is_some();
     let workspace_id = update.workspace_id.as_ref().and_then(Option::as_deref);
     let row = sqlx::query(
@@ -471,7 +500,7 @@ async fn update_split_spec_in_tx(
     if row.is_none() {
         return Err(conflict("stale upstream revision"));
     }
-    Ok(())
+    Ok(base_url_changed)
 }
 
 async fn update_split_api_key_secret(
@@ -482,6 +511,7 @@ async fn update_split_api_key_secret(
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     update_split_api_key_secret_in_tx(&mut tx, id, api_key_ciphertext).await?;
     bump_split_spec_revision_in_tx(&mut tx, id).await?;
+    bump_split_owner_epoch_in_tx(&mut tx, id).await?;
     notify(&mut tx, id).await?;
     commit_with_record(tx, id).await
 }
@@ -650,6 +680,26 @@ async fn bump_split_spec_revision_in_tx(
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
            SET spec_revision = spec_revision + 1, updated_at = NOW()
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if row.is_none() {
+        return Err(conflict("upstream not found"));
+    }
+    Ok(())
+}
+
+async fn bump_split_owner_epoch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> StorageResult<()> {
+    let row = sqlx::query(
+        "UPDATE upstream_spec_v1
+           SET owner_epoch = owner_epoch + CASE WHEN kind = 'gemini_api_key' THEN 1 ELSE 0 END, updated_at = NOW()
          WHERE id = $1 AND deleted_at IS NULL
          RETURNING id",
     )

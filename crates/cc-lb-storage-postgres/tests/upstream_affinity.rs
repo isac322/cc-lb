@@ -1,8 +1,10 @@
 use std::{error::Error, str::FromStr, sync::Arc};
 
 use cc_lb_storage_api::{
-    MetaStore, StorageError, UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityKind,
-    UpstreamAffinityStore, UpstreamCreate, UpstreamStore, upstream::UpstreamKind,
+    ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyOrgCapability, MetaStore,
+    StorageError, UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityKind,
+    UpstreamAffinityStore, UpstreamApiKeyStore, UpstreamCreate, UpstreamStore, UpstreamUpdate,
+    upstream::UpstreamKind,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sha2::{Digest, Sha256};
@@ -10,6 +12,7 @@ use sqlx::{
     AssertSqlSafe, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
+use url::Url;
 use uuid::Uuid;
 
 const BIND_BATCH_SIZE: usize = 128;
@@ -452,15 +455,365 @@ async fn upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind() ->
     fixture.drop_schema().await
 }
 
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn upstream_affinity_owner_epoch_fences_gemini_identity_only() -> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let storage = fixture.store();
+    storage.initialize().await?;
+
+    let gemini = create_upstream_kind(
+        &storage,
+        "epoch-gemini",
+        UpstreamKind::GeminiApiKey,
+        Some(b"gemini-old".to_vec()),
+    )
+    .await?;
+    assert_eq!(
+        storage.read_upstream_owner_epoch(gemini, 1).await?,
+        Some(0),
+        "new upstreams start at epoch zero"
+    );
+    let gemini_key = affinity_key_with_kind(
+        "principal-gemini",
+        [70; 32],
+        "gemini",
+        UpstreamAffinityKind::GeminiCachedContent,
+    );
+    let initial = binding(gemini_key.clone(), gemini, 10, None);
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&initial), 0, TTL_SECS)
+        .await?;
+
+    let replaced =
+        UpstreamStore::update_api_key_secret(&storage, gemini, Some(b"gemini-new".to_vec()))
+            .await?;
+    assert_eq!(replaced.revision, 2);
+    assert_eq!(
+        storage.read_upstream_owner_epoch(gemini, 1).await?,
+        None,
+        "a stale spec revision cannot read the current owner epoch"
+    );
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, replaced.revision)
+            .await?,
+        Some(1),
+        "Gemini API-key identity changes advance the owner epoch"
+    );
+    assert!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&gemini_key), 10, TTL_SECS)
+            .await?
+            .is_empty(),
+        "bindings from the previous Gemini owner epoch are stale"
+    );
+
+    let stale_keys = [
+        binding(
+            affinity_key_with_kind(
+                "principal-gemini-stale-a",
+                [71; 32],
+                "gemini",
+                UpstreamAffinityKind::GeminiCachedContent,
+            ),
+            gemini,
+            0,
+            None,
+        ),
+        binding(
+            affinity_key_with_kind(
+                "principal-gemini-stale-b",
+                [72; 32],
+                "gemini",
+                UpstreamAffinityKind::GeminiCachedContent,
+            ),
+            gemini,
+            0,
+            None,
+        ),
+    ];
+    let error = storage
+        .bind_upstream_affinities(&stale_keys, 10, TTL_SECS)
+        .await
+        .expect_err("stale owner epoch must reject a new binding");
+    assert!(matches!(error, StorageError::Conflict { .. }));
+    assert!(
+        storage
+            .resolve_upstream_affinities(
+                &stale_keys
+                    .iter()
+                    .map(|binding| binding.key.clone())
+                    .collect::<Vec<_>>(),
+                10,
+                TTL_SECS,
+            )
+            .await?
+            .is_empty(),
+        "a rejected stale batch must not leave partial rows"
+    );
+
+    let fresh_key = affinity_key_with_kind(
+        "principal-gemini-fresh",
+        [73; 32],
+        "gemini",
+        UpstreamAffinityKind::GeminiCachedContent,
+    );
+    let mut fresh = binding(fresh_key.clone(), gemini, 11, None);
+    fresh.owner_epoch = 1;
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&fresh), 10, TTL_SECS)
+        .await?;
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&fresh_key), 10, TTL_SECS)
+            .await?,
+        vec![fresh.clone()]
+    );
+
+    let renamed = UpstreamStore::update(
+        &storage,
+        gemini,
+        replaced.revision,
+        UpstreamUpdate {
+            name: Some("epoch-gemini-renamed".to_owned()),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, renamed.revision)
+            .await?,
+        Some(1),
+        "renaming does not change owner identity"
+    );
+    let enabled = UpstreamStore::set_enabled(&storage, gemini, renamed.revision, false).await?;
+    assert_eq!(enabled.revision, renamed.revision + 1);
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, enabled.revision)
+            .await?,
+        Some(1),
+        "enabling does not change owner identity"
+    );
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&fresh_key), 10, TTL_SECS)
+            .await?,
+        vec![fresh]
+    );
+
+    let project_a = access(Some("project-a"), 12);
+    UpstreamApiKeyStore::write_api_key_access(&storage, gemini, enabled.revision, &project_a)
+        .await?;
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, enabled.revision)
+            .await?,
+        Some(2),
+        "a changed Gemini project identity advances the owner epoch"
+    );
+    assert!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&fresh_key), 12, TTL_SECS)
+            .await?
+            .is_empty(),
+        "changing the Gemini project invalidates the prior binding"
+    );
+    let project_key = affinity_key_with_kind(
+        "principal-gemini-project",
+        [75; 32],
+        "gemini",
+        UpstreamAffinityKind::GeminiCachedContent,
+    );
+    let mut project_binding = binding(project_key.clone(), gemini, 12, None);
+    project_binding.owner_epoch = 2;
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&project_binding), 12, TTL_SECS)
+        .await?;
+    let same_project = access(Some("project-a"), 13);
+    UpstreamApiKeyStore::write_api_key_access(&storage, gemini, enabled.revision, &same_project)
+        .await?;
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, enabled.revision)
+            .await?,
+        Some(2),
+        "refreshing unchanged project access preserves the owner epoch"
+    );
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&project_key), 13, TTL_SECS)
+            .await?,
+        vec![project_binding]
+    );
+
+    let with_base_url = UpstreamStore::update_spec(
+        &storage,
+        gemini,
+        enabled.revision,
+        UpstreamUpdate {
+            base_url: Some(Some(Url::parse("https://gemini.example.test")?)),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, with_base_url.revision)
+            .await?,
+        Some(3),
+        "changing Gemini base URL advances the owner epoch"
+    );
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, enabled.revision)
+            .await?,
+        None,
+        "the pre-base-URL spec revision is stale"
+    );
+    assert!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&project_key), 13, TTL_SECS)
+            .await?
+            .is_empty()
+    );
+    let same_base_url = UpstreamStore::update_spec(
+        &storage,
+        gemini,
+        with_base_url.revision,
+        UpstreamUpdate {
+            base_url: Some(Some(Url::parse("https://gemini.example.test")?)),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, same_base_url.revision)
+            .await?,
+        Some(3),
+        "re-saving the same Gemini base URL preserves the owner epoch"
+    );
+    let base_key = affinity_key_with_kind(
+        "principal-gemini-base-url",
+        [76; 32],
+        "gemini",
+        UpstreamAffinityKind::GeminiCachedContent,
+    );
+    let mut base_binding = binding(base_key.clone(), gemini, 14, None);
+    base_binding.owner_epoch = 3;
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&base_binding), 14, TTL_SECS)
+        .await?;
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&base_key), 14, TTL_SECS)
+            .await?,
+        vec![base_binding]
+    );
+    let project_b = access(Some("project-b"), 15);
+    UpstreamApiKeyStore::write_api_key_access(&storage, gemini, same_base_url.revision, &project_b)
+        .await?;
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(gemini, same_base_url.revision)
+            .await?,
+        Some(4),
+        "changing Gemini project identity invalidates the current binding"
+    );
+    assert!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&base_key), 15, TTL_SECS)
+            .await?
+            .is_empty()
+    );
+
+    let openai = create_upstream_kind(
+        &storage,
+        "epoch-openai",
+        UpstreamKind::OpenaiApiKey,
+        Some(b"openai-old".to_vec()),
+    )
+    .await?;
+    let openai_key = affinity_key_with_kind(
+        "principal-openai",
+        [74; 32],
+        "openai",
+        UpstreamAffinityKind::OpenaiResponseId,
+    );
+    let openai_binding = binding(openai_key.clone(), openai, 20, None);
+    storage
+        .bind_upstream_affinities(std::slice::from_ref(&openai_binding), 20, TTL_SECS)
+        .await?;
+    let openai_updated =
+        UpstreamStore::update_api_key_secret(&storage, openai, Some(b"openai-new".to_vec()))
+            .await?;
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(openai, openai_updated.revision)
+            .await?,
+        Some(0),
+        "non-Gemini API-key credential changes preserve epoch zero"
+    );
+    let access = ApiKeyAccessWrite {
+        verified: true,
+        key_class: ApiKeyClass::Unknown,
+        key_hint: "openai-test".to_owned(),
+        api_key_id: None,
+        needs_workspace: false,
+        capabilities: ApiKeyCapabilities::not_checked(),
+        remediation: Vec::new(),
+        usage_report_state: Some(ApiKeyOrgCapability::NotApplicable),
+        provider: None,
+        project_id: None,
+        project_source: None,
+        provider_report_state: None,
+        provider_report_status_metadata: None,
+        last_error: None,
+        checked_at_unix_secs: Some(21),
+        last_attempt_at_unix_secs: 21,
+    };
+    UpstreamApiKeyStore::write_api_key_access(&storage, openai, openai_updated.revision, &access)
+        .await?;
+    assert_eq!(
+        storage
+            .read_upstream_owner_epoch(openai, openai_updated.revision)
+            .await?,
+        Some(0),
+        "non-Gemini access metadata changes preserve epoch zero"
+    );
+    assert_eq!(
+        storage
+            .resolve_upstream_affinities(std::slice::from_ref(&openai_key), 21, TTL_SECS)
+            .await?,
+        vec![openai_binding]
+    );
+
+    fixture.drop_schema().await
+}
+
 async fn create_upstream(storage: &PostgresStorage, name: &str) -> TestResult<Uuid> {
+    create_upstream_kind(storage, name, UpstreamKind::AnthropicOauth, None).await
+}
+
+async fn create_upstream_kind(
+    storage: &PostgresStorage,
+    name: &str,
+    kind: UpstreamKind,
+    api_key_ciphertext: Option<Vec<u8>>,
+) -> TestResult<Uuid> {
     Ok(UpstreamStore::create(
         storage,
         UpstreamCreate {
             id: Uuid::new_v4(),
             name: name.to_owned(),
-            kind: UpstreamKind::AnthropicOauth,
+            kind,
             base_url: None,
-            api_key_ciphertext: None,
+            api_key_ciphertext,
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
@@ -473,11 +826,46 @@ async fn create_upstream(storage: &PostgresStorage, name: &str) -> TestResult<Uu
 }
 
 fn affinity_key(principal_id: &str, value_sha256: [u8; 32]) -> UpstreamAffinityKey {
+    affinity_key_with_kind(
+        principal_id,
+        value_sha256,
+        "anthropic",
+        UpstreamAffinityKind::AnthropicWebSearchEncryptedContent,
+    )
+}
+
+fn affinity_key_with_kind(
+    principal_id: &str,
+    value_sha256: [u8; 32],
+    provider: &str,
+    kind: UpstreamAffinityKind,
+) -> UpstreamAffinityKey {
     UpstreamAffinityKey {
         principal_id: principal_id.to_owned(),
-        provider: "anthropic".to_owned(),
-        kind: UpstreamAffinityKind::AnthropicWebSearchEncryptedContent,
+        provider: provider.to_owned(),
+        kind,
         value_sha256,
+    }
+}
+
+fn access(project_id: Option<&str>, checked_at_unix_secs: u64) -> ApiKeyAccessWrite {
+    ApiKeyAccessWrite {
+        verified: true,
+        key_class: ApiKeyClass::Unknown,
+        key_hint: "test-key".to_owned(),
+        api_key_id: None,
+        needs_workspace: false,
+        capabilities: ApiKeyCapabilities::not_checked(),
+        remediation: Vec::new(),
+        usage_report_state: Some(ApiKeyOrgCapability::NotApplicable),
+        provider: None,
+        project_id: project_id.map(str::to_owned),
+        project_source: None,
+        provider_report_state: None,
+        provider_report_status_metadata: None,
+        last_error: None,
+        checked_at_unix_secs: Some(checked_at_unix_secs),
+        last_attempt_at_unix_secs: checked_at_unix_secs,
     }
 }
 
@@ -490,6 +878,7 @@ fn binding(
     UpstreamAffinityBinding {
         key,
         upstream_id,
+        owner_epoch: 0,
         observed_at_unix_secs,
         expires_at_unix_secs,
     }

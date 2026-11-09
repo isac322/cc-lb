@@ -35,6 +35,9 @@ Provider-owned state referenced inside a supported HTTP generation request is fo
 - OpenAI HTTP Responses: response ids and stateless reasoning `encrypted_content` items observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
 - Gemini generateContent / countTokens: `cachedContent` references (including nested `generateContentRequest.cachedContent`). `thoughtSignature` is forwarded but is not treated as affinity state.
 
+- Gemini cachedContents creation: the exact `POST /gemini/v1beta/cachedContents` operation is available only with Gemini API-key upstreams and explicit-caching Gemini 2.5 and Gemini 3 family models. Gemini 4+ explicit caching, other models, and non-create `cachedContents` API surfaces remain HTTP `404 operation_not_supported`. cc-lb forwards the request body unchanged and binds a successful canonical response `name` in the form `cachedContents/<id>` to the selected upstream before returning success; later `generateContent` and `countTokens` requests that reference that name remain pinned to its owner.
+
+  Provider `4xx` and `5xx` responses retain their original status and create no owner binding. An unbound reference returns HTTP `503` with `api_error`; an unavailable owner returns HTTP `503 upstream_affinity_unavailable`, without cross-credential failover. Each cached-content binding is checked against its owner upstream's identity epoch. Replacing the API key or changing the base URL or project invalidates it; re-saving the same URL or project and refreshing access metadata preserve it. API-key replacement conservatively invalidates bindings even when the same key is entered again. Later reuse of an invalidated binding fails closed with HTTP `503` until a new resource is created, and a stale create response cannot rebind after an owner identity change. Malformed, non-JSON, or noncanonical create responses, missing, invalid, or expired `expireTime`, and persistence failures return HTTP `503` without a success body.
 - Prompt-cache analysis and cache-aware routing apply to Anthropic breakpoints and scoped older-model OpenAI Responses observations. Native pricing is exposed when catalog data exists. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` remains hard affinity.
 
 Admin preflight is separate from client proxy routing: `GET /v1/models` and `POST /v1/messages/count_tokens` (Anthropic), `GET /v1/models` (OpenAI), and `GET /v1beta/models` (Gemini) run as direct upstream probes during key verification.
@@ -74,6 +77,7 @@ Not yet supported: files, uploads, batches, vector stores, conversations, contai
 | Method | Client path | Credentials |
 |---|---|---|
 | POST | `/gemini/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens` | API key, OAuth |
+| POST | `/gemini/v1beta/cachedContents` (create only) | API key |
 | POST | `/gemini/v1beta/models/{model}:embedContent`, `:batchEmbedContents`, `:predict` | API key |
 | GET | `/gemini/v1beta/models`, `/gemini/v1beta/models/{model}` (also `/gemini/v1/models` and `/gemini/v1/models/{model}`) | API key |
 | POST | `/gemini/v1beta/openai/chat/completions`, `/gemini/v1beta/openai/embeddings`, `/gemini/v1beta/openai/images/generations` | API key |
@@ -91,7 +95,7 @@ OpenAI's `OpenAI-Beta` header is passed through. Gemini client-supplied `key=` q
 
 New tunnel handshakes during server drain receive HTTP `503` without upgrading. Existing tunnels stop relaying and send best-effort close frames, without an explicit close code or reason, to both peers. Idle Gemini connections waiting for a setup frame also close on drain. After an upgrade, drain cannot produce a new HTTP response.
 
-Not yet supported: file upload/download, cachedContents, batches, operations, predictLongRunning, fileSearchStores, interactions, agents, auth_tokens, and OpenAI-compatible files/batches. Code Assist account controls are not proxy operations: loadCodeAssist, onboardUser, retrieveUserQuota*, listExperiments, metrics, admin controls, and user settings are excluded.
+Not yet supported: cachedContents operations other than create, file upload/download, batches, operations, predictLongRunning, fileSearchStores, interactions, agents, auth_tokens, and OpenAI-compatible files/batches. Code Assist account controls are not proxy operations: loadCodeAssist, onboardUser, retrieveUserQuota*, listExperiments, metrics, admin controls, and user settings are excluded.
 
 #### Unsupported operations and body limits
 

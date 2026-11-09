@@ -56,12 +56,26 @@ pub struct UpstreamAffinityKey {
 pub struct UpstreamAffinityBinding {
     pub key: UpstreamAffinityKey,
     pub upstream_id: UpstreamRecordId,
+    /// Owner identity epoch captured when this binding was created.
+    ///
+    /// A binding is valid only while this equals the current upstream owner
+    /// epoch. `0` preserves compatibility with rows written before epoch
+    /// fencing was introduced.
+    #[serde(default)]
+    pub owner_epoch: u64,
     pub observed_at_unix_secs: u64,
     pub expires_at_unix_secs: Option<u64>,
 }
 
 #[async_trait]
 pub trait UpstreamAffinityStore: Send + Sync + 'static {
+    /// Returns an epoch only if the dispatched credential snapshot is still current.
+    async fn read_upstream_owner_epoch(
+        &self,
+        upstream_id: UpstreamRecordId,
+        expected_spec_revision: u64,
+    ) -> StorageResult<Option<u64>>;
+
     async fn resolve_upstream_affinities(
         &self,
         keys: &[UpstreamAffinityKey],

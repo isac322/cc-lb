@@ -74,8 +74,9 @@ use crate::downstream_stream_drop_guard::{
     DownstreamStreamDropGuard, StreamTerminationAttribution,
 };
 use crate::error_format::{
-    anthropic_error_body, anthropic_error_response, provider_error_body_with_retry_after,
-    provider_error_response, provider_error_response_with_retry_after,
+    anthropic_error_body, anthropic_error_response, provider_error_body,
+    provider_error_body_with_retry_after, provider_error_response,
+    provider_error_response_with_retry_after,
 };
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::limit_input_estimate::estimate_anthropic_input;
@@ -109,7 +110,8 @@ use crate::terminal_observer::{
 };
 use crate::upstream_affinity::{
     UpstreamAffinityExtractionError, extract_request_affinity_keys, extract_response_affinity_keys,
-    extract_response_affinity_keys_from_sse_event, request_observes_response_affinity,
+    extract_response_affinity_keys_from_sse_event, gemini_cached_content_expiry,
+    request_observes_response_affinity,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 #[cfg(test)]
@@ -474,6 +476,7 @@ pub enum RequestKind {
     AnthropicMessages,
     OpenaiResponses,
     GeminiGenerateContent,
+    GeminiCachedContentsCreate,
     GeminiCountTokens,
     AnthropicModels,
     AnthropicComplete,
@@ -530,6 +533,7 @@ impl RequestKind {
             Self::AnthropicMessages => ProviderCapability::AnthropicMessages,
             Self::OpenaiResponses => ProviderCapability::OpenaiResponses,
             Self::GeminiGenerateContent => ProviderCapability::GeminiGenerateContent,
+            Self::GeminiCachedContentsCreate => ProviderCapability::GeminiCachedContentsCreate,
             Self::GeminiCountTokens => ProviderCapability::GeminiCountTokens,
             Self::AnthropicModels => ProviderCapability::AnthropicModels,
             Self::AnthropicComplete => ProviderCapability::AnthropicComplete,
@@ -565,6 +569,7 @@ impl From<ProviderCapability> for RequestKind {
             ProviderCapability::AnthropicMessages => Self::AnthropicMessages,
             ProviderCapability::AnthropicCountTokens => Self::AnthropicMessages,
             ProviderCapability::GeminiGenerateContent => Self::GeminiGenerateContent,
+            ProviderCapability::GeminiCachedContentsCreate => Self::GeminiCachedContentsCreate,
             ProviderCapability::GeminiCountTokens => Self::GeminiCountTokens,
             ProviderCapability::AnthropicModels => Self::AnthropicModels,
             ProviderCapability::AnthropicComplete => Self::AnthropicComplete,
@@ -3212,6 +3217,7 @@ struct LimitRejectionErr {
 
 struct RequestAffinityResolution {
     target_upstream_id: Uuid,
+    owner_epoch: u64,
     pending_keys: Vec<UpstreamAffinityKey>,
 }
 
@@ -3237,6 +3243,7 @@ struct ResponseAffinityContext {
     upstream_id: Uuid,
     pending_request_keys: Vec<UpstreamAffinityKey>,
     observe_response_keys: bool,
+    owner_epoch: Option<u64>,
     ttl_secs: u64,
 }
 
@@ -3244,6 +3251,7 @@ async fn bind_upstream_affinity_keys(
     context: &ResponseAffinityContext,
     keys: &[UpstreamAffinityKey],
     now_unix_secs: u64,
+    expires_at_unix_secs: Option<u64>,
 ) -> Result<(), ()> {
     if keys.is_empty() {
         return Ok(());
@@ -3251,6 +3259,7 @@ async fn bind_upstream_affinity_keys(
     let Some(store) = context.store.as_ref() else {
         return Err(());
     };
+    let owner_epoch = context.owner_epoch.ok_or(())?;
     let mut seen = HashSet::with_capacity(keys.len());
     let mut bindings = Vec::with_capacity(keys.len());
     for key in keys {
@@ -3258,8 +3267,9 @@ async fn bind_upstream_affinity_keys(
             bindings.push(UpstreamAffinityBinding {
                 key: key.clone(),
                 upstream_id: context.upstream_id,
+                owner_epoch,
                 observed_at_unix_secs: now_unix_secs,
-                expires_at_unix_secs: None,
+                expires_at_unix_secs,
             });
         }
     }
@@ -4018,6 +4028,7 @@ impl Lifecycle {
         let requested_keys = keys.iter().collect::<HashSet<_>>();
         let mut matched_keys = HashSet::with_capacity(bindings.len().min(keys.len()));
         let mut target_upstream_id = None;
+        let mut owner_epoch = None;
         for binding in &bindings {
             if !requested_keys.contains(&binding.key) {
                 continue;
@@ -4034,6 +4045,16 @@ impl Lifecycle {
                 Some(_) => {}
                 None => target_upstream_id = Some(binding.upstream_id),
             }
+            if binding.key.provider == "gemini"
+                && owner_epoch.is_some_and(|epoch| epoch != binding.owner_epoch)
+            {
+                return Err(RequestAffinityFailure {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_type: "api_error",
+                    message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                });
+            }
+            owner_epoch = Some(binding.owner_epoch);
         }
         let Some(target_upstream_id) = target_upstream_id else {
             return Err(RequestAffinityFailure {
@@ -4049,6 +4070,7 @@ impl Lifecycle {
             .collect();
         Ok(Some(RequestAffinityResolution {
             target_upstream_id,
+            owner_epoch: owner_epoch.expect("resolved affinity has a matching binding"),
             pending_keys,
         }))
     }
@@ -4913,9 +4935,10 @@ impl Lifecycle {
             upstream_id,
             pending_request_keys: Vec::new(),
             observe_response_keys: true,
+            owner_epoch: Some(0),
             ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
         };
-        bind_upstream_affinity_keys(&context, &keys, unix_secs(self.clock.now()))
+        bind_upstream_affinity_keys(&context, &keys, unix_secs(self.clock.now()), None)
             .await
             .map_err(|_| {
                 WebSocketError::new(
@@ -5125,10 +5148,12 @@ impl Lifecycle {
             .value()
             .is_some_and(|body| !body_is_consistency_safe(request_capability, body))
         {
-            let response = anthropic_error_response(
+            let response = provider_error_response(
+                request_capability,
                 StatusCode::NOT_FOUND,
                 "operation_not_supported",
                 "operation is not supported by the consistency-safe proxy boundary",
+                None,
             );
             if let Some(o) = observer.as_ref() {
                 o.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
@@ -5616,6 +5641,11 @@ impl Lifecycle {
         let mut attempt_timings = AttemptTimings::default();
         let mut keepalive_shaped_body = None;
         let mut keepalive_request_dispatched_at = None;
+        let affinity_owner_epoch_required = request_capability
+            == ProviderCapability::GeminiCachedContentsCreate
+            || (request_capability.provider() == cc_lb_domain::Provider::Gemini
+                && request_affinity.is_some());
+        let mut routed_owner_epoch;
         let (mut response, dispatch_started, dispatch_unix_secs, signer) = loop {
             // A failed-over upstream is announced before its signer is built,
             // so a terminal failure here never reports the previous upstream's
@@ -5631,6 +5661,47 @@ impl Lifecycle {
                 );
                 emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
             }
+            routed_owner_epoch = if affinity_owner_epoch_required {
+                match self.upstream_affinity_store.as_ref() {
+                    None => None,
+                    Some(store) => match store
+                        .read_upstream_owner_epoch(routed.route.upstream_id, routed.record.revision)
+                        .await
+                    {
+                        Ok(Some(epoch))
+                            if request_affinity
+                                .as_ref()
+                                .is_none_or(|affinity| affinity.owner_epoch == epoch) =>
+                        {
+                            Some(epoch)
+                        }
+                        Ok(Some(_)) | Ok(None) | Err(_) => {
+                            if let Some(o) = observer.as_ref() {
+                                o.terminate_failure(InternalFailure {
+                                    status: StatusCode::SERVICE_UNAVAILABLE,
+                                    error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                                    error: InternalError {
+                                        stage: InternalErrorStage::Storage,
+                                        kind: InternalErrorKind::Unavailable,
+                                        message: Some(
+                                            UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned(),
+                                        ),
+                                    },
+                                });
+                            }
+                            return Ok(provider_error_response(
+                                request_capability,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                                UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                None,
+                            ));
+                        }
+                    },
+                }
+            } else {
+                Some(0)
+            };
             let replacement_request = active_limit.as_ref().and_then(|limit| {
                 let request = body_view.limit_request(
                     &ctx.canonical_model_id,
@@ -6006,6 +6077,7 @@ impl Lifecycle {
             observe_response_keys: body_view
                 .value()
                 .is_some_and(|value| request_observes_response_affinity(request_capability, value)),
+            owner_epoch: routed_owner_epoch,
             ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
         };
         response = self
@@ -6225,11 +6297,14 @@ impl Lifecycle {
         let stream_response = stream_requested || audio_stream;
         let buffered_transform_required =
             transform_ctx.gemini_oauth || transform_ctx.dialect.response_transform_hook().is_some();
-        if is_sse_response(
-            response.headers(),
-            stream_requested,
-            response_affinity_context.capability,
-        ) || (stream_response && !buffered_transform_required)
+        let force_buffered_response =
+            response_affinity_context.capability == ProviderCapability::GeminiCachedContentsCreate;
+        if !force_buffered_response
+            && (is_sse_response(
+                response.headers(),
+                stream_requested,
+                response_affinity_context.capability,
+            ) || (stream_response && !buffered_transform_required))
         {
             let provider = response_affinity_context.capability.provider();
             let response_status = response.status();
@@ -6414,7 +6489,13 @@ impl Lifecycle {
             None => None,
         };
         let mut downstream_body = if body_collect_failed {
-            parts.status = StatusCode::BAD_GATEWAY;
+            parts.status = if response_affinity_context.capability
+                == ProviderCapability::GeminiCachedContentsCreate
+            {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
             parts.headers.clear();
             parts.headers.insert(
                 CONTENT_TYPE,
@@ -6490,6 +6571,17 @@ impl Lifecycle {
             // Do not gate this scan on request tools: a successful buffered response can
             // introduce unsolicited provider state (e.g. an Anthropic web-search result or
             // an OpenAI response id) that later requests must pin.
+            let now_unix_secs = unix_secs(self.clock.now());
+            let response_expiry = if response_affinity_context.capability
+                == ProviderCapability::GeminiCachedContentsCreate
+            {
+                response_body_json
+                    .as_ref()
+                    .and_then(|response_json| gemini_cached_content_expiry(response_json).ok())
+                    .filter(|expiry| *expiry > now_unix_secs)
+            } else {
+                None
+            };
             let extraction_failed = if let Some(response_json) = response_body_json.as_ref() {
                 match extract_response_affinity_keys(
                     response_affinity_context.capability,
@@ -6498,18 +6590,22 @@ impl Lifecycle {
                 ) {
                     Ok(response_keys) => {
                         affinity_keys.extend(response_keys);
-                        false
+                        response_affinity_context.capability
+                            == ProviderCapability::GeminiCachedContentsCreate
+                            && response_expiry.is_none()
                     }
                     Err(_) => true,
                 }
             } else {
-                false
+                response_affinity_context.capability
+                    == ProviderCapability::GeminiCachedContentsCreate
             };
             if extraction_failed
                 || bind_upstream_affinity_keys(
                     &response_affinity_context,
                     &affinity_keys,
-                    unix_secs(self.clock.now()),
+                    now_unix_secs,
+                    response_expiry,
                 )
                 .await
                 .is_err()
@@ -6522,8 +6618,19 @@ impl Lifecycle {
                     CONTENT_TYPE,
                     HeaderValue::from_static("application/json; charset=utf-8"),
                 );
-                downstream_body =
-                    anthropic_error_body("api_error", UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE);
+                downstream_body = if response_affinity_context.capability
+                    == ProviderCapability::GeminiCachedContentsCreate
+                {
+                    provider_error_body(
+                        response_affinity_context.capability,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "api_error",
+                        UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                        None,
+                    )
+                } else {
+                    anthropic_error_body("api_error", UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE)
+                };
             }
         }
         let client_status = parts.status;
@@ -7777,6 +7884,7 @@ impl Lifecycle {
                                         &response_affinity_context,
                                         &affinity_keys,
                                         unix_secs(affinity_clock.now()),
+                                        None,
                                     )
                                     .await
                                     .is_err()
@@ -8523,6 +8631,7 @@ impl Lifecycle {
                                     &response_affinity_context,
                                     &affinity_keys,
                                     unix_secs(affinity_clock.now()),
+                                    None,
                                 )
                                 .await
                                 .is_err()
@@ -9049,6 +9158,7 @@ impl Lifecycle {
                     &response_affinity_context,
                     &pending_request_affinity_keys,
                     unix_secs(affinity_clock.now()),
+                    None,
                 )
                 .await
                 .is_err()
@@ -14603,6 +14713,7 @@ mod tests {
             upstream_id,
             pending_request_keys: Vec::new(),
             observe_response_keys: false,
+            owner_epoch: None,
             ttl_secs: 3_600,
         };
         let response = lifecycle.relay_response(
@@ -17292,6 +17403,15 @@ mod tests {
                 message: "affinity store down".to_owned(),
             })
         }
+        async fn read_upstream_owner_epoch(
+            &self,
+            _upstream_id: cc_lb_storage_api::UpstreamRecordId,
+            _expected_spec_revision: u64,
+        ) -> cc_lb_storage_api::StorageResult<Option<u64>> {
+            Err(cc_lb_storage_api::StorageError::Unavailable {
+                message: "affinity store down".to_owned(),
+            })
+        }
 
         async fn bind_upstream_affinities(
             &self,
@@ -17513,7 +17633,7 @@ mod tests {
         for (provider, path) in [
             (Provider::Anthropic, "/v1/files"),
             (Provider::Openai, "/v1/responses/resp_1/cancel"),
-            (Provider::Gemini, "/v1beta/cachedContents"),
+            (Provider::Gemini, "/v1beta/cachedContents/unknown"),
             (Provider::Anthropic, "/v1/responses"),
         ] {
             let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());

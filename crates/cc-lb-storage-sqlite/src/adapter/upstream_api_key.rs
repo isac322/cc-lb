@@ -293,7 +293,18 @@ impl UpstreamApiKeyStore for SqliteStorage {
         let now = now_unix_secs_u64(self.clock())?;
         let mut tx = self.begin_immediate().await?;
         ensure_live_spec_revision_in_tx(&mut tx, upstream_id, expected_spec_revision).await?;
-        write_api_key_access_in_tx(&mut tx, upstream_id, access, now).await?;
+        let project_changed = write_api_key_access_in_tx(&mut tx, upstream_id, access, now).await?;
+        if project_changed {
+            sqlx::query(
+                "UPDATE upstream_spec_v1
+                    SET owner_epoch = owner_epoch + 1, updated_at = unixepoch()
+                  WHERE id = ? AND kind = 'gemini_api_key' AND deleted_at IS NULL",
+            )
+            .bind(upstream_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
         tx.commit().await.map_err(map_sqlx_error)
     }
 
@@ -721,8 +732,17 @@ pub(crate) async fn write_api_key_access_in_tx(
     upstream_id: Uuid,
     access: &ApiKeyAccessWrite,
     now_unix_secs: u64,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     insert_details_if_missing_in_tx(tx, upstream_id, &access.key_hint, now_unix_secs).await?;
+    let current_project_id: Option<String> = sqlx::query_scalar(
+        "SELECT project_id FROM upstream_api_key_details_v1 WHERE upstream_id = ?",
+    )
+    .bind(upstream_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?
+    .flatten();
+    let project_changed = current_project_id != access.project_id;
     sqlx::query(
         "UPDATE upstream_api_key_details_v1
             SET verified = ?,
@@ -778,7 +798,7 @@ pub(crate) async fn write_api_key_access_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
-    Ok(())
+    Ok(project_changed)
 }
 
 /// Zeroes poll failures and clears the poll schedule and success/attempt

@@ -13,7 +13,9 @@ use cc_lb_clock::TestClock;
 use cc_lb_control::{
     ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
-use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProxyError, UpstreamDispatch};
+use cc_lb_engine::{
+    DispatchError, Lifecycle, LifecycleConfig, ProviderScope, ProxyError, UpstreamDispatch,
+};
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
     UpstreamAffinityKind, UpstreamAffinityStore,
@@ -150,6 +152,7 @@ impl UpstreamDispatch for RecordingDispatch {
 #[derive(Default)]
 struct MemoryAffinityStore {
     bindings: Mutex<HashMap<UpstreamAffinityKey, UpstreamAffinityBinding>>,
+    owner_epochs: Mutex<HashMap<Uuid, u64>>,
     resolve_failure: Mutex<Option<String>>,
     bind_failure: Mutex<Option<String>>,
 }
@@ -159,6 +162,7 @@ impl MemoryAffinityStore {
         self.insert_binding(UpstreamAffinityBinding {
             key,
             upstream_id,
+            owner_epoch: 0,
             observed_at_unix_secs: TEST_NOW_UNIX_SECS,
             expires_at_unix_secs: None,
         });
@@ -178,9 +182,31 @@ impl MemoryAffinityStore {
             .get(key)
             .map(|binding| binding.upstream_id)
     }
+    fn binding_epoch_for(&self, key: &UpstreamAffinityKey) -> Option<u64> {
+        self.bindings
+            .lock()
+            .expect("affinity binding lock")
+            .get(key)
+            .map(|binding| binding.owner_epoch)
+    }
 
     fn len(&self) -> usize {
         self.bindings.lock().expect("affinity binding lock").len()
+    }
+    fn set_owner_epoch(&self, upstream_id: Uuid, owner_epoch: u64) {
+        self.owner_epochs
+            .lock()
+            .expect("owner epoch lock")
+            .insert(upstream_id, owner_epoch);
+    }
+
+    fn owner_epoch(&self, upstream_id: Uuid) -> u64 {
+        self.owner_epochs
+            .lock()
+            .expect("owner epoch lock")
+            .get(&upstream_id)
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -215,8 +241,16 @@ impl UpstreamAffinityStore for MemoryAffinityStore {
             .iter()
             .filter_map(|key| bindings.get(key))
             .filter(|binding| binding_is_active(binding, now_unix_secs, ttl_secs))
+            .filter(|binding| binding.owner_epoch == self.owner_epoch(binding.upstream_id))
             .cloned()
             .collect())
+    }
+    async fn read_upstream_owner_epoch(
+        &self,
+        upstream_id: Uuid,
+        _expected_spec_revision: u64,
+    ) -> StorageResult<Option<u64>> {
+        Ok(Some(self.owner_epoch(upstream_id)))
     }
 
     async fn bind_upstream_affinities(
@@ -227,6 +261,13 @@ impl UpstreamAffinityStore for MemoryAffinityStore {
     ) -> StorageResult<()> {
         if let Some(message) = self.bind_failure.lock().expect("bind failure lock").clone() {
             return Err(StorageError::Unavailable { message });
+        }
+        for binding in incoming {
+            if binding.owner_epoch != self.owner_epoch(binding.upstream_id) {
+                return Err(StorageError::Conflict {
+                    message: "upstream owner epoch differs".to_owned(),
+                });
+            }
         }
 
         let mut prepared = HashMap::<UpstreamAffinityKey, UpstreamAffinityBinding>::new();
@@ -330,6 +371,29 @@ fn openai_upstream_record(
     let mut record = upstream_record(id, name, enabled);
     record.kind = cc_lb_storage_api::upstream::UpstreamKind::OpenaiApiKey;
     record
+}
+
+fn gemini_upstream_record(
+    id: Uuid,
+    name: &str,
+    enabled: bool,
+) -> cc_lb_storage_api::UpstreamRecord {
+    let mut record = upstream_record(id, name, enabled);
+    record.kind = cc_lb_storage_api::upstream::UpstreamKind::GeminiApiKey;
+    record
+}
+
+fn gemini_cached_contents_request(body: Value) -> Request<Bytes> {
+    let mut request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1beta/cachedContents")
+        .header("x-api-key", crate::common::managed_api_key())
+        .body(Bytes::from(body.to_string()))
+        .expect("Gemini cached contents request builds");
+    request
+        .extensions_mut()
+        .insert(ProviderScope(cc_lb_domain::Provider::Gemini));
+    request
 }
 
 fn responses_request(body: Value) -> Request<Bytes> {
@@ -477,6 +541,7 @@ async fn legacy_null_binding_expires_at_retention_boundary_without_read_extensio
     store.insert_binding(UpstreamAffinityBinding {
         key: affinity_key("retention-boundary"),
         upstream_id: origin,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS - 9,
         expires_at_unix_secs: None,
     });
@@ -529,12 +594,14 @@ async fn memory_affinity_purge_removes_explicit_and_retention_expiry_in_bounded_
     store.insert_binding(UpstreamAffinityBinding {
         key: affinity_key("active"),
         upstream_id: origin,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS,
         expires_at_unix_secs: None,
     });
     store.insert_binding(UpstreamAffinityBinding {
         key: affinity_key("retention-expired"),
         upstream_id: origin,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS - 10,
         expires_at_unix_secs: None,
     });
@@ -542,6 +609,7 @@ async fn memory_affinity_purge_removes_explicit_and_retention_expiry_in_bounded_
         key: affinity_key("explicit-expired"),
         upstream_id: origin,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+        owner_epoch: 0,
         expires_at_unix_secs: Some(TEST_NOW_UNIX_SECS),
     });
 
@@ -587,6 +655,7 @@ async fn memory_affinity_bind_replaces_expired_target_without_waiting_for_purge(
     store.insert_binding(UpstreamAffinityBinding {
         key: key.clone(),
         upstream_id: old,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS - 10,
         expires_at_unix_secs: None,
     });
@@ -596,6 +665,7 @@ async fn memory_affinity_bind_replaces_expired_target_without_waiting_for_purge(
             &[UpstreamAffinityBinding {
                 key: key.clone(),
                 upstream_id: new,
+                owner_epoch: 0,
                 observed_at_unix_secs: TEST_NOW_UNIX_SECS,
                 expires_at_unix_secs: None,
             }],
@@ -633,6 +703,10 @@ async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
     assert_eq!(
         store.upstream_for(&affinity_key("opaque-known")),
         Some(origin)
+    );
+    assert_eq!(
+        store.binding_epoch_for(&affinity_key("opaque-known")),
+        Some(0)
     );
 
     let pinned_dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
@@ -767,6 +841,7 @@ async fn no_failover_when_request_affinity_pinned() {
     store.insert_binding(UpstreamAffinityBinding {
         key: affinity_key("opaque-pinned"),
         upstream_id: origin,
+        owner_epoch: 0,
         observed_at_unix_secs: TEST_NOW_UNIX_SECS,
         expires_at_unix_secs: None,
     });
@@ -799,6 +874,35 @@ async fn no_failover_when_request_affinity_pinned() {
         dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
         &["http://origin.local/v1/messages".to_owned()]
     );
+}
+
+#[tokio::test]
+async fn stale_owner_epoch_binding_is_treated_as_unbound() {
+    let owner = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert_binding(UpstreamAffinityBinding {
+        key: affinity_key("stale-owner-epoch"),
+        upstream_id: owner,
+        owner_epoch: 1,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+        expires_at_unix_secs: None,
+    });
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let lifecycle = lifecycle(
+        vec![upstream_record(owner, "owner", true)],
+        dispatch.clone(),
+        Some(store),
+    );
+
+    let response = handle_authenticated(
+        &lifecycle,
+        messages_request(opaque_request(&["stale-owner-epoch"], false)),
+    )
+    .await
+    .expect("stale affinity request handled");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(dispatch.call_count(), 0);
 }
 
 #[tokio::test]
@@ -1610,4 +1714,92 @@ fn gzip_without_trailer(body: &Bytes) -> Bytes {
     encoder.write_all(body).expect("gzip write succeeds");
     let compressed = encoder.finish().expect("gzip finish succeeds");
     Bytes::copy_from_slice(&compressed[..compressed.len() - 8])
+}
+
+#[tokio::test]
+async fn gemini_cached_contents_bind_failure_and_missing_store_fail_closed() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    for missing_store in [false, true] {
+        let store = Arc::new(MemoryAffinityStore::default());
+        *store.bind_failure.lock().expect("bind failure lock") =
+            Some("forced bind failure".to_owned());
+        let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+            "name": "cachedContents/test-cache",
+            "expireTime": "2100-01-01T00:00:00Z",
+        })));
+        let lifecycle = lifecycle(
+            vec![gemini_upstream_record(upstream, "gemini", true)],
+            dispatch.clone(),
+            (!missing_store).then(|| store.clone()),
+        );
+
+        let (status, _, body) = collect_body(
+            handle_authenticated(
+                &lifecycle,
+                gemini_cached_contents_request(json!({
+                    "model": "models/gemini-2.5-flash",
+                    "contents": [],
+                })),
+            )
+            .await
+            .expect("Gemini cached contents request handled"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        if !missing_store {
+            assert_eq!(dispatch.call_count(), 1);
+            let error_body: Value = serde_json::from_slice(&body).expect("Gemini error body JSON");
+            assert_eq!(error_body["error"]["code"], 503);
+            assert_eq!(error_body["error"]["status"], "UNAVAILABLE");
+        }
+        assert_eq!(store.len(), 0);
+        assert!(!String::from_utf8_lossy(&body).contains("cachedContents/test-cache"));
+    }
+}
+
+#[tokio::test]
+async fn gemini_cached_contents_create_binds_routed_owner_epoch_before_return() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.set_owner_epoch(upstream, 7);
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "name": "cachedContents/owner-epoch",
+        "expireTime": "2100-01-01T00:00:00Z",
+    })));
+    let lifecycle = lifecycle(
+        vec![gemini_upstream_record(upstream, "gemini", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let response = handle_authenticated(
+        &lifecycle,
+        gemini_cached_contents_request(json!({
+            "model": "models/gemini-2.5-flash",
+            "contents": [],
+        })),
+    )
+    .await
+    .expect("Gemini cached contents request handled");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(dispatch.call_count(), 1);
+    let key = UpstreamAffinityKey {
+        principal_id: "principal-test".to_owned(),
+        provider: "gemini".to_owned(),
+        kind: UpstreamAffinityKind::GeminiCachedContent,
+        value_sha256: Sha256::digest(b"cachedContents/owner-epoch").into(),
+    };
+    assert_eq!(store.binding_epoch_for(&key), Some(7));
+    assert_eq!(
+        store
+            .bindings
+            .lock()
+            .expect("affinity binding lock")
+            .get(&key)
+            .expect("binding persisted before response is returned")
+            .expires_at_unix_secs,
+        Some(4_102_444_800),
+    );
 }

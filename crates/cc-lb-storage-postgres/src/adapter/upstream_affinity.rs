@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     time::Instant,
 };
 
@@ -21,33 +21,58 @@ const RESOLVE_KEYS_PER_QUERY: usize = 1_000;
 
 const BIND_UPSTREAM_AFFINITIES_SQL: &str = "\
     INSERT INTO upstream_affinity_v1 \
-      (principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs) \
-    SELECT principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs \
+      (principal_id, provider, kind, value_sha256, upstream_id, owner_epoch, observed_at_unix_secs, expires_at_unix_secs) \
+    SELECT input.principal_id, input.provider, input.kind, input.value_sha256, input.upstream_id, input.owner_epoch, input.observed_at_unix_secs, input.expires_at_unix_secs \
     FROM UNNEST( \
-      $1::text[], $2::text[], $3::text[], $4::bytea[], $5::uuid[], $6::bigint[], $7::bigint[] \
-    ) AS input(principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs) \
+      $1::text[], $2::text[], $3::text[], $4::bytea[], $5::uuid[], $6::bigint[], $7::bigint[], $8::bigint[] \
+    ) AS input(principal_id, provider, kind, value_sha256, upstream_id, owner_epoch, observed_at_unix_secs, expires_at_unix_secs) \
+    JOIN upstream_spec_v1 spec ON spec.id = input.upstream_id \
+      AND (input.kind <> 'gemini_cached_content' OR (spec.deleted_at IS NULL AND spec.owner_epoch = input.owner_epoch)) \
     ON CONFLICT(principal_id, provider, kind, value_sha256) DO UPDATE SET \
       upstream_id = CASE WHEN \
-        (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $8) \
-        OR ($9::bigint IS NOT NULL AND upstream_affinity_v1.observed_at_unix_secs <= $9) \
+        (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $9) \
+        OR ($10::bigint IS NOT NULL AND upstream_affinity_v1.observed_at_unix_secs <= $10) \
         THEN EXCLUDED.upstream_id ELSE upstream_affinity_v1.upstream_id END, \
+      owner_epoch = EXCLUDED.owner_epoch, \
       observed_at_unix_secs = CASE WHEN \
-        (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $8) \
-        OR ($9::bigint IS NOT NULL AND upstream_affinity_v1.observed_at_unix_secs <= $9) \
+        (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $9) \
+        OR ($10::bigint IS NOT NULL AND upstream_affinity_v1.observed_at_unix_secs <= $10) \
         THEN EXCLUDED.observed_at_unix_secs \
         ELSE GREATEST(upstream_affinity_v1.observed_at_unix_secs, EXCLUDED.observed_at_unix_secs) END, \
       expires_at_unix_secs = CASE WHEN \
-        (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $8) \
-        OR ($9::bigint IS NOT NULL AND upstream_affinity_v1.observed_at_unix_secs <= $9) \
+        (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $9) \
+        OR ($10::bigint IS NOT NULL AND upstream_affinity_v1.observed_at_unix_secs <= $10) \
         THEN EXCLUDED.expires_at_unix_secs \
         WHEN upstream_affinity_v1.expires_at_unix_secs IS NULL OR EXCLUDED.expires_at_unix_secs IS NULL THEN NULL \
         ELSE GREATEST(upstream_affinity_v1.expires_at_unix_secs, EXCLUDED.expires_at_unix_secs) END \
     WHERE upstream_affinity_v1.upstream_id = EXCLUDED.upstream_id \
-       OR (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $8) \
-       OR ($9::bigint IS NOT NULL AND upstream_affinity_v1.observed_at_unix_secs <= $9)";
+       OR (upstream_affinity_v1.expires_at_unix_secs IS NOT NULL AND upstream_affinity_v1.expires_at_unix_secs <= $9) \
+       OR ($10::bigint IS NOT NULL AND upstream_affinity_v1.observed_at_unix_secs <= $10)";
 
 #[async_trait]
 impl UpstreamAffinityStore for PostgresStorage {
+    async fn read_upstream_owner_epoch(
+        &self,
+        upstream_id: cc_lb_storage_api::UpstreamRecordId,
+        expected_spec_revision: u64,
+    ) -> StorageResult<Option<u64>> {
+        let epoch: Option<i64> = sqlx::query_scalar(
+            "SELECT owner_epoch FROM upstream_spec_v1 \
+             WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL",
+        )
+        .bind(upstream_id)
+        .bind(u64_to_i64(
+            expected_spec_revision,
+            "upstream spec revision",
+        )?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        epoch
+            .map(|value| i64_to_u64(value, "upstream owner epoch"))
+            .transpose()
+    }
+
     async fn resolve_upstream_affinities(
         &self,
         keys: &[UpstreamAffinityKey],
@@ -69,15 +94,18 @@ impl UpstreamAffinityStore for PostgresStorage {
             let mut bindings = Vec::new();
             for chunk in keys.chunks(RESOLVE_KEYS_PER_QUERY) {
                 let mut query = QueryBuilder::<Postgres>::new(
-                    "SELECT principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs \
-                     FROM upstream_affinity_v1 \
-                     WHERE (expires_at_unix_secs IS NULL OR expires_at_unix_secs > ",
+                    "SELECT affinity.principal_id, affinity.provider, affinity.kind, affinity.value_sha256, affinity.upstream_id, affinity.owner_epoch, affinity.observed_at_unix_secs, affinity.expires_at_unix_secs \
+                     FROM upstream_affinity_v1 affinity \
+                     JOIN upstream_spec_v1 spec ON spec.id = affinity.upstream_id \
+                     WHERE (affinity.kind <> 'gemini_cached_content' \
+                        OR (spec.deleted_at IS NULL AND affinity.owner_epoch = spec.owner_epoch)) \
+                       AND (affinity.expires_at_unix_secs IS NULL OR affinity.expires_at_unix_secs > ",
                 );
                 query
                     .push_bind(now)
                     .push(") AND (")
                     .push_bind(cutoff)
-                    .push("::bigint IS NULL OR observed_at_unix_secs > ")
+                    .push("::bigint IS NULL OR affinity.observed_at_unix_secs > ")
                     .push_bind(cutoff)
                     .push(") AND (");
                 for (index, key) in chunk.iter().enumerate() {
@@ -85,17 +113,17 @@ impl UpstreamAffinityStore for PostgresStorage {
                         query.push(" OR ");
                     }
                     query
-                        .push("(principal_id = ")
+                        .push("(affinity.principal_id = ")
                         .push_bind(&key.principal_id)
-                        .push(" AND provider = ")
+                        .push(" AND affinity.provider = ")
                         .push_bind(&key.provider)
-                        .push(" AND kind = ")
+                        .push(" AND affinity.kind = ")
                         .push_bind(key.kind.as_str())
-                        .push(" AND value_sha256 = ")
+                        .push(" AND affinity.value_sha256 = ")
                         .push_bind(key.value_sha256.as_slice())
                         .push(")");
                 }
-                query.push(") ORDER BY principal_id, provider, kind, value_sha256");
+                query.push(") ORDER BY affinity.principal_id, affinity.provider, affinity.kind, affinity.value_sha256");
 
                 let rows = query
                     .build()
@@ -134,12 +162,14 @@ impl UpstreamAffinityStore for PostgresStorage {
                 .map(|value| u64_to_i64(value, "upstream affinity retention cutoff"))
                 .transpose()?;
             let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+            let mut fenced_upstreams = HashSet::new();
             let chunk_capacity = bindings.len().min(BINDINGS_PER_QUERY);
             let mut principal_ids = Vec::<&str>::with_capacity(chunk_capacity);
             let mut providers = Vec::<&str>::with_capacity(chunk_capacity);
             let mut kinds = Vec::<&str>::with_capacity(chunk_capacity);
             let mut value_sha256s = Vec::<&[u8]>::with_capacity(chunk_capacity);
             let mut upstream_ids = Vec::with_capacity(chunk_capacity);
+            let mut owner_epochs = Vec::with_capacity(chunk_capacity);
             let mut observed_at_unix_secs = Vec::with_capacity(chunk_capacity);
             let mut expires_at_unix_secs = Vec::with_capacity(chunk_capacity);
 
@@ -149,14 +179,35 @@ impl UpstreamAffinityStore for PostgresStorage {
                 kinds.clear();
                 value_sha256s.clear();
                 upstream_ids.clear();
+                owner_epochs.clear();
                 observed_at_unix_secs.clear();
                 expires_at_unix_secs.clear();
+
                 for binding in chunk {
+                    if binding.key.kind == UpstreamAffinityKind::GeminiCachedContent
+                        && fenced_upstreams.insert((binding.upstream_id, binding.owner_epoch))
+                    {
+                        let current_epoch: Option<i64> = sqlx::query_scalar(
+                            "SELECT owner_epoch FROM upstream_spec_v1 \
+                             WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+                        )
+                        .bind(binding.upstream_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(map_sqlx_error)?;
+                        if current_epoch != Some(binding.owner_epoch) {
+                            tx.rollback().await.map_err(map_sqlx_error)?;
+                            return Err(StorageError::Conflict {
+                                message: "upstream affinity owner epoch is stale".to_owned(),
+                            });
+                        }
+                    }
                     principal_ids.push(binding.key.principal_id.as_str());
                     providers.push(binding.key.provider.as_str());
                     kinds.push(binding.key.kind.as_str());
                     value_sha256s.push(binding.key.value_sha256.as_slice());
                     upstream_ids.push(binding.upstream_id);
+                    owner_epochs.push(binding.owner_epoch);
                     observed_at_unix_secs.push(binding.observed_at_unix_secs);
                     expires_at_unix_secs.push(binding.expires_at_unix_secs);
                 }
@@ -167,6 +218,7 @@ impl UpstreamAffinityStore for PostgresStorage {
                     .bind(&kinds)
                     .bind(&value_sha256s)
                     .bind(&upstream_ids)
+                    .bind(&owner_epochs)
                     .bind(&observed_at_unix_secs)
                     .bind(&expires_at_unix_secs)
                     .bind(now)
@@ -296,6 +348,7 @@ fn retention_cutoff(now_unix_secs: u64, ttl_secs: u64) -> Option<u64> {
 struct PreparedAffinityBinding<'a> {
     key: &'a UpstreamAffinityKey,
     upstream_id: uuid::Uuid,
+    owner_epoch: i64,
     observed_at_unix_secs: i64,
     expires_at_unix_secs: Option<i64>,
 }
@@ -307,6 +360,7 @@ fn prepare_bindings(
     let mut indexes = HashMap::<&UpstreamAffinityKey, usize>::with_capacity(bindings.len());
 
     for binding in bindings {
+        let owner_epoch = u64_to_i64(binding.owner_epoch, "upstream affinity owner epoch")?;
         let observed_at_unix_secs = u64_to_i64(
             binding.observed_at_unix_secs,
             "upstream affinity observed_at_unix_secs",
@@ -322,16 +376,18 @@ fn prepare_bindings(
                 prepared.push(PreparedAffinityBinding {
                     key: &binding.key,
                     upstream_id: binding.upstream_id,
+                    owner_epoch,
                     observed_at_unix_secs,
                     expires_at_unix_secs,
                 });
             }
             Entry::Occupied(entry) => {
                 let existing = &mut prepared[*entry.get()];
-                if existing.upstream_id != binding.upstream_id {
+                if existing.upstream_id != binding.upstream_id
+                    || existing.owner_epoch != owner_epoch
+                {
                     return Err(StorageError::Conflict {
-                        message: "upstream affinity is already bound to a different upstream"
-                            .to_owned(),
+                        message: "upstream affinity owner epoch or target conflict".to_owned(),
                     });
                 }
                 existing.observed_at_unix_secs =
@@ -376,6 +432,10 @@ fn row_to_binding(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamAffinityB
                 })?,
         },
         upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
+        owner_epoch: i64_to_u64(
+            row.try_get("owner_epoch").map_err(map_sqlx_error)?,
+            "upstream affinity owner epoch",
+        )?,
         observed_at_unix_secs: i64_to_u64(
             row.try_get("observed_at_unix_secs")
                 .map_err(map_sqlx_error)?,
