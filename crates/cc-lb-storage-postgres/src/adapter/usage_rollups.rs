@@ -301,15 +301,14 @@ impl UsageRollupStore for PostgresStorage {
 async fn reconcile_gemini_model_identity(
     storage: &PostgresStorage,
 ) -> StorageResult<Option<UsageRollupRun>> {
-    let state = sqlx::query_as::<_, (String, i64, String, i64, String)>(
-        "SELECT status, cursor, cursor_xid::text, upper_bound, upper_bound_xid::text \
-         FROM usage_rollup_reconciliations_v1 WHERE id = $1",
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM usage_rollup_reconciliations_v1 WHERE id = $1",
     )
     .bind(GEMINI_RECONCILIATION_ID)
     .fetch_optional(&storage.pool)
     .await
     .map_err(map_sqlx_error)?;
-    let Some((status, _, _, _, _)) = state else {
+    let Some(status) = status else {
         return Ok(None);
     };
     if status == "complete" {
@@ -330,20 +329,19 @@ async fn reconcile_gemini_model_identity(
             checkpoint: None,
         }));
     }
-    let state = sqlx::query_as::<_, (String, i64, String, i64, String)>(
-        "SELECT status, cursor, cursor_xid::text, upper_bound, upper_bound_xid::text \
-         FROM usage_rollup_reconciliations_v1 WHERE id = $1",
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM usage_rollup_reconciliations_v1 WHERE id = $1",
     )
     .bind(GEMINI_RECONCILIATION_ID)
     .fetch_one(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    if state.0 == "complete" {
+    if status == "complete" {
         tx.rollback().await.map_err(map_sqlx_error)?;
         return Ok(None);
     }
 
-    if state.0 == "pending" {
+    if status == "pending" {
         let has_work = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM request_events_v1 AS events \
              JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
@@ -363,21 +361,6 @@ async fn reconcile_gemini_model_identity(
             .await
             .map_err(map_sqlx_error)?;
         } else {
-            let upper_xid = sqlx::query_scalar::<_, String>(
-                "SELECT pg_snapshot_xmin(pg_current_snapshot())::text",
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-            let upper_bound = sqlx::query_scalar::<_, Option<i64>>(
-                "SELECT MAX(seq) FROM request_events_v1 \
-                 WHERE tx_id < $1::xid8",
-            )
-            .bind(&upper_xid)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?
-            .unwrap_or(0);
             sqlx::query("DELETE FROM usage_rollups_v2")
                 .execute(&mut *tx)
                 .await
@@ -395,13 +378,9 @@ async fn reconcile_gemini_model_identity(
             .await
             .map_err(map_sqlx_error)?;
             sqlx::query(
-                "UPDATE usage_rollup_reconciliations_v1 \
-                 SET status = 'rewriting', cursor = 0, cursor_xid = '0'::xid8, \
-                     upper_bound = $1, upper_bound_xid = $2::xid8 \
-                 WHERE id = $3",
+                "UPDATE usage_rollup_reconciliations_v1 SET status = 'rewriting' \
+                 WHERE id = $1",
             )
-            .bind(upper_bound)
-            .bind(&upper_xid)
             .bind(GEMINI_RECONCILIATION_ID)
             .execute(&mut *tx)
             .await
@@ -415,24 +394,20 @@ async fn reconcile_gemini_model_identity(
         }));
     }
 
-    let rows = sqlx::query(
-        "SELECT events.seq, events.tx_id::text AS tx_id_text \
+    let seqs = sqlx::query_scalar::<_, i64>(
+        "SELECT events.seq \
          FROM request_events_v1 AS events \
          JOIN upstream_spec_v1 AS upstream ON upstream.id = events.upstream_id \
-         WHERE (events.tx_id, events.seq) > ($1::xid8, $2) \
-           AND events.tx_id < $3::xid8 \
-           AND upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+         WHERE upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
            AND events.model LIKE 'models/%' \
-         ORDER BY events.tx_id ASC, events.seq ASC LIMIT $4",
+         ORDER BY events.seq ASC LIMIT $1 \
+         FOR UPDATE OF events",
     )
-    .bind(&state.2)
-    .bind(state.1)
-    .bind(&state.4)
     .bind(ROLLUP_BATCH_LIMIT)
     .fetch_all(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    if rows.is_empty() {
+    if seqs.is_empty() {
         sqlx::query(
             "UPDATE usage_rollup_reconciliations_v1 SET status = 'complete' \
              WHERE id = $1",
@@ -442,29 +417,18 @@ async fn reconcile_gemini_model_identity(
         .await
         .map_err(map_sqlx_error)?;
     } else {
-        let mut seqs = Vec::with_capacity(rows.len());
-        let mut last_seq = 0_i64;
-        let mut last_xid = String::new();
-        for row in rows {
-            last_seq = row.try_get("seq").map_err(map_sqlx_error)?;
-            last_xid = row.try_get("tx_id_text").map_err(map_sqlx_error)?;
-            seqs.push(last_seq);
-        }
         sqlx::query(
-            "UPDATE request_events_v1 SET model = substring(model FROM 8) \
-             WHERE seq = ANY($1) AND model LIKE 'models/%'",
+            "UPDATE request_events_v1 AS events \
+             SET model = substring(events.model FROM 8) \
+             WHERE events.seq = ANY($1) \
+               AND events.model LIKE 'models/%' \
+               AND EXISTS ( \
+                 SELECT 1 FROM upstream_spec_v1 AS upstream \
+                 WHERE upstream.id = events.upstream_id \
+                   AND upstream.kind IN ('gemini_api_key', 'gemini_oauth') \
+               )",
         )
         .bind(&seqs)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-        sqlx::query(
-            "UPDATE usage_rollup_reconciliations_v1 \
-             SET cursor = $1, cursor_xid = $2::xid8 WHERE id = $3",
-        )
-        .bind(last_seq)
-        .bind(&last_xid)
-        .bind(GEMINI_RECONCILIATION_ID)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
