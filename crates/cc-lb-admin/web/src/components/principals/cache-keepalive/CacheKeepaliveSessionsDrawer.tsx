@@ -67,6 +67,14 @@ function extractTriggerLabel(row: CacheKeepaliveRow): string {
     row.display_reason && row.display_reason !== row.reason
       ? `${row.display_reason} · ${row.reason}`
       : (row.display_reason ?? row.reason);
+  if (
+    row.state !== 'not_tracked' &&
+    /^(max renewals reached|max duration reached|TTL expired before follow-up|renewal dispatch unavailable)$/i.test(
+      row.reason.trim(),
+    )
+  ) {
+    return 'Agent in-turn';
+  }
   const backtickToolMatch = sourceText.match(/tool_use:\s*`([^`]+)`/i);
   if (backtickToolMatch?.[1]) return backtickToolMatch[1];
   const toolMatch = sourceText.match(/tool_use:\s*([A-Za-z0-9_.:/-]+)/i);
@@ -82,11 +90,7 @@ function extractTriggerLabel(row: CacheKeepaliveRow): string {
   if (/snapshot too large/i.test(sourceText)) return 'Snapshot too large';
   if (/ambiguous turn/i.test(sourceText)) return 'Ambiguous turn';
   if (/agent-in-turn/i.test(sourceText)) return 'Agent in-turn';
-  if (/max renewals reached/i.test(sourceText)) return 'Max renewals reached';
-  if (/max duration reached/i.test(sourceText)) return 'Max duration reached';
-  if (/TTL expired before follow-up/i.test(sourceText)) return 'TTL expired';
-  if (/renewal dispatch unavailable/i.test(sourceText)) return 'Dispatch error';
-  return 'Other';
+  return row.state !== 'not_tracked' ? 'Agent in-turn' : 'Other';
 }
 
 function extractActorLabel(
@@ -108,12 +112,80 @@ function formatSignedMoney(val: number) {
   return val > 0 ? `+${formatMoney(val)}` : formatMoney(val);
 }
 
-function formatNetPnl(val: number) {
-  if (val === 0) return '$0.00';
-  const sign = val > 0 ? '+' : '−';
+interface SplitUsdParts {
+  intPart: string;
+  fracDigits: string;
+  hasDot: boolean;
+}
+
+export function splitUsdNoTrailingZeros(
+  val: number | null,
+  signed: boolean,
+): SplitUsdParts {
+  if (val === null) return { intPart: '—', fracDigits: '', hasDot: false };
+  if (Math.abs(val) < 0.00005)
+    return { intPart: '$0', fracDigits: '', hasDot: false };
+  const sign = val > 0 ? (signed ? '+' : '') : '−';
   const abs = Math.abs(val);
-  const str = abs.toFixed(4);
-  return `${sign}$${str.replace(/0$/, '')}`;
+  const fixed = abs.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  const dotIdx = fixed.indexOf('.');
+  if (dotIdx === -1)
+    return { intPart: `${sign}$${fixed}`, fracDigits: '', hasDot: false };
+  return {
+    intPart: `${sign}$${fixed.slice(0, dotIdx)}`,
+    fracDigits: fixed.slice(dotIdx + 1),
+    hasDot: true,
+  };
+}
+
+function DecimalAlignedUsd({
+  value,
+  signed = true,
+  maxFracDigits,
+  scope,
+  className,
+}: {
+  value: number | null;
+  signed?: boolean;
+  maxFracDigits: number;
+  scope: 'group' | 'item';
+  className?: string;
+}) {
+  const { intPart, fracDigits, hasDot } = splitUsdNoTrailingZeros(
+    value,
+    signed,
+  );
+  const fullText = hasDot ? `${intPart}.${fracDigits}` : intPart;
+  const padRightCh =
+    maxFracDigits <= 0
+      ? 0
+      : hasDot
+        ? Math.max(0, maxFracDigits - fracDigits.length)
+        : maxFracDigits + 1;
+  const tone =
+    value === null
+      ? 'text-text-faint'
+      : value > 0
+        ? 'text-success-text'
+        : value < 0
+          ? 'text-danger-text'
+          : 'text-text-muted';
+  return (
+    <span
+      data-decimal-scope={scope}
+      style={padRightCh > 0 ? { paddingRight: `${padRightCh}ch` } : undefined}
+      className={cx(
+        'inline-flex shrink-0 items-baseline justify-end font-mono text-data tabular-nums',
+        tone,
+        className,
+      )}
+    >
+      {fullText}
+      {hasDot ? (
+        <span data-decimal-dot={scope} aria-hidden="true" className="hidden" />
+      ) : null}
+    </span>
+  );
 }
 
 const STATE_TONE: Record<
@@ -279,11 +351,15 @@ function SessionListRow({
   isSelected,
   onSelect,
   detail,
+  maxItemFracDigits,
+  groupMode,
 }: {
   row: CacheKeepaliveRow;
   isSelected: boolean;
   onSelect: () => void;
   detail?: React.ReactNode;
+  maxItemFracDigits: number;
+  groupMode: GroupMode;
 }) {
   const isError = row.error != null;
   const triggerLabel = extractTriggerLabel(row);
@@ -308,7 +384,8 @@ function SessionListRow({
         onClick={onSelect}
         aria-current={isSelected || undefined}
         className={cx(
-          'w-full min-h-[68px] text-left rounded-sm border-b px-4 py-3 transition-colors',
+          'w-full min-h-[68px] text-left rounded-sm border-b py-3 transition-colors',
+          groupMode === 'trigger' ? 'pl-6 pr-4' : 'px-4',
           'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
           isSelected
             ? 'bg-selected border-subtle'
@@ -348,20 +425,13 @@ function SessionListRow({
             <Badge tone={STATE_TONE[row.state]}>{STATE_LABEL[row.state]}</Badge>
             {isError && <Badge tone="danger">Error</Badge>}
           </div>
-          <span
-            className={cx(
-              'col-start-2 row-start-1 justify-self-end text-caption tabular-nums sm:col-start-3',
-              row.net_pnl === null
-                ? 'text-text-faint'
-                : row.net_pnl > 0
-                  ? 'text-success-text'
-                  : row.net_pnl < 0
-                    ? 'text-danger-text'
-                    : 'text-text-muted',
-            )}
-          >
-            {row.net_pnl === null ? '—' : formatNetPnl(row.net_pnl)}
-          </span>
+          <DecimalAlignedUsd
+            value={row.net_pnl}
+            signed={row.net_pnl !== 0}
+            maxFracDigits={maxItemFracDigits}
+            scope="item"
+            className="col-start-2 row-start-1 justify-self-end sm:col-start-3"
+          />
           <span className="col-start-2 row-start-2 justify-self-end text-caption tabular-nums text-text-muted sm:col-start-4 sm:row-start-1">
             {row.relative_time ? (
               row.relative_time
@@ -625,9 +695,34 @@ export function CacheKeepaliveSessionsDrawer({
     }
     return [...groups.entries()];
   }, [visibleRows]);
-
   const flipLayoutKey = `${groupMode}:${selected?.id ?? ''}:${showNotTracked}:${[...selectedStatuses].sort().join(',')}:${[...collapsedGroups].sort().join(',')}`;
   useFlipReorder(listElement, visibleRows, flipLayoutKey);
+
+  const maxGroupFracDigits = useMemo(
+    () =>
+      groupedRows.reduce((max, [, rows]) => {
+        const total = rows.reduce((sum, row) => sum + (row.net_pnl ?? 0), 0);
+        return Math.max(
+          max,
+          splitUsdNoTrailingZeros(total, Math.abs(total) >= 0.00005).fracDigits
+            .length,
+        );
+      }, 0),
+    [groupedRows],
+  );
+  const maxItemFracDigits = useMemo(
+    () =>
+      visibleRows.reduce(
+        (max, row) =>
+          Math.max(
+            max,
+            splitUsdNoTrailingZeros(row.net_pnl, row.net_pnl !== 0).fracDigits
+              .length,
+          ),
+        0,
+      ),
+    [visibleRows],
+  );
 
   // Pagination remains strictly user-driven via the "Loading older sessions..."
   // control so opening the drawer never auto-drains multi-page retention history.
@@ -860,6 +955,8 @@ export function CacheKeepaliveSessionsDrawer({
                       <SessionListRow
                         key={r.id}
                         row={r}
+                        maxItemFracDigits={maxItemFracDigits}
+                        groupMode={groupMode}
                         isSelected={selected?.id === r.id}
                         onSelect={() =>
                           setSelected((current) =>
@@ -905,7 +1002,7 @@ export function CacheKeepaliveSessionsDrawer({
                                   return next;
                                 })
                               }
-                              className="flex w-full min-h-9 max-md:min-h-10 items-center justify-between gap-3 border-b border-subtle bg-overlay-2 px-4 py-2 text-left"
+                              className="flex w-full min-h-9 max-md:min-h-10 items-center justify-between gap-3 border-b border-subtle bg-overlay-2 px-3 py-2 text-left"
                             >
                               <span className="flex min-w-0 items-center gap-2">
                                 <ChevronRight
@@ -925,11 +1022,15 @@ export function CacheKeepaliveSessionsDrawer({
                                   {rows.length === 1 ? '' : 's'}
                                 </span>
                               </span>
-                              <span className="shrink-0 text-caption tabular-nums text-text-muted">
-                                {groupPnl === null
-                                  ? '—'
-                                  : formatNetPnl(groupPnl)}
-                              </span>
+                              <DecimalAlignedUsd
+                                value={groupPnl}
+                                signed={
+                                  groupPnl !== null &&
+                                  Math.abs(groupPnl) >= 0.00005
+                                }
+                                maxFracDigits={maxGroupFracDigits}
+                                scope="group"
+                              />
                             </button>
                           </li>
                           {!isCollapsed
@@ -937,6 +1038,8 @@ export function CacheKeepaliveSessionsDrawer({
                                 <SessionListRow
                                   key={r.id}
                                   row={r}
+                                  maxItemFracDigits={maxItemFracDigits}
+                                  groupMode={groupMode}
                                   isSelected={selected?.id === r.id}
                                   onSelect={() =>
                                     setSelected((current) =>
