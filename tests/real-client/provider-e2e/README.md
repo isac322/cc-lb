@@ -32,6 +32,76 @@ Runs the budget guard, `gpt-6.1-sol` catalog parser, WebSocket `service_tier: "a
 ./tests/real-client/run-provider-e2e.sh --self-test
 ```
 
+### Offline installed-SDK cached-input pricing regression
+
+`cached-input-pricing-sdk.py` runs the installed Python `openai` Responses SDK and
+`google-genai` SDK through an existing real `cc-lb` binary. It covers JSON and SSE
+for both providers, with a positive-cache case and a zero-cache control for each
+transport (eight actual SDK requests). It does not call live providers or use
+live credentials.
+
+Prerequisites: Python 3.10+, its `venv` module, current stable `openai` and
+`google-genai` packages, and a `cc-lb` binary built with SQLite and both provider
+routes. Install the SDKs into a disposable environment, not the repository:
+
+```bash
+SDK_ENV=$(mktemp -d)
+SDK_LEDGER="$SDK_ENV/resources.jsonl"
+python3 -m venv "$SDK_ENV/venv"
+"$SDK_ENV/venv/bin/python" -m pip install --upgrade openai google-genai
+
+# Fixed behavior: cached-input total must be 4010 micros.
+CC_LB_BIN="$PWD/target/debug/cc-lb" \
+  "$SDK_ENV/venv/bin/python" \
+  tests/real-client/provider-e2e/cached-input-pricing-sdk.py \
+  --ledger "$SDK_LEDGER"
+
+# Capture the known old behavior using an existing baseline binary.
+CC_LB_BIN=/absolute/path/to/baseline/cc-lb \
+  "$SDK_ENV/venv/bin/python" \
+  tests/real-client/provider-e2e/cached-input-pricing-sdk.py \
+  --ledger "$SDK_LEDGER" --expected-cached-total 2010
+```
+
+The harness freezes per-token USD rates at `2e-6` input, `1e-5` output, and
+`1e-7` cached input. The provider fixture reports 21,000 gross input tokens,
+including 20,000 cached tokens, and one output token. Fixed events must contain
+2,000 input, 2,000 cache-read, and 10 output micros, totaling 4,010. Zero-cache
+controls must total 42,010. Baseline mode expects the old incorrect cached total
+of 2,010 and zero cache-read cost; it is reproduction evidence, not a fixed-build
+pass.
+
+Both modes use the same native fixtures: `gpt-5.6` Responses with a supported
+implicit message-array boundary, and `gemini-2.5-flash` generation. OpenAI usage
+reports explicit zero cache-write tokens and zero 30-minute/12-hour write splits,
+so this regression tests cached-read pricing without requiring cache-write rates.
+No opaque cache key or resource inflates the admission estimate.
+
+Each request gets a fresh admin-issued managed key. Independent read-only SQLite
+queries check its terminal event, successful status, normalized tokens, cost
+components, and durable per-key settlement in both configured cost windows.
+The harness rejects duplicate requests or duplicated settlement. It uses ephemeral
+loopback ports, synthetic upstream credentials, explicit SDK base URLs, an
+allowlisted child environment, and a Python socket audit guard that rejects
+non-loopback SDK connections. The frozen catalog's refresh URL is also loopback.
+Readiness and persistence have bounded condition-based polling; `--timeout`
+controls each deadline.
+
+Clients, the real server, provider sockets, and fixture threads close on success
+or failure. The printed scratch directory retains `server.log`, `prices.json`,
+`storage.sqlite`, and `summary.json`; SDK versions and the binary hash appear in
+the summary. Resource creation and closure append to the selected `--ledger`
+without overwriting existing entries. By default, the ledger is
+`cc-lb-cached-input-sdk-resources.jsonl` in Python's temporary directory.
+Keep the ledger outside the repository.
+Pass `--cleanup` when authorizing immediate evidence cleanup: after closing the
+processes, it verifies the run's ownership marker and directory inode before
+deleting only that exact scratch directory. The shared ledger remains intact.
+Otherwise, retain the evidence until explicit cleanup.
+
+Responses WebSocket is not covered by this SDK harness. The server's native
+cached-input pricing tests cover that transport separately.
+
 ### 2. Preflight Check (Zero Provider Calls / Zero Cost)
 
 Verifies `target/debug/cc-lb`, installed CLI binaries (`omp`, `codex`, `agy`), free local port offsets, and credential variable presence (without printing secret values):

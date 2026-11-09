@@ -549,7 +549,8 @@ impl RealtimeWebSocketSession {
                 reservation,
                 counts.input_tokens,
                 counts.output_tokens,
-                cost.total_micros,
+                (cost.pricing_status == cc_lb_pricing::PricingStatus::Known)
+                    .then_some(cost.total_micros),
             );
         }
     }
@@ -734,10 +735,130 @@ mod tests {
         RealtimeStreamMetrics, RealtimeUsage, RealtimeWebSocketKind, RealtimeWebSocketTermination,
         realtime_stream_complete, realtime_terminal_outcome, record_stream_termination_metric,
     };
+    use crate::responses_websocket::tests::{
+        DIRECT_PRICING_LOCK, DIRECT_PRINCIPAL, DirectAccountingFixture, install_direct_pricing,
+    };
     use crate::terminal_observer::{StreamTerminationCause, StreamTerminationOutcome};
     use bytes::Bytes;
     use http::StatusCode;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use std::sync::Arc;
+
+    struct UnusedRealtimeDialect;
+
+    impl cc_lb_upstream::UpstreamDialect for UnusedRealtimeDialect {
+        fn shape(
+            &self,
+            _context: &cc_lb_upstream::DialectShapeContext,
+            _upstream: &cc_lb_domain::Upstream,
+            _principal: &cc_lb_domain::Principal,
+            _builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+        ) -> Result<cc_lb_upstream::ShapedRequest, cc_lb_upstream::DialectError> {
+            unreachable!("settling an admitted session does not shape requests")
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn observerless_finish_settles_native_cache_unknown_and_zero_cost() {
+        let _guard = DIRECT_PRICING_LOCK.lock().await;
+        install_direct_pricing();
+        for (kind, known, unknown) in [
+            (
+                RealtimeWebSocketKind::Openai,
+                "ws-openai-known",
+                "ws-openai-unknown",
+            ),
+            (
+                RealtimeWebSocketKind::Gemini,
+                "ws-gemini-known",
+                "ws-gemini-unknown",
+            ),
+        ] {
+            for (model, zero, expected) in [
+                (known, false, 4_010),
+                (unknown, false, 8_010),
+                (known, true, 0),
+            ] {
+                let fixture = DirectAccountingFixture::new().await;
+                let reservation = fixture.reserve(model);
+                let reservation_id = reservation.id().to_owned();
+                let frame = match kind {
+                    RealtimeWebSocketKind::Openai => serde_json::json!({
+                        "type": "response.done",
+                        "response": { "usage": {
+                            "input_tokens": if zero { 0 } else { 21_000 },
+                            "output_tokens": if zero { 0 } else { 1 },
+                            "input_token_details": { "cached_tokens": if zero { 0 } else { 20_000 } }
+                        } }
+                    }),
+                    RealtimeWebSocketKind::Gemini => serde_json::json!({
+                        "usageMetadata": {
+                            "promptTokenCount": if zero { 0 } else { 21_000 },
+                            "responseTokenCount": if zero { 0 } else { 1 },
+                            "cachedContentTokenCount": if zero { 0 } else { 20_000 }
+                        },
+                        "serverContent": { "turnComplete": true }
+                    }),
+                };
+                let mut usage = RealtimeUsage::default();
+                usage.observe(kind, &Bytes::from(serde_json::to_vec(&frame).unwrap()));
+                let counts = usage
+                    .counts
+                    .as_ref()
+                    .expect("provider-native terminal usage");
+                assert_eq!(counts.input_tokens, if zero { 0 } else { 1_000 });
+                assert_eq!(
+                    counts.cache_read_input_tokens,
+                    if zero { 0 } else { 20_000 }
+                );
+                let session = super::RealtimeWebSocketSession {
+                    candidate: crate::responses_websocket::WebSocketCandidate {
+                        upstream_id: uuid::Uuid::nil(),
+                        upstream_name: "embedded-realtime".to_owned(),
+                    },
+                    url: "wss://provider.invalid/realtime".parse().unwrap(),
+                    headers: http::HeaderMap::new(),
+                    observer: None,
+                    completion_observer: Arc::new(
+                        crate::completion_observer::CompletionObserver::new(),
+                    ),
+                    stream_span: tracing::Span::none(),
+                    reservation: Some(reservation),
+                    limit_engine: Some(fixture.engine.clone()),
+                    model: model.to_owned(),
+                    principal: cc_lb_domain::Principal {
+                        id: DIRECT_PRINCIPAL.to_owned(),
+                        kind: cc_lb_domain::PrincipalKind::InternalKey,
+                    },
+                    upstream: match kind {
+                        RealtimeWebSocketKind::Openai => {
+                            cc_lb_domain::Upstream::OpenaiDirect { base_url: None }
+                        }
+                        RealtimeWebSocketKind::Gemini => {
+                            cc_lb_domain::Upstream::GeminiDirect { base_url: None }
+                        }
+                    },
+                    path: "/realtime".to_owned(),
+                    dialect: Arc::new(UnusedRealtimeDialect),
+                };
+                session.finish(
+                    usage,
+                    RealtimeStreamMetrics::new(),
+                    RealtimeWebSocketTermination::Completed,
+                );
+                fixture
+                    .assert_settled(
+                        &reservation_id,
+                        model,
+                        expected,
+                        if zero { 0 } else { 1_000 },
+                        if zero { 0 } else { 1 },
+                    )
+                    .await;
+            }
+        }
+    }
+
     #[test]
     fn realtime_usage_sums_only_response_done() {
         let mut usage = RealtimeUsage::default();

@@ -51,6 +51,8 @@ impl SchedulerDispatch {
             )
             .unwrap_or_else(ComputedCostBreakdown::unknown)
         };
+        let actual_cost_micros = (cost.pricing_status == cc_lb_pricing::PricingStatus::Known)
+            .then_some(cost.total_micros);
         let ts = unix_secs(self.clock.now());
         let duration_ms = duration_ms(finalization.duration);
         let thread_id = SessionKey::extract_thread_id(&record.session_key_hash);
@@ -72,7 +74,7 @@ impl SchedulerDispatch {
             record,
             model,
             usage: &finalization.usage,
-            cost_micros: cost.total_micros,
+            cost_micros: actual_cost_micros,
             hit_miss,
             authorized_after_dispatch,
             generation: job.generation,
@@ -94,7 +96,7 @@ impl SchedulerDispatch {
                 ttl: record.ttl,
                 hit_miss: Some(hit_miss.to_owned()),
                 cache_read_input_tokens: Some(finalization.usage.cache_read_input_tokens),
-                cost_micros: Some(cost.total_micros),
+                cost_micros: actual_cost_micros,
                 request_ref: Some(event_id.clone()),
                 event_ref: Some(source_ref_id.to_owned()),
             });
@@ -116,7 +118,7 @@ impl SchedulerDispatch {
                 reservation_id,
                 finalization.usage.input_tokens,
                 finalization.usage.output_tokens,
-                cost.total_micros,
+                actual_cost_micros,
             );
             if !reconciled {
                 return Err(cc_lb_scheduler::error::SchedulerError::Job(format!(
@@ -164,7 +166,7 @@ struct RenewalProjectionInput<'a> {
     record: &'a CacheKeepaliveSessionRecord,
     model: &'a str,
     usage: &'a RenewalUsage,
-    cost_micros: i64,
+    cost_micros: Option<i64>,
     hit_miss: &'a str,
     authorized_after_dispatch: bool,
     generation: u64,
@@ -180,6 +182,7 @@ fn duration_ms(duration: std::time::Duration) -> u64 {
 }
 
 fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
+    let known = input.cost.pricing_status == cc_lb_pricing::PricingStatus::Known;
     RequestEvent {
         ts: input.ts,
         ts_ms: Some(input.ts.saturating_mul(1_000)),
@@ -201,12 +204,12 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
         cache_creation_input_tokens_5m: Some(input.usage.cache_creation_input_tokens_5m),
         cache_creation_input_tokens_1h: Some(input.usage.cache_creation_input_tokens_1h),
         cache_read_input_tokens: Some(input.usage.cache_read_input_tokens),
-        cost_usd_micros: Some(input.cost.total_micros),
-        cost_input_micros: Some(input.cost.input_micros),
-        cost_output_micros: Some(input.cost.output_micros),
-        cost_cache_creation_5m_micros: Some(input.cost.cache_creation_5m_micros),
-        cost_cache_creation_1h_micros: Some(input.cost.cache_creation_1h_micros),
-        cost_cache_read_micros: Some(input.cost.cache_read_micros),
+        cost_usd_micros: known.then_some(input.cost.total_micros),
+        cost_input_micros: known.then_some(input.cost.input_micros),
+        cost_output_micros: known.then_some(input.cost.output_micros),
+        cost_cache_creation_5m_micros: known.then_some(input.cost.cache_creation_5m_micros),
+        cost_cache_creation_1h_micros: known.then_some(input.cost.cache_creation_1h_micros),
+        cost_cache_read_micros: known.then_some(input.cost.cache_read_micros),
         request_body_first_chunk_ms: None,
         request_body_receive_ms: None,
         request_body_wait_ms: None,
@@ -224,7 +227,9 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
 
 fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProjections {
     RequestEventProjections {
-        turn: Some(CacheKeepaliveTurnRow {
+        // Turn projections require a known numeric price. Preserve the
+        // measured request event and unknown evidence rather than invent zero.
+        turn: input.cost_micros.map(|cost_micros| CacheKeepaliveTurnRow {
             source_ref_id: input.source_ref_id.to_owned(),
             session_key_hash: input.record.session_key_hash.clone(),
             principal_id: input.record.principal_id.clone(),
@@ -238,7 +243,7 @@ fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProject
             cache_creation_input_tokens_5m: input.usage.cache_creation_input_tokens_5m,
             cache_creation_input_tokens_1h: input.usage.cache_creation_input_tokens_1h,
             cache_read_input_tokens: input.usage.cache_read_input_tokens,
-            cost_micros: input.cost_micros,
+            cost_micros,
             hit_miss: input.hit_miss.to_owned(),
             ts: input.ts,
         }),

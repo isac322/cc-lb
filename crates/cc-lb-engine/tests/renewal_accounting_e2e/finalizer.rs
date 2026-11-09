@@ -65,7 +65,7 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
                 reservation_id,
                 input.finalization.usage.input_tokens,
                 input.finalization.usage.output_tokens,
-                cost.total_micros,
+                Some(cost.total_micros),
             ),
             "durable renewal write must precede one direct reconciliation"
         );

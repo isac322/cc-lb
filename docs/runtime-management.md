@@ -169,6 +169,22 @@ The existing cache-input subtraction is unchanged: reported cache-read tokens
 are counted separately from uncached input. OpenAI and Anthropic output already
 includes reasoning or thinking tokens, so their output counts are unchanged.
 
+Completed request costs price uncached input, cached reads, and output as
+disjoint token sets. OpenAI and Gemini cached-read rates come from their native
+catalog entries, including published service-tier and context-threshold rates;
+they do not fall back to Anthropic cache rates. Positive cached usage without
+an applicable rate leaves actual request costs unknown. A published zero rate
+remains a known zero, and a request with no cached usage does not require a
+cached-read rate.
+
+When a completed request's actual cost is unknown, managed-key limit accounting
+finalizes its original admitted estimate as CostUsd liability. Request and token
+usage still settle once, and concurrency is released. The request's actual-cost
+fields remain empty. If no estimate was available and no CostUsd limit applied,
+only measured request/token usage is added; the monetary accumulator is unchanged.
+No unavailable cost is reported as a known zero, and finalized rows are not
+re-priced later.
+
 Before dispatch, Anthropic Messages limit admission estimates text and metadata
 string bytes at one token per four bytes, plus 4,784 tokens per recognized native
 `image` block in message content, including images inside `tool_result.content`.

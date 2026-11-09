@@ -286,6 +286,9 @@ mod tier_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GLOBAL_TEST_LOCK;
+    use crate::catalog_parser::{FROZEN_NATIVE_CATALOG, parse_litellm_json};
+    use cc_lb_clock::TestClock;
     use cc_lb_lifecycle::{
         ParseInfo, RouteInfo, StreamSuccess, TerminationReason, UsageSnapshot, UsageSource,
     };
@@ -429,102 +432,127 @@ mod tests {
         assert_eq!(partial.output_image_tokens, Some(8));
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn terminated_with_usage_emits_priced() {
-        let bus = Arc::new(TestBus::new());
-        let mut rx_bcast = bus.subscribe_lifecycle();
-        let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_lifecycle_pricing_subscriber(rx, bus.clone());
+    #[test]
+    fn terminated_with_usage_emits_priced() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::global_catalog().install_snapshot(
+            parse_litellm_json(
+                br#"{"claude-sonnet-4-5-20250929":{
+                "litellm_provider":"anthropic",
+                "input_cost_per_token":0.000003,
+                "output_cost_per_token":0.000015,
+                "cache_creation_input_token_cost":0.00000375,
+                "cache_read_input_token_cost":0.0000003
+            }}"#,
+                &TestClock::new_at_secs(1_700_000_000),
+            )
+            .expect("frozen Anthropic catalog"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("single-threaded runtime");
+        runtime.block_on(async {
+            let bus = Arc::new(TestBus::new());
+            let mut rx_bcast = bus.subscribe_lifecycle();
+            let (tx, rx) = mpsc::channel(16);
+            let handle = spawn_lifecycle_pricing_subscriber(rx, bus.clone());
 
-        tx.send(LifecycleEvent::ParseCompleted {
-            event_id: eid("evt-1"),
-            result: Ok(ParseInfo {
-                path: "/v1/messages".into(),
-                method: "POST".into(),
-                model: Some("claude-sonnet-4-5-20250929".into()),
-                stream: false,
-                body_bytes: 100,
-                ..ParseInfo::default()
-            }),
-        })
-        .await
-        .unwrap();
-        tx.send(LifecycleEvent::RouteCompleted {
-            event_id: eid("evt-1"),
-            result: Ok(RouteInfo {
-                cache_breakpoints: None,
-                cache_prefix_hash: None,
-                upstream_id: Uuid::nil(),
-                upstream_name: "u1".into(),
-                model: Some("claude-sonnet-4-5-20250929".into()),
-                upstream_kind: Some("anthropic_key".into()),
-                route_ms: None,
+            tx.send(LifecycleEvent::ParseCompleted {
+                event_id: eid("evt-1"),
+                result: Ok(ParseInfo {
+                    path: "/v1/messages".into(),
+                    method: "POST".into(),
+                    model: Some("claude-sonnet-4-5-20250929".into()),
+                    stream: false,
+                    body_bytes: 100,
+                    ..ParseInfo::default()
+                }),
+            })
+            .await
+            .unwrap();
+            tx.send(LifecycleEvent::RouteCompleted {
+                event_id: eid("evt-1"),
+                result: Ok(RouteInfo {
+                    cache_breakpoints: None,
+                    cache_prefix_hash: None,
+                    upstream_id: Uuid::nil(),
+                    upstream_name: "u1".into(),
+                    model: Some("claude-sonnet-4-5-20250929".into()),
+                    upstream_kind: Some("anthropic_key".into()),
+                    route_ms: None,
+                    routing_trace: None,
+                    predicted_cache_read_tokens: None,
+                    matched_v3_cache_key: None,
+                    breakpoint_content_block_index: None,
+                    matched_content_block_index: None,
+                    lookback_distance: None,
+                    predicted_cache_creation_tokens_5m: None,
+                    predicted_cache_creation_tokens_1h: None,
+                    token_estimate_source: None,
+                    cache_value_micros: None,
+                    formula_winner_upstream_id: None,
+                    kept_upstream_id: None,
+                    quota_urgency_5h: None,
+                    quota_urgency_7d: None,
+                    quota_urgency_combined: None,
+                    quota_warning_multiplier: None,
+                }),
                 routing_trace: None,
-                predicted_cache_read_tokens: None,
-                matched_v3_cache_key: None,
-                breakpoint_content_block_index: None,
-                matched_content_block_index: None,
-                lookback_distance: None,
-                predicted_cache_creation_tokens_5m: None,
-                predicted_cache_creation_tokens_1h: None,
-                token_estimate_source: None,
-                cache_value_micros: None,
-                formula_winner_upstream_id: None,
-                kept_upstream_id: None,
-                quota_urgency_5h: None,
-                quota_urgency_7d: None,
-                quota_urgency_combined: None,
-                quota_warning_multiplier: None,
-            }),
-            routing_trace: None,
-        })
-        .await
-        .unwrap();
-        tx.send(LifecycleEvent::UsageObserved {
-            event_id: eid("evt-1"),
-            source: UsageSource::NonStreamBody,
-            usage: UsageSnapshot {
-                input_tokens: 1000,
-                output_tokens: 500,
-                ..Default::default()
-            },
-        })
-        .await
-        .unwrap();
-        tx.send(LifecycleEvent::RequestTerminated {
-            event_id: eid("evt-1"),
-            reason: TerminationReason::Success,
-            client_status: 200,
-            duration_ms: 100,
-            first_body_chunk_ms: None,
-            first_content_delta_ms: None,
-            dns_ms: None,
-            connect_ms: None,
-            connection_reused: None,
-            internal_errors: Vec::new(),
-            proxy_setup_ms: None,
-            request_body_read_ms: None,
-            request_body_bytes: None,
-            finalize_ms: None,
-            setup_timings: Default::default(),
-            io_timings: Default::default(),
-            upstream_body_ms: None,
-            event_kind: None,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-        handle.shutdown().await;
+            })
+            .await
+            .unwrap();
+            tx.send(LifecycleEvent::UsageObserved {
+                event_id: eid("evt-1"),
+                source: UsageSource::NonStreamBody,
+                usage: UsageSnapshot {
+                    input_tokens: 1000,
+                    output_tokens: 500,
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+            tx.send(LifecycleEvent::RequestTerminated {
+                event_id: eid("evt-1"),
+                reason: TerminationReason::Success,
+                client_status: 200,
+                duration_ms: 100,
+                first_body_chunk_ms: None,
+                first_content_delta_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
+                internal_errors: Vec::new(),
+                proxy_setup_ms: None,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
+                setup_timings: Default::default(),
+                io_timings: Default::default(),
+                upstream_body_ms: None,
+                event_kind: None,
+            })
+            .await
+            .unwrap();
+            drop(tx);
+            handle.shutdown().await;
 
-        let mut saw_priced = false;
-        while let Ok(event) = rx_bcast.try_recv() {
-            if let LifecycleEvent::Priced { event_id, cost } = event {
-                assert_eq!(event_id, "evt-1");
-                assert!(cost.total_micros.is_some() || cost.total_micros.is_none());
-                saw_priced = true;
+            let mut saw_priced = false;
+            while let Ok(event) = rx_bcast.try_recv() {
+                if let LifecycleEvent::Priced { event_id, cost } = event {
+                    assert_eq!(event_id, "evt-1");
+                    assert_eq!(cost.input_micros, Some(3_000));
+                    assert_eq!(cost.output_micros, Some(7_500));
+                    assert_eq!(cost.cache_read_micros, Some(0));
+                    assert_eq!(cost.total_micros, Some(10_500));
+                    saw_priced = true;
+                }
             }
-        }
-        assert!(saw_priced, "expected Priced event on the bus");
+            assert!(saw_priced, "expected Priced event on the bus");
+        });
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -653,5 +681,138 @@ mod tests {
             }
         }
         assert!(saw_priced);
+    }
+
+    #[test]
+    fn parsed_native_catalog_emits_authoritative_costs_for_observed_and_streamed_usage() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (read_rate, cached, expected) in [
+            (Some(0.0000001), 20_000, Some((2_000, 2_000, 4_010))),
+            (Some(0.0000001), 0, Some((42_000, 0, 42_010))),
+            (None, 20_000, None),
+            (None, 0, Some((42_000, 0, 42_010))),
+            (Some(0.0), 20_000, Some((2_000, 0, 2_010))),
+        ] {
+            let mut catalog: serde_json::Value =
+                serde_json::from_slice(FROZEN_NATIVE_CATALOG).unwrap();
+            for entry in catalog.as_object_mut().unwrap().values_mut() {
+                let entry = entry.as_object_mut().unwrap();
+                entry.remove("cache_read_input_token_cost");
+                if let Some(rate) = read_rate {
+                    entry.insert(
+                        "cache_read_input_token_cost".to_owned(),
+                        serde_json::json!(rate),
+                    );
+                }
+            }
+            crate::global_catalog().install_snapshot(
+                parse_litellm_json(
+                    &serde_json::to_vec(&catalog).unwrap(),
+                    &TestClock::new_at_secs(1_700_000_000),
+                )
+                .expect("frozen catalog variant"),
+            );
+            for model in ["gpt-6.1-sol", "gemini-4-argon"] {
+                for streamed in [false, true] {
+                    let event_id = format!("{model}-{read_rate:?}-{cached}-{streamed}");
+                    let bus = TestBus::new();
+                    let mut emitted = bus.subscribe_lifecycle();
+                    let mut partials = HashMap::new();
+                    handle_event(
+                        &bus,
+                        &mut partials,
+                        16,
+                        LifecycleEvent::ParseCompleted {
+                            event_id: event_id.clone(),
+                            result: Ok(ParseInfo {
+                                path: if model.starts_with("gpt") {
+                                    "/v1/responses".to_owned()
+                                } else {
+                                    format!("/v1beta/models/{model}:generateContent")
+                                },
+                                method: "POST".to_owned(),
+                                model: Some(model.to_owned()),
+                                stream: streamed,
+                                ..Default::default()
+                            }),
+                        },
+                    );
+                    let usage = UsageSnapshot {
+                        input_tokens: 21_000 - cached,
+                        cache_read_input_tokens: cached,
+                        output_tokens: 1,
+                        ..Default::default()
+                    };
+                    let usage_event = if streamed {
+                        LifecycleEvent::StreamCompleted {
+                            event_id: event_id.clone(),
+                            result: Ok(StreamSuccess {
+                                usage,
+                                usage_present: true,
+                                ..Default::default()
+                            }),
+                        }
+                    } else {
+                        LifecycleEvent::UsageObserved {
+                            event_id: event_id.clone(),
+                            usage,
+                            source: UsageSource::NonStreamBody,
+                        }
+                    };
+                    handle_event(&bus, &mut partials, 16, usage_event);
+                    handle_event(
+                        &bus,
+                        &mut partials,
+                        16,
+                        LifecycleEvent::RequestTerminated {
+                            event_id: event_id.clone(),
+                            reason: TerminationReason::Success,
+                            client_status: 200,
+                            duration_ms: 1,
+                            first_body_chunk_ms: None,
+                            first_content_delta_ms: None,
+                            dns_ms: None,
+                            connect_ms: None,
+                            connection_reused: None,
+                            internal_errors: Vec::new(),
+                            proxy_setup_ms: None,
+                            request_body_read_ms: None,
+                            request_body_bytes: None,
+                            finalize_ms: None,
+                            setup_timings: Default::default(),
+                            io_timings: Default::default(),
+                            upstream_body_ms: None,
+                            event_kind: None,
+                        },
+                    );
+                    let LifecycleEvent::Priced {
+                        event_id: priced_id,
+                        cost,
+                    } = emitted.try_recv().expect("authoritative Priced event")
+                    else {
+                        panic!("expected Priced event");
+                    };
+                    assert_eq!(priced_id, event_id);
+                    if let Some((input, read, total)) = expected {
+                        assert_eq!(cost.input_micros, Some(input), "{event_id}");
+                        assert_eq!(cost.cache_read_micros, Some(read), "{event_id}");
+                        assert_eq!(cost.output_micros, Some(10), "{event_id}");
+                        assert_eq!(cost.total_micros, Some(total), "{event_id}");
+                    } else {
+                        assert_eq!(cost.input_micros, None, "{event_id}");
+                        assert_eq!(cost.cache_read_micros, None, "{event_id}");
+                        assert_eq!(cost.output_micros, None, "{event_id}");
+                        assert_eq!(cost.total_micros, None, "{event_id}");
+                    }
+                    assert!(partials.is_empty());
+                    assert!(
+                        emitted.try_recv().is_err(),
+                        "one Priced event per completion"
+                    );
+                }
+            }
+        }
     }
 }

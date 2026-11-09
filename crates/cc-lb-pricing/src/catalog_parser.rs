@@ -296,35 +296,47 @@ fn parse_native_pricing(
     };
     let mut native = ProviderNativePricing::unknown(provider);
     native.ordinary_input = NativePricingRate::known(ordinary_input);
-    if provider == NativePricingProvider::OpenAi {
+    if provider == NativePricingProvider::OpenAi || provider == NativePricingProvider::Gemini {
         native.cached_input_read = native_rate(model, object, "cache_read_input_token_cost")?;
-        for (field, lifetime) in [
-            (
-                "cache_creation_input_token_cost_above_30m",
-                NativePricingLifetime::ThirtyMinutes,
-            ),
-            (
-                "cache_creation_input_token_cost_above_30min",
-                NativePricingLifetime::ThirtyMinutes,
-            ),
-            (
-                "cache_creation_input_token_cost_above_1hr",
-                NativePricingLifetime::OneHour,
-            ),
-            (
-                "cache_creation_input_token_cost_above_12hr",
-                NativePricingLifetime::TwelveHours,
-            ),
-        ] {
-            if object.contains_key(field) {
-                native
-                    .total_write
-                    .insert(lifetime, native_rate(model, object, field)?);
+        native.cached_input_read_by_tier =
+            parse_native_tier_rates(model, object, "cache_read_input_token_cost")?;
+        insert_above_token_costs(
+            &mut native.cached_input_read_above_tokens,
+            model,
+            object,
+            "cache_read_input_token_cost",
+            |rate| &mut rate.cache_read_per_million_usd,
+        )?;
+        if provider == NativePricingProvider::OpenAi {
+            for (field, lifetime) in [
+                (
+                    "cache_creation_input_token_cost_above_30m",
+                    NativePricingLifetime::ThirtyMinutes,
+                ),
+                (
+                    "cache_creation_input_token_cost_above_30min",
+                    NativePricingLifetime::ThirtyMinutes,
+                ),
+                (
+                    "cache_creation_input_token_cost_above_1hr",
+                    NativePricingLifetime::OneHour,
+                ),
+                (
+                    "cache_creation_input_token_cost_above_12hr",
+                    NativePricingLifetime::TwelveHours,
+                ),
+            ] {
+                if object.contains_key(field) {
+                    native
+                        .total_write
+                        .insert(lifetime, native_rate(model, object, field)?);
+                }
             }
         }
     } else if provider == NativePricingProvider::Anthropic {
         native.cached_input_read = native_rate(model, object, "cache_read_input_token_cost")?;
-    } else if provider == NativePricingProvider::Gemini {
+    }
+    if provider == NativePricingProvider::Gemini {
         native.explicit_resource.token = first_native_rate(
             model,
             object,
@@ -355,6 +367,23 @@ fn parse_native_pricing(
     Ok(Some(native))
 }
 
+fn parse_native_tier_rates(
+    model: &str,
+    object: &Map<String, Value>,
+    base: &str,
+) -> Result<BTreeMap<String, NativePricingRate>, LoaderError> {
+    let discovered = discover_tier_costs(object, base);
+    discovered
+        .into_iter()
+        .map(|(tier, (field, cost))| {
+            Ok((
+                tier,
+                NativePricingRate::known(usd_per_token_to_per_million(model, field, cost)?),
+            ))
+        })
+        .collect()
+}
+
 fn first_native_rate(
     model: &str,
     object: &Map<String, Value>,
@@ -372,19 +401,18 @@ fn discover_tier_costs<'a>(object: &'a Map<String, Value>, base: &str) -> RawTie
         .iter()
         .filter_map(|(key, value)| {
             let suffix = key.strip_prefix(base)?.strip_prefix('_')?;
-            if suffix.to_ascii_lowercase().contains("above_")
-                || suffix.to_ascii_lowercase().contains("cache_hit")
-                || suffix.to_ascii_lowercase().contains("hr")
+            let normalized = suffix.to_ascii_lowercase();
+            if normalized.contains("above_")
+                || normalized.contains("cache_hit")
+                || normalized.contains("hr")
             {
                 return None;
             }
-            let tier = match suffix {
-                "batches" => "batch",
-                _ => suffix,
+            let tier = match normalized.as_str() {
+                "batches" => "batch".to_owned(),
+                _ => normalized,
             };
-            value
-                .as_f64()
-                .map(|cost| (tier.to_owned(), (key.as_str(), cost)))
+            value.as_f64().map(|cost| (tier, (key.as_str(), cost)))
         })
         .collect()
 }
@@ -523,10 +551,63 @@ fn record_missing_catalog_field(model: &str, field: &'static str) {
     .increment(1);
 }
 
+// Frozen Standard-rate entries from #1163, checked 2026-11-09:
+// https://developers.openai.com/api/docs/pricing (short context, <=272K)
+// https://aistudio.google.com/docs/pricing#gemini-4-argon (promotion through November 30)
+#[cfg(test)]
+pub(crate) const FROZEN_NATIVE_CATALOG: &[u8] = br#"{
+    "gpt-6.1-sol": {
+        "litellm_provider": "openai",
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000010,
+        "cache_read_input_token_cost": 0.0000001
+    },
+    "gemini-4-argon": {
+        "litellm_provider": "gemini",
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000010,
+        "cache_read_input_token_cost": 0.0000001
+    }
+}"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NativePricingStatus;
+    use crate::{
+        NativePricingProvider, NativePricingRate, NativePricingStatus, NativeResourcePricing,
+        UsdPerMillion,
+    };
+
+    #[test]
+    fn frozen_native_catalog_keeps_generation_reads_out_of_legacy_maps() {
+        let snapshot = parse_litellm_json(
+            FROZEN_NATIVE_CATALOG,
+            &cc_lb_clock::TestClock::new_at_secs(1_700_000_000),
+        )
+        .expect("frozen catalog parses");
+
+        assert_eq!(snapshot.models.len(), 2);
+        for (model, provider) in [
+            ("gpt-6.1-sol", NativePricingProvider::OpenAi),
+            ("gemini-4-argon", NativePricingProvider::Gemini),
+        ] {
+            let pricing = &snapshot.models[model];
+            assert_eq!(pricing.input_per_million_usd.as_micros_usd(), 2_000_000);
+            assert_eq!(pricing.output_per_million_usd.as_micros_usd(), 10_000_000);
+            let native = pricing.native.as_ref().expect("provider-native pricing");
+            assert_eq!(native.provider, provider);
+            assert_eq!(
+                native.cached_input_read,
+                NativePricingRate::known(UsdPerMillion::from_micros_usd(100_000))
+            );
+            assert_eq!(native.explicit_resource, NativeResourcePricing::default());
+        }
+        assert!(snapshot.cache_read_per_million_usd.is_empty());
+        assert!(snapshot.cache_read_per_million_usd_by_tier.is_empty());
+        assert!(snapshot.cache_creation_per_million_usd.is_empty());
+        assert!(snapshot.cache_creation_per_million_usd_by_tier.is_empty());
+        assert!(snapshot.above_tokens_rates.is_empty());
+    }
 
     #[test]
     fn image_generation_falls_back_to_image_output_price() {
