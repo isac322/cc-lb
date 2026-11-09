@@ -863,9 +863,6 @@ async fn gemini_complete_missing_project_rejects_without_creating_upstream() {
 
 #[tokio::test]
 async fn gemini_complete_polls_pending_operation_until_done_without_repeated_name() {
-    let _poll_delay = cc_lb_admin::v1::oauth::set_gemini_operation_poll_delay_for_tests(
-        std::time::Duration::from_millis(10),
-    );
     for (initial, operation_path) in [
         (
             json!({"name": "operations/onboard"}),

@@ -143,7 +143,10 @@ impl CrashFixture {
         scenario: &str,
         checkpoint_sleep_secs: f64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let admin_pool = PgPoolOptions::new().max_connections(2).connect(url).await?;
+        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
+        sqlx::query("SELECT pg_advisory_lock(7283945182)")
+            .execute(&admin_pool)
+            .await?;
         sqlx::query(AssertSqlSafe(format!(
             "CREATE SCHEMA {}",
             quote_ident(schema)

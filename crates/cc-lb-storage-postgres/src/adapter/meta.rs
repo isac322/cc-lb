@@ -59,19 +59,32 @@ fn get_fast_init_full_sql() -> &'static str {
         .as_str()
 }
 
+fn sqlx_migration_lock_id(database_name: &str) -> i64 {
+    let mut crc: u32 = 0xffff_ffff;
+    for &byte in database_name.as_bytes() {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    0x3d32_ad9e_i64 * i64::from(!crc)
+}
+
 #[async_trait]
 impl MetaStore for PostgresStorage {
     async fn initialize(&self) -> StorageResult<()> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
 
-        let (is_non_public,): (bool,) =
-            sqlx::query_as("SELECT current_schema() IS DISTINCT FROM 'public'")
+        let (is_non_public, database_name): (bool, String) =
+            sqlx::query_as("SELECT current_schema() IS DISTINCT FROM 'public', current_database()")
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
 
         if is_non_public {
-            sqlx::query("SELECT pg_advisory_xact_lock(21422, hashtext(current_schema()))")
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(sqlx_migration_lock_id(&database_name))
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;

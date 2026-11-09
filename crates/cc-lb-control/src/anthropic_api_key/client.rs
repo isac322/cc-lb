@@ -49,7 +49,7 @@ impl ProbeLimits {
 ///
 /// Built once at startup with [`AnthropicOrgApi::production`] and shared by
 /// the admin API and the scheduler. Tests point it at a local fixture with
-/// [`AnthropicOrgApi::with_origin_and_limits`]; there is no config field or env var.
+/// [`AnthropicOrgApi::with_origin`]; there is no config field or env var.
 #[derive(Clone)]
 pub struct AnthropicOrgApi {
     origin: Url,
@@ -65,15 +65,10 @@ impl AnthropicOrgApi {
 
     /// A custom origin with production limits.
     pub fn with_origin(origin: Url) -> Self {
-        Self::with_origin_and_limits(origin, ProbeLimits::PRODUCTION)
-    }
-
-    /// A custom origin and probe limits for deterministic integration tests.
-    pub fn with_origin_and_limits(origin: Url, limits: ProbeLimits) -> Self {
         Self {
             origin,
             http: probe_http_client(),
-            limits,
+            limits: ProbeLimits::PRODUCTION,
         }
     }
 
