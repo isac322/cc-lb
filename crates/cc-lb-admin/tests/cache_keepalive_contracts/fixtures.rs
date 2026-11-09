@@ -103,7 +103,7 @@ pub fn cache_keepalive_contract_seed(principal_id: &str) -> CacheKeepaliveContra
                         cache_creation_input_tokens_5m: 0,
                         cache_creation_input_tokens_1h: 0,
                         cache_read_input_tokens: 8_000,
-                        cost_micros: 14_400,
+                        cost_micros: Some(14_400),
                         hit_miss: "hit".to_owned(),
                         ts: timestamp,
                     }),

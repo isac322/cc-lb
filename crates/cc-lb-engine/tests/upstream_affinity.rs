@@ -151,7 +151,7 @@ impl UpstreamDispatch for RecordingDispatch {
 }
 
 #[derive(Default)]
-struct MemoryAffinityStore {
+pub(super) struct MemoryAffinityStore {
     bindings: Mutex<HashMap<UpstreamAffinityKey, UpstreamAffinityBinding>>,
     owner_epochs: Mutex<HashMap<Uuid, u64>>,
     resolve_failure: Mutex<Option<String>>,

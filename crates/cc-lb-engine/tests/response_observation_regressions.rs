@@ -121,6 +121,9 @@ fn lifecycle_exports_queryable_numeric_stage_and_response_stream_attributes() {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 
+    // Keep callsite interest dependent on the current subscriber across untraced siblings.
+    let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())

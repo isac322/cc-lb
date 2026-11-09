@@ -183,7 +183,8 @@ pub fn derive_activity_view(
     let total_spent_micros = source
         .turns
         .iter()
-        .fold(0_i64, |total, turn| total.saturating_add(turn.cost_micros));
+        .filter_map(|turn| turn.cost_micros)
+        .fold(0_i64, |total, cost| total.saturating_add(cost));
     let total_avoided_micros = (evidence_status == "observed")
         .then(|| pnl.map(|value| value.avoided_micros))
         .flatten();
@@ -365,16 +366,18 @@ fn activity_turn(
     let hit = record.hit_miss.eq_ignore_ascii_case("hit");
     let followed_up = !pending && hit && follow_up_proven(record, evidence) && evidence_known;
     let ttl = renewal_evidence.map_or(ttl, |renewal| renewal.ttl);
-    let pnl = rates_from_catalog(catalog, &record.model, ttl).map(|rates| {
-        derive_turn_pnl(
-            CacheKeepaliveTurnPnlInput {
-                renewal_tokens: record.cache_read_input_tokens,
-                spent_micros: record.cost_micros,
-                followed_up,
-                pending,
-            },
-            rates,
-        )
+    let pnl = record.cost_micros.and_then(|spent_micros| {
+        rates_from_catalog(catalog, &record.model, ttl).map(|rates| {
+            derive_turn_pnl(
+                CacheKeepaliveTurnPnlInput {
+                    renewal_tokens: record.cache_read_input_tokens,
+                    spent_micros,
+                    followed_up,
+                    pending,
+                },
+                rates,
+            )
+        })
     });
     let action = if !evidence_known {
         "follow-up evidence unavailable"

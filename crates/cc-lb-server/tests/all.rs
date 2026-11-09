@@ -65,6 +65,8 @@ mod multi_instance_storage_tail;
 mod multi_instance_truncated_partial;
 #[path = "multi_route_dispatch.rs"]
 mod multi_route_dispatch;
+#[path = "native_cached_input_pricing.rs"]
+mod native_cached_input_pricing;
 #[path = "notify_listener.rs"]
 mod notify_listener;
 #[path = "oauth_refresh.rs"]
@@ -73,6 +75,10 @@ mod oauth_refresh;
 mod oauth_usage_proxy;
 #[path = "observation_failure_isolation.rs"]
 mod observation_failure_isolation;
+#[path = "openai_cache_keepalive.rs"]
+mod openai_cache_keepalive;
+#[path = "openai_cache_keepalive_support.rs"]
+mod openai_cache_keepalive_support;
 #[path = "postgres_tls.rs"]
 mod postgres_tls;
 #[path = "preflight.rs"]

@@ -92,6 +92,14 @@ Realtime and Live WebSocket admission uses an upstream-scoped circuit breaker ke
 
 Gemini Live rejects the handshake with HTTP `503` when the principal has no eligible Gemini API-key upstream, before receiving a setup frame. With an eligible key, model-specific routing still runs after the setup frame supplies the model.
 
+Realtime and Live routing filters receive the parsed, bounded header session identity as `RequestContext.thread_id`, using the existing header precedence. No setup-frame metadata fallback or Claude ancestry fields are added. Principal-limit denials publish one rejected limit decision through the shared audit and metrics path before returning the existing protocol-appropriate error; rejected sessions do not contact the provider.
+
+Successful provider upgrades publish a provider-neutral response-started milestone. Active sessions publish cumulative usage snapshots from the provider usage frames, and final settlement uses the terminal cumulative usage without adding earlier snapshots again. Gemini Live snapshots retain reported thinking and tool-use prompt counts and distinguish absent, zero, positive, and invalid cache evidence. These observations do not reinterpret WebSocket frames as Anthropic SSE events or buffer the full media session.
+
+Terminal observations retain bounded, redacted native close code/reason and available relay I/O details, along with the provider handshake request ID from `x-request-id`, `request-id`, or `x-goog-request-id`. Close frames still reach the peer unchanged. Upgraded connections retain status `101`, including downstream cancellations; native diagnostics do not synthesize HTTP/2 fields or a new HTTP response. The connection emits one terminal completion.
+
+With OpenTelemetry tracing enabled, Realtime and Live provider handshakes receive the current proxy child span's W3C trace context after signing, without replacing host-owned credentials or destination details.
+
 OpenAI's `OpenAI-Beta` header is passed through. Gemini client-supplied `key=` query credentials are removed before the configured upstream key is applied. Usage accounting observes only provider usage frames: OpenAI `response.done` and Gemini frames containing `usageMetadata`.
 
 New tunnel handshakes during server drain receive HTTP `503` without upgrading. Existing tunnels stop relaying and send best-effort close frames, without an explicit close code or reason, to both peers. Idle Gemini connections waiting for a setup frame also close on drain. After an upgrade, drain cannot produce a new HTTP response.
@@ -164,11 +172,11 @@ correlate turn events without new database fields.
 
 ### Generation usage accounting
 
-Gemini's normalized output count is `candidatesTokenCount + thoughtsTokenCount`.
+Gemini GenerateContent's normalized output count is `candidatesTokenCount + thoughtsTokenCount`.
 The reasoning count remains available as a subset of that normalized output;
-cost and limit accounting must not add it again. Repeated cumulative usage
-snapshots replace the previous counts instead of accumulating them. Missing or
-`null` fields retain the last reported component.
+cost and limit accounting must not add it again. Repeated cumulative GenerateContent
+usage snapshots replace the previous counts instead of accumulating them. The
+GenerateContent SSE accumulator retains the last component when a field is missing or `null`.
 
 Native Gemini generation requests accept both `service_tier` and `serviceTier`
 for routing and cost reservations; `service_tier` takes precedence when both
@@ -189,6 +197,27 @@ Thinking level does not affect routing or token accounting.
 The existing cache-input subtraction is unchanged: reported cache-read tokens
 are counted separately from uncached input. OpenAI and Anthropic output already
 includes reasoning or thinking tokens, so their output counts are unchanged.
+
+Completed request costs price uncached input, cached reads, and output as
+disjoint token sets. OpenAI and Gemini cached-read rates come from their native
+catalog entries, including published service-tier and context-threshold rates;
+they do not fall back to Anthropic cache rates. Positive cached usage without
+an applicable rate leaves actual request costs unknown. A published zero rate
+remains a known zero, and a request with no cached usage does not require a
+cached-read rate.
+
+When a completed request's actual cost is unknown, managed-key limit accounting
+finalizes its original admitted estimate as CostUsd liability. Request and token
+usage still settle once, and concurrency is released. The request's actual-cost
+fields remain empty. If no estimate was available and no CostUsd limit applied,
+only measured request/token usage is added; the monetary accumulator is unchanged.
+No unavailable cost is reported as a known zero, and finalized rows are not
+re-priced later.
+
+Keep-alive renewals retain their token usage, hit identity, and history when
+actual cost is unavailable; their monetary PNL stays unknown. An automatic
+storage upgrade records price availability separately from signed cost values
+and preserves existing renewal costs as known.
 
 Before dispatch, Anthropic Messages limit admission estimates text and metadata
 string bytes at one token per four bytes, plus 4,784 tokens per recognized native
