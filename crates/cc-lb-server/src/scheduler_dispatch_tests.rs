@@ -1324,7 +1324,9 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
 #[tokio::test]
 async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     // Given
+    install_test_pricing();
     let fixture = Fixture::new().await;
+    fixture.http.return_cache_hit_usage(10, 40, 10);
     let key_store = KeyStore::new(fixture.storage.clone());
     let (_key, secret) = key_store
         .create(
@@ -1377,7 +1379,10 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     assert_eq!(event.key_id.as_deref(), Some(key_id.as_str()));
     assert_eq!(event.upstream_id, Some(fixture.upstream_id));
     assert_eq!(event.model.as_deref(), Some("claude-test"));
-    assert!(event.cost_usd_micros.is_some());
+    assert_eq!(event.cost_input_micros, Some(20));
+    assert_eq!(event.cost_output_micros, Some(120));
+    assert_eq!(event.cost_cache_read_micros, Some(0));
+    assert_eq!(event.cost_usd_micros, Some(140));
     let turn_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_turns")
         .fetch_one(fixture.storage.pool())
         .await
