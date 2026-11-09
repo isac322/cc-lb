@@ -12,25 +12,16 @@ function MetricStack({
   segments,
   total,
   maxTotal,
-  pulse,
 }: {
   children: ReactNode;
   segments: readonly StackedBarSegment[];
   total?: number;
   /** Optional outer denominator for relative bars; segments keep their own scale. */
   maxTotal?: number;
-  pulse?: boolean;
 }) {
   return (
     <>
-      <span
-        className={cx(
-          'block tabular-nums leading-5',
-          pulse ? 'animate-pulse' : '',
-        )}
-      >
-        {children}
-      </span>
+      <span className="block tabular-nums leading-5">{children}</span>
       <span className="mt-[3px] block h-1" data-cell-bar="">
         <StackedBar
           size="xs"
@@ -57,7 +48,6 @@ export function MetricCell({
   segments,
   total,
   maxTotal,
-  pulse,
   children,
 }: {
   className?: string;
@@ -70,7 +60,6 @@ export function MetricCell({
   total?: number;
   /** Optional shared cost scale; omit to keep a request metric's own full width. */
   maxTotal?: number;
-  pulse?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -85,12 +74,7 @@ export function MetricCell({
           aria-describedby={describedBy}
           className="block w-full min-w-18 cursor-help rounded-sm border-0 bg-transparent px-3 py-1.5 text-inherit [text-align:inherit] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
         >
-          <MetricStack
-            segments={segments}
-            total={total}
-            maxTotal={maxTotal}
-            pulse={pulse}
-          >
+          <MetricStack segments={segments} total={total} maxTotal={maxTotal}>
             {children}
           </MetricStack>
         </button>

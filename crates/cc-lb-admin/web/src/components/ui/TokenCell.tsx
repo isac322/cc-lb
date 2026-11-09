@@ -59,11 +59,9 @@ function TokenFigure({ tokens, slot }: { tokens: number; slot: string }) {
  */
 export function TokenCell({
   event,
-  isPartial,
   className,
 }: {
   event: RequestEventWithPhase;
-  isPartial?: boolean;
   className?: string;
 }) {
   const b = tokenBreakdown(event);
@@ -101,7 +99,6 @@ export function TokenCell({
       }, show breakdown`}
       popover={popover}
       segments={rows}
-      pulse={isPartial}
     >
       <span className="inline-flex items-baseline">
         <TokenFigure tokens={prompt} slot="in" />

@@ -102,7 +102,6 @@ export function CostCell({
       popover={popover}
       segments={segments}
       total={c.total}
-      pulse={isPartial}
     >
       <CostFigure text={text} />
     </MetricCell>

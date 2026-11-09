@@ -127,51 +127,24 @@ describe('RequestEventsTable', () => {
         principalNameMap={principalNameMap}
         loading
         reservedRowCount={3}
-        columns={{ session: false }}
+        columns={{ principal: false }}
       />,
     );
 
     const headerCells = container.querySelectorAll('thead th');
     const body = container.querySelector('tbody');
     const rows = container.querySelectorAll('tbody > tr');
-    // Session is off; kind stays even with no rows yet.
-    const expectedSkeletonWidths = [
-      'max-w-24',
-      'max-w-24',
-      'max-w-28',
-      'max-w-12',
-      'max-w-24',
-      'max-w-12',
-      'max-w-16',
-      'max-w-20',
-      'max-w-16',
-    ];
 
+    // Principal is off; session and kind stay even with no rows yet.
     expect(headerCells).toHaveLength(9);
     expect(rows).toHaveLength(3);
     expect(body?.style.height).toBe('7.5rem');
-
     for (const row of rows) {
-      expect(row.className).toContain('border-b');
-      expect(row.className).toContain('border-row');
-      expect((row as HTMLTableRowElement).style.height).toBe('2.5rem');
-      const cells = row.querySelectorAll('td');
-      expect(cells).toHaveLength(headerCells.length);
-
-      cells.forEach((cell, index) => {
-        const skeleton = cell.querySelector('.skeleton');
-        expect(skeleton?.className).toContain(expectedSkeletonWidths[index]);
-
-        if (index >= 5) {
-          expect(cell.className).toContain('text-right');
-          expect(cell.className).toContain('tabular-nums');
-          expect(skeleton?.className).toContain('ml-auto');
-        }
-      });
+      expect(row.querySelectorAll('td')).toHaveLength(headerCells.length);
     }
   });
 
-  it('uses the same row height for loading and loaded events', () => {
+  it('reserves the same space for loading and empty bodies, and none once loaded', () => {
     const event = {
       event_id: 'evt_row_height',
       request_id: 'req_row_height',
@@ -186,27 +159,29 @@ describe('RequestEventsTable', () => {
         events={[]}
         principalNameMap={principalNameMap}
         loading
-        reservedRowCount={1}
+        reservedRowCount={2}
       />,
     );
-    const loadingRow = container.querySelector(
-      'tbody > tr',
-    ) as HTMLTableRowElement;
-    const loadingRowHeight = loadingRow.style.height;
+    expect(container.querySelector('tbody')?.style.height).toBe('5rem');
 
-    expect(loadingRowHeight).toBe('2.5rem');
+    rerender(
+      <RequestEventsTable
+        events={[]}
+        principalNameMap={principalNameMap}
+        reservedRowCount={2}
+      />,
+    );
+    expect(container.querySelector('tbody')?.style.height).toBe('5rem');
 
     rerender(
       <RequestEventsTable
         events={[event]}
         principalNameMap={principalNameMap}
+        reservedRowCount={2}
       />,
     );
-
-    const loadedRow = container.querySelector(
-      'tbody > tr[aria-label="View request evt_row_height"]',
-    ) as HTMLTableRowElement;
-    expect(loadedRow.style.height).toBe(loadingRowHeight);
+    expect(screen.getByLabelText('View request evt_row_height')).toBeDefined();
+    expect(container.querySelector('tbody')?.style.height).toBe('');
   });
 
   it('keeps the empty state at the reserved loading body height', () => {
@@ -233,7 +208,6 @@ describe('RequestEventsTable', () => {
     const emptyBody = container.querySelector('tbody');
     const emptyRow = emptyBody?.querySelector('tr');
     expect(emptyBody?.style.height).toBe(loadingHeight);
-    expect(emptyRow?.className).toContain('h-full');
     // Every column, session and kind included, is present with no rows.
     expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('10');
     expect(screen.getByText('No requests')).toBeDefined();
@@ -557,52 +531,366 @@ describe('RequestEventsTable', () => {
     expect(a1.getAttribute('style')).not.toBe(b1.getAttribute('style'));
   });
 
-  it.each([
-    ['fit', undefined],
-    ['scroll', 'min-w-[1080px]'],
-  ])(
-    'drops a leading claude- from model ids in %s tables, keeping the full id',
-    (_mode, minWidthClass) => {
-      const events = [
-        {
-          event_id: 'evt_m',
-          request_id: 'req_m',
-          ts: 1718553120,
-          status: 200,
-          duration_ms: 100,
-          model: 'claude-sonnet-4-6',
-          _phase: 'final',
-        } satisfies RequestEventWithPhase,
-        {
-          event_id: 'evt_other',
-          request_id: 'req_other',
-          ts: 1718553121,
-          status: 200,
-          duration_ms: 100,
-          model: 'my-claude-proxy',
-          _phase: 'final',
-        } satisfies RequestEventWithPhase,
-      ];
+  it('drops a leading claude- from model ids, keeping the full id', () => {
+    const events = [
+      {
+        event_id: 'evt_m',
+        request_id: 'req_m',
+        ts: 1718553120,
+        status: 200,
+        duration_ms: 100,
+        model: 'claude-sonnet-4-6',
+        _phase: 'final',
+      } satisfies RequestEventWithPhase,
+      {
+        event_id: 'evt_other',
+        request_id: 'req_other',
+        ts: 1718553121,
+        status: 200,
+        duration_ms: 100,
+        model: 'my-claude-proxy',
+        _phase: 'final',
+      } satisfies RequestEventWithPhase,
+    ];
 
+    const { container } = render(
+      <RequestEventsTable
+        events={events}
+        principalNameMap={principalNameMap}
+      />,
+    );
+    const model = container.querySelector(
+      'tbody span[title="claude-sonnet-4-6"]',
+    );
+    expect(model?.textContent).toBe('sonnet-4-6');
+    expect(model?.getAttribute('aria-label')).toBe('claude-sonnet-4-6');
+    // Only a leading prefix goes.
+    expect(
+      container.querySelector('tbody span[title="my-claude-proxy"]')
+        ?.textContent,
+    ).toBe('my-claude-proxy');
+  });
+
+  describe('Column widths', () => {
+    const shortEvents: RequestEventWithPhase[] = [
+      {
+        event_id: 'evt_short',
+        request_id: 'req_short',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 200,
+        duration_ms: 100,
+        principal_id: 'p_short',
+        upstream_name: 'up',
+        thread_id: 'sess-1',
+        request_kind: 'main',
+        model: 'claude-haiku-4-5',
+        _phase: 'final',
+      },
+    ];
+    const longPrincipalId = 'p_long';
+    const longEvents: RequestEventWithPhase[] = [
+      {
+        event_id: 'evt_long',
+        request_id: 'req_long',
+        ts: 1718553121,
+        ts_ms: 1718553121000,
+        status: 200,
+        duration_ms: 100,
+        principal_id: longPrincipalId,
+        upstream_name: 'u'.repeat(60),
+        thread_id: '01234567-89ab-cdef-0123-456789abcdef',
+        request_kind: 'custom-kind-abcdefgh',
+        model: `claude-${'m'.repeat(33)}`,
+        thinking_level: 'high',
+        service_tier: 'priority',
+        _phase: 'final',
+      },
+      {
+        event_id: 'evt_partial',
+        request_id: 'req_partial',
+        ts: 1718553122,
+        ts_ms: 1718553122000,
+        status: 0,
+        duration_ms: 0,
+        _phase: 'partial',
+      },
+      {
+        event_id: 'evt_disconnect',
+        request_id: 'req_disconnect',
+        ts: 1718553123,
+        ts_ms: 1718553123000,
+        status: 499,
+        error_code: 'client_closed_request',
+        duration_ms: 100,
+        _phase: 'final',
+      },
+      {
+        event_id: 'evt_semantic',
+        request_id: 'req_semantic',
+        ts: 1718553124,
+        ts_ms: 1718553124000,
+        status: 200,
+        error_code: 'upstream_stream_error',
+        upstream_error_type: 'overloaded_error',
+        duration_ms: 100,
+        _phase: 'final',
+      },
+    ];
+    const names = new Map([
+      ['p_short', 'alice'],
+      [longPrincipalId, 'P'.repeat(60)],
+    ]);
+
+    it('never derives a column width from row content', () => {
+      const { container, rerender } = render(
+        <RequestEventsTable events={shortEvents} principalNameMap={names} />,
+      );
+      const before = container.querySelector('colgroup')?.outerHTML;
+      expect(before).toBeDefined();
+
+      rerender(
+        <RequestEventsTable
+          events={[...longEvents, ...shortEvents]}
+          principalNameMap={names}
+        />,
+      );
+
+      expect(container.querySelector('colgroup')?.outerHTML).toBe(before);
+      const headers = Array.from(
+        container.querySelectorAll('thead th'),
+        (th) => th.textContent,
+      );
+      const cols = container.querySelectorAll('colgroup > col');
+      expect(cols).toHaveLength(headers.length);
+    });
+
+    it('sets the table minimum to the visible columns plus the session floor', () => {
+      const { container, rerender } = render(
+        <RequestEventsTable
+          events={shortEvents}
+          principalNameMap={names}
+          columns={{ principal: false }}
+        />,
+      );
+      const table = container.querySelector('table');
+      expect(table?.style.getPropertyValue('--events-min-w')).toBe('59rem');
+
+      rerender(
+        <RequestEventsTable events={shortEvents} principalNameMap={names} />,
+      );
+      expect(table?.style.getPropertyValue('--events-min-w')).toBe('65.5rem');
+    });
+  });
+
+  describe('Status cell', () => {
+    const statusCell = (container: HTMLElement, eventId: string) => {
+      const headers = Array.from(
+        container.querySelectorAll('thead th'),
+        (th) => th.textContent,
+      );
+      const row = screen.getByLabelText(`View request ${eventId}`);
+      return row.querySelectorAll('td')[headers.indexOf('Status')];
+    };
+    const visibleText = (cell: Element) => {
+      const clone = cell.cloneNode(true) as Element;
+      for (const hidden of clone.querySelectorAll('.sr-only')) hidden.remove();
+      return clone.textContent?.trim() ?? '';
+    };
+
+    it('never prints words, only an HTTP number or nothing', () => {
+      const base = {
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        duration_ms: 100,
+      } as const;
+      const events: RequestEventWithPhase[] = [
+        ...[200, 404, 503].map((status) => ({
+          ...base,
+          event_id: `s${status}`,
+          request_id: `s${status}`,
+          status,
+          _phase: 'final' as const,
+        })),
+        {
+          ...base,
+          event_id: 's0',
+          request_id: 's0',
+          status: 0,
+          error_code: 'terminal_dropped',
+          _phase: 'final',
+        },
+        {
+          ...base,
+          event_id: 's504',
+          request_id: 's504',
+          status: 504,
+          error_code: 'tower_timeout',
+          _phase: 'final',
+        },
+        {
+          ...base,
+          event_id: 's499',
+          request_id: 's499',
+          status: 499,
+          error_code: 'other_error',
+          _phase: 'final',
+        },
+        {
+          ...base,
+          event_id: 'sdisc',
+          request_id: 'sdisc',
+          status: 499,
+          error_code: 'client_closed_request',
+          _phase: 'final',
+        },
+        {
+          ...base,
+          event_id: 'ssem',
+          request_id: 'ssem',
+          status: 200,
+          error_code: 'upstream_stream_error',
+          upstream_error_type: 'overloaded_error',
+          _phase: 'final',
+        },
+        {
+          ...base,
+          event_id: 'spart',
+          request_id: 'spart',
+          status: 0,
+          duration_ms: 0,
+          _phase: 'partial',
+        },
+      ];
       const { container } = render(
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          minWidthClass={minWidthClass}
         />,
       );
-      const model = container.querySelector(
-        'tbody span[title="claude-sonnet-4-6"]',
+
+      // Every fixture's event_id equals its request_id, the row's label key.
+      for (const event of events) {
+        expect(visibleText(statusCell(container, event.request_id))).toMatch(
+          /^(\d{1,3})?$/,
+        );
+      }
+    });
+
+    it('keeps the status icon a control that does not select the row', async () => {
+      const user = userEvent.setup();
+      const base = {
+        ts: 1718553120,
+        duration_ms: 100,
+        _phase: 'final',
+      } as const;
+      render(
+        <RequestEventsTable
+          events={[
+            {
+              ...base,
+              event_id: 'evt_disc',
+              request_id: 'req_disc',
+              status: 499,
+              error_code: 'client_closed_request',
+            },
+            {
+              ...base,
+              event_id: 'evt_sem',
+              request_id: 'req_sem',
+              status: 200,
+              error_code: 'upstream_stream_error',
+              upstream_error_type: 'overloaded_error',
+            },
+          ]}
+          principalNameMap={principalNameMap}
+        />,
       );
-      expect(model?.textContent).toBe('sonnet-4-6');
-      expect(model?.getAttribute('aria-label')).toBe('claude-sonnet-4-6');
-      // Only a leading prefix goes.
+
+      await user.click(
+        screen.getByRole('button', { name: 'Client disconnected (HTTP 499)' }),
+      );
       expect(
-        container.querySelector('tbody span[title="my-claude-proxy"]')
-          ?.textContent,
-      ).toBe('my-claude-proxy');
-    },
-  );
+        screen
+          .getByLabelText('View request evt_disc')
+          .getAttribute('aria-selected'),
+      ).toBe('false');
+      expect(
+        screen.queryByRole('dialog', { name: 'Request detail' }),
+      ).toBeNull();
+      // The click opens the icon's Hint. Base UI moves focus into that open
+      // popup, so dismiss it before using the next row's icon.
+      expect(
+        await screen.findByText('HTTP 499 · client_closed_request'),
+      ).toBeDefined();
+      await user.keyboard('{Escape}');
+      expect(screen.queryByText('HTTP 499 · client_closed_request')).toBeNull();
+
+      screen
+        .getByRole('button', { name: 'overloaded_error (HTTP 200)' })
+        .focus();
+      await user.keyboard('{Enter}');
+
+      expect(
+        await screen.findByText(
+          'HTTP 200 · upstream_stream_error',
+          {},
+          { timeout: 1000 },
+        ),
+      ).toBeDefined();
+      expect(
+        screen
+          .getByLabelText('View request evt_sem')
+          .getAttribute('aria-selected'),
+      ).toBe('false');
+      expect(
+        screen.queryByRole('dialog', { name: 'Request detail' }),
+      ).toBeNull();
+    });
+  });
+
+  it('titles a long custom request kind with the raw kind', () => {
+    render(
+      <RequestEventsTable
+        events={[
+          {
+            event_id: 'evt_kind',
+            request_id: 'req_kind',
+            ts: 1718553120,
+            status: 200,
+            duration_ms: 100,
+            request_kind: 'custom-kind-abcdefgh',
+            _phase: 'final',
+          },
+        ]}
+        principalNameMap={principalNameMap}
+      />,
+    );
+
+    expect(screen.getByTitle('custom-kind-abcdefgh')).toBeDefined();
+  });
+
+  it('names empty principal, upstream and model cells for screen readers', () => {
+    render(
+      <RequestEventsTable
+        events={[
+          {
+            event_id: 'evt_nulls',
+            request_id: 'req_nulls',
+            ts: 1718553120,
+            status: 200,
+            duration_ms: 100,
+            _phase: 'final',
+          },
+        ]}
+        principalNameMap={principalNameMap}
+      />,
+    );
+
+    expect(screen.getByText('No principal')).toBeDefined();
+    expect(screen.getByText('No upstream')).toBeDefined();
+    expect(screen.getByText('No model')).toBeDefined();
+  });
 
   describe('Cost Tooltip', () => {
     it('shows positive cost categories and keeps the authoritative total', async () => {

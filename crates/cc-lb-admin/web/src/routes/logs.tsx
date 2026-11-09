@@ -162,7 +162,6 @@ export function getLogsRouteState({
   };
 }
 
-const LOGS_TABLE_COLUMNS = { cost: true, tokens: true } as const;
 const LOGS_RESERVED_ROW_COUNT = 10;
 // Every committed model value re-runs the historical query and reconnects the
 // live SSE stream, so typing has to settle before the URL changes.
@@ -735,8 +734,6 @@ function LogsPage() {
         onAnchorRange={focusAround}
         principalNameMap={principalNameMap}
         reservedRowCount={LOGS_RESERVED_ROW_COUNT}
-        columns={LOGS_TABLE_COLUMNS}
-        minWidthClass="min-w-[1080px]"
         emptyTitle={emptyCopy.title}
         emptyDescription={emptyCopy.description}
         emptyAction={emptyCopy.action}
