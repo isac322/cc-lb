@@ -508,6 +508,7 @@ fn batch_b_wire_snapshots_are_stable() {
         thinking_tokens: Some(64),
         thinking_budget_tokens: None,
         reasoning_effort: None,
+        thinking_level: Some("LOW".to_owned()),
         service_tier: Some("priority".to_owned()),
         upstream_error_type: Some("overloaded_error".to_owned()),
         upstream_error_message: Some("upstream overloaded; retry".to_owned()),

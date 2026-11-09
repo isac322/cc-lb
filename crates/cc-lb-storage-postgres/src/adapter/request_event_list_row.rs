@@ -32,6 +32,7 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         session_id_source: row.session_id_source,
         model: row.model,
         reasoning_effort: row.reasoning_effort,
+        thinking_level: row.thinking_level,
         thinking_budget_tokens: row
             .thinking_budget_tokens
             .map(|value| i64_to_u64(value, "request event list thinking_budget_tokens"))

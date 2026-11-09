@@ -1594,6 +1594,25 @@ mod cache_score_tests {
             Some(6_000_000)
         );
         assert_eq!(pricing.cache_read_micros_per_million, Some(2_000_000));
+        for alias in ["service_tier", "serviceTier"] {
+            let request = serde_json::json!({(alias): "priority"});
+            let metadata = super::request_cache_metadata_from_value_with_analysis_for_capability(
+                &http::HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(super::ProviderCapability::GeminiGenerateContent),
+            );
+            let gemini_pricing = cache_pricing_summary_for_model(
+                &catalog,
+                "tier-model",
+                metadata.requested_service_tier.as_deref(),
+            );
+            assert_eq!(gemini_pricing.input_micros_per_million, Some(3_000_000));
+            assert_eq!(
+                gemini_pricing.cache_read_micros_per_million,
+                Some(2_000_000)
+            );
+        }
     }
     #[test]
     fn native_cache_pricing_context_maps_rates_without_legacy_fallback() {
@@ -4266,6 +4285,7 @@ impl Lifecycle {
                             .pointer("/reasoning/effort")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
+                        thinking_level: None,
                         cache_breakpoints: Vec::new(),
                         cache_prefix_hash: None,
                         thread_id: identity.thread_id.clone(),
@@ -5243,6 +5263,7 @@ impl Lifecycle {
                     cache_control_block_count: cache_metadata.cache_control_block_count,
                     thinking_budget_tokens: cache_metadata.thinking_budget_tokens,
                     reasoning_effort: cache_metadata.reasoning_effort.clone(),
+                    thinking_level: cache_metadata.thinking_level.clone(),
                     cache_breakpoints: cache_metadata.cache_breakpoints.clone(),
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                     thread_id: cache_metadata.thread_id.clone(),
@@ -10051,9 +10072,8 @@ impl LimitRequest {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             service_tier: value
-                .and_then(|v| v.get("service_tier"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
+                .and_then(|value| request_service_tier(value, capability))
+                .map(str::to_owned),
         }
     }
 }
@@ -10834,6 +10854,7 @@ pub(crate) struct RequestCacheMetadata {
     cache_control_block_count: Option<u64>,
     thinking_budget_tokens: Option<u64>,
     reasoning_effort: Option<String>,
+    thinking_level: Option<String>,
     cache_control_message_indices: Vec<u64>,
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub(crate) cache_prefix_hash: Option<String>,
@@ -11182,6 +11203,29 @@ fn request_reasoning_metadata(
         _ => (None, None),
     }
 }
+
+/// Normalize field names only. Keep the requested value, including unknown
+/// casing, visible to routing and admission rather than treating it as absent.
+fn request_service_tier(value: &Value, capability: Option<ProviderCapability>) -> Option<&str> {
+    let tier = value.get("service_tier").or_else(|| {
+        (capability == Some(ProviderCapability::GeminiGenerateContent))
+            .then(|| value.get("serviceTier"))
+            .flatten()
+    })?;
+    tier.as_str()
+}
+
+fn request_thinking_level(value: &Value, capability: Option<ProviderCapability>) -> Option<String> {
+    if capability != Some(ProviderCapability::GeminiGenerateContent) {
+        return None;
+    }
+    value
+        .pointer("/generationConfig/thinkingConfig/thinkingLevel")
+        .and_then(Value::as_str)
+        .filter(|level| !level.is_empty() && level.len() <= 64)
+        .map(str::to_owned)
+}
+
 fn bounded_openai_replay_component(raw: &str) -> String {
     let digest = Sha256::digest(raw.as_bytes());
     format!(
@@ -11312,10 +11356,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     let native_cache = capability.and_then(|capability| {
         provider_cache::analyze(capability, value, &canonical_model_id, headers)
     });
-    let requested_service_tier = value
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
+    let requested_service_tier = request_service_tier(value, capability).map(str::to_owned);
 
     let messages = value.get("messages").and_then(Value::as_array);
     let message_count = messages.map(|items| items.len() as u64);
@@ -11436,6 +11477,7 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
         cache_control_block_count: Some(cache_control_block_count),
         thinking_budget_tokens,
         reasoning_effort,
+        thinking_level: request_thinking_level(value, capability),
         cache_control_message_indices,
         cache_breakpoints,
         cache_prefix_hash,
@@ -14830,6 +14872,125 @@ mod tests {
             metadata.requested_service_tier.as_deref(),
             Some("Priority-Raw")
         );
+    }
+
+    #[test]
+    fn gemini_request_aliases_preserve_tier_and_bounded_thinking_metadata() {
+        for alias in ["service_tier", "serviceTier"] {
+            for tier in ["flex", "priority", "FLEX", "future-tier"] {
+                let request = json!({
+                    (alias): tier,
+                    "generationConfig": {"thinkingConfig": {
+                        "thinkingLevel": "LOW",
+                        "thinkingBudget": 1024,
+                        "includeThoughts": true
+                    }},
+                    "reasoning_effort": "wrong-provider"
+                });
+                let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                    &HeaderMap::new(),
+                    Some(&request),
+                    None,
+                    Some(ProviderCapability::GeminiGenerateContent),
+                );
+                let limit = LimitRequest::from_value(
+                    Some(&request),
+                    "gemini-test",
+                    Some(ProviderCapability::GeminiGenerateContent),
+                    &[],
+                    false,
+                );
+                assert_eq!(metadata.requested_service_tier.as_deref(), Some(tier));
+                assert_eq!(limit.service_tier.as_deref(), Some(tier));
+                assert_eq!(metadata.thinking_level.as_deref(), Some("LOW"));
+                assert_eq!(metadata.thinking_budget_tokens, Some(1024));
+                assert_eq!(metadata.reasoning_effort, None);
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_service_tier_alias_precedence_and_malformed_fields_are_conservative() {
+        for (request, expected) in [
+            (
+                json!({"service_tier":"priority","serviceTier":"flex"}),
+                Some("priority"),
+            ),
+            (json!({"service_tier":null,"serviceTier":"flex"}), None),
+            (json!({"serviceTier":null}), None),
+            (json!({"serviceTier":42}), None),
+            (json!({"servicetier":"flex"}), None),
+        ] {
+            let capability = Some(ProviderCapability::GeminiGenerateContent);
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                capability,
+            );
+            let limit =
+                LimitRequest::from_value(Some(&request), "gemini-test", capability, &[], false);
+            assert_eq!(metadata.requested_service_tier.as_deref(), expected);
+            assert_eq!(limit.service_tier.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn gemini_thinking_level_ignores_malformed_and_unbounded_values() {
+        for level in [
+            json!(null),
+            json!(false),
+            json!(3),
+            json!(""),
+            json!("x".repeat(65)),
+        ] {
+            let request = json!({"generationConfig": {"thinkingConfig": {
+                "thinkingLevel": level, "thinkingBudget": 9007199254740992_u64
+            }}});
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+            );
+            assert_eq!(metadata.thinking_level, None);
+            assert_eq!(metadata.thinking_budget_tokens, None);
+        }
+        for level in [
+            "LOW".to_owned(),
+            "low".to_owned(),
+            "future-level".to_owned(),
+            "x".repeat(64),
+        ] {
+            let request = json!({"generationConfig": {"thinkingConfig": {"thinkingLevel": level}}});
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+            );
+            assert_eq!(metadata.thinking_level.as_deref(), Some(level.as_str()));
+            assert_eq!(metadata.reasoning_effort, None);
+        }
+        for capability in [
+            ProviderCapability::AnthropicMessages,
+            ProviderCapability::OpenaiChatCompletions,
+            ProviderCapability::OpenaiResponses,
+            ProviderCapability::GeminiOpenaiChatCompletions,
+        ] {
+            let request = json!({
+                "serviceTier": "priority",
+                "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW"}}
+            });
+            let metadata = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&request),
+                None,
+                Some(capability),
+            );
+            assert_eq!(metadata.thinking_level, None);
+            assert_eq!(metadata.requested_service_tier, None);
+        }
     }
 
     #[test]

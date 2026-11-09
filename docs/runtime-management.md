@@ -165,6 +165,18 @@ cost and limit accounting must not add it again. Repeated cumulative usage
 snapshots replace the previous counts instead of accumulating them. Missing or
 `null` fields retain the last reported component.
 
+Native Gemini generation requests accept both `service_tier` and `serviceTier`
+for routing and cost reservations; `service_tier` takes precedence when both
+appear. The original request bytes are forwarded unchanged. Completed-request
+costs use the observed `usageMetadata.serviceTier` or `service_tier`, including
+wrapped `response.usageMetadata`; the requested tier never substitutes for a
+missing response tier.
+
+Request history records `generationConfig.thinkingConfig.thinkingLevel` as
+optional `thinking_level` metadata, separately from `reasoning_effort` and
+`thinking_budget_tokens`. Non-empty levels up to 64 bytes retain their original
+casing. Thinking level does not affect routing or token accounting.
+
 The existing cache-input subtraction is unchanged: reported cache-read tokens
 are counted separately from uncached input. OpenAI and Anthropic output already
 includes reasoning or thinking tokens, so their output counts are unchanged.

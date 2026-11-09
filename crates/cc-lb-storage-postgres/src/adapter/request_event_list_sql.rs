@@ -77,6 +77,7 @@ SELECT \
     r.session_id_source, \
     r.model, \
     r.reasoning_effort, \
+    r.thinking_level, \
     r.thinking_budget_tokens, \
     r.thinking_tokens, \
     r.service_tier, \
@@ -162,6 +163,7 @@ pub(super) struct ListRow {
     pub(super) session_id_source: Option<String>,
     pub(super) model: Option<String>,
     pub(super) reasoning_effort: Option<String>,
+    pub(super) thinking_level: Option<String>,
     pub(super) thinking_budget_tokens: Option<i64>,
     pub(super) thinking_tokens: Option<i64>,
     pub(super) service_tier: Option<String>,
