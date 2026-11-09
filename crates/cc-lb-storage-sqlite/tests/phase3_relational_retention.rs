@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Path, str::FromStr, sync::Arc};
 
 use cc_lb_storage_api::{
     CacheKeepaliveEvidenceRow, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheTtl,
@@ -6,7 +6,7 @@ use cc_lb_storage_api::{
     RequestEventExportPage, RequestEventKind, RequestEventStore, RequestEventStreamFilters,
     SubscriptionQuotaWindow, UsageRollupResolution, UsageRollupStore,
 };
-use sqlx::Row;
+use sqlx::{Connection, Row, migrate::Migrator, sqlite::SqliteConnectOptions};
 use uuid::Uuid;
 
 async fn storage(name: &str) -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
@@ -222,6 +222,337 @@ async fn every_relational_scalar_roundtrips_without_persisting_diagnostics() {
             .expect("idempotent rollup")
             .processed_events,
         0
+    );
+}
+
+#[tokio::test]
+async fn canonical_gemini_events_share_one_rollup_series_and_controls_stay_unchanged() {
+    let (_dir, storage) = storage("canonical-gemini-rollup.sqlite").await;
+    let upstream_id = Uuid::from_u128(1_204_001);
+    let rows = [
+        ("gemini-cached", Some("gemini-2.5-flash")),
+        ("gemini-native", Some("gemini-2.5-flash")),
+        ("openai-control", Some("gpt-4o")),
+        ("unknown-control", None),
+    ];
+    for (index, (request_id, model)) in rows.into_iter().enumerate() {
+        storage
+            .append_request_event(&RequestEvent {
+                ts: 1_800_000_000,
+                ts_ms: Some(1_800_000_000_000 + index as u64),
+                request_id: request_id.to_owned(),
+                event_id: Some(format!("canonical-gemini-{request_id}")),
+                principal_id: Some("principal-test".to_owned()),
+                upstream_id: Some(upstream_id),
+                upstream_name: Some("gemini-identity-events".to_owned()),
+                model: model.map(str::to_owned),
+                status: 200,
+                input_tokens: Some(2),
+                output_tokens: Some(1),
+                duration_ms: 1,
+                ..RequestEvent::default()
+            })
+            .await
+            .expect("append canonical identity event");
+    }
+
+    let events = storage
+        .query_request_events_between_cursors(
+            0,
+            storage
+                .current_request_event_cursor()
+                .await
+                .expect("cursor"),
+            10,
+            &RequestEventStreamFilters::default(),
+        )
+        .await
+        .expect("query request events");
+    assert_eq!(
+        events
+            .iter()
+            .map(|(_, event)| event.model.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("gemini-2.5-flash"),
+            Some("gemini-2.5-flash"),
+            Some("gpt-4o"),
+            None
+        ]
+    );
+
+    let first_run = storage
+        .rollup_usage_once()
+        .await
+        .expect("roll up canonical identity events");
+    assert_eq!(first_run.processed_events, 4);
+    let rollups = storage
+        .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, 1_800_000_060)
+        .await
+        .expect("query canonical identity rollups");
+    assert_eq!(rollups.len(), 3);
+    let gemini = rollups
+        .iter()
+        .find(|rollup| rollup.model == "gemini-2.5-flash")
+        .expect("one Gemini model series");
+    assert_eq!(gemini.request_count, 2);
+    assert_eq!(gemini.input_tokens, 4);
+    assert_eq!(gemini.output_tokens, 2);
+    assert!(rollups.iter().any(|rollup| rollup.model == "gpt-4o"));
+    assert!(rollups.iter().any(|rollup| rollup.model == "unknown"));
+
+    let second_run = storage
+        .rollup_usage_once()
+        .await
+        .expect("second rollup is idempotent");
+    assert_eq!(second_run.processed_events, 0);
+    assert_eq!(
+        storage
+            .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, 1_800_000_060)
+            .await
+            .expect("query rollups after idempotent run"),
+        rollups
+    );
+}
+
+#[tokio::test]
+async fn canonicalize_gemini_model_identity_migration_rebuilds_historical_rollups() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!(
+        "sqlite://{}",
+        dir.path().join("canonicalize.sqlite").display()
+    );
+    let options = SqliteConnectOptions::from_str(&url)
+        .expect("connect options")
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let mut connection = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .expect("connect sqlite");
+    let migrator = Migrator::new(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/migrations"
+    )))
+    .await
+    .expect("load migrations");
+    migrator
+        .run_direct(Some(113), &mut connection, false)
+        .await
+        .expect("migrate through 113");
+
+    let gemini_upstream_id = Uuid::from_u128(1_204_011);
+    let unrelated_upstream_id = Uuid::from_u128(1_204_012);
+    for (id, name, kind) in [
+        (gemini_upstream_id, "gemini-history", "gemini_api_key"),
+        (unrelated_upstream_id, "unrelated-history", "openai_api_key"),
+    ] {
+        sqlx::query(
+            "INSERT INTO upstream_spec_v1 (
+                id, name, kind, base_url, enabled, warmup_enabled,
+                warmup_dialect_plugin, spec_revision, created_at, updated_at,
+                deleted_at, workspace_id
+            ) VALUES (?, ?, ?, NULL, 1, 0, NULL, 1, 0, 0, NULL, NULL)",
+        )
+        .bind(id.to_string())
+        .bind(name)
+        .bind(kind)
+        .execute(&mut connection)
+        .await
+        .expect("seed upstream");
+    }
+    connection.close().await.expect("close seed connection");
+
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open pre-migration sqlite");
+    let events = [
+        (
+            "gemini-prefixed",
+            Some(gemini_upstream_id),
+            Some("gemini-history"),
+            Some("models/gemini-2.5-flash"),
+            401,
+            10,
+            5,
+            5,
+        ),
+        (
+            "gemini-canonical",
+            Some(gemini_upstream_id),
+            Some("gemini-history"),
+            Some("gemini-2.5-flash"),
+            200,
+            7,
+            3,
+            7,
+        ),
+        (
+            "unrelated-prefixed",
+            Some(unrelated_upstream_id),
+            Some("unrelated-history"),
+            Some("models/gemini-2.5-flash"),
+            200,
+            11,
+            4,
+            11,
+        ),
+        ("unknown-model", None, None, None, 404, 13, 6, 13),
+    ];
+    for (
+        request_id,
+        upstream_id,
+        upstream_name,
+        model,
+        status,
+        input_tokens,
+        output_tokens,
+        duration_ms,
+    ) in events
+    {
+        storage
+            .append_request_event(&RequestEvent {
+                ts: 1_800_000_000,
+                ts_ms: Some(1_800_000_000_000),
+                request_id: request_id.to_owned(),
+                event_id: Some(format!("canonicalize-{request_id}")),
+                principal_id: Some("historical-principal".to_owned()),
+                upstream_id,
+                upstream_name: upstream_name.map(str::to_owned),
+                model: model.map(str::to_owned),
+                status,
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(output_tokens),
+                duration_ms,
+                ..RequestEvent::default()
+            })
+            .await
+            .expect("seed historical request event");
+    }
+
+    let seeded = storage
+        .rollup_usage_once()
+        .await
+        .expect("seed historical rollups");
+    assert_eq!(seeded.processed_events, 4);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM usage_rollups_v2 \
+             WHERE resolution = 'minute'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .expect("count seeded rollups"),
+        4
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT error_count FROM overview_excluded_error_rollups_v1 \
+             WHERE resolution = 'minute' AND bucket_start_unix_secs = ?",
+        )
+        .bind(1_800_000_000_i64)
+        .fetch_one(storage.pool())
+        .await
+        .expect("read seeded excluded errors"),
+        2
+    );
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/0114_canonicalize_gemini_model_identity.sql"
+    ))
+    .execute(storage.pool())
+    .await
+    .expect("execute canonicalization migration");
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_rollups_v2")
+            .fetch_one(storage.pool())
+            .await
+            .expect("count cleared rollups"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM overview_excluded_error_rollups_v1")
+            .fetch_one(storage.pool())
+            .await
+            .expect("count cleared excluded errors"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM usage_rollup_checkpoints_v1 \
+             WHERE id IN ('high_water', 'cost_components_backfill_upper', \
+                          'cost_components_backfill_cursor')",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .expect("count cleared checkpoints"),
+        0
+    );
+
+    for (event_id, expected_model) in [
+        ("canonicalize-gemini-prefixed", Some("gemini-2.5-flash")),
+        ("canonicalize-gemini-canonical", Some("gemini-2.5-flash")),
+        (
+            "canonicalize-unrelated-prefixed",
+            Some("models/gemini-2.5-flash"),
+        ),
+        ("canonicalize-unknown-model", None),
+    ] {
+        let event = storage
+            .get_request_event(event_id)
+            .await
+            .expect("read migrated event")
+            .expect("migrated event exists");
+        assert_eq!(event.model.as_deref(), expected_model);
+    }
+
+    let first_run = storage
+        .rollup_usage_once()
+        .await
+        .expect("roll up migrated history");
+    assert_eq!(first_run.processed_events, 4);
+    let rollups = storage
+        .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, 1_800_000_060)
+        .await
+        .expect("query migrated rollups");
+    assert_eq!(rollups.len(), 3);
+    let gemini = rollups
+        .iter()
+        .find(|rollup| rollup.model == "gemini-2.5-flash")
+        .expect("canonical Gemini rollup");
+    assert_eq!(gemini.request_count, 2);
+    assert_eq!(gemini.input_tokens, 17);
+    assert_eq!(gemini.output_tokens, 8);
+    assert_eq!(gemini.error_count, 1);
+    assert_eq!(gemini.latency_ms_sum, 12);
+    assert!(rollups.iter().any(|rollup| {
+        rollup.model == "models/gemini-2.5-flash" && rollup.upstream_id == unrelated_upstream_id
+    }));
+    assert!(rollups.iter().any(|rollup| rollup.model == "unknown"));
+
+    let excluded = storage
+        .query_overview_excluded_error_buckets_in_range(
+            UsageRollupResolution::Minute,
+            0,
+            1_800_000_060,
+        )
+        .await
+        .expect("query migrated excluded errors");
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0].error_count, 2);
+
+    let second_run = storage
+        .rollup_usage_once()
+        .await
+        .expect("run migrated rollup again");
+    assert_eq!(second_run.processed_events, 0);
+    assert_eq!(
+        storage
+            .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, 1_800_000_060)
+            .await
+            .expect("query idempotent migrated rollups"),
+        rollups
     );
 }
 
