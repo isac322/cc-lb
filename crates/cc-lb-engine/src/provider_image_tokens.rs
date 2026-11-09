@@ -420,22 +420,22 @@ fn openai_family_policy(model: &str) -> Option<OpenAiPolicy> {
     Some(policy)
 }
 
+// Dated policies are opt-in: unsupported future snapshots must use the unknown fallback.
+const OPENAI_DATED_SNAPSHOTS: &[(&str, &str)] = &[
+    ("gpt-4.1-mini-2025-04-14", "gpt-4.1-mini"),
+    ("gpt-4.1-nano-2025-04-14", "gpt-4.1-nano"),
+    ("gpt-4o-2024-08-06", "gpt-4o"),
+    ("gpt-4.1-2025-04-14", "gpt-4.1"),
+    ("gpt-4o-mini-2024-07-18", "gpt-4o-mini"),
+    ("gpt-5-2025-08-07", "gpt-5"),
+    ("gpt-5-nano-2025-04-14", "gpt-5-nano"),
+];
+
 fn openai_dated_policy(model: &str) -> Option<OpenAiPolicy> {
-    let (base, day) = model.rsplit_once('-')?;
-    let (base, month) = base.rsplit_once('-')?;
-    let (base, year) = base.rsplit_once('-')?;
-    if year.len() != 4
-        || month.len() != 2
-        || day.len() != 2
-        || !year.bytes().all(|byte| byte.is_ascii_digit())
-        || !month.bytes().all(|byte| byte.is_ascii_digit())
-        || !day.bytes().all(|byte| byte.is_ascii_digit())
-        || !matches!(month.parse::<u32>(), Ok(1..=12))
-        || !matches!(day.parse::<u32>(), Ok(1..=31))
-    {
-        return None;
-    }
-    openai_family_policy(base)
+    let (_, family) = OPENAI_DATED_SNAPSHOTS
+        .iter()
+        .find(|(snapshot, _)| *snapshot == model)?;
+    openai_family_policy(family)
 }
 
 pub(super) fn gemini_image_tokens(
@@ -489,12 +489,9 @@ fn gemini_generation(model: &str) -> Option<bool> {
     let suffix = model.strip_prefix("gemini-")?;
     let major = suffix.as_bytes().first().copied()?;
     let boundary = suffix.as_bytes().get(1).copied();
-    if !matches!(boundary, Some(b'.' | b'-')) {
-        return None;
-    }
-    match major {
-        b'3' | b'4' => Some(true),
-        b'1' | b'2' => Some(false),
+    match (major, boundary) {
+        (b'3' | b'4', None | Some(b'.' | b'-')) => Some(true),
+        (b'1' | b'2', Some(b'.' | b'-')) => Some(false),
         _ => None,
     }
 }
@@ -562,7 +559,7 @@ mod tests {
         );
         assert_eq!(
             openai_image_tokens("gpt-4.1-mini-2025-04-15", None, Some((1024, 1024))),
-            1_659
+            UNKNOWN_OPENAI_TOKENS
         );
         assert_eq!(
             openai_image_tokens("gpt-5-nano-2025-04-14", None, Some((1024, 1024))),
@@ -598,6 +595,10 @@ mod tests {
         }
         assert_eq!(
             openai_image_tokens(&repeated, None, Some((1024, 1024))),
+            UNKNOWN_OPENAI_TOKENS
+        );
+        assert_eq!(
+            openai_image_tokens("gpt-4.1-2099-01-01", None, Some((1024, 1024))),
             UNKNOWN_OPENAI_TOKENS
         );
     }
@@ -654,6 +655,11 @@ mod tests {
             201_756
         );
         assert_eq!(
+            gemini_image_tokens("gemini-3", Some(&json("\"low\"")), None),
+            280
+        );
+        assert_eq!(gemini_image_tokens("gemini-4", None, None), 1_120);
+        assert_eq!(
             gemini_image_tokens("gemini-3-pro", None, Some((1, 1))),
             1_120
         );
@@ -671,6 +677,10 @@ mod tests {
         );
         assert_eq!(
             gemini_image_tokens("gemini-30-pro", None, Some((384, 384))),
+            UNKNOWN_GEMINI_TOKENS
+        );
+        assert_eq!(
+            gemini_image_tokens("gemini-30", None, None),
             UNKNOWN_GEMINI_TOKENS
         );
     }
