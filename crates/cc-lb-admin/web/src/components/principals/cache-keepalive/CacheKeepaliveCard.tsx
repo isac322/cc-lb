@@ -56,7 +56,7 @@ function CacheKeepaliveHelpHover() {
   return (
     <HelpIcon
       label="Cache keepalive help"
-      text="Keeps the Anthropic prompt cache warm by renewing its TTL — fires a tiny synthetic request just before the prompt cache expires so the next real request still hits a warm cache."
+      text="When supported by the provider, cache keepalive renews the prompt cache TTL — it fires a tiny synthetic request just before the cache expires so the next real request still hits a warm cache."
     />
   );
 }

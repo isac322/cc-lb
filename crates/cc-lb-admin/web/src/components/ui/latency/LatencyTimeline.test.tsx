@@ -3,10 +3,11 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { RequestEvent } from '../../../lib/api';
+import type { ApiKeyProvider, RequestEvent } from '../../../lib/api';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import {
   buildSseMarkers,
@@ -440,6 +441,130 @@ describe('LatencyTimeline', () => {
   afterEach(() => {
     cleanup();
   });
+
+  const providerCopyEvent = ev({
+    source_kind: 'proxy',
+    duration_ms: 1000,
+    shape_ms: 10,
+    upstream_ttfb_ms: 100,
+    stream_message_start_ms: 5,
+    stream_content_block_start_ms: 15,
+    stream_first_content_delta_ms: 20,
+    stream_last_content_delta_ms: 600,
+    stream_message_stop_ms: 650,
+    stream_last_chunk_ms: 700,
+    stream_total_ms: 750,
+    sse_event_count: 40,
+    content_delta_count: 30,
+    ping_count: 2,
+    inter_token_avg_ms: 20,
+  });
+
+  async function expectPopoverCopy(
+    buttonName: RegExp,
+    description: RegExp,
+    excluded?: RegExp,
+  ) {
+    const trigger = screen.getByRole('button', { name: buttonName });
+    fireEvent.click(trigger);
+    const text = await screen.findByText(description);
+    if (excluded) expect(text.textContent).not.toMatch(excluded);
+    fireEvent.click(trigger);
+    await waitFor(() => {
+      expect(screen.queryByText(description)).toBeNull();
+    });
+  }
+
+  it.each([
+    [undefined, /shape the outbound body for the selected upstream/i],
+    [null, /shape the outbound body for the selected upstream/i],
+    ['openai', /shape the outbound body for OpenAI/i],
+    ['gemini', /shape the outbound body for Gemini/i],
+  ] satisfies Array<[ApiKeyProvider | null | undefined, RegExp]>)(
+    'uses provider-neutral stream explanations with %s provider context',
+    async (provider, shapeDescription) => {
+      render(<LatencyTimeline event={providerCopyEvent} provider={provider} />);
+
+      const explanations: Array<[RegExp, RegExp]> = [
+        [/^Shape 10 ms$/, shapeDescription],
+        [/^Stream relay 750 ms$/, /Complete streamed response body relay/i],
+        [/^Message start \d+ ms$/, /First stream event — the provider/i],
+        [/^Content block start \d+ ms$/, /First content-block event/i],
+        [
+          /^First content delta \(TTFT\) \d+ ms$/,
+          /Time-to-first-token \(TTFT\)\. First streamed content delta/i,
+        ],
+        [/^Last content delta \d+ ms$/, /Last streamed content delta/i],
+        [/^Message stop \d+ ms$/, /Stream completion event — the provider/i],
+        [/^Last chunk \d+ ms$/, /Last byte received from the provider/i],
+      ];
+      for (const [button, description] of explanations) {
+        await expectPopoverCopy(
+          button,
+          description,
+          /Anthropic|event:|content_block_delta/,
+        );
+      }
+    },
+  );
+
+  it('retains precise Anthropic event and shaping explanations with explicit context', async () => {
+    render(<LatencyTimeline event={providerCopyEvent} provider="anthropic" />);
+
+    const explanations: Array<[RegExp, RegExp]> = [
+      [/^Shape 10 ms$/, /Anthropic-format shaping of the outbound body/],
+      [/^Stream relay 750 ms$/, /Complete SSE response body relay/],
+      [
+        /^Message start \d+ ms$/,
+        /First `event: message_start` frame — Anthropic/,
+      ],
+      [
+        /^Content block start \d+ ms$/,
+        /First `event: content_block_start` frame/,
+      ],
+      [
+        /^First content delta \(TTFT\) \d+ ms$/,
+        /First `event: content_block_delta`/,
+      ],
+      [/^Last content delta \d+ ms$/, /Last `event: content_block_delta`/],
+      [
+        /^Message stop \d+ ms$/,
+        /`event: message_stop` — the assistant turn is finalized/,
+      ],
+      [/^Last chunk \d+ ms$/, /Last byte received from Anthropic/],
+    ];
+    for (const [button, description] of explanations) {
+      await expectPopoverCopy(button, description);
+    }
+  });
+
+  it.each([
+    [undefined, /shape the outbound body for the selected upstream/i],
+    ['openai', /shape the outbound body for OpenAI/i],
+    ['gemini', /shape the outbound body for Gemini/i],
+    ['anthropic', /Anthropic-format shaping/i],
+  ] satisfies Array<[ApiKeyProvider | undefined, RegExp]>)(
+    'uses the same %s shaping explanation in stage details',
+    async (provider, description) => {
+      render(<LatencyTimeline event={providerCopyEvent} provider={provider} />);
+      fireEvent.click(screen.getByText(/^Stage details \(\d+\)$/));
+      await expectPopoverCopy(/^Shape.*Internal pre/, description);
+    },
+  );
+
+  it.each([
+    [undefined, /First stream event — the provider/i],
+    ['openai', /First stream event — the provider/i],
+    ['gemini', /First stream event — the provider/i],
+    ['anthropic', /First `event: message_start` frame — Anthropic/],
+  ] satisfies Array<[ApiKeyProvider | undefined, RegExp]>)(
+    'uses the same %s explanation in marker details',
+    async (provider, description) => {
+      render(<LatencyTimeline event={providerCopyEvent} provider={provider} />);
+      fireEvent.click(screen.getByText(/^SSE marker details \(\d+\)$/));
+      await expectPopoverCopy(/^Message start.*\+/, description);
+    },
+  );
 
   it('renders group rows for a streaming event', () => {
     const event = ev({

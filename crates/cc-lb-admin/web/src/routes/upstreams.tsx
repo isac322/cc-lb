@@ -120,6 +120,7 @@ import {
 import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import {
   ApiError,
+  type ApiKeyProvider,
   apiKeyAccessOf,
   keyUsageProvenance,
   type OrganizationMetadataInner,
@@ -1356,6 +1357,15 @@ export function DetailView({
   const recheckKey = useRecheckApiKey();
   const keyAccess = apiKeyAccessOf(upstream);
   const keyNotice = apiKeyNoticeOf(keyAccess);
+  const apiKeyProvider: ApiKeyProvider | null =
+    upstream.kind === 'anthropic_api_key' &&
+    isAnthropicBaseUrl(upstream.base_url ?? '')
+      ? 'anthropic'
+      : upstream.kind === 'openai_api_key'
+        ? 'openai'
+        : upstream.kind === 'gemini_api_key'
+          ? 'gemini'
+          : null;
   /** Replace key, from the key notice or Access: one dialog for the pane. */
   const [replaceOpen, setReplaceOpen] = useState(false);
   const keyUsage =
@@ -1972,7 +1982,7 @@ export function DetailView({
               {keyNotice ? (
                 <ApiKeyNotice
                   kind={keyNotice}
-                  anthropicHost={isAnthropicBaseUrl(upstream.base_url ?? '')}
+                  provider={apiKeyProvider}
                   lastError={keyAccess?.last_error ?? null}
                   onReplace={() => setReplaceOpen(true)}
                   onRecheck={() => recheckKey.mutate(upstream.id)}

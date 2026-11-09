@@ -13,7 +13,7 @@ export function UpstreamsListEmpty({
     <EmptyState
       headingLevel={2}
       title="No upstreams yet"
-      description="An upstream is a Claude subscription or API key the pool routes requests through. Nothing can be proxied until one exists."
+      description="An upstream is a provider credential the pool routes requests through. Nothing can be proxied until one exists."
       action={
         <Button
           variant="primary"

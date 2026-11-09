@@ -62,8 +62,7 @@ export function FirstRunChecklist({
     {
       id: 'upstream',
       title: 'Add an upstream',
-      detail:
-        'A Claude subscription or API key the pool routes requests through.',
+      detail: 'A provider credential the pool routes requests through.',
       done: upstreamCount > 0,
       target: 'new-upstream',
       actionLabel: 'New upstream',

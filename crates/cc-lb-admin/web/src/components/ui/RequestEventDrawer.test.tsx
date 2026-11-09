@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   act,
   cleanup,
+  fireEvent,
   type RenderOptions,
   render as rtlRender,
   screen,
@@ -509,6 +510,68 @@ describe('RequestEventDrawer', () => {
     expect(screen.getByLabelText('Copy parent agent id')).toBeDefined();
     expect(screen.getByText('Client app')).toBeDefined();
     expect(screen.getByText('cli-bg')).toBeDefined();
+  });
+
+  it('passes OpenAI provider context to latency explanations', async () => {
+    const event = {
+      event_id: 'evt_openai_latency',
+      request_id: 'req_openai_latency',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 200,
+      duration_ms: 1000,
+      source_kind: 'proxy',
+      event_kind: 'openai_responses',
+      shape_ms: 25,
+      upstream_ttfb_ms: 100,
+      stream_message_start_ms: 5,
+      stream_content_block_start_ms: 15,
+      stream_first_content_delta_ms: 20,
+      stream_last_content_delta_ms: 600,
+      stream_message_stop_ms: 650,
+      stream_last_chunk_ms: 700,
+      stream_total_ms: 750,
+      sse_event_count: 40,
+      content_delta_count: 30,
+      ping_count: 2,
+      inter_token_avg_ms: 20,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse(event))),
+    );
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    const shapeButton = screen.getByRole('button', { name: /^Shape 25 ms$/ });
+    fireEvent.click(shapeButton);
+    const shapeDescription = await screen.findByText(
+      /shape the outbound body for OpenAI/i,
+    );
+    expect(shapeDescription.textContent).not.toMatch(/Anthropic/i);
+    fireEvent.click(shapeButton);
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/shape the outbound body for OpenAI/i),
+      ).toBeNull(),
+    );
+
+    const markerButton = screen.getByRole('button', {
+      name: /^First content delta \(TTFT\) \d+ ms$/,
+    });
+    fireEvent.click(markerButton);
+    const markerDescription = await screen.findByText(
+      /First streamed content delta/i,
+    );
+    expect(markerDescription.textContent).not.toMatch(/Anthropic|event:/i);
   });
 
   it('omits Claude session identity rows when absent', () => {

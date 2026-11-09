@@ -5,7 +5,7 @@
 // state and hands its matching action to this notice.
 
 import { KeyRound } from 'lucide-react';
-import type { ApiKeyAccess } from '../../lib/api';
+import type { ApiKeyAccess, ApiKeyProvider } from '../../lib/api';
 import { Button, Notice } from '../ui/primitives';
 
 export type ApiKeyNoticeKind = 'rejected' | 'never_checked' | 'check_failed';
@@ -33,7 +33,7 @@ export function apiKeyUsable(access: ApiKeyAccess | null): boolean {
 
 export function ApiKeyNotice({
   kind,
-  anthropicHost,
+  provider,
   lastError,
   onReplace,
   onRecheck,
@@ -41,8 +41,8 @@ export function ApiKeyNotice({
   recheckError,
 }: {
   kind: ApiKeyNoticeKind;
-  /** The upstream calls api.anthropic.com; otherwise "your endpoint". */
-  anthropicHost: boolean;
+  /** Provider context from the API-key upstream kind; null keeps copy neutral. */
+  provider: ApiKeyProvider | null;
   lastError: string | null;
   onReplace: () => void;
   onRecheck: () => void;
@@ -50,6 +50,14 @@ export function ApiKeyNotice({
   /** Why the last Re-check from this notice failed. */
   recheckError: string | null;
 }) {
+  const providerLabel =
+    provider === 'anthropic'
+      ? 'Anthropic'
+      : provider === 'openai'
+        ? 'OpenAI'
+        : provider === 'gemini'
+          ? 'Gemini'
+          : null;
   const failure = recheckError ? (
     <p role="alert" className="mt-1 text-danger-text">
       Re-check failed: {recheckError}
@@ -68,8 +76,8 @@ export function ApiKeyNotice({
       <Notice
         tone="danger"
         title={
-          anthropicHost
-            ? 'Anthropic rejected this key'
+          providerLabel
+            ? `${providerLabel} rejected this key`
             : 'Your endpoint rejected this key'
         }
         action={
@@ -90,7 +98,10 @@ export function ApiKeyNotice({
   if (kind === 'never_checked') {
     return (
       <Notice tone="warning" title="Key not checked yet" action={recheckButton}>
-        <p>Re-check → see what this key can do at Anthropic.</p>
+        <p>
+          Re-check → see what this key can do at{' '}
+          {providerLabel ? providerLabel : 'your endpoint'}.
+        </p>
         {failure}
       </Notice>
     );

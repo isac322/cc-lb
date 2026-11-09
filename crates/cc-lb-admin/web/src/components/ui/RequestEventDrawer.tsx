@@ -1,7 +1,9 @@
 import { Copy } from 'lucide-react';
 import { useRef } from 'react';
+import type { ApiKeyProvider } from '../../lib/api';
 import { fmtBytes, fmtMs } from '../../lib/format';
 import type { ProviderFamily } from '../../lib/providers';
+import { effectiveRequestEventKind } from '../../lib/logRows';
 import { useRequestEventDetail } from '../../lib/queries';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { useCopyButton } from '../../lib/useCopyButton';
@@ -112,6 +114,22 @@ function RequestDetail({
     (merged.cache_read_input_tokens ?? 0) > 0;
 
   const principalLabel = principalName ?? merged.principal_id ?? DASH;
+  // Endpoint kinds identify native provider traffic without dashboard data.
+  // count_tokens combines Anthropic and OpenAI paths; shared and historical
+  // kinds do not establish a provider either, so keep those neutral.
+  let latencyProvider: ApiKeyProvider | undefined;
+  switch (effectiveRequestEventKind(merged)) {
+    case 'messages':
+      latencyProvider = 'anthropic';
+      break;
+    case 'openai_responses':
+      latencyProvider = 'openai';
+      break;
+    case 'gemini_generate_content':
+    case 'gemini_count_tokens':
+      latencyProvider = 'gemini';
+      break;
+  }
 
   return (
     <>
@@ -218,6 +236,7 @@ function RequestDetail({
             event={merged}
             isPartial={isPartial}
             isLoading={isDetailPending && !hasLatencyTimelineData}
+            provider={latencyProvider}
           />
         </DetailSection>
       </div>
