@@ -29,6 +29,7 @@ use serde_json::Value;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::field::{Field, Visit};
+use tracing::instrument::WithSubscriber as _;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt as _};
 
@@ -2789,11 +2790,11 @@ async fn cache_keepalive_dispatch_error_persists_message_and_logs_warning() {
     let job = fixture.pending_keepalive_job(1).await;
     let capture = CacheKeepaliveWarnCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
-    let _guard = tracing::subscriber::set_default(subscriber);
 
     let outcome = fixture
         .dispatch(pusher)
         .dispatch_cache_keepalive(job)
+        .with_subscriber(subscriber)
         .await
         .expect("dispatch cache keepalive job");
 
