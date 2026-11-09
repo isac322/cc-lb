@@ -524,7 +524,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, error = NULL, running_since_unix_secs = NULL,
              encrypted_payload = ''::bytea,
-             expires_at = CASE WHEN refresh_count > 0 THEN GREATEST(expires_at, $6) ELSE expires_at END,
+             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN GREATEST(expires_at, $6) ELSE expires_at END,
              updated_at = $2,
              first_scheduled_at = CASE WHEN $4 THEN $5 ELSE first_scheduled_at END
              WHERE session_key_hash = $3 AND status = 'active'
@@ -564,7 +564,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         let result = sqlx::query(
             "UPDATE cache_keepalive_sessions SET status = 'terminal', enqueue_state = 'pending', terminal_reason = $1, error = NULL, running_since_unix_secs = NULL,
              encrypted_payload = ''::bytea,
-             expires_at = CASE WHEN refresh_count > 0 THEN GREATEST(expires_at, $4) ELSE expires_at END,
+             expires_at = CASE WHEN refresh_count > 0 OR EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash) THEN GREATEST(expires_at, $4) ELSE expires_at END,
              updated_at = $2
              WHERE session_key_hash = $3 AND status = 'active'",
         )

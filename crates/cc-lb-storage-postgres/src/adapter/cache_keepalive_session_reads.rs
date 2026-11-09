@@ -41,6 +41,82 @@ SELECT \
     display_reason, \
     error, \
     config_snapshot";
+const SESSION_WITH_PURGED_TURNS_SQL: &str = r#"
+(
+    SELECT
+        session_key_hash,
+        principal_id,
+        upstream_id,
+        cycle_id,
+        last_message_at_ms,
+        ttl,
+        generation,
+        refresh_count,
+        status,
+        enqueue_state,
+        terminal_reason,
+        display_reason,
+        error,
+        config_snapshot
+    FROM cache_keepalive_sessions
+    UNION ALL
+    SELECT
+        t.session_key_hash,
+        t.principal_id,
+        (ARRAY_AGG(t.upstream_id ORDER BY t.ts DESC, t.source_ref_id ASC))[1] AS upstream_id,
+        (ARRAY_AGG(t.cycle_id ORDER BY t.ts DESC, t.source_ref_id ASC))[1] AS cycle_id,
+        (MAX(t.ts) * 1000)::BIGINT AS last_message_at_ms,
+        COALESCE((
+            SELECT e.ttl FROM cache_keepalive_evidence e
+            WHERE e.principal_id = t.principal_id
+              AND e.event_ref = (ARRAY_AGG(t.source_ref_id ORDER BY t.ts DESC, t.source_ref_id ASC))[1]
+              AND e.evidence_kind = 'renewal'
+            ORDER BY e.request_start_ms DESC, e.evidence_id DESC
+            LIMIT 1
+        ), '5m') AS ttl,
+        COUNT(*)::BIGINT AS generation,
+        COUNT(*)::BIGINT AS refresh_count,
+        'terminal'::TEXT AS status,
+        'pending'::TEXT AS enqueue_state,
+        CASE WHEN COUNT(*) >= COALESCE((
+            SELECT (d.config_snapshot::jsonb ->> 'max_refreshes_per_session')::BIGINT
+            FROM cache_keepalive_decisions d
+            WHERE d.principal_id = t.principal_id
+              AND d.source_ref_id = (ARRAY_AGG(t.source_ref_id ORDER BY t.ts DESC, t.source_ref_id ASC))[1]
+              AND d.config_snapshot IS NOT NULL
+            LIMIT 1
+        ), 12) THEN 'max_refreshes' ELSE 'expired' END AS terminal_reason,
+        CASE WHEN COUNT(*) >= COALESCE((
+            SELECT (d.config_snapshot::jsonb ->> 'max_refreshes_per_session')::BIGINT
+            FROM cache_keepalive_decisions d
+            WHERE d.principal_id = t.principal_id
+              AND d.source_ref_id = (ARRAY_AGG(t.source_ref_id ORDER BY t.ts DESC, t.source_ref_id ASC))[1]
+              AND d.config_snapshot IS NOT NULL
+            LIMIT 1
+        ), 12) THEN 'max renewals reached' ELSE 'TTL expired before follow-up' END AS display_reason,
+        NULL::TEXT AS error,
+        (
+            SELECT d.config_snapshot
+            FROM cache_keepalive_decisions d
+            WHERE d.principal_id = t.principal_id
+              AND d.source_ref_id = (ARRAY_AGG(t.source_ref_id ORDER BY t.ts DESC, t.source_ref_id ASC))[1]
+            LIMIT 1
+        ) AS config_snapshot
+    FROM cache_keepalive_turns t
+    WHERE NOT EXISTS (
+        SELECT 1 FROM cache_keepalive_sessions s
+        WHERE s.principal_id = t.principal_id AND s.session_key_hash = t.session_key_hash
+    )
+    AND EXISTS (
+        SELECT 1 FROM cache_keepalive_evidence e
+        WHERE e.principal_id = t.principal_id
+          AND e.event_ref = t.source_ref_id
+          AND e.evidence_kind = 'renewal'
+    )
+    GROUP BY t.principal_id, t.session_key_hash
+) AS cache_keepalive_sessions"#;
+
+const ZERO_TURN_CANCELLED_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND refresh_count = 0 AND error IS NULL AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash))";
 
 const DECISION_ENTRY_SELECT: &str = "\
 SELECT \
@@ -125,6 +201,10 @@ fn filter_includes_decisions(filter: CacheKeepaliveSessionFilter) -> bool {
 fn push_session_filter(builder: &mut QueryBuilder<Postgres>, filter: CacheKeepaliveSessionFilter) {
     match filter {
         CacheKeepaliveSessionFilter::All | CacheKeepaliveSessionFilter::Error => {}
+        CacheKeepaliveSessionFilter::Tracked => {
+            builder.push(" AND NOT ");
+            builder.push(ZERO_TURN_CANCELLED_SQL);
+        }
         CacheKeepaliveSessionFilter::Renewed => {
             builder.push(" AND status = 'active' AND refresh_count > 0");
         }
@@ -133,18 +213,16 @@ fn push_session_filter(builder: &mut QueryBuilder<Postgres>, filter: CacheKeepal
         }
         CacheKeepaliveSessionFilter::Capped => {
             builder.push(
-                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss') \
-                  AND NOT (terminal_reason = 'cancelled' AND refresh_count = 0 AND error IS NULL)",
+                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss') AND NOT ",
             );
+            builder.push(ZERO_TURN_CANCELLED_SQL);
         }
         CacheKeepaliveSessionFilter::Expired => {
             builder.push(" AND terminal_reason IN ('expired', 'cache_miss')");
         }
         CacheKeepaliveSessionFilter::NotTracked => {
-            builder.push(
-                " AND status = 'terminal' AND terminal_reason = 'cancelled' \
-                  AND refresh_count = 0 AND error IS NULL",
-            );
+            builder.push(" AND ");
+            builder.push(ZERO_TURN_CANCELLED_SQL);
         }
     }
     if matches!(filter, CacheKeepaliveSessionFilter::Error) {
@@ -211,7 +289,9 @@ fn push_session_list_branch(
     fetch_limit: i64,
 ) {
     builder.push(SESSION_ENTRY_SELECT);
-    builder.push(" FROM cache_keepalive_sessions WHERE principal_id = ");
+    builder.push(" FROM ");
+    builder.push(SESSION_WITH_PURGED_TURNS_SQL);
+    builder.push(" WHERE principal_id = ");
     builder.push_bind(&query.principal_id);
     push_session_filter(builder, query.filter);
     push_page_bounds(
@@ -399,7 +479,9 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
     ) -> StorageResult<Option<CacheKeepaliveSessionListItem>> {
         let mut builder = QueryBuilder::<Postgres>::new("WITH candidates AS (");
         builder.push(SESSION_ENTRY_SELECT);
-        builder.push(" FROM cache_keepalive_sessions WHERE principal_id = ");
+        builder.push(" FROM ");
+        builder.push(SESSION_WITH_PURGED_TURNS_SQL);
+        builder.push(" WHERE principal_id = ");
         builder.push_bind(principal_id);
         builder.push(" AND session_key_hash = ");
         builder.push_bind(id);

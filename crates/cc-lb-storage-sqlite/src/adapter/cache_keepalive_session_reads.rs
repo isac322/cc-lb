@@ -41,8 +41,130 @@ SELECT
     END AS reason,
     display_reason,
     error,
-    config_snapshot
-FROM cache_keepalive_sessions";
+    config_snapshot";
+
+const SESSION_WITH_PURGED_TURNS_SQL: &str = "
+(
+    SELECT
+        session_key_hash,
+        principal_id,
+        upstream_id,
+        cycle_id,
+        last_message_at_ms,
+        ttl,
+        generation,
+        refresh_count,
+        status,
+        enqueue_state,
+        terminal_reason,
+        display_reason,
+        error,
+        config_snapshot
+    FROM cache_keepalive_sessions
+    UNION ALL
+    SELECT
+        t.session_key_hash,
+        t.principal_id,
+        (
+            SELECT t2.upstream_id
+            FROM cache_keepalive_turns t2
+            WHERE t2.principal_id = t.principal_id
+              AND t2.session_key_hash = t.session_key_hash
+            ORDER BY t2.ts DESC, t2.source_ref_id ASC
+            LIMIT 1
+        ) AS upstream_id,
+        (
+            SELECT t2.cycle_id
+            FROM cache_keepalive_turns t2
+            WHERE t2.principal_id = t.principal_id
+              AND t2.session_key_hash = t.session_key_hash
+            ORDER BY t2.ts DESC, t2.source_ref_id ASC
+            LIMIT 1
+        ) AS cycle_id,
+        MAX(t.ts) * 1000 AS last_message_at_ms,
+        COALESCE((
+            SELECT e.ttl
+            FROM cache_keepalive_evidence e
+            WHERE e.principal_id = t.principal_id
+              AND e.event_ref = (
+                  SELECT t2.source_ref_id
+                  FROM cache_keepalive_turns t2
+                  WHERE t2.principal_id = t.principal_id
+                    AND t2.session_key_hash = t.session_key_hash
+                  ORDER BY t2.ts DESC, t2.source_ref_id ASC
+                  LIMIT 1
+              )
+              AND e.evidence_kind = 'renewal'
+            ORDER BY e.request_start_ms DESC, e.evidence_id DESC
+            LIMIT 1
+        ), '5m') AS ttl,
+        COUNT(*) AS generation,
+        COUNT(*) AS refresh_count,
+        'terminal' AS status,
+        'pending' AS enqueue_state,
+        CASE WHEN COUNT(*) >= COALESCE((
+            SELECT CAST(json_extract(d.config_snapshot, '$.max_refreshes_per_session') AS INTEGER)
+            FROM cache_keepalive_decisions d
+            WHERE d.principal_id = t.principal_id
+              AND d.source_ref_id = (
+                  SELECT t2.source_ref_id
+                  FROM cache_keepalive_turns t2
+                  WHERE t2.principal_id = t.principal_id
+                    AND t2.session_key_hash = t.session_key_hash
+                  ORDER BY t2.ts DESC, t2.source_ref_id ASC
+                  LIMIT 1
+              )
+              AND d.config_snapshot IS NOT NULL
+            LIMIT 1
+        ), 12) THEN 'max_refreshes' ELSE 'expired' END AS terminal_reason,
+        CASE WHEN COUNT(*) >= COALESCE((
+            SELECT CAST(json_extract(d.config_snapshot, '$.max_refreshes_per_session') AS INTEGER)
+            FROM cache_keepalive_decisions d
+            WHERE d.principal_id = t.principal_id
+              AND d.source_ref_id = (
+                  SELECT t2.source_ref_id
+                  FROM cache_keepalive_turns t2
+                  WHERE t2.principal_id = t.principal_id
+                    AND t2.session_key_hash = t.session_key_hash
+                  ORDER BY t2.ts DESC, t2.source_ref_id ASC
+                  LIMIT 1
+              )
+              AND d.config_snapshot IS NOT NULL
+            LIMIT 1
+        ), 12) THEN 'max renewals reached' ELSE 'TTL expired before follow-up' END AS display_reason,
+        NULL AS error,
+        (
+            SELECT d.config_snapshot
+            FROM cache_keepalive_decisions d
+            WHERE d.principal_id = t.principal_id
+              AND d.source_ref_id = (
+                  SELECT t2.source_ref_id
+                  FROM cache_keepalive_turns t2
+                  WHERE t2.principal_id = t.principal_id
+                    AND t2.session_key_hash = t.session_key_hash
+                  ORDER BY t2.ts DESC, t2.source_ref_id ASC
+                  LIMIT 1
+              )
+            LIMIT 1
+        ) AS config_snapshot
+    FROM cache_keepalive_turns t
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM cache_keepalive_sessions s
+        WHERE s.principal_id = t.principal_id
+          AND s.session_key_hash = t.session_key_hash
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM cache_keepalive_evidence e
+        WHERE e.principal_id = t.principal_id
+          AND e.event_ref = t.source_ref_id
+          AND e.evidence_kind = 'renewal'
+    )
+    GROUP BY t.principal_id, t.session_key_hash
+) AS cache_keepalive_sessions";
+
+const ZERO_TURN_CANCELLED_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND refresh_count = 0 AND error IS NULL AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash))";
 
 const DECISION_ENTRY_SELECT: &str = "
 SELECT
@@ -191,7 +313,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         )?;
         let mut sessions_query = QueryBuilder::<Sqlite>::new(SESSION_ENTRY_SELECT);
         sessions_query
-            .push(" WHERE principal_id = ")
+            .push(" FROM cache_keepalive_sessions WHERE principal_id = ")
             .push_bind(principal_id)
             .push(" ORDER BY last_message_at_ms DESC, entry_id ASC");
         let sessions = sessions_query
@@ -233,6 +355,8 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         let mut builder = QueryBuilder::<Sqlite>::new("WITH candidates AS (");
         builder
             .push(SESSION_ENTRY_SELECT)
+            .push(" FROM ")
+            .push(SESSION_WITH_PURGED_TURNS_SQL)
             .push(" WHERE principal_id = ")
             .push_bind(principal_id)
             .push(" AND session_key_hash = ")
@@ -883,6 +1007,8 @@ fn push_session_branch(
 ) {
     builder
         .push(SESSION_ENTRY_SELECT)
+        .push(" FROM ")
+        .push(SESSION_WITH_PURGED_TURNS_SQL)
         .push(" WHERE principal_id = ")
         .push_bind(&query.principal_id);
     if let Some(horizon_start_ms) = horizon_start_ms {
@@ -891,7 +1017,11 @@ fn push_session_branch(
             .push_bind(horizon_start_ms);
     }
     match query.filter {
-        CacheKeepaliveSessionFilter::All => {}
+        CacheKeepaliveSessionFilter::All | CacheKeepaliveSessionFilter::Error => {}
+        CacheKeepaliveSessionFilter::Tracked => {
+            builder.push(" AND NOT ");
+            builder.push(ZERO_TURN_CANCELLED_SQL);
+        }
         CacheKeepaliveSessionFilter::Renewed => {
             builder.push(" AND status = 'active' AND refresh_count > 0");
         }
@@ -900,22 +1030,20 @@ fn push_session_branch(
         }
         CacheKeepaliveSessionFilter::Capped => {
             builder.push(
-                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss') \
-                  AND NOT (terminal_reason = 'cancelled' AND refresh_count = 0 AND error IS NULL)",
+                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss') AND NOT ",
             );
+            builder.push(ZERO_TURN_CANCELLED_SQL);
         }
         CacheKeepaliveSessionFilter::Expired => {
             builder.push(" AND terminal_reason IN ('expired', 'cache_miss')");
         }
         CacheKeepaliveSessionFilter::NotTracked => {
-            builder.push(
-                " AND status = 'terminal' AND terminal_reason = 'cancelled' \
-                  AND refresh_count = 0 AND error IS NULL",
-            );
+            builder.push(" AND ");
+            builder.push(ZERO_TURN_CANCELLED_SQL);
         }
-        CacheKeepaliveSessionFilter::Error => {
-            builder.push(" AND error IS NOT NULL");
-        }
+    }
+    if matches!(query.filter, CacheKeepaliveSessionFilter::Error) {
+        builder.push(" AND error IS NOT NULL");
     }
     if let (Some(cursor), Some(cursor_last_message_at_ms)) =
         (query.cursor.as_ref(), cursor_last_message_at_ms)
@@ -966,7 +1094,8 @@ fn push_decision_branch(
         CacheKeepaliveSessionFilter::Error => {
             builder.push(" AND error IS NOT NULL");
         }
-        CacheKeepaliveSessionFilter::Renewed
+        CacheKeepaliveSessionFilter::Tracked
+        | CacheKeepaliveSessionFilter::Renewed
         | CacheKeepaliveSessionFilter::Scheduled
         | CacheKeepaliveSessionFilter::Capped
         | CacheKeepaliveSessionFilter::Expired => unreachable!("decision branch is skipped"),

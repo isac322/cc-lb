@@ -350,6 +350,17 @@ describe('cacheKeepaliveSessionsPath', () => {
     );
   });
 
+  it('encodes the tracked-only default status filter', () => {
+    expect(
+      cacheKeepaliveSessionsPath('p1', {
+        horizon: '24h',
+        status: 'tracked',
+      }),
+    ).toBe(
+      '/admin/v1/principals/p1/cache-keepalive?horizon=24h&status=tracked',
+    );
+  });
+
   it('throws at the request boundary on an invalid horizon', () => {
     const params: CacheKeepaliveSessionsParams = JSON.parse(
       '{"horizon":"banana"}',
@@ -376,9 +387,10 @@ describe('cache keepalive filter enums', () => {
     expect(CacheKeepaliveHorizonSchema.safeParse('banana').success).toBe(false);
   });
 
-  it('accepts all, every base state, and error as status filters', () => {
+  it('accepts all, tracked, every base state, and error as status filters', () => {
     for (const status of [
       'all',
+      'tracked',
       'renewed',
       'scheduled',
       'capped',
