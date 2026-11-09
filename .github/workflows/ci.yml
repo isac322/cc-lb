@@ -34,8 +34,8 @@ env:
 jobs:
   # `code` is false only when every changed file matches the docs-only ignore
   # list that `push.paths-ignore` uses. Code jobs run unless this job succeeded
-  # with code=false, so a detection failure runs everything (and fails the
-  # gate).
+  # with code=false, so a detection failure or runner-provisioning abandonment
+  # safely falls back to running the full code suite.
   changes:
     name: Detect code changes
     if: github.event_name == 'pull_request'
@@ -716,6 +716,17 @@ jobs:
               skipped)
                 if ! skip_ok "$job"; then
                   echo "::error::$job: skipped without a matching condition (run cancelled?)"
+                  rc=1
+                fi
+                ;;
+              abandoned)
+                # When GitHub Actions abandons `changes` during third-party
+                # action preparation, `docs_only` is false so every code job
+                # below is required to run and succeed.
+                if [[ $job == changes ]] && ! $docs_only; then
+                  echo "::warning::changes: abandoned (fell back to running full code suite)"
+                else
+                  echo "::error::$job: $result"
                   rc=1
                 fi
                 ;;
