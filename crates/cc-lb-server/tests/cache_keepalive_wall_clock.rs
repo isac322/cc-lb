@@ -1,9 +1,10 @@
 //! #988 keepalive pre-deploy E2E scenarios.
 //!
 //! These tests intentionally use `SystemClock` and the production scheduler/worker
-//! path. The 45-second idle is deliberate: `PgPollFetcher` backs off for 2, 4, 8,
-//! 16, and 32 seconds using `futures_timer`, so this wait cannot be virtualized.
-
+//! path: SQLite uses `SqliteWorkerPollStrategy`'s 100ms timer, while Postgres uses
+//! `PostgresWorkerPollStrategy`'s 1s timer plus `LISTEN`. A 3-second anchored idle
+//! window spans multiple idle poll cycles on both backends before a live request
+//! schedules a keepalive job.
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cc_lb_storage_api::cache_keepalive_job_key;
@@ -12,7 +13,7 @@ use super::keepalive_support::harness::{
     Backend, ClockMode, Harness, HarnessOptions, JobTiming, KeepaliveOptions, request_body,
 };
 
-const IDLE_AFTER_WORKER_START: Duration = Duration::from_secs(45);
+const IDLE_AFTER_WORKER_START: Duration = Duration::from_secs(3);
 const WORKER_START_WAIT: Duration = Duration::from_secs(5);
 const JOB_LOCK_WAIT: Duration = Duration::from_secs(30);
 const RENEWAL_WAIT: Duration = Duration::from_secs(10);

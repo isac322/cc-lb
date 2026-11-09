@@ -67,7 +67,6 @@ async fn create_principal_id() -> (
     (directory, storage, state, principal_id)
 }
 
-#[tokio::test]
 async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_zero() {
     // Given: a principal with persisted sessions and a deterministic current time.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
@@ -97,7 +96,6 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
     assert!(body["next_cursor"].is_null());
 }
 
-#[tokio::test]
 async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     let upstream = storage
@@ -165,7 +163,6 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
     assert_eq!(detail["upstream"], row["upstream"]);
 }
 
-#[tokio::test]
 async fn cache_keepalive_detail_returns_frozen_multi_turn_fields() {
     // Given: a principal with a terminal session and its persisted renewal turns.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
@@ -213,7 +210,6 @@ async fn cache_keepalive_detail_returns_frozen_multi_turn_fields() {
     }));
 }
 
-#[tokio::test]
 async fn cache_keepalive_detail_query_preserves_all_state_shapes() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
@@ -241,7 +237,6 @@ async fn cache_keepalive_detail_query_preserves_all_state_shapes() {
     }
 }
 
-#[tokio::test]
 async fn cache_keepalive_list_scopes_rows_by_horizon_and_paginates_with_a_cursor() {
     // Given: one terminal session outside 24 hours and several recent rows.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
@@ -287,7 +282,6 @@ async fn cache_keepalive_list_scopes_rows_by_horizon_and_paginates_with_a_cursor
     );
 }
 
-#[tokio::test]
 async fn cache_keepalive_list_filters_base_states_and_orthogonal_errors() {
     // Given: persisted Renewed, Scheduled, Capped, Expired, Not tracked, and Error rows.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
@@ -356,7 +350,6 @@ async fn cache_keepalive_list_filters_base_states_and_orthogonal_errors() {
     );
 }
 
-#[tokio::test]
 async fn cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malformed_queries() {
     // Given: a decision-only Not tracked entry.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
@@ -379,4 +372,27 @@ async fn cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malfor
     // Then: detail exposes its raw record without fabricating renewal activity.
     assert_eq!(detail["raw_record"]["principal_id"], principal_id);
     assert_eq!(detail["total_renewals_current_cycle"], 0);
+}
+
+#[tokio::test]
+async fn cache_keepalive_contracts_suite_part_1() {
+    cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_zero().await;
+    cache_keepalive_list_preserves_soft_deleted_upstream_names().await;
+}
+
+#[tokio::test]
+async fn cache_keepalive_contracts_suite_part_2() {
+    cache_keepalive_detail_returns_frozen_multi_turn_fields().await;
+    cache_keepalive_detail_query_preserves_all_state_shapes().await;
+}
+
+#[tokio::test]
+async fn cache_keepalive_contracts_suite_part_3() {
+    cache_keepalive_list_scopes_rows_by_horizon_and_paginates_with_a_cursor().await;
+    cache_keepalive_list_filters_base_states_and_orthogonal_errors().await;
+}
+
+#[tokio::test]
+async fn cache_keepalive_contracts_suite_part_4() {
+    cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malformed_queries().await;
 }

@@ -19,7 +19,6 @@ use uuid::Uuid;
 
 const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 
-#[tokio::test]
 async fn usage_returns_200_grouped_by_model() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
@@ -36,7 +35,6 @@ async fn usage_returns_200_grouped_by_model() {
     assert_eq!(body["group_by"], "model");
 }
 
-#[tokio::test]
 async fn usage_principal_filter_precedes_every_grouping_and_intersects_provider_scope() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -124,7 +122,6 @@ async fn usage_principal_filter_precedes_every_grouping_and_intersects_provider_
     }
 }
 
-#[tokio::test]
 async fn usage_etag_isolated_by_principal_filter() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -182,7 +179,6 @@ async fn usage_etag_isolated_by_principal_filter() {
     assert!(body.is_empty());
 }
 
-#[tokio::test]
 async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -321,7 +317,6 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
     assert!(summary_body.is_empty());
 }
 
-#[tokio::test]
 async fn usage_returns_200_grouped_by_principal() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
@@ -337,7 +332,6 @@ async fn usage_returns_200_grouped_by_principal() {
     assert_eq!(body["group_by"], "principal");
 }
 
-#[tokio::test]
 async fn usage_totals_projection_preserves_full_series_totals() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -406,7 +400,6 @@ async fn usage_totals_projection_preserves_full_series_totals() {
     );
 }
 
-#[tokio::test]
 async fn usage_totals_projection_preserves_components_across_rollup_lag() {
     let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -499,7 +492,6 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
     );
 }
 
-#[tokio::test]
 async fn usage_totals_projection_preserves_recorded_zero_components_across_rollups() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -554,7 +546,6 @@ async fn usage_totals_projection_preserves_recorded_zero_components_across_rollu
     );
 }
 
-#[tokio::test]
 async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() {
     let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -667,7 +658,6 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
     );
 }
 
-#[tokio::test]
 async fn usage_rejects_invalid_projection() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
@@ -682,7 +672,6 @@ async fn usage_rejects_invalid_projection() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
 async fn usage_rejects_invalid_group_by() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
@@ -697,7 +686,6 @@ async fn usage_rejects_invalid_group_by() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
 async fn usage_filters_by_upstream_id() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -749,7 +737,6 @@ async fn usage_filters_by_upstream_id() {
     assert_eq!(input_tokens, 3);
 }
 
-#[tokio::test]
 async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -818,7 +805,6 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
     assert_eq!(bucket["cost_cache_read_micros"], 5);
 }
 
-#[tokio::test]
 async fn usage_principal_preserves_recorded_zero_component_costs() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -865,7 +851,6 @@ async fn usage_principal_preserves_recorded_zero_component_costs() {
     assert_eq!(bucket["cost_cache_read_micros"], 0);
 }
 
-#[tokio::test]
 async fn usage_principal_preserves_components_when_request_events_are_ahead() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -919,7 +904,6 @@ async fn usage_principal_preserves_components_when_request_events_are_ahead() {
     assert_eq!(bucket["cost_cache_read_micros"], 0);
 }
 
-#[tokio::test]
 async fn usage_principal_totals_returns_all_principals_with_component_costs_beyond_top_5_and_20() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -990,7 +974,6 @@ async fn usage_principal_totals_returns_all_principals_with_component_costs_beyo
     }
 }
 
-#[tokio::test]
 async fn usage_non_principal_grouping_does_not_expose_component_costs() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -1037,7 +1020,6 @@ async fn usage_non_principal_grouping_does_not_expose_component_costs() {
     assert!(!bucket.contains_key("cost_cache_read_micros"));
 }
 
-#[tokio::test]
 async fn summary_error_rate_excludes_client_navigation_statuses() {
     let clock = test_clock();
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
@@ -1072,7 +1054,6 @@ async fn summary_error_rate_excludes_client_navigation_statuses() {
     assert_eq!(body["totals"]["error_rate"], 0.2);
 }
 
-#[tokio::test]
 async fn usage_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) = authed_bytes(
@@ -1087,7 +1068,6 @@ async fn usage_503_when_storage_missing() {
 
 /// Diagnostics are log-only. Whether supplied to storage or taken out first,
 /// they must not affect relational rollups or principal cost components.
-#[tokio::test]
 async fn usage_is_unchanged_when_diagnostics_are_taken_before_storage() {
     const USAGE_URI: &str = "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal";
 
@@ -1314,4 +1294,32 @@ fn usage_event(
         retry_overhead_ms: None,
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn dashboard_usage_suite_part_1() {
+    usage_returns_200_grouped_by_model().await;
+    usage_principal_filter_precedes_every_grouping_and_intersects_provider_scope().await;
+    usage_etag_isolated_by_principal_filter().await;
+    dashboard_etags_short_circuit_rollup_scans_before_response_building().await;
+    usage_returns_200_grouped_by_principal().await;
+    usage_totals_projection_preserves_full_series_totals().await;
+    usage_totals_projection_preserves_components_across_rollup_lag().await;
+    usage_totals_projection_preserves_recorded_zero_components_across_rollups().await;
+    usage_totals_projection_matches_upstream_filter_and_empty_transition().await;
+    usage_rejects_invalid_projection().await;
+}
+
+#[tokio::test]
+async fn dashboard_usage_suite_part_2() {
+    usage_rejects_invalid_group_by().await;
+    usage_filters_by_upstream_id().await;
+    usage_principal_enriches_mixed_legacy_and_component_costs().await;
+    usage_principal_preserves_recorded_zero_component_costs().await;
+    usage_principal_preserves_components_when_request_events_are_ahead().await;
+    usage_principal_totals_returns_all_principals_with_component_costs_beyond_top_5_and_20().await;
+    usage_non_principal_grouping_does_not_expose_component_costs().await;
+    summary_error_rate_excludes_client_navigation_statuses().await;
+    usage_503_when_storage_missing().await;
+    usage_is_unchanged_when_diagnostics_are_taken_before_storage().await;
 }
