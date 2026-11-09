@@ -168,11 +168,11 @@ correlate turn events without new database fields.
 
 ### Generation usage accounting
 
-Gemini's normalized output count is `candidatesTokenCount + thoughtsTokenCount`.
+Gemini GenerateContent's normalized output count is `candidatesTokenCount + thoughtsTokenCount`.
 The reasoning count remains available as a subset of that normalized output;
-cost and limit accounting must not add it again. Repeated cumulative usage
-snapshots replace the previous counts instead of accumulating them. Missing or
-`null` fields retain the last reported component.
+cost and limit accounting must not add it again. Repeated cumulative GenerateContent
+usage snapshots replace the previous counts instead of accumulating them. The
+GenerateContent SSE accumulator retains the last component when a field is missing or `null`.
 
 Native Gemini generation requests accept both `service_tier` and `serviceTier`
 for routing and cost reservations; `service_tier` takes precedence when both
