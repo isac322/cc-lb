@@ -2156,6 +2156,7 @@ export function ProviderOverviewPage({
             <RequestEventsFeed
               feed={feed}
               principalNameMap={principalNameMap}
+              providerScope={scopedProvider}
               emptyTitle="No recent requests"
               tableContainerClassName="relative min-w-0 max-md:-mx-4 md:glass md:rounded-md min-h-48 h-96 max-h-[60vh] overflow-auto"
             />

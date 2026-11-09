@@ -232,6 +232,8 @@ interface RequestEventsTableProps {
    * avoid coupling isolated request feeds to the upstream query.
    */
   providerByUpstream?: ReadonlyMap<string, ProviderFamily>;
+  /** Active provider lens used to disambiguate shared request kinds. */
+  providerScope?: ProviderFamily;
   /** Hide an entity column the surrounding page already implies. */
   columns?: {
     principal?: boolean;
@@ -327,6 +329,7 @@ interface RequestEventRowProps {
 export function providerForEvent(
   event: RequestEventWithPhase,
   providerByUpstream?: ReadonlyMap<string, ProviderFamily>,
+  providerScope?: ProviderFamily,
 ): ProviderFamily {
   const upstreamProvider =
     event.upstream_id == null
@@ -334,7 +337,7 @@ export function providerForEvent(
       : providerByUpstream?.get(event.upstream_id);
   if (upstreamProvider != null) return upstreamProvider;
   const inferred = providersForRequestEventKind(event.event_kind);
-  return inferred.length === 1 ? inferred[0] : 'anthropic';
+  return inferred.length === 1 ? inferred[0] : (providerScope ?? 'anthropic');
 }
 
 const RequestEventRow = memo(function RequestEventRow({
@@ -572,6 +575,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
   loadingMore,
   hasMore,
   providerByUpstream,
+  providerScope,
   onAnchorRange,
 }: RequestEventsTableProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -676,7 +680,11 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                       null
                     }
                     upstreamName={event.upstream_name ?? null}
-                    provider={providerForEvent(event, providerByUpstream)}
+                    provider={providerForEvent(
+                      event,
+                      providerByUpstream,
+                      providerScope,
+                    )}
                     showProviderLogo={showProviderLogo}
                     showPrincipal={showPrincipal}
                     showUpstream={showUpstream}

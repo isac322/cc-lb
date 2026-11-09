@@ -11,7 +11,11 @@ import {
   RequestEventsFeed,
 } from '../components/ui/RequestEventsFeed';
 import type { DashboardUsageResponse } from '../lib/api';
-import { type ProviderFamily, useInstallation } from '../lib/providers';
+import {
+  type ProviderFamily,
+  providerOf,
+  useInstallation,
+} from '../lib/providers';
 import { usePrincipalNameMap, useUpstreams, useUsage } from '../lib/queries';
 import {
   TIME_PRESET_OPTIONS,
@@ -28,9 +32,11 @@ import { mergePrincipalProviderUsage } from './principalMerge';
 function LiveRequestsSection({
   principalNameMap,
   providers,
+  providerByUpstream,
 }: {
   principalNameMap: Map<string, string>;
   providers: readonly ProviderFamily[];
+  providerByUpstream: ReadonlyMap<string, ProviderFamily>;
 }) {
   const feed = useRequestEventsFeed({
     filters: {},
@@ -66,6 +72,7 @@ function LiveRequestsSection({
       <RequestEventsFeed
         feed={feed}
         principalNameMap={principalNameMap}
+        providerByUpstream={providerByUpstream}
         emptyTitle="No recent requests"
         tableContainerClassName="relative min-w-0 max-md:-mx-4 md:glass md:rounded-md min-h-48 h-96 max-h-[60vh] overflow-auto"
       />
@@ -160,6 +167,16 @@ export function MultiProviderOverview() {
   const navigate = useNavigate({ from: '/' });
   const principalNames = usePrincipalNameMap();
   const configuredUpstreams = upstreams.data?.upstreams ?? [];
+  const providerByUpstream = useMemo(
+    () =>
+      new Map(
+        configuredUpstreams.map((upstream) => [
+          upstream.id,
+          providerOf(upstream.kind),
+        ]),
+      ),
+    [configuredUpstreams],
+  );
   const hasSubscription = (provider: ProviderFamily) =>
     configuredUpstreams.some(
       (upstream) =>
@@ -223,6 +240,7 @@ export function MultiProviderOverview() {
         <LiveRequestsSection
           principalNameMap={principalNames}
           providers={providers}
+          providerByUpstream={providerByUpstream}
         />
       </div>
     </PageContainer>

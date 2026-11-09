@@ -74,6 +74,13 @@ describe('RequestEventsTable', () => {
       ).toBe(expected[kind]);
     }
   });
+  it('uses the active provider scope for shared request kinds without inventory identity', () => {
+    const event = {
+      event_kind: 'chat_completions',
+    } as RequestEventWithPhase;
+    expect(providerForEvent(event, undefined, 'openai')).toBe('openai');
+    expect(providerForEvent(event, undefined, 'gemini')).toBe('gemini');
+  });
   beforeEach(() => {
     vi.stubGlobal(
       'fetch',
