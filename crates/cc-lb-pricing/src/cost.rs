@@ -1,5 +1,6 @@
 use crate::tier_resolver::{
-    apply_threshold_bands, resolve_native_rate, resolve_optional_price, resolve_tier_rate,
+    apply_threshold_bands, resolve_native_cached_read_rate, resolve_native_rate,
+    resolve_optional_price, resolve_tier_rate,
 };
 use crate::{
     ComputedCostBreakdown, NativePricingLifetime, NativePricingStatus, PricingStatus,
@@ -219,11 +220,21 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
             .get(model_key),
         tier.as_deref(),
     );
-    let mut cache_read_price = resolve_optional_price(
-        snapshot.cache_read_per_million_usd.get(model_key).copied(),
-        snapshot.cache_read_per_million_usd_by_tier.get(model_key),
-        tier.as_deref(),
-    );
+    let native_pricing = pricing.native.as_ref().filter(|native| {
+        matches!(
+            native.provider,
+            crate::NativePricingProvider::OpenAi | crate::NativePricingProvider::Gemini
+        )
+    });
+    let mut cache_read_price = if native_pricing.is_none() {
+        resolve_optional_price(
+            snapshot.cache_read_per_million_usd.get(model_key).copied(),
+            snapshot.cache_read_per_million_usd_by_tier.get(model_key),
+            tier.as_deref(),
+        )
+    } else {
+        None
+    };
 
     let write_total = cache_write_input.unwrap_or_default();
     let write_detail_total = cache_write_30m_input
@@ -250,6 +261,12 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
         Some(&mut cache_creation_price),
         Some(&mut cache_read_price),
     );
+    if let Some(native) = native_pricing {
+        let rate = resolve_native_cached_read_rate(native, gross_input_tokens, tier.as_deref());
+        cache_read_price = (rate.status == NativePricingStatus::Known)
+            .then_some(rate.price_per_million_usd)
+            .flatten();
+    }
     let input_image_tokens = input_image_tokens.min(input);
     let output_image_tokens = output_image_tokens.min(output);
     let input_image_price = pricing.input_image_per_million_usd.unwrap_or(input_price);
@@ -278,6 +295,10 @@ pub fn virtual_cost_micros_full_with_context_and_provider_writes(
         }
         (0, 0)
     };
+    if native_pricing.is_some() && cache_read_input > 0 && cache_read_price.is_none() {
+        record_missing_cache_field(&normalized, "cache_read_per_million_usd");
+        return Some(ComputedCostBreakdown::unknown());
+    }
 
     let cr_micros = cache_read_price
         .map(|price| component_cost(cache_read_input, price))
@@ -357,6 +378,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use super::*;
+    use crate::catalog_parser::{FROZEN_NATIVE_CATALOG, parse_litellm_json};
     use crate::{
         CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, LocalCacheInputEstimate,
         NativePricingProvider, NativePricingRate, NativeResourcePricing, Pricing, ThresholdBand,
@@ -1076,6 +1098,8 @@ mod tests {
             provider: NativePricingProvider::OpenAi,
             ordinary_input: NativePricingRate::known(UsdPerMillion::from_micros_usd(2_000_000)),
             cached_input_read: NativePricingRate::known(UsdPerMillion::from_micros_usd(100_000)),
+            cached_input_read_by_tier: BTreeMap::new(),
+            cached_input_read_above_tokens: BTreeMap::new(),
             total_write: BTreeMap::from([
                 (
                     NativePricingLifetime::ThirtyMinutes,
@@ -1102,5 +1126,223 @@ mod tests {
         assert_eq!(breakdown.cached_input_read_micros, 2);
         assert_eq!(breakdown.total_write_micros, 50);
         assert_eq!(breakdown.total_micros, 252);
+    }
+
+    #[test]
+    fn frozen_native_catalog_prices_cached_reads_as_disjoint_input_for_openai_and_gemini() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = parse_litellm_json(
+            FROZEN_NATIVE_CATALOG,
+            &cc_lb_clock::TestClock::new_at_secs(1_700_000_000),
+        )
+        .expect("frozen catalog parses");
+        global_catalog().install_snapshot(snapshot);
+
+        for model in ["gpt-6.1-sol", "gemini-4-argon"] {
+            let cached =
+                virtual_cost_micros_full_with_context(model, 1_000, 1, 0, 0, 0, 20_000, None)
+                    .expect("frozen native model");
+            assert_eq!(cached.pricing_status, PricingStatus::Known);
+            assert_eq!(cached.input_micros, 2_000);
+            assert_eq!(cached.output_micros, 10);
+            assert_eq!(cached.cache_read_micros, 2_000);
+            assert_eq!(cached.total_micros, 4_010);
+
+            let uncached =
+                virtual_cost_micros_full_with_context(model, 21_000, 1, 0, 0, 0, 0, None)
+                    .expect("frozen native model");
+            assert_eq!(uncached.pricing_status, PricingStatus::Known);
+            assert_eq!(uncached.input_micros, 42_000);
+            assert_eq!(uncached.output_micros, 10);
+            assert_eq!(uncached.cache_read_micros, 0);
+            assert_eq!(uncached.total_micros, 42_010);
+        }
+    }
+
+    fn native_read_catalog(fields: serde_json::Value, poison_legacy: bool) -> CatalogSnapshot {
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(FROZEN_NATIVE_CATALOG).expect("frozen JSON");
+        for entry in catalog.as_object_mut().unwrap().values_mut() {
+            let entry = entry.as_object_mut().unwrap();
+            entry.remove("cache_read_input_token_cost");
+            entry.extend(fields.as_object().unwrap().clone());
+        }
+        let mut snapshot = parse_litellm_json(
+            &serde_json::to_vec(&catalog).unwrap(),
+            &cc_lb_clock::TestClock::new_at_secs(1_700_000_000),
+        )
+        .expect("native pricing variant parses");
+        assert!(snapshot.cache_read_per_million_usd.is_empty());
+        assert!(snapshot.cache_read_per_million_usd_by_tier.is_empty());
+        for bands in snapshot.above_tokens_rates.values() {
+            for band in bands.values() {
+                assert_eq!(band.default.cache_read_per_million_usd, None);
+                assert!(
+                    band.by_tier
+                        .values()
+                        .all(|rate| rate.cache_read_per_million_usd.is_none())
+                );
+            }
+        }
+        if poison_legacy {
+            for model in ["gpt-6.1-sol", "gemini-4-argon"] {
+                snapshot
+                    .cache_read_per_million_usd
+                    .insert(model.to_owned(), UsdPerMillion::from_whole_usd(99));
+                snapshot.cache_read_per_million_usd_by_tier.insert(
+                    model.to_owned(),
+                    BTreeMap::from([("priority".to_owned(), UsdPerMillion::from_whole_usd(88))]),
+                );
+                let band = snapshot
+                    .above_tokens_rates
+                    .entry(model.to_owned())
+                    .or_default()
+                    .entry(1)
+                    .or_default();
+                band.default.cache_read_per_million_usd = Some(UsdPerMillion::from_whole_usd(77));
+                band.by_tier
+                    .entry("priority".to_owned())
+                    .or_default()
+                    .cache_read_per_million_usd = Some(UsdPerMillion::from_whole_usd(66));
+            }
+        }
+        snapshot
+    }
+
+    fn assert_native_read_cost(
+        ordinary: u64,
+        cached: u64,
+        tier: Option<&str>,
+        expected: Option<(i64, i64, i64)>,
+    ) {
+        for model in ["gpt-6.1-sol", "gemini-4-argon"] {
+            let breakdown =
+                virtual_cost_micros_full_with_context(model, ordinary, 1, 0, 0, 0, cached, tier)
+                    .expect("native model exists");
+            let projected: cc_lb_request_log::CostBreakdown = breakdown.into();
+            if let Some((input, read, output)) = expected {
+                assert_eq!(breakdown.pricing_status, PricingStatus::Known, "{model}");
+                assert_eq!(breakdown.input_micros, input, "{model}");
+                assert_eq!(breakdown.cache_read_micros, read, "{model}");
+                assert_eq!(breakdown.output_micros, output, "{model}");
+                assert_eq!(breakdown.total_micros, input + read + output, "{model}");
+                assert_eq!(projected.total_micros, Some(input + read + output));
+                assert_eq!(projected.cache_read_micros, Some(read));
+            } else {
+                assert_eq!(breakdown, ComputedCostBreakdown::unknown(), "{model}");
+                assert_eq!(projected.total_micros, None);
+                assert_eq!(projected.input_micros, None);
+                assert_eq!(projected.output_micros, None);
+                assert_eq!(projected.cache_read_micros, None);
+                assert_eq!(projected.cache_creation_5m_micros, None);
+                assert_eq!(projected.cache_creation_1h_micros, None);
+                assert_eq!(projected.cache_write_micros, None);
+            }
+        }
+    }
+
+    #[test]
+    fn native_cached_read_missing_positive_is_unknown_but_zero_usage_stays_known() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        global_catalog().install_snapshot(native_read_catalog(serde_json::json!({}), true));
+        assert_native_read_cost(1_000, 20_000, None, None);
+        assert_native_read_cost(1_000, 20_000, Some("priority"), None);
+        assert_native_read_cost(1_000, 0, None, Some((2_000, 0, 10)));
+    }
+
+    #[test]
+    fn native_cached_read_explicit_zero_is_known_zero() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for rate in [0.0, 0.0000000000001] {
+            global_catalog().install_snapshot(native_read_catalog(
+                serde_json::json!({"cache_read_input_token_cost": rate}),
+                true,
+            ));
+            assert_native_read_cost(1_000, 20_000, None, Some((2_000, 0, 10)));
+        }
+        global_catalog().install_snapshot(native_read_catalog(
+            serde_json::json!({"cache_read_input_token_cost": 0.0000001}),
+            true,
+        ));
+        assert_native_read_cost(1_000, 1, None, Some((2_000, 0, 10)));
+    }
+
+    #[test]
+    fn native_read_tier_precedence_and_batch_fallback_ignore_legacy_maps() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        global_catalog().install_snapshot(native_read_catalog(
+            serde_json::json!({
+                "cache_read_input_token_cost": 0.0000001,
+                "cache_read_input_token_cost_priority": 0.0000003
+            }),
+            true,
+        ));
+        assert_native_read_cost(1_000, 20_000, Some(" Priority "), Some((2_000, 6_000, 10)));
+        assert_native_read_cost(1_000, 20_000, Some("flex"), Some((2_000, 2_000, 10)));
+        assert_native_read_cost(1_000, 20_000, Some("batch"), Some((1_000, 1_000, 5)));
+
+        global_catalog().install_snapshot(native_read_catalog(
+            serde_json::json!({
+                "cache_read_input_token_cost": 0.0000001,
+                "cache_read_input_token_cost_batches": 0.00000004,
+                "cache_read_input_token_cost_priority": 0
+            }),
+            true,
+        ));
+        assert_native_read_cost(1_000, 20_000, Some("batch"), Some((1_000, 800, 5)));
+        assert_native_read_cost(1_000, 20_000, Some("priority"), Some((2_000, 0, 10)));
+
+        global_catalog().install_snapshot(native_read_catalog(
+            serde_json::json!({
+                "cache_read_input_token_cost_priority": 0.0000003
+            }),
+            true,
+        ));
+        assert_native_read_cost(1_000, 20_000, Some("priority"), Some((2_000, 6_000, 10)));
+        assert_native_read_cost(1_000, 20_000, None, None);
+    }
+
+    #[test]
+    fn native_read_thresholds_count_cache_once_and_inherit_sparse_components() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        global_catalog().install_snapshot(native_read_catalog(
+            serde_json::json!({
+                "cache_read_input_token_cost": 0.0000001,
+                "cache_read_input_token_cost_priority": 0.0000003,
+                "cache_read_input_token_cost_above_20k_tokens": 0.0000005,
+                "input_cost_per_token_above_30k_tokens": 0.000003,
+                "output_cost_per_token_priority_above_30k_tokens": 0.000020,
+                "cache_read_input_token_cost_priority_above_40k_tokens": 0
+            }),
+            true,
+        ));
+        assert_native_read_cost(1_000, 19_000, None, Some((2_000, 1_900, 10)));
+        assert_native_read_cost(1_000, 19_001, None, Some((2_000, 9_500, 10)));
+        assert_native_read_cost(1_000, 20_000, Some("priority"), Some((2_000, 10_000, 10)));
+        assert_native_read_cost(1_000, 20_000, Some("batch"), Some((1_000, 5_000, 5)));
+        assert_native_read_cost(1_000, 29_000, Some("priority"), Some((2_000, 14_500, 10)));
+        assert_native_read_cost(1_000, 29_001, Some("priority"), Some((3_000, 14_500, 20)));
+        assert_native_read_cost(1_000, 39_000, Some("priority"), Some((3_000, 19_500, 20)));
+        assert_native_read_cost(1_000, 39_001, Some("priority"), Some((3_000, 0, 20)));
+
+        global_catalog().install_snapshot(native_read_catalog(
+            serde_json::json!({
+                "cache_read_input_token_cost_above_20k_tokens": 0.0000005
+            }),
+            true,
+        ));
+        assert_native_read_cost(1_000, 19_000, None, None);
+        assert_native_read_cost(1_000, 19_001, None, Some((2_000, 9_500, 10)));
+        assert_native_read_cost(1_000, 0, None, Some((2_000, 0, 10)));
     }
 }

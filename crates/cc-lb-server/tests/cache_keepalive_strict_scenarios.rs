@@ -609,7 +609,7 @@ async fn nested_one_hour_renewal_persists_ttl_split_and_cost() {
     assert_eq!(turn.input_tokens, 0);
     assert_eq!(turn.output_tokens, 0);
     assert_eq!(turn.cache_read_input_tokens, 0);
-    assert_eq!(turn.cost_micros, 252);
+    assert_eq!(turn.cost_micros, Some(252));
     assert_eq!(turn.hit_miss, "miss");
     assert_eq!(
         event.source_ref_id.as_deref(),

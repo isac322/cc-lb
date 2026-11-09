@@ -313,7 +313,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         let mut turns = Vec::new();
         for batch in session_key_hashes.chunks(SESSION_HASH_BATCH_SIZE) {
             let mut query = QueryBuilder::<Sqlite>::new(
-                "SELECT source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts FROM cache_keepalive_turns WHERE principal_id = ",
+                "SELECT source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, cycle_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, cost_known, hit_miss, ts FROM cache_keepalive_turns WHERE principal_id = ",
             );
             query
                 .push_bind(principal_id)
@@ -592,7 +592,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 ((SELECT COUNT(*) FROM cache_keepalive_sessions WHERE principal_id = ? AND last_message_at_ms >= ?)
                  + (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = ? AND last_message_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id))) AS sessions_last_5m,
                 (SELECT COUNT(*) FROM cache_keepalive_decisions WHERE principal_id = ? AND last_message_at_ms >= ? AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns WHERE source_ref_id = cache_keepalive_decisions.source_ref_id)) AS recent_decisions,
-                (SELECT COALESCE(SUM(cost_micros), 0) FROM cache_keepalive_turns WHERE principal_id = ? AND (? IS NULL OR ts * 1000 >= ?)) AS total_spent_micros,
+                (SELECT COALESCE(SUM(CASE WHEN cost_known = 1 THEN cost_micros ELSE 0 END), 0) FROM cache_keepalive_turns WHERE principal_id = ? AND (? IS NULL OR ts * 1000 >= ?)) AS total_spent_micros,
                 (SELECT COUNT(*) FROM cache_keepalive_turns WHERE principal_id = ? AND lower(hit_miss) = 'hit' AND (? IS NULL OR ts * 1000 >= ?)) AS successful_hits,
                 (SELECT COUNT(*) FROM pending_current WHERE principal_id = ?) AS pending_evidence,
                 (SELECT COUNT(*) FROM cache_keepalive_turns t

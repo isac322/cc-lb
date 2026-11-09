@@ -37,7 +37,7 @@ use cc_lb_control::api_keys::limit_engine::LimitEngine;
 // calls without adding public engine hooks or runtime observation state.
 trait ReservationSettlement {
     fn refund_by_id(&self, id: &str) -> bool;
-    fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: i64) -> bool;
+    fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: Option<i64>) -> bool;
 }
 
 impl ReservationSettlement for LimitEngine {
@@ -47,7 +47,7 @@ impl ReservationSettlement for LimitEngine {
     }
 
     #[inline]
-    fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: i64) -> bool {
+    fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: Option<i64>) -> bool {
         LimitEngine::reconcile_by_id(self, id, input, output, cost)
     }
 }
@@ -112,6 +112,7 @@ struct Partial {
     usage_seen: bool,
     websocket: bool,
     cost_micros: Option<i64>,
+    priced_seen: bool,
     termination: Option<TerminationInfo>,
 }
 
@@ -123,7 +124,7 @@ struct TerminationInfo {
 
 impl TerminationInfo {
     fn is_ready(&self, partial: &Partial) -> bool {
-        !self.expects_priced || partial.cost_micros.is_some()
+        !self.expects_priced || partial.priced_seen
     }
 }
 
@@ -239,7 +240,7 @@ fn handle_event(
         // background pricing event, while unmeasured outcomes refund immediately.
         let expects_priced = (partial.websocket || matches!(reason, TerminationReason::Success))
             && partial.usage_seen
-            && partial.cost_micros.is_none();
+            && !partial.priced_seen;
         let termination = TerminationInfo {
             reason: reason.clone(),
             deadline: now + FINALIZATION_GRACE,
@@ -311,6 +312,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         LifecycleEvent::Priced { cost, .. } => {
             partial.cost_micros = cost.total_micros;
+            partial.priced_seen = true;
         }
         _ => {}
     }
@@ -352,7 +354,7 @@ fn finalize(engine: &impl ReservationSettlement, partial: Partial, reason: &Term
     }
     let input = partial.usage.input_tokens;
     let output = partial.usage.output_tokens;
-    let cost = partial.cost_micros.unwrap_or(0);
+    let cost = partial.cost_micros;
 
     let reconciled = engine.reconcile_by_id(&reservation_id, input, output, cost);
     let outcome = if reconciled {
@@ -479,6 +481,7 @@ mod tests {
         let mut partial = Partial {
             reservation_id: Some(reservation.id().to_owned()),
             cost_micros: usage.as_ref().map(|_| 25),
+            priced_seen: usage.is_some(),
             ..Default::default()
         };
         reservation.forget();
@@ -619,7 +622,7 @@ mod tests {
 
             assert_eq!(remaining_tokens(&engine, &record), "982");
             assert_eq!(concurrency.current(&record.key_hash_b64), 0);
-            assert!(!engine.reconcile_by_id(&reservation_id, 7, 11, 25));
+            assert!(!engine.reconcile_by_id(&reservation_id, 7, 11, Some(25)));
             assert!(!engine.refund_by_id(&reservation_id));
             assert_eq!(remaining_tokens(&engine, &record), "982");
             assert!(matches!(
@@ -651,7 +654,7 @@ mod tests {
         assert_eq!(remaining_tokens(&engine, &record), "1000");
         assert_eq!(concurrency.current(&record.key_hash_b64), 0);
         assert!(!engine.refund_by_id(&reservation_id));
-        assert!(!engine.reconcile_by_id(&reservation_id, 0, 0, 0));
+        assert!(!engine.reconcile_by_id(&reservation_id, 0, 0, Some(0)));
         assert_eq!(remaining_tokens(&engine, &record), "1000");
     }
 
@@ -695,6 +698,7 @@ mod tests {
             }),
         );
         partial.cost_micros = None;
+        partial.priced_seen = false;
         let event_id = eid("ws-delayed-price");
         let mut partials = HashMap::from([(event_id.clone(), partial)]);
         handle_event(
@@ -882,7 +886,7 @@ mod tests {
             self.engine.refund_by_id(id)
         }
 
-        fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: i64) -> bool {
+        fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: Option<i64>) -> bool {
             self.reconciles.set(self.reconciles.get() + 1);
             self.engine.reconcile_by_id(id, input, output, cost)
         }
@@ -974,7 +978,7 @@ mod tests {
                 "terminal replay cannot refund twice"
             );
             assert!(!engine.refund_by_id(&reservation_id));
-            assert!(!engine.reconcile_by_id(&reservation_id, 7, 11, 25));
+            assert!(!engine.reconcile_by_id(&reservation_id, 7, 11, Some(25)));
             assert_eq!(
                 remaining_tokens(&engine, &record),
                 if reconciled { "982" } else { "1000" }
@@ -1001,6 +1005,299 @@ mod tests {
                 let probe = probe.expect("a full refund restores the exact cost budget");
                 drop(probe);
             }
+        }
+    }
+    #[test]
+    fn unknown_priced_cost_is_terminal_before_or_after_termination() {
+        // `Priced { total_micros: None }` is an explicit completed-but-unknown
+        // result, not an absent pricing event. It must not consume the grace
+        // window or be converted into a known zero-cost settlement.
+        for priced_before_termination in [true, false] {
+            let (engine, view, record, concurrency) = accounting_fixture();
+            let mut partial = reserved_partial(
+                &engine,
+                &view,
+                &record,
+                "GET",
+                Some(UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                }),
+            );
+            partial.cost_micros = None;
+            partial.priced_seen = false;
+            let observer = CountingSettlement {
+                engine: engine.as_ref(),
+                refunds: std::cell::Cell::new(0),
+                reconciles: std::cell::Cell::new(0),
+            };
+            let event_id = format!("unknown-priced-{priced_before_termination}");
+            let mut partials = HashMap::from([(event_id.clone(), partial)]);
+            let unknown_cost = LifecycleEvent::Priced {
+                event_id: event_id.clone(),
+                cost: cc_lb_request_log::CostBreakdown {
+                    total_micros: None,
+                    ..Default::default()
+                },
+            };
+
+            if priced_before_termination {
+                handle_event(&observer, &mut partials, 16, unknown_cost.clone());
+            }
+            handle_event(
+                &observer,
+                &mut partials,
+                16,
+                terminal_event(&event_id, TerminationReason::Success),
+            );
+            if !priced_before_termination {
+                assert!(
+                    partials.contains_key(&event_id),
+                    "a completed unknown cost is the only event still needed for settlement"
+                );
+                handle_event(&observer, &mut partials, 16, unknown_cost);
+            }
+
+            assert!(
+                !partials.contains_key(&event_id),
+                "explicit unknown pricing must finalize without grace expiry"
+            );
+            assert_eq!(
+                observer.reconciles.get(),
+                1,
+                "unknown completed cost settles the measured reservation exactly once"
+            );
+            assert_eq!(observer.refunds.get(), 0);
+            assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+            assert_eq!(remaining_tokens(&engine, &record), "982");
+            assert_cost_budget(&engine, &view, &record, 200);
+        }
+    }
+    #[test]
+    fn known_zero_and_positive_prices_settle_without_waiting() {
+        for known_cost in [0, 25] {
+            let (engine, view, record, concurrency) = accounting_fixture();
+            let mut partial = reserved_partial(
+                &engine,
+                &view,
+                &record,
+                "GET",
+                Some(UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                }),
+            );
+            partial.cost_micros = Some(known_cost);
+            let observer = CountingSettlement {
+                engine: engine.as_ref(),
+                refunds: std::cell::Cell::new(0),
+                reconciles: std::cell::Cell::new(0),
+            };
+            let event_id = format!("known-priced-{known_cost}");
+            let mut partials = HashMap::from([(event_id.clone(), partial)]);
+            handle_event(
+                &observer,
+                &mut partials,
+                16,
+                LifecycleEvent::Priced {
+                    event_id: event_id.clone(),
+                    cost: cc_lb_request_log::CostBreakdown {
+                        total_micros: Some(known_cost),
+                        ..Default::default()
+                    },
+                },
+            );
+            handle_event(
+                &observer,
+                &mut partials,
+                16,
+                terminal_event(&event_id, TerminationReason::Success),
+            );
+
+            assert!(!partials.contains_key(&event_id));
+            assert_eq!(observer.reconciles.get(), 1);
+            assert_eq!(observer.refunds.get(), 0);
+            assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+            assert_cost_budget(&engine, &view, &record, known_cost);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn grace_expired_without_priced_keeps_estimate_and_ignores_late_events() {
+        for (method, reason) in [
+            ("POST", TerminationReason::Success),
+            ("GET", TerminationReason::Dropped),
+            (
+                "GET",
+                TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+            ),
+        ] {
+            let (engine, view, record, concurrency) = accounting_fixture();
+            let mut partial = reserved_partial(
+                &engine,
+                &view,
+                &record,
+                method,
+                Some(UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                }),
+            );
+            partial.cost_micros = None;
+            partial.priced_seen = false;
+            let reservation_id = partial.reservation_id.clone().unwrap();
+            let event_id = "grace-expired-unknown";
+            let mut partials = HashMap::from([(event_id.to_owned(), partial)]);
+            let terminal = terminal_event(event_id, reason);
+            handle_event(engine.as_ref(), &mut partials, 16, terminal.clone());
+            assert!(partials.contains_key(event_id));
+            assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+            assert_eq!(remaining_tokens(&engine, &record), "900");
+
+            tokio::time::advance(FINALIZATION_GRACE - Duration::from_millis(1)).await;
+            flush_expired_terminations(&engine, &mut partials);
+            assert!(partials.contains_key(event_id));
+            assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+            tokio::time::advance(Duration::from_millis(1)).await;
+            flush_expired_terminations(&engine, &mut partials);
+            assert!(!partials.contains_key(event_id));
+            assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+            assert_eq!(remaining_tokens(&engine, &record), "982");
+            assert_cost_budget(&engine, &view, &record, 200);
+
+            for late_cost in [Some(0), Some(25), None] {
+                handle_event(
+                    engine.as_ref(),
+                    &mut partials,
+                    16,
+                    LifecycleEvent::Priced {
+                        event_id: event_id.to_owned(),
+                        cost: cc_lb_request_log::CostBreakdown {
+                            total_micros: late_cost,
+                            ..Default::default()
+                        },
+                    },
+                );
+                handle_event(engine.as_ref(), &mut partials, 16, terminal.clone());
+                handle_event(engine.as_ref(), &mut partials, 16, terminal.clone());
+                flush_expired_terminations(&engine, &mut partials);
+                assert!(!partials.contains_key(event_id));
+                assert!(!engine.refund_by_id(&reservation_id));
+                assert!(!engine.reconcile_by_id(&reservation_id, 7, 11, late_cost));
+                assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+                assert_eq!(remaining_tokens(&engine, &record), "982");
+                assert_cost_budget(&engine, &view, &record, 200);
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_pricing_preserves_http_refunds_and_measured_websocket_interruptions() {
+        for (method, measured, reason) in [
+            ("POST", false, TerminationReason::Success),
+            ("POST", false, TerminationReason::Dropped),
+            (
+                "POST",
+                true,
+                TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+            ),
+            ("GET", false, TerminationReason::Dropped),
+            ("GET", true, TerminationReason::Dropped),
+            (
+                "GET",
+                true,
+                TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+            ),
+        ] {
+            let (engine, view, record, concurrency) = accounting_fixture();
+            let mut partial = reserved_partial(
+                &engine,
+                &view,
+                &record,
+                method,
+                measured.then_some(UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                }),
+            );
+            partial.cost_micros = None;
+            partial.priced_seen = false;
+            let reservation_id = partial.reservation_id.clone().unwrap();
+            let observer = CountingSettlement {
+                engine: engine.as_ref(),
+                refunds: std::cell::Cell::new(0),
+                reconciles: std::cell::Cell::new(0),
+            };
+            let event_id = "unknown-pricing-policy";
+            let mut partials = HashMap::from([(event_id.to_owned(), partial)]);
+            handle_event(
+                &observer,
+                &mut partials,
+                16,
+                LifecycleEvent::Priced {
+                    event_id: event_id.to_owned(),
+                    cost: cc_lb_request_log::CostBreakdown {
+                        total_micros: None,
+                        ..Default::default()
+                    },
+                },
+            );
+            let terminal = terminal_event(event_id, reason);
+            handle_event(&observer, &mut partials, 16, terminal.clone());
+            handle_event(&observer, &mut partials, 16, terminal);
+            let reconciled = method == "GET" && measured;
+            assert!(!partials.contains_key(event_id));
+            assert_eq!(observer.reconciles.get(), usize::from(reconciled));
+            assert_eq!(observer.refunds.get(), usize::from(!reconciled));
+            assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+            assert_eq!(
+                remaining_tokens(&engine, &record),
+                if reconciled { "982" } else { "1000" }
+            );
+            assert_cost_budget(&engine, &view, &record, if reconciled { 200 } else { 0 });
+            assert!(!engine.refund_by_id(&reservation_id));
+            assert!(!engine.reconcile_by_id(&reservation_id, 7, 11, Some(0)));
+            assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+            assert_cost_budget(&engine, &view, &record, if reconciled { 200 } else { 0 });
+        }
+    }
+
+    fn assert_cost_budget(
+        engine: &Arc<LimitEngine>,
+        view: &cc_lb_control::api_keys::principal_view::PrincipalView,
+        record: &cc_lb_storage_api::StoredApiKeyRecord,
+        charged: i64,
+    ) {
+        let remaining = 1_000 - charged;
+        let probe = engine
+            .reserve(
+                view,
+                record,
+                "ws-accounting-principal",
+                "gpt-5-codex",
+                Some(0),
+                0,
+                Some(remaining),
+            )
+            .expect("the exact remaining cost budget must be usable");
+        drop(probe);
+        if charged > 0 {
+            assert!(matches!(
+                engine.reserve(
+                    view,
+                    record,
+                    "ws-accounting-principal",
+                    "gpt-5-codex",
+                    Some(0),
+                    0,
+                    Some(remaining + 1),
+                ),
+                Err(cc_lb_control::api_keys::limit_engine::RejectReason::CostRateLimit)
+            ));
         }
     }
 }
