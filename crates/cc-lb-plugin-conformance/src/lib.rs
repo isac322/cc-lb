@@ -389,7 +389,8 @@ impl<'a> ConformanceSuite<'a> {
     ///
     /// Coverage:
     /// - `Filter` → canonical V1 request
-    /// - `Shape` → `call_shape(sample_shape_request())`
+    /// - `Shape` → selected request, response, SSE, and V2 realtime-frame hooks,
+    ///   plus the optional Gemini envelope hook.
     ///
     /// Assertions are boundary-only: hooks must not trap and responses
     /// (where hooks return one) must rkyv-decode as the expected type.
