@@ -50,7 +50,7 @@ const RESERVED_ROW_REM = 2.5;
  *   `table-fixed` table sized by its `<colgroup>`, so no column width depends
  *   on row content. Each column starts at its compact `rem` minimum (43.75rem
  *   with both entities so a 768px portrait tablet fits without horizontal
- *   scroll, 39.5rem with one); the container width above the table's minimum
+ *   scroll, 39.6875rem with one); the container width above the table's minimum
  *   (`100cqw` of the wrapper) is split by `grow` among the columns, and
  *   Session, which has no width of its own, takes its share plus any rounding
  *   remainder. Between 42rem and 59rem cell horizontal padding tightens so all
@@ -546,7 +546,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
   );
   const colCount = visible.length;
   // The table never narrows below its compact columns plus Session's floor;
-  // with both entities that is 43.75rem (700px) and with one 39.5rem (632px).
+  // with both entities that is 43.75rem (700px) and with one 39.6875rem (635px).
   const minWidthRem = visible.reduce(
     (sum, k) => sum + (COLUMNS[k].rem ?? 0),
     SESSION_FLOOR_REM,
