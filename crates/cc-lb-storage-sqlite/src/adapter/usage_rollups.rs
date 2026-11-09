@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Write as _,
+};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
@@ -15,10 +18,44 @@ const CHECKPOINT_ID: &str = "high_water";
 const COST_BACKFILL_UPPER_ID: &str = "cost_components_backfill_upper";
 const COST_BACKFILL_CURSOR_ID: &str = "cost_components_backfill_cursor";
 const GEMINI_RECONCILIATION_ID: &str = "canonicalize_gemini_model_identity";
+const GEMINI_RECONCILIATION_MARKER_PREFIX: &str = "__cc_lb_gemini_reconciliation_source__:";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const TOKEN_INTERVAL_BATCH_SIZE: usize = 100;
+fn gemini_reconciliation_marker(
+    resolution: &str,
+    bucket_start: i64,
+    principal: &str,
+    upstream_id: &str,
+    model: &str,
+) -> String {
+    let identity = format!("{resolution}\0{bucket_start}\0{principal}\0{upstream_id}\0{model}");
+    let mut marker =
+        String::with_capacity(GEMINI_RECONCILIATION_MARKER_PREFIX.len() + identity.len() * 2);
+    marker.push_str(GEMINI_RECONCILIATION_MARKER_PREFIX);
+    for byte in identity.bytes() {
+        let _ = write!(marker, "{byte:02x}");
+    }
+    marker
+}
+
+async fn cleanup_gemini_reconciliation_markers(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> StorageResult<()> {
+    sqlx::query(
+        "DELETE FROM usage_rollups_v2 \
+         WHERE model LIKE ? \
+           AND upstream_id IN ( \
+             SELECT id FROM upstream_spec_v1 \
+             WHERE kind IN ('gemini_api_key', 'gemini_oauth'))",
+    )
+    .bind(format!("{GEMINI_RECONCILIATION_MARKER_PREFIX}%"))
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RollupKey {
@@ -413,6 +450,13 @@ async fn merge_stale_gemini_rollups(
         let principal: String = source.try_get("principal_id").map_err(map_sqlx_error)?;
         let upstream_id: String = source.try_get("upstream_id").map_err(map_sqlx_error)?;
         let model: String = source.try_get("model").map_err(map_sqlx_error)?;
+        let marker = gemini_reconciliation_marker(
+            &resolution,
+            bucket_start,
+            &principal,
+            &upstream_id,
+            &model,
+        );
 
         sqlx::query(
             "INSERT INTO usage_rollups_v2 \
@@ -504,10 +548,11 @@ async fn merge_stale_gemini_rollups(
         .map_err(map_sqlx_error)?;
 
         sqlx::query(
-            "DELETE FROM usage_rollups_v2 \
+            "UPDATE usage_rollups_v2 SET model = ? \
              WHERE resolution = ? AND bucket_start_unix_secs = ? AND principal_id = ? \
                AND upstream_id = ? AND model = ?",
         )
+        .bind(&marker)
         .bind(&resolution)
         .bind(bucket_start)
         .bind(&principal)
@@ -656,6 +701,9 @@ async fn reconcile_gemini_model_identity(
                 .map_err(map_sqlx_error)?;
             }
         }
+        if no_reconciliation_work {
+            cleanup_gemini_reconciliation_markers(&mut tx).await?;
+        }
         tx.commit().await.map_err(map_sqlx_error)?;
         if no_reconciliation_work {
             return Ok(None);
@@ -733,6 +781,7 @@ async fn reconcile_gemini_model_identity(
         .await
         .map_err(map_sqlx_error)?;
         if has_nested_work == 0 {
+            cleanup_gemini_reconciliation_markers(&mut tx).await?;
             sqlx::query(
                 "UPDATE usage_rollup_reconciliations_v1 SET status = 'complete' \
                  WHERE id = ?",
