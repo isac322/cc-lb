@@ -74,7 +74,7 @@ All notable changes to this project will be documented in this file.
 - OpenAI `gpt-image-1` image responses and token-billed audio transcription responses now retain documented input and output token usage in request events; duration-based audio usage, binary speech responses, and image models without documented token usage remain unchanged. ([#1093](https://github.com/isac322/cc-lb/issues/1093))
 
 - Gemini tool-use prompt token usage is now preserved as a separate optional request-event component, while ordinary input/output and billing semantics remain unchanged. ([#1090](https://github.com/isac322/cc-lb/issues/1090))
-- Native cache observations now preserve OpenAI write totals and lifetime counters through diagnostics, state, metrics, and storage. Request-log prompt totals add the native write aggregate once; lifetime buckets are not added again. Gemini analysis uses the URL model, and malformed usage or unsupported model/API combinations remain unknown. ([#1164](https://github.com/isac322/cc-lb/issues/1164))
+- Native cache observations now preserve OpenAI write totals and lifetime counters through diagnostics, state, metrics, and storage. Request-log prompt totals add the native write aggregate once; lifetime buckets are not added again. Direct WebSocket cost settlement includes native writes and retains admitted liability when their cost is unknown. Gemini analysis uses the URL model, and malformed usage or unsupported model/API combinations remain unknown. ([#1164](https://github.com/isac322/cc-lb/issues/1164))
 
 ### Security
 
