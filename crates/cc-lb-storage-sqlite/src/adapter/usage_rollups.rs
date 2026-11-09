@@ -439,9 +439,9 @@ async fn merge_stale_gemini_rollups(
     .bind(if nested { 1_i64 } else { 0_i64 })
     .bind(if nested { 1_i64 } else { 0_i64 })
     .bind(ROLLUP_BATCH_LIMIT)
+    .fetch_all(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
-
     for source in source_rows {
         let resolution: String = source.try_get("resolution").map_err(map_sqlx_error)?;
         let bucket_start: i64 = source
