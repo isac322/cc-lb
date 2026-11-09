@@ -113,7 +113,39 @@ pub fn responses_replace_lifecycle_with_kind(
         dispatcher,
         test_bus,
         upstream_kind,
-        Arc::new(ResponsesSplitDialect),
+        Arc::new(ResponsesSplitDialect {
+            provider_failure: ProviderFailureTransform::PassThrough,
+        }),
+    )
+}
+
+pub fn responses_replace_provider_failure_lifecycle_with_kind(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+    upstream_kind: StorageUpstreamKind,
+) -> Lifecycle {
+    transform_lifecycle_with_dialect(
+        dispatcher,
+        test_bus,
+        upstream_kind,
+        Arc::new(ResponsesSplitDialect {
+            provider_failure: ProviderFailureTransform::Replace,
+        }),
+    )
+}
+
+pub fn responses_drop_provider_failure_lifecycle_with_kind(
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+    upstream_kind: StorageUpstreamKind,
+) -> Lifecycle {
+    transform_lifecycle_with_dialect(
+        dispatcher,
+        test_bus,
+        upstream_kind,
+        Arc::new(ResponsesSplitDialect {
+            provider_failure: ProviderFailureTransform::Drop,
+        }),
     )
 }
 
@@ -386,7 +418,16 @@ impl SseEventTransformHook for FailAfterFirstDialect {
     }
 }
 
-struct ResponsesSplitDialect;
+#[derive(Clone, Copy)]
+enum ProviderFailureTransform {
+    PassThrough,
+    Replace,
+    Drop,
+}
+
+struct ResponsesSplitDialect {
+    provider_failure: ProviderFailureTransform,
+}
 
 impl UpstreamDialect for ResponsesSplitDialect {
     fn shape(
@@ -458,6 +499,31 @@ impl SseEventTransformHook for ResponsesSplitDialect {
                     ],
                 })
             }
+            "response.failed" => match self.provider_failure {
+                ProviderFailureTransform::PassThrough => Ok(TransformSseEventResult::Unchanged),
+                ProviderFailureTransform::Drop => Ok(TransformSseEventResult::Drop),
+                ProviderFailureTransform::Replace => {
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&request.event.data).expect("failure JSON");
+                    let sequence = value["sequence_number"]
+                        .as_u64()
+                        .expect("failure sequence number");
+                    Ok(TransformSseEventResult::Replace {
+                        events: vec![SseEvent {
+                            event: "response.output_text.delta".to_owned(),
+                            data: Bytes::from(
+                                serde_json::json!({
+                                    "type": "response.output_text.delta",
+                                    "sequence_number": sequence,
+                                    "response_id": DOWNSTREAM_ID,
+                                    "delta": "provider failure transformed",
+                                })
+                                .to_string(),
+                            ),
+                        }],
+                    })
+                }
+            },
             _ => Ok(TransformSseEventResult::Unchanged),
         }
     }

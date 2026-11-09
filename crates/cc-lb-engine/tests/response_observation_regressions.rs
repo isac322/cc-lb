@@ -615,10 +615,6 @@ async fn finite_gzip_eos_case(
         .expect("lifecycle returns the streaming response");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers().get(CONTENT_LENGTH),
-        Some(&HeaderValue::from_str(&expected_body.len().to_string()).expect("content length"))
-    );
-    assert_eq!(
         response.headers().get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("gzip"))
     );
@@ -686,10 +682,6 @@ async fn delivered_body_drop_case(
         .await
         .expect("lifecycle returns the streaming response");
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(CONTENT_LENGTH),
-        Some(&HeaderValue::from_str(&expected_body.len().to_string()).expect("content length"))
-    );
     assert_eq!(
         response.headers().get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("gzip"))

@@ -1,10 +1,38 @@
 use super::*;
 use client_disconnect_support::{
-    assert_responses_failed, assert_stream_failure_once, responses_replace_lifecycle_with_kind,
-    sse_json_events,
+    assert_responses_failed, assert_stream_failure_once,
+    responses_drop_provider_failure_lifecycle_with_kind, responses_replace_lifecycle_with_kind,
+    responses_replace_provider_failure_lifecycle_with_kind, sse_json_events,
 };
+
 use serde_json::{Value, json};
 use std::io::Write as _;
+
+fn assert_local_responses_failure(body: &[u8], response_id: Option<&str>) -> Value {
+    let events = sse_json_events(body);
+    let (name, failure) = events.last().expect("local failure event");
+    assert_eq!(name, "response.failed");
+    assert_eq!(failure["type"], "response.failed");
+    assert_eq!(
+        failure["response"]["id"],
+        response_id.map(Value::from).unwrap_or(Value::Null)
+    );
+    assert_eq!(failure["response"]["status"], "failed");
+    assert_eq!(failure["response"]["error"]["code"], "api_error");
+    let failure_sequence = failure["sequence_number"]
+        .as_u64()
+        .expect("local failure sequence");
+    let highest_emitted_sequence = events[..events.len() - 1]
+        .iter()
+        .filter_map(|(_, value)| value["sequence_number"].as_u64())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        failure_sequence > highest_emitted_sequence,
+        "local failure sequence must follow all emitted events: {events:?}",
+    );
+    failure.clone()
+}
 
 const OUTPUT: &[u8] = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":7,\"delta\":\"partial\"}\n\n";
 const CREATED: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_proxy_test\",\"object\":\"response\",\"status\":\"in_progress\"}}\n\n";
@@ -524,14 +552,13 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
     plaintext.extend_from_slice(provider_failure);
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&plaintext)?;
-    let compressed = encoder.finish()?;
-    let split = compressed.len().saturating_sub(8);
-    let first = Bytes::copy_from_slice(&compressed[..split]);
-    let mut corrupt_trailer = compressed[split..].to_vec();
-    corrupt_trailer[0] ^= 0xff;
-    let mut upstream_body = first.to_vec();
-    upstream_body.extend_from_slice(&corrupt_trailer);
-    let second = Bytes::from(corrupt_trailer);
+    encoder.flush()?;
+    let flushed_prefix = encoder.get_ref().clone();
+    let invalid_deflate_payload = vec![0x07];
+    let mut upstream_body = flushed_prefix.clone();
+    upstream_body.extend_from_slice(&invalid_deflate_payload);
+    let first = Bytes::from(flushed_prefix);
+    let second = Bytes::from(invalid_deflate_payload);
     let body_stream = async_stream::stream! {
         yield Ok::<Bytes, std::io::Error>(first);
         yield Ok::<Bytes, std::io::Error>(second);
@@ -597,6 +624,15 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
     );
     assert_eq!(rows[0].upstream_content_encoding.as_deref(), Some("gzip"));
     assert_eq!(
+        rows[0].upstream_body_end.as_deref(),
+        Some("decode_error_mid_body"),
+        "the corrupt deflate block must fail decoder.push, not EOF trailer validation",
+    );
+    assert_eq!(
+        rows[0].upstream_body_error_cause.as_deref(),
+        Some("decode_error"),
+    );
+    assert_eq!(
         rows[0].upstream_body_bytes,
         Some(upstream_body.len() as u64),
     );
@@ -618,7 +654,9 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
     let mut updates = bus.bus.subscribe();
     let store = Arc::new(crate::upstream_affinity::MemoryAffinityStore::default());
     store.fail_bind("forced affinity store failure");
-    let mut upstream_body = CREATED.to_vec();
+    // Keep the prefix free of response affinity state so the provider terminal
+    // itself is the first event that exercises the failing bind.
+    let mut upstream_body = OUTPUT.to_vec();
     upstream_body.extend_from_slice(provider_failure);
     let lifecycle = lifecycle_with_upstream_kind(
         sse_dispatch(StatusCode::OK, Body::from(upstream_body)),
@@ -631,6 +669,8 @@ data: {"type":"response.failed","sequence_number":8,"response":{"id":"resp_proxy
     let response = lifecycle.handle(request, &auth).await?;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await?.to_bytes();
+    let failure = assert_local_responses_failure(&body, Some("resp_proxy_test"));
+    assert_eq!(failure["response"]["error"]["code"], "api_error");
     let events_json = sse_json_events(&body);
     assert!(
         events_json.iter().any(|(_, value)| {
@@ -778,6 +818,119 @@ data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_up
     );
     assert_success_terminal(&mut healthy_events, 200).await;
     assert_one_final(&mut healthy_updates).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_replaced_provider_failure_before_malformed_emits_local_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_transformed_provider_failure_then_fault(false, true).await
+}
+
+#[tokio::test]
+async fn responses_replaced_provider_failure_before_body_error_emits_local_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_transformed_provider_failure_then_fault(false, false).await
+}
+
+#[tokio::test]
+async fn responses_dropped_provider_failure_before_malformed_emits_local_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_transformed_provider_failure_then_fault(true, true).await
+}
+
+#[tokio::test]
+async fn responses_dropped_provider_failure_before_body_error_emits_local_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_transformed_provider_failure_then_fault(true, false).await
+}
+
+async fn assert_transformed_provider_failure_then_fault(
+    drop_failure: bool,
+    malformed: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let provider_failure = br#"event: response.failed
+data: {"type":"response.failed","sequence_number":9,"response":{"id":"resp_proxy_test","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"provider rate limit"}}}
+
+"#;
+    let mut upstream = CREATED.to_vec();
+    upstream.extend_from_slice(OUTPUT);
+    upstream.extend_from_slice(provider_failure);
+    let body = if malformed {
+        upstream.extend_from_slice(b"event: response.completed\ndata: {invalid-json}\n\n");
+        Body::from(upstream.clone())
+    } else {
+        upstream_frame_error_after(Bytes::from(upstream.clone()))
+    };
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let mut events = lifecycle_receiver(&bus);
+    let mut updates = bus.bus.subscribe();
+    let dispatcher = sse_dispatch(StatusCode::OK, body);
+    let lifecycle = if drop_failure {
+        responses_drop_provider_failure_lifecycle_with_kind(
+            dispatcher,
+            &bus,
+            StorageUpstreamKind::OpenaiApiKey,
+        )
+    } else {
+        responses_replace_provider_failure_lifecycle_with_kind(
+            dispatcher,
+            &bus,
+            StorageUpstreamKind::OpenaiApiKey,
+        )
+    }
+    .with_upstream_affinity_store(Arc::new(
+        crate::upstream_affinity::MemoryAffinityStore::default(),
+    ));
+    let request = responses_request();
+    let auth = lifecycle.authenticate(request.headers()).await?;
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+    assert_local_responses_failure(&body, Some("resp_downstream"));
+    let parsed = sse_json_events(&body);
+    assert_eq!(
+        parsed.len(),
+        if drop_failure { 4 } else { 5 },
+        "only emitted SSE events contribute to the downstream sequence: {parsed:?}",
+    );
+    assert_eq!(
+        parsed
+            .iter()
+            .filter(|(_, value)| value["delta"] == "provider failure transformed")
+            .count(),
+        usize::from(!drop_failure),
+    );
+    assert!(
+        !String::from_utf8_lossy(&body).contains("provider rate limit"),
+        "the transformed-away provider failure must not leak into downstream failure",
+    );
+    assert!(
+        !String::from_utf8_lossy(&body).contains("rate_limit_exceeded"),
+        "only the safe local failure is client-visible",
+    );
+    // The provider event and the later body fault can produce multiple
+    // StreamCompleted observations; only the request terminal is singular.
+    assert_error_terminal(&mut events, 200, "upstream_stream_error").await;
+    assert_one_final(&mut updates).await;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, 200);
+    let (expected_type, expected_message) = if malformed {
+        (
+            "upstream_response_framing_error",
+            "upstream SSE response could not be safely processed",
+        )
+    } else {
+        ("rate_limit_exceeded", "provider rate limit")
+    };
+    assert_eq!(rows[0].upstream_error_type.as_deref(), Some(expected_type),);
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some(expected_message),
+    );
     Ok(())
 }
 

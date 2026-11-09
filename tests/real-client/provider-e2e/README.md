@@ -92,26 +92,48 @@ CC_LB_BIN=/absolute/path/to/old/cc-lb \
 CC_LB_BIN=/absolute/path/to/new/cc-lb \
   python3 tests/real-client/provider-e2e/local-error-contract.py --expect new
 
-# Optional baseline proof: requires all three original defects to reproduce,
-# while still requiring healthy and provider-failed controls to pass.
+# Optional baseline proof: requires all three original defects and the new
+# framing defect, while retaining the original controls.
 CC_LB_BIN=/absolute/path/to/old/cc-lb \
   python3 tests/real-client/provider-e2e/local-error-contract.py --expect old
 ```
 
-Each run makes nine requests: healthy, injected-fault, and provider-failed
-controls for Responses SSE, buffered Responses, and buffered Gemini.
-Streaming faults close chunked transfer after `response.created` and a normal
-output delta, without the terminating chunk. Buffered faults send a truncated
-`Content-Length` body. The gate checks safe SDK-visible messages, native error
-metadata, HTTP status/content type, response identity and event sequence,
-byte-identical healthy/provider-failed passthrough, and exactly one committed
-failure per faulty request. The proxy's canonical response `request-id`
+Each run makes ten requests. The original nine cover healthy, injected-fault,
+and provider-failed responses for Responses SSE, buffered Responses, and
+buffered Gemini. Streaming faults close chunked transfer after
+`response.created` and a normal output delta, without the terminating chunk.
+Buffered faults send a truncated `Content-Length` body. The gate checks safe
+SDK-visible messages, native error metadata, HTTP status/content type, response
+identity and event sequence, byte-identical healthy/provider-failed passthrough,
+and exactly one committed failure per faulty request.
+
+The tenth request sends a Responses `response.failed` rate-limit event followed
+by a complete SSE event containing malformed JSON. The loopback upstream writes
+the entire body once and declares its exact original `Content-Length`, including
+the malformed suffix. The proxy must suppress that suffix without changing the
+provider prefix or retaining a stale downstream length. The real SDK consumes
+the response through its HTTP transport: it must observe one original
+`rate_limit_exceeded` failure and message, reach a clean body end, and receive
+neither an incomplete-framing error nor a synthetic local override. The report
+records response headers, captured body length, transport completion or actual
+exception, SDK events, and each wire-contract check. Both upstream and downstream
+SSE bodies are retained. `--expect new` requires every check to pass.
+`--expect old` requires the tenth wire contract to fail, without assuming an
+exception class. In the preserved pre-fix binary at `5656c6ae`, the observed
+response advertised `Content-Length: 1871` but delivered zero body bytes;
+HTTPX2 raised `RemoteProtocolError` and the SDK reported `APIConnectionError`
+with no provider message. The durable row still recorded HTTP 200,
+`upstream_stream_error`, and the original provider rate-limit details. This
+baseline justifies the framing-defect oracle; its exact exceptions are evidence,
+not hard-coded expectations.
+
+For every request, the proxy's canonical response `request-id`
 (or `x-request-id` if supplied instead) joins the selected upstream to both
 `/admin/v1/events/delta` and a read-only SQLite query. If neither header exists,
 the isolated, sequential harness requires exactly one new SQLite row since
 its pre-request cursor and joins that actual ID to admin evidence. The report
 records both observed headers and the correlation source; it never invents an
-ID. A final table-wide count checks that all nine requests have one durable row.
+ID. A final table-wide count checks that all ten requests have one durable row.
 SQLite evidence reads the current relational `request_id`, `upstream_id`,
 `error_code`, and `list_status` columns. Full event details come from the admin
 delta API; the harness does not depend on the legacy SQLite `payload` column.
@@ -189,9 +211,10 @@ input hashes; `replay-report.json` records the observed messages. Neither
 preparing the workspace nor passing the Python harness proves parser replay:
 the printed Cargo command must also pass.
 
-Limits: this harness covers transport-body failure, not private principal
-disappearance, affinity-store failures, decode/inspection/transform fault
-injection, or Anthropic/Gemini SSE. Those remain engine integration-test gates.
+Limits: this harness covers transport-body failure and malformed post-terminal
+Responses SSE under explicit `Content-Length`, not private principal
+disappearance, affinity-store failures, decode/transform fault injection, or
+Anthropic/Gemini SSE. Those remain engine integration-test gates.
 It proves SDK HTTP handling and the official Codex SSE parser, not the Codex
 CLI's rendering, retry loop, or live-provider behavior. All documentation here
 describes runnable checks, not an assertion that they have already passed.

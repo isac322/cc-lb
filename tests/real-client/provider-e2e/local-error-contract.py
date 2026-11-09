@@ -22,7 +22,10 @@ STREAM_MESSAGE = "upstream SSE response could not be safely processed"
 BODY_MESSAGE = "upstream response body could not be read"
 RESPONSE_ID = "resp_loopback_1165"
 PROVIDER_MESSAGE = "loopback provider rejected the request"
+PROVIDER_RATE_LIMIT_MESSAGE = "loopback provider rate limit exceeded"
+CONTENT_LENGTH_FAILURE_MODE = "provider-failed-content-length-malformed"
 SYNTHETIC_KEY = "loopback-no-provider-secret"
+MALFORMED_COMPLETE_SUFFIX = b"event: response.completed\ndata: {invalid-json}\n\n"
 ADMIN_TOKEN = "loopback-admin-only"
 
 
@@ -72,9 +75,11 @@ def stream_frames(mode):
             {"type": "response.output_item.done", "sequence_number": 6, "output_index": 0, "item": item},
             {"type": "response.completed", "sequence_number": 7, "response": response},
         ]
-    elif mode == "provider-failed":
-        values.append({"type": "response.failed", "sequence_number": 4, "response": dict(response, status="failed", error={"code": "server_error", "message": PROVIDER_MESSAGE})})
-    return b"".join(map(frame, values))
+    elif mode in ("provider-failed", CONTENT_LENGTH_FAILURE_MODE):
+        code, message = ("rate_limit_exceeded", PROVIDER_RATE_LIMIT_MESSAGE) if mode == CONTENT_LENGTH_FAILURE_MODE else ("server_error", PROVIDER_MESSAGE)
+        values.append({"type": "response.failed", "sequence_number": 4, "response": dict(response, status="failed", error={"code": code, "message": message})})
+    data = b"".join(map(frame, values))
+    return data + MALFORMED_COMPLETE_SUFFIX if mode == CONTENT_LENGTH_FAILURE_MODE else data
 
 
 class Upstream(http.server.BaseHTTPRequestHandler):
@@ -97,6 +102,15 @@ class Upstream(http.server.BaseHTTPRequestHandler):
                 self.server.last_body = data
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
+                if mode == CONTENT_LENGTH_FAILURE_MODE:
+                    # One complete upstream body, with an exact length including
+                    # the malformed suffix: only proxy suppression changes it.
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    self.wfile.flush()
+                    self.server.calls[-1].update(content_length=len(data), body_bytes=len(data), body_writes=1)
+                    return
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
                 # Flush normal deltas before the transport fault, as in the issue repro.
@@ -277,9 +291,14 @@ token_env = "CC_LB_ADMIN_TOKEN"
                 self.original, self.capture = original, capture
 
             def __iter__(self):
-                for chunk in self.original:
-                    self.capture["body"].extend(chunk)
-                    yield chunk
+                try:
+                    for chunk in self.original:
+                        self.capture["body"].extend(chunk)
+                        yield chunk
+                    self.capture["body_complete"] = True
+                except httpx.HTTPError as error:
+                    self.capture["transport_error"] = {"exception": type(error).__name__, "message": str(error)}
+                    raise
 
             def close(self):
                 self.original.close()
@@ -293,7 +312,7 @@ token_env = "CC_LB_ADMIN_TOKEN"
                 response = self.transport.handle_request(request)
                 id_headers = {name: response.headers.get(name) for name in ("request-id", "x-request-id")}
                 id_source = next((name for name, value in id_headers.items() if value), None)
-                capture = {"status": response.status_code, "request_id": id_headers[id_source] if id_source else None, "request_id_source": id_source, "request_id_headers": id_headers, "content_type": response.headers.get("content-type", ""), "body": bytearray()}
+                capture = {"status": response.status_code, "request_id": id_headers[id_source] if id_source else None, "request_id_source": id_source, "request_id_headers": id_headers, "content_type": response.headers.get("content-type", ""), "headers": dict(response.headers), "body": bytearray(), "body_complete": False, "transport_error": None}
                 captures.append(capture)
                 response.stream = CaptureStream(response.stream, capture)
                 return response
@@ -303,7 +322,7 @@ token_env = "CC_LB_ADMIN_TOKEN"
 
         return httpx.Client(transport=LoopbackTransport(), timeout=20, trust_env=False)
 
-    def sdk_request(self, provider, streaming):
+    def sdk_request(self, provider, streaming, observe_transport_error=False):
         before = len(self.captures)
         result = {"events": [], "message": None, "exception": None, "native_error": None}
         with self.capture_client() as http_client:
@@ -325,6 +344,11 @@ token_env = "CC_LB_ADMIN_TOKEN"
                         result["exception"] = type(error).__name__
                         result["message"] = error.message
                         result["native_error"] = error.body
+                    except self.httpx.HTTPError as error:
+                        if not observe_transport_error:
+                            raise
+                        result["exception"] = type(error).__name__
+                        result["transport_error"] = {"exception": type(error).__name__, "message": str(error)}
             else:
                 options = self.types.HttpOptions(base_url=self.base_url + "/gemini", api_version="v1beta", headers={"Authorization": "Bearer " + self.key}, httpx_client=http_client, retry_options=self.types.HttpRetryOptions(attempts=1))
                 with self.genai.Client(api_key=self.key, vertexai=False, http_options=options) as client:
@@ -395,7 +419,7 @@ token_env = "CC_LB_ADMIN_TOKEN"
         before = len(self.server.calls)
         with sqlite3.connect(f"file:{self.db}?mode=ro", uri=True) as db:
             baseline = db.execute("SELECT COALESCE(MAX(id), 0) FROM request_events_v1").fetchone()[0]
-        sdk, capture = self.sdk_request(provider, streaming)
+        sdk, capture = self.sdk_request(provider, streaming, observe_transport_error=mode == CONTENT_LENGTH_FAILURE_MODE)
         require(self.server.failure is None, self.server.failure or "upstream failed")
         require(len(self.server.calls) == before + 1, name + ": expected exactly one upstream request")
         body = bytes(capture.pop("body"))
@@ -410,6 +434,32 @@ token_env = "CC_LB_ADMIN_TOKEN"
         self.report["cases"].append(evidence)
         if streaming:
             require("text/event-stream" in capture["content_type"], name + ": wrong SSE content type")
+        if mode == CONTENT_LENGTH_FAILURE_MODE:
+            expected_body = self.server.last_body[:-len(MALFORMED_COMPLETE_SUFFIX)]
+            call = self.server.calls[-1]
+            require(call["content_length"] == call["body_bytes"] == len(self.server.last_body) and call["body_writes"] == 1, name + ": upstream did not send one exactly framed body")
+            (self.root / (name + ".upstream.sse")).write_bytes(self.server.last_body)
+            evidence["upstream"] = call
+            evidence["body_bytes"] = len(body)
+            content_length = capture["headers"].get("content-length")
+            checks = {
+                "http_status": capture["status"] == 200,
+                "transport_complete": capture["body_complete"] and capture["transport_error"] is None and sdk["exception"] is None,
+                "downstream_framing": content_length is None or content_length == str(len(body)),
+                "unchanged_provider_prefix": body == expected_body,
+                "single_provider_terminal": sdk["events"].count("response.failed") == 1 and "response.completed" not in sdk["events"] and "error" not in sdk["events"],
+                "provider_error": (sdk["native_error"] or {}).get("code") == "rate_limit_exceeded" and sdk["message"] == PROVIDER_RATE_LIMIT_MESSAGE,
+                "durable_failure": event["error_code"] == "upstream_stream_error" and event["status"] == 200,
+                "durable_provider_error": event["admin_event"].get("upstream_error_type") == "rate_limit_exceeded" and event["admin_event"].get("upstream_error_message") == PROVIDER_RATE_LIMIT_MESSAGE,
+            }
+            evidence["wire_contract_checks"] = checks
+            evidence["wire_contract_passed"] = all(checks.values())
+            self.contract(name, evidence["wire_contract_passed"])
+            if self.expect == "old":
+                # Baseline runs record actual diagnostics without pinning the
+                # oracle to one SDK exception class or transport message.
+                evidence["baseline_observation"] = "PASS" if evidence["wire_contract_passed"] else "FAIL"
+            return
         if mode == "healthy":
             require(capture["status"] == 200, name + ": wrong HTTP status")
             require(sdk["exception"] is None, name + ": SDK rejected healthy control")
@@ -470,11 +520,14 @@ token_env = "CC_LB_ADMIN_TOKEN"
             self.case("openai", True, mode)
             self.case("openai", False, mode)
             self.case("gemini", False, mode)
+        self.case("openai", True, CONTENT_LENGTH_FAILURE_MODE)
         # Re-read all durable rows after every request, catching delayed duplicates.
         with sqlite3.connect(f"file:{self.db}?mode=ro", uri=True) as db:
             counts = db.execute("SELECT request_id, upstream_id, COUNT(*) FROM request_events_v1 GROUP BY request_id, upstream_id").fetchall()
-        require(len(counts) == 9 and all(count == 1 for _, _, count in counts), "durable accounting is not exactly once across all nine request/upstream identities")
+        require(len(counts) == 10 and all(count == 1 for _, _, count in counts), "durable accounting is not exactly once across all ten request/upstream identities")
         expected_failures = ["openai-stream-fault", "openai-buffered-fault", "gemini-buffered-fault"] if self.expect == "old" else []
+        if self.expect == "old":
+            expected_failures.append("openai-stream-" + CONTENT_LENGTH_FAILURE_MODE)
         require(self.report["contract_failures"] == expected_failures, "native contracts differ from --expect; inspect report.json")
         self.report["result"] = "PASS" if self.expect == "new" else "OLD_DEFECTS_REPRODUCED"
 
@@ -502,7 +555,7 @@ token_env = "CC_LB_ADMIN_TOKEN"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expect", choices=("old", "new"), default="new", help="new is the regression gate; old proves all three original defects plus unchanged controls")
+    parser.add_argument("--expect", choices=("old", "new"), default="new", help="new is the regression gate; old proves the three original defects and the Content-Length framing defect")
     parser.add_argument("--output-parent", type=Path, default=Path(tempfile.gettempdir()), help="existing scratch parent outside the repository; a fresh run directory is always created")
     args = parser.parse_args()
     binary = os.environ.get("CC_LB_BIN")
@@ -525,7 +578,7 @@ def main():
         run.execute()
     finally:
         run.close()
-    print(run.report["result"], "9 loopback requests; no provider calls")
+    print(run.report["result"], f"{len(run.report['cases'])} loopback requests; no provider calls")
     print("Replay fixture:", root / "responses-fault.sse")
 
 
