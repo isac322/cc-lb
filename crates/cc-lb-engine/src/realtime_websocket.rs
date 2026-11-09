@@ -3,20 +3,23 @@ use crate::completion_observer::{CompletionObserver, StreamCompletionLog, Stream
 use crate::downstream_stream_drop_guard::record_stream_termination_metric;
 use crate::responses_websocket::WebSocketCandidate;
 use crate::terminal_observer::{
-    InternalFailure, LifecycleContext, StreamTerminationCause, StreamTerminationOutcome,
-    UpstreamErrorCode, record_websocket_terminal_span,
+    InternalFailure, LifecycleContext, StreamErrorClassification, StreamTerminationCause,
+    StreamTerminationOutcome, UpstreamErrorCode, classify_stream_error,
+    record_websocket_terminal_span,
 };
 use crate::usage_parser::{UsageCounts, merge_usage_value, merge_usage_value_for_shape};
 use bytes::Bytes;
 use cc_lb_control::api_keys::limit_engine::{LimitEngine, Reservation};
 use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, Provider};
 use cc_lb_lifecycle::{LifecycleEvent, StreamError, StreamSuccess, UsageSnapshot, UsageSource};
+use cc_lb_observability::{RedactionPolicy, truncate_reason};
 use cc_lb_upstream::{
     RealtimeFrameDirection, RealtimeFrameKind, TransformRealtimeFrameRequest,
     TransformRealtimeFrameResult,
 };
 use http::{HeaderMap, StatusCode};
 use serde_json::Value;
+use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::Instant;
 use url::Url;
@@ -33,6 +36,64 @@ pub enum RealtimeWebSocketTermination {
     ProviderClosed,
     ProxyRelayError,
     DownstreamCancelled,
+}
+
+/// Bounded transport diagnostics retained independently of provider frame bodies.
+#[derive(Default)]
+pub struct RealtimeWebSocketDiagnostics {
+    close: Option<(u16, String)>,
+    relay_error: Option<StreamErrorClassification>,
+}
+
+impl RealtimeWebSocketDiagnostics {
+    pub fn with_close(mut self, code: u16, reason: &str) -> Self {
+        self.close = Some((
+            code,
+            truncate_reason(&RedactionPolicy::default().redact_text(reason)),
+        ));
+        self
+    }
+
+    /// Classify the real relay error chain without inventing HTTP/2 attribution.
+    pub fn with_relay_error(mut self, error: &(dyn StdError + 'static)) -> Self {
+        let mut classified = classify_stream_error(error);
+        let mut source = Some(error);
+        let mut io_cause = None;
+        for _ in 0..8 {
+            let Some(error) = source else {
+                break;
+            };
+            if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                io_cause = Some(classify_stream_error(error).cause);
+                break;
+            }
+            source = error.source();
+        }
+        classified.cause = io_cause.unwrap_or(StreamTerminationCause::TransportError);
+        classified.h2_reason = None;
+        self.relay_error = Some(classified);
+        self
+    }
+
+    fn message(&self) -> Option<String> {
+        match (&self.close, &self.relay_error) {
+            (Some((code, reason)), Some(error)) => Some(truncate_reason(&format!(
+                "websocket close code={code} reason={reason}; {}",
+                error.redacted_chain,
+            ))),
+            (Some((code, reason)), None) => Some(truncate_reason(&format!(
+                "websocket close code={code} reason={reason}",
+            ))),
+            (None, Some(error)) => Some(error.redacted_chain.clone()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Cheap cloneable handle passed to the usage worker, never the relay parser.
+#[derive(Clone)]
+pub struct RealtimeUsageObserver {
+    observer: Option<LifecycleContext>,
 }
 
 fn realtime_stream_complete(
@@ -319,6 +380,7 @@ pub struct RealtimeWebSocketSession {
     pub(crate) upstream: cc_lb_domain::Upstream,
     pub(crate) path: String,
     pub(crate) dialect: Arc<dyn cc_lb_upstream::UpstreamDialect>,
+    pub(crate) provider_request_id: Option<String>,
 }
 
 impl RealtimeWebSocketSession {
@@ -353,7 +415,15 @@ impl RealtimeWebSocketSession {
         })
     }
 
-    pub fn connected(&self) {
+    /// Publish the actual successful provider upgrade, not an HTTP body milestone.
+    pub fn connected(&mut self, response_headers: &HeaderMap) {
+        self.provider_request_id = ["x-request-id", "request-id", "x-goog-request-id"]
+            .iter()
+            .find_map(|name| {
+                let value = response_headers.get(*name)?.to_str().ok()?;
+                (!value.is_empty() && value.len() <= 512)
+                    .then(|| truncate_reason(&RedactionPolicy::default().redact_text(value)))
+            });
         if let Some(observer) = &self.observer {
             observer.set_response_stream_span(self.stream_span.clone());
             observer.emit_lifecycle(LifecycleEvent::UpstreamAttempt {
@@ -362,6 +432,31 @@ impl RealtimeWebSocketSession {
                 upstream_id: self.candidate.upstream_id,
             });
             observer.set_success_status(StatusCode::SWITCHING_PROTOCOLS);
+            observer.emit_lifecycle(LifecycleEvent::UpstreamResponseStarted {
+                event_id: observer.event_id().to_owned(),
+                status: StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+                headers: Default::default(),
+                bulkhead_wait_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
+                shape_ms: None,
+                sign_ms: None,
+                upstream_ttfb_ms: None,
+            });
+        }
+    }
+
+    /// Trace propagation belongs to the engine-created connection child span.
+    pub fn inject_trace_context(&self, headers: &mut HeaderMap) {
+        self.stream_span.in_scope(|| {
+            cc_lb_observability::inject_current_trace_context(headers);
+        });
+    }
+
+    pub fn usage_observer(&self) -> RealtimeUsageObserver {
+        RealtimeUsageObserver {
+            observer: self.observer.clone(),
         }
     }
 
@@ -371,6 +466,7 @@ impl RealtimeWebSocketSession {
         usage: RealtimeUsage,
         metrics: RealtimeStreamMetrics,
         termination: RealtimeWebSocketTermination,
+        diagnostics: RealtimeWebSocketDiagnostics,
     ) {
         let status = StatusCode::SWITCHING_PROTOCOLS;
         // A proxy relay error or downstream cancellation always wins over a
@@ -381,7 +477,10 @@ impl RealtimeWebSocketSession {
             termination,
             metrics.turn_complete().unwrap_or(usage.complete),
         );
-        let (outcome, cause) = realtime_terminal_outcome(termination, complete);
+        let (outcome, mut cause) = realtime_terminal_outcome(termination, complete);
+        if !complete && let Some(error) = &diagnostics.relay_error {
+            cause = error.cause;
+        }
         record_stream_termination_metric(
             outcome,
             cause,
@@ -401,31 +500,63 @@ impl RealtimeWebSocketSession {
                 Some("realtime WebSocket stream ended before completion"),
             )
         };
+        let diagnostic_message = diagnostics.message();
+        let error_message = diagnostic_message.as_deref().or(error_message);
+        if let Some((code, reason)) = &diagnostics.close {
+            self.stream_span
+                .record("websocket.close.code", i64::from(*code));
+            self.stream_span
+                .record("websocket.close.reason", reason.as_str());
+        }
+        if let Some(error) = &diagnostics.relay_error {
+            self.stream_span
+                .record("error.io.kind", error.io_kind.as_deref());
+            self.stream_span
+                .record("error.io.os_error", error.io_os_error);
+        }
         record_websocket_terminal_span(
             &self.stream_span,
             outcome,
             cause,
             error_type,
-            error_message,
+            if complete { None } else { error_message },
         );
         if let Some(observer) = &self.observer {
             if let Some(counts) = usage.counts.as_ref() {
                 observer.set_usage_counts(counts, complete);
                 observer.emit_lifecycle(LifecycleEvent::UsageObserved {
                     event_id: observer.event_id().to_owned(),
-                    usage: UsageSnapshot {
-                        input_tokens: counts.input_tokens,
-                        output_tokens: counts.output_tokens,
-                        input_image_tokens: counts.input_image_tokens,
-                        output_image_tokens: counts.output_image_tokens,
-                        cache_read_input_tokens: counts.cache_read_input_tokens,
-                        cache_write_input_tokens: counts.cache_write_input_tokens,
-                        cache_write_input_tokens_30m: counts.cache_write_input_tokens_30m,
-                        cache_write_input_tokens_12h: counts.cache_write_input_tokens_12h,
-                        thinking_tokens: counts.thinking_tokens,
+                    usage: usage.snapshot(),
+                    source: UsageSource::NonStreamBody,
+                });
+            }
+            if !complete || diagnostics.close.is_some() || self.provider_request_id.is_some() {
+                observer.emit_lifecycle(LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+                    event_id: observer.event_id().to_owned(),
+                    diagnostics: cc_lb_lifecycle::UpstreamStreamDiagnostics {
+                        // The upgraded WebSocket has no HTTP response body.
+                        http_version: None,
+                        request_id: self.provider_request_id.clone(),
+                        body_bytes: metrics.total_bytes,
+                        body_end: diagnostics
+                            .relay_error
+                            .as_ref()
+                            .map(|_| cc_lb_lifecycle::UpstreamBodyEnd::TransportError),
+                        body_error_cause: (!complete).then(|| cause.as_str().to_owned()),
+                        body_error_io_kind: diagnostics
+                            .relay_error
+                            .as_ref()
+                            .and_then(|error| error.io_kind.clone()),
+                        warning_type: diagnostics
+                            .close
+                            .as_ref()
+                            .map(|_| "websocket_close".to_owned()),
+                        warning_message: diagnostics
+                            .close
+                            .as_ref()
+                            .and_then(|_| diagnostic_message.clone()),
                         ..Default::default()
                     },
-                    source: UsageSource::NonStreamBody,
                 });
             }
             let latency = metrics.latency(status.as_u16());
@@ -461,7 +592,8 @@ impl RealtimeWebSocketSession {
                             _ => "realtime_stream_incomplete",
                         }
                         .to_owned(),
-                        error_message: "realtime WebSocket stream ended before completion"
+                        error_message: error_message
+                            .unwrap_or("realtime WebSocket stream ended before completion")
                             .to_owned(),
                         body_bytes: Some(latency.total_bytes),
                         body_chunk_count: Some(latency.stream_event_count),
@@ -494,7 +626,8 @@ impl RealtimeWebSocketSession {
                             stage: InternalErrorStage::Relay,
                             kind: InternalErrorKind::Unavailable,
                             message: Some(
-                                "realtime WebSocket relay failed before provider completion"
+                                error_message
+                                    .unwrap_or("realtime WebSocket relay failed before provider completion")
                                     .to_owned(),
                             ),
                         },
@@ -578,9 +711,18 @@ impl RealtimeWebSocketSession {
 pub struct RealtimeUsage {
     counts: Option<UsageCounts>,
     complete: bool,
+    observer: Option<RealtimeUsageObserver>,
+    published: Option<UsageSnapshot>,
 }
 
 impl RealtimeUsage {
+    pub fn with_observer(observer: RealtimeUsageObserver) -> Self {
+        Self {
+            observer: Some(observer),
+            ..Default::default()
+        }
+    }
+
     /// Run on the bounded usage worker, never on the transport relay task.
     pub fn observe(&mut self, kind: RealtimeWebSocketKind, frame: &Bytes) {
         let Ok(value) = sonic_rs::from_slice::<Value>(frame) else {
@@ -693,15 +835,28 @@ impl RealtimeUsage {
                 };
                 merge_usage_value(&mut normalized, usage);
                 // Live usageMetadata is cumulative for the session, unlike Realtime response.done.
-                self.counts = Some(UsageCounts {
-                    present: true,
-                    billable_present: true,
-                    input_tokens: normalized.input_tokens,
-                    output_tokens: number(usage, "responseTokenCount")
-                        .saturating_add(number(usage, "thoughtsTokenCount")),
-                    cache_read_input_tokens: normalized.cache_read_input_tokens,
-                    ..Default::default()
+                normalized.output_tokens = number(usage, "responseTokenCount")
+                    .saturating_add(number(usage, "thoughtsTokenCount"));
+                self.counts = Some(normalized);
+            }
+        }
+        if let Some(observer) = self
+            .observer
+            .as_ref()
+            .and_then(|handle| handle.observer.as_ref())
+            && let Some(counts) = self.counts.as_ref()
+        {
+            let snapshot = self.snapshot();
+            if self.published.as_ref() != Some(&snapshot) {
+                // Active counters are cumulative replacements. Only finish can
+                // declare completeness after the terminal relay path is known.
+                observer.set_usage_counts(counts, false);
+                observer.emit_lifecycle(LifecycleEvent::UsageObserved {
+                    event_id: observer.event_id().to_owned(),
+                    usage: snapshot.clone(),
+                    source: UsageSource::NonStreamBody,
                 });
+                self.published = Some(snapshot);
             }
         }
     }
@@ -713,8 +868,44 @@ impl RealtimeUsage {
                 output_tokens: counts.output_tokens,
                 input_image_tokens: counts.input_image_tokens,
                 output_image_tokens: counts.output_image_tokens,
+                cache_creation_input_tokens: counts.cache_creation_input_tokens,
+                cache_creation_input_tokens_5m: counts.cache_creation_input_tokens_5m,
+                cache_creation_input_tokens_1h: counts.cache_creation_input_tokens_1h,
                 cache_read_input_tokens: counts.cache_read_input_tokens,
-                ..Default::default()
+                cache_write_input_tokens: counts.cache_write_input_tokens,
+                cache_write_input_tokens_30m: counts.cache_write_input_tokens_30m,
+                cache_write_input_tokens_12h: counts.cache_write_input_tokens_12h,
+                cache_read_evidence: match counts.cache_read_evidence {
+                    crate::usage_parser::CacheTokenEvidence::Unreported => None,
+                    crate::usage_parser::CacheTokenEvidence::Zero => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Positive => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Invalid => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+                    }
+                },
+                cache_creation_evidence: match counts.cache_creation_evidence {
+                    crate::usage_parser::CacheTokenEvidence::Unreported => None,
+                    crate::usage_parser::CacheTokenEvidence::Zero => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Positive => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Invalid => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+                    }
+                },
+                thinking_tokens: counts.thinking_tokens,
+                tool_use_prompt_tokens: counts.tool_use_prompt_tokens,
+                web_search_requests: counts.web_search_requests,
+                web_fetch_requests: counts.web_fetch_requests,
+                service_tier: counts.service_tier.clone(),
+                inference_geo: counts.inference_geo.clone(),
+                iterations: counts.iterations.clone(),
             })
             .unwrap_or_default()
     }
@@ -742,6 +933,164 @@ mod tests {
     use bytes::Bytes;
     use http::StatusCode;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    #[test]
+    fn realtime_diagnostics_redact_bound_and_classify_real_io() {
+        let reason = format!("Bearer abcdef.ghijkl {}", "x".repeat(4096));
+        let error = std::io::Error::from_raw_os_error(54);
+        let diagnostics = super::RealtimeWebSocketDiagnostics::default()
+            .with_close(1011, &reason)
+            .with_relay_error(&error);
+        let message = diagnostics.message().expect("native close retained");
+        assert!(message.starts_with("websocket close code=1011 reason="));
+        assert!(!message.contains("Bearer abcdef.ghijkl"));
+        assert!(message.len() <= cc_lb_observability::ROUTING_REASON_MAX_BYTES);
+        let io = diagnostics.relay_error.expect("typed I/O classification");
+        assert_eq!(io.io_os_error, Some(54));
+        assert_eq!(io.io_kind, Some(format!("{:?}", error.kind())));
+        assert_eq!(io.h2_reason, None);
+    }
+
+    #[test]
+    fn realtime_relay_io_causes_remain_typed_without_h2() {
+        for (kind, expected) in [
+            (
+                std::io::ErrorKind::ConnectionReset,
+                StreamTerminationCause::IoReset,
+            ),
+            (
+                std::io::ErrorKind::TimedOut,
+                StreamTerminationCause::IoTimeout,
+            ),
+            (
+                std::io::ErrorKind::UnexpectedEof,
+                StreamTerminationCause::UnexpectedEof,
+            ),
+        ] {
+            let error = std::io::Error::new(kind, "relay failed");
+            let diagnostics =
+                super::RealtimeWebSocketDiagnostics::default().with_relay_error(&error);
+            let io = diagnostics.relay_error.expect("real transport error");
+            assert_eq!(io.cause, expected);
+            assert_eq!(io.io_kind, Some(format!("{kind:?}")));
+            assert_eq!(io.h2_reason, None);
+        }
+    }
+
+    #[test]
+    fn realtime_usage_publishes_changed_cumulative_snapshots_before_finish() {
+        use cc_lb_clock::{ClockHandle, SystemClock};
+        use cc_lb_control::RequestEventBus;
+        use cc_lb_control::event_bus::InMemoryBus;
+        use cc_lb_lifecycle::LifecycleEvent;
+        use std::sync::Arc;
+
+        for kind in [RealtimeWebSocketKind::Openai, RealtimeWebSocketKind::Gemini] {
+            let bus = Arc::new(InMemoryBus::new());
+            let mut events = bus.subscribe_lifecycle();
+            let clock: ClockHandle = Arc::new(SystemClock);
+            let observer = crate::terminal_observer::LifecycleContext::new(
+                "realtime-usage".to_owned(),
+                bus,
+                &clock,
+            );
+            observer.mark_authn_reached();
+            let mut usage = RealtimeUsage::with_observer(super::RealtimeUsageObserver {
+                observer: Some(observer.clone()),
+            });
+            let frames = match kind {
+                RealtimeWebSocketKind::Openai => [
+                    br#"{"type":"response.done","response":{"usage":{"input_tokens":10,"output_tokens":3}}}"#.as_slice(),
+                    br#"{"type":"response.done","response":{"usage":{"input_tokens":10,"output_tokens":4}}}"#.as_slice(),
+                ],
+                RealtimeWebSocketKind::Gemini => [
+                    br#"{"usageMetadata":{"promptTokenCount":10,"responseTokenCount":2,"thoughtsTokenCount":1,"cachedContentTokenCount":0,"toolUsePromptTokenCount":0}}"#.as_slice(),
+                    br#"{"usageMetadata":{"promptTokenCount":25,"responseTokenCount":5,"thoughtsTokenCount":2,"cachedContentTokenCount":5,"toolUsePromptTokenCount":9}}"#.as_slice(),
+                ],
+            };
+            for (index, (frame, expected)) in frames.into_iter().zip([(10, 3), (20, 7)]).enumerate()
+            {
+                usage.observe(kind, &Bytes::copy_from_slice(frame));
+                let LifecycleEvent::UsageObserved {
+                    usage: snapshot, ..
+                } = events.try_recv().expect("active snapshot before close")
+                else {
+                    panic!("expected only a usage observation");
+                };
+                assert_eq!((snapshot.input_tokens, snapshot.output_tokens), expected);
+                if kind == RealtimeWebSocketKind::Gemini {
+                    assert_eq!(snapshot.tool_use_prompt_tokens, Some([0, 9][index]));
+                    assert_eq!(snapshot.thinking_tokens, [1, 2][index]);
+                    assert_eq!(snapshot.cache_read_input_tokens, [0, 5][index]);
+                    assert_eq!(
+                        snapshot.cache_read_evidence,
+                        Some(
+                            [
+                                cc_lb_request_log::RequestCacheEvidence::Zero,
+                                cc_lb_request_log::RequestCacheEvidence::Positive,
+                            ][index]
+                        )
+                    );
+                }
+                assert!(events.try_recv().is_err(), "no early terminal observation");
+            }
+            if kind == RealtimeWebSocketKind::Gemini {
+                usage.observe(kind, &Bytes::copy_from_slice(frames[1]));
+                assert!(
+                    events.try_recv().is_err(),
+                    "unchanged cumulative usage is deduplicated"
+                );
+            }
+            usage.observe(kind, &Bytes::from_static(br#"{"ignored":true}"#));
+            assert!(events.try_recv().is_err(), "ordinary frames are not usage");
+            assert_eq!(
+                (
+                    usage.snapshot().input_tokens,
+                    usage.snapshot().output_tokens
+                ),
+                (20, 7)
+            );
+            if kind == RealtimeWebSocketKind::Gemini {
+                use cc_lb_request_log::RequestCacheEvidence;
+                for (frame, tool_tokens, evidence) in [
+                    (
+                        br#"{"usageMetadata":{"promptTokenCount":20,"responseTokenCount":4}}"#.as_slice(),
+                        None,
+                        None,
+                    ),
+                    (
+                        br#"{"usageMetadata":{"promptTokenCount":20,"responseTokenCount":4,"cachedContentTokenCount":0,"toolUsePromptTokenCount":0}}"#.as_slice(),
+                        Some(0),
+                        Some(RequestCacheEvidence::Zero),
+                    ),
+                    (
+                        br#"{"usageMetadata":{"promptTokenCount":20,"responseTokenCount":4,"cachedContentTokenCount":"invalid"}}"#.as_slice(),
+                        None,
+                        Some(RequestCacheEvidence::Invalid),
+                    ),
+                ] {
+                    usage.observe(kind, &Bytes::copy_from_slice(frame));
+                    let LifecycleEvent::UsageObserved { usage: snapshot, .. } =
+                        events.try_recv().expect("metadata changes remain observable")
+                    else {
+                        panic!("expected active usage metadata");
+                    };
+                    assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (20, 4));
+                    assert_eq!(snapshot.tool_use_prompt_tokens, tool_tokens);
+                    assert_eq!(snapshot.thinking_tokens, 0);
+                    assert_eq!(snapshot.cache_read_input_tokens, 0);
+                    assert_eq!(snapshot.cache_read_evidence, evidence);
+                    usage.observe(kind, &Bytes::copy_from_slice(frame));
+                    assert!(events.try_recv().is_err(), "identical metadata is deduplicated");
+                }
+            }
+            observer.finish();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(LifecycleEvent::RequestTerminated { .. })
+            ));
+        }
+    }
     use std::sync::Arc;
 
     struct UnusedRealtimeDialect;
@@ -840,11 +1189,13 @@ mod tests {
                     },
                     path: "/realtime".to_owned(),
                     dialect: Arc::new(UnusedRealtimeDialect),
+                    provider_request_id: None,
                 };
                 session.finish(
                     usage,
                     RealtimeStreamMetrics::new(),
                     RealtimeWebSocketTermination::Completed,
+                    super::RealtimeWebSocketDiagnostics::default(),
                 );
                 fixture
                     .assert_settled(
@@ -858,7 +1209,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn realtime_usage_sums_only_response_done() {
         let mut usage = RealtimeUsage::default();

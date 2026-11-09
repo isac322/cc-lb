@@ -749,3 +749,735 @@ async fn websocket_handshake_gemini_provider_401_and_429_preserve_status() {
         provider_task.abort();
     }
 }
+
+fn native_websocket_path(gemini: bool) -> &'static str {
+    if gemini {
+        "/gemini/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+    } else {
+        "/openai/v1/realtime?model=gpt-realtime"
+    }
+}
+
+async fn native_websocket_observed_state(
+    address: SocketAddr,
+    gemini: bool,
+    bus: Arc<cc_lb_control::InMemoryBus>,
+    concurrent_limit: Option<i64>,
+) -> ProxyState {
+    let mut upstream = websocket_upstream(
+        1,
+        "native-provider",
+        Url::parse(&format!("http://{address}/")).unwrap(),
+    );
+    upstream.kind = if gemini {
+        UpstreamKind::GeminiApiKey
+    } else {
+        UpstreamKind::OpenaiApiKey
+    };
+    let mut state = websocket_test_state(
+        vec![upstream],
+        TerminalStrategy::FirstPick,
+        DrainController::new(),
+        Arc::new(RealtimeKeySignerFactory),
+        Arc::new(FixtureKeyStore),
+        vec!["*".to_owned()],
+    )
+    .await;
+    state.storage.initialize().await
+        .expect("initialize the complete runtime SQLite schema");
+    let lifecycle = Arc::try_unwrap(state.lifecycle)
+        .unwrap_or_else(|_| panic!("private fixture lifecycle has one owner"));
+    let mut lifecycle = lifecycle.with_event_bus(bus);
+    if let Some(cap) = concurrent_limit {
+        let view = state.dynamic_view.load();
+        let principal_view = Arc::new(PrincipalView::for_tests(
+            TEST_PRINCIPAL,
+            true,
+            vec!["*".to_owned()],
+            vec![cc_lb_storage_api::principal::Limit {
+                kind: cc_lb_storage_api::principal::LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: cap,
+            }],
+            HashMap::from([(
+                TEST_PRINCIPAL.to_owned(),
+                (
+                    Some(Arc::new(RouterPipelineCache {
+                        user_filters: Vec::new(),
+                        terminal: TerminalStrategy::FirstPick,
+                        instantiation_error: None,
+                        provider_filters: None,
+                    })),
+                    DialectCache::Inherit,
+                ),
+            )]),
+        ));
+        state.dynamic_view.store(
+            cc_lb_control::DynamicViewBuilder::from_view(&view)
+                .principal_view(principal_view)
+                .build(),
+        );
+        lifecycle = lifecycle.with_static_limit_subject(
+            LimitEngine::new(
+                Arc::new(KeyConcurrencyManager::new()),
+                state.clock.clone(),
+            ),
+            TEST_PRINCIPAL.to_owned(),
+            TEST_KEY.key_id.clone(),
+            TEST_KEY.record.clone(),
+        );
+    }
+    state.lifecycle = Arc::new(lifecycle);
+    state
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn realtime_and_live_principal_concurrent_limit_rejects_without_second_provider_contact() {
+    for (gemini, http_control) in [(false, true), (false, false), (true, false)] {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let metrics_handle = recorder.handle();
+        let _metrics_guard = metrics::set_default_local_recorder(&recorder);
+        let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+        let address = listener.local_addr().unwrap();
+        let provider_listener = listener.clone();
+        let provider = tokio::spawn(async move {
+            let (stream, _) = provider_listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if gemini {
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap().to_text().unwrap(),
+                    r#"{"setup":{"model":"models/gemini-live"}}"#,
+                );
+            }
+            socket.send(provider_ready_message()).await.unwrap();
+            while socket.next().await.is_some() {}
+        });
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let event_logger =
+            cc_lb_engine::spawn_lifecycle_event_logger(bus.attach_lifecycle_writer(128));
+        let state = native_websocket_observed_state(address, gemini, bus.clone(), Some(1)).await;
+        let storage = state.storage.clone();
+        let (audit_sink, audit_writer) =
+            cc_lb_control::spawn_audit_writer(storage.clone(), 16);
+        let audit_subscriber = cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(
+            bus.attach_lifecycle_limit_rejection_audit(128),
+            Arc::new(audit_sink),
+        );
+        let (proxy, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+        let (mut first, _) = connect_async(realtime_request(proxy, native_websocket_path(gemini)))
+            .await
+            .expect("first session is admitted");
+        if gemini {
+            first
+                .send(UpstreamMessage::Text(
+                    r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
+                ))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), first.next())
+                .await.unwrap().unwrap().unwrap(),
+            provider_ready_message(),
+        );
+        if http_control {
+            let response = reqwest::Client::new()
+                .post(format!("http://{proxy}/openai/v1/responses"))
+                .header("x-api-key", TEST_KEY.plaintext.as_str())
+                .header("content-type", "application/json")
+                .body(r#"{"model":"gpt-4.1","input":"concurrent admission control","max_output_tokens":100,"store":false}"#)
+                .send()
+                .await
+                .expect("HTTP Responses control receives an admission response");
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let body = response.bytes().await.expect("HTTP control rejection body");
+            let value: serde_json::Value = serde_json::from_slice(&body)
+                .expect("HTTP control rejection is JSON");
+            assert!(value["error"].is_object());
+        } else if gemini {
+            let (mut second, response) =
+                connect_async(realtime_request(proxy, native_websocket_path(true)))
+                    .await
+                    .expect("Live upgrades before model-bearing setup admission");
+            assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+            second
+                .send(UpstreamMessage::Text(
+                    r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
+                ))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(5), second.next())
+                .await.unwrap().unwrap().unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(value["status"], 429);
+            assert_eq!(value["error"]["type"], "rate_limit_error");
+            assert_eq!(value["error"]["code"], "limit_rejected");
+        } else {
+            let error = connect_async(realtime_request(proxy, native_websocket_path(false)))
+                .await
+                .expect_err("second Realtime session is rejected before upgrade");
+            let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+                panic!("OpenAI concurrent rejection must be HTTP");
+            };
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let value: serde_json::Value =
+                serde_json::from_slice(response.body().as_ref().unwrap()).unwrap();
+            assert_eq!(value["error"]["type"], "rate_limit_error");
+            assert_eq!(value["error"]["code"], "limit_rejected");
+        }
+        let mut observed = Vec::new();
+        let rejected_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                let rejected = matches!(
+                    event,
+                    LifecycleEvent::RequestTerminated { client_status: 429, .. }
+                );
+                let event_id = event.event_id().clone();
+                observed.push(event);
+                if rejected {
+                    break event_id;
+                }
+            }
+        })
+        .await
+        .expect("denied session terminates");
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "principal denial must happen before a second provider TCP connection",
+        );
+        first.close(None).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), provider)
+            .await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                let first_terminated = matches!(
+                    event,
+                    LifecycleEvent::RequestTerminated { .. }
+                ) && event.event_id() != &rejected_id;
+                observed.push(event);
+                if first_terminated {
+                    break;
+                }
+            }
+        }).await.expect("admitted session terminates after client close");
+        observed.extend(std::iter::from_fn(|| events.try_recv().ok()));
+        let denied: Vec<_> = observed.iter()
+            .filter(|event| event.event_id() == &rejected_id)
+            .collect();
+        assert_eq!(denied.iter().filter(|event| matches!(
+            event,
+            LifecycleEvent::LimitDecision {
+                decision: cc_lb_lifecycle::LimitDecisionKind::Rejected { .. }, ..
+            }
+        )).count(), 1, "one principal denial publishes exactly one rejected decision");
+        assert_eq!(denied.iter().filter(|event| matches!(
+            event, LifecycleEvent::RequestTerminated { .. }
+        )).count(), 1, "one denied session produces exactly one terminal event");
+        assert!(!denied.iter().any(|event| matches!(
+            event, LifecycleEvent::UpstreamAttempt { .. }
+        )), "rejected admission never attempts a provider handshake");
+        audit_subscriber.shutdown().await;
+        event_logger.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(5), audit_writer)
+            .await.unwrap().unwrap();
+        let audits = storage.query_recent_audit(
+            cc_lb_storage_api::AuditQueryScope::All,
+            0,
+            cc_lb_clock::unix_secs(std::time::SystemTime::now()).saturating_add(1),
+            10,
+            false,
+        ).await.unwrap();
+        assert_eq!(audits.len(), 1, "one principal rejection produces one durable audit row");
+        assert_eq!(audits[0].request_id, rejected_id);
+        assert_eq!(audits[0].principal_id, TEST_PRINCIPAL);
+        assert_eq!(audits[0].api_key_id.as_deref(), Some(TEST_KEY.key_id.as_str()));
+        assert_eq!(audits[0].status, 429);
+        assert_eq!(audits[0].limit_violation.as_deref(), Some("Concurrent"));
+        let rendered = metrics_handle.render();
+        for metric in ["cclb_limit_hits_total", "cclb_concurrent_rejects_total"] {
+            let samples: Vec<_> = rendered.lines()
+                .filter(|line| line.starts_with(&format!("{metric}{{")))
+                .filter(|line| line.contains(&format!("key_id=\"{}\"", TEST_KEY.key_id)))
+                .collect();
+            assert_eq!(samples.len(), 1, "{metric} has one key-attributed sample");
+            assert_eq!(samples[0].split_whitespace().last(), Some("1"), "{metric} increments once");
+        }
+        let counter_sum = |metric: &str, labels: &[&str]| -> u64 {
+            rendered.lines()
+                .filter(|line| line.starts_with(&format!("{metric}{{")))
+                .filter(|line| labels.iter().all(|label| line.contains(label)))
+                .map(|line| line.split_whitespace().last().unwrap().parse::<u64>().unwrap())
+                .sum()
+        };
+        assert_eq!(counter_sum(
+            "cc_lb_request_decisions_total",
+            &["stage=\"limit\"", "outcome=\"rejected\""],
+        ), 1, "one denied request records one rejected limit decision");
+        assert_eq!(counter_sum(
+            "cc_lb_lifecycle_limit_rejection_audit_events_total",
+            &["outcome=\"enqueued\""],
+        ), 1, "one denied request enqueues one audit entry");
+        assert_eq!(counter_sum(
+            "cc_lb_lifecycle_limit_rejection_audit_events_total",
+            &["outcome=\"dropped\""],
+        ), 0, "the rejection audit is never dropped");
+        proxy_task.abort();
+    }
+}
+
+struct NativeResponseHeaders;
+
+impl tokio_tungstenite::tungstenite::handshake::server::Callback for NativeResponseHeaders {
+    fn on_request(
+        self,
+        request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+        mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    ) -> Result<
+        tokio_tungstenite::tungstenite::handshake::server::Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
+        let request_id_header = if request.uri().path().starts_with("/ws/") {
+            assert_eq!(request.headers()["x-goog-api-key"], "provider-test-credential");
+            "x-goog-request-id"
+        } else {
+            assert_eq!(request.headers()["authorization"], "Bearer provider-test-credential");
+            "x-request-id"
+        };
+        response.headers_mut().insert(
+            request_id_header,
+            HeaderValue::from_static("native-provider-request-id"),
+        );
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn realtime_and_live_publish_active_cumulative_usage_then_preserve_provider_close() {
+    use cc_lb_request_log::RequestEventUpdate;
+    use cc_lb_storage_api::RequestEventStreamFilters;
+
+    for gemini in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<UpstreamMessage>(1);
+        let provider = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket =
+                tokio_tungstenite::accept_hdr_async(stream, NativeResponseHeaders)
+                    .await.unwrap();
+            if gemini {
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap().to_text().unwrap(),
+                    r#"{"setup":{"model":"models/gemini-live"}}"#,
+                );
+            }
+            while let Some(frame) = frame_rx.recv().await {
+                let closing = frame.is_close();
+                socket.send(frame).await.unwrap();
+                if closing {
+                    return;
+                }
+            }
+        });
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut updates = bus.subscribe();
+        let mut lifecycle_events = bus.subscribe_lifecycle();
+        let state = native_websocket_observed_state(address, gemini, bus.clone(), None).await;
+        let storage = state.storage.clone();
+        let assembler = cc_lb_engine::spawn_request_event_assembler(
+            bus.attach_lifecycle_assembler(128),
+            storage.clone(),
+            Some(bus),
+            Arc::new(cc_lb_observability::NoopMetricsHook),
+        );
+        let (proxy, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+        let (mut client, response) =
+            connect_async(realtime_request(proxy, native_websocket_path(gemini)))
+                .await.unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        if gemini {
+            client.send(UpstreamMessage::Text(
+                r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
+            )).await.unwrap();
+        }
+        let event_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match updates.recv().await.unwrap() {
+                    RequestEventUpdate::Partial(partial)
+                        if partial.upstream_response_status == Some(101) => break partial.event_id,
+                    RequestEventUpdate::Final(_) => panic!("session finalized before provider close"),
+                    _ => {}
+                }
+            }
+        }).await.expect("active dashboard sees the provider upgrade");
+        let frames = if gemini {
+            [
+                r#"{"usageMetadata":{"promptTokenCount":10,"responseTokenCount":2,"thoughtsTokenCount":1,"cachedContentTokenCount":0,"toolUsePromptTokenCount":0}}"#,
+                r#"{"usageMetadata":{"promptTokenCount":25,"responseTokenCount":5,"thoughtsTokenCount":2,"cachedContentTokenCount":5,"toolUsePromptTokenCount":9}}"#,
+            ]
+        } else {
+            [
+                r#"{"type":"response.done","response":{"id":"first","usage":{"input_tokens":10,"output_tokens":3}}}"#,
+                r#"{"type":"response.done","response":{"id":"second","usage":{"input_tokens":10,"output_tokens":4}}}"#,
+            ]
+        };
+        let mut observed_before_close = Vec::new();
+        for (frame, input, output) in [(frames[0], 10, 3), (frames[1], 20, 7)] {
+            frame_tx.send(UpstreamMessage::Text(frame.into())).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), client.next())
+                    .await.unwrap().unwrap().unwrap().to_text().unwrap(),
+                frame,
+            );
+            if input == 10 {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        match updates.recv().await.unwrap() {
+                            RequestEventUpdate::Partial(partial)
+                                if partial.event_id == event_id
+                                    && partial.input_tokens == Some(input)
+                                    && partial.output_tokens == Some(output) => {
+                                        assert_eq!(partial.upstream_response_status, Some(101));
+                                        if gemini {
+                                            assert_eq!(partial.tool_use_prompt_tokens, Some(0));
+                                            assert_eq!(partial.thinking_tokens, Some(1));
+                                        }
+                                        break;
+                                    }
+                            RequestEventUpdate::Final(_) => panic!("usage must be visible before close"),
+                            _ => {}
+                        }
+                    }
+                }).await.expect("dashboard receives first usage while session remains open");
+            } else {
+                // Later dashboard partials are intentionally throttled using std::Instant.
+                // The consumer lifecycle stream still exposes the newest cumulative snapshot.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let event = lifecycle_events.recv().await.unwrap();
+                        assert!(!matches!(event, LifecycleEvent::RequestTerminated { .. }));
+                        let latest = matches!(
+                            &event,
+                            LifecycleEvent::UsageObserved { usage, .. }
+                                if usage.input_tokens == input && usage.output_tokens == output
+                        );
+                        observed_before_close.push(event);
+                        if latest {
+                            break;
+                        }
+                    }
+                }).await.expect("latest cumulative usage is published before provider close");
+            }
+        }
+        if gemini {
+            let completed = r#"{"serverContent":{"turnComplete":true}}"#;
+            frame_tx.send(UpstreamMessage::Text(completed.into())).await.unwrap();
+            assert_eq!(client.next().await.unwrap().unwrap().to_text().unwrap(), completed);
+        }
+        frame_tx.send(UpstreamMessage::Close(Some(
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
+                reason: "provider maintenance".into(),
+            },
+        ))).await.unwrap();
+        let UpstreamMessage::Close(Some(close)) =
+            tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await.unwrap().unwrap().unwrap()
+        else {
+            panic!("native provider close frame must reach the client");
+        };
+        assert_eq!(u16::from(close.code), 1001);
+        assert_eq!(close.reason.as_str(), "provider maintenance");
+        let final_row = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let RequestEventUpdate::Final(final_update) = updates.recv().await.unwrap() {
+                    assert_eq!(final_update.event.event_id.as_deref(), Some(event_id.as_str()));
+                    break final_update.event;
+                }
+            }
+        }).await.expect("closed session produces a durable final row");
+        assert_eq!((final_row.input_tokens, final_row.output_tokens), (Some(20), Some(7)));
+        assert_eq!(final_row.status, 101);
+        let mut response_started = 0;
+        let mut usage_snapshots = Vec::new();
+        let mut stream_completed = 0;
+        let mut request_terminated = 0;
+        observed_before_close.extend(std::iter::from_fn(|| lifecycle_events.try_recv().ok()));
+        for event in observed_before_close {
+            assert_eq!(event.event_id(), &event_id);
+            match event {
+                LifecycleEvent::UpstreamResponseStarted { status, .. } => {
+                    assert_eq!(status, 101);
+                    response_started += 1;
+                }
+                LifecycleEvent::UsageObserved { usage, .. } => {
+                    usage_snapshots.push((usage.input_tokens, usage.output_tokens));
+                }
+                LifecycleEvent::StreamCompleted { result, .. } => {
+                    assert!(result.is_ok(), "completed turns retain successful stream outcome");
+                    stream_completed += 1;
+                }
+                LifecycleEvent::RequestTerminated { client_status, .. } => {
+                    assert_eq!(client_status, 101);
+                    request_terminated += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(response_started, 1, "the close must not re-emit the handshake");
+        assert!(usage_snapshots.contains(&(10, 3)));
+        assert_eq!(usage_snapshots.last(), Some(&(20, 7)));
+        assert_eq!(stream_completed, 1, "one provider close completes the stream once");
+        assert_eq!(request_terminated, 1, "one provider close terminates the request once");
+        assembler.shutdown().await;
+        let cursor = storage.current_request_event_cursor().await.unwrap();
+        let rows = storage.query_request_events_between_cursors(
+            0, cursor, 10, &RequestEventStreamFilters::default(),
+        ).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!((rows[0].1.input_tokens, rows[0].1.output_tokens), (Some(20), Some(7)));
+        let stored = &rows[0].1;
+        assert_eq!(stored.status, 101);
+        if gemini {
+            assert_eq!(stored.tool_use_prompt_tokens, Some(9));
+            assert_eq!(stored.thinking_tokens, Some(2));
+            assert_eq!(stored.cache_read_input_tokens, Some(5));
+        }
+        assert_eq!(stored.upstream_request_id.as_deref(), Some("native-provider-request-id"));
+        assert_eq!(stored.upstream_stream_warning_type.as_deref(), Some("websocket_close"));
+        assert_native_close_details(
+            stored.upstream_stream_warning_message.as_deref()
+                .expect("successful native close details are durable"),
+            1001,
+            "provider maintenance",
+        );
+        assert_eq!(stored.upstream_error_message, None, "completed turns do not become stream errors");
+        assert_eq!(stored.upstream_body_error_h2_reason, None);
+        assert_eq!(stored.upstream_http_version, None);
+        assert_eq!(stored.upstream_body_error_io_kind, None);
+        tokio::time::timeout(Duration::from_secs(5), provider)
+            .await.unwrap().unwrap();
+        proxy_task.abort();
+    }
+}
+
+#[tokio::test]
+async fn realtime_and_live_persist_native_close_details_and_request_id() {
+    use cc_lb_request_log::RequestEventUpdate;
+    use cc_lb_storage_api::RequestEventStreamFilters;
+
+    for gemini in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket =
+                tokio_tungstenite::accept_hdr_async(stream, NativeResponseHeaders)
+                    .await.unwrap();
+            if gemini {
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap().to_text().unwrap(),
+                    r#"{"setup":{"model":"models/gemini-live"}}"#,
+                );
+            }
+            socket.send(UpstreamMessage::Close(Some(
+                tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    reason: "provider policy changed".into(),
+                },
+            ))).await.unwrap();
+        });
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut updates = bus.subscribe();
+        let mut events = bus.subscribe_lifecycle();
+        let state = native_websocket_observed_state(address, gemini, bus.clone(), None).await;
+        let storage = state.storage.clone();
+        let assembler = cc_lb_engine::spawn_request_event_assembler(
+            bus.attach_lifecycle_assembler(128),
+            storage.clone(),
+            Some(bus),
+            Arc::new(cc_lb_observability::NoopMetricsHook),
+        );
+        let (proxy, proxy_task) = spawn_proxy_router(proxy_router(state, 30)).await;
+        let (mut client, response) =
+            connect_async(realtime_request(proxy, native_websocket_path(gemini)))
+                .await.unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        if gemini {
+            client.send(UpstreamMessage::Text(
+                r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
+            )).await.unwrap();
+        }
+        let UpstreamMessage::Close(Some(close)) =
+            tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await.unwrap().unwrap().unwrap()
+        else {
+            panic!("provider policy close must reach the client unchanged");
+        };
+        assert_eq!(u16::from(close.code), 1008);
+        assert_eq!(close.reason.as_str(), "provider policy changed");
+        let row = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let RequestEventUpdate::Final(update) = updates.recv().await.unwrap() {
+                    break update.event;
+                }
+            }
+        }).await.expect("provider close finalizes the request");
+        let recorded = row.upstream_error_message.as_deref()
+            .expect("provider close details reach the final request row");
+        assert_native_close_details(recorded, 1008, "provider policy changed");
+        assert_eq!(row.status, 101, "upgraded sessions never invent an HTTP failure status");
+        let mut request_terminated = 0;
+        let mut errors = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            assert_eq!(Some(event.event_id().as_str()), row.event_id.as_deref());
+            match event {
+                LifecycleEvent::StreamCompleted { result, .. } => {
+                    errors.push(result.expect_err("policy close before completion remains a stream error"));
+                }
+                LifecycleEvent::RequestTerminated { client_status, .. } => {
+                    assert_eq!(client_status, 101);
+                    request_terminated += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(errors.len(), 1);
+        assert_native_close_details(&errors[0].error_message, 1008, "provider policy changed");
+        assert_eq!(recorded, errors[0].error_message, "the row preserves the observed stream error");
+        assert_eq!(request_terminated, 1, "one policy close terminates the request once");
+        assembler.shutdown().await;
+        let cursor = storage.current_request_event_cursor().await.unwrap();
+        let rows = storage.query_request_events_between_cursors(
+            0, cursor, 10, &RequestEventStreamFilters::default(),
+        ).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.event_id, row.event_id);
+        assert_eq!(rows[0].1.upstream_error_message.as_deref(), Some(recorded));
+        assert_eq!(rows[0].1.upstream_request_id.as_deref(), Some("native-provider-request-id"));
+        assert_eq!(rows[0].1.upstream_http_version, None);
+        assert_eq!(rows[0].1.upstream_body_error_io_kind, None);
+        assert_eq!(rows[0].1.upstream_body_error_h2_reason, None);
+        tokio::time::timeout(Duration::from_secs(5), provider)
+            .await.unwrap().unwrap();
+        proxy_task.abort();
+    }
+}
+
+fn assert_native_close_details(message: &str, code: u16, reason: &str) {
+    assert!(message.contains(&code.to_string()), "close code must remain observable");
+    assert!(message.contains(reason), "close reason must remain observable");
+    assert!(
+        message.len() <= cc_lb_observability::ROUTING_REASON_MAX_BYTES,
+        "close details must be bounded",
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn realtime_and_live_handshakes_propagate_child_trace_without_replacing_signer_credentials() {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing_subscriber::prelude::*;
+    use tracing::instrument::WithSubscriber as _;
+
+    // Two live dispatchers make tracing-core register callsites against every subscriber,
+    // rather than caching `never` from an untraced sibling's thread-local dispatcher.
+    let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
+    const TRACE_ID: &str = "0af7651916cd43dd8448eb211c80319c";
+    const PARENT_ID: &str = "b7ad6b7169203331";
+    for gemini in [false, true] {
+        let exporter = InMemorySpanExporter::default();
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer_provider.tracer("native-handshake-test")),
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (capture_tx, capture_rx) = tokio::sync::oneshot::channel();
+        let provider = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                HandshakeCapture { sender: Some(capture_tx) },
+            ).await.unwrap();
+            if gemini {
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap().to_text().unwrap(),
+                    r#"{"setup":{"model":"models/gemini-live"}}"#,
+                );
+            }
+            socket.send(provider_ready_message()).await.unwrap();
+            while socket.next().await.is_some() {}
+        });
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let state = native_websocket_observed_state(address, gemini, bus, None).await;
+        let drain = state.drain_controller.clone();
+        let router = proxy_router(state, 30).layer(middleware::from_fn(
+            move |request: Request<Body>, next: Next| {
+                async move {
+                    next.run(request).await
+                }.with_subscriber(dispatch.clone())
+            },
+        ));
+        let (proxy, proxy_task) = spawn_proxy_router(router).await;
+        let mut request = realtime_request(proxy, native_websocket_path(gemini));
+        request.headers_mut().insert(
+            "traceparent",
+            HeaderValue::from_static("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+        );
+        request.headers_mut().insert("tracestate", HeaderValue::from_static("vendor=value"));
+        let (mut client, _) = connect_async(request).await.unwrap();
+        if gemini {
+            client.send(UpstreamMessage::Text(
+                r#"{"setup":{"model":"models/gemini-live"}}"#.into(),
+            )).await.unwrap();
+        }
+        let (_, headers) = tokio::time::timeout(Duration::from_secs(5), capture_rx)
+            .await.unwrap().unwrap();
+        if gemini {
+            assert_eq!(headers["x-goog-api-key"], "provider-test-credential");
+            assert!(!headers.contains_key("authorization"));
+        } else {
+            assert_eq!(headers["authorization"], "Bearer provider-test-credential");
+        }
+        let traceparent = headers["traceparent"].to_str().unwrap().to_owned();
+        let parts: Vec<_> = traceparent.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "00");
+        assert_eq!(parts[1], TRACE_ID, "the provider remains on the caller's trace");
+        assert_ne!(parts[2], PARENT_ID, "the handshake injects a local child, not the caller header");
+        assert_ne!(parts[2], "0000000000000000");
+        assert_eq!(parts[3], "01");
+        assert_eq!(headers["tracestate"], "vendor=value", "the proxy child retains incoming trace state");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await.unwrap().unwrap().unwrap(),
+            provider_ready_message(),
+        );
+        client.close(None).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), provider)
+            .await.unwrap().unwrap();
+        assert!(!drain.await_drained(Duration::from_secs(5)).await);
+        tracer_provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        let injected = spans.iter().find(|span|
+            span.span_context.span_id().to_string() == parts[2]
+        ).expect("provider traceparent identifies an actual exported local span");
+        assert_eq!(injected.name.as_ref(), "proxy.realtime_stream");
+        assert_eq!(injected.span_context.trace_id().to_string(), TRACE_ID);
+        assert_eq!(injected.span_context.trace_state().get("vendor"), Some("value"));
+        assert_ne!(injected.parent_span_id.to_string(), "0000000000000000");
+        proxy_task.abort();
+        tracer_provider.shutdown().unwrap();
+    }
+}

@@ -75,7 +75,7 @@ impl Lifecycle {
                     thinking_level: None,
                     cache_breakpoints: Vec::new(),
                     cache_prefix_hash: None,
-                    thread_id,
+                    thread_id: thread_id.clone(),
                     observed_session_id,
                     request_kind,
                     // These fields describe Claude's request ancestry. Live
@@ -151,6 +151,7 @@ impl Lifecycle {
                 .map(|query| query.into_owned());
             let ctx = RequestContext::builder()
                 .request_id(request_id)
+                .thread_id(thread_id)
                 .downstream_headers(clean_headers)
                 .method(http::Method::GET)
                 .path(path.to_owned())
@@ -237,7 +238,7 @@ impl Lifecycle {
                 parsed: Ok(body),
                 json_parse_ms: 0.0,
             };
-            let mut limit = self
+            let mut limit = match self
                 .reserve_limit(
                     &view.principal_view,
                     &ctx,
@@ -260,13 +261,28 @@ impl Lifecycle {
                     },
                 )
                 .await
-                .map_err(|error| {
-                    WebSocketError::new(
-                        error.response.status().as_u16(),
+            {
+                Ok(limit) => limit,
+                Err(LimitRejectionErr { response, info }) => {
+                    if let Some(observer) = observer.as_ref() {
+                        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                            event_id: observer.event_id().to_owned(),
+                            decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                                reason: info.reason_label.clone(),
+                                subject: info.subject,
+                                request_summary: info.request_summary,
+                                route_summary: info.route_summary,
+                                limit_violation: info.limit_violation,
+                            },
+                        });
+                    }
+                    return Err(WebSocketError::new(
+                        response.status().as_u16(),
                         error_codes::LIMIT_REJECTED,
-                        error.info.reason_label,
-                    )
-                })?;
+                        info.reason_label,
+                    ));
+                }
+            };
             if let Some(observer) = observer.as_ref() {
                 observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                     event_id: observer.event_id().to_owned(),
@@ -369,6 +385,8 @@ impl Lifecycle {
                     stream_inter_output_avg_ms = tracing::field::Empty,
                     provider_session_id = tracing::field::Empty,
                     provider_connection_id = tracing::field::Empty,
+                    websocket.close.code = tracing::field::Empty,
+                    websocket.close.reason = tracing::field::Empty,
                 ),
                 reservation: limit.as_mut().and_then(|limit| limit.reservation.take()),
                 limit_engine: self.limit_engine.clone(),
@@ -377,6 +395,7 @@ impl Lifecycle {
                 upstream: routed.route.upstream.clone(),
                 path: path.to_owned(),
                 dialect: routed.route.dialect.clone(),
+                provider_request_id: None,
             })
         }
         .await;
