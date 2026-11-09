@@ -1116,8 +1116,8 @@ async fn realtime_and_live_publish_active_cumulative_usage_then_preserve_provide
         }).await.expect("active dashboard sees the provider upgrade");
         let frames = if gemini {
             [
-                r#"{"usageMetadata":{"promptTokenCount":10,"responseTokenCount":3}}"#,
-                r#"{"usageMetadata":{"promptTokenCount":20,"responseTokenCount":7}}"#,
+                r#"{"usageMetadata":{"promptTokenCount":10,"responseTokenCount":2,"thoughtsTokenCount":1,"cachedContentTokenCount":0,"toolUsePromptTokenCount":0}}"#,
+                r#"{"usageMetadata":{"promptTokenCount":25,"responseTokenCount":5,"thoughtsTokenCount":2,"cachedContentTokenCount":5,"toolUsePromptTokenCount":9}}"#,
             ]
         } else {
             [
@@ -1142,6 +1142,10 @@ async fn realtime_and_live_publish_active_cumulative_usage_then_preserve_provide
                                     && partial.input_tokens == Some(input)
                                     && partial.output_tokens == Some(output) => {
                                         assert_eq!(partial.upstream_response_status, Some(101));
+                                        if gemini {
+                                            assert_eq!(partial.tool_use_prompt_tokens, Some(0));
+                                            assert_eq!(partial.thinking_tokens, Some(1));
+                                        }
                                         break;
                                     }
                             RequestEventUpdate::Final(_) => panic!("usage must be visible before close"),
@@ -1239,6 +1243,11 @@ async fn realtime_and_live_publish_active_cumulative_usage_then_preserve_provide
         assert_eq!((rows[0].1.input_tokens, rows[0].1.output_tokens), (Some(20), Some(7)));
         let stored = &rows[0].1;
         assert_eq!(stored.status, 101);
+        if gemini {
+            assert_eq!(stored.tool_use_prompt_tokens, Some(9));
+            assert_eq!(stored.thinking_tokens, Some(2));
+            assert_eq!(stored.cache_read_input_tokens, Some(5));
+        }
         assert_eq!(stored.upstream_request_id.as_deref(), Some("native-provider-request-id"));
         assert_eq!(stored.upstream_stream_warning_type.as_deref(), Some("websocket_close"));
         assert_native_close_details(

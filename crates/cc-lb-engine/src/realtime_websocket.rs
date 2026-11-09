@@ -834,15 +834,9 @@ impl RealtimeUsage {
                 };
                 merge_usage_value(&mut normalized, usage);
                 // Live usageMetadata is cumulative for the session, unlike Realtime response.done.
-                self.counts = Some(UsageCounts {
-                    present: true,
-                    billable_present: true,
-                    input_tokens: normalized.input_tokens,
-                    output_tokens: number(usage, "responseTokenCount")
-                        .saturating_add(number(usage, "thoughtsTokenCount")),
-                    cache_read_input_tokens: normalized.cache_read_input_tokens,
-                    ..Default::default()
-                });
+                normalized.output_tokens = number(usage, "responseTokenCount")
+                    .saturating_add(number(usage, "thoughtsTokenCount"));
+                self.counts = Some(normalized);
             }
         }
         if let Some(observer) = self
@@ -873,12 +867,44 @@ impl RealtimeUsage {
                 output_tokens: counts.output_tokens,
                 input_image_tokens: counts.input_image_tokens,
                 output_image_tokens: counts.output_image_tokens,
+                cache_creation_input_tokens: counts.cache_creation_input_tokens,
+                cache_creation_input_tokens_5m: counts.cache_creation_input_tokens_5m,
+                cache_creation_input_tokens_1h: counts.cache_creation_input_tokens_1h,
                 cache_read_input_tokens: counts.cache_read_input_tokens,
                 cache_write_input_tokens: counts.cache_write_input_tokens,
                 cache_write_input_tokens_30m: counts.cache_write_input_tokens_30m,
                 cache_write_input_tokens_12h: counts.cache_write_input_tokens_12h,
+                cache_read_evidence: match counts.cache_read_evidence {
+                    crate::usage_parser::CacheTokenEvidence::Unreported => None,
+                    crate::usage_parser::CacheTokenEvidence::Zero => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Positive => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Invalid => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+                    }
+                },
+                cache_creation_evidence: match counts.cache_creation_evidence {
+                    crate::usage_parser::CacheTokenEvidence::Unreported => None,
+                    crate::usage_parser::CacheTokenEvidence::Zero => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Zero)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Positive => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Positive)
+                    }
+                    crate::usage_parser::CacheTokenEvidence::Invalid => {
+                        Some(cc_lb_request_log::RequestCacheEvidence::Invalid)
+                    }
+                },
                 thinking_tokens: counts.thinking_tokens,
-                ..Default::default()
+                tool_use_prompt_tokens: counts.tool_use_prompt_tokens,
+                web_search_requests: counts.web_search_requests,
+                web_fetch_requests: counts.web_fetch_requests,
+                service_tier: counts.service_tier.clone(),
+                inference_geo: counts.inference_geo.clone(),
+                iterations: counts.iterations.clone(),
             })
             .unwrap_or_default()
     }
@@ -974,11 +1000,12 @@ mod tests {
                     br#"{"type":"response.done","response":{"usage":{"input_tokens":10,"output_tokens":4}}}"#.as_slice(),
                 ],
                 RealtimeWebSocketKind::Gemini => [
-                    br#"{"usageMetadata":{"promptTokenCount":10,"responseTokenCount":3}}"#.as_slice(),
-                    br#"{"usageMetadata":{"promptTokenCount":20,"responseTokenCount":7}}"#.as_slice(),
+                    br#"{"usageMetadata":{"promptTokenCount":10,"responseTokenCount":2,"thoughtsTokenCount":1,"cachedContentTokenCount":0,"toolUsePromptTokenCount":0}}"#.as_slice(),
+                    br#"{"usageMetadata":{"promptTokenCount":25,"responseTokenCount":5,"thoughtsTokenCount":2,"cachedContentTokenCount":5,"toolUsePromptTokenCount":9}}"#.as_slice(),
                 ],
             };
-            for (frame, expected) in frames.into_iter().zip([(10, 3), (20, 7)]) {
+            for (index, (frame, expected)) in frames.into_iter().zip([(10, 3), (20, 7)]).enumerate()
+            {
                 usage.observe(kind, &Bytes::copy_from_slice(frame));
                 let LifecycleEvent::UsageObserved {
                     usage: snapshot, ..
@@ -987,6 +1014,20 @@ mod tests {
                     panic!("expected only a usage observation");
                 };
                 assert_eq!((snapshot.input_tokens, snapshot.output_tokens), expected);
+                if kind == RealtimeWebSocketKind::Gemini {
+                    assert_eq!(snapshot.tool_use_prompt_tokens, Some([0, 9][index]));
+                    assert_eq!(snapshot.thinking_tokens, [1, 2][index]);
+                    assert_eq!(snapshot.cache_read_input_tokens, [0, 5][index]);
+                    assert_eq!(
+                        snapshot.cache_read_evidence,
+                        Some(
+                            [
+                                cc_lb_request_log::RequestCacheEvidence::Zero,
+                                cc_lb_request_log::RequestCacheEvidence::Positive,
+                            ][index]
+                        )
+                    );
+                }
                 assert!(events.try_recv().is_err(), "no early terminal observation");
             }
             if kind == RealtimeWebSocketKind::Gemini {
@@ -1005,6 +1046,40 @@ mod tests {
                 ),
                 (20, 7)
             );
+            if kind == RealtimeWebSocketKind::Gemini {
+                use cc_lb_request_log::RequestCacheEvidence;
+                for (frame, tool_tokens, evidence) in [
+                    (
+                        br#"{"usageMetadata":{"promptTokenCount":20,"responseTokenCount":4}}"#.as_slice(),
+                        None,
+                        None,
+                    ),
+                    (
+                        br#"{"usageMetadata":{"promptTokenCount":20,"responseTokenCount":4,"cachedContentTokenCount":0,"toolUsePromptTokenCount":0}}"#.as_slice(),
+                        Some(0),
+                        Some(RequestCacheEvidence::Zero),
+                    ),
+                    (
+                        br#"{"usageMetadata":{"promptTokenCount":20,"responseTokenCount":4,"cachedContentTokenCount":"invalid"}}"#.as_slice(),
+                        None,
+                        Some(RequestCacheEvidence::Invalid),
+                    ),
+                ] {
+                    usage.observe(kind, &Bytes::copy_from_slice(frame));
+                    let LifecycleEvent::UsageObserved { usage: snapshot, .. } =
+                        events.try_recv().expect("metadata changes remain observable")
+                    else {
+                        panic!("expected active usage metadata");
+                    };
+                    assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (20, 4));
+                    assert_eq!(snapshot.tool_use_prompt_tokens, tool_tokens);
+                    assert_eq!(snapshot.thinking_tokens, 0);
+                    assert_eq!(snapshot.cache_read_input_tokens, 0);
+                    assert_eq!(snapshot.cache_read_evidence, evidence);
+                    usage.observe(kind, &Bytes::copy_from_slice(frame));
+                    assert!(events.try_recv().is_err(), "identical metadata is deduplicated");
+                }
+            }
             observer.finish();
             assert!(matches!(
                 events.try_recv(),
