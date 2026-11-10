@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
 use cc_lb_storage_api::{
     MetaStore, RequestEvent, RequestEventStore, UsageRollup, UsageRollupResolution,
@@ -12,12 +12,16 @@ use uuid::Uuid;
 const TIMEOUT_ITERATIONS: usize = 50;
 const CONNECTION_DROP_ITERATIONS: usize = 50;
 const EVENTS_PER_ITERATION: u64 = 5;
+static CRASH_RECOVERY_SCENARIO_LOCK: Mutex<()> = Mutex::new(());
 fn get_postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
 }
 
 #[test]
 fn client_timeout_mid_commit() {
+    let _guard = CRASH_RECOVERY_SCENARIO_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let url = match get_postgres_url() {
         Some(url) => url,
         None => {
@@ -64,6 +68,9 @@ fn client_timeout_mid_commit() {
 
 #[test]
 fn connection_drop_mid_commit() {
+    let _guard = CRASH_RECOVERY_SCENARIO_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let url = match get_postgres_url() {
         Some(url) => url,
         None => {
