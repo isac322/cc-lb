@@ -168,6 +168,36 @@ describe('useCacheKeepaliveSessionDetail', () => {
     expect(result.current.data?.config_snapshot?.snapshot_bytes).toBe(524_288);
   });
 
+  test('selecting a different session never shows the previous session while it loads', async () => {
+    const { promise: secondResponse, resolve: resolveSecond } =
+      Promise.withResolvers<Response>();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(cacheKeepaliveRenewedDetailFixture))
+      .mockImplementationOnce(() => secondResponse);
+    vi.stubGlobal('fetch', fetchMock);
+    const { result, rerender } = renderHook(
+      ({ sessionId }) =>
+        useCacheKeepaliveSessionDetail(PRINCIPAL_ID, sessionId, '24h'),
+      {
+        initialProps: { sessionId: SESSION_ID },
+        wrapper: makeWrapper(makeClient()),
+      },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    rerender({ sessionId: 'other-session' });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isLoading).toBe(true);
+    resolveSecond(
+      jsonResponse({
+        ...cacheKeepaliveRenewedDetailFixture,
+        id: 'other-session',
+      }),
+    );
+    await waitFor(() => expect(result.current.data?.id).toBe('other-session'));
+  });
+
   test('an advancing list fingerprint starts a new request while the first detail is in flight', async () => {
     const { promise: firstResponse, resolve: resolveFirst } =
       Promise.withResolvers<Response>();

@@ -6,7 +6,6 @@
 
 import {
   type InfiniteData,
-  keepPreviousData,
   type QueryClient,
   queryOptions,
   useInfiniteQuery,
@@ -2147,7 +2146,14 @@ export function useCacheKeepaliveSessionDetail(
       Boolean(sessionId) &&
       !isMissing(query.state.error),
     meta: { inlineError: true },
-    placeholderData: keepPreviousData,
+    // Keep showing the same session while its row fingerprint or horizon
+    // changes; a different session starts from the loading state.
+    placeholderData: (previousData, previousQuery) => {
+      const previousKey = previousQuery?.queryKey;
+      return previousKey?.[2] === principalId && previousKey[3] === sessionId
+        ? previousData
+        : undefined;
+    },
     retry: (failureCount, error) => !isMissing(error) && failureCount < 1,
     refetchOnMount: (query) => !isMissing(query.state.error),
     refetchOnWindowFocus: (query) => !isMissing(query.state.error),
