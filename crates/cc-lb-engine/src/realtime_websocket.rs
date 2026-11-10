@@ -35,6 +35,9 @@ pub enum RealtimeWebSocketTermination {
     Completed,
     ProviderClosed,
     ProxyRelayError,
+    /// The downstream sent a normal WebSocket close (1000).
+    DownstreamClosed,
+    /// The downstream disconnected before the current turn completed.
     DownstreamCancelled,
 }
 
@@ -102,7 +105,8 @@ fn realtime_stream_complete(
 ) -> bool {
     match termination {
         RealtimeWebSocketTermination::Completed => true,
-        RealtimeWebSocketTermination::ProviderClosed => usage_complete,
+        RealtimeWebSocketTermination::ProviderClosed
+        | RealtimeWebSocketTermination::DownstreamClosed => usage_complete,
         RealtimeWebSocketTermination::ProxyRelayError
         | RealtimeWebSocketTermination::DownstreamCancelled => false,
     }
@@ -129,7 +133,12 @@ fn realtime_terminal_outcome(
             StreamTerminationOutcome::ProxyError,
             StreamTerminationCause::TransportError,
         ),
-        RealtimeWebSocketTermination::DownstreamCancelled => (
+        RealtimeWebSocketTermination::DownstreamClosed if complete => (
+            StreamTerminationOutcome::Completed,
+            StreamTerminationCause::None,
+        ),
+        RealtimeWebSocketTermination::DownstreamClosed
+        | RealtimeWebSocketTermination::DownstreamCancelled => (
             StreamTerminationOutcome::ClientCancelled,
             StreamTerminationCause::None,
         ),
@@ -209,14 +218,14 @@ impl RealtimeStreamMetrics {
                 _ => None,
             },
             RealtimeWebSocketKind::Gemini => {
-                if value.pointer("/serverContent/modelTurn").is_some() {
-                    Some(false)
-                } else if value
+                if value
                     .pointer("/serverContent/turnComplete")
                     .and_then(Value::as_bool)
                     == Some(true)
                 {
                     Some(true)
+                } else if value.pointer("/serverContent/modelTurn").is_some() {
+                    Some(false)
                 } else {
                     None
                 }
@@ -492,7 +501,8 @@ impl RealtimeWebSocketSession {
         } else {
             (
                 Some(match termination {
-                    RealtimeWebSocketTermination::DownstreamCancelled => "client_closed_request",
+                    RealtimeWebSocketTermination::DownstreamClosed
+                    | RealtimeWebSocketTermination::DownstreamCancelled => "client_closed_request",
                     RealtimeWebSocketTermination::ProxyRelayError => "proxy_relay_error",
                     RealtimeWebSocketTermination::ProviderClosed
                     | RealtimeWebSocketTermination::Completed => "realtime_stream_incomplete",
@@ -585,7 +595,8 @@ impl RealtimeWebSocketSession {
                 } else {
                     Err(StreamError {
                         error_type: match termination {
-                            RealtimeWebSocketTermination::DownstreamCancelled => {
+                            RealtimeWebSocketTermination::DownstreamClosed
+                            | RealtimeWebSocketTermination::DownstreamCancelled => {
                                 "client_closed_request"
                             }
                             RealtimeWebSocketTermination::ProxyRelayError => "proxy_relay_error",
@@ -611,7 +622,8 @@ impl RealtimeWebSocketSession {
                 reservation.handoff_after_response();
             }
             match termination {
-                RealtimeWebSocketTermination::DownstreamCancelled => {
+                RealtimeWebSocketTermination::DownstreamClosed
+                | RealtimeWebSocketTermination::DownstreamCancelled => {
                     if complete {
                         observer.set_success_status(status);
                     } else {
@@ -1306,6 +1318,50 @@ mod tests {
                 realtime_stream_complete(termination, metrics.turn_complete().unwrap_or_default());
             assert!(!complete);
             assert_eq!(realtime_terminal_outcome(termination, complete).0, expected);
+        }
+    }
+    #[test]
+    fn normal_downstream_close_uses_only_the_latest_completed_turn() {
+        for (kind, completed, next_turn) in [
+            (
+                RealtimeWebSocketKind::Openai,
+                br#"{"type":"response.done"}"#.as_slice(),
+                br#"{"type":"response.created"}"#.as_slice(),
+            ),
+            (
+                RealtimeWebSocketKind::Gemini,
+                br#"{"serverContent":{"modelTurn":{"parts":[]},"turnComplete":true}}"#.as_slice(),
+                br#"{"serverContent":{"modelTurn":{"parts":[]}}}"#.as_slice(),
+            ),
+        ] {
+            let mut metrics = RealtimeStreamMetrics::new();
+            metrics.observe_turn_boundary(kind, completed);
+            assert_eq!(metrics.turn_complete(), Some(true));
+            let complete = realtime_stream_complete(
+                RealtimeWebSocketTermination::DownstreamClosed,
+                metrics.turn_complete().unwrap_or_default(),
+            );
+            assert!(complete);
+            assert_eq!(
+                realtime_terminal_outcome(RealtimeWebSocketTermination::DownstreamClosed, complete)
+                    .0,
+                StreamTerminationOutcome::Completed
+            );
+
+            metrics.observe_turn_boundary(kind, next_turn);
+            assert_eq!(metrics.turn_complete(), Some(false));
+            assert!(!realtime_stream_complete(
+                RealtimeWebSocketTermination::DownstreamClosed,
+                metrics.turn_complete().unwrap_or_default(),
+            ));
+            assert_eq!(
+                realtime_terminal_outcome(RealtimeWebSocketTermination::DownstreamClosed, false).0,
+                StreamTerminationOutcome::ClientCancelled
+            );
+            assert!(!realtime_stream_complete(
+                RealtimeWebSocketTermination::DownstreamCancelled,
+                true,
+            ));
         }
     }
 
