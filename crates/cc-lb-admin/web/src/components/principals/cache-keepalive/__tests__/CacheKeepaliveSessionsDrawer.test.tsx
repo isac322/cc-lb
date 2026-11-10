@@ -496,4 +496,57 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     expect(screen.getByTitle('openai-12h')).toBeDefined();
     expect(screen.getByTestId('cache-keepalive-sessions-off')).toBeDefined();
   });
+  it('keeps paging when a page contains only hidden not-tracked rows', async () => {
+    const fetchNextPage = vi.fn();
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+      data: {
+        pages: [
+          {
+            summary: summaryBase,
+            rows: [
+              {
+                id: 'openai-5m-hidden',
+                last_message_at_ms: 1_700_000_000_000,
+                state: 'not_tracked',
+                is_active: false,
+                ttl: '5m',
+                attempts: null,
+                max_attempts: 12,
+                reason: 'ordinary not-tracked row',
+                generation: 1,
+                upstream: 'openai',
+                error: null,
+                net_pnl: null,
+                total_spent: 0,
+                total_avoided: null,
+                evidence_status: 'none',
+                session_key_hash: 'openai-5m-hidden',
+              },
+            ],
+            next_cursor: 'next-page',
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      hasNextPage: true,
+      isFetchingNextPage: false,
+      fetchNextPage,
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const loadOlder = screen.getByRole('button', {
+      name: 'Loading older sessions...',
+    });
+    expect(loadOlder).toBeDefined();
+    await userEvent.setup().click(loadOlder);
+    expect(fetchNextPage).toHaveBeenCalledOnce();
+  });
 });

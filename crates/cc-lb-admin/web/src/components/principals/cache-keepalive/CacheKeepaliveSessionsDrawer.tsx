@@ -562,10 +562,24 @@ export function CacheKeepaliveSessionsDrawer({
           ) : !enabled && visibleRows.length === 0 ? (
             <EmptyState title="No sessions recorded" />
           ) : visibleRows.length === 0 ? (
-            <EmptyState
-              title="No sessions"
-              description="No sessions recorded in this horizon."
-            />
+            query.hasNextPage ? (
+              <div className="flex min-h-[340px] items-center justify-center">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => query.fetchNextPage()}
+                  disabled={query.isFetchingNextPage}
+                  iconLeft={query.isFetchingNextPage ? <Spinner /> : undefined}
+                >
+                  Loading older sessions...
+                </Button>
+              </div>
+            ) : (
+              <EmptyState
+                title="No sessions"
+                description="No sessions recorded in this horizon."
+              />
+            )
           ) : (
             <div className="min-h-full md:grid md:grid-cols-[248px_minmax(0,1fr)] md:divide-x md:divide-subtle lg:grid-cols-[272px_minmax(0,1fr)]">
               {/* Left Pane: Collapsible Trigger groups + Decimal-aligned USD columns */}
