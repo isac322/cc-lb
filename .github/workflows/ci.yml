@@ -544,7 +544,7 @@ jobs:
         with:
           toolchain: 1.99.1
       - name: Run compile-fail contract tests
-        run: cargo test -p cc-lb-engine --test all authn_rail_typestate_contracts
+        run: cargo test -p cc-lb-engine --test integration authn_rail_typestate_contracts
 
       - name: Show sccache stats
         if: always()
