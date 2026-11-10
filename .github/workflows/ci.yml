@@ -475,7 +475,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       SQLX_OFFLINE: "true"
-      LLVM_PROFILE_FILE_NAME: shard-0-%8m.profraw
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -512,15 +511,6 @@ jobs:
               --all-features \
               --archive-file nextest-archive.tar.zst
 
-      - name: Run compile-fail contract tests
-        run: |
-          mkdir -p target/llvm-cov-target
-          cargo llvm-cov nextest \
-            --archive-file nextest-archive.tar.zst \
-            -E 'test(authn_rail_typestate_contracts)' \
-            --test-threads=2 \
-            --no-report
-
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-nextest-archive
@@ -531,6 +521,46 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          fi
+  nextest-cov-contract:
+    needs:
+      - changes
+      - nextest-cov-build
+    if: ${{ !cancelled() && needs.nextest-cov-build.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      LLVM_PROFILE_FILE_NAME: shard-0-%8m.profraw
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Export cargo-installed tools
+        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-nextest-archive
+      - name: Run compile-fail contract tests
+        run: |
+          mkdir -p target/llvm-cov-target
+          cargo llvm-cov nextest \
+            --archive-file nextest-archive.tar.zst \
+            -E 'test(authn_rail_typestate_contracts)' \
+            --test-threads=2 \
+            --no-report
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-profraw-0
@@ -662,6 +692,7 @@ jobs:
     needs:
       - changes
       - nextest-cov-build
+      - nextest-cov-contract
       - nextest-cov-runtime
       - nextest-cov-wasm
       - nextest-cov-shard
@@ -669,6 +700,7 @@ jobs:
       ${{
         !cancelled() &&
         needs.nextest-cov-build.result == 'success' &&
+        needs.nextest-cov-contract.result == 'success' &&
         needs.nextest-cov-runtime.result == 'success' &&
         needs.nextest-cov-wasm.result == 'success' &&
         needs.nextest-cov-shard.result == 'success' &&
@@ -763,6 +795,7 @@ jobs:
       - nextest-cov-runtime
       - nextest-cov-wasm
       - nextest-cov-build
+      - nextest-cov-contract
       - nextest-cov-shard
       - nextest-cov
       - e2e
@@ -791,7 +824,7 @@ jobs:
           set -euo pipefail
           JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
             cargo-deny promtool nextest-cov-runtime nextest-cov-wasm
-            nextest-cov-build nextest-cov-shard nextest-cov e2e)
+            nextest-cov-build nextest-cov-contract nextest-cov-shard nextest-cov e2e)
           if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
             "${JOBS[@]}" <<<"$RESULTS" >/dev/null; then
             echo "::error::needs context does not match the expected jobs: ${JOBS[*]}"
