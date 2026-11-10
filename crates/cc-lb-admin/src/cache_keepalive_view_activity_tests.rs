@@ -629,6 +629,7 @@ fn legacy_null_cycle_turn_survives_without_owned_cycle_evidence() {
     let c1 = Uuid::from_u128(19);
     let c2 = Uuid::from_u128(20);
     item.cycle_id = Some(c2);
+    item.last_message_at_ms = 100_000;
 
     let legacy_turn = turn("legacy-turn", 200);
     let mut c1_turn = turn("c1-turn", 100);
@@ -655,6 +656,37 @@ fn legacy_null_cycle_turn_survives_without_owned_cycle_evidence() {
             .map(|turn| turn.source_ref_id.as_str())
             .collect::<Vec<_>>(),
         ["legacy-turn"]
+    );
+}
+
+#[test]
+fn active_current_cycle_excludes_legacy_null_cycle_turns_before_last_message() {
+    let mut item = item(CacheKeepaliveSessionEntrySource::Session);
+    item.status = Some(CacheKeepaliveSessionStatus::Active);
+    item.cycle_id = Some(Uuid::from_u128(21));
+    item.last_message_at_ms = 100_000;
+    let mut current = turn("current", 200);
+    current.cycle_id = item.cycle_id;
+    let legacy = turn("legacy", 99);
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &[legacy, current],
+            evidence: &[],
+            now_ms: 1_730_000_100_000,
+        },
+        PriceCatalog::new_empty().as_ref(),
+    );
+
+    assert_eq!(
+        activity
+            .turns
+            .iter()
+            .map(|turn| turn.source_ref_id.as_str())
+            .collect::<Vec<_>>(),
+        ["current"]
     );
 }
 
@@ -779,6 +811,8 @@ fn unknown_cost_keeps_hit_history_without_claiming_zero_pnl() {
     assert_eq!(activity.turns[0].pnl, None);
     assert_eq!(activity.pnl, None);
     assert_eq!(activity.total_spent_micros, 0);
+    let row = row_from_activity(12, &item, &activity, None).expect("row");
+    assert_eq!(row.net_pnl, None);
 }
 
 #[test]
@@ -1122,6 +1156,87 @@ fn idle_gap_terminal_endings_and_fallback_timing_preserve_unknown_cost() {
         assert_eq!(gap.avoided_micros, None);
         assert_eq!(gap.net_pnl_micros, None);
     }
+}
+
+#[test]
+fn null_cycle_gaps_split_by_ttl_or_max_attempts_and_price_unknown_or_pending_turns() {
+    let mut session_item = item(CacheKeepaliveSessionEntrySource::Session);
+    session_item.status = Some(CacheKeepaliveSessionStatus::Terminal);
+    session_item.config_snapshot = Some(CacheKeepaliveConfigSnapshot {
+        refresh_lead_time_5m_secs: 60,
+        refresh_lead_time_1h_secs: 600,
+        max_refreshes_per_session: 2,
+        max_total_duration_secs: 14_400,
+        snapshot_max_bytes: 8_388_608,
+    });
+    let mut first = turn("first", 100);
+    first.cost_micros = Some(1_000);
+    let mut second = turn("second", 101);
+    second.cost_micros = Some(2_000);
+    let mut third = turn("third", 102);
+    third.cost_micros = Some(3_000);
+    let mut fourth = turn("fourth", 500);
+    fourth.cost_micros = Some(4_000);
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &session_item,
+            session: None,
+            turns: &[first, second, third, fourth],
+            evidence: &[],
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+
+    assert_eq!(activity.evidence_status, "unknown");
+    assert_eq!(activity.gaps.len(), 3);
+    assert_eq!(
+        activity
+            .gaps
+            .iter()
+            .map(|gap| gap.pulses.len())
+            .collect::<Vec<_>>(),
+        [2, 1, 1]
+    );
+    assert_eq!(
+        activity
+            .gaps
+            .iter()
+            .map(|gap| gap.net_pnl_micros)
+            .collect::<Vec<_>>(),
+        [Some(-3_000), Some(-3_000), Some(-4_000)]
+    );
+
+    let cycle_id = Uuid::from_u128(22);
+    let mut pending_item = item(CacheKeepaliveSessionEntrySource::Session);
+    pending_item.status = Some(CacheKeepaliveSessionStatus::Active);
+    pending_item.cycle_id = Some(cycle_id);
+    let mut pending_turn = turn("pending", 200);
+    pending_turn.cycle_id = Some(cycle_id);
+    pending_turn.cost_micros = Some(6_000);
+    let pending_evidence = [renewal_evidence(
+        "pending",
+        cycle_id,
+        200_000,
+        CacheTtl::Ttl5m,
+        "hit",
+        "pending",
+    )];
+    let pending_activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &pending_item,
+            session: None,
+            turns: &[pending_turn],
+            evidence: &pending_evidence,
+            now_ms: 1_730_000_100_000,
+        },
+        priced_catalog().as_ref(),
+    );
+    assert_eq!(pending_activity.evidence_status, "pending");
+    assert_eq!(pending_activity.gaps[0].net_pnl_micros, Some(-6_000));
+    let pending_row = row_from_activity(12, &pending_item, &pending_activity, None).expect("row");
+    let net_pnl = pending_row.net_pnl.expect("priced pending net_pnl");
+    assert!((net_pnl + 0.006).abs() < 1e-12, "net_pnl={net_pnl}");
 }
 
 #[test]

@@ -123,7 +123,8 @@ function buildRailPoints(
 
   gap.pulses.forEach((pulse, idx) => {
     const prevPulse = idx > 0 ? gap.pulses[idx - 1] : null;
-    const pct = Math.min(93, Math.max(7, (pulse.offset_sec / maxSec) * 100));
+    const ratio = Math.min(1, Math.max(0, pulse.offset_sec / maxSec));
+    const pct = 7 + ratio * 86;
     const sincePrevSec =
       pulse.since_prev_renewal_sec ??
       (prevPulse ? Math.max(0, pulse.offset_sec - prevPulse.offset_sec) : null);
@@ -659,8 +660,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
               Spent {fmtUsdPlain(session.total_spent)} (no follow-up) =
             </span>
           ) : null}
-          {session.net_pnl === null ||
-          session.evidence_status !== 'observed' ? (
+          {session.evidence_status !== 'observed' ? (
             <span className="text-text-faint">
               Evidence {session.evidence_status} ·
             </span>

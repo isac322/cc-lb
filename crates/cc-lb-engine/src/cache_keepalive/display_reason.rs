@@ -87,11 +87,30 @@ fn first_tool_use_name(response: &Value) -> Option<String> {
         .and_then(Value::as_array)
         .and_then(|content| {
             content.iter().find_map(|block| {
-                (block.get("type").and_then(Value::as_str) == Some("tool_use"))
-                    .then(|| block.get("name").and_then(Value::as_str))
-                    .flatten()
-                    .map(ToOwned::to_owned)
+                matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("tool_use" | "mcp_tool_use")
+                )
+                .then(|| block.get("name").and_then(Value::as_str))
+                .flatten()
+                .map(ToOwned::to_owned)
             })
+        })
+        .or_else(|| {
+            response
+                .get("output")
+                .and_then(Value::as_array)
+                .and_then(|output| {
+                    output.iter().find_map(|item| {
+                        matches!(
+                            item.get("type").and_then(Value::as_str),
+                            Some("function_call" | "custom_tool_call" | "mcp_call")
+                        )
+                        .then(|| item.get("name").and_then(Value::as_str))
+                        .flatten()
+                        .map(ToOwned::to_owned)
+                    })
+                })
         })
 }
 
@@ -130,6 +149,35 @@ mod tests {
         assert_eq!(
             reason,
             "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s"
+        );
+    }
+    #[test]
+    fn agent_mcp_tool_use_reason_when_scheduling_first_renewal() {
+        let response = json!({
+            "content": [{"type": "mcp_tool_use", "name": "mcp__search"}]
+        });
+
+        let reason = CacheKeepaliveDisplayReason::agent_in_turn(&response, Duration::from_secs(60))
+            .to_string();
+
+        assert_eq!(
+            reason,
+            "agent-in-turn (tool_use: `mcp__search`) — first renewal in 1m"
+        );
+    }
+
+    #[test]
+    fn agent_function_call_reason_when_scheduling_first_renewal() {
+        let response = json!({
+            "output": [{"type": "function_call", "name": "search"}]
+        });
+
+        let reason = CacheKeepaliveDisplayReason::agent_in_turn(&response, Duration::from_secs(60))
+            .to_string();
+
+        assert_eq!(
+            reason,
+            "agent-in-turn (tool_use: `search`) — first renewal in 1m"
         );
     }
 

@@ -119,10 +119,10 @@ pub fn derive_activity_view(
     {
         state = CacheKeepaliveViewState::Capped;
     }
-    // The session row is the authoritative current-generation projection for
-    // detail views. List items normally carry the same cycle id, but older
-    // projections can omit or lag it while the session record is current.
-    // Preserve null-cycle legacy turns when they have no owned cycle evidence.
+    let is_active = matches!(
+        source.item.status,
+        Some(cc_lb_storage_api::CacheKeepaliveSessionStatus::Active)
+    );
     let cycle_id = source
         .session
         .and_then(|session| session.cycle_id)
@@ -140,9 +140,12 @@ pub fn derive_activity_view(
             if turn.cycle_id.is_some() {
                 return false;
             }
-            renewal_evidence_for_turn(turn, source.evidence)
-                .and_then(|renewal| renewal.cycle_id)
-                .is_none_or(|renewal_cycle_id| renewal_cycle_id == cycle_id)
+            let renewal_cycle_id = renewal_evidence_for_turn(turn, source.evidence)
+                .and_then(|renewal| renewal.cycle_id);
+            if renewal_cycle_id.is_some() {
+                return renewal_cycle_id == Some(cycle_id);
+            }
+            !(is_active && turn.ts.saturating_mul(1_000) < source.item.last_message_at_ms)
         })
         .collect::<Vec<_>>();
     records.sort_by(|left, right| {
@@ -151,10 +154,6 @@ pub fn derive_activity_view(
             .cmp(&left.ts)
             .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
     });
-    let is_active = matches!(
-        source.item.status,
-        Some(cc_lb_storage_api::CacheKeepaliveSessionStatus::Active)
-    );
     let pending_source_ref_id = if is_active && cycle_id.is_some() {
         records
             .first()
@@ -306,21 +305,51 @@ fn idle_gaps(
             .then_with(|| left.ts.cmp(&right.ts))
             .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
     });
+    let config = source.item.config_snapshot.as_ref();
+    let max_attempts = config.map_or(12, |config| config.max_refreshes_per_session);
     let mut cycle_indices = HashMap::new();
     let mut cycles: Vec<(Option<Uuid>, Vec<usize>)> = Vec::new();
+    let mut open_none_group: Option<usize> = None;
     for (index, turn) in ordered_turns {
         let cycle_id = turn.cycle_id.or_else(|| {
             renewal_evidence_for_turn(turn, source.evidence).and_then(|renewal| renewal.cycle_id)
         });
-        let cycle_index = *cycle_indices.entry(cycle_id).or_insert_with(|| {
-            cycles.push((cycle_id, Vec::new()));
-            cycles.len() - 1
-        });
+        let cycle_index = match cycle_id {
+            Some(cycle_id) => {
+                open_none_group = None;
+                *cycle_indices.entry(cycle_id).or_insert_with(|| {
+                    cycles.push((Some(cycle_id), Vec::new()));
+                    cycles.len() - 1
+                })
+            }
+            None => {
+                let should_split = open_none_group.is_none_or(|group_index| {
+                    let current_group = &cycles[group_index].1;
+                    let previous_index = *current_group.last().expect("open null-cycle group");
+                    let previous_turn = &source.turns[previous_index];
+                    let previous_ttl = renewal_evidence_for_turn(previous_turn, source.evidence)
+                        .map_or(source.item.ttl, |renewal| renewal.ttl);
+                    pulse_time_ms(turn, source.evidence)
+                        .saturating_sub(pulse_time_ms(previous_turn, source.evidence))
+                        > previous_ttl.as_secs().saturating_mul(1_000)
+                        || current_group.len()
+                            >= usize::try_from(max_attempts.max(1)).unwrap_or(usize::MAX)
+                        || turn.upstream_id != previous_turn.upstream_id
+                        || turn.model != previous_turn.model
+                });
+                if should_split {
+                    cycles.push((None, Vec::new()));
+                    open_none_group = Some(cycles.len() - 1);
+                }
+                open_none_group.expect("null-cycle group must be open")
+            }
+        };
         cycles[cycle_index].1.push(index);
     }
-    let config = source.item.config_snapshot.as_ref();
-    let max_attempts = config.map_or(12, |config| config.max_refreshes_per_session);
-    let has_current_cycle = cycle_indices.contains_key(&current_cycle_id);
+    let has_current_cycle = match current_cycle_id {
+        Some(cycle_id) => cycle_indices.contains_key(&cycle_id),
+        None => cycles.iter().any(|(cycle_id, _)| cycle_id.is_none()),
+    };
     let mut gaps = Vec::with_capacity(cycles.len() + usize::from(is_active && !has_current_cycle));
     for (cycle_id, indices) in cycles {
         let first_turn = &source.turns[indices[0]];
@@ -407,6 +436,13 @@ fn idle_gaps(
             let pnl = retained_turns[index].pnl?;
             Some(total.saturating_add(pnl.avoided_micros))
         });
+        let all_turns_priced = !indices.is_empty()
+            && indices
+                .iter()
+                .all(|&index| retained_turns[index].pnl.is_some());
+        let net_pnl_micros = avoided_micros
+            .map(|avoided| avoided.saturating_sub(spent_micros))
+            .or_else(|| (all_turns_priced && spent_micros > 0).then_some(-spent_micros));
         gaps.push(CacheKeepaliveIdleGap {
             cycle_id,
             pause_at_ms,
@@ -422,7 +458,7 @@ fn idle_gaps(
             since_last_renewal_sec: Some(ending_at_ms.saturating_sub(last_pulse_ms) / 1_000),
             spent_micros,
             avoided_micros,
-            net_pnl_micros: avoided_micros.map(|avoided| avoided.saturating_sub(spent_micros)),
+            net_pnl_micros,
         });
     }
     if is_active && !has_current_cycle {
