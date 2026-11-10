@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cc_lb_control::SubscriptionQuotaCacheLike;
-use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
+use cc_lb_domain::{
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaCredits, SubscriptionQuotaDataState,
+};
 use cc_lb_storage_api::{
     StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
@@ -45,6 +47,7 @@ pub struct MergedQuotaSnapshot {
     pub extra_usage_enabled: Option<bool>,
     pub extra_usage_monthly_limit: Option<f64>,
     pub extra_usage_used_credits: Option<f64>,
+    pub credits: Option<SubscriptionQuotaCredits>,
     pub observed_at_unix_millis: u64,
 }
 
@@ -272,6 +275,7 @@ impl MergedQuotaSnapshot {
             extra_usage_enabled: record.extra_usage_enabled,
             extra_usage_monthly_limit: record.extra_usage_monthly_limit,
             extra_usage_used_credits: record.extra_usage_used_credits,
+            credits: record.credits.clone(),
             observed_at_unix_millis: record.observed_at_unix_millis,
         }
     }
@@ -385,6 +389,7 @@ fn candidate_from_snapshot(
         extra_usage_enabled: snapshot.extra_usage_enabled,
         extra_usage_monthly_limit: snapshot.extra_usage_monthly_limit,
         extra_usage_used_credits: snapshot.extra_usage_used_credits,
+        credits: snapshot.credits,
         observed_at_unix_millis: Some(snapshot.observed_at_unix_millis),
         max_staleness_secs,
         fallback_available: snapshot.fallback_available,
@@ -411,6 +416,7 @@ fn unobserved_candidate(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         observed_at_unix_millis: None,
         max_staleness_secs,
         fallback_available: None,
@@ -445,6 +451,7 @@ mod tests {
             extra_usage_enabled: None,
             extra_usage_monthly_limit: None,
             extra_usage_used_credits: None,
+            credits: None,
             observed_at_unix_millis,
         }
     }
@@ -474,6 +481,7 @@ mod tests {
             disabled_reason: None,
             extra_usage_enabled: None,
             extra_usage_monthly_limit: None,
+            credits: None,
             extra_usage_used_credits: None,
             ingested_at_unix_millis: observed_at_unix_millis,
         }

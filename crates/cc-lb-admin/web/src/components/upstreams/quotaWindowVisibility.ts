@@ -1,12 +1,13 @@
 import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
 import type { ProviderFamily } from '../../lib/providers';
+import { selectCodexCredits } from './codexCredits';
 
 /**
  * Canonical window order everywhere a window list is shown: the shared
  * windows, Gemini model-family windows, Claude·OSS model-family windows, the
- * legacy model windows, then extra usage. The backend's `unified`
- * account-restriction envelope is not a web-visible window: snapshots for it
- * are neither requested nor rendered.
+ * legacy model windows, then extra usage. The `unified` restriction envelope
+ * is requested for routing truth but displayed only when it carries Codex
+ * credits. Credits from Overage and Unified share one row and never a chart.
  */
 export const QUOTA_WINDOW_ORDER = [
   '5h',
@@ -19,6 +20,7 @@ export const QUOTA_WINDOW_ORDER = [
   '7d_sonnet',
   '7d_opus',
   'overage',
+  'unified',
 ] as const;
 
 function orderedWindows(latestWindows: readonly QuotaSnapshot[]): string[] {
@@ -107,6 +109,7 @@ export function selectVisibleGraphWindows({
     const snap = byWindow.get(window);
     if (!snap) return false;
     if (window === 'unified') return false;
+    if (snap.credits != null) return false;
     if (snap.state === 'absent' || snap.state === 'unobserved') return false;
     if (!isObservedAtOrAfter(snap.observed_at_unix_millis, sinceUnixSecs)) {
       return false;
@@ -135,7 +138,9 @@ export function selectQuotaCardSnapshots({
   for (const window of orderedWindows(latestWindows)) {
     const snap = byWindow.get(window);
     if (!snap) continue;
-    if (window === 'unified') continue;
+    // Credit observations from the API (Overage) and headers (Unified) are
+    // rendered once below, with each fact retaining its source and freshness.
+    if (window === 'unified' || snap.credits != null) continue;
     if (snap.state === 'absent') continue;
     if (provider !== undefined && provider !== 'anthropic') {
       if (snap.state === 'unobserved') continue;
@@ -149,6 +154,16 @@ export function selectQuotaCardSnapshots({
     if (snap.state === 'unobserved') continue;
     if (window === 'overage' && !isOverageActive(snap)) continue;
     result.push(snap);
+  }
+  if (selectCodexCredits(latestWindows) != null) {
+    const creditSnapshot = latestWindows.find(
+      (snapshot) =>
+        (snapshot.window === 'overage' || snapshot.window === 'unified') &&
+        snapshot.credits != null &&
+        snapshot.state !== 'absent' &&
+        snapshot.state !== 'unobserved',
+    );
+    if (creditSnapshot) result.push({ ...creditSnapshot, window: 'unified' });
   }
   return result;
 }

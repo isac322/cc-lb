@@ -1,4 +1,5 @@
 use cc_lb_control::anthropic_metadata::CedarEmberStatus;
+use cc_lb_domain::SubscriptionQuotaCredits;
 use cc_lb_engine::SubscriptionQuotaSink;
 use cc_lb_oauth_protocol::GeminiOAuthProfile;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
@@ -274,6 +275,7 @@ fn base_record(
         extra_usage_enabled,
         extra_usage_monthly_limit,
         extra_usage_used_credits,
+        credits: None,
         ingested_at_unix_millis: observed_at_unix_millis,
     }
 }
@@ -344,9 +346,26 @@ fn records_from_openai_api(
 ) -> Vec<SubscriptionQuotaSample> {
     let mut records = Vec::new();
     collect_openai_windows(value, &mut records, upstream_id, observed_at_unix_millis);
+    let has_base_window = !records.is_empty();
+    if let Some(credits) = codex_credits_from_value(value) {
+        let mut record = base_record(
+            upstream_id,
+            SubscriptionQuotaWindow::Overage,
+            SubscriptionQuotaSampleKind::Sample,
+            observed_at_unix_millis,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        record.fallback_available = credits.fallback_available();
+        record.credits = Some(credits);
+        records.push(record);
+    }
     // A recognized window establishes a usable snapshot, not an error or an
     // unsupported body. Omitted companion windows are explicitly absent.
-    if !records.is_empty() {
+    if has_base_window {
         for window in [
             SubscriptionQuotaWindow::FiveHour,
             SubscriptionQuotaWindow::SevenDay,
@@ -413,6 +432,40 @@ fn collect_openai_windows(
         }
         collect_openai_windows(child, records, upstream_id, observed_at_unix_millis);
     }
+}
+
+fn codex_credits_from_value(value: &serde_json::Value) -> Option<SubscriptionQuotaCredits> {
+    let object = value.get("credits")?.as_object()?;
+    let credits = SubscriptionQuotaCredits {
+        has_credits: object
+            .get("has_credits")
+            .and_then(serde_json::Value::as_bool),
+        unlimited: object.get("unlimited").and_then(serde_json::Value::as_bool),
+        limit_reached: object
+            .get("overage_limit_reached")
+            .and_then(serde_json::Value::as_bool),
+        balance: object
+            .get("balance")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        approx_local_messages: parse_message_estimate(object.get("approx_local_messages")),
+        approx_cloud_messages: parse_message_estimate(object.get("approx_cloud_messages")),
+    };
+    (credits.has_credits.is_some()
+        || credits.unlimited.is_some()
+        || credits.limit_reached.is_some()
+        || credits.balance.is_some()
+        || credits.approx_local_messages.is_some()
+        || credits.approx_cloud_messages.is_some())
+    .then_some(credits)
+}
+
+fn parse_message_estimate(value: Option<&serde_json::Value>) -> Option<[u64; 2]> {
+    let values = value?.as_array()?;
+    let [lower, upper] = values.as_slice() else {
+        return None;
+    };
+    Some([lower.as_u64()?, upper.as_u64()?])
 }
 
 fn codex_window_from_duration_secs(seconds: u64) -> Option<SubscriptionQuotaWindow> {

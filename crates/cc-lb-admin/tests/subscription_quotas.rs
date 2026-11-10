@@ -1477,6 +1477,7 @@ fn quota_observation_with_status_and_reset(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: observed_at_unix_secs.saturating_mul(1_000),
     }
 }

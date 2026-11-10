@@ -541,6 +541,14 @@ fn upstream_subscription_quota_store_postgres() {
         upstream_subscription_quota_store::run_all,
     );
 }
+
+#[test]
+fn upstream_subscription_quota_credit_only_changes_create_checkpoints_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_credit_only_changes_create_checkpoints",
+        upstream_subscription_quota_store::credit_only_changes_create_checkpoints,
+    );
+}
 #[test]
 fn upstream_subscription_quota_absent_replaces_latest_without_erasing_history_postgres() {
     run_postgres_scenario(

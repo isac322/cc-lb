@@ -231,6 +231,8 @@ Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycl
 | `GET /admin/v1/subscription-quotas/series` | Storage | After the batch flush |
 | `GET /admin/v1/subscription-quotas/aggregate` | Cache for the latest values, storage for history | Latest after the subscriber processes the event; history after the flush |
 
+Codex credit observations use these same delivery and freshness boundaries. Usage polls store the full credit state on `overage`; response headers store their partial credit state on `unified`. Each window keeps the existing whole-observation source selection. The router considers both windows, so a header that omits the usage-poll restriction cannot clear it. Explicit negative credit signals remain conservative blocks until that source reports a replacement; stale positive credit signals cannot establish availability.
+
 ## Writing tests against this contract
 
 Assert right after a 2xx admin response:

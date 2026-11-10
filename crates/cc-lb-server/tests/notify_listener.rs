@@ -516,6 +516,7 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
             extra_usage_enabled: None,
             extra_usage_monthly_limit: None,
             extra_usage_used_credits: None,
+            credits: None,
             ingested_at_unix_millis: 1_800_000_000_000,
         }])
         .await

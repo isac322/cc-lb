@@ -371,6 +371,7 @@ fn quota_snapshot(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         fallback_available: None,
         overage_in_use: None,
         overage_period_monthly_utilization: None,
@@ -393,6 +394,7 @@ impl SubscriptionQuotaCacheLike for RecordingQuotaCache {
             utilization: record.utilization,
             status: record.status.map(|status| status.as_str().to_owned()),
             resets_at_unix_secs: record.resets_at_unix_secs,
+            credits: record.credits.clone(),
             ..quota_snapshot(record.window, 0.0, "allowed", 0)
         };
         let mut snapshots = self.snapshots.lock().expect("quota snapshots lock");

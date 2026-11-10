@@ -44,6 +44,51 @@ fn parses_pro_primary_as_seven_day_and_drops_null_secondary() {
 }
 
 #[test]
+fn parses_available_credits_on_unified_without_claiming_an_overage_limit() {
+    let observations = parse_openai_codex_quota_headers(&headers(&[
+        ("x-codex-primary-used-percent", "100"),
+        ("x-codex-primary-window-minutes", "10080"),
+        ("x-codex-primary-reset-at", "1800600000"),
+        ("x-codex-credits-has-credits", "True"),
+        ("x-codex-credits-unlimited", "False"),
+        ("x-codex-credits-balance", "62500.0000000000"),
+        ("x-codex-active-limit", "codex"),
+    ]));
+
+    let credits = observations
+        .iter()
+        .find(|observation| observation.window == SubscriptionQuotaWindow::Unified)
+        .expect("credit observation");
+    assert_eq!(credits.fallback_available, Some(true));
+    assert!(credits.utilization.is_none());
+}
+
+#[test]
+fn parses_unavailable_and_unlimited_credit_headers_without_a_limit_claim() {
+    for (has_credits, unlimited, expected) in [
+        ("False", "False", Some(false)),
+        ("True", "True", Some(true)),
+    ] {
+        let observations = parse_openai_codex_quota_headers(&headers(&[
+            ("x-codex-credits-has-credits", has_credits),
+            ("x-codex-credits-unlimited", unlimited),
+            ("x-codex-credits-balance", "0.0000000000"),
+        ]));
+        let credits = observations
+            .iter()
+            .find(|observation| observation.window == SubscriptionQuotaWindow::Unified)
+            .expect("credit observation");
+        assert_eq!(credits.fallback_available, expected);
+        assert_eq!(
+            credits
+                .credits
+                .as_ref()
+                .and_then(|value| value.limit_reached),
+            None
+        );
+    }
+}
+#[test]
 fn drops_codex_windows_with_unknown_duration() {
     let observations = parse_openai_codex_quota_headers(&headers(&[
         ("x-codex-primary-used-percent", "12.5"),

@@ -235,9 +235,9 @@ describe('QuotaWindowRow', () => {
     expect(row.textContent).not.toContain('Resets in');
     expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
   });
-  it('renders nothing for the backend-only unified window', () => {
-    // `unified` is not a SubscriptionQuotaWindow; the backend may still
-    // report it on the wire for routing, but the row must not render.
+  it('renders nothing for a unified restriction without credit facts', () => {
+    // Unified is a transport envelope, not a timed usage window. Only its
+    // Codex credit observations are visible.
     render(
       <QuotaWindowRows>
         <QuotaWindowRow
@@ -249,6 +249,98 @@ describe('QuotaWindowRow', () => {
       </QuotaWindowRows>,
     );
     expect(screen.queryByRole('listitem')).toBeNull();
+  });
+
+  it.each([
+    {
+      name: 'available',
+      credits: {
+        has_credits: true,
+        unlimited: false,
+        limit_reached: false,
+        balance: '62500.0000000000',
+        approx_local_messages: [10, 20],
+        approx_cloud_messages: null,
+      },
+      status: 'Available',
+    },
+    {
+      name: 'unlimited',
+      credits: {
+        has_credits: true,
+        unlimited: true,
+        limit_reached: false,
+        balance: null,
+        approx_local_messages: null,
+        approx_cloud_messages: null,
+      },
+      status: 'Unlimited',
+    },
+    {
+      name: 'blocked',
+      credits: {
+        has_credits: true,
+        unlimited: true,
+        limit_reached: true,
+        balance: '62500.0000000000',
+        approx_local_messages: null,
+        approx_cloud_messages: null,
+      },
+      status: 'Blocked',
+    },
+    {
+      name: 'unknown',
+      credits: {
+        has_credits: null,
+        unlimited: null,
+        limit_reached: null,
+        balance: '62500.0000000000',
+        approx_local_messages: null,
+        approx_cloud_messages: null,
+      },
+      status: 'Unknown',
+    },
+  ])(
+    'renders Codex credits as a status and raw balance ($name)',
+    ({ credits, status }) => {
+      const row = renderRow(
+        snap({
+          window: 'unified',
+          utilization: null,
+          resets_at_unix_secs: null,
+          credits,
+        }),
+      );
+      expect(row.textContent).toContain('Codex credits');
+      expect(row.textContent).toContain(status);
+      expect(row.textContent).toContain(
+        credits.balance != null
+          ? `${credits.balance} credits`
+          : 'No balance reported',
+      );
+      expect(screen.queryByRole('meter')).toBeNull();
+    },
+  );
+
+  it('marks stale Codex credits without treating them as fresh availability', () => {
+    const row = renderRow(
+      snap({
+        window: 'unified',
+        state: 'stale',
+        utilization: null,
+        resets_at_unix_secs: null,
+        credits: {
+          has_credits: true,
+          unlimited: false,
+          limit_reached: false,
+          balance: '62500.0000000000',
+          approx_local_messages: null,
+          approx_cloud_messages: null,
+        },
+      }),
+    );
+    expect(row.textContent).toContain('Stale');
+    expect(row.textContent).not.toContain('Available');
   });
   it('omits an explicitly absent 5h window without a row, meter, or placeholder', () => {
     render(

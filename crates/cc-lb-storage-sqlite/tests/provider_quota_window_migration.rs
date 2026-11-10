@@ -1,9 +1,14 @@
 use std::{error::Error, path::Path, str::FromStr, sync::Arc};
 
 use cc_lb_clock::SystemClock;
-use cc_lb_storage_api::MetaStore;
+use cc_lb_storage_api::{
+    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaSource,
+    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    UpstreamSubscriptionQuotaStore,
+};
 use cc_lb_storage_sqlite::open_sqlite;
 use sqlx::{Connection, SqliteConnection, migrate::Migrator, sqlite::SqliteConnectOptions};
+use uuid::Uuid;
 #[tokio::test]
 async fn quota_window_migration_preserves_rows_and_accepts_provider_windows()
 -> Result<(), Box<dyn Error>> {
@@ -26,7 +31,8 @@ async fn quota_window_migration_preserves_rows_and_accepts_provider_windows()
             upstream_id, window, source, changed_at_unix_millis, sample_id,
             semantic_fingerprint, utilization, status, resets_at_unix_secs,
             ingested_at_unix_millis
-        ) VALUES ('u', '5h', 'api', 1, 's', zeroblob(32), 0.1, 'allowed', 2, 1)",
+        ) VALUES ('00000000-0000-0000-0000-000000000001', '5h', 'api', 1,
+                  '00000000-0000-0000-0000-000000000002', zeroblob(32), 0.1, 'allowed', 2, 1)",
     )
     .execute(&mut connection)
     .await?;
@@ -34,7 +40,8 @@ async fn quota_window_migration_preserves_rows_and_accepts_provider_windows()
         "INSERT INTO upstream_subscription_quota_latest_v1 (
             upstream_id, window, source, sample_kind, observed_at_unix_millis,
             sample_id, utilization, status, resets_at_unix_secs, ingested_at_unix_millis
-        ) VALUES ('u', '5h', 'api', 'sample', 1, 's', 0.1, 'allowed', 2, 1)",
+        ) VALUES ('00000000-0000-0000-0000-000000000001', '5h', 'api', 'sample', 1,
+                  '00000000-0000-0000-0000-000000000002', 0.1, 'allowed', 2, 1)",
     )
     .execute(&mut connection)
     .await?;
@@ -66,6 +73,33 @@ async fn quota_window_migration_preserves_rows_and_accepts_provider_windows()
             .fetch_one(storage.pool())
             .await?;
     assert_eq!((checkpoints, latest, history), (1, 1, 1));
+
+    let upstream_id = Uuid::from_u128(1);
+    let legacy_latest = storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+        .await?;
+    assert_eq!(legacy_latest.len(), 1);
+    assert_eq!(legacy_latest[0].credits, None);
+    assert_eq!(legacy_latest[0].utilization, Some(0.1));
+    assert_eq!(legacy_latest[0].source, SubscriptionQuotaSource::Api);
+    let legacy_checkpoints = storage
+        .list_subscription_quota_slim_checkpoints(SubscriptionQuotaCheckpointRangeQuery {
+            upstream_ids: vec![upstream_id],
+            windows: vec![SubscriptionQuotaWindow::FiveHour],
+            sources: vec![SubscriptionQuotaSource::Api],
+            since_unix_millis: 0,
+            until_unix_millis: 2,
+        })
+        .await?;
+    assert_eq!(legacy_checkpoints.len(), 1);
+    assert_eq!(legacy_checkpoints[0].utilization, Some(0.1));
+    let legacy_credits: Option<String> = sqlx::query_scalar(
+        "SELECT credits_json FROM upstream_subscription_quota_checkpoints_v1 WHERE upstream_id = ?",
+    )
+    .bind(upstream_id.to_string())
+    .fetch_one(storage.pool())
+    .await?;
+    assert_eq!(legacy_credits, None);
 
     sqlx::query(
         "INSERT INTO upstream_subscription_quota_checkpoints_v1 (

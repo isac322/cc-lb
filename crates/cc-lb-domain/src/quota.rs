@@ -55,6 +55,36 @@ pub enum SubscriptionQuotaDataState {
     Unobserved,
 }
 
+/// Provider-reported credit state used by subscription quota routing and admin views.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionQuotaCredits {
+    /// Provider-reported availability flag.
+    pub has_credits: Option<bool>,
+    /// Whether the provider reports unlimited credits.
+    pub unlimited: Option<bool>,
+    /// Whether the provider reports that the credit limit is reached.
+    pub limit_reached: Option<bool>,
+    /// Provider-reported balance, preserved as its original decimal string.
+    pub balance: Option<String>,
+    /// Optional provider-reported local-message estimate pair.
+    pub approx_local_messages: Option<[u64; 2]>,
+    /// Optional provider-reported cloud-message estimate pair.
+    pub approx_cloud_messages: Option<[u64; 2]>,
+}
+
+impl SubscriptionQuotaCredits {
+    /// Derives availability only from explicit provider flags.
+    pub fn fallback_available(&self) -> Option<bool> {
+        if self.limit_reached == Some(true) {
+            Some(false)
+        } else if self.unlimited == Some(true) || self.has_credits == Some(true) {
+            Some(true)
+        } else {
+            self.has_credits
+        }
+    }
+}
+
 /// Latest subscription quota snapshot for one candidate/window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubscriptionQuotaCandidateSnapshot {
@@ -82,6 +112,9 @@ pub struct SubscriptionQuotaCandidateSnapshot {
     pub extra_usage_monthly_limit: Option<f64>,
     /// Provider extra-usage consumed credits.
     pub extra_usage_used_credits: Option<f64>,
+    /// Provider-reported credit state, when the provider exposes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<SubscriptionQuotaCredits>,
     /// Observation timestamp in Unix milliseconds.
     pub observed_at_unix_millis: Option<u64>,
     /// Configured maximum age before this snapshot becomes stale.

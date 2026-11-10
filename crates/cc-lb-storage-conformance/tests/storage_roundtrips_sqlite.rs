@@ -349,6 +349,10 @@ upstream_subscription_quota_sqlite_test!(
     append_then_list_latest_roundtrip
 );
 upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_credit_only_changes_create_checkpoints_sqlite,
+    credit_only_changes_create_checkpoints
+);
+upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_same_millis_appends_with_different_sample_ids_dont_collide_sqlite,
     same_millis_appends_with_different_sample_ids_dont_collide
 );

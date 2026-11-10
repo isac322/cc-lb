@@ -18,6 +18,16 @@ For plans that report a five-hour window, the weekly pace gate suppresses five-h
 
 A provider-confirmed `Absent` five-hour window contributes no five-hour pressure and does not trigger the unusable-five-hour fallback. Weekly-only plans route on their reported weekly windows. `Unobserved` (no observation yet) and `Stale` (an outdated actual sample) remain distinct from `Absent` and retain conservative fallback behavior; missing response headers alone do not prove that a window is absent.
 
+## Codex credits
+
+Codex OAuth usage polls read the `credits` object from the provider usage response. Response headers provide the same availability, unlimited, and balance fields when a request completes. The raw balance stays a decimal string in credits; it is not converted to dollars or a utilization percentage. Optional local and cloud message estimates remain informational and never establish capacity.
+
+Availability follows explicit provider flags. `overage_limit_reached=true` blocks credit routing even when the provider also reports credits or unlimited access. A balance without an availability flag is unknown. Header observations do not invent an overage-limit result, so a usage-poll restriction remains effective until a later usage poll reports that the limit is no longer reached.
+
+When a fresh Codex base window is exhausted and credits are explicitly available or unlimited, the account enters the existing `Overage` tier. Base-positive accounts remain in their normal base tier. Unavailable, blocked, and stale credit observations do not authorize overage routing.
+
+The reported measurements did not include a Codex account with an exhausted base window and usable credits. That runtime request path remains covered by contract-faithful routing tests.
+
 ## Inspecting a decision
 
 Use request-event and routing metrics to inspect the selected tier, formula version, warning multiplier, and bounded reason fields. Do not treat a routing choice as a promise of a specific provider response or quota outcome.

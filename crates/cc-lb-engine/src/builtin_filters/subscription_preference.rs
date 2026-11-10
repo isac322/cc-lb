@@ -881,7 +881,14 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         snapshot.extra_usage_enabled == Some(true)
             && snapshot_extra_usage_remaining(snapshot).is_some_and(|remaining| remaining <= 0.0)
     });
+    let credits_limit_reached = all_snapshots.iter().flatten().any(|snapshot| {
+        snapshot
+            .credits
+            .as_ref()
+            .is_some_and(|credits| credits.limit_reached == Some(true))
+    });
     let blocked = fallback_unavailable
+        || credits_limit_reached
         || overage_status_blocked
         || overage_util_blocked
         || extra_usage_disabled

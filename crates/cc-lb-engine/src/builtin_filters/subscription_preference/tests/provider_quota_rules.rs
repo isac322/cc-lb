@@ -144,6 +144,171 @@ fn provider_candidates_follow_all_four_tiers_before_api_key_fallback() {
 }
 
 #[test]
+fn openai_credits_keep_exhausted_base_candidate_in_overage_tier() {
+    let credits = cc_lb_domain::SubscriptionQuotaCredits {
+        has_credits: Some(true),
+        unlimited: Some(false),
+        limit_reached: Some(false),
+        balance: Some("62500.0000000000".to_owned()),
+        approx_local_messages: Some([10, 20]),
+        approx_cloud_messages: None,
+    };
+    let candidate = provider_oauth(
+        1,
+        UpstreamKind::OpenaiOauth,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE)
+                .fallback_available(true)
+                .credits(credits)
+                .build(),
+        ],
+    );
+    let key = other_provider("key", 2, UpstreamKind::OpenaiApiKey);
+
+    let output = filter_for_model(&[candidate.clone(), key], "gpt-5");
+
+    assert_eq!(output.kept_upstream_ids, vec![candidate.upstream_id]);
+    assert_eq!(
+        output
+            .subscription_preference
+            .expect("subscription preference trace")
+            .chosen_tier,
+        cc_lb_domain::SubscriptionTier::Overage
+    );
+}
+
+#[test]
+fn openai_credit_limit_reached_still_blocks_overage() {
+    let candidate = provider_oauth(
+        1,
+        UpstreamKind::OpenaiOauth,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE)
+                .fallback_available(true)
+                .credits(cc_lb_domain::SubscriptionQuotaCredits {
+                    has_credits: Some(true),
+                    unlimited: Some(true),
+                    limit_reached: Some(true),
+                    balance: None,
+                    approx_local_messages: None,
+                    approx_cloud_messages: None,
+                })
+                .build(),
+        ],
+    );
+    let key = other_provider("key", 2, UpstreamKind::OpenaiApiKey);
+
+    let output = filter_for_model(&[candidate, key.clone()], "gpt-5");
+
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+}
+
+#[test]
+fn codex_credit_flags_preserve_base_tiers_and_require_fresh_overage_availability() {
+    for (has_credits, unlimited, expected_overage) in [
+        (Some(true), Some(false), true),
+        (Some(false), Some(true), true),
+        (Some(false), Some(false), false),
+        (None, None, false),
+    ] {
+        let credits = cc_lb_domain::SubscriptionQuotaCredits {
+            has_credits,
+            unlimited,
+            limit_reached: None,
+            balance: Some("62500.0000000000".to_owned()),
+            approx_local_messages: None,
+            approx_cloud_messages: None,
+        };
+        let mut credit_snapshot = fresh(WINDOW_OVERAGE).credits(credits.clone()).build();
+        credit_snapshot.fallback_available = credits.fallback_available();
+        let key = other_provider("key", 2, UpstreamKind::OpenaiApiKey);
+        let mut healthy = healthy_windows([WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY]);
+        healthy.push(credit_snapshot.clone());
+        let base = provider_oauth(1, UpstreamKind::OpenaiOauth, healthy);
+        let output = filter_for_model(&[base.clone(), key.clone()], "gpt-5");
+        assert_eq!(output.kept_upstream_ids, vec![base.upstream_id]);
+        assert_eq!(
+            output.subscription_preference.unwrap().chosen_tier,
+            cc_lb_domain::SubscriptionTier::KnownBase
+        );
+
+        let mut exhausted = provider_oauth(
+            1,
+            UpstreamKind::OpenaiOauth,
+            vec![
+                absent(WINDOW_FIVE_HOUR).build(),
+                fresh(WINDOW_SEVEN_DAY).util(1.0).build(),
+                credit_snapshot,
+            ],
+        );
+        let output = filter_for_model(&[exhausted.clone(), key.clone()], "gpt-5");
+        assert_eq!(
+            output.kept_upstream_ids,
+            vec![if expected_overage {
+                exhausted.upstream_id
+            } else {
+                key.upstream_id
+            }],
+            "has_credits={has_credits:?}, unlimited={unlimited:?}"
+        );
+        if expected_overage {
+            assert_eq!(
+                output.subscription_preference.unwrap().chosen_tier,
+                cc_lb_domain::SubscriptionTier::Overage
+            );
+        }
+        exhausted.subscription_quotas[2].state = SubscriptionQuotaDataState::Stale;
+        let output = filter_for_model(&[exhausted.clone(), key], "gpt-5");
+        assert_eq!(output.kept_upstream_ids, vec![upstream_id(2)]);
+        let pinned = filter_for_model(std::slice::from_ref(&exhausted), "gpt-5");
+        assert_eq!(pinned.kept_upstream_ids, vec![exhausted.upstream_id]);
+        assert_eq!(pinned.reason, SINGLE_CANDIDATE_PRESERVED_REASON);
+    }
+}
+
+#[test]
+fn openai_credit_header_does_not_clear_usage_poll_limit_restriction() {
+    let candidate = provider_oauth(
+        1,
+        UpstreamKind::OpenaiOauth,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE)
+                .fallback_available(false)
+                .credits(cc_lb_domain::SubscriptionQuotaCredits {
+                    has_credits: Some(true),
+                    unlimited: Some(false),
+                    limit_reached: Some(true),
+                    balance: None,
+                    approx_local_messages: None,
+                    approx_cloud_messages: None,
+                })
+                .build(),
+            fresh(WINDOW_UNIFIED)
+                .fallback_available(true)
+                .credits(cc_lb_domain::SubscriptionQuotaCredits {
+                    has_credits: Some(true),
+                    unlimited: Some(false),
+                    limit_reached: None,
+                    balance: Some("62500.0000000000".to_owned()),
+                    approx_local_messages: None,
+                    approx_cloud_messages: None,
+                })
+                .build(),
+        ],
+    );
+    let key = other_provider("key", 2, UpstreamKind::OpenaiApiKey);
+
+    let output = filter_for_model(&[candidate, key.clone()], "gpt-5");
+
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+}
+#[test]
 fn openai_pro_absent_five_hour_is_known_base_but_unobserved_is_partial() {
     let weekly = fresh(WINDOW_SEVEN_DAY)
         .util(0.25)

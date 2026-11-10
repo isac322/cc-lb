@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use cc_lb_domain::SubscriptionQuotaCredits;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 use http::HeaderMap;
 
@@ -65,6 +66,7 @@ impl PartialUnifiedQuotaObservation {
             fallback_available: self.fallback_available,
             overage_in_use: self.overage_in_use,
             overage_period_monthly_utilization: self.overage_period_monthly_utilization,
+            credits: None,
             upgrade_paths: self.upgrade_paths,
             disabled_reason: self.disabled_reason,
         })
@@ -261,7 +263,53 @@ pub fn parse_openai_codex_quota_headers(headers: &http::HeaderMap) -> Vec<Unifie
             ..UnifiedQuotaObservation::default()
         });
     }
+    if let Some(credits) = parse_codex_credits(headers) {
+        observations.push(UnifiedQuotaObservation {
+            window: SubscriptionQuotaWindow::Unified,
+            representative_claim: Some("Codex credits".to_owned()),
+            fallback_available: credits.fallback_available(),
+            credits: Some(credits),
+            ..UnifiedQuotaObservation::default()
+        });
+    }
     observations
+}
+
+fn parse_codex_credits(headers: &http::HeaderMap) -> Option<SubscriptionQuotaCredits> {
+    let has_credits = headers
+        .get("x-codex-credits-has-credits")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_codex_bool);
+    let unlimited = headers
+        .get("x-codex-credits-unlimited")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_codex_bool);
+    let balance = headers
+        .get("x-codex-credits-balance")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_string);
+    if has_credits.is_none() && unlimited.is_none() && balance.is_none() {
+        return None;
+    }
+    Some(SubscriptionQuotaCredits {
+        has_credits,
+        unlimited,
+        limit_reached: None,
+        balance,
+        approx_local_messages: None,
+        approx_cloud_messages: None,
+    })
+}
+
+fn parse_codex_bool(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("true") || value == "1" {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("false") || value == "0" {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn subscription_quota_window_order(window: SubscriptionQuotaWindow) -> u8 {

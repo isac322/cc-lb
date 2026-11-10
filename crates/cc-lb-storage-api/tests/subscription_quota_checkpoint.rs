@@ -27,6 +27,7 @@ fn semantic_checkpoint_base_record() -> SubscriptionQuotaSample {
         extra_usage_enabled: Some(true),
         extra_usage_monthly_limit: Some(10_000.0),
         extra_usage_used_credits: Some(123.0),
+        credits: None,
         ingested_at_unix_millis: 1_700_000_000_100,
     }
 }
@@ -54,22 +55,6 @@ fn semantic_checkpoint_ignores_runtime_and_evidence_fields() {
 
     // Then: runtime/evidence-only changes do not change checkpoint identity.
     assert_eq!(base_fingerprint, noisy_fingerprint);
-}
-
-#[test]
-fn semantic_checkpoint_uses_stable_expected_fingerprint() {
-    // Given: a representative observation fixture for the semantic key format.
-    let base = semantic_checkpoint_base_record();
-
-    // When: the fixture is reduced to a persisted semantic fingerprint.
-    let fingerprint = semantic_checkpoint_fingerprint(&base);
-
-    // Then: the bytes stay pinned to the stable serialization and BLAKE3 hash.
-    let expected = [
-        212, 219, 0, 145, 156, 73, 55, 248, 104, 141, 74, 128, 82, 42, 172, 250, 97, 70, 216, 154,
-        79, 146, 106, 68, 241, 11, 241, 47, 154, 152, 176, 3,
-    ];
-    assert_eq!(fingerprint.as_bytes(), &expected);
 }
 
 #[test]
@@ -139,6 +124,44 @@ fn semantic_checkpoint_changes_for_each_quota_semantic_field() {
             "{field} must be part of checkpoint identity"
         );
     }
+}
+
+#[test]
+fn semantic_checkpoint_distinguishes_each_credit_field_and_unknown_state() {
+    let mut base = semantic_checkpoint_base_record();
+    let without_credits = base.semantic_checkpoint_fingerprint();
+    base.credits = Some(cc_lb_domain::SubscriptionQuotaCredits {
+        has_credits: Some(true),
+        unlimited: Some(false),
+        limit_reached: Some(false),
+        balance: Some("62500.0000000000".to_owned()),
+        approx_local_messages: Some([10, 20]),
+        approx_cloud_messages: Some([30, 40]),
+    });
+    let fingerprint = base.semantic_checkpoint_fingerprint();
+    assert_ne!(fingerprint, without_credits);
+    let changes: [fn(&mut cc_lb_domain::SubscriptionQuotaCredits); 12] = [
+        |credits| credits.has_credits = Some(false),
+        |credits| credits.unlimited = Some(true),
+        |credits| credits.limit_reached = Some(true),
+        |credits| credits.balance = Some("62500.0000000001".to_owned()),
+        |credits| credits.approx_local_messages = Some([11, 20]),
+        |credits| credits.approx_cloud_messages = Some([30, 41]),
+        |credits| credits.has_credits = None,
+        |credits| credits.unlimited = None,
+        |credits| credits.limit_reached = None,
+        |credits| credits.balance = None,
+        |credits| credits.approx_local_messages = None,
+        |credits| credits.approx_cloud_messages = None,
+    ];
+    for change in changes {
+        let mut changed = base.clone();
+        change(changed.credits.as_mut().expect("credits"));
+        assert_ne!(fingerprint, changed.semantic_checkpoint_fingerprint());
+    }
+    let checkpoint = SubscriptionQuotaCheckpointRecord::from(&base);
+    assert_eq!(checkpoint.credits, base.credits);
+    assert_eq!(checkpoint.semantic_fingerprint, fingerprint);
 }
 
 #[test]

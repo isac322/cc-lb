@@ -207,6 +207,7 @@ fn previous_quota(upstream_id: Uuid) -> SubscriptionQuotaSample {
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: 1_800_000_000_001,
     }
 }

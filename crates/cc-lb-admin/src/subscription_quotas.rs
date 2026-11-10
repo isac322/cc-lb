@@ -13,7 +13,9 @@ use axum::{
 };
 use cc_lb_clock::Clock;
 use cc_lb_control::DynamicViewHolder;
-use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
+use cc_lb_domain::{
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaCredits, SubscriptionQuotaDataState,
+};
 use cc_lb_quota::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaChartPointRecord,
@@ -92,6 +94,8 @@ struct LatestWindowResponse {
     representative_claim: Option<String>,
     disabled_reason: Option<String>,
     extra_usage_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credits: Option<SubscriptionQuotaCredits>,
     extra_usage_monthly_limit: Option<f64>,
     extra_usage_used_credits: Option<f64>,
     observed_at_unix_millis: Option<u64>,
@@ -2364,6 +2368,8 @@ fn provider_quota_windows(kind: UpstreamKind) -> &'static [SubscriptionQuotaWind
         UpstreamKind::OpenaiOauth => &[
             SubscriptionQuotaWindow::FiveHour,
             SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaWindow::Overage,
+            SubscriptionQuotaWindow::Unified,
         ],
         UpstreamKind::GeminiOauth => &[
             SubscriptionQuotaWindow::GeminiFiveHour,
@@ -2488,6 +2494,7 @@ fn latest_window_response(
         extra_usage_enabled: snapshot.extra_usage_enabled,
         extra_usage_monthly_limit: snapshot.extra_usage_monthly_limit,
         extra_usage_used_credits: snapshot.extra_usage_used_credits,
+        credits: snapshot.credits,
         observed_at_unix_millis: snapshot.observed_at_unix_millis,
         age_secs,
         fallback_available: snapshot.fallback_available,
@@ -2750,7 +2757,10 @@ mod tests {
                 provider_supports_window(UpstreamKind::OpenaiOauth, id),
                 matches!(
                     window,
-                    SubscriptionQuotaWindow::FiveHour | SubscriptionQuotaWindow::SevenDay
+                    SubscriptionQuotaWindow::FiveHour
+                        | SubscriptionQuotaWindow::SevenDay
+                        | SubscriptionQuotaWindow::Overage
+                        | SubscriptionQuotaWindow::Unified
                 )
             );
             assert!(!provider_supports_window(UpstreamKind::GeminiApiKey, id));
