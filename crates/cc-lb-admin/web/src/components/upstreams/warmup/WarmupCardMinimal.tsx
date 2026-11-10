@@ -118,12 +118,13 @@ function HelpIcon({
       }
       side="top"
     >
-      <span
+      <button
+        type="button"
         aria-label={label}
-        className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-sm text-text-faint transition-colors hover:bg-overlay-5 hover:text-text"
+        className="relative inline-flex h-4 w-4 max-md:h-11 max-md:w-11 max-md:-my-3.5 cursor-help items-center justify-center rounded-sm text-text-faint transition-colors hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
       >
         <HelpCircle className="h-3.5 w-3.5" />
-      </span>
+      </button>
     </Hint>
   );
 }
@@ -612,50 +613,62 @@ function WarmupCardMinimalInner({
                   Shape plugin
                   <ShapePluginHelpHover />
                 </span>
-                {pluginRegistryPending ? (
-                  <Skeleton className="h-8 w-48 rounded-sm" />
-                ) : shapePlugins.length === 0 &&
-                  !upstream.warmup_dialect_plugin ? (
-                  <div className="text-body-sm text-text-muted">
-                    <span>{COPY.noShapePluginsAvailable}</span>{' '}
-                    <a
-                      href="/plugins"
-                      className="max-md:relative max-md:inline-flex max-md:min-h-10 max-md:items-center max-md:px-2 max-md:-mx-2 rounded-sm text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-                    >
-                      Plugins
-                    </a>
-                  </div>
-                ) : (
-                  <div className="w-56 max-w-full min-w-0 max-md:w-full">
-                    <Select
-                      id="dialect-plugin-select"
-                      data-testid="warmup-plugin-select"
+                <div className="flex flex-wrap items-center justify-end gap-2 max-md:w-full max-md:flex-col max-md:items-stretch">
+                  {pluginRegistryPending ? (
+                    <Skeleton className="h-8 w-48 rounded-sm" />
+                  ) : shapePlugins.length === 0 &&
+                    !upstream.warmup_dialect_plugin ? (
+                    <div className="text-body-sm text-text-muted">
+                      <span>{COPY.noShapePluginsAvailable}</span>{' '}
+                      <a
+                        href="/plugins"
+                        className="max-md:relative max-md:inline-flex max-md:min-h-10 max-md:items-center max-md:px-2 max-md:-mx-2 rounded-sm text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                      >
+                        Plugins
+                      </a>
+                    </div>
+                  ) : (
+                    <div className="w-56 max-w-full min-w-0 max-md:w-full">
+                      <Select
+                        id="dialect-plugin-select"
+                        data-testid="warmup-plugin-select"
+                        size="sm"
+                        value={selectedPluginValue}
+                        onChange={handlePluginChange}
+                        disabled={settingsPending}
+                        aria-label={COPY.dialectPluginLabel}
+                        allLabel={COPY.defaultPluginOption}
+                        options={[
+                          ...(selectedPluginValue && !selectedPluginKnown
+                            ? [
+                                {
+                                  value: selectedPluginValue,
+                                  label: COPY.unknownPluginTemplate.replace(
+                                    '{id}',
+                                    selectedPluginValue,
+                                  ),
+                                },
+                              ]
+                            : []),
+                          ...shapePlugins.map((p: PluginEntry) => ({
+                            value: p.id,
+                            label: p.name,
+                          })),
+                        ]}
+                      />
+                    </div>
+                  )}
+                  {pluginSnapshot && (
+                    <Button
                       size="sm"
-                      value={selectedPluginValue}
-                      onChange={handlePluginChange}
-                      disabled={settingsPending}
-                      aria-label={COPY.dialectPluginLabel}
-                      allLabel={COPY.defaultPluginOption}
-                      options={[
-                        ...(selectedPluginValue && !selectedPluginKnown
-                          ? [
-                              {
-                                value: selectedPluginValue,
-                                label: COPY.unknownPluginTemplate.replace(
-                                  '{id}',
-                                  selectedPluginValue,
-                                ),
-                              },
-                            ]
-                          : []),
-                        ...shapePlugins.map((p: PluginEntry) => ({
-                          value: p.id,
-                          label: p.name,
-                        })),
-                      ]}
-                    />
-                  </div>
-                )}
+                      variant="secondary"
+                      data-testid="warmup-config-button"
+                      onClick={() => setConfigOpen(true)}
+                    >
+                      View plugin config
+                    </Button>
+                  )}
+                </div>
               </div>
             )}
 
@@ -765,7 +778,7 @@ function WarmupCardMinimalInner({
         />
       </DetailSection>
 
-      {upstream.kind === 'anthropic_oauth' && pluginSnapshot && (
+      {capabilitiesOf(upstream.kind).warmup && pluginSnapshot && (
         <WarmupConfigModal
           open={configOpen}
           onOpenChange={setConfigOpen}
