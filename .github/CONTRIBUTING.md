@@ -26,6 +26,10 @@ Run the narrowest relevant checks for your change and report the commands and re
 
 [`AGENTS.md`](../AGENTS.md) records repository rules that apply to every change, including the authentication ordering in the request path, the SQLite storage backend, CI failure handling, and the JSON library policy.
 
+The coverage report downloads its binaries and runtime while the test shards run. Before collecting profiles, `scripts/wait-coverage-producers.mjs` requires the contract job and all four shards to finish successfully. API errors, failed jobs, and a 15-minute timeout fail the report. Run `node --test scripts/test-wait-coverage-producers.mjs` when changing this barrier.
+
+The barrier rejects workflow reruns because artifacts are scoped to the run rather than the attempt. Diagnose failed CI locally and push a verified fix to start a new run; do not rerun a failed workflow.
+
 ## Documentation and public claims
 
 Public wording must be English, direct, and evidence-backed. Use [`positioning.yml`](../positioning.yml) as the positioning source and [`PRODUCT.md`](../PRODUCT.md) for product context. The supported upstream kinds are Anthropic, OpenAI, and Gemini API-key and OAuth, with operation and credential limits in [`runtime management`](../docs/runtime-management.md). Bedrock and Vertex remain unsupported; do not add claims or guarantees without source evidence.

@@ -129,6 +129,8 @@ jobs:
         run: python3 scripts/test_chart_metadata.py -v
       - name: Test Docker release alias selection
         run: node --test scripts/test_release_aliases.mjs
+      - name: Test coverage producer barrier
+        run: node --test scripts/test-wait-coverage-producers.mjs
 
   release-pr-artifacts:
     name: verify server release artifacts
@@ -696,21 +698,19 @@ jobs:
     needs:
       - changes
       - nextest-cov-build
-      - nextest-cov-contract
       - nextest-cov-runtime
-      - nextest-cov-wasm
-      - nextest-cov-shard
     if: >-
       ${{
         !cancelled() &&
         needs.nextest-cov-build.result == 'success' &&
-        needs.nextest-cov-contract.result == 'success' &&
         needs.nextest-cov-runtime.result == 'success' &&
-        needs.nextest-cov-wasm.result == 'success' &&
-        needs.nextest-cov-shard.result == 'success' &&
         (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')
       }}
     runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -722,6 +722,11 @@ jobs:
           path: .
       - name: Restore coverage runtime
         run: bash scripts/coverage-runtime.sh restore coverage-runtime.tar.gz "$RUNNER_TEMP/coverage-runtime"
+
+      - name: Wait for every coverage producer to succeed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/wait-coverage-producers.mjs
 
       - name: Collect every shard's raw profiles
         uses: actions/download-artifact@v8
