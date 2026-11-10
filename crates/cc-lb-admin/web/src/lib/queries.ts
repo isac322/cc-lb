@@ -65,6 +65,7 @@ import {
 } from './api';
 
 import {
+  type CacheKeepaliveDetail,
   type CacheKeepaliveHorizon,
   type CacheKeepaliveSessionsFilters,
   getCacheKeepaliveSessionDetail,
@@ -353,7 +354,16 @@ export const qk = {
     principalId: string,
     sessionId: string,
     horizon: CacheKeepaliveHorizon,
-  ) => ['cache-keepalive', 'detail', principalId, sessionId, horizon] as const,
+    rowFingerprint: string | null = null,
+  ) =>
+    [
+      'cache-keepalive',
+      'detail',
+      principalId,
+      sessionId,
+      horizon,
+      rowFingerprint,
+    ] as const,
 };
 
 async function invalidatePrincipalRecordQueries(
@@ -2117,6 +2127,7 @@ export function useCacheKeepaliveSessionDetail(
   principalId: string,
   sessionId: string | null,
   horizon: CacheKeepaliveHorizon = 'all',
+  rowFingerprint: string | null = null,
 ) {
   const visibility = useVisibility();
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
@@ -2128,21 +2139,32 @@ export function useCacheKeepaliveSessionDetail(
       principalId,
       sessionId ?? '',
       horizon,
+      rowFingerprint,
     ),
     enabled: (query) =>
       Boolean(principalId) &&
       Boolean(sessionId) &&
       !isMissing(query.state.error),
     meta: { inlineError: true },
-    placeholderData: undefined,
+    // Keep showing the same session while its row fingerprint or horizon
+    // changes; a different session starts from the loading state.
+    placeholderData: (previousData, previousQuery) => {
+      const previousKey = previousQuery?.queryKey;
+      return previousKey?.[2] === principalId && previousKey[3] === sessionId
+        ? previousData
+        : undefined;
+    },
     retry: (failureCount, error) => !isMissing(error) && failureCount < 1,
     refetchOnMount: (query) => !isMissing(query.state.error),
     refetchOnWindowFocus: (query) => !isMissing(query.state.error),
     refetchOnReconnect: (query) => !isMissing(query.state.error),
-    refetchInterval: (query) =>
-      isHidden || isMissing(query.state.error)
-        ? false
-        : POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
+    refetchInterval: (query) => {
+      if (isHidden || isMissing(query.state.error)) return false;
+      const detail = query.state.data as CacheKeepaliveDetail | undefined;
+      return detail?.is_active === true || detail?.evidence_status === 'pending'
+        ? POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS
+        : false;
+    },
     queryFn: () =>
       getCacheKeepaliveSessionDetail(principalId, sessionId ?? '', horizon),
   });

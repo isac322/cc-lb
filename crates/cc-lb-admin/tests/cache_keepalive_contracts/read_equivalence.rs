@@ -609,6 +609,7 @@ async fn empty_and_disabled_summary_are_zero() {
             "unknown_cycles": 0,
             "retained_from_ms": null
         },
+        "groups": null,
         "rows": [],
         "next_cursor": null
     });
@@ -674,6 +675,7 @@ async fn summary_five_minute_cutoff_is_inclusive() {
     // only visible through the deleted-sessions aggregate.
     expected["summary"]["unlisted_sessions"] = json!(1);
     expected["summary"]["unlisted_renewals"] = json!(1);
+    expected["groups"] = Value::Null;
     let (status, candidate) = get_json(
         &state,
         &format!(

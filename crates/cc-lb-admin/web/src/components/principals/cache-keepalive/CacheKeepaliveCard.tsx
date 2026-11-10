@@ -119,17 +119,15 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const togglePending = updateSettings.isPending;
   const toggleLocked = togglePending || principalWritePending;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const enabled = principal.cache_keepalive?.enabled ?? false;
   const summaryQ = useCacheKeepaliveSummary(
     principal.id,
-    principal.cache_keepalive?.enabled ?? false,
+    enabled && !sessionsOpen,
   );
   const summary = summaryQ.data;
   const effectiveCostSaved = summary?.cost_saved ?? null;
-
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useState(false);
-
-  const enabled = principal.cache_keepalive?.enabled ?? false;
 
   const applyEnabled = (
     nextEnabled: boolean,

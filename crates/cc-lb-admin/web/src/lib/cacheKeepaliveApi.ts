@@ -36,6 +36,7 @@ export type CacheKeepaliveHorizon = z.infer<typeof CacheKeepaliveHorizonSchema>;
 
 export const CACHE_KEEPALIVE_STATUS_FILTERS = [
   'all',
+  'visible',
   'tracked',
   'renewed',
   'scheduled',
@@ -83,6 +84,17 @@ export const CacheKeepaliveSummarySchema = z.object({
 });
 export type CacheKeepaliveSummary = z.infer<typeof CacheKeepaliveSummarySchema>;
 
+export const CacheKeepaliveGroupSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  kind: z.enum(['tool', 'state']),
+  sessions: z.number(),
+  net_pnl: z.number().nullable(),
+  total_spent: z.number(),
+  total_avoided: z.number().nullable(),
+});
+export type CacheKeepaliveGroup = z.infer<typeof CacheKeepaliveGroupSchema>;
+
 export const CacheKeepaliveRowSchema = z.object({
   id: z.string(),
   last_message_at_ms: z.number(),
@@ -103,11 +115,14 @@ export const CacheKeepaliveRowSchema = z.object({
   evidence_status: CacheKeepaliveEvidenceStatusSchema,
   session_key_hash: z.string(),
   retained_renewals: z.number().optional(),
+  group_key: z.string(),
+  group_label: z.string(),
+  group_kind: z.enum(['tool', 'state']),
 });
 export type CacheKeepaliveRow = z.infer<typeof CacheKeepaliveRowSchema>;
-
 export const CacheKeepaliveListResponseSchema = z.object({
-  summary: CacheKeepaliveSummarySchema,
+  summary: CacheKeepaliveSummarySchema.nullable(),
+  groups: z.array(CacheKeepaliveGroupSchema).nullable(),
   rows: z.array(CacheKeepaliveRowSchema),
   next_cursor: z.string().nullable(),
 });

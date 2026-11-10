@@ -1,5 +1,6 @@
 pub mod economics;
 pub mod status;
+pub(crate) mod trigger;
 
 use std::collections::HashMap;
 

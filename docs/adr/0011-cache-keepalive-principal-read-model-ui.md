@@ -31,11 +31,17 @@ Rather than reparse request bodies on read, the missing UI display fields are pe
 
 ### Live updates by polling, not a new event stream
 
-The Principal-detail surfaces stay live through the existing admin-web React Query polling pattern (visibility-gated `refetchInterval`), not Server-Sent Events. We deliberately did not use the admin event stream: its subscription filters (`crates/cc-lb-admin/src/events.rs` `StreamFilters`) carry principal/model/upstream/status/source-kind but no session or cache identity, so a renewal event cannot be mapped back to a specific session row. Rather than widen that transport (a larger, riskier change), the card summary, session list, and open session detail each poll their own query; a pure client-side merge dedupes by id and trims to keep the list bounded, and a FLIP transition animates a row that rises. This reuses an established pattern and adds no new transport abstraction.
+The Principal-detail surfaces stay live through the existing admin-web React Query polling pattern (visibility-gated `refetchInterval`), not Server-Sent Events. We deliberately did not use the admin event stream: its subscription filters (`crates/cc-lb-admin/src/events.rs` `StreamFilters`) carry principal/model/upstream/status/source-kind but no session or cache identity, and renewal completion is the only keep-alive mutation that emits an event, so it cannot replace polling. Polling is limited to data that can still change:
 
-### Explicit five-state model with an orthogonal error flag
+- The session sheet polls only the pages the operator has loaded (one page until they choose "Load more sessions"); it never walks every page on its own.
+- While the sheet is open the card pauses its own summary poll; when the sheet shows the 24h horizon it writes its overview summary into the card's query.
+- The open session detail polls only while the session is active or its follow-up evidence is pending, and refetches when the selected row's generation or active state changes in the list.
 
-Sessions are displayed as exactly one base state — Renewed, Scheduled, Capped, Expired, or Not tracked — derived server-side from the stored status/terminal-reason/refresh-count. Error is modeled as an orthogonal nullable field (`error IS NOT NULL`), not a sixth base state, so an errored session still shows its real base state plus a red error treatment. The status filter scopes only the row list; it never changes the card metrics or the overview strip.
+A pure client-side merge dedupes rows by id, and a FLIP transition animates a row that rises. This reuses an established pattern and adds no new transport abstraction.
+
+### Explicit state model with an orthogonal error flag
+
+Sessions are displayed as exactly one base state — Renewed, Scheduled, Capped, Expired, Cancelled, Failed, or Not tracked — derived server-side from the stored status/terminal-reason/refresh-count. Capped means only the renewal or duration cap; Failed covers dispatch, decrypt, unsupported-provider, and stale terminals. Error is modeled as an orthogonal nullable field (`error IS NOT NULL`), not an extra base state, so an errored session still shows its real base state plus a red error treatment. The status filter scopes only the row list; it never changes the card metrics or the overview strip. When keep-alive is disabled for the principal, the sheet lists with the `all` status so retained decisions stay visible.
 ### Durable cycle/evidence projection
 
 Renewal attribution is backed by a retention-managed evidence projection
@@ -58,14 +64,30 @@ scheduler caps do not close the evidence window.
 
 The read model treats retained history as accounting history, not lifetime
 session state. Exact persisted spend is summed from retained turn rows,
-including misses, and survives session reset or session purge. Avoided and net
-savings are nullable when evidence or catalog pricing is incomplete. A valid
+including misses, and survives session reset or session purge. Money is
+real-time: pending or unknown follow-up evidence counts as zero avoided so far,
+so net is avoided minus spent. Avoided and net are null only when catalog
+pricing or a turn's cost is unknown. A valid
 renewal without a proven follow-up has spend but no avoided credit.
 
 Summary-only requests use SQL aggregates over retained turns and evidence,
 including grouped model/TTL avoided-token totals. They do not materialize all
-sessions, turns, or snapshots in Rust. List and detail paths load only their
-requested rows. Current-cycle detail renewal counts use cycle-linked evidence;
+sessions, turns, or snapshots in Rust.
+
+The session sheet lists with the `visible` status: tracked sessions plus
+not-tracked rows that carry an error or a 12h TTL. Other not-tracked decisions
+never leave the server for that view. A list request without a cursor is an
+overview: it returns the summary, the trigger groups (count, spent, avoided,
+net over every matching row, computed in bounded batches), and the first page,
+all for one horizon start. The summary aggregate and the group batches are
+separate storage reads, not one snapshot, so the header equals the group
+totals plus the deleted-sessions aggregate when the underlying data stays
+unchanged between those reads; a renewal or a newly attributed follow-up that
+lands in between can make one response differ until the next poll. The
+browser never needs to load every row to reconcile them. A list
+request with a cursor returns rows only and skips the summary and group
+aggregates. Rows carry their server-computed trigger group. Detail loads only
+the requested session. Current-cycle detail renewal counts use cycle-linked evidence;
 retained history remains available independently. The Admin Web card disables
 summary polling while keep-alive is disabled.
 

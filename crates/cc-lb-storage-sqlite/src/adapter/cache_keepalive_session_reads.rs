@@ -15,6 +15,7 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 // for principal_id. Rust byte order matches the column's default BINARY collation,
 // so sorted input makes concatenated chunk results globally ordered.
 const SESSION_HASH_BATCH_SIZE: usize = 900;
+const EVIDENCE_ID_BATCH_SIZE: usize = 4_000;
 
 const SESSION_ENTRY_SELECT: &str = "
 SELECT
@@ -303,6 +304,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         let include_decisions = matches!(
             query.filter,
             CacheKeepaliveSessionFilter::All
+                | CacheKeepaliveSessionFilter::Visible
                 | CacheKeepaliveSessionFilter::NotTracked
                 | CacheKeepaliveSessionFilter::Error
         );
@@ -560,46 +562,71 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         if cycle_ids.is_empty() && source_ref_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut renewal_query = QueryBuilder::<Sqlite>::new(
-            "SELECT * FROM cache_keepalive_evidence WHERE principal_id = ",
-        );
-        renewal_query.push_bind(principal_id);
-        renewal_query.push(" AND (");
-        let mut has_clause = false;
-        if !cycle_ids.is_empty() {
-            renewal_query.push("cycle_id IN (");
-            let mut separated = renewal_query.separated(", ");
-            for cycle_id in cycle_ids {
-                separated.push_bind(cycle_id.to_string());
+        // Both OR branches are unions of independent ids. Merge their matches
+        // before deriving the shared follow-up time window and prefix scope.
+        let mut evidence = Vec::new();
+        let batches = cycle_ids
+            .len()
+            .max(source_ref_ids.len())
+            .div_ceil(EVIDENCE_ID_BATCH_SIZE);
+        for batch in 0..batches {
+            let start = batch * EVIDENCE_ID_BATCH_SIZE;
+            let cycle_ids = &cycle_ids
+                [start.min(cycle_ids.len())..(start + EVIDENCE_ID_BATCH_SIZE).min(cycle_ids.len())];
+            let source_ref_ids = &source_ref_ids[start.min(source_ref_ids.len())
+                ..(start + EVIDENCE_ID_BATCH_SIZE).min(source_ref_ids.len())];
+            let mut renewal_query = QueryBuilder::<Sqlite>::new(
+                "SELECT * FROM cache_keepalive_evidence WHERE principal_id = ",
+            );
+            renewal_query.push_bind(principal_id);
+            renewal_query.push(" AND (");
+            let mut has_clause = false;
+            if !cycle_ids.is_empty() {
+                renewal_query.push("cycle_id IN (");
+                let mut separated = renewal_query.separated(", ");
+                for cycle_id in cycle_ids {
+                    separated.push_bind(cycle_id.to_string());
+                }
+                separated.push_unseparated(")");
+                has_clause = true;
             }
-            separated.push_unseparated(")");
-            has_clause = true;
+            if !source_ref_ids.is_empty() {
+                if has_clause {
+                    renewal_query.push(" OR ");
+                }
+                renewal_query.push("event_ref IN (");
+                let mut separated = renewal_query.separated(", ");
+                for source_ref_id in source_ref_ids {
+                    separated.push_bind(source_ref_id);
+                }
+                separated.push_unseparated(")");
+            }
+            renewal_query.push(") ORDER BY request_start_ms ASC, evidence_id ASC");
+            let renewal_rows = renewal_query
+                .build()
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_sqlx_error)?;
+            evidence.extend(
+                renewal_rows
+                    .into_iter()
+                    .map(sqlite_evidence_from_row)
+                    .collect::<StorageResult<Vec<_>>>()?,
+            );
         }
-        if !source_ref_ids.is_empty() {
-            if has_clause {
-                renewal_query.push(" OR ");
-            }
-            renewal_query.push("event_ref IN (");
-            let mut separated = renewal_query.separated(", ");
-            for source_ref_id in source_ref_ids {
-                separated.push_bind(source_ref_id);
-            }
-            separated.push_unseparated(")");
-        }
-        renewal_query.push(") ORDER BY request_start_ms ASC, evidence_id ASC");
-        let renewal_rows = renewal_query
-            .build()
-            .fetch_all(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-        let mut evidence = renewal_rows
-            .into_iter()
-            .map(sqlite_evidence_from_row)
-            .collect::<StorageResult<Vec<_>>>()?;
+        let mut seen = std::collections::HashSet::new();
+        evidence.retain(|entry| seen.insert(entry.evidence_id.clone()));
+        evidence.sort_unstable_by(|left, right| {
+            left.request_start_ms
+                .cmp(&right.request_start_ms)
+                .then_with(|| left.evidence_id.cmp(&right.evidence_id))
+        });
         let prefix_hashes = evidence
             .iter()
-            .filter_map(|entry| entry.prefix_hash.as_ref())
-            .collect::<std::collections::BTreeSet<_>>();
+            .filter_map(|entry| entry.prefix_hash.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         if prefix_hashes.is_empty() {
             return Ok(evidence);
         }
@@ -619,40 +646,44 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             })
             .max()
             .unwrap_or(follow_up_until_ms);
-        let mut follow_up_query = QueryBuilder::<Sqlite>::new(
-            "SELECT * FROM cache_keepalive_evidence \
+        for prefix_hashes in prefix_hashes.chunks(EVIDENCE_ID_BATCH_SIZE) {
+            let mut follow_up_query = QueryBuilder::<Sqlite>::new(
+                "SELECT * FROM cache_keepalive_evidence \
              WHERE principal_id = ",
-        );
-        follow_up_query.push_bind(principal_id);
-        follow_up_query.push(" AND evidence_kind = 'follow_up' AND prefix_hash IN (");
-        let mut separated = follow_up_query.separated(", ");
-        for prefix_hash in prefix_hashes {
-            separated.push_bind(prefix_hash);
+            );
+            follow_up_query.push_bind(principal_id);
+            follow_up_query.push(" AND evidence_kind = 'follow_up' AND prefix_hash IN (");
+            let mut separated = follow_up_query.separated(", ");
+            for prefix_hash in prefix_hashes {
+                separated.push_bind(prefix_hash);
+            }
+            separated.push_unseparated(") AND request_start_ms > ");
+            follow_up_query.push_bind(u64_to_i64(
+                follow_up_from_ms,
+                "cache_keepalive_follow_up_from_ms",
+                "value exceeds i64::MAX",
+            )?);
+            follow_up_query.push(" AND request_start_ms <= ");
+            follow_up_query.push_bind(u64_to_i64(
+                follow_up_until_ms,
+                "cache_keepalive_follow_up_until_ms",
+                "value exceeds i64::MAX",
+            )?);
+            follow_up_query.push(" ORDER BY request_start_ms ASC, evidence_id ASC");
+            let follow_up_rows = follow_up_query
+                .build()
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_sqlx_error)?;
+            evidence.extend(
+                follow_up_rows
+                    .into_iter()
+                    .map(sqlite_evidence_from_row)
+                    .collect::<StorageResult<Vec<_>>>()?,
+            );
         }
-        separated.push_unseparated(") AND request_start_ms > ");
-        follow_up_query.push_bind(u64_to_i64(
-            follow_up_from_ms,
-            "cache_keepalive_follow_up_from_ms",
-            "value exceeds i64::MAX",
-        )?);
-        follow_up_query.push(" AND request_start_ms <= ");
-        follow_up_query.push_bind(u64_to_i64(
-            follow_up_until_ms,
-            "cache_keepalive_follow_up_until_ms",
-            "value exceeds i64::MAX",
-        )?);
-        follow_up_query.push(" ORDER BY request_start_ms ASC, evidence_id ASC");
-        let follow_up_rows = follow_up_query
-            .build()
-            .fetch_all(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-        evidence.extend(
-            follow_up_rows
-                .into_iter()
-                .map(sqlite_evidence_from_row)
-                .collect::<StorageResult<Vec<_>>>()?,
-        );
+        seen.clear();
+        evidence.retain(|entry| seen.insert(entry.evidence_id.clone()));
         evidence.sort_unstable_by(|left, right| {
             left.request_start_ms
                 .cmp(&right.request_start_ms)
@@ -1205,6 +1236,11 @@ fn push_session_branch(
     }
     match query.filter {
         CacheKeepaliveSessionFilter::All | CacheKeepaliveSessionFilter::Error => {}
+        CacheKeepaliveSessionFilter::Visible => {
+            builder.push(" AND (NOT ");
+            builder.push(ZERO_TURN_CANCELLED_SQL);
+            builder.push(" OR error IS NOT NULL OR ttl = '12h')");
+        }
         CacheKeepaliveSessionFilter::Tracked => {
             builder.push(" AND NOT ");
             builder.push(ZERO_TURN_CANCELLED_SQL);
@@ -1281,6 +1317,9 @@ fn push_decision_branch(
     }
     match query.filter {
         CacheKeepaliveSessionFilter::All => {}
+        CacheKeepaliveSessionFilter::Visible => {
+            builder.push(" AND (error IS NOT NULL OR ttl = '12h')");
+        }
         CacheKeepaliveSessionFilter::NotTracked => {
             builder.push(" AND decision = 'not_tracked'");
         }

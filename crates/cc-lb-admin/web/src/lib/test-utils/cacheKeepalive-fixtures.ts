@@ -50,6 +50,9 @@ export function apiRowFromFixture(
     total_avoided: fixture.state === 'not_tracked' ? 0 : 0.12,
     evidence_status: fixture.state === 'not_tracked' ? 'none' : 'observed',
     session_key_hash: `hash-${fixture.id}`,
+    group_key: fixture.groupKey,
+    group_label: fixture.groupLabel,
+    group_kind: fixture.groupKind,
   };
 }
 
@@ -73,6 +76,50 @@ export const cacheKeepaliveApiRows: CacheKeepaliveRow[] =
 
 export const cacheKeepaliveListResponseFixture: CacheKeepaliveListResponse = {
   summary: cacheKeepaliveSummaryFixture,
+  groups: [
+    {
+      key: 'Bash',
+      label: 'Bash',
+      kind: 'tool',
+      sessions: 1,
+      net_pnl: cacheKeepaliveApiRows[0].net_pnl,
+      total_spent: cacheKeepaliveApiRows[0].total_spent,
+      total_avoided: cacheKeepaliveApiRows[0].total_avoided,
+    },
+    {
+      key: 'Edit',
+      label: 'Edit',
+      kind: 'tool',
+      sessions: 1,
+      net_pnl: cacheKeepaliveApiRows[1].net_pnl,
+      total_spent: cacheKeepaliveApiRows[1].total_spent,
+      total_avoided: cacheKeepaliveApiRows[1].total_avoided,
+    },
+    {
+      key: 'Agent in-turn',
+      label: 'Agent in-turn',
+      kind: 'state',
+      sessions: 4,
+      net_pnl: cacheKeepaliveApiRows
+        .slice(2, 5)
+        .concat(cacheKeepaliveApiRows[6])
+        .reduce((sum, row) => sum + (row.net_pnl ?? 0), 0),
+      total_spent: cacheKeepaliveApiRows
+        .slice(2, 5)
+        .concat(cacheKeepaliveApiRows[6])
+        .reduce((sum, row) => sum + row.total_spent, 0),
+      total_avoided: 0.12 * 4,
+    },
+    {
+      key: 'stop_reason=end_turn',
+      label: 'stop_reason=end_turn',
+      kind: 'state',
+      sessions: 1,
+      net_pnl: 0,
+      total_spent: 0,
+      total_avoided: 0,
+    },
+  ],
   rows: cacheKeepaliveApiRows,
   next_cursor: 'cursor-page-2',
 };
@@ -80,6 +127,7 @@ export const cacheKeepaliveListResponseFixture: CacheKeepaliveListResponse = {
 export const cacheKeepaliveSummaryOnlyResponseFixture: CacheKeepaliveListResponse =
   {
     summary: cacheKeepaliveSummaryFixture,
+    groups: null,
     rows: [],
     next_cursor: null,
   };

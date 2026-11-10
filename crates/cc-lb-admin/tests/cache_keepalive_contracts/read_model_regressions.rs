@@ -1370,6 +1370,45 @@ async fn delete_turn_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, sou
         .await
         .expect("delete cache keepalive evidence");
 }
+async fn append_not_tracked_decision(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    principal_id: &str,
+    source_ref_id: &str,
+    ts: u64,
+    ttl: CacheTtl,
+    error: Option<&str>,
+) {
+    let mut decision =
+        cache_keepalive_decision(principal_id, source_ref_id, ts.saturating_mul(1_000));
+    decision.decision = "not_tracked".to_owned();
+    decision.reason = format!("decision fixture {source_ref_id}");
+    decision.ttl = ttl;
+    decision.error = error.map(ToOwned::to_owned);
+    storage
+        .append_request_event_with_projections(
+            &RequestEvent {
+                ts,
+                ts_ms: Some(ts.saturating_mul(1_000)),
+                request_id: format!("request-{source_ref_id}"),
+                source_kind: Some("cache_keepalive_decision".to_owned()),
+                source_ref_id: Some(source_ref_id.to_owned()),
+                event_id: Some(format!("event-{source_ref_id}")),
+                principal_id: Some(principal_id.to_owned()),
+                upstream_id: Some(UPSTREAM_ID),
+                model: Some(MODEL.to_owned()),
+                status: 200,
+                duration_ms: 1,
+                ..RequestEvent::default()
+            },
+            &RequestEventProjections {
+                turn: None,
+                decision,
+                evidence: Vec::new(),
+            },
+        )
+        .await
+        .expect("append decision fixture");
+}
 
 async fn fetch_all_keepalive_pages(
     state: &cc_lb_admin::AdminState,
@@ -1398,6 +1437,294 @@ async fn fetch_all_keepalive_pages(
             return (summary, rows);
         }
     }
+}
+async fn fetch_visible_pages(
+    state: &cc_lb_admin::AdminState,
+    principal_id: &str,
+    horizon: &str,
+    limit: u32,
+) -> (Value, Value, Vec<Value>) {
+    let mut cursor = None;
+    let mut summary = Value::Null;
+    let mut groups = Value::Null;
+    let mut rows = Vec::new();
+    let mut first_page = true;
+    loop {
+        let mut uri = format!(
+            "/admin/v1/principals/{principal_id}/cache-keepalive?horizon={horizon}&status=visible&limit={limit}"
+        );
+        if let Some(cursor_value) = cursor.as_deref() {
+            uri.push_str("&cursor=");
+            uri.push_str(cursor_value);
+        }
+        let (status, body) = get_json(state, &uri).await;
+        assert_eq!(status, StatusCode::OK, "visible paged list: {body:?}");
+        if first_page {
+            summary = body["summary"].clone();
+            groups = body["groups"].clone();
+            assert!(summary.is_object(), "overview summary: {body:?}");
+            assert!(groups.is_array(), "overview groups: {body:?}");
+            first_page = false;
+        } else {
+            assert!(
+                body.get("summary").is_none() || body["summary"].is_null(),
+                "cursor page must omit summary: {body:?}"
+            );
+            assert!(
+                body.get("groups").is_none() || body["groups"].is_null(),
+                "cursor page must omit groups: {body:?}"
+            );
+        }
+        rows.extend(
+            body["rows"]
+                .as_array()
+                .expect("visible paged rows")
+                .iter()
+                .cloned(),
+        );
+        cursor = body["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            return (summary, groups, rows);
+        }
+    }
+}
+
+fn sum_group_micros(groups: &Value, field: &str) -> Option<i64> {
+    groups
+        .as_array()?
+        .iter()
+        .map(|group| {
+            group[field]
+                .as_f64()
+                .map(|value| (value * 1_000_000.0).round() as i64)
+        })
+        .try_fold(0_i64, |total, value| value.map(|value| total + value))
+}
+
+#[test]
+fn q2_visible_groups_cover_all_pages_and_are_limit_independent() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::q2_visible_groups_cover_all_pages_and_are_limit_independent";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build visible groups runtime")
+            .block_on(q2_visible_groups_cover_all_pages_and_are_limit_independent_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn q2_visible_groups_cover_all_pages_and_are_limit_independent_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+
+    seed_session(&storage, &principal_id, "old-and-new", CYCLE_ONE, false).await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "old-and-new",
+            cycle_id: Uuid::from_u128(0x0101),
+            source_ref_id: "old-and-new-old-visible",
+            ts: NOW_UNIX_SECS.saturating_sub(3 * 86_400),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 7_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "old-and-new",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "old-and-new-new-visible",
+            ts: NOW_UNIX_SECS.saturating_sub(1_800),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 11_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "purged-with-evidence",
+            cycle_id: Uuid::from_u128(0x0103),
+            source_ref_id: "purged-with-evidence-visible",
+            ts: NOW_UNIX_SECS.saturating_sub(1_200),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 13_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "purged-without-evidence",
+            cycle_id: Uuid::from_u128(0x0104),
+            source_ref_id: "purged-without-evidence-visible",
+            ts: NOW_UNIX_SECS.saturating_sub(900),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 17_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    delete_turn_evidence(&storage, "purged-without-evidence-visible").await;
+
+    seed_session(
+        &storage,
+        &principal_id,
+        "pending-session",
+        Uuid::from_u128(0x0105),
+        false,
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "pending-session",
+            cycle_id: Uuid::from_u128(0x0105),
+            source_ref_id: "pending-session-visible",
+            ts: NOW_UNIX_SECS.saturating_sub(600),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 19_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+
+    seed_session(
+        &storage,
+        &principal_id,
+        "unknown-session",
+        Uuid::from_u128(0x0106),
+        false,
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "unknown-session",
+            cycle_id: Uuid::from_u128(0x0106),
+            source_ref_id: "unknown-session-visible",
+            ts: NOW_UNIX_SECS.saturating_sub(300),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 23_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    delete_turn_evidence(&storage, "unknown-session-visible").await;
+
+    append_not_tracked_decision(
+        &storage,
+        &principal_id,
+        "hidden-not-tracked-decision",
+        NOW_UNIX_SECS.saturating_sub(100),
+        CacheTtl::Ttl5m,
+        None,
+    )
+    .await;
+    append_not_tracked_decision(
+        &storage,
+        &principal_id,
+        "visible-12h-clean-decision",
+        NOW_UNIX_SECS.saturating_sub(90),
+        CacheTtl::Ttl12h,
+        None,
+    )
+    .await;
+    append_not_tracked_decision(
+        &storage,
+        &principal_id,
+        "visible-12h-error-decision",
+        NOW_UNIX_SECS.saturating_sub(80),
+        CacheTtl::Ttl12h,
+        Some("decision fixture error"),
+    )
+    .await;
+
+    for horizon in ["1h", "24h", "all"] {
+        let (summary, groups, rows) = fetch_visible_pages(&state, &principal_id, horizon, 2).await;
+        let group_rows = groups.as_array().expect("groups array");
+        let group_sessions: u64 = group_rows
+            .iter()
+            .map(|group| group["sessions"].as_u64().expect("group session count"))
+            .sum();
+        assert_eq!(
+            group_sessions,
+            rows.len() as u64,
+            "{horizon}: groups must count every visible row"
+        );
+        let group_keys = group_rows
+            .iter()
+            .map(|group| group["key"].as_str().expect("group key"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            rows.iter().all(|row| {
+                group_keys.contains(row["group_key"].as_str().expect("row group key"))
+            }),
+            "{horizon}: every row must reference a group"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !row["id"].as_str().unwrap().contains("hidden-not-tracked")),
+            "{horizon}: hidden decisions must not be listed"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["id"] == "visible-12h-clean-decision")
+                && rows
+                    .iter()
+                    .any(|row| row["id"] == "visible-12h-error-decision"),
+            "{horizon}: visible 12h decisions must be listed"
+        );
+        let group_spent = sum_group_micros(&groups, "total_spent").expect("group spent");
+        let unlisted_spent = (summary["unlisted_spent"].as_f64().expect("unlisted spent")
+            * 1_000_000.0)
+            .round() as i64;
+        assert_json_dollars(&summary["total_spent"], group_spent + unlisted_spent);
+        if let (Some(group_net), Some(unlisted_net), Some(cost_saved)) = (
+            sum_group_micros(&groups, "net_pnl"),
+            summary["unlisted_net"]
+                .as_f64()
+                .map(|value| (value * 1_000_000.0).round() as i64),
+            summary["cost_saved"]
+                .as_f64()
+                .map(|value| (value * 1_000_000.0).round() as i64),
+        ) {
+            assert_eq!(
+                group_net + unlisted_net,
+                cost_saved,
+                "{horizon}: group net invariant"
+            );
+        }
+    }
+
+    let (_summary_one, groups_one, _rows_one) =
+        fetch_visible_pages(&state, &principal_id, "24h", 1).await;
+    let (_summary_many, groups_many, _rows_many) =
+        fetch_visible_pages(&state, &principal_id, "24h", 50).await;
+    assert_eq!(
+        groups_one, groups_many,
+        "overview groups must not depend on first-page limit"
+    );
 }
 
 fn sum_json_micros(rows: &[Value], field: &str) -> i64 {
