@@ -1004,6 +1004,10 @@ export interface Remediation {
  */
 export interface PreflightRequest {
   api_key_value?: string;
+  kind?: Extract<
+    UpstreamKind,
+    'anthropic_api_key' | 'openai_api_key' | 'gemini_api_key'
+  >;
   workspace_id?: string;
   base_url?: string;
 }

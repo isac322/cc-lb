@@ -10,7 +10,13 @@
 
 import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
 import { KeyRound, Layers } from 'lucide-react';
-import { type ClipboardEvent, type ReactNode, useState } from 'react';
+import {
+  type ClipboardEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { toast } from 'sonner';
 import {
   ApiError,
@@ -20,7 +26,12 @@ import {
   type RemediationCode,
   type Upstream,
 } from '../../../lib/api';
-import { DEFAULT_ANTHROPIC_BASE_URL } from '../../../lib/constants';
+import {
+  defaultEndpointFor,
+  PROVIDER_LABELS,
+  type ProviderFamily,
+  providerOf,
+} from '../../../lib/providers';
 import {
   useCreateUpstream,
   usePreflightApiKey,
@@ -144,6 +155,7 @@ export interface ApiKeyConnect {
 
 export function useApiKeyConnect({
   replace,
+  provider: createProvider = 'anthropic',
   onCancel,
   onBackToKind,
   onSignInInstead,
@@ -151,6 +163,8 @@ export function useApiKeyConnect({
 }: {
   /** Replace mode: the upstream whose key is being replaced. */
   replace: Upstream | null;
+  /** Create mode: provider selected before entering the API-key flow. */
+  provider?: ProviderFamily;
   onCancel: () => void;
   /** Create mode: Back from the first API-key step. */
   onBackToKind?: () => void;
@@ -167,13 +181,20 @@ export function useApiKeyConnect({
   // in another admin's newer save makes Save a stale_revision refusal
   // instead of overwriting that save with this older draft.
   const [opened] = useState(replace);
-
+  const provider = opened ? providerOf(opened.kind) : createProvider;
+  const kind =
+    provider === 'openai'
+      ? 'openai_api_key'
+      : provider === 'gemini'
+        ? 'gemini_api_key'
+        : 'anthropic_api_key';
+  const previousKind = useRef(kind);
   const [step, setStep] = useState<ApiKeyStep>('key');
   const [guideVisited, setGuideVisited] = useState(false);
   const [guideTier, setGuideTier] = useState<GuideTier>('full');
   const [keyValue, setKeyValue] = useState('');
   const [baseUrl, setBaseUrl] = useState(
-    replace?.base_url ?? DEFAULT_ANTHROPIC_BASE_URL,
+    replace?.base_url ?? defaultEndpointFor(kind),
   );
   /** Result of checking the key alone (no workspace header). */
   const [checked, setChecked] = useState<PreflightResponse | null>(null);
@@ -192,15 +213,48 @@ export function useApiKeyConnect({
   const [final, setFinal] = useState<PreflightResponse | null>(null);
   const [unverified, setUnverified] = useState(false);
   const [name, setName] = useState('');
-  // Base URL is a rare need: hidden behind "Use a custom endpoint" unless a
-  // non-Anthropic value is already there.
-  const [endpointOpen, setEndpointOpen] = useState(
-    () => !isAnthropicBaseUrl(replace?.base_url ?? ''),
+  /** Optional provider project provenance; never shared with Anthropic workspace state. */
+  const [projectId, setProjectId] = useState(
+    () => opened?.api_key_access?.project_id ?? '',
   );
+  // Base URL is a rare need: hidden behind "Use a custom endpoint".
+  const [endpointOpen, setEndpointOpen] = useState(
+    () =>
+      Boolean(replace) &&
+      (replace?.base_url ?? '').trim().replace(/\/+$/, '') !==
+        defaultEndpointFor(kind),
+  );
+  useEffect(() => {
+    if (previousKind.current === kind) return;
+    previousKind.current = kind;
+    setStep('key');
+    setGuideVisited(false);
+    setKeyValue('');
+    setBaseUrl(defaultEndpointFor(kind));
+    setChecked(null);
+    setRequestError(null);
+    setKeyFieldError(null);
+    setSaveError(null);
+    setWorkspaceId('');
+    setWorkspaceCheck(null);
+    setWorkspaceFormatError(null);
+    setFinal(null);
+    setUnverified(false);
+    setName('');
+    setProjectId('');
+    setEndpointOpen(false);
+  }, [kind]);
 
   const parsed = parseApiKeyPaste(keyValue);
-  const anthropicHost = isAnthropicBaseUrl(baseUrl);
-  // Client mirror of the server's prefix gate; a proxy may accept anything.
+  const defaultEndpoint = defaultEndpointFor(kind);
+  const isDefaultEndpoint =
+    baseUrl.trim().replace(/\/+$/, '') === defaultEndpoint;
+  const endpointError =
+    endpointOpen && baseUrl.trim() === ''
+      ? 'Enter a custom endpoint before checking the key.'
+      : null;
+  const anthropicHost = provider === 'anthropic' && isAnthropicBaseUrl(baseUrl);
+  // Client mirror of the server's prefix gate, only for Anthropic.
   const gate = anthropicHost && parsed.kind === 'key' ? parsed.gate : null;
   const problem: KeyProblem | null =
     gate ?? (checked ? problemOf(checked) : null);
@@ -249,12 +303,13 @@ export function useApiKeyConnect({
   ];
 
   const keyBody = (literal?: string): PreflightRequest | null => {
-    const body: PreflightRequest = {};
     const key = literal ?? (parsed.kind === 'key' ? parsed.key : null);
-    if (!key) return null;
-    body.api_key_value = key;
-    if (!anthropicHost) body.base_url = baseUrl.trim();
-    return body;
+    if (!key || endpointError) return null;
+    return {
+      ...(provider !== 'anthropic' ? { kind } : {}),
+      api_key_value: key,
+      ...(!isDefaultEndpoint ? { base_url: baseUrl.trim() } : {}),
+    };
   };
 
   const resetCheck = () => {
@@ -286,7 +341,7 @@ export function useApiKeyConnect({
       setName(
         res?.workspace.name
           ? `${res.workspace.name} API key`
-          : 'Anthropic API key',
+          : `${PROVIDER_LABELS[provider]} API key`,
       );
     }
     setStep('finish');
@@ -393,11 +448,11 @@ export function useApiKeyConnect({
           spec_revision: opened.spec_revision,
           body: {
             api_key_value: apiKeyValue,
-            // `workspace_id: null` keeps the stored one; a key that needs
-            // none must not inherit the old key's workspace.
-            ...(workspace
-              ? { workspace_id: workspace }
-              : { clear_workspace_id: true }),
+            ...(provider === 'anthropic'
+              ? workspace
+                ? { workspace_id: workspace }
+                : { clear_workspace_id: true }
+              : {}),
             skip_preflight: unverified || undefined,
           },
         });
@@ -406,11 +461,18 @@ export function useApiKeyConnect({
       } else {
         const created = await createUpstream.mutateAsync({
           name: name.trim(),
-          kind: 'anthropic_api_key',
-          // Anthropic itself is the default, never stored as a custom value.
-          base_url: anthropicHost ? null : baseUrl.trim(),
+          kind,
+          ...(provider === 'anthropic'
+            ? { base_url: anthropicHost ? null : baseUrl.trim() }
+            : isDefaultEndpoint
+              ? {}
+              : { base_url: baseUrl.trim() }),
           api_key_value: apiKeyValue,
-          workspace_id: workspace,
+          ...(provider === 'anthropic'
+            ? { workspace_id: workspace }
+            : projectId.trim()
+              ? { project_id: projectId.trim() }
+              : {}),
           skip_preflight: unverified || undefined,
         });
         toast.success(`${created.name} added`);
@@ -578,7 +640,9 @@ export function useApiKeyConnect({
                 finishWith({ ...checked, inference: 'unverified' }, true)
               }
             >
-              Save anyway
+              {provider === 'anthropic'
+                ? 'Save anyway'
+                : 'Save without checking'}
             </Button>
           ) : null}
           <Button
@@ -674,9 +738,11 @@ export function useApiKeyConnect({
         : problem === 'key_enterprise_scoped'
           ? "This is an Enterprise management key — it can't call models."
           : problem === 'key_invalid'
-            ? anthropicHost
-              ? "Anthropic rejected this key — check for a typo, or it's expired or deleted."
-              : 'Your endpoint rejected this key.'
+            ? provider === 'anthropic'
+              ? anthropicHost
+                ? "Anthropic rejected this key — check for a typo, or it's expired or deleted."
+                : 'Your endpoint rejected this key.'
+              : `${PROVIDER_LABELS[provider]} rejected this key — check the key or endpoint.`
             : problem === 'key_oat'
               ? 'That is an OAuth token, not an API key — it expires and cc-lb cannot refresh it.'
               : (keyFieldError ??
@@ -696,12 +762,27 @@ export function useApiKeyConnect({
     body = (
       <div className="flex flex-col gap-3">
         <StepHeading
-          title={isReplace ? 'Paste the new key' : 'Paste your API key'}
-          subtitle="cc-lb checks what it can do before anything is saved."
+          title={
+            isReplace
+              ? 'Paste the new key'
+              : `Paste your ${PROVIDER_LABELS[provider]} key`
+          }
+          subtitle={`cc-lb checks the ${PROVIDER_LABELS[provider]} key before anything is saved.`}
         />
+        <p className="text-body-sm text-text-muted">
+          Requests and checks use{' '}
+          <span className="font-mono text-data">
+            {baseUrl || defaultEndpoint}
+          </span>
+          .
+        </p>
         <Field
           label="API key"
-          hint="Starts with sk-ant-"
+          hint={
+            provider === 'anthropic'
+              ? 'Starts with sk-ant-'
+              : 'Use the key issued by this provider.'
+          }
           error={keyError}
           required
         >
@@ -714,7 +795,9 @@ export function useApiKeyConnect({
             autoFocus
             autoComplete="off"
             spellCheck={false}
-            placeholder="sk-ant-…"
+            placeholder={
+              provider === 'anthropic' ? 'sk-ant-…' : 'Paste the provider key'
+            }
             readOnly={busy}
             aria-busy={busy || undefined}
             onPaste={(e) => {
@@ -732,22 +815,29 @@ export function useApiKeyConnect({
         </Field>
         {/* Key-help slot: one help affordance. A rejection notice carries
             the Guide action itself, so the quiet link steps aside. */}
-        {keyRejected ? null : (
-          <button
-            type="button"
-            className={cx(QUIET_LINK_CLASS, '-mt-1')}
-            disabled={busy}
-            onClick={openGuide}
-          >
-            Don't have a key?
-          </button>
-        )}
+        {provider === 'anthropic' &&
+          (keyRejected ? null : (
+            <button
+              type="button"
+              className={cx(QUIET_LINK_CLASS, '-mt-1')}
+              disabled={busy}
+              onClick={openGuide}
+            >
+              Don't have a key?
+            </button>
+          ))}
+        {endpointError ? (
+          <Notice tone="warning" role="alert">
+            {endpointError}
+          </Notice>
+        ) : null}
         <KeyProblemNotice
+          provider={provider}
           problem={problem}
-          customEndpoint={!anthropicHost}
+          customEndpoint={!isDefaultEndpoint}
           requestError={requestError}
           onRetry={() => void checkKey()}
-          onOpenGuide={openGuide}
+          onOpenGuide={provider === 'anthropic' ? openGuide : undefined}
           busy={busy}
         />
         {isReplace ? null : (
@@ -755,6 +845,7 @@ export function useApiKeyConnect({
             open={endpointOpen}
             value={baseUrl}
             busy={busy}
+            hint={`Requests and checks go here instead of ${PROVIDER_LABELS[provider]}.`}
             onOpen={() => {
               setBaseUrl('');
               resetCheck();
@@ -765,7 +856,7 @@ export function useApiKeyConnect({
               resetCheck();
             }}
             onUseDefault={() => {
-              setBaseUrl(DEFAULT_ANTHROPIC_BASE_URL);
+              setBaseUrl(defaultEndpoint);
               resetCheck();
               setEndpointOpen(false);
             }}
@@ -858,6 +949,7 @@ export function useApiKeyConnect({
           </Notice>
         ) : null}
         <KeyProblemNotice
+          provider={provider}
           problem={workspaceProblem === 'key_invalid' ? null : workspaceProblem}
           customEndpoint={!anthropicHost}
           checks="workspace"
@@ -869,6 +961,9 @@ export function useApiKeyConnect({
   } else {
     body = (
       <FinishStep
+        provider={provider}
+        projectId={projectId}
+        onProjectIdChange={setProjectId}
         final={final}
         unverified={unverified}
         inferenceDenied={
@@ -902,6 +997,7 @@ export function useApiKeyConnect({
  * `aria-invalid` + `aria-describedby` so nothing is announced twice.
  */
 function KeyProblemNotice({
+  provider,
   problem,
   customEndpoint = false,
   checks = 'key',
@@ -910,6 +1006,7 @@ function KeyProblemNotice({
   onOpenGuide,
   busy = false,
 }: {
+  provider: ProviderFamily;
   problem: KeyProblem | null;
   /** The key went to a proxy: Console's create-key guide doesn't apply. */
   customEndpoint?: boolean;
@@ -965,12 +1062,19 @@ function KeyProblemNotice({
         </Notice>
       );
     case 'key_invalid':
-      return customEndpoint ? (
-        <Notice role="alert">Check the key and Base URL → Check key.</Notice>
+      return provider === 'anthropic' ? (
+        customEndpoint ? (
+          <Notice role="alert">Check the key and Base URL → Check key.</Notice>
+        ) : (
+          <Notice role="alert">
+            Paste it again or create a fresh key.
+            {guideAction}
+          </Notice>
+        )
       ) : (
         <Notice role="alert">
-          Paste it again or create a fresh key.
-          {guideAction}
+          {provider === 'openai' ? 'OpenAI' : 'Gemini'} rejected this key. Check
+          the key or endpoint, then try again.
         </Notice>
       );
     case 'key_oat':
@@ -985,8 +1089,9 @@ function KeyProblemNotice({
     case 'key_forbidden':
       return (
         <Notice tone="warning" role="alert">
-          Valid key, but Anthropic won't let it count tokens. Save anyway → add
-          it unverified.
+          {provider === 'anthropic'
+            ? "Valid key, but Anthropic won't let it count tokens. Save anyway → add it unverified."
+            : `Valid ${provider === 'openai' ? 'OpenAI' : 'Gemini'} key, but the provider denied the check. Save without checking → add it unverified.`}
         </Notice>
       );
     case 'probe_unreachable':
@@ -994,7 +1099,7 @@ function KeyProblemNotice({
         <Notice tone="warning" role="alert">
           {customEndpoint
             ? "Couldn't reach your endpoint."
-            : "Couldn't reach Anthropic."}{' '}
+            : `Couldn't reach ${provider === 'anthropic' ? 'Anthropic' : provider === 'openai' ? 'OpenAI' : 'Gemini'}.`}{' '}
           Try again → check the {checks}.
         </Notice>
       );
@@ -1091,6 +1196,9 @@ function GuideStep({
 }
 
 function FinishStep({
+  provider,
+  projectId,
+  onProjectIdChange,
   final,
   unverified,
   inferenceDenied,
@@ -1100,6 +1208,9 @@ function FinishStep({
   saveError,
   onSubmit,
 }: {
+  provider: ProviderFamily;
+  projectId: string;
+  onProjectIdChange: (value: string) => void;
   final: PreflightResponse | null;
   unverified: boolean;
   inferenceDenied: boolean;
@@ -1114,6 +1225,89 @@ function FinishStep({
   const ws = final?.workspace;
   const usageOk = final?.usage_report === 'ok';
   const replacing = name === null;
+  if (provider !== 'anthropic') {
+    const label = provider === 'openai' ? 'OpenAI' : 'Gemini';
+    return (
+      <div className="flex flex-col gap-4">
+        {unverified ? (
+          <StepHeading
+            title="Key not verified"
+            subtitle="The upstream remains unverified until a provider check passes."
+          />
+        ) : (
+          <SuccessHeader
+            title={`${label} key verified`}
+            subtitle={
+              replacing
+                ? 'Check the summary, then save the key.'
+                : 'Check the summary, then name the upstream.'
+            }
+          />
+        )}
+        <div className="@container rounded-sm border border-subtle p-3">
+          <DetailFacts>
+            <DetailFact label="Provider">{label}</DetailFact>
+            <DetailFact label="Inference">
+              {final?.inference === 'ok' ? (
+                <StatusBadge tone="ok" label="Key accepted" />
+              ) : (
+                <StatusBadge tone="warn" label="Key not verified" />
+              )}
+            </DetailFact>
+            <DetailFact label="Endpoint">
+              <span className="break-all font-mono text-data">
+                {final ? 'Provider-native check' : 'Not checked'}
+              </span>
+            </DetailFact>
+            <DetailFact label="Project">
+              <span className="break-all font-mono text-data">
+                {projectId || 'Not configured'}
+              </span>
+            </DetailFact>
+          </DetailFacts>
+        </div>
+        {name === null ? null : (
+          <Field
+            label="Upstream name"
+            hint="Only used inside cc-lb — pick something recognizable."
+          >
+            <input
+              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+              value={name}
+              autoFocus
+              disabled={disabled}
+              onChange={(e) => onNameChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && name.trim()) onSubmit();
+              }}
+            />
+          </Field>
+        )}
+        {replacing ? null : (
+          <Field
+            label="Project ID"
+            hint="Optional provider project provenance. It never authorizes administrator reporting."
+          >
+            <input
+              className={cx(
+                INPUT_CLASS,
+                PENDING_INPUT_CLASS,
+                'font-mono text-data',
+              )}
+              value={projectId}
+              disabled={disabled}
+              onChange={(e) => onProjectIdChange(e.target.value)}
+            />
+          </Field>
+        )}
+        {saveError ? (
+          <Notice tone="danger" role="alert">
+            {saveError}
+          </Notice>
+        ) : null}
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col gap-4">
       {unverified ? (
