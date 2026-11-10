@@ -15,6 +15,7 @@ interface Props {
   principalId: string;
   sessionId: string;
   horizon?: CacheKeepaliveHorizon;
+  rowFingerprint?: string | null;
   onClose: () => void;
 }
 
@@ -592,12 +593,14 @@ export function SessionDetailPane({
   principalId,
   sessionId,
   horizon,
+  rowFingerprint,
   onClose,
 }: Props) {
   const query = useCacheKeepaliveSessionDetail(
     principalId,
     sessionId,
     horizon ?? 'all',
+    rowFingerprint,
   );
   const { effective: timeZone } = useTimezone();
 

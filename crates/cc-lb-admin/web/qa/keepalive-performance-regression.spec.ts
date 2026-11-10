@@ -79,6 +79,7 @@ const CursorPayloadSchema = z.object({
   horizon_start_ms: z.number().nullable(),
   filter: z.enum([
     'all',
+    'visible',
     'renewed',
     'scheduled',
     'capped',
@@ -150,12 +151,37 @@ const KeepaliveSummaryBodySchema = z.object({
   renewing_now: z.number(),
   sessions_last_5m: z.number(),
   retained_successful_hits: z.number(),
-  cost_saved: z.number(),
+  cost_saved: z.number().nullable(),
 });
 const KeepaliveListBodySchema = z
   .object({
-    summary: KeepaliveSummaryBodySchema,
-    rows: z.array(z.object({ id: z.string() }).passthrough()),
+    summary: KeepaliveSummaryBodySchema.nullable(),
+    groups: z
+      .array(
+        z
+          .object({
+            key: z.string(),
+            label: z.string(),
+            kind: z.enum(['tool', 'state']),
+            sessions: z.number(),
+            net_pnl: z.number().nullable(),
+            total_spent: z.number(),
+            total_avoided: z.number().nullable(),
+          })
+          .passthrough(),
+      )
+      .nullable(),
+    rows: z
+      .array(
+        z
+          .object({
+            id: z.string(),
+            group_key: z.string(),
+            group_label: z.string(),
+            group_kind: z.enum(['tool', 'state']),
+          })
+          .passthrough(),
+      ),
     next_cursor: z.string().nullable(),
   })
   .passthrough();
@@ -579,7 +605,10 @@ test.afterEach(async ({ page, context }, testInfo) => {
   );
   let screenshotError: string | null = null;
   try {
-    await page.screenshot({ path: screenshotPath, fullPage: false });
+    await page.screenshot({
+      path: screenshotPath ?? undefined,
+      fullPage: false,
+    });
   } catch (error) {
     screenshotPath = null;
     screenshotError = error instanceof Error ? error.message : String(error);
@@ -1293,6 +1322,9 @@ test('UI-01 renders four metrics and flashes only a changed value from the actua
   expect(flashEvent!.value).toBe(valueEvent!.value);
   expect(valueEvent!.previous_value).toBe(before[valueEvent!.index]);
   const after = await metrics.allTextContents();
+  if (changedSummary === null || changedSummary.cost_saved === null) {
+    throw new Error('summary response unexpectedly omitted overview metrics');
+  }
   expect(after).toEqual([
     changedSummary.renewing_now.toLocaleString('en-US'),
     changedSummary.sessions_last_5m.toLocaleString('en-US'),

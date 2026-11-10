@@ -607,6 +607,17 @@ async fn read_model_contract(url: &str) -> Result<()> {
             CacheKeepaliveSessionFilter::Error,
             vec!["not-tracked-decision"],
         ),
+        (
+            CacheKeepaliveSessionFilter::Visible,
+            vec![
+                "scheduled-session",
+                "not-tracked-decision",
+                "renewed-session",
+                "capped-session",
+                "expired-session",
+                "max-duration-session",
+            ],
+        ),
     ] {
         let filtered = storage
             .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {

@@ -17,6 +17,9 @@ export type CacheKeepaliveRowFixture = Readonly<{
   attempts: number | null;
   maxAttempts: number;
   netPnl: number;
+  groupKey: string;
+  groupLabel: string;
+  groupKind: 'tool' | 'state';
   turns: readonly CacheKeepaliveTurnFixture[];
 }>;
 
@@ -30,6 +33,9 @@ export const cacheKeepaliveRows = [
     attempts: 8,
     maxAttempts: 12,
     netPnl: 0.102,
+    groupKey: 'Bash',
+    groupLabel: 'Bash',
+    groupKind: 'tool',
     turns: [
       { number: 1, renewals: 2, followedUp: true, pending: false, pnl: 0.063 },
       { number: 2, renewals: 3, followedUp: true, pending: false, pnl: 0.057 },
@@ -45,6 +51,9 @@ export const cacheKeepaliveRows = [
     attempts: 0,
     maxAttempts: 12,
     netPnl: 0,
+    groupKey: 'Edit',
+    groupLabel: 'Edit',
+    groupKind: 'tool',
     turns: [
       { number: 1, renewals: 0, followedUp: false, pending: true, pnl: 0 },
     ],
@@ -58,6 +67,9 @@ export const cacheKeepaliveRows = [
     attempts: 12,
     maxAttempts: 12,
     netPnl: 0.0936,
+    groupKey: 'Agent in-turn',
+    groupLabel: 'Agent in-turn',
+    groupKind: 'state',
     turns: [
       { number: 1, renewals: 2, followedUp: true, pending: false, pnl: 0.076 },
       { number: 2, renewals: 4, followedUp: true, pending: false, pnl: 0.061 },
@@ -79,6 +91,9 @@ export const cacheKeepaliveRows = [
     attempts: 6,
     maxAttempts: 12,
     netPnl: -0.0576,
+    groupKey: 'Agent in-turn',
+    groupLabel: 'Agent in-turn',
+    groupKind: 'state',
     turns: [
       {
         number: 1,
@@ -98,6 +113,9 @@ export const cacheKeepaliveRows = [
     attempts: 8,
     maxAttempts: 12,
     netPnl: 0.1152,
+    groupKey: 'Agent in-turn',
+    groupLabel: 'Agent in-turn',
+    groupKind: 'state',
     turns: [
       { number: 1, renewals: 3, followedUp: true, pending: false, pnl: 0.1632 },
       {
@@ -118,6 +136,9 @@ export const cacheKeepaliveRows = [
     attempts: null,
     maxAttempts: 12,
     netPnl: 0,
+    groupKey: 'stop_reason=end_turn',
+    groupLabel: 'stop_reason=end_turn',
+    groupKind: 'state',
     turns: [
       { number: 1, renewals: 0, followedUp: false, pending: false, pnl: null },
     ],
@@ -131,6 +152,9 @@ export const cacheKeepaliveRows = [
     attempts: 1,
     maxAttempts: 12,
     netPnl: -0.006,
+    groupKey: 'Agent in-turn',
+    groupLabel: 'Agent in-turn',
+    groupKind: 'state',
     turns: [
       {
         number: 1,

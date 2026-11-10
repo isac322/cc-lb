@@ -98,6 +98,7 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
     assert_eq!(body["summary"]["unknown_cycles"], 3);
     assert!(body["summary"]["retained_from_ms"].is_null());
     assert_eq!(body["rows"], serde_json::json!([]));
+    assert!(body.get("groups").is_some_and(Value::is_null));
     assert!(body["next_cursor"].is_null());
 }
 
@@ -258,6 +259,8 @@ async fn cache_keepalive_list_scopes_rows_by_horizon_and_paginates_with_a_cursor
     let (status, _headers, raw) = authed_bytes(app(state.clone()), "GET", &next_uri, None).await;
     assert_eq!(status, StatusCode::OK, "second page: {raw:?}");
     let second: Value = serde_json::from_slice(&raw).expect("second page JSON");
+    assert!(second.get("summary").is_some_and(Value::is_null));
+    assert!(second.get("groups").is_some_and(Value::is_null));
     let first_ids = first["rows"]
         .as_array()
         .expect("first rows")
@@ -379,6 +382,44 @@ async fn cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malfor
     assert_eq!(detail["total_renewals_current_cycle"], 0);
 }
 
+async fn cache_keepalive_overview_batches_activity_loads() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    for index in 0..=500 {
+        storage
+            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                session_key_hash: format!("batch-session-{index:04}"),
+                principal_id: principal_id.clone(),
+                accounting_key_id: None,
+                upstream_id: uuid::Uuid::nil(),
+                cycle_id: uuid::Uuid::nil(),
+                cache_anchor_at_unix_secs: NOW_UNIX_SECS,
+                ttl: CacheTtl::Ttl5m,
+                run_at_unix_secs: NOW_UNIX_SECS + 270,
+                expires_at_unix_secs: NOW_UNIX_SECS + 300,
+                encrypted_payload: vec![1],
+                display_reason: "agent-in-turn (tool_use: `bash`)".to_owned(),
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
+                now_unix_secs: NOW_UNIX_SECS,
+            })
+            .await
+            .expect("seed batch session");
+    }
+
+    let uri = format!("/admin/v1/principals/{principal_id}/cache-keepalive?horizon=all");
+    let (status, _headers, raw) = authed_bytes(app(state), "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::OK, "batched overview: {raw:?}");
+    let body: Value = serde_json::from_slice(&raw).expect("batched overview JSON");
+    assert_eq!(body["rows"].as_array().expect("overview rows").len(), 50);
+    assert_eq!(body["groups"][0]["label"], "Bash");
+    assert_eq!(body["groups"][0]["sessions"], 501);
+}
+
 #[tokio::test]
 async fn cache_keepalive_contracts_suite_part_1() {
     cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_zero().await;
@@ -395,6 +436,7 @@ async fn cache_keepalive_contracts_suite_part_2() {
 async fn cache_keepalive_contracts_suite_part_3() {
     cache_keepalive_list_scopes_rows_by_horizon_and_paginates_with_a_cursor().await;
     cache_keepalive_list_filters_base_states_and_orthogonal_errors().await;
+    cache_keepalive_overview_batches_activity_loads().await;
 }
 
 #[tokio::test]

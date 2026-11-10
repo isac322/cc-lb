@@ -3,7 +3,10 @@ use std::collections::{BTreeSet, HashMap};
 mod serialize;
 mod wire;
 
-use crate::cache_keepalive_view::{CacheKeepaliveActivitySource, derive_activity_view};
+use crate::cache_keepalive_view::{
+    CacheKeepaliveActivitySource, derive_activity_view,
+    trigger::{CacheKeepaliveTriggerKind, extract_trigger_descriptor},
+};
 use cc_lb_pricing::PriceCatalog;
 #[cfg(test)]
 use cc_lb_storage_api::CacheKeepaliveSessionStatus;
@@ -16,8 +19,8 @@ use uuid::Uuid;
 
 use serialize::{config_snapshot, dollars_from_micros, raw_record, ttl_name};
 pub(crate) use wire::{
-    CacheKeepaliveDetailResponse, CacheKeepaliveListResponse, CacheKeepaliveRowResponse,
-    CacheKeepaliveSummaryResponse,
+    CacheKeepaliveDetailResponse, CacheKeepaliveGroupResponse, CacheKeepaliveListResponse,
+    CacheKeepaliveRowResponse, CacheKeepaliveSummaryResponse,
 };
 use wire::{CacheKeepaliveGapResponse, CacheKeepalivePulseResponse, CacheKeepaliveTurnResponse};
 
@@ -218,29 +221,6 @@ pub(crate) fn summary_for_items(
     })
 }
 
-pub(super) fn row_for_item(
-    context: &CacheKeepaliveViewContext<'_>,
-    item: &CacheKeepaliveSessionListItem,
-    batch: &CacheKeepaliveActivityBatch,
-    upstream_names: &HashMap<Uuid, String>,
-) -> StorageResult<CacheKeepaliveRowResponse> {
-    // List rows do not expose session-only next-renewal/raw fields.
-    let activity = activity_for_item(
-        context.catalog,
-        context.now_ms,
-        item,
-        None,
-        batch,
-        context.horizon_start_ms,
-    )?;
-    row_from_activity(
-        context.max_attempts,
-        item,
-        &activity,
-        upstream_names.get(&item.upstream_id).cloned(),
-    )
-}
-
 pub(super) async fn list_upstream_names(
     storage: &dyn Storage,
     items: &[CacheKeepaliveSessionListItem],
@@ -358,6 +338,12 @@ pub(crate) fn row_from_activity(
     activity: &crate::cache_keepalive_view::CacheKeepaliveActivityView,
     upstream: Option<String>,
 ) -> StorageResult<CacheKeepaliveRowResponse> {
+    let trigger =
+        extract_trigger_descriptor(item.display_reason.as_deref(), &item.reason, activity.state);
+    let group_kind = match trigger.kind {
+        CacheKeepaliveTriggerKind::Tool => "tool",
+        CacheKeepaliveTriggerKind::State => "state",
+    };
     Ok(CacheKeepaliveRowResponse {
         id: item.id.clone(),
         last_message_at_ms: item.last_message_at_ms,
@@ -389,6 +375,9 @@ pub(crate) fn row_from_activity(
             .session_key_hash
             .clone()
             .unwrap_or_else(|| item.id.clone()),
+        group_key: trigger.label.clone(),
+        group_label: trigger.label,
+        group_kind,
     })
 }
 

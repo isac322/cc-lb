@@ -3,6 +3,7 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  qk,
   useCacheKeepaliveSessionDetail,
   useCacheKeepaliveSessions,
   useCacheKeepaliveSummary,
@@ -165,6 +166,119 @@ describe('useCacheKeepaliveSessionDetail', () => {
     expect([...detailUrl.searchParams.keys()]).toEqual(['id', 'horizon']);
     expect(result.current.data?.turns).toHaveLength(3);
     expect(result.current.data?.config_snapshot?.snapshot_bytes).toBe(524_288);
+  });
+
+  test('selecting a different session never shows the previous session while it loads', async () => {
+    const { promise: secondResponse, resolve: resolveSecond } =
+      Promise.withResolvers<Response>();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(cacheKeepaliveRenewedDetailFixture))
+      .mockImplementationOnce(() => secondResponse);
+    vi.stubGlobal('fetch', fetchMock);
+    const { result, rerender } = renderHook(
+      ({ sessionId }) =>
+        useCacheKeepaliveSessionDetail(PRINCIPAL_ID, sessionId, '24h'),
+      {
+        initialProps: { sessionId: SESSION_ID },
+        wrapper: makeWrapper(makeClient()),
+      },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    rerender({ sessionId: 'other-session' });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isLoading).toBe(true);
+    resolveSecond(
+      jsonResponse({
+        ...cacheKeepaliveRenewedDetailFixture,
+        id: 'other-session',
+      }),
+    );
+    await waitFor(() => expect(result.current.data?.id).toBe('other-session'));
+  });
+
+  test('an advancing list fingerprint starts a new request while the first detail is in flight', async () => {
+    const { promise: firstResponse, resolve: resolveFirst } =
+      Promise.withResolvers<Response>();
+    const updated = { ...cacheKeepaliveRenewedDetailFixture, generation: 8 };
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => firstResponse)
+      .mockResolvedValue(jsonResponse(updated));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = makeClient();
+    const { result, rerender } = renderHook(
+      ({ fingerprint }) =>
+        useCacheKeepaliveSessionDetail(
+          PRINCIPAL_ID,
+          SESSION_ID,
+          '24h',
+          fingerprint,
+        ),
+      {
+        initialProps: { fingerprint: 'generation-7' },
+        wrapper: makeWrapper(client),
+      },
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    rerender({ fingerprint: 'generation-8' });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.data?.generation).toBe(8));
+    resolveFirst(jsonResponse(cacheKeepaliveRenewedDetailFixture));
+    await waitFor(() =>
+      expect(
+        client.getQueryState(
+          qk.cacheKeepaliveSessionDetail(
+            PRINCIPAL_ID,
+            SESSION_ID,
+            '24h',
+            'generation-7',
+          ),
+        )?.status,
+      ).toBe('success'),
+    );
+    expect(result.current.data?.generation).toBe(8);
+  });
+
+  test('same-generation economics changes refetch, but an unchanged fingerprint does not', async () => {
+    const original = {
+      ...cacheKeepaliveRenewedDetailFixture,
+      is_active: false,
+    };
+    const updated = { ...original, net_pnl: 9, total_avoided: 10 };
+    const { promise: nextResponse, resolve: resolveNext } =
+      Promise.withResolvers<Response>();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(original))
+      .mockImplementationOnce(() => nextResponse);
+    vi.stubGlobal('fetch', fetchMock);
+    const { result, rerender } = renderHook(
+      ({ fingerprint }) =>
+        useCacheKeepaliveSessionDetail(
+          PRINCIPAL_ID,
+          SESSION_ID,
+          '24h',
+          fingerprint,
+        ),
+      {
+        initialProps: { fingerprint: 'economics-before' },
+        wrapper: makeWrapper(makeClient()),
+      },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    rerender({ fingerprint: 'economics-before' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    rerender({ fingerprint: 'economics-after' });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(result.current.data).toEqual(original);
+    expect(result.current.isPlaceholderData).toBe(true);
+    resolveNext(jsonResponse(updated));
+    await waitFor(() => expect(result.current.data?.net_pnl).toBe(9));
+    expect(result.current.data?.generation).toBe(original.generation);
+    rerender({ fingerprint: 'economics-after' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   test('stays idle and issues no request when sessionId is null', () => {
