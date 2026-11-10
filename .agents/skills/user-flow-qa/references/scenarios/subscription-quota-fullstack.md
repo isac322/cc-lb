@@ -269,6 +269,8 @@ The browser suite covers Overview and upstream detail at 390, 768, and 1440px, i
 
 
 
+The `web` CI workflow runs the same fixed-UI suite without retries and captures the pull request's base branch with `qa/capture-codex-credit-baseline.ts`, using the shared fixture module. Its `codex-credit-visuals-*` artifact retains unmodified Overview/detail PNGs for all three widths, the actual captured source revisions, and baseline summary counts for 14 days. Link that artifact in the pull request for independent visual review; the archive contains synthetic data only.
+
 ## 5. Automated-test coverage map (leverage; focus manual QA on gaps)
 - Endpoint contracts + series windowing/anchor/no-zeroes: `crates/cc-lb-admin/tests/subscription_quotas.rs` (snapshot + some multi-observation transition, including Fable tests).
 - Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy, including Fable storage conformance).
