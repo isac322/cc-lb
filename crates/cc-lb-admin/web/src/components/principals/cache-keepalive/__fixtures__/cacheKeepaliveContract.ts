@@ -11,7 +11,7 @@ export type CacheKeepaliveState = (typeof CACHE_KEEPALIVE_STATES)[number];
 export const cacheKeepaliveCardCopy = {
   title: 'Cache keepalive',
   tooltip:
-    'Keeps the Anthropic prompt cache warm by renewing its TTL — fires a tiny synthetic request just before the prompt cache expires so the next real request still hits a warm cache.',
+    'When supported by the provider, cache keepalive renews the prompt cache TTL — it fires a tiny synthetic request just before the cache expires so the next real request still hits a warm cache.',
   metrics: [
     ['Renewing now', 'current scheduled or mid-renewal'],
     ['Sessions (last 5m)', 'seen in last five minutes'],

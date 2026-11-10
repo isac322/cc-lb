@@ -267,6 +267,67 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+describe.each([
+  ['anthropic_api_key', null, 'Anthropic'],
+  ['anthropic_api_key', 'https://api.anthropic.com/', 'Anthropic'],
+  ['anthropic_api_key', 'https://proxy.example.com', null],
+  ['anthropic_api_key', 'https://api.anthropic.com/v1/', null],
+  ['openai_api_key', null, 'OpenAI'],
+  ['openai_api_key', 'https://api.openai.com/', 'OpenAI'],
+  ['openai_api_key', 'https://proxy.example.com', 'OpenAI'],
+  ['openai_api_key', 'https://api.anthropic.com/', 'OpenAI'],
+  ['gemini_api_key', null, 'Gemini'],
+  ['gemini_api_key', 'https://generativelanguage.googleapis.com/', 'Gemini'],
+  ['gemini_api_key', 'https://proxy.example.com', 'Gemini'],
+  ['gemini_api_key', 'https://api.anthropic.com/', 'Gemini'],
+] as const)('provider-aware notices for %s at %s', (kind, baseUrl, label) => {
+  test('rejection uses the upstream provider context and keeps Replace key', () => {
+    renderPane(
+      keyUpstream(
+        { ...REJECTED, provider: 'anthropic', last_error: null },
+        { kind, base_url: baseUrl },
+      ),
+      successQuery(usage({ source: 'estimated' })),
+    );
+    const title = label
+      ? `${label} rejected this key`
+      : 'Your endpoint rejected this key';
+    const notice = notices().find((el) => el.textContent?.includes(title));
+    expect(notice).toBeDefined();
+    expect(notice?.getAttribute('role')).toBe('alert');
+    if (label !== 'Anthropic') {
+      expect(notice?.textContent).not.toContain('Anthropic');
+    }
+    const action = within(notice as HTMLElement).getByRole('button', {
+      name: 'Replace key',
+    });
+    fireEvent.click(action);
+    expect(screen.getByTestId('connect-dialog').dataset.mode).toBe('replace');
+  });
+
+  test('an unchecked key uses the upstream provider context and keeps Re-check', () => {
+    renderPane(
+      keyUpstream(null, { kind, base_url: baseUrl }),
+      successQuery(usage({ source: 'estimated' })),
+    );
+    const notice = notices().find((el) =>
+      el.textContent?.includes('Key not checked yet'),
+    );
+    expect(notice).toBeDefined();
+    expect(notice?.textContent).toContain(
+      `Re-check → see what this key can do at ${label ?? 'your endpoint'}.`,
+    );
+    if (label !== 'Anthropic') {
+      expect(notice?.textContent).not.toContain('Anthropic');
+    }
+    const action = within(notice as HTMLElement).getByRole('button', {
+      name: 'Re-check',
+    });
+    fireEvent.click(action);
+    expect(recheckMutate).toHaveBeenCalledWith('upstream-key');
+  });
+});
+
 describe('UI-K-01 K1 rejected key', () => {
   test('danger notice owns Replace key; Access keeps the badge and Re-check', () => {
     renderPane(

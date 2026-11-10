@@ -7,6 +7,7 @@ import {
   useMemo,
   useState,
 } from 'react';
+import type { ApiKeyProvider } from '../../../lib/api';
 import { fmtBytes, fmtMs, fmtN, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Skeleton } from '../primitives';
@@ -21,6 +22,8 @@ import {
   latencyResponsibilityDescription,
   responseBodyDuration,
 } from './computeStageGroups';
+
+type LatencyProvider = ApiKeyProvider;
 
 // -----------------------------------------------------------------------------
 // Group / stage taxonomy
@@ -92,7 +95,7 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   other_setup:
     'Remaining proxy setup time after auth, route, limit reserve, and measured setup stages.',
   shape:
-    'Run the shape plugin: dialect adaptation + Anthropic-format shaping of the outbound body.',
+    'Run the shape plugin: adapt the request dialect and shape the outbound body for the selected upstream.',
   sign: 'Sign the outbound request (OAuth refresh if the credential needs one).',
   bulkhead_wait:
     'Time spent queued in the bulkhead waiting for an upstream concurrency slot.',
@@ -102,9 +105,9 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   upstream_wait:
     'upstream_ttfb − (bulkhead_wait + dns + connect). Approximates provider-side processing + network RTT.',
   stream_relay:
-    'Complete SSE response body relay from response headers through the last downstream chunk.',
+    'Complete streamed response body relay from response headers through the last downstream chunk.',
   partial_stream:
-    'Partial response body relay from response headers until client cancellation was observed.',
+    'Partial streamed response body relay from response headers until client cancellation was observed.',
   body_collect:
     'Non-stream response body download from response headers until the complete body was collected.',
   finalize:
@@ -114,6 +117,41 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
 };
 
 const MARKER_DESCRIPTIONS: Record<string, string> = {
+  message_start:
+    'First stream event — the provider has begun the response (usage/model metadata may be available).',
+  content_block_start:
+    'First content-block event — a text or tool-use content block just started.',
+  first_delta:
+    'Time-to-first-token (TTFT). First streamed content delta — the first actual token/character delivered.',
+  last_delta: 'Last streamed content delta — the final token or character.',
+  message_stop:
+    'Stream completion event — the provider has finalized the assistant turn. Final usage and stop reason may be available.',
+  last_chunk:
+    'Last byte received from the provider on this stream. End of upstream response.',
+};
+
+function stageDescription(
+  key: string,
+  provider?: LatencyProvider | null,
+): string | undefined {
+  if (key === 'shape') {
+    if (provider === 'anthropic') {
+      return 'Run the shape plugin: dialect adaptation + Anthropic-format shaping of the outbound body.';
+    }
+    if (provider === 'openai') {
+      return 'Run the shape plugin: adapt the request dialect and shape the outbound body for OpenAI.';
+    }
+    if (provider === 'gemini') {
+      return 'Run the shape plugin: adapt the request dialect and shape the outbound body for Gemini.';
+    }
+  }
+  if (key === 'stream_relay' && provider === 'anthropic') {
+    return 'Complete SSE response body relay from response headers through the last downstream chunk.';
+  }
+  return STAGE_DESCRIPTIONS[key];
+}
+
+const ANTHROPIC_MARKER_DESCRIPTIONS: Record<string, string> = {
   message_start:
     'First `event: message_start` frame — Anthropic has begun the assistant turn (usage/model metadata available).',
   content_block_start:
@@ -126,6 +164,15 @@ const MARKER_DESCRIPTIONS: Record<string, string> = {
   last_chunk:
     'Last byte received from Anthropic on this stream. End of upstream response.',
 };
+
+function markerDescription(
+  key: string,
+  provider?: LatencyProvider | null,
+): string | undefined {
+  return provider === 'anthropic'
+    ? ANTHROPIC_MARKER_DESCRIPTIONS[key]
+    : MARKER_DESCRIPTIONS[key];
+}
 
 // -----------------------------------------------------------------------------
 // Data model
@@ -643,14 +690,16 @@ function StageInfo({
   overview,
   total,
   groupLabel,
+  provider,
 }: {
   stage: StageDetail;
   overview: StageDetail[];
   total: number;
   groupLabel: string;
+  provider?: LatencyProvider | null;
 }) {
   const overviewTotal = overview.reduce((a, s) => a + s.ms, 0);
-  const description = STAGE_DESCRIPTIONS[stage.key];
+  const description = stageDescription(stage.key, provider);
   const multi = overview.length > 1 && overviewTotal > 0;
 
   return (
@@ -778,8 +827,14 @@ function MarkerIcon({ starred }: { starred?: boolean }) {
   );
 }
 
-function MarkerInfo({ marker }: { marker: SseMarker }) {
-  const description = MARKER_DESCRIPTIONS[marker.key];
+function MarkerInfo({
+  marker,
+  provider,
+}: {
+  marker: SseMarker;
+  provider?: LatencyProvider | null;
+}) {
+  const description = markerDescription(marker.key, provider);
   return (
     <div className="flex flex-col gap-1 min-w-[220px]">
       <div className="flex items-center gap-1.5">
@@ -821,6 +876,7 @@ function SegmentButton({
   active,
   overview,
   groupLabel,
+  provider,
 }: {
   stage: StageDetail;
   startMs: number;
@@ -828,6 +884,7 @@ function SegmentButton({
   active: ActiveKeyApi;
   overview: StageDetail[];
   groupLabel: string;
+  provider?: LatencyProvider | null;
 }) {
   const isActive = active.isActive(stage.key);
   const isSticky = active.isSticky(stage.key);
@@ -847,6 +904,7 @@ function SegmentButton({
           overview={overview}
           total={total}
           groupLabel={groupLabel}
+          provider={provider}
         />
       }
     >
@@ -923,12 +981,14 @@ function MarkerDot({
   active,
   axisTop,
   dotTop,
+  provider,
 }: {
   marker: StaggeredMarker;
   total: number;
   active: ActiveKeyApi;
   axisTop: number;
   dotTop: number;
+  provider?: LatencyProvider | null;
 }) {
   const leftPct = clampPct((marker.absMs / total) * 100);
   const isActive = active.isActive(marker.key);
@@ -947,7 +1007,7 @@ function MarkerDot({
           }}
         />
       )}
-      <InfoPopover content={<MarkerInfo marker={marker} />}>
+      <InfoPopover content={<MarkerInfo marker={marker} provider={provider} />}>
         <button
           type="button"
           {...active.bind(marker.key)}
@@ -1074,11 +1134,13 @@ function SseLane({
   total,
   active,
   event,
+  provider,
 }: {
   markers: SseMarker[];
   total: number;
   active: ActiveKeyApi;
   event: RequestEventWithPhase;
+  provider?: LatencyProvider | null;
 }) {
   const staggered = useMemo(
     () => computeMarkerTracks(markers, total, 6),
@@ -1111,32 +1173,52 @@ function SseLane({
             active={active}
             axisTop={axisTop}
             dotTop={dotY(m.track)}
+            provider={provider}
           />
         ))}
       </div>
       <TimeAxisTicks totalMs={total} tsMs={event.ts_ms} />
-      <StreamCounters event={event} />
+      <StreamCounters event={event} provider={provider} />
     </div>
   );
 }
 
-function StreamCounters({ event }: { event: RequestEventWithPhase }) {
+function StreamCounters({
+  event,
+  provider,
+}: {
+  event: RequestEventWithPhase;
+  provider?: LatencyProvider | null;
+}) {
+  const isAnthropic = provider === 'anthropic';
   return (
     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-caption text-text-muted">
       <CounterPill
         label="SSE"
         value={event._phase === 'final' ? event.sse_event_count : undefined}
-        description="Total parsed SSE frames — every `event:` line the proxy relayed (message_start, content_block_start, content_block_delta, ping, message_stop, etc. combined)."
+        description={
+          isAnthropic
+            ? 'Total parsed SSE frames — every `event:` line the proxy relayed (message_start, content_block_start, content_block_delta, ping, message_stop, etc. combined).'
+            : 'Total parsed SSE frames recorded while relaying the upstream response.'
+        }
       />
       <CounterPill
         label="deltas"
         value={event._phase === 'final' ? event.content_delta_count : undefined}
-        description="Number of `event: content_block_delta` frames — approximates the streamed token chunk count."
+        description={
+          isAnthropic
+            ? 'Number of `event: content_block_delta` frames — approximates the streamed token chunk count.'
+            : 'Number of streamed content deltas recorded by the proxy — approximates the token chunk count.'
+        }
       />
       <CounterPill
         label="pings"
         value={event._phase === 'final' ? event.ping_count : undefined}
-        description="Number of `event: ping` keepalive frames Anthropic sent to keep the SSE connection alive during long turns."
+        description={
+          isAnthropic
+            ? 'Number of `event: ping` keepalive frames Anthropic sent to keep the SSE connection alive during long turns.'
+            : 'Number of stream keepalive events recorded by the proxy.'
+        }
       />
       <CounterPill
         label="chunks"
@@ -1150,7 +1232,11 @@ function StreamCounters({ event }: { event: RequestEventWithPhase }) {
             ? fmtMs(event.inter_token_avg_ms)
             : undefined
         }
-        description="Average time between consecutive content_block_delta events: (last_content_delta − first_content_delta) / (delta_count − 1). Approximates per-token pacing."
+        description={
+          isAnthropic
+            ? 'Average time between consecutive content_block_delta events: (last_content_delta − first_content_delta) / (delta_count − 1). Approximates per-token pacing.'
+            : 'Average time between consecutive streamed content deltas: (last_content_delta − first_content_delta) / (delta_count − 1). Approximates per-token pacing.'
+        }
       />
     </div>
   );
@@ -1220,11 +1306,13 @@ function StageDetailsList({
   total,
   unaccounted,
   active,
+  provider,
 }: {
   stages: StageDetail[];
   total: number;
   unaccounted: number;
   active: ActiveKeyApi;
+  provider?: LatencyProvider | null;
 }) {
   const [open, setOpen] = useState(false);
   const count = stages.length + (unaccounted > 0 ? 1 : 0);
@@ -1264,7 +1352,7 @@ function StageDetailsList({
             setupTiming={s.setupTiming}
             total={total}
             hint={GROUP_META[s.group].label}
-            description={STAGE_DESCRIPTIONS[s.key]}
+            description={stageDescription(s.key, provider)}
             detail={s.detail}
           />
         ))}
@@ -1295,9 +1383,11 @@ function StageDetailsList({
 function SseDetailsList({
   markers,
   active,
+  provider,
 }: {
   markers: SseMarker[];
   active: ActiveKeyApi;
+  provider?: LatencyProvider | null;
 }) {
   const [open, setOpen] = useState(false);
   const activeKey = active.activeKey;
@@ -1321,7 +1411,7 @@ function SseDetailsList({
         {markers.map((m) => {
           const isActive = active.isActive(m.key);
           const isSticky = active.isSticky(m.key);
-          const description = MARKER_DESCRIPTIONS[m.key];
+          const description = markerDescription(m.key, provider);
           const button = (
             <button
               type="button"
@@ -1357,7 +1447,7 @@ function SseDetailsList({
             <InfoPopover
               key={m.key}
               side="left"
-              content={<MarkerInfo marker={m} />}
+              content={<MarkerInfo marker={m} provider={provider} />}
             >
               {button}
             </InfoPopover>
@@ -1476,10 +1566,12 @@ export function LatencyTimeline({
   event,
   isPartial,
   isLoading = false,
+  provider,
 }: {
   event: RequestEventWithPhase;
   isPartial?: boolean;
   isLoading?: boolean;
+  provider?: LatencyProvider | null;
 }) {
   const attribution = useMemo(() => computeLatencyAttribution(event), [event]);
   const total = attribution.totalMs;
@@ -1645,6 +1737,7 @@ export function LatencyTimeline({
                           active={active}
                           overview={groupItems}
                           groupLabel={groupLabel}
+                          provider={provider}
                         />
                       ))}
                     </div>
@@ -1668,6 +1761,7 @@ export function LatencyTimeline({
               total={total}
               active={active}
               event={event}
+              provider={provider}
             />
           )}
         </>
@@ -1678,8 +1772,11 @@ export function LatencyTimeline({
         total={total}
         unaccounted={unaccounted}
         active={active}
+        provider={provider}
       />
-      {showStreamLane && <SseDetailsList markers={markers} active={active} />}
+      {showStreamLane && (
+        <SseDetailsList markers={markers} active={active} provider={provider} />
+      )}
     </div>
   );
 }

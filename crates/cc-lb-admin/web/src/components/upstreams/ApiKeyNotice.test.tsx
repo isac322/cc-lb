@@ -1,6 +1,10 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { API_KEY_ACCESS_NOT_CHECKED, type ApiKeyAccess } from '../../lib/api';
+import {
+  API_KEY_ACCESS_NOT_CHECKED,
+  type ApiKeyAccess,
+  type ApiKeyProvider,
+} from '../../lib/api';
 import { ApiKeyNotice, apiKeyNoticeOf, apiKeyUsable } from './ApiKeyNotice';
 
 afterEach(cleanup);
@@ -24,6 +28,12 @@ describe('apiKeyNoticeOf', () => {
     expect(
       apiKeyNoticeOf({ ...OK, verified: false, inference: 'denied' }),
     ).toBe('rejected');
+    expect(
+      apiKeyNoticeOf({
+        ...API_KEY_ACCESS_NOT_CHECKED,
+        inference: 'denied',
+      }),
+    ).toBe('rejected');
     expect(apiKeyNoticeOf(API_KEY_ACCESS_NOT_CHECKED)).toBe('never_checked');
     expect(apiKeyNoticeOf({ ...OK, verified: false })).toBe('check_failed');
   });
@@ -40,8 +50,8 @@ describe('apiKeyUsable', () => {
 });
 
 describe('ApiKeyNotice', () => {
-  const handlers = () => ({
-    anthropicHost: true,
+  const handlers = (provider: ApiKeyProvider | null = 'anthropic') => ({
+    provider,
     onReplace: vi.fn(),
     onRecheck: vi.fn(),
   });
@@ -76,11 +86,27 @@ describe('ApiKeyNotice', () => {
         lastError="Your endpoint rejected this key. Check the key and the Base URL."
         rechecking={false}
         recheckError={null}
-        {...handlers()}
-        anthropicHost={false}
+        {...handlers(null)}
       />,
     );
     expect(screen.getByText('Your endpoint rejected this key')).toBeDefined();
+    expect(screen.queryByText(/Anthropic/)).toBeNull();
+  });
+
+  test.each([
+    ['openai', 'OpenAI'],
+    ['gemini', 'Gemini'],
+  ] as const)('K1 names the %s provider', (provider, label) => {
+    render(
+      <ApiKeyNotice
+        kind="rejected"
+        lastError={null}
+        rechecking={false}
+        recheckError={null}
+        {...handlers(provider)}
+      />,
+    );
+    expect(screen.getByText(`${label} rejected this key`)).toBeDefined();
     expect(screen.queryByText(/Anthropic/)).toBeNull();
   });
 
@@ -101,6 +127,41 @@ describe('ApiKeyNotice', () => {
     ).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Re-check' }));
     expect(h.onRecheck).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['openai', 'OpenAI'],
+    ['gemini', 'Gemini'],
+  ] as const)('K2 names the %s provider', (provider, label) => {
+    render(
+      <ApiKeyNotice
+        kind="never_checked"
+        lastError={null}
+        rechecking={false}
+        recheckError={null}
+        {...handlers(provider)}
+      />,
+    );
+    expect(
+      screen.getByText(`Re-check → see what this key can do at ${label}.`),
+    ).toBeDefined();
+    expect(screen.queryByText(/Anthropic/)).toBeNull();
+  });
+
+  test('K2 on a custom endpoint keeps the guidance neutral', () => {
+    render(
+      <ApiKeyNotice
+        kind="never_checked"
+        lastError={null}
+        rechecking={false}
+        recheckError={null}
+        {...handlers(null)}
+      />,
+    );
+    expect(
+      screen.getByText('Re-check → see what this key can do at your endpoint.'),
+    ).toBeDefined();
+    expect(screen.queryByText(/Anthropic/)).toBeNull();
   });
 
   test('K3: a failed check shows last_error, pending, and a failed Re-check', () => {
