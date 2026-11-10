@@ -269,6 +269,12 @@ cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more 
 | `filter` | `cc_lb_filter` | `cc_lb_filter_{anthropic,openai,gemini}` | `v1::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. |
 | `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `cc_lb_{shape,transform_response,transform_sse_event}_{anthropic,openai,gemini}` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Provider-specific request and response processing. Legacy shape is Anthropic-only. |
 
+Before encoding filter requests on V1, V2, or V3, the host removes query
+segments whose parameter name is exactly `key`, case-insensitively. Other
+segments retain their order and encoding; names are not percent-decoded.
+An absent query stays absent, and an all-`key` query remains a present empty
+string. Provider credential headers are also removed before dispatch.
+
 Filter example:
 
 ```rust
