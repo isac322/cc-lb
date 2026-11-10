@@ -677,12 +677,7 @@ test('Scenario 14: Current plugin config stays reachable across required viewpor
       },
     },
   });
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: async () => undefined },
-    });
-  });
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await installAppFixtures(page, {
     upstreams: [configured, oauthDisabled(), apiKeyUpstream()],
   });
@@ -724,6 +719,9 @@ test('Scenario 14: Current plugin config stays reachable across required viewpor
     await page.screenshot({ path: testInfo.outputPath(`config-${viewport.width}.png`) });
     await dialog.getByRole('button', { name: 'Copy JSON' }).click();
     await expect(dialog.getByRole('button', { name: 'Copied' })).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      JSON.stringify(configured.warmup_dialect_plugin?.config, null, 2),
+    );
 
     await page.keyboard.press('Escape');
     await expect(opener).toBeFocused();
