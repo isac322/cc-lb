@@ -74,7 +74,7 @@ pool-history is NOT computed per request: a background task records pre-aggregat
 ## 2. Deterministic state mutation — THE ENGINE
 
 Write contract: `latest_v1` upserts on every accepted observation **only if** `excluded.observed_at_unix_millis >= existing` (adapter:439-450). `checkpoints_v1` inserts a row **only when the semantic fingerprint changes**. Fingerprint = BLAKE3 of the SEMANTIC fields; hand-written SQL controls the fingerprint blob directly (a *different* 32-byte blob ⇒ new checkpoint; the *same* blob ⇒ dedup).
-- Semantic fields (a change here ⇒ new checkpoint): `utilization, status, resets_at_unix_secs, surpassed_threshold, fallback_percentage, fallback_available, overage_in_use, overage_period_monthly_utilization, upgrade_paths, disabled_reason, extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits`.
+- Semantic fields (a change here ⇒ new checkpoint): `utilization, status, resets_at_unix_secs, surpassed_threshold, fallback_percentage, fallback_available, overage_in_use, overage_period_monthly_utilization, upgrade_paths, disabled_reason, extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits`, and every `credits` field (availability, unlimited, limit reached, exact decimal balance, and local/cloud estimate pairs). Credits persist as `credits_json` in latest/checkpoint rows; they never become utilization or a monthly dollar budget.
 - Excluded/evidence fields (change here ⇒ NO new checkpoint, latest freshness only): `sample_id, changed_at/observed_at_unix_millis, ingested_at_unix_millis, representative_claim, sample_kind`.
 
 Schemas: `upstream_subscription_quota_latest_v1` PK `(upstream_id,window,source)`; `upstream_subscription_quota_checkpoints_v1` PK `(upstream_id,window,source,changed_at_unix_millis,sample_id)` + `semantic_fingerprint BLOB(32)`. Full column list: migrations `0019_subscription_quota_unified_signals.sql` (latest), `0044_subscription_quota_checkpoints.sql` (checkpoints), and SQLite 0051 / Postgres 0081 (Fable latest/checkpoint constraints). `window ∈ (5h,7d,7d_sonnet,7d_opus,7d_fable,overage,unified)`, `source ∈ (header,api)`, `status ∈ (allowed,allowed_warning,rejected)`, `utilization ∈ [0,1]`.
@@ -237,6 +237,35 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
     jq -e '.upstreams[0].windows[] | select(.window == "5h") | .utilization == 0.05 and .status == "allowed"' "$QA_ROOT/c1-reset-latest.json"
     ```
   - **Expected observable result:** Both endpoints return `200`. The `5h` series contains a `markers[]` entry with `kind:"reset"`, its last utilization is exactly `0.05`, and `/latest` shows `status:"allowed"` with the new reset-cycle utilization. No leading `0%` bucket is fabricated before the left anchor.
+
+### T14 Codex credits: availability, restrictions, freshness, and display
+
+Use the isolated instance requirements in §0.1. Never use live provider grants for these mutations. The automated commands below create deterministic fixtures and exercise production parsers, SQLite/storage, cache, routing, and browser components without purchasing credits.
+
+| Given / transition | Expected storage and routing | Expected admin API and UI |
+|---|---|---|
+| Base windows exhausted, fresh `has_credits=true` with balance `"62500.0000000000"` | API `overage` observation has `fallback_available=true`; a multi-candidate Codex pool can select `Overage` | One credit summary, Available and exact balance in credits; base meters remain used-percent |
+| Credits unavailable, zero or null balance | Explicit negative availability blocks overage; balance alone never permits it | Unavailable, retaining reported zero or unknown balance without a percentage or USD conversion |
+| `unlimited=true`, independently of `has_credits` | Fresh explicit unlimited state permits overage unless a restriction blocks it | Unlimited; no invented amount when balance is absent |
+| Poll reports `overage_limit_reached=true`, then newer headers report usable credits | API `overage` and header `unified` remain separate observations; the poll restriction wins | Blocked, with status and balance provenance retained independently |
+| A newer poll explicitly clears its restriction | Replaces the API slot; becomes eligible only if no other observation remains explicitly negative | Summary follows the remaining source facts; a header negative is not cleared by the other source |
+| Missing flags or stale positive credit observation | Unknown/stale does not establish fresh overage availability | Unknown or Stale; stale provenance stays visible |
+| Credit field changes without a utilization change | Credit-only changes create semantic checkpoints; identical state advances latest freshness without another checkpoint | Raw credit fields survive persistence and cache hydration |
+
+Run from the repository root:
+
+```bash
+cargo test -p cc-lb-server --lib codex_usage_and_header_credit_observations_drive_routing_and_keep_poll_restrictions
+cargo test -p cc-lb-server --lib scheduler_dispatch::usage::tests::codex
+cargo test -p cc-lb-engine --lib builtin_filters::subscription_preference::tests::provider_quota_rules
+cargo test -p cc-lb-storage-conformance --test integration upstream_subscription_quota
+cargo test -p cc-lb-server --test integration reconcile_subscription_quota_hydration
+bun run --cwd crates/cc-lb-admin/web test --run src/components/upstreams/codexCredits.test.tsx
+bun run --cwd crates/cc-lb-admin/web e2e e2e/codex-credits.spec.ts
+```
+
+The browser suite covers Overview and upstream detail at 390, 768, and 1440px, including source conflicts, one summary, exact units, no credit meter, preserved base meters, and overflow. Its admin API fixtures model wire state; the Rust hydration test separately proves real SQLite → cache → authenticated latest API. For manual native-server captures, seed only a disposable database, restart after direct SQL so the cache reloads, and compare the same six states with the latest API. Do not count a screenshot as evidence of live provider eligibility: exhausted-base plus usable credits remains an unmeasured provider scenario.
+
 
 
 
