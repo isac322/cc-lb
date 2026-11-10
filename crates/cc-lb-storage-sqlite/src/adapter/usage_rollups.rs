@@ -632,7 +632,7 @@ async fn reconcile_gemini_model_identity(
                    AND marker.principal_id = rollup.principal_id \
                    AND marker.upstream_id = rollup.upstream_id \
                    AND marker.marker_model = rollup.model \
-               )",
+               ))",
         )
         .fetch_one(&mut *tx)
         .await
@@ -668,7 +668,7 @@ async fn reconcile_gemini_model_identity(
                        AND marker.principal_id = rollup.principal_id \
                        AND marker.upstream_id = rollup.upstream_id \
                        AND marker.marker_model = rollup.model \
-                   )",
+                   ))",
             )
             .bind(event_upper_bound)
             .bind(rollup_upper_bound)
@@ -715,7 +715,7 @@ async fn reconcile_gemini_model_identity(
                        AND marker.principal_id = rollup.principal_id \
                        AND marker.upstream_id = rollup.upstream_id \
                        AND marker.marker_model = rollup.model \
-                   )",
+                   ))",
             )
             .bind(rollup_upper_bound)
             .fetch_one(&mut *tx)
@@ -811,7 +811,7 @@ async fn reconcile_gemini_model_identity(
                        AND marker.principal_id = rollup.principal_id \
                        AND marker.upstream_id = rollup.upstream_id \
                    AND marker.marker_model = rollup.model \
-                   )",
+                   ))",
         )
         .bind(nested_event_cursor)
         .bind(event_upper_bound)
@@ -901,7 +901,7 @@ async fn reconcile_gemini_model_identity(
                AND marker.principal_id = rollup.principal_id \
                AND marker.upstream_id = rollup.upstream_id \
                AND marker.marker_model = rollup.model \
-           )",
+           ))",
     )
     .bind(rollup_upper_bound)
     .fetch_one(&mut *tx)
