@@ -183,10 +183,9 @@ mapping table. Key rules:
 - `tool_use` with only wait-for-user tools
   (`attempt_completion`, `ExitPlanMode`, `ask_followup_question`, `ask`, …) or
   only `server_tool_use` → **UserTurn**.
-- `stop_reason == "end_turn"` with a completion-tool defined-but-not-invoked →
-  **AgentInTurn**.
-- `stop_reason == "end_turn"` (plain) → **UserTurn** (unless
-  `treat_end_turn_as_ambiguous` opts in).
+- `stop_reason == "end_turn"` → **UserTurn** (unless
+  `treat_end_turn_as_ambiguous` opts in). No tool is executing for this stop
+  reason, even when completion tools are defined in the request.
 - `stop_reason == "max_tokens" | "stop_sequence"` → **Ambiguous**.
 
 `Ambiguous` responses behave like `UserTurn` in this release (fail-safe:

@@ -123,7 +123,8 @@ function buildRailPoints(
 
   gap.pulses.forEach((pulse, idx) => {
     const prevPulse = idx > 0 ? gap.pulses[idx - 1] : null;
-    const pct = Math.min(93, Math.max(7, (pulse.offset_sec / maxSec) * 100));
+    const ratio = Math.min(1, Math.max(0, pulse.offset_sec / maxSec));
+    const pct = 7 + ratio * 86;
     const sincePrevSec =
       pulse.since_prev_renewal_sec ??
       (prevPulse ? Math.max(0, pulse.offset_sec - prevPulse.offset_sec) : null);
@@ -425,17 +426,12 @@ function TimeRailGap({
   );
 }
 
-function leadWindowSec(session: CacheKeepaliveDetail): number {
+function leadWindowSec(session: CacheKeepaliveDetail): number | null {
+  if (session.ttl === '12h') return null;
   const ttlSec =
-    session.ttl === '12h'
-      ? 12 * 3600
-      : session.ttl === '1h'
-        ? 3600
-        : session.ttl === '30m'
-          ? 30 * 60
-          : 300;
+    session.ttl === '1h' ? 3600 : session.ttl === '30m' ? 30 * 60 : 300;
   const leadSec =
-    session.ttl === '1h' || session.ttl === '12h'
+    session.ttl === '1h'
       ? (session.config_snapshot?.lead_1h ?? 300)
       : (session.config_snapshot?.lead_5m ?? 30);
   return Math.max(0, ttlSec - leadSec);
@@ -445,6 +441,7 @@ function synthesizeGapsFromTurns(
   session: CacheKeepaliveDetail,
 ): CacheKeepaliveGap[] {
   const leadSec = leadWindowSec(session);
+  if (leadSec === null) return [];
   if (session.turns.length === 0) {
     if (session.state === 'scheduled') {
       return [
@@ -617,9 +614,11 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const session = query.data;
   const isError = session.error != null;
   const railGaps =
-    session.gaps && session.gaps.length > 0
-      ? session.gaps
-      : synthesizeGapsFromTurns(session);
+    session.ttl === '12h'
+      ? []
+      : session.gaps && session.gaps.length > 0
+        ? session.gaps
+        : synthesizeGapsFromTurns(session);
 
   return (
     <div
@@ -661,8 +660,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
               Spent {fmtUsdPlain(session.total_spent)} (no follow-up) =
             </span>
           ) : null}
-          {session.net_pnl === null ||
-          session.evidence_status !== 'observed' ? (
+          {session.evidence_status !== 'observed' ? (
             <span className="text-text-faint">
               Evidence {session.evidence_status} ·
             </span>
@@ -679,6 +677,15 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
       </div>
 
       <div className="space-y-3 p-4">
+        {session.ttl === '12h' ? (
+          <p
+            className="rounded-sm bg-overlay-2 px-3.5 py-3 text-body-sm text-text-muted"
+            data-testid="cache-keepalive-12h-retention"
+          >
+            12h retention is recorded without read re-anchoring. This session is
+            not periodically renewed.
+          </p>
+        ) : null}
         {query.isError ? (
           <div
             className="flex items-center justify-between gap-2 rounded-sm bg-danger/8 px-3 py-2 text-caption text-danger-text"

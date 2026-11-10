@@ -11,15 +11,17 @@ export type CacheKeepaliveState = (typeof CACHE_KEEPALIVE_STATES)[number];
 export const cacheKeepaliveCardCopy = {
   title: 'Cache keepalive',
   tooltip:
-    'When supported by the provider, cache keepalive renews the prompt cache TTL — it fires a tiny synthetic request just before the cache expires so the next real request still hits a warm cache.',
+    'OpenAI Responses keepalive is for GPT-5.6+ models: 30m sessions may renew during idle gaps, while 12h retention is recorded without read re-anchoring.',
   metrics: [
     ['Renewing now', 'current scheduled or mid-renewal'],
     ['Sessions (last 5m)', 'seen in last five minutes'],
     ['Renewals fired', 'retained history'],
     ['Cost saved', 'net, after renewal spend'],
   ],
-  caption: 'Renews the prompt-cache TTL during idle gaps.',
-  offLine: 'Off. Turn on to renew the prompt-cache TTL for idle sessions.',
+  caption:
+    'Keeps supported prompt caches warm during idle gaps. OpenAI Responses support is limited to GPT-5.6+ models: 30m sessions may renew, while 12h retention is recorded without read re-anchoring.',
+  offLine:
+    'Off. Turn on to renew supported prompt-cache sessions during idle gaps. OpenAI Responses 12h retention is recorded without read re-anchoring.',
   actions: ['Sessions', 'Settings'],
 } as const;
 
