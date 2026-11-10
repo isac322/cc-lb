@@ -722,6 +722,8 @@ test('Scenario 14: Current plugin config stays reachable across required viewpor
       viewport.width,
     );
 
+    await opener.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`card-${viewport.width}.png`) });
     await opener.click();
     const dialog = page.getByRole('dialog', { name: /anthropic-shape-v2/ });
     await expect(dialog).toBeVisible();

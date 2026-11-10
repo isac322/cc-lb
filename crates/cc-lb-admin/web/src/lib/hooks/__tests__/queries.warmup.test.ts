@@ -275,9 +275,14 @@ describe('useUpdateUpstreamWarmupSettings', () => {
 });
 
 describe('warm-up plugin snapshot after mutation', () => {
-  test.each(['save', 'clear'] as const)(
-    '%s refreshes the effective snapshot before the next poll',
-    async (operation) => {
+  test.each([
+    ['save', false],
+    ['clear', false],
+    ['save', true],
+    ['clear', true],
+  ] as const)(
+    '%s refreshes the effective snapshot with initial summary pending=%s',
+    async (operation, initialSummaryPending) => {
       const previousPlugin = {
         wasm_registry_id: 'shape-before',
         wire_version: 1,
@@ -293,12 +298,14 @@ describe('warm-up plugin snapshot after mutation', () => {
         spec_revision: SPEC_REVISION,
         warmup_dialect_plugin: previousPlugin,
       });
+      let initialSummaryStarted = false;
+      const initialSummaryGate = Promise.withResolvers<void>();
       vi.stubGlobal(
         'fetch',
         vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
           const url = String(input);
           if (url.endsWith('/warmup')) {
-            return jsonResponse({
+            const response = jsonResponse({
               upstream_id: UPSTREAM_ID,
               last_attempt: null,
               recent_attempts: [],
@@ -311,6 +318,11 @@ describe('warm-up plugin snapshot after mutation', () => {
               },
               dialect_plugin: upstream.warmup_dialect_plugin,
             });
+            if (initialSummaryPending && !initialSummaryStarted) {
+              initialSummaryStarted = true;
+              await initialSummaryGate.promise;
+            }
+            return response;
           }
           if (init?.method === 'PATCH') {
             const patch = JSON.parse(String(init.body));
@@ -339,29 +351,42 @@ describe('warm-up plugin snapshot after mutation', () => {
         { wrapper: makeWrapper(client) },
       );
       try {
-        await waitFor(() =>
-          expect(result.current.summary.data?.dialect_plugin).toEqual(
-            previousPlugin,
-          ),
-        );
-        if (operation === 'save') {
-          await result.current.save.mutateAsync({
-            id: UPSTREAM_ID,
-            spec_revision: SPEC_REVISION,
-            body: { warmup_dialect_plugin: nextPlugin },
-          });
+        if (initialSummaryPending) {
+          await waitFor(() => expect(initialSummaryStarted).toBe(true));
         } else {
-          await result.current.clear.mutateAsync({
-            id: UPSTREAM_ID,
-            spec_revision: SPEC_REVISION,
-          });
+          await waitFor(() =>
+            expect(result.current.summary.data?.dialect_plugin).toEqual(
+              previousPlugin,
+            ),
+          );
         }
+        const mutation =
+          operation === 'save'
+            ? result.current.save.mutateAsync({
+                id: UPSTREAM_ID,
+                spec_revision: SPEC_REVISION,
+                body: { warmup_dialect_plugin: nextPlugin },
+              })
+            : result.current.clear.mutateAsync({
+                id: UPSTREAM_ID,
+                spec_revision: SPEC_REVISION,
+              });
+        if (initialSummaryPending) {
+          await waitFor(() =>
+            expect(upstream.warmup_dialect_plugin).toEqual(
+              operation === 'save' ? nextPlugin : null,
+            ),
+          );
+          initialSummaryGate.resolve();
+        }
+        await mutation;
         await waitFor(() =>
           expect(result.current.summary.data?.dialect_plugin).toEqual(
             operation === 'save' ? nextPlugin : null,
           ),
         );
       } finally {
+        initialSummaryGate.resolve();
         unmount();
         client.clear();
       }

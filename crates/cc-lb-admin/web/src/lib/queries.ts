@@ -1342,6 +1342,7 @@ export function useClearUpstreamWarmupDialectPlugin() {
         ifMatch: spec_revision,
       }),
     onSuccess: async (serverResponse, { id }) => {
+      await qc.cancelQueries({ queryKey: warmupKeys.summary(id) });
       qc.setQueryData(qk.upstream(id), serverResponse);
       await qc.invalidateQueries({ queryKey: warmupKeys.summary(id) });
       await qc.invalidateQueries({ queryKey: qk.upstream(id) });
@@ -1368,6 +1369,7 @@ export function useUpdateUpstreamWarmupSettings() {
         { ifMatch: spec_revision },
       ),
     onSuccess: async (serverResponse, { id }) => {
+      await qc.cancelQueries({ queryKey: warmupKeys.summary(id) });
       qc.setQueryData(qk.upstream(id), serverResponse);
       await qc.invalidateQueries({ queryKey: warmupKeys.summary(id) });
       await qc.invalidateQueries({ queryKey: qk.upstream(id) });
