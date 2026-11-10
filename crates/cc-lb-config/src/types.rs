@@ -367,6 +367,11 @@ pub struct SchedulerConfig {
     pub singleton_concurrency: usize,
     #[serde(default = "default_scheduler_keepalive_concurrency")]
     pub keepalive_concurrency: usize,
+    /// Maximum time allowed for one keep-alive provider request. Must be below
+    /// the scheduler's 60-second per-job timeout.
+    #[serde(default = "default_scheduler_keepalive_dispatch_timeout_secs")]
+    #[schemars(range(min = 1, max = 59))]
+    pub keepalive_dispatch_timeout_secs: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -378,6 +383,7 @@ impl Default for SchedulerConfig {
             entity_concurrency: 8,
             singleton_concurrency: 2,
             keepalive_concurrency: 4,
+            keepalive_dispatch_timeout_secs: 30,
         }
     }
 }
@@ -1113,6 +1119,10 @@ fn default_scheduler_singleton_concurrency() -> usize {
 
 fn default_scheduler_keepalive_concurrency() -> usize {
     SchedulerConfig::default().keepalive_concurrency
+}
+
+fn default_scheduler_keepalive_dispatch_timeout_secs() -> u64 {
+    SchedulerConfig::default().keepalive_dispatch_timeout_secs
 }
 
 fn default_tracing_level() -> String {

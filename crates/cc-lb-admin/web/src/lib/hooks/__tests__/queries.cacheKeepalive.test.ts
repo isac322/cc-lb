@@ -75,7 +75,7 @@ describe('useCacheKeepaliveSummary', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(urlFrom(fetchMock)).toBe(
-      `/admin/v1/principals/${PRINCIPAL_ID}/cache-keepalive?limit=0`,
+      `/admin/v1/principals/${PRINCIPAL_ID}/cache-keepalive?limit=0&horizon=24h`,
     );
     expect(result.current.data).toEqual(cacheKeepaliveSummaryFixture);
   });
@@ -152,7 +152,7 @@ describe('useCacheKeepaliveSessionDetail', () => {
   test('fetches one session detail and decodes its turns', async () => {
     const fetchMock = stubFetchOnce(cacheKeepaliveRenewedDetailFixture);
     const { result } = renderHook(
-      () => useCacheKeepaliveSessionDetail(PRINCIPAL_ID, SESSION_ID),
+      () => useCacheKeepaliveSessionDetail(PRINCIPAL_ID, SESSION_ID, '24h'),
       { wrapper: makeWrapper(makeClient()) },
     );
 
@@ -161,7 +161,8 @@ describe('useCacheKeepaliveSessionDetail', () => {
     const detailUrl = new URL(urlFrom(fetchMock), 'http://localhost');
     expect(detailUrl.pathname).toBe(SESSION_DETAIL_PATH);
     expect(detailUrl.searchParams.get('id')).toBe(SESSION_ID);
-    expect([...detailUrl.searchParams.keys()]).toEqual(['id']);
+    expect(detailUrl.searchParams.get('horizon')).toBe('24h');
+    expect([...detailUrl.searchParams.keys()]).toEqual(['id', 'horizon']);
     expect(result.current.data?.turns).toHaveLength(3);
     expect(result.current.data?.config_snapshot?.snapshot_bytes).toBe(524_288);
   });

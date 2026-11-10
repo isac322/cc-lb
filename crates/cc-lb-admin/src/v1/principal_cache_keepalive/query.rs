@@ -27,7 +27,7 @@ pub(super) enum CacheKeepaliveHorizon {
 }
 
 impl CacheKeepaliveHorizon {
-    fn start_ms(self, now_ms: u64) -> Option<u64> {
+    pub(super) fn start_ms(self, now_ms: u64) -> Option<u64> {
         match self {
             Self::Hours1 => Some(now_ms.saturating_sub(HOUR_MS)),
             Self::Hours6 => Some(now_ms.saturating_sub(HOUR_MS.saturating_mul(6))),
@@ -154,7 +154,7 @@ fn parse_limit(value: Option<&str>) -> Result<u32, QueryError> {
     Ok(limit)
 }
 
-fn parse_horizon(value: Option<&str>) -> Result<CacheKeepaliveHorizon, QueryError> {
+pub(super) fn parse_horizon(value: Option<&str>) -> Result<CacheKeepaliveHorizon, QueryError> {
     match value.unwrap_or("24h") {
         "1h" => Ok(CacheKeepaliveHorizon::Hours1),
         "6h" => Ok(CacheKeepaliveHorizon::Hours6),
@@ -175,6 +175,8 @@ fn parse_filter(
         "renewed" => CacheKeepaliveSessionFilter::Renewed,
         "scheduled" => CacheKeepaliveSessionFilter::Scheduled,
         "capped" => CacheKeepaliveSessionFilter::Capped,
+        "cancelled" => CacheKeepaliveSessionFilter::Cancelled,
+        "failed" => CacheKeepaliveSessionFilter::Failed,
         "expired" => CacheKeepaliveSessionFilter::Expired,
         "not_tracked" => CacheKeepaliveSessionFilter::NotTracked,
         "error" => CacheKeepaliveSessionFilter::Error,

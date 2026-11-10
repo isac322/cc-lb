@@ -149,7 +149,7 @@ type FixtureManifest = z.infer<typeof FixtureManifestSchema>;
 const KeepaliveSummaryBodySchema = z.object({
   renewing_now: z.number(),
   sessions_last_5m: z.number(),
-  renewals_fired: z.number(),
+  retained_successful_hits: z.number(),
   cost_saved: z.number(),
 });
 const KeepaliveListBodySchema = z
@@ -1150,8 +1150,12 @@ test('UI-01 renders four metrics and flashes only a changed value from the actua
   await expect(
     card.getByText('Sessions (last 5m)', { exact: true }),
   ).toBeVisible();
-  await expect(card.getByText('Renewals fired', { exact: true })).toBeVisible();
-  await expect(card.getByText('Cost saved', { exact: true })).toBeVisible();
+  await expect(
+    card.getByText('Successful renewals · 24h', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    card.getByText('Cost saved · 24h', { exact: true }),
+  ).toBeVisible();
   const metrics = card.getByTestId('cache-keepalive-metric-value');
   await expect(metrics).toHaveCount(4);
   await expect(metrics.first()).toHaveAttribute('aria-busy', 'false');
@@ -1292,7 +1296,7 @@ test('UI-01 renders four metrics and flashes only a changed value from the actua
   expect(after).toEqual([
     changedSummary.renewing_now.toLocaleString('en-US'),
     changedSummary.sessions_last_5m.toLocaleString('en-US'),
-    changedSummary.renewals_fired.toLocaleString('en-US'),
+    changedSummary.retained_successful_hits.toLocaleString('en-US'),
     `$${changedSummary.cost_saved.toFixed(2)}`,
   ]);
   expect(

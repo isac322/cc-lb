@@ -29,6 +29,7 @@ fn options(backend: Backend) -> HarnessOptions {
             refresh_lead_time_5m_secs: 299,
             ..KeepaliveOptions::default()
         },
+        ..HarnessOptions::default()
     }
 }
 

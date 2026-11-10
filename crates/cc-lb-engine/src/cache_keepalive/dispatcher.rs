@@ -42,7 +42,6 @@ use super::scheduler::{
     RenewalUsage,
 };
 
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 const ERROR_BODY_PREFIX_BYTES: usize = 512;
 
 pub struct AnthropicKeepaliveDispatcher {
@@ -65,7 +64,7 @@ impl AnthropicKeepaliveDispatcher {
             upstream_store,
             http_client,
             clock,
-            timeout: DISPATCH_TIMEOUT,
+            timeout: Duration::from_secs(30),
         }
     }
 
@@ -219,7 +218,10 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                 DispatchOutcome::Error(format!("status={} body={}", status, body_prefix(&body)))
             }
             Ok(Err(source)) => DispatchOutcome::Error(source),
-            Err(source) => DispatchOutcome::Error(source.to_string()),
+            Err(_elapsed) => DispatchOutcome::Error(format!(
+                "renewal timed out after {}s",
+                self.timeout.as_secs()
+            )),
         }
     }
 }

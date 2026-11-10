@@ -22,7 +22,6 @@ import {
   SegmentedControl,
   type SegmentedOption,
   Skeleton,
-  Spinner,
 } from '../../ui/primitives';
 import { mergeLiveSessions } from './liveMergeSessions';
 import {
@@ -275,6 +274,15 @@ function SessionMasterRow({
         <span className="shrink-0 text-caption text-text-faint tabular-nums">
           {renewalLabel}
         </span>
+        {row.state === 'cancelled' ? (
+          <span className="shrink-0 rounded-sm bg-overlay-5 px-1.5 py-0.5 text-caption text-text-muted">
+            Cancelled
+          </span>
+        ) : row.state === 'failed' ? (
+          <span className="shrink-0 rounded-sm bg-danger/12 px-1.5 py-0.5 text-caption text-danger-text">
+            Failed
+          </span>
+        ) : null}
       </span>
       <DecimalAlignedUsd
         value={row.net_pnl}
@@ -284,6 +292,44 @@ function SessionMasterRow({
         className="font-medium"
       />
     </button>
+  );
+}
+function DeletedSessionsRow({
+  summary,
+  maxFracDigits,
+}: {
+  summary: CacheKeepaliveSummary;
+  maxFracDigits: number;
+}) {
+  return (
+    <div
+      className="flex w-full items-start justify-between gap-2 rounded-sm bg-overlay-2 pl-5 pr-3.5 py-1.5 text-left"
+      data-testid="cache-keepalive-deleted-sessions"
+    >
+      <span className="min-w-0">
+        <span className="block truncate text-label text-text">
+          Deleted sessions ({summary.unlisted_sessions.toLocaleString('en-US')})
+        </span>
+        <span className="block text-caption text-text-faint">
+          {summary.unlisted_renewals.toLocaleString('en-US')} renewals · Spent{' '}
+          <span className="whitespace-nowrap">
+            {fmtUsdPlain(summary.unlisted_spent)}
+          </span>
+        </span>
+        <span className="block text-caption text-text-faint">
+          Session records were removed after retention, but their renewal cost
+          stays in the totals.
+        </span>
+      </span>
+      <span className="flex shrink-0 items-baseline gap-1 text-caption text-text-muted">
+        Net
+        <DecimalAlignedUsd
+          value={summary.unlisted_net}
+          maxFracDigits={maxFracDigits}
+          scope="group"
+        />
+      </span>
+    </div>
   );
 }
 
@@ -300,32 +346,44 @@ function SheetSummaryHeader({
   onHorizonChange: (h: CacheKeepaliveHorizon) => void;
   showHorizon: boolean;
 }) {
-  const effectiveCostSaved =
-    summary?.cost_saved ?? summary?.resolved_cost_saved ?? null;
-  const effectiveTotalAvoided =
-    summary?.total_avoided ?? summary?.resolved_total_avoided ?? null;
+  const effectiveCostSaved = summary?.cost_saved ?? null;
+  const effectiveTotalAvoided = summary?.total_avoided ?? null;
 
   return (
     <header
       className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-subtle px-4 py-2.5"
       data-testid="cache-keepalive-pnl-equation"
     >
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-body-sm tabular-nums">
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-body-sm tabular-nums">
         {isLoading ? (
           <Skeleton className="h-5 w-52" />
         ) : summary ? (
           <>
-            <span className={cx('font-medium', pnlTone(effectiveCostSaved))}>
+            <span
+              className={cx(
+                'font-medium whitespace-nowrap',
+                pnlTone(effectiveCostSaved),
+              )}
+            >
               Net {fmtUsdSigned(effectiveCostSaved)}
             </span>
             <span className="text-caption text-text-faint">
-              (Saved {fmtUsdPlain(effectiveTotalAvoided)} − Spent{' '}
-              {fmtUsdPlain(summary.total_spent)})
+              Saved{' '}
+              <span className="whitespace-nowrap">
+                {fmtUsdPlain(effectiveTotalAvoided)}
+              </span>{' '}
+              · Spent{' '}
+              <span className="whitespace-nowrap">
+                {fmtUsdPlain(summary.total_spent)}
+              </span>
             </span>
-            {effectiveCostSaved === null ||
-            summary.evidence_status !== 'observed' ? (
+            {effectiveCostSaved === null ? (
               <span className="text-caption text-text-faint">
-                · Evidence {summary.evidence_status}
+                · Price unknown
+              </span>
+            ) : summary.evidence_status !== 'observed' ? (
+              <span className="text-caption text-text-faint">
+                · Follow-up {summary.evidence_status}
               </span>
             ) : null}
           </>
@@ -337,13 +395,18 @@ function SheetSummaryHeader({
       </div>
 
       {showHorizon ? (
-        <SegmentedControl
-          ariaLabel="Time range"
-          size="sm"
-          value={horizon}
-          onChange={onHorizonChange}
-          options={HORIZON_OPTIONS}
-        />
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 text-caption text-text-muted">
+            Showing {horizon === 'all' ? 'All time' : `Last ${horizon}`}
+          </span>
+          <SegmentedControl
+            ariaLabel="Time range"
+            size="sm"
+            value={horizon}
+            onChange={onHorizonChange}
+            options={HORIZON_OPTIONS}
+          />
+        </div>
       ) : null}
     </header>
   );
@@ -366,6 +429,8 @@ function SessionListSkeleton() {
   );
 }
 
+const horizonByPrincipal = new Map<string, CacheKeepaliveHorizon>();
+
 export function CacheKeepaliveSessionsDrawer({
   open,
   onOpenChange,
@@ -374,42 +439,61 @@ export function CacheKeepaliveSessionsDrawer({
   const [collapsedTriggers, setCollapsedTriggers] = useState<
     Record<string, boolean>
   >({});
-  const [horizon, setHorizon] = useState<CacheKeepaliveHorizon>('24h');
+  const [horizon, setHorizon] = useState<CacheKeepaliveHorizon>(
+    () => horizonByPrincipal.get(principal.id) ?? '24h',
+  );
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset local drawer state when the principal identity changes
   useEffect(() => {
     setSelectedSessionId(null);
     setCollapsedTriggers({});
-    setHorizon('24h');
+    setHorizon(horizonByPrincipal.get(principal.id) ?? '24h');
   }, [principal.id]);
+
+  const handleHorizonChange = (next: CacheKeepaliveHorizon) => {
+    horizonByPrincipal.set(principal.id, next);
+    setHorizon(next);
+  };
 
   const enabled = principal.cache_keepalive?.enabled ?? false;
   const query = useCacheKeepaliveSessions(
     principal.id,
     {
       horizon,
-      status: enabled ? 'all' : undefined,
+      status: 'all',
     },
     open,
   );
 
-  const visibleRows = useMemo(() => {
-    const rawRows = query.data?.pages.flatMap((p) => p.rows ?? []) ?? [];
-    const maxRows = Math.max(
-      100,
-      query.data?.pages.length ? query.data.pages.length * 100 : 100,
-    );
-    return mergeLiveSessions(rawRows, maxRows).filter(
-      (row) =>
-        !enabled ||
-        row.state !== 'not_tracked' ||
-        row.error != null ||
-        row.ttl === '12h',
-    );
-  }, [enabled, query.data]);
+  const allRows = useMemo(
+    () =>
+      mergeLiveSessions(
+        query.data?.pages.flatMap((page) => page.rows ?? []) ?? [],
+      ),
+    [query.data],
+  );
+  const visibleRows = useMemo(
+    () =>
+      allRows.filter(
+        (row) =>
+          !enabled ||
+          row.state !== 'not_tracked' ||
+          row.error != null ||
+          row.ttl === '12h',
+      ),
+    [allRows, enabled],
+  );
+
+  useEffect(() => {
+    if (open && query.hasNextPage && !query.isFetchingNextPage) {
+      void query.fetchNextPage();
+    }
+  }, [open, query.fetchNextPage, query.hasNextPage, query.isFetchingNextPage]);
+
+  const pagesComplete =
+    !query.isLoading && !query.hasNextPage && !query.isFetchingNextPage;
 
   const groups = useMemo(() => {
     const grouped = new Map<
@@ -436,17 +520,14 @@ export function CacheKeepaliveSessionsDrawer({
       .map((trigger) => {
         const group = grouped.get(trigger);
         const sessions = group?.sessions ?? [];
-        const pnlValues = sessions
-          .map((s) => s.net_pnl)
-          .filter((v): v is number => v !== null);
         const groupNet =
-          pnlValues.length > 0
-            ? pnlValues.reduce((acc, v) => acc + v, 0)
+          pagesComplete && sessions.every((session) => session.net_pnl !== null)
+            ? sessions.reduce((acc, session) => acc + (session.net_pnl ?? 0), 0)
             : null;
         return { trigger, kind: group?.kind ?? 'state', sessions, groupNet };
       })
       .filter((group) => group.sessions.length > 0);
-  }, [visibleRows]);
+  }, [pagesComplete, visibleRows]);
 
   // 1. Group titles align their '.' with each other across all groups.
   const maxGroupFracDigits = useMemo(
@@ -474,10 +555,15 @@ export function CacheKeepaliveSessionsDrawer({
     [visibleRows],
   );
 
-  const selectedSession = visibleRows.find((s) => s.id === selectedSessionId);
-  const desktopSession = selectedSession ?? visibleRows[0] ?? null;
-  const showMobileDetail =
-    selectedSession !== undefined && selectedSession !== null;
+  const selectedSession = allRows.find((s) => s.id === selectedSessionId);
+  const hasSelection = selectedSessionId !== null;
+  const selectedSessionHidden =
+    hasSelection &&
+    (selectedSession === undefined ||
+      !visibleRows.some((row) => row.id === selectedSession.id));
+  const desktopSession =
+    selectedSession ?? (hasSelection ? null : (visibleRows[0] ?? null));
+  const showMobileDetail = hasSelection;
   const summary = query.data?.pages[0]?.summary;
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -508,8 +594,8 @@ export function CacheKeepaliveSessionsDrawer({
           horizon={horizon}
           summary={summary}
           isLoading={query.isLoading}
-          onHorizonChange={setHorizon}
-          showHorizon={enabled}
+          onHorizonChange={handleHorizonChange}
+          showHorizon
         />
 
         {query.isError && query.data ? (
@@ -559,27 +645,16 @@ export function CacheKeepaliveSessionsDrawer({
                 Retry sessions
               </Button>
             </div>
-          ) : !enabled && visibleRows.length === 0 ? (
+          ) : !enabled &&
+            visibleRows.length === 0 &&
+            (summary?.unlisted_sessions ?? 0) === 0 ? (
             <EmptyState title="No sessions recorded" />
-          ) : visibleRows.length === 0 ? (
-            query.hasNextPage ? (
-              <div className="flex min-h-[340px] items-center justify-center">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => query.fetchNextPage()}
-                  disabled={query.isFetchingNextPage}
-                  iconLeft={query.isFetchingNextPage ? <Spinner /> : undefined}
-                >
-                  Loading older sessions...
-                </Button>
-              </div>
-            ) : (
-              <EmptyState
-                title="No sessions"
-                description="No sessions recorded in this horizon."
-              />
-            )
+          ) : visibleRows.length === 0 &&
+            (summary?.unlisted_sessions ?? 0) === 0 ? (
+            <EmptyState
+              title="No sessions"
+              description="No sessions recorded in this horizon."
+            />
           ) : (
             <div className="min-h-full md:grid md:grid-cols-[248px_minmax(0,1fr)] md:divide-x md:divide-subtle lg:grid-cols-[272px_minmax(0,1fr)]">
               {/* Left Pane: Collapsible Trigger groups + Decimal-aligned USD columns */}
@@ -682,21 +757,11 @@ export function CacheKeepaliveSessionsDrawer({
                     </div>
                   );
                 })}
-
-                {query.hasNextPage ? (
-                  <div className="flex justify-center pt-3 pb-2">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => query.fetchNextPage()}
-                      disabled={query.isFetchingNextPage}
-                      iconLeft={
-                        query.isFetchingNextPage ? <Spinner /> : undefined
-                      }
-                    >
-                      Loading older sessions...
-                    </Button>
-                  </div>
+                {summary && summary.unlisted_sessions > 0 ? (
+                  <DeletedSessionsRow
+                    summary={summary}
+                    maxFracDigits={maxGroupFracDigits}
+                  />
                 ) : null}
               </div>
 
@@ -707,16 +772,48 @@ export function CacheKeepaliveSessionsDrawer({
                   'min-w-0 md:block',
                 )}
               >
-                {desktopSession ? (
+                {selectedSessionHidden ? (
+                  <div
+                    className="flex h-full min-h-[340px] flex-col items-center justify-center gap-3 p-6 text-center"
+                    data-testid="cache-keepalive-session-no-longer-listed"
+                  >
+                    <p className="text-body-sm text-text-muted">
+                      This session is no longer in this list.
+                    </p>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setSelectedSessionId(null)}
+                    >
+                      Back to sessions
+                    </Button>
+                  </div>
+                ) : desktopSession ? (
                   <SessionDetailPane
                     principalId={principal.id}
                     sessionId={desktopSession.id}
+                    horizon={horizon}
                     onClose={() => setSelectedSessionId(null)}
                   />
                 ) : null}
               </div>
             </div>
           )}
+          {query.isFetchingNextPage ? (
+            <p
+              className="border-t border-subtle px-4 py-2 text-caption text-text-muted"
+              data-testid="cache-keepalive-loading-sessions"
+            >
+              Loading sessions… ({allRows.length} loaded)
+            </p>
+          ) : pagesComplete ? (
+            <p
+              className="border-t border-subtle px-4 py-2 text-caption text-text-muted"
+              data-testid="cache-keepalive-all-sessions"
+            >
+              All {visibleRows.length} sessions shown
+            </p>
+          ) : null}
         </div>
       </div>
     </Drawer>

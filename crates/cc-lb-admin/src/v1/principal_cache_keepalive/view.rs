@@ -28,6 +28,7 @@ pub(super) struct CacheKeepaliveViewContext<'a> {
     pub(super) catalog: &'a PriceCatalog,
     pub(super) now_ms: u64,
     pub(super) max_attempts: u32,
+    pub(super) horizon_start_ms: Option<u64>,
 }
 
 struct LoadedActivity {
@@ -175,7 +176,7 @@ pub(crate) fn summary_for_items(
         if matches!(item.status, Some(CacheKeepaliveSessionStatus::Active)) {
             renewing_now = renewing_now.saturating_add(1);
         }
-        let activity = activity_for_item(catalog, now_ms, item, None, batch)?;
+        let activity = activity_for_item(catalog, now_ms, item, None, batch, None)?;
         total_spent_micros = total_spent_micros.saturating_add(activity.total_spent_micros);
         unknown_cycles = unknown_cycles.saturating_add(activity.unknown_cycles);
         if activity.evidence_status == "unknown" {
@@ -191,21 +192,26 @@ pub(crate) fn summary_for_items(
             total_avoided_micros = total_avoided_micros.saturating_add(pnl.avoided_micros);
         }
     }
-    let economics_known = evidence_status == "observed";
+    let economics_known = items.iter().all(|item| {
+        activity_for_item(catalog, now_ms, item, None, batch, None)
+            .map(|activity| activity.pnl.is_some())
+            .unwrap_or(false)
+    });
     Ok(CacheKeepaliveSummaryResponse {
         renewing_now,
         sessions_last_5m,
-        renewals_fired,
         retained_successful_hits: renewals_fired,
         cost_saved: economics_known
             .then(|| dollars_from_micros(cost_saved_micros))
             .transpose()?,
-        resolved_cost_saved: None,
         total_spent: dollars_from_micros(total_spent_micros)?,
         total_avoided: economics_known
             .then(|| dollars_from_micros(total_avoided_micros))
             .transpose()?,
-        resolved_total_avoided: None,
+        unlisted_sessions: 0,
+        unlisted_renewals: 0,
+        unlisted_spent: 0.0,
+        unlisted_net: Some(0.0),
         evidence_status: evidence_status.to_owned(),
         unknown_cycles,
         retained_from_ms,
@@ -219,7 +225,14 @@ pub(super) fn row_for_item(
     upstream_names: &HashMap<Uuid, String>,
 ) -> StorageResult<CacheKeepaliveRowResponse> {
     // List rows do not expose session-only next-renewal/raw fields.
-    let activity = activity_for_item(context.catalog, context.now_ms, item, None, batch)?;
+    let activity = activity_for_item(
+        context.catalog,
+        context.now_ms,
+        item,
+        None,
+        batch,
+        context.horizon_start_ms,
+    )?;
     row_from_activity(
         context.max_attempts,
         item,
@@ -364,7 +377,6 @@ pub(crate) fn row_from_activity(
         retained_renewals: activity.retained_renewals,
         net_pnl: activity
             .pnl
-            .filter(|_| activity.evidence_status == "observed" || activity.total_spent_micros > 0)
             .map(|pnl| dollars_from_micros(pnl.net_micros))
             .transpose()?,
         total_spent: dollars_from_micros(activity.total_spent_micros)?,
@@ -386,6 +398,7 @@ pub(crate) fn activity_for_item(
     item: &CacheKeepaliveSessionListItem,
     session: Option<&CacheKeepaliveSessionRecord>,
     batch: &CacheKeepaliveActivityBatch,
+    horizon_start_ms: Option<u64>,
 ) -> StorageResult<crate::cache_keepalive_view::CacheKeepaliveActivityView> {
     Ok(derive_activity_view(
         CacheKeepaliveActivitySource {
@@ -394,6 +407,7 @@ pub(crate) fn activity_for_item(
             turns: batch.turns_for_item(item)?,
             evidence: &batch.evidence,
             now_ms,
+            horizon_start_ms,
         },
         catalog,
     ))
@@ -450,6 +464,7 @@ async fn load_detail_activity(
             turns: &turns,
             evidence: &evidence,
             now_ms: context.now_ms,
+            horizon_start_ms: context.horizon_start_ms,
         },
         context.catalog,
     );

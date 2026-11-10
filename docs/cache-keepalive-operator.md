@@ -288,13 +288,16 @@ upstream response.
 
 ## Metrics
 
-The keep-alive Prometheus surface contains two counters:
+The keep-alive Prometheus surface contains four counters:
 
+- `cc_lb_cache_keepalive_cancel_errors_total` counts cancellation fences that
+  failed with a storage error. A fence that finds no active generation is the
+  normal case and is not counted. This is separate from `cancelled_total`.
+- `cc_lb_cache_keepalive_dispatch_skipped_total{reason}` counts claimed
+  renewals skipped before provider dispatch because durable authorization no
+  longer held or its storage check failed.
 - `cc_lb_cache_keepalive_cancelled_total{principal_id, reason}` counts the
   latest real-response completion's cancellation paths listed below.
-  `principal_id` is the principal's id. It is not a count of all durable
-  terminal transitions, and an increment does not prove an active session
-  existed or that a storage cancellation succeeded.
   - `user_turn_detected`: a response-derived compaction boundary with no
     current cache breakpoint. Ordinary `UserTurn` and `Ambiguous` classifier
     decisions do not increment this cancellation counter.

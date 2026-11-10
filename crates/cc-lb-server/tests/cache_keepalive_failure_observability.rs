@@ -28,7 +28,7 @@ impl FailureCase {
         match self {
             Self::Http { .. } => ERROR_BODY_PREFIX,
             Self::Transport => "upstream dispatch failed",
-            Self::Timeout => "deadline has elapsed",
+            Self::Timeout => "renewal timed out after 1s",
             Self::UpstreamGone => "upstream gone",
         }
     }
@@ -79,7 +79,14 @@ fn assert_mock_attempt(harness: &Harness, case: FailureCase) {
 }
 
 async fn run_sqlite_failure_case(case: FailureCase) -> (Harness, String) {
-    let harness = Harness::new(8_388_608).await;
+    let mut options = HarnessOptions::default();
+    options.keepalive.snapshot_max_bytes = 8_388_608;
+    if matches!(case, FailureCase::Timeout) {
+        options.scheduler_keepalive_dispatch_timeout_secs = 1;
+    }
+    let harness = Harness::with_options(options)
+        .await
+        .expect("SQLite harness setup");
     let session_key_hash = harness.session_key_hash(SESSION_ID, None);
     let live = harness
         .post(
@@ -246,6 +253,7 @@ async fn c6_postgres_http_400_invalid_request_terminalizes_when_available() {
             refresh_lead_time_5m_secs: 299,
             ..KeepaliveOptions::default()
         },
+        ..HarnessOptions::default()
     };
     let Some(harness) = (match Harness::optional(options).await {
         Ok(harness) => harness,

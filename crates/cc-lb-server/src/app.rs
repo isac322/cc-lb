@@ -1484,12 +1484,17 @@ async fn build_app_with_storage_inner(
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_routing_tier_subscriber_handle,
     )));
-    let keepalive_dispatcher = Arc::new(AnthropicKeepaliveDispatcher::new(
-        Arc::clone(&dynamic_view_holder),
-        Arc::clone(&stores.upstreams),
-        Arc::clone(&dispatcher),
-        clock.clone(),
-    ));
+    let keepalive_dispatcher = Arc::new(
+        AnthropicKeepaliveDispatcher::new(
+            Arc::clone(&dynamic_view_holder),
+            Arc::clone(&stores.upstreams),
+            Arc::clone(&dispatcher),
+            clock.clone(),
+        )
+        .with_timeout(Duration::from_secs(
+            config.scheduler.keepalive_dispatch_timeout_secs,
+        )),
+    );
     let cache_keepalive_enqueuer = Arc::new(
         crate::cache_keepalive_enqueuer::ServerCacheKeepaliveEnqueuer::new(
             crate::cache_keepalive_enqueuer::ServerCacheKeepaliveEnqueuerDeps {

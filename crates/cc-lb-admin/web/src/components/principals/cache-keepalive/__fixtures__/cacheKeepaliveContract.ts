@@ -3,6 +3,8 @@ export const CACHE_KEEPALIVE_STATES = [
   'scheduled',
   'capped',
   'expired',
+  'cancelled',
+  'failed',
   'not_tracked',
 ] as const;
 
@@ -15,8 +17,8 @@ export const cacheKeepaliveCardCopy = {
   metrics: [
     ['Renewing now', 'current scheduled or mid-renewal'],
     ['Sessions (last 5m)', 'seen in last five minutes'],
-    ['Renewals fired', 'retained history'],
-    ['Cost saved', 'net, after renewal spend'],
+    ['Successful renewals · 24h', 'renewals that hit the cache'],
+    ['Cost saved · 24h', 'net, after renewal spend'],
   ],
   caption:
     'Keeps supported prompt caches warm during idle gaps. OpenAI Responses support is limited to GPT-5.6+ models: 30m sessions may renew, while 12h retention is recorded without read re-anchoring.',
@@ -39,10 +41,13 @@ export const cacheKeepaliveDrawerCopy = {
     'Scheduled',
     'Capped',
     'Expired',
+    'Cancelled',
+    'Failed',
     'Not tracked',
     'Error',
   ],
-  loadingOlder: 'Loading older sessions...',
+  loading: 'Loading sessions…',
+  allShown: 'All sessions shown',
   exhausted: '· No more sessions ·',
   overviewFields: [
     'Session ID',
@@ -58,6 +63,7 @@ export const cacheKeepaliveDrawerCopy = {
     'Final turn',
     'waiting for follow-up',
     'cache used by follow-up',
+    'follow-up unknown',
     'no follow-up (loss)',
   ],
   configCollapsible: 'Config in effect at schedule time',

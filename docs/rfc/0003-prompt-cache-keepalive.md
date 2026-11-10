@@ -304,10 +304,10 @@ Admin API additions: `POST /admin/v1/principals` and
 
 ## Observability
 
-Prometheus metrics (all labelled by `principal_id` at minimum):
-
-- `cc_lb_cache_keepalive_cancelled_total{principal_id, reason=new_request|no_cache_control|max_refreshes|max_duration|user_turn_detected|shutdown|upstream_gone|snapshot_too_large|cached_prefix_too_small|zero_token_renewal_unsupported}`
-- `cc_lb_cache_keepalive_active_sessions{principal_id}` (gauge)
+Prometheus metrics:
+- `cc_lb_cache_keepalive_cancel_errors_total`
+- `cc_lb_cache_keepalive_dispatch_skipped_total{reason}`
+- `cc_lb_cache_keepalive_cancelled_total{principal_id, reason}`
 
 Existing per-request `cache_read_input_tokens` telemetry naturally
 reflects success without new event schema.

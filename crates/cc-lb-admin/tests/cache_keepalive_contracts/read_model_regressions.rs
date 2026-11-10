@@ -307,7 +307,6 @@ async fn terminal_unfollowed_hit_and_miss_preserve_observed_loss_case() {
     assert_eq!(body["summary"]["total_avoided"], json!(0.0));
     assert_json_dollars(&body["summary"]["cost_saved"], -21_000);
     assert_eq!(body["summary"]["evidence_status"], "observed");
-    assert_eq!(body["summary"]["renewals_fired"], 1);
     assert_eq!(body["summary"]["retained_successful_hits"], 1);
 
     let (detail_status, detail) = get_json(
@@ -377,7 +376,6 @@ async fn terminal_unfollowed_hit_only_preserves_observed_loss_case() {
     assert_eq!(body["summary"]["total_avoided"], json!(0.0));
     assert_json_dollars(&body["summary"]["cost_saved"], -6_000);
     assert_eq!(body["summary"]["evidence_status"], "observed");
-    assert_eq!(body["summary"]["renewals_fired"], 1);
     assert_eq!(body["summary"]["retained_successful_hits"], 1);
 
     let (detail_status, detail) = get_json(
@@ -455,7 +453,7 @@ async fn replacement_retains_c1_economics_without_inheriting_c2_timeline_case() 
     assert_eq!(body["summary"]["total_spent"], json!(0.021));
     assert_eq!(body["summary"]["total_avoided"], json!(0.075));
     assert_eq!(body["summary"]["cost_saved"], json!(0.054));
-    assert_eq!(body["summary"]["renewals_fired"], 1);
+    assert_eq!(body["summary"]["retained_successful_hits"], 1);
     assert_eq!(body["summary"]["evidence_status"], "observed");
 
     let (detail_status, detail) = get_json(
@@ -590,7 +588,6 @@ async fn miss_attempt_is_not_counted_as_successful_renewal_case() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "miss list: {body:?}");
-    assert_eq!(body["summary"]["renewals_fired"], 0);
     assert_eq!(body["summary"]["retained_successful_hits"], 0);
     assert_eq!(body["summary"]["total_spent"], json!(0.015));
     assert_eq!(body["summary"]["total_avoided"], json!(0.0));
@@ -684,8 +681,8 @@ async fn active_unfollowed_turns_are_pending_but_active_followup_is_observed_cas
         "active unfollowed list: {pending_body:?}"
     );
     assert_eq!(pending_body["summary"]["evidence_status"], "pending");
-    assert!(pending_body["summary"]["cost_saved"].is_null());
-    assert!(pending_body["summary"]["total_avoided"].is_null());
+    assert_json_dollars(&pending_body["summary"]["cost_saved"], -21_000);
+    assert_json_dollars(&pending_body["summary"]["total_avoided"], 0);
 
     let (_observed_directory, observed_storage, observed_state, observed_principal_id) =
         create_principal_id().await;
@@ -936,8 +933,8 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     assert_eq!(status, StatusCode::OK, "two-follow-up list: {body:?}");
     assert_eq!(body["summary"]["evidence_status"], "pending");
     assert_json_dollars(&body["summary"]["total_spent"], 21_000);
-    assert!(body["summary"]["total_avoided"].is_null());
-    assert!(body["summary"]["cost_saved"].is_null());
+    assert_json_dollars(&body["summary"]["total_avoided"], 75_000);
+    assert_json_dollars(&body["summary"]["cost_saved"], 54_000);
     assert_eq!(body["summary"]["retained_successful_hits"], 1);
     let row = body["rows"]
         .as_array()
@@ -947,7 +944,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
         .expect("two-follow-up row");
     assert_eq!(row["evidence_status"], "pending");
     assert_json_dollars(&row["total_spent"], 21_000);
-    assert!(row["total_avoided"].is_null());
+    assert_json_dollars(&row["total_avoided"], 75_000);
     assert_json_dollars(&row["net_pnl"], 54_000);
 
     let (detail_status, detail) = get_json(
@@ -962,7 +959,7 @@ async fn active_two_follow_ups_select_earliest_follow_up_renewal_case() {
     );
     assert_eq!(detail["evidence_status"], "pending");
     assert_json_dollars(&detail["total_spent"], 21_000);
-    assert!(detail["total_avoided"].is_null());
+    assert_json_dollars(&detail["total_avoided"], 75_000);
     assert_json_dollars(&detail["net_pnl"], 54_000);
     assert_eq!(detail["is_last_pending"], true);
     let turns = detail["turns"]
@@ -1048,8 +1045,8 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     assert_eq!(multi_turn_body["summary"]["evidence_status"], "pending");
     assert_json_dollars(&multi_turn_body["summary"]["total_spent"], 21_000);
     assert_eq!(multi_turn_body["summary"]["retained_successful_hits"], 1);
-    assert!(multi_turn_body["summary"]["cost_saved"].is_null());
-    assert!(multi_turn_body["summary"]["total_avoided"].is_null());
+    assert_json_dollars(&multi_turn_body["summary"]["cost_saved"], -21_000);
+    assert_json_dollars(&multi_turn_body["summary"]["total_avoided"], 0);
     let multi_turn_row = multi_turn_body["rows"]
         .as_array()
         .expect("active multi-turn rows")
@@ -1059,7 +1056,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     assert_eq!(multi_turn_row["evidence_status"], "pending");
     assert_json_dollars(&multi_turn_row["total_spent"], 21_000);
     assert_json_dollars(&multi_turn_row["net_pnl"], -21_000);
-    assert!(multi_turn_row["total_avoided"].is_null());
+    assert_json_dollars(&multi_turn_row["total_avoided"], 0);
 
     let (multi_turn_detail_status, multi_turn_detail) = get_json(
         &multi_turn_state,
@@ -1074,7 +1071,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     assert_eq!(multi_turn_detail["evidence_status"], "pending");
     assert_json_dollars(&multi_turn_detail["total_spent"], 21_000);
     assert_json_dollars(&multi_turn_detail["net_pnl"], -21_000);
-    assert!(multi_turn_detail["total_avoided"].is_null());
+    assert_json_dollars(&multi_turn_detail["total_avoided"], 0);
     assert_eq!(multi_turn_detail["is_last_pending"], true);
     let multi_turns = multi_turn_detail["turns"]
         .as_array()
@@ -1146,8 +1143,8 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     );
     assert_eq!(historical_body["summary"]["evidence_status"], "pending");
     assert_json_dollars(&historical_body["summary"]["total_spent"], 12_000);
-    assert!(historical_body["summary"]["cost_saved"].is_null());
-    assert!(historical_body["summary"]["total_avoided"].is_null());
+    assert_json_dollars(&historical_body["summary"]["cost_saved"], -12_000);
+    assert_json_dollars(&historical_body["summary"]["total_avoided"], 0);
     let (historical_detail_status, historical_detail) = get_json(
         &historical_state,
         &keepalive_detail_uri(&historical_principal_id, "historical-active-pending"),
@@ -1161,7 +1158,7 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     assert_eq!(historical_detail["evidence_status"], "pending");
     assert_json_dollars(&historical_detail["total_spent"], 12_000);
     assert_json_dollars(&historical_detail["net_pnl"], -12_000);
-    assert!(historical_detail["total_avoided"].is_null());
+    assert_json_dollars(&historical_detail["total_avoided"], 0);
     assert_eq!(historical_detail["turns"].as_array().unwrap().len(), 1);
     assert_eq!(historical_detail["turns"][0]["pending"], true);
 
@@ -1207,8 +1204,8 @@ async fn active_multi_turn_and_cycle_history_keep_pending_parity_case() {
     );
     assert_eq!(follow_ups_body["summary"]["evidence_status"], "pending");
     assert_json_dollars(&follow_ups_body["summary"]["total_spent"], 12_000);
-    assert!(follow_ups_body["summary"]["cost_saved"].is_null());
-    assert!(follow_ups_body["summary"]["total_avoided"].is_null());
+    assert_json_dollars(&follow_ups_body["summary"]["cost_saved"], 63_000);
+    assert_json_dollars(&follow_ups_body["summary"]["total_avoided"], 75_000);
     let (follow_ups_detail_status, follow_ups_detail) = get_json(
         &follow_ups_state,
         &keepalive_detail_uri(&follow_ups_principal_id, "active-multiple-follow-ups"),
@@ -1346,7 +1343,7 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
     )
     .await;
     assert_eq!(status_24h, StatusCode::OK);
-    assert_eq!(body_24h["summary"]["renewals_fired"], 1);
+    assert_eq!(body_24h["summary"]["retained_successful_hits"], 1);
     assert_eq!(body_24h["summary"]["evidence_status"], "observed");
     assert_json_dollars(&body_24h["summary"]["total_spent"], 6_000);
     assert_json_dollars(&body_24h["summary"]["total_avoided"], 75_000);
@@ -1358,8 +1355,588 @@ async fn summary_respects_horizon_and_ignores_follow_up_only_evidence_case() {
     )
     .await;
     assert_eq!(status_7d, StatusCode::OK);
-    assert_eq!(body_7d["summary"]["renewals_fired"], 2);
+    assert_eq!(body_7d["summary"]["retained_successful_hits"], 2);
     assert_eq!(body_7d["summary"]["evidence_status"], "unknown");
     assert_json_dollars(&body_7d["summary"]["total_spent"], 21_000);
-    assert!(body_7d["summary"]["cost_saved"].is_null());
+    // The legacy turn has no renewal evidence: it avoided $0 so far, so the
+    // real-time net still counts its spend.
+    assert_json_dollars(&body_7d["summary"]["cost_saved"], 54_000);
+}
+
+async fn delete_turn_evidence(storage: &cc_lb_storage_sqlite::SqliteStorage, source_ref_id: &str) {
+    sqlx::query("DELETE FROM cache_keepalive_evidence WHERE event_ref = ?")
+        .bind(source_ref_id)
+        .execute(storage.pool())
+        .await
+        .expect("delete cache keepalive evidence");
+}
+
+async fn fetch_all_keepalive_pages(
+    state: &cc_lb_admin::AdminState,
+    principal_id: &str,
+    horizon: &str,
+) -> (Value, Vec<Value>) {
+    let mut cursor = None;
+    let mut summary = Value::Null;
+    let mut rows = Vec::new();
+    loop {
+        let mut uri = format!(
+            "/admin/v1/principals/{principal_id}/cache-keepalive?horizon={horizon}&limit=2"
+        );
+        if let Some(cursor_value) = cursor.as_deref() {
+            uri.push_str("&cursor=");
+            uri.push_str(cursor_value);
+        }
+        let (status, body) = get_json(state, &uri).await;
+        assert_eq!(status, StatusCode::OK, "paged list: {body:?}");
+        if summary.is_null() {
+            summary = body["summary"].clone();
+        }
+        rows.extend(body["rows"].as_array().expect("paged rows").iter().cloned());
+        cursor = body["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            return (summary, rows);
+        }
+    }
+}
+
+fn sum_json_micros(rows: &[Value], field: &str) -> i64 {
+    rows.iter()
+        .filter_map(|row| row[field].as_f64())
+        .map(|value| (value * 1_000_000.0).round() as i64)
+        .sum()
+}
+
+#[test]
+fn header_avoided_rounds_per_renewal_like_rows() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::header_avoided_rounds_per_renewal_like_rows";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build rounding runtime")
+            .block_on(header_avoided_rounds_per_renewal_like_rows_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn header_avoided_rounds_per_renewal_like_rows_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    // Two followed-up 1-token renewals: each prices to a fraction of a
+    // microdollar, so summing tokens before rounding would disagree with rows.
+    for (index, session) in ["tiny-one", "tiny-two"].into_iter().enumerate() {
+        let cycle_id = Uuid::from_u128(0x0201 + index as u128);
+        seed_session(&storage, &principal_id, session, cycle_id, true).await;
+        append_turn(
+            &storage,
+            AppendTurnParams {
+                principal_id: &principal_id,
+                session_key_hash: session,
+                cycle_id,
+                source_ref_id: &format!("{session}-turn"),
+                ts: NOW_UNIX_SECS.saturating_sub(60),
+                cache_read_input_tokens: 1,
+                cost_micros: 0,
+                hit_miss: "hit",
+                with_follow_up: true,
+            },
+        )
+        .await;
+    }
+    let (summary, rows) = fetch_all_keepalive_pages(&state, &principal_id, "24h").await;
+    let row_avoided = sum_json_micros(&rows, "total_avoided");
+    assert!(row_avoided > 0, "rows must credit the follow-ups: {rows:?}");
+    assert_json_dollars(&summary["total_avoided"], row_avoided);
+    assert_json_dollars(&summary["cost_saved"], row_avoided);
+}
+
+#[test]
+fn q1_q7_keepalive_contract_invariants_and_realtime_wire() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::q1_q7_keepalive_contract_invariants_and_realtime_wire";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build q1-q7 runtime")
+            .block_on(q1_q7_keepalive_contract_invariants_and_realtime_wire_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+
+    seed_session(&storage, &principal_id, "old-and-new", CYCLE_ONE, false).await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "old-and-new",
+            // Each real request opens a new cycle, so the old follow-up
+            // belongs to an earlier cycle than the current one.
+            cycle_id: Uuid::from_u128(0x0101),
+            source_ref_id: "old-and-new-old",
+            ts: NOW_UNIX_SECS.saturating_sub(3 * 86_400),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 7_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "old-and-new",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "old-and-new-new",
+            ts: NOW_UNIX_SECS.saturating_sub(1_800),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 11_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "purged-with-evidence",
+            cycle_id: Uuid::from_u128(0x0103),
+            source_ref_id: "purged-with-evidence-turn",
+            ts: NOW_UNIX_SECS.saturating_sub(1_200),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 13_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "purged-without-evidence",
+            cycle_id: Uuid::from_u128(0x0104),
+            source_ref_id: "purged-without-evidence-turn",
+            ts: NOW_UNIX_SECS.saturating_sub(900),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 17_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    delete_turn_evidence(&storage, "purged-without-evidence-turn").await;
+
+    seed_session(
+        &storage,
+        &principal_id,
+        "pending-session",
+        Uuid::from_u128(0x0105),
+        false,
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "pending-session",
+            cycle_id: Uuid::from_u128(0x0105),
+            source_ref_id: "pending-session-turn",
+            ts: NOW_UNIX_SECS.saturating_sub(600),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 19_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+
+    seed_session(
+        &storage,
+        &principal_id,
+        "unknown-session",
+        Uuid::from_u128(0x0106),
+        false,
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "unknown-session",
+            cycle_id: Uuid::from_u128(0x0106),
+            source_ref_id: "unknown-session-turn",
+            ts: NOW_UNIX_SECS.saturating_sub(300),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 23_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    delete_turn_evidence(&storage, "unknown-session-turn").await;
+
+    for horizon in ["1h", "24h", "all"] {
+        let (summary, rows) = fetch_all_keepalive_pages(&state, &principal_id, horizon).await;
+        let spent = sum_json_micros(&rows, "total_spent");
+        let avoided = sum_json_micros(&rows, "total_avoided");
+        let net = sum_json_micros(&rows, "net_pnl");
+        let unlisted_spent =
+            (summary["unlisted_spent"].as_f64().unwrap() * 1_000_000.0).round() as i64;
+        assert_json_dollars(&summary["total_spent"], spent + unlisted_spent);
+        assert_json_dollars(&summary["cost_saved"], net - unlisted_spent);
+        assert_json_dollars(&summary["total_avoided"], avoided);
+        assert!(summary.get("renewals_fired").is_none());
+        assert!(summary.get("resolved_cost_saved").is_none());
+        assert!(summary.get("resolved_total_avoided").is_none());
+        assert!(summary["unlisted_sessions"].is_number());
+        assert!(summary["unlisted_renewals"].is_number());
+        assert!(summary["unlisted_spent"].is_number());
+        assert_json_dollars(&summary["unlisted_net"], -unlisted_spent);
+    }
+
+    // A deleted session whose renewal cost is unknown cannot state its net.
+    sqlx::query("UPDATE cache_keepalive_turns SET cost_known = 0 WHERE source_ref_id = ?")
+        .bind("purged-without-evidence-turn")
+        .execute(storage.pool())
+        .await
+        .expect("mark unlisted cost unknown");
+    let (summary, _rows) = fetch_all_keepalive_pages(&state, &principal_id, "24h").await;
+    assert!(summary["unlisted_net"].is_null(), "{summary:?}");
+    assert!(summary["cost_saved"].is_null(), "{summary:?}");
+}
+
+#[test]
+fn q2_q3_horizon_money_and_membership_boundary() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::q2_q3_horizon_money_and_membership_boundary";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build q2-q3 runtime")
+            .block_on(q2_q3_horizon_money_and_membership_boundary_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn q2_q3_horizon_money_and_membership_boundary_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    seed_session(&storage, &principal_id, "horizon-scoped", CYCLE_ONE, false).await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "horizon-scoped",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "horizon-old",
+            ts: NOW_UNIX_SECS.saturating_sub(2 * 86_400),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 31_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "horizon-scoped",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "horizon-new",
+            ts: NOW_UNIX_SECS.saturating_sub(1_800),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 37_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+    let (summary_24h, rows_24h) = fetch_all_keepalive_pages(&state, &principal_id, "24h").await;
+    assert_eq!(rows_24h.len(), 1);
+    assert_json_dollars(&rows_24h[0]["total_spent"], 37_000);
+    assert_json_dollars(&summary_24h["total_spent"], 37_000);
+    let (_summary_all, rows_all) = fetch_all_keepalive_pages(&state, &principal_id, "all").await;
+    assert_eq!(rows_all.len(), 1);
+    assert_json_dollars(&rows_all[0]["total_spent"], 68_000);
+
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET last_message_at_ms = ? WHERE session_key_hash = ?",
+    )
+    .bind((NOW_UNIX_SECS.saturating_sub(2 * 86_400) * 1_000) as i64)
+    .bind("horizon-scoped")
+    .execute(storage.pool())
+    .await
+    .expect("freeze old last message timestamp");
+    let (_summary_membership, rows_membership) =
+        fetch_all_keepalive_pages(&state, &principal_id, "24h").await;
+    assert_eq!(
+        rows_membership
+            .iter()
+            .filter(|row| row["id"] == "horizon-scoped")
+            .count(),
+        1
+    );
+    seed_session(&storage, &principal_id, "boundary-scoped", CYCLE_TWO, false).await;
+    for (source_ref_id, ts, cost_micros) in [
+        (
+            "boundary-included",
+            NOW_UNIX_SECS.saturating_sub(3_600),
+            5_000,
+        ),
+        (
+            "boundary-excluded",
+            NOW_UNIX_SECS.saturating_sub(3_601),
+            7_000,
+        ),
+    ] {
+        append_turn(
+            &storage,
+            AppendTurnParams {
+                principal_id: &principal_id,
+                session_key_hash: "boundary-scoped",
+                cycle_id: CYCLE_TWO,
+                source_ref_id,
+                ts,
+                cache_read_input_tokens: 20_000,
+                cost_micros,
+                hit_miss: "hit",
+                with_follow_up: true,
+            },
+        )
+        .await;
+    }
+    let (boundary_status, boundary_detail) = get_json(
+        &state,
+        &format!(
+            "{}&horizon=1h",
+            keepalive_detail_uri(&principal_id, "boundary-scoped")
+        ),
+    )
+    .await;
+    assert_eq!(boundary_status, StatusCode::OK);
+    assert_json_dollars(&boundary_detail["total_spent"], 5_000);
+}
+
+#[test]
+fn q4_q5_unknown_and_pending_realtime_money_and_gap_labels() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::q4_q5_unknown_and_pending_realtime_money_and_gap_labels";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build q4-q5 runtime")
+            .block_on(q4_q5_unknown_and_pending_realtime_money_and_gap_labels_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn q4_q5_unknown_and_pending_realtime_money_and_gap_labels_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    // Terminal, so the gap is closed and its ending depends only on evidence.
+    seed_session(&storage, &principal_id, "unknown-label", CYCLE_ONE, true).await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "unknown-label",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "unknown-label-turn",
+            ts: NOW_UNIX_SECS.saturating_sub(300),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 41_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    delete_turn_evidence(&storage, "unknown-label-turn").await;
+    let (status, detail) = get_json(
+        &state,
+        &format!(
+            "{}&horizon=24h",
+            keepalive_detail_uri(&principal_id, "unknown-label")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unknown detail: {detail:?}");
+    assert_json_dollars(&detail["net_pnl"], -41_000);
+    assert_json_dollars(&detail["total_avoided"], 0);
+    assert_ne!(detail["turns"][0]["label"], "no follow-up");
+    assert_eq!(detail["gaps"][0]["ending_kind"], "followup_unknown");
+
+    seed_session(&storage, &principal_id, "pending-label", CYCLE_ONE, false).await;
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "pending-label",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "pending-label-turn",
+            ts: NOW_UNIX_SECS.saturating_sub(200),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 43_000,
+            hit_miss: "hit",
+            with_follow_up: false,
+        },
+    )
+    .await;
+    let (summary, _) = fetch_all_keepalive_pages(&state, &principal_id, "24h").await;
+    assert!(!summary["cost_saved"].is_null());
+    assert!(!summary["total_avoided"].is_null());
+    let (status, _body) = get_json(
+        &state,
+        &keepalive_detail_uri(&principal_id, "missing-keepalive-id"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn q6_terminal_states_and_status_filters_match_rows() {
+    const TEST_NAME: &str = "cache_keepalive_contracts::read_model_regressions::q6_terminal_states_and_status_filters_match_rows";
+    if std::env::var(CHILD_ENV).as_deref() == Ok(TEST_NAME) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build q6 runtime")
+            .block_on(q6_terminal_states_and_status_filters_match_rows_case());
+        return;
+    }
+    run_isolated(TEST_NAME);
+}
+
+async fn q6_terminal_states_and_status_filters_match_rows_case() {
+    install_regression_catalog();
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+
+    for (id, reason, with_turn) in [
+        (
+            "cancelled-row",
+            CacheKeepaliveTerminalReason::Cancelled,
+            true,
+        ),
+        (
+            "failed-row",
+            CacheKeepaliveTerminalReason::DispatchError,
+            true,
+        ),
+        (
+            "capped-row",
+            CacheKeepaliveTerminalReason::MaxRefreshes,
+            true,
+        ),
+        (
+            "not-tracked-row",
+            CacheKeepaliveTerminalReason::Cancelled,
+            false,
+        ),
+    ] {
+        seed_session(&storage, &principal_id, id, CYCLE_ONE, false).await;
+        if with_turn {
+            append_turn(
+                &storage,
+                AppendTurnParams {
+                    principal_id: &principal_id,
+                    session_key_hash: id,
+                    cycle_id: CYCLE_ONE,
+                    source_ref_id: id,
+                    ts: NOW_UNIX_SECS.saturating_sub(100),
+                    cache_read_input_tokens: 20_000,
+                    cost_micros: 1_000,
+                    hit_miss: "hit",
+                    with_follow_up: false,
+                },
+            )
+            .await;
+        }
+        storage
+            .mark_cache_keepalive_terminal(id, 1, reason, None, NOW_UNIX_SECS + 1)
+            .await
+            .expect("terminalize state fixture");
+    }
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET refresh_count = 1 WHERE session_key_hash IN (?, ?, ?)",
+    )
+    .bind("cancelled-row")
+    .bind("failed-row")
+    .bind("capped-row")
+    .execute(storage.pool())
+    .await
+    .expect("set terminal filter refresh counts");
+
+    append_turn(
+        &storage,
+        AppendTurnParams {
+            principal_id: &principal_id,
+            session_key_hash: "purged-followed",
+            cycle_id: CYCLE_ONE,
+            source_ref_id: "purged-followed-turn",
+            ts: NOW_UNIX_SECS.saturating_sub(80),
+            cache_read_input_tokens: 20_000,
+            cost_micros: 1_000,
+            hit_miss: "hit",
+            with_follow_up: true,
+        },
+    )
+    .await;
+
+    let (_summary, rows) = fetch_all_keepalive_pages(&state, &principal_id, "all").await;
+    let state_for = |id: &str| {
+        rows.iter()
+            .find(|row| row["id"] == id)
+            .unwrap_or_else(|| panic!("missing state row {id}"))["state"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(state_for("cancelled-row"), "cancelled");
+    assert_eq!(state_for("failed-row"), "failed");
+    assert_eq!(state_for("capped-row"), "capped");
+    assert_eq!(state_for("not-tracked-row"), "not_tracked");
+    assert_eq!(state_for("purged-followed"), "cancelled");
+
+    for (filter, expected) in [
+        ("cancelled", "cancelled"),
+        ("failed", "failed"),
+        ("capped", "capped"),
+    ] {
+        let (status, body) = get_json(
+            &state,
+            &format!(
+                "/admin/v1/principals/{principal_id}/cache-keepalive?horizon=all&limit=2&status={filter}"
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "filtered list: {body:?}");
+        let mut filtered_rows = body["rows"].as_array().cloned().unwrap_or_default();
+        let mut cursor = body["next_cursor"].as_str().map(str::to_owned);
+        while let Some(cursor_value) = cursor {
+            let (status, page) = get_json(
+                &state,
+                &format!(
+                    "/admin/v1/principals/{principal_id}/cache-keepalive?horizon=all&limit=2&status={filter}&cursor={cursor_value}"
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            filtered_rows.extend(page["rows"].as_array().cloned().unwrap_or_default());
+            cursor = page["next_cursor"].as_str().map(str::to_owned);
+        }
+        assert!(!filtered_rows.is_empty());
+        assert!(filtered_rows.iter().all(|row| row["state"] == expected));
+    }
 }

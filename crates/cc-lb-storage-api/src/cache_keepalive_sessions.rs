@@ -297,6 +297,17 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         now_unix_secs: u64,
     ) -> StorageResult<bool>;
 
+    /// Performs the durable authorization check immediately before provider dispatch.
+    ///
+    /// Cancellation committed before this check prevents the send. Once this check
+    /// succeeds, the in-flight attempt is allowed even if cancellation commits afterward.
+    /// The row must still be active at `generation` and owned by this worker's running claim.
+    async fn authorize_cache_keepalive_dispatch(
+        &self,
+        session_key_hash: &str,
+        generation: u64,
+    ) -> StorageResult<bool>;
+
     async fn update_cache_keepalive_payload(
         &self,
         session_key_hash: &str,

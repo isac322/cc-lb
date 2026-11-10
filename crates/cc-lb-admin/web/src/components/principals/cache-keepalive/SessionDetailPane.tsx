@@ -4,6 +4,7 @@ import { ApiError } from '../../../lib/api';
 import type {
   CacheKeepaliveDetail,
   CacheKeepaliveGap,
+  CacheKeepaliveHorizon,
 } from '../../../lib/cacheKeepaliveApi';
 import { useTimezone } from '../../../lib/locale';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
@@ -13,6 +14,7 @@ import { RelativeTime } from '../../ui/RelativeTime';
 interface Props {
   principalId: string;
   sessionId: string;
+  horizon?: CacheKeepaliveHorizon;
   onClose: () => void;
 }
 
@@ -92,7 +94,13 @@ function shortThreadDisplay(id: string): string {
 interface RailPoint {
   id: string;
   pct: number;
-  kind: 'start' | 'pulse' | 'end_hit' | 'end_waiting' | 'end_miss';
+  kind:
+    | 'start'
+    | 'pulse'
+    | 'end_hit'
+    | 'end_waiting'
+    | 'end_unknown'
+    | 'end_miss';
   title: string;
   badgeText: string;
   badgeTone: 'neutral' | 'accent' | 'ok' | 'warn';
@@ -185,6 +193,18 @@ function buildRailPoints(
       title: 'Waiting for next message',
       badgeText: deltaLabel(gap.total_duration_sec),
       badgeTone: 'accent',
+      absTime: railTime(gap.ending_at_ms, timeZone),
+      sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
+      sinceLastRenewal: sinceLastRenewalForEnd,
+    });
+  } else if (gap.ending_kind === 'followup_unknown') {
+    points.push({
+      id: 'end',
+      pct: 100,
+      kind: 'end_unknown',
+      title: 'Follow-up unknown',
+      badgeText: fmtUsdSigned(gap.net_pnl_usd),
+      badgeTone: 'neutral',
       absTime: railTime(gap.ending_at_ms, timeZone),
       sinceUserReq: plusDeltaLabel(gap.total_duration_sec),
       sinceLastRenewal: sinceLastRenewalForEnd,
@@ -328,7 +348,12 @@ function TimeRailGap({
                 </span>{' '}
                 ({afterRenewalLabel})
               </span>
-              <span className={cx('font-mono text-data font-medium', netTone)}>
+              <span
+                className={cx(
+                  'whitespace-nowrap font-mono text-data font-medium',
+                  netTone,
+                )}
+              >
                 {netText}
               </span>
             </>
@@ -336,12 +361,31 @@ function TimeRailGap({
             <span className="text-caption text-text-muted">
               Waiting · {deltaLabel(gap.total_duration_sec)}
             </span>
+          ) : gap.ending_kind === 'followup_unknown' ? (
+            <>
+              <span className="text-caption text-text-faint">
+                Follow-up unknown ({railTime(gap.ending_at_ms, timeZone)})
+              </span>
+              <span
+                className={cx(
+                  'whitespace-nowrap font-mono text-data font-medium',
+                  netTone,
+                )}
+              >
+                {netText}
+              </span>
+            </>
           ) : (
             <>
               <span className="text-caption text-text-faint">
                 No follow-up ({railTime(gap.ending_at_ms, timeZone)})
               </span>
-              <span className={cx('font-mono text-data font-medium', netTone)}>
+              <span
+                className={cx(
+                  'whitespace-nowrap font-mono text-data font-medium',
+                  netTone,
+                )}
+              >
                 {netText}
               </span>
             </>
@@ -398,7 +442,9 @@ function TimeRailGap({
                         ? 'border-traffic-success-text bg-traffic-success-text'
                         : pt.kind === 'end_waiting'
                           ? 'border-accent bg-accent'
-                          : 'border-subtle-strong bg-bg',
+                          : pt.kind === 'end_unknown'
+                            ? 'border-subtle-strong bg-panel'
+                            : 'border-subtle-strong bg-bg',
                     isHovered
                       ? 'scale-125 ring-2 ring-subtle-strong'
                       : undefined,
@@ -411,16 +457,31 @@ function TimeRailGap({
       </div>
 
       {/* Bottom 1-line micro legend for the rail */}
-      <div className="flex items-center justify-between text-caption text-text-faint">
-        <span>0s (pause)</span>
-        <span>
-          {count === 0
-            ? `Next renewal at ${plusDeltaLabel(gap.total_duration_sec)}`
-            : count === 1
-              ? `↻ 1 renewal at ${plusDeltaLabel(gap.pulses[0].offset_sec)} (−${fmtUsdPlain(gap.spent_usd)})`
-              : `↻ ${count} renewals (${plusDeltaLabel(gap.pulses[0].offset_sec)} → ${plusDeltaLabel(gap.pulses[count - 1].offset_sec)}) · −${fmtUsdPlain(gap.spent_usd)}`}
+      <div className="flex items-center justify-between gap-2 text-caption text-text-faint">
+        <span className="shrink-0 whitespace-nowrap">0s (pause)</span>
+        <span className="min-w-0 text-center">
+          {count === 0 ? (
+            `Next renewal at ${plusDeltaLabel(gap.total_duration_sec)}`
+          ) : count === 1 ? (
+            <>
+              ↻ 1 renewal at {plusDeltaLabel(gap.pulses[0].offset_sec)}{' '}
+              <span className="whitespace-nowrap">
+                (−{fmtUsdPlain(gap.spent_usd)})
+              </span>
+            </>
+          ) : (
+            <>
+              ↻ {count} renewals ({plusDeltaLabel(gap.pulses[0].offset_sec)} →{' '}
+              {plusDeltaLabel(gap.pulses[count - 1].offset_sec)}){' '}
+              <span className="whitespace-nowrap">
+                · −{fmtUsdPlain(gap.spent_usd)}
+              </span>
+            </>
+          )}
         </span>
-        <span>{deltaLabel(gap.total_duration_sec)}</span>
+        <span className="shrink-0 whitespace-nowrap">
+          {deltaLabel(gap.total_duration_sec)}
+        </span>
       </div>
     </div>
   );
@@ -488,6 +549,9 @@ function synthesizeGapsFromTurns(
   });
   const lastPulseMs = ordered[ordered.length - 1].time_ms;
   const anyFollowedUp = ordered.some((t) => t.followed_up === true);
+  const anyUnknown = ordered.some(
+    (t) => t.followed_up === null || t.evidence_status === 'unknown',
+  );
   const anyPending = ordered.some((t) => t.pending);
   const endingAtMs = Math.max(session.last_message_at_ms, lastPulseMs);
   const totalDurationSec = Math.max(
@@ -507,11 +571,13 @@ function synthesizeGapsFromTurns(
       pulses,
       ending_kind: anyPending
         ? 'scheduled_waiting'
-        : anyFollowedUp
-          ? 'followup_hit'
-          : session.state === 'capped'
-            ? 'capped_no_followup'
-            : 'ttl_expired_no_followup',
+        : anyUnknown
+          ? 'followup_unknown'
+          : anyFollowedUp
+            ? 'followup_hit'
+            : session.state === 'capped'
+              ? 'capped_no_followup'
+              : 'ttl_expired_no_followup',
       ending_at_ms: endingAtMs,
       total_duration_sec: totalDurationSec,
       since_last_renewal_sec: sinceLastSec,
@@ -522,8 +588,17 @@ function synthesizeGapsFromTurns(
   ];
 }
 
-export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
-  const query = useCacheKeepaliveSessionDetail(principalId, sessionId);
+export function SessionDetailPane({
+  principalId,
+  sessionId,
+  horizon,
+  onClose,
+}: Props) {
+  const query = useCacheKeepaliveSessionDetail(
+    principalId,
+    sessionId,
+    horizon ?? 'all',
+  );
   const { effective: timeZone } = useTimezone();
 
   if (query.isLoading) {
@@ -649,29 +724,29 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          {session.total_avoided != null && session.total_avoided > 0 ? (
-            <span className="text-text-faint">
-              Saved {fmtUsdPlain(session.total_avoided)} − Spent{' '}
-              {fmtUsdPlain(session.total_spent)} =
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <span className="text-text-faint">
+            Saved{' '}
+            <span className="whitespace-nowrap">
+              {fmtUsdPlain(session.total_avoided)}
+            </span>{' '}
+            · Spent{' '}
+            <span className="whitespace-nowrap">
+              {fmtUsdPlain(session.total_spent)}
             </span>
-          ) : session.total_spent > 0 ? (
-            <span className="text-text-faint">
-              Spent {fmtUsdPlain(session.total_spent)} (no follow-up) =
-            </span>
-          ) : null}
+          </span>
           {session.evidence_status !== 'observed' ? (
             <span className="text-text-faint">
-              Evidence {session.evidence_status} ·
+              Follow-up {session.evidence_status} ·
             </span>
           ) : null}
           <span
             className={cx(
-              'font-mono text-data font-medium',
+              'whitespace-nowrap font-mono text-data font-medium',
               pnlTone(session.net_pnl),
             )}
           >
-            {fmtUsdSigned(session.net_pnl)}
+            Net {fmtUsdSigned(session.net_pnl)}
           </span>
         </div>
       </div>

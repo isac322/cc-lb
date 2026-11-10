@@ -14,6 +14,8 @@ export const CACHE_KEEPALIVE_STATES = [
   'scheduled',
   'capped',
   'expired',
+  'cancelled',
+  'failed',
   'not_tracked',
 ] as const;
 
@@ -39,6 +41,8 @@ export const CACHE_KEEPALIVE_STATUS_FILTERS = [
   'scheduled',
   'capped',
   'expired',
+  'cancelled',
+  'failed',
   'not_tracked',
   'error',
 ] as const;
@@ -64,13 +68,15 @@ export type CacheKeepaliveEvidenceStatus = z.infer<
 export const CacheKeepaliveSummarySchema = z.object({
   renewing_now: z.number(),
   sessions_last_5m: z.number(),
-  renewals_fired: z.number(),
   retained_successful_hits: z.number(),
   cost_saved: z.number().nullable(),
-  resolved_cost_saved: z.number().nullable().optional(),
   total_spent: z.number(),
   total_avoided: z.number().nullable(),
-  resolved_total_avoided: z.number().nullable().optional(),
+  unlisted_sessions: z.number(),
+  unlisted_renewals: z.number(),
+  unlisted_spent: z.number(),
+  // Null when a deleted session's renewal has an unknown cost.
+  unlisted_net: z.number().nullable(),
   evidence_status: CacheKeepaliveEvidenceStatusSchema,
   unknown_cycles: z.number(),
   retained_from_ms: z.number().nullable(),
@@ -163,6 +169,7 @@ export const CacheKeepaliveGapSchema = z.object({
   pulses: z.array(CacheKeepalivePulseSchema),
   ending_kind: z.enum([
     'followup_hit',
+    'followup_unknown',
     'scheduled_waiting',
     'capped_no_followup',
     'ttl_expired_no_followup',
@@ -244,8 +251,12 @@ export async function getCacheKeepaliveSessions(
 export async function getCacheKeepaliveSessionDetail(
   principalId: string,
   sessionId: string,
+  horizon: CacheKeepaliveHorizon = 'all',
 ): Promise<CacheKeepaliveDetail> {
-  const searchParams = new URLSearchParams({ id: sessionId });
+  const searchParams = new URLSearchParams({
+    id: sessionId,
+    horizon: CacheKeepaliveHorizonSchema.parse(horizon),
+  });
   const path = `/admin/v1/principals/${principalId}/cache-keepalive/detail?${searchParams.toString()}`;
   const res = await getJson<unknown>(path);
   return CacheKeepaliveDetailSchema.parse(res);

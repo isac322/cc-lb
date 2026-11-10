@@ -128,34 +128,69 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
         ) AS refresh_count,
         'terminal' AS status,
         'pending' AS enqueue_state,
-        CASE WHEN (
-            SELECT COUNT(*)
-            FROM cache_keepalive_turns tc
-            WHERE tc.principal_id = t.principal_id
-              AND tc.session_key_hash = t.session_key_hash
-              AND tc.cycle_id IS (
-                  SELECT t2.cycle_id
-                  FROM cache_keepalive_turns t2
-                  WHERE t2.principal_id = t.principal_id
-                    AND t2.session_key_hash = t.session_key_hash
-                  ORDER BY t2.ts DESC, t2.source_ref_id ASC
-                  LIMIT 1
-              )
-        ) >= COALESCE((
-            SELECT CAST(json_extract(d.config_snapshot, '$.max_refreshes_per_session') AS INTEGER)
-            FROM cache_keepalive_decisions d
-            WHERE d.principal_id = t.principal_id
-              AND d.source_ref_id = (
-                  SELECT t2.source_ref_id
-                  FROM cache_keepalive_turns t2
-                  WHERE t2.principal_id = t.principal_id
-                    AND t2.session_key_hash = t.session_key_hash
-                  ORDER BY t2.ts DESC, t2.source_ref_id ASC
-                  LIMIT 1
-              )
-              AND d.config_snapshot IS NOT NULL
-            LIMIT 1
-        ), 12) THEN 'max_refreshes' ELSE 'expired' END AS terminal_reason,
+        CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM cache_keepalive_evidence r
+                JOIN cache_keepalive_evidence f
+                  ON f.principal_id = r.principal_id
+                 AND f.evidence_kind = 'follow_up'
+                 AND f.upstream_id = r.upstream_id
+                 AND f.model = r.model
+                 AND COALESCE(f.cache_read_input_tokens, 0) > 0
+                 AND f.prefix_hash = r.prefix_hash
+                 AND f.request_start_ms > r.request_start_ms
+                 AND f.request_start_ms <= r.request_start_ms + CASE r.ttl
+                     WHEN '1h' THEN 3600000
+                     WHEN '30m' THEN 1800000
+                     WHEN '12h' THEN 43200000
+                     ELSE 300000
+                 END
+                WHERE r.principal_id = t.principal_id
+                  AND r.evidence_kind = 'renewal'
+                  AND r.event_ref = (
+                      SELECT t2.source_ref_id
+                      FROM cache_keepalive_turns t2
+                      WHERE t2.principal_id = t.principal_id
+                        AND t2.session_key_hash = t.session_key_hash
+                      ORDER BY t2.ts DESC, t2.source_ref_id ASC
+                      LIMIT 1
+                  )
+                  AND r.cycle_id IS NOT NULL
+                  AND r.prefix_hash IS NOT NULL
+                  AND r.prefix_policy_version IS NOT NULL
+                  AND r.prefix_schema_version IS NOT NULL
+            ) THEN 'cancelled'
+            WHEN (
+                SELECT COUNT(*)
+                FROM cache_keepalive_turns tc
+                WHERE tc.principal_id = t.principal_id
+                  AND tc.session_key_hash = t.session_key_hash
+                  AND tc.cycle_id IS (
+                      SELECT t2.cycle_id
+                      FROM cache_keepalive_turns t2
+                      WHERE t2.principal_id = t.principal_id
+                        AND t2.session_key_hash = t.session_key_hash
+                      ORDER BY t2.ts DESC, t2.source_ref_id ASC
+                      LIMIT 1
+                  )
+            ) >= COALESCE((
+                SELECT CAST(json_extract(d.config_snapshot, '$.max_refreshes_per_session') AS INTEGER)
+                FROM cache_keepalive_decisions d
+                WHERE d.principal_id = t.principal_id
+                  AND d.source_ref_id = (
+                      SELECT t2.source_ref_id
+                      FROM cache_keepalive_turns t2
+                      WHERE t2.principal_id = t.principal_id
+                        AND t2.session_key_hash = t.session_key_hash
+                      ORDER BY t2.ts DESC, t2.source_ref_id ASC
+                      LIMIT 1
+                  )
+                  AND d.config_snapshot IS NOT NULL
+                LIMIT 1
+            ), 12) THEN 'max_refreshes'
+            ELSE 'expired'
+        END AS terminal_reason,
         COALESCE(
             (
                 SELECT NULLIF(t2.display_reason, '')
@@ -200,7 +235,7 @@ const SESSION_WITH_PURGED_TURNS_SQL: &str = "
     GROUP BY t.principal_id, t.session_key_hash
 ) AS cache_keepalive_sessions";
 
-const ZERO_TURN_CANCELLED_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND refresh_count = 0 AND error IS NULL AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash))";
+const ZERO_TURN_CANCELLED_SQL: &str = "(status = 'terminal' AND terminal_reason = 'cancelled' AND refresh_count = 0 AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns turn_row WHERE turn_row.principal_id = cache_keepalive_sessions.principal_id AND turn_row.session_key_hash = cache_keepalive_sessions.session_key_hash))";
 
 const DECISION_ENTRY_SELECT: &str = "
 SELECT
@@ -766,7 +801,32 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                    )) +
                 COALESCE(SUM(CASE WHEN e_summary.cycle_id IS NULL OR e_summary.prefix_hash IS NULL OR e_summary.prefix_policy_version IS NULL OR e_summary.prefix_schema_version IS NULL THEN 1 ELSE 0 END), 0) AS unknown_cycles,
                 COALESCE(SUM(CASE WHEN e_summary.cycle_id IS NOT NULL AND e_summary.prefix_hash IS NOT NULL AND e_summary.prefix_policy_version IS NOT NULL AND e_summary.prefix_schema_version IS NOT NULL THEN 1 ELSE 0 END), 0) AS observed_evidence,
-                MIN(e_summary.request_start_ms) AS retained_from_ms
+                MIN(e_summary.request_start_ms) AS retained_from_ms,
+                (SELECT COUNT(*) FROM cache_keepalive_turns t_cost
+                 WHERE t_cost.principal_id = ?
+                   AND (? IS NULL OR t_cost.ts * 1000 >= ?)
+                   AND cost_known = 0) AS unknown_costs,
+                (SELECT COUNT(DISTINCT t_unlisted.session_key_hash) FROM cache_keepalive_turns t_unlisted
+                 WHERE t_unlisted.principal_id = ?
+                   AND (? IS NULL OR t_unlisted.ts * 1000 >= ?)
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_sessions s_unlisted WHERE s_unlisted.principal_id = t_unlisted.principal_id AND s_unlisted.session_key_hash = t_unlisted.session_key_hash)
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns t_evidence JOIN cache_keepalive_evidence e_unlisted ON e_unlisted.principal_id = t_evidence.principal_id AND e_unlisted.evidence_kind = 'renewal' AND e_unlisted.event_ref = t_evidence.source_ref_id WHERE t_evidence.principal_id = t_unlisted.principal_id AND t_evidence.session_key_hash = t_unlisted.session_key_hash)) AS unlisted_sessions,
+                (SELECT COUNT(*) FROM cache_keepalive_turns t_unlisted
+                 WHERE t_unlisted.principal_id = ?
+                   AND (? IS NULL OR t_unlisted.ts * 1000 >= ?)
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_sessions s_unlisted WHERE s_unlisted.principal_id = t_unlisted.principal_id AND s_unlisted.session_key_hash = t_unlisted.session_key_hash)
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns t_evidence JOIN cache_keepalive_evidence e_unlisted ON e_unlisted.principal_id = t_evidence.principal_id AND e_unlisted.evidence_kind = 'renewal' AND e_unlisted.event_ref = t_evidence.source_ref_id WHERE t_evidence.principal_id = t_unlisted.principal_id AND t_evidence.session_key_hash = t_unlisted.session_key_hash)) AS unlisted_renewals,
+                (SELECT COALESCE(SUM(CASE WHEN t_unlisted.cost_known = 1 THEN t_unlisted.cost_micros ELSE 0 END), 0) FROM cache_keepalive_turns t_unlisted
+                 WHERE t_unlisted.principal_id = ?
+                   AND (? IS NULL OR t_unlisted.ts * 1000 >= ?)
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_sessions s_unlisted WHERE s_unlisted.principal_id = t_unlisted.principal_id AND s_unlisted.session_key_hash = t_unlisted.session_key_hash)
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns t_evidence JOIN cache_keepalive_evidence e_unlisted ON e_unlisted.principal_id = t_evidence.principal_id AND e_unlisted.evidence_kind = 'renewal' AND e_unlisted.event_ref = t_evidence.source_ref_id WHERE t_evidence.principal_id = t_unlisted.principal_id AND t_evidence.session_key_hash = t_unlisted.session_key_hash)) AS unlisted_spent_micros,
+                (SELECT COUNT(*) FROM cache_keepalive_turns t_unlisted
+                 WHERE t_unlisted.principal_id = ?
+                   AND (? IS NULL OR t_unlisted.ts * 1000 >= ?)
+                   AND t_unlisted.cost_known = 0
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_sessions s_unlisted WHERE s_unlisted.principal_id = t_unlisted.principal_id AND s_unlisted.session_key_hash = t_unlisted.session_key_hash)
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns t_evidence JOIN cache_keepalive_evidence e_unlisted ON e_unlisted.principal_id = t_evidence.principal_id AND e_unlisted.evidence_kind = 'renewal' AND e_unlisted.event_ref = t_evidence.source_ref_id WHERE t_evidence.principal_id = t_unlisted.principal_id AND t_evidence.session_key_hash = t_unlisted.session_key_hash)) AS unlisted_unknown_costs
              FROM cache_keepalive_evidence e_summary
              WHERE e_summary.principal_id = ?
                AND e_summary.evidence_kind = 'renewal'
@@ -794,6 +854,21 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .bind(horizon_start_ms)
         .bind(horizon_start_ms)
         .bind(principal_id)
+        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
+        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
+        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
+        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
+        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
         .bind(principal_id)
         .bind(horizon_start_ms)
         .bind(horizon_start_ms)
@@ -894,8 +969,8 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                     COUNT(*) AS observed_cycles
              FROM proven r
              WHERE r.rn = 1 AND lower(r.hit_miss) = 'hit'
-             GROUP BY r.model, r.ttl
-             ORDER BY r.model, r.ttl",
+             GROUP BY r.model, r.ttl, r.cache_read_input_tokens
+             ORDER BY r.model, r.ttl, r.cache_read_input_tokens",
         )
         .bind(principal_id)
         .bind(horizon_start_ms)
@@ -905,12 +980,12 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .await
         .map_err(map_sqlx_error)?;
         let mut observed_cycles = 0_u64;
-        let groups = group_rows
+        let mut groups = group_rows
             .into_iter()
             .map(|row| {
-                observed_cycles = observed_cycles.saturating_add(i64_to_u64_count(
-                    row.try_get("observed_cycles").map_err(map_sqlx_error)?,
-                )?);
+                let renewals =
+                    i64_to_u64_count(row.try_get("observed_cycles").map_err(map_sqlx_error)?)?;
+                observed_cycles = observed_cycles.saturating_add(renewals);
                 Ok(cc_lb_storage_api::CacheKeepaliveSummaryGroup {
                     model: row.try_get("model").map_err(map_sqlx_error)?,
                     ttl: ttl_from_evidence_db(
@@ -920,9 +995,52 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                         row.try_get("avoided_cache_read_tokens")
                             .map_err(map_sqlx_error)?,
                     )?,
+                    renewals,
                 })
             })
             .collect::<StorageResult<Vec<_>>>()?;
+        let model_rows = sqlx::query(
+            "SELECT DISTINCT t.model,
+                COALESCE(
+                    (SELECT e.ttl FROM cache_keepalive_evidence e
+                     WHERE e.principal_id = t.principal_id AND e.event_ref = t.source_ref_id
+                       AND e.evidence_kind = 'renewal' LIMIT 1),
+                    (SELECT s.ttl FROM cache_keepalive_sessions s
+                     WHERE s.principal_id = t.principal_id AND s.session_key_hash = t.session_key_hash),
+                    '5m'
+                ) AS ttl
+             FROM cache_keepalive_turns t
+             WHERE t.principal_id = ?
+               AND (? IS NULL OR t.ts * 1000 >= ?)
+             ORDER BY t.model, ttl",
+        )
+        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        for model_row in model_rows {
+            let model = model_row
+                .try_get::<String, _>("model")
+                .map_err(map_sqlx_error)?;
+            let ttl = ttl_from_evidence_db(
+                &model_row
+                    .try_get::<String, _>("ttl")
+                    .map_err(map_sqlx_error)?,
+            )?;
+            if !groups
+                .iter()
+                .any(|group| group.model == model && group.ttl == ttl)
+            {
+                groups.push(cc_lb_storage_api::CacheKeepaliveSummaryGroup {
+                    model,
+                    ttl,
+                    avoided_cache_read_tokens: 0,
+                    renewals: 0,
+                });
+            }
+        }
         Ok(cc_lb_storage_api::CacheKeepaliveSummaryAggregate {
             renewing_now: row
                 .try_get::<i64, _>("renewing_now")
@@ -954,6 +1072,37 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                     message: "negative cache keepalive successful hit count".to_owned(),
                 })?,
             unknown_cycles,
+            unknown_costs: row
+                .try_get::<i64, _>("unknown_costs")
+                .map_err(map_sqlx_error)?
+                .try_into()
+                .map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive unknown cost count".to_owned(),
+                })?,
+            unlisted_sessions: row
+                .try_get::<i64, _>("unlisted_sessions")
+                .map_err(map_sqlx_error)?
+                .try_into()
+                .map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive unlisted session count".to_owned(),
+                })?,
+            unlisted_renewals: row
+                .try_get::<i64, _>("unlisted_renewals")
+                .map_err(map_sqlx_error)?
+                .try_into()
+                .map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive unlisted renewal count".to_owned(),
+                })?,
+            unlisted_spent_micros: row
+                .try_get("unlisted_spent_micros")
+                .map_err(map_sqlx_error)?,
+            unlisted_unknown_costs: row
+                .try_get::<i64, _>("unlisted_unknown_costs")
+                .map_err(map_sqlx_error)?
+                .try_into()
+                .map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive unlisted unknown cost count".to_owned(),
+                })?,
             retained_from_ms: row
                 .try_get::<Option<i64>, _>("retained_from_ms")
                 .map_err(map_sqlx_error)?
@@ -1048,9 +1197,11 @@ fn push_session_branch(
         .push(" WHERE principal_id = ")
         .push_bind(&query.principal_id);
     if let Some(horizon_start_ms) = horizon_start_ms {
-        builder
-            .push(" AND last_message_at_ms >= ")
-            .push_bind(horizon_start_ms);
+        builder.push(" AND (last_message_at_ms >= ");
+        builder.push_bind(horizon_start_ms);
+        builder.push(" OR EXISTS (SELECT 1 FROM cache_keepalive_turns h_turn WHERE h_turn.principal_id = cache_keepalive_sessions.principal_id AND h_turn.session_key_hash = cache_keepalive_sessions.session_key_hash AND h_turn.ts * 1000 >= ");
+        builder.push_bind(horizon_start_ms);
+        builder.push("))");
     }
     match query.filter {
         CacheKeepaliveSessionFilter::All | CacheKeepaliveSessionFilter::Error => {}
@@ -1066,9 +1217,15 @@ fn push_session_branch(
         }
         CacheKeepaliveSessionFilter::Capped => {
             builder.push(
-                " AND status = 'terminal' AND terminal_reason NOT IN ('expired', 'cache_miss') AND NOT ",
+                " AND status = 'terminal' AND terminal_reason IN ('max_refreshes', 'max_duration')",
             );
+        }
+        CacheKeepaliveSessionFilter::Cancelled => {
+            builder.push(" AND status = 'terminal' AND terminal_reason = 'cancelled' AND NOT ");
             builder.push(ZERO_TURN_CANCELLED_SQL);
+        }
+        CacheKeepaliveSessionFilter::Failed => {
+            builder.push(" AND status = 'terminal' AND terminal_reason IN ('dispatch_error', 'decrypt_failed', 'unsupported_provider', 'stale')");
         }
         CacheKeepaliveSessionFilter::Expired => {
             builder.push(" AND terminal_reason IN ('expired', 'cache_miss')");
@@ -1134,6 +1291,8 @@ fn push_decision_branch(
         | CacheKeepaliveSessionFilter::Renewed
         | CacheKeepaliveSessionFilter::Scheduled
         | CacheKeepaliveSessionFilter::Capped
+        | CacheKeepaliveSessionFilter::Cancelled
+        | CacheKeepaliveSessionFilter::Failed
         | CacheKeepaliveSessionFilter::Expired => unreachable!("decision branch is skipped"),
     }
     if let (Some(cursor), Some(cursor_last_message_at_ms)) =

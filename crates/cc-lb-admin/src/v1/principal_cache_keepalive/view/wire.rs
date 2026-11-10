@@ -13,15 +13,15 @@ pub(crate) struct CacheKeepaliveListResponse {
 pub(crate) struct CacheKeepaliveSummaryResponse {
     pub(crate) renewing_now: u64,
     pub(crate) sessions_last_5m: u64,
-    pub(crate) renewals_fired: u64,
     pub(crate) retained_successful_hits: u64,
     pub(crate) cost_saved: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resolved_cost_saved: Option<f64>,
     pub(crate) total_spent: f64,
     pub(crate) total_avoided: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resolved_total_avoided: Option<f64>,
+    pub(crate) unlisted_sessions: u64,
+    pub(crate) unlisted_renewals: u64,
+    pub(crate) unlisted_spent: f64,
+    /// `-unlisted_spent`, or null when any unlisted renewal has an unknown cost.
+    pub(crate) unlisted_net: Option<f64>,
     pub(crate) evidence_status: String,
     pub(crate) unknown_cycles: u64,
     pub(crate) retained_from_ms: Option<u64>,

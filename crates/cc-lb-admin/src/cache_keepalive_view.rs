@@ -39,6 +39,7 @@ pub struct CacheKeepaliveActivitySource<'a> {
     pub turns: &'a [CacheKeepaliveTurnRecord],
     pub evidence: &'a [CacheKeepaliveEvidenceRecord],
     pub now_ms: u64,
+    pub horizon_start_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -112,12 +113,20 @@ pub fn derive_activity_view(
     source: CacheKeepaliveActivitySource<'_>,
     catalog: &PriceCatalog,
 ) -> CacheKeepaliveActivityView {
+    let horizon_start_ms = source.horizon_start_ms;
     let mut state = state_from_item(source.item);
     if state == CacheKeepaliveViewState::NotTracked
         && !source.item.is_decision()
         && !source.turns.is_empty()
     {
-        state = CacheKeepaliveViewState::Capped;
+        state = if matches!(
+            source.item.terminal_reason,
+            Some(CacheKeepaliveTerminalReason::Cancelled)
+        ) {
+            CacheKeepaliveViewState::Cancelled
+        } else {
+            CacheKeepaliveViewState::Capped
+        };
     }
     let is_active = matches!(
         source.item.status,
@@ -130,6 +139,9 @@ pub fn derive_activity_view(
     let mut records = source
         .turns
         .iter()
+        .filter(|turn| {
+            horizon_start_ms.is_none_or(|start_ms| turn.ts.saturating_mul(1_000) >= start_ms)
+        })
         .filter(|turn| {
             let Some(cycle_id) = cycle_id else {
                 return true;
@@ -189,14 +201,20 @@ pub fn derive_activity_view(
             )
         })
         .collect::<Vec<_>>();
-    let retained_turns = source
+    let scoped_turns = source
         .turns
+        .iter()
+        .filter(|turn| {
+            horizon_start_ms.is_none_or(|start_ms| turn.ts.saturating_mul(1_000) >= start_ms)
+        })
+        .collect::<Vec<_>>();
+    let retained_turns = scoped_turns
         .iter()
         .enumerate()
         .map(|(index, record)| {
             activity_turn(
                 record,
-                u32::try_from(source.turns.len().saturating_sub(index)).unwrap_or(u32::MAX),
+                u32::try_from(scoped_turns.len().saturating_sub(index)).unwrap_or(u32::MAX),
                 false,
                 catalog,
                 source.item.ttl,
@@ -213,16 +231,16 @@ pub fn derive_activity_view(
         (_, Some(turns)) => Some(sum_turn_pnl(&turns)),
         (_, None) => None,
     };
-    let (evidence_status, unknown_cycles) =
-        evidence_status(source.turns, source.evidence, pending_source_ref_id);
-    let total_spent_micros = source
-        .turns
+    let (evidence_status, unknown_cycles) = evidence_status(
+        scoped_turns.iter().copied(),
+        source.evidence,
+        pending_source_ref_id,
+    );
+    let total_spent_micros = scoped_turns
         .iter()
         .filter_map(|turn| turn.cost_micros)
         .fold(0_i64, |total, cost| total.saturating_add(cost));
-    let total_avoided_micros = (evidence_status == "observed")
-        .then(|| pnl.map(|value| value.avoided_micros))
-        .flatten();
+    let total_avoided_micros = pnl.map(|value| value.avoided_micros);
     let next_renewal = source.session.and_then(|session| {
         next_renewal_display(
             state,
@@ -230,7 +248,7 @@ pub fn derive_activity_view(
             source.now_ms,
         )
     });
-    let gaps = idle_gaps(&source, &retained_turns, cycle_id, is_active);
+    let gaps = idle_gaps(&source, &scoped_turns, &retained_turns, cycle_id, is_active);
     CacheKeepaliveActivityView {
         id: source.item.id.clone(),
         source: source.item.source,
@@ -294,11 +312,12 @@ fn pulse_time_ms(
 
 fn idle_gaps(
     source: &CacheKeepaliveActivitySource<'_>,
+    scoped_turns: &[&CacheKeepaliveTurnRecord],
     retained_turns: &[CacheKeepaliveActivityTurn],
     current_cycle_id: Option<Uuid>,
     is_active: bool,
 ) -> Vec<CacheKeepaliveIdleGap> {
-    let mut ordered_turns = source.turns.iter().enumerate().collect::<Vec<_>>();
+    let mut ordered_turns = scoped_turns.iter().copied().enumerate().collect::<Vec<_>>();
     ordered_turns.sort_by(|(_, left), (_, right)| {
         pulse_time_ms(left, source.evidence)
             .cmp(&pulse_time_ms(right, source.evidence))
@@ -326,7 +345,7 @@ fn idle_gaps(
                 let should_split = open_none_group.is_none_or(|group_index| {
                     let current_group = &cycles[group_index].1;
                     let previous_index = *current_group.last().expect("open null-cycle group");
-                    let previous_turn = &source.turns[previous_index];
+                    let previous_turn = scoped_turns[previous_index];
                     let previous_ttl = renewal_evidence_for_turn(previous_turn, source.evidence)
                         .map_or(source.item.ttl, |renewal| renewal.ttl);
                     pulse_time_ms(turn, source.evidence)
@@ -352,7 +371,7 @@ fn idle_gaps(
     };
     let mut gaps = Vec::with_capacity(cycles.len() + usize::from(is_active && !has_current_cycle));
     for (cycle_id, indices) in cycles {
-        let first_turn = &source.turns[indices[0]];
+        let first_turn = scoped_turns[indices[0]];
         let first_evidence = renewal_evidence_for_turn(first_turn, source.evidence);
         let ttl = first_evidence.map_or(source.item.ttl, |renewal| renewal.ttl);
         let first_pulse_ms = first_evidence.map_or_else(
@@ -365,7 +384,7 @@ fn idle_gaps(
             .iter()
             .enumerate()
             .map(|(index, &turn_index)| {
-                let turn = &source.turns[turn_index];
+                let turn = scoped_turns[turn_index];
                 let time_ms = renewal_evidence_for_turn(turn, source.evidence).map_or_else(
                     || turn.ts.saturating_mul(1_000),
                     |renewal| renewal.request_start_ms,
@@ -399,6 +418,10 @@ fn idle_gaps(
                 })
             })
             .min_by_key(|follow_up| (follow_up.request_start_ms, &follow_up.evidence_id));
+        let evidence_unknown = indices.iter().any(|&index| {
+            renewal_evidence_for_turn(scoped_turns[index], source.evidence)
+                .is_none_or(|renewal| !renewal_evidence_known(renewal))
+        });
         let (ending_kind, ending_at_ms) = if let Some(follow_up) = follow_up {
             ("followup_hit", follow_up.request_start_ms)
         } else if is_active && cycle_id == current_cycle_id {
@@ -411,6 +434,8 @@ fn idle_gaps(
                     })
                     .max(last_pulse_ms),
             )
+        } else if evidence_unknown {
+            ("followup_unknown", last_pulse_ms)
         } else if u32::try_from(pulses.len()).unwrap_or(u32::MAX) >= max_attempts
             || matches!(
                 source.item.terminal_reason,
@@ -426,29 +451,28 @@ fn idle_gaps(
         };
         let spent_micros = indices
             .iter()
-            .filter_map(|&index| source.turns[index].cost_micros)
+            .filter_map(|&index| scoped_turns[index].cost_micros)
             .fold(0_i64, i64::saturating_add);
-        let avoided_micros = indices.iter().try_fold(0_i64, |total, &index| {
-            let renewal = renewal_evidence_for_turn(&source.turns[index], source.evidence)?;
-            if !renewal_evidence_known(renewal) {
-                return None;
-            }
-            let pnl = retained_turns[index].pnl?;
-            Some(total.saturating_add(pnl.avoided_micros))
-        });
         let all_turns_priced = !indices.is_empty()
             && indices
                 .iter()
                 .all(|&index| retained_turns[index].pnl.is_some());
-        let net_pnl_micros = avoided_micros
-            .map(|avoided| avoided.saturating_sub(spent_micros))
-            .or_else(|| (all_turns_priced && spent_micros > 0).then_some(-spent_micros));
+        let avoided_micros = all_turns_priced.then(|| {
+            indices.iter().fold(0_i64, |total, &index| {
+                total.saturating_add(
+                    retained_turns[index]
+                        .pnl
+                        .map_or(0, |pnl| pnl.avoided_micros),
+                )
+            })
+        });
+        let net_pnl_micros = avoided_micros.map(|avoided| avoided.saturating_sub(spent_micros));
         gaps.push(CacheKeepaliveIdleGap {
             cycle_id,
             pause_at_ms,
             cached_tokens: indices
                 .iter()
-                .map(|&index| source.turns[index].cache_read_input_tokens)
+                .map(|&index| scoped_turns[index].cache_read_input_tokens)
                 .max()
                 .unwrap_or(0),
             pulses,
@@ -491,11 +515,12 @@ fn idle_gaps(
     gaps
 }
 
-fn evidence_status(
-    turns: &[CacheKeepaliveTurnRecord],
+fn evidence_status<'a>(
+    turns: impl IntoIterator<Item = &'a CacheKeepaliveTurnRecord>,
     evidence: &[CacheKeepaliveEvidenceRecord],
     pending_source_ref_id: Option<&str>,
 ) -> (String, u64) {
+    let turns = turns.into_iter().collect::<Vec<_>>();
     if turns.is_empty()
         && !evidence
             .iter()

@@ -292,6 +292,45 @@ fn pol09_api_key_usage_poll_rejects_unknown_fields() {
 }
 
 #[test]
+fn keepalive_dispatch_timeout_defaults_to_thirty_seconds_and_rejects_job_timeout_bounds() {
+    assert_eq!(
+        SchedulerConfig::default().keepalive_dispatch_timeout_secs,
+        30
+    );
+
+    for value in [0, 60, 61] {
+        let config = Config::from_stored_toml(&format!(
+            "[scheduler]\nkeepalive_dispatch_timeout_secs = {value}\n"
+        ))
+        .expect("timeout value parses");
+        let error = config
+            .validate_without_filesystem()
+            .expect_err("invalid keepalive timeout is rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("scheduler.keepalive_dispatch_timeout_secs"),
+            "{error}"
+        );
+    }
+
+    let valid = Config::from_stored_toml("[scheduler]\nkeepalive_dispatch_timeout_secs = 59\n")
+        .expect("valid timeout parses");
+    valid
+        .validate_without_filesystem()
+        .expect("timeout below scheduler job timeout is valid");
+}
+
+#[test]
+fn keepalive_dispatch_timeout_round_trips() {
+    let config = Config::from_stored_toml("[scheduler]\nkeepalive_dispatch_timeout_secs = 42\n")
+        .expect("timeout parses");
+    let serialized = toml::to_string_pretty(&config).expect("serialize config");
+    let reparsed = Config::from_stored_toml(&serialized).expect("round-trip config");
+    assert_eq!(reparsed.scheduler.keepalive_dispatch_timeout_secs, 42);
+}
+
+#[test]
 fn default_scheduler_config_matches_snapshot() {
     insta::assert_json_snapshot!(SchedulerConfig::default());
 }

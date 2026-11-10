@@ -1,7 +1,9 @@
 use cc_lb_clock::unix_secs;
 use cc_lb_control::api_keys::limit_engine::Reservation;
 use cc_lb_control::api_keys::principal_view::PrincipalStatus;
-use cc_lb_engine::cache_keepalive::{DispatchOutcome, KeepaliveDispatchContext, RequestSnapshot};
+use cc_lb_engine::cache_keepalive::{
+    DispatchOutcome, KeepaliveDispatchContext, RequestSnapshot, record_dispatch_skipped,
+};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -112,6 +114,34 @@ impl SchedulerDispatch {
                 return Ok(JobOutcome::Done);
             }
         };
+        let authorized = match CacheKeepaliveSessionStore::authorize_cache_keepalive_dispatch(
+            self.storage.as_ref(),
+            &job.session_key_hash,
+            job.generation,
+        )
+        .await
+        {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                // Same policy as a failed reservation: terminalize instead of
+                // returning Err, because a retry could never re-claim the
+                // generation this attempt already holds as `running`.
+                drop(reservation);
+                record_dispatch_skipped("storage_error");
+                self.mark_cache_keepalive_terminal(
+                    &job,
+                    CacheKeepaliveTerminalReason::DispatchError,
+                    Some(&error.to_string()),
+                )
+                .await?;
+                return Ok(JobOutcome::Done);
+            }
+        };
+        if !authorized {
+            drop(reservation);
+            record_dispatch_skipped("not_authorized");
+            return Ok(JobOutcome::Done);
+        }
         let source_ref_id = format!("{}:{}", job.session_key_hash, job.generation);
 
         let outcome = self

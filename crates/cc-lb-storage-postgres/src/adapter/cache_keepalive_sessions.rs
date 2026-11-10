@@ -352,6 +352,26 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn authorize_cache_keepalive_dispatch(
+        &self,
+        session_key_hash: &str,
+        generation: u64,
+    ) -> StorageResult<bool> {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM cache_keepalive_sessions
+                 WHERE session_key_hash = $1 AND generation = $2 AND status = 'active'
+                   AND enqueue_state = 'running'
+             )",
+        )
+        .bind(session_key_hash)
+        .bind(u64_to_i64(generation, "cache keepalive generation")?)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
     async fn update_cache_keepalive_payload(
         &self,
         session_key_hash: &str,

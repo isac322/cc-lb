@@ -94,7 +94,7 @@ function MetricTile({
         data-testid="cache-keepalive-metric-value"
         aria-busy={isLoading}
         className={cx(
-          'flex h-9 items-center text-display text-text tabular-nums',
+          'flex h-9 items-center whitespace-nowrap text-display text-text tabular-nums',
           flash && 'flash-text-active',
         )}
         style={
@@ -124,8 +124,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
     principal.cache_keepalive?.enabled ?? false,
   );
   const summary = summaryQ.data;
-  const effectiveCostSaved =
-    summary?.cost_saved ?? summary?.resolved_cost_saved ?? null;
+  const effectiveCostSaved = summary?.cost_saved ?? null;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -324,7 +323,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
                 subtext="seen in last five minutes"
               />
               <MetricTile
-                label="Renewals fired"
+                label="Successful renewals · 24h"
                 isLoading={summaryQ.isLoading}
                 value={
                   summaryQ.isLoading
@@ -333,10 +332,10 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
                       ? summary.retained_successful_hits.toLocaleString('en-US')
                       : '—'
                 }
-                subtext="retained history"
+                subtext="renewals that hit the cache"
               />
               <MetricTile
-                label="Cost saved"
+                label="Cost saved · 24h"
                 isLoading={summaryQ.isLoading}
                 value={
                   summaryQ.isLoading
@@ -347,10 +346,9 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
                 }
                 subtext={
                   summary?.evidence_status === 'unknown'
-                    ? 'unknown evidence coverage'
-                    : summary?.evidence_status === 'pending' &&
-                        summary?.resolved_cost_saved != null
-                      ? 'net (active renewal pending)'
+                    ? 'follow-up unknown'
+                    : summary?.evidence_status === 'pending'
+                      ? 'follow-up pending'
                       : 'net, after renewal spend'
                 }
               />

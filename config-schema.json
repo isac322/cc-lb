@@ -124,6 +124,7 @@
         "dlq_retention_days": 30,
         "entity_concurrency": 8,
         "keepalive_concurrency": 4,
+        "keepalive_dispatch_timeout_secs": 30,
         "recurring_jobs": {
           "anthropic_compat_refresh": {
             "enabled": true,
@@ -903,6 +904,14 @@
           "format": "uint",
           "default": 4,
           "minimum": 0
+        },
+        "keepalive_dispatch_timeout_secs": {
+          "description": "Maximum time allowed for one keep-alive provider request. Must be below\nthe scheduler's 60-second per-job timeout.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "maximum": 59,
+          "minimum": 1
         },
         "recurring_jobs": {
           "description": "Built-in recurring jobs by name. `api_key_usage_poll` (default every\n300 s, 15 s jitter) requires `60 <= interval_secs <= 604800` and\n`jitter_secs < interval_secs`.",

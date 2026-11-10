@@ -1518,7 +1518,10 @@ async fn summary_aggregate_observes_complete_unfollowed_terminal_loss() {
     assert_eq!(aggregate.retained_from_ms, Some(1_001_000));
     assert_eq!(aggregate.evidence_status, "observed");
     assert!(
-        aggregate.groups.is_empty(),
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0),
         "no follow-up means zero avoided tokens"
     );
 }
@@ -1567,7 +1570,12 @@ async fn summary_aggregate_active_complete_unfollowed_hit_and_miss_are_pending()
     assert_eq!(aggregate.successful_hits, 1);
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "pending");
-    assert!(aggregate.groups.is_empty());
+    assert!(
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0)
+    );
 }
 
 #[tokio::test]
@@ -1721,7 +1729,10 @@ async fn summary_aggregate_active_same_cycle_hit_then_miss_shared_follow_up_cred
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "observed");
     assert!(
-        aggregate.groups.is_empty(),
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0),
         "the latest miss must suppress avoided-token credit for the shared follow-up"
     );
 }
@@ -1774,7 +1785,12 @@ async fn summary_aggregate_active_latest_unresolved_keeps_older_observed_turn_pe
     assert_eq!(aggregate.successful_hits, 1);
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "pending");
-    assert!(aggregate.groups.is_empty());
+    assert!(
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0)
+    );
 }
 
 #[tokio::test]
@@ -1942,7 +1958,12 @@ async fn summary_aggregate_historical_observed_turn_does_not_clear_active_pendin
     assert_eq!(aggregate.successful_hits, 2);
     assert_eq!(aggregate.unknown_cycles, 0);
     assert_eq!(aggregate.evidence_status, "pending");
-    assert!(aggregate.groups.is_empty());
+    assert!(
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0)
+    );
 }
 
 #[tokio::test]
@@ -1999,7 +2020,13 @@ async fn summary_aggregate_legacy_and_incomplete_evidence_remain_unknown() {
             (missing != "evidence").then_some(1_000_000),
             "{missing}"
         );
-        assert!(aggregate.groups.is_empty(), "{missing}");
+        assert!(
+            aggregate
+                .groups
+                .iter()
+                .all(|group| group.avoided_cache_read_tokens == 0),
+            "{missing}"
+        );
     }
 }
 
@@ -2026,7 +2053,12 @@ async fn summary_aggregate_counts_only_hits_and_keeps_miss_and_zero_costs() {
     assert_eq!(aggregate.total_spent_micros, 21_000);
     assert_eq!(aggregate.successful_hits, 2);
     assert_eq!(aggregate.unknown_cycles, 0);
-    assert!(aggregate.groups.is_empty());
+    assert!(
+        aggregate
+            .groups
+            .iter()
+            .all(|group| group.avoided_cache_read_tokens == 0)
+    );
 }
 
 #[tokio::test]
@@ -2171,4 +2203,179 @@ async fn purged_session_reconstructs_display_reason_from_turn() {
         Some(display_reason)
     );
     assert_eq!(reconstructed.reason, "TTL expired before follow-up");
+}
+
+#[tokio::test]
+async fn unlisted_aggregate_counts_only_turns_without_renewal_evidence() {
+    let (_temp_dir, storage) = storage().await;
+    let cycle_id = Uuid::from_u128(9_001);
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "reconstructable-purged",
+            cycle_id,
+            source_ref_id: "reconstructable-purged-turn",
+            ts: 10_000,
+            hit_miss: "hit",
+            cost_micros: 7_000,
+            renewal_tokens: 20_000,
+            with_follow_up: true,
+        },
+    )
+    .await;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "unlisted-purged",
+            cycle_id,
+            source_ref_id: "unlisted-purged-turn",
+            ts: 10_001,
+            hit_miss: "hit",
+            cost_micros: 11_000,
+            renewal_tokens: 20_000,
+            with_follow_up: false,
+        },
+    )
+    .await;
+    sqlx::query("DELETE FROM cache_keepalive_evidence WHERE event_ref = ?")
+        .bind("unlisted-purged-turn")
+        .execute(storage.pool())
+        .await
+        .expect("delete unlisted renewal evidence");
+
+    let aggregate = storage
+        .read_cache_keepalive_summary_aggregate_for_horizon(PRINCIPAL_ID, 0, None)
+        .await
+        .expect("read unlisted aggregate");
+    assert_eq!(aggregate.unlisted_sessions, 1);
+    assert_eq!(aggregate.unlisted_renewals, 1);
+    assert_eq!(aggregate.unlisted_spent_micros, 11_000);
+}
+
+#[tokio::test]
+async fn list_horizon_membership_uses_in_horizon_turn_timestamp() {
+    let (_temp_dir, storage) = storage().await;
+    storage
+        .replace_from_real_request(&request("old-last-message", 100, "scheduled"))
+        .await
+        .expect("seed old session");
+    let mut projection = economics_projection("inside-horizon", None, 200, "hit", 6_000);
+    projection.turn.as_mut().expect("turn").session_key_hash = "old-last-message".to_owned();
+    projection.decision.session_key_hash = Some("old-last-message".to_owned());
+    storage
+        .append_request_event_with_projections(&event("inside-horizon", 200), &projection)
+        .await
+        .expect("append in-horizon turn");
+    let query = CacheKeepaliveSessionListQuery {
+        principal_id: PRINCIPAL_ID.to_owned(),
+        horizon_start_ms: Some(150_000),
+        filter: CacheKeepaliveSessionFilter::All,
+        cursor: None,
+        limit: 10,
+    };
+    let page = storage
+        .list_cache_keepalive_sessions(&query)
+        .await
+        .expect("list horizon membership");
+    assert_eq!(
+        page.rows
+            .iter()
+            .filter(|row| row.id == "old-last-message")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn reconstructed_followed_purged_session_is_cancelled() {
+    let (_temp_dir, storage) = storage().await;
+    append_economics_turn(
+        &storage,
+        EconomicsTurnParams {
+            session_key_hash: "purged-followed-terminal",
+            cycle_id: Uuid::from_u128(9_002),
+            source_ref_id: "purged-followed-terminal-turn",
+            ts: 10_000,
+            hit_miss: "hit",
+            cost_micros: 6_000,
+            renewal_tokens: 20_000,
+            with_follow_up: true,
+        },
+    )
+    .await;
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "purged-followed-terminal")
+        .await
+        .expect("lookup reconstructed followed session")
+        .expect("reconstructed followed session");
+    assert_eq!(
+        item.terminal_reason,
+        Some(cc_lb_storage_api::CacheKeepaliveTerminalReason::Cancelled)
+    );
+}
+
+#[tokio::test]
+async fn status_filters_match_capped_cancelled_and_failed_terminal_reasons() {
+    let (_temp_dir, storage) = storage().await;
+    for (id, reason) in [
+        (
+            "filter-capped",
+            cc_lb_storage_api::CacheKeepaliveTerminalReason::MaxRefreshes,
+        ),
+        (
+            "filter-cancelled",
+            cc_lb_storage_api::CacheKeepaliveTerminalReason::Cancelled,
+        ),
+        (
+            "filter-failed",
+            cc_lb_storage_api::CacheKeepaliveTerminalReason::DispatchError,
+        ),
+    ] {
+        storage
+            .replace_from_real_request(&request(id, 1_000, "terminal"))
+            .await
+            .expect("seed filter session");
+        let mut projection = economics_projection(id, None, 1_001, "hit", 1_000);
+        projection
+            .turn
+            .as_mut()
+            .expect("filter turn")
+            .session_key_hash = id.to_owned();
+        projection.decision.session_key_hash = Some(id.to_owned());
+        storage
+            .append_request_event_with_projections(&event(id, 1_001), &projection)
+            .await
+            .expect("append filter turn");
+        storage
+            .mark_cache_keepalive_terminal(id, 1, reason, None, 1_002)
+            .await
+            .expect("terminalize filter session");
+    }
+    sqlx::query("UPDATE cache_keepalive_sessions SET refresh_count = 1")
+        .execute(storage.pool())
+        .await
+        .expect("set filter refresh counts");
+    for (filter, expected_id) in [
+        (CacheKeepaliveSessionFilter::Capped, "filter-capped"),
+        (CacheKeepaliveSessionFilter::Cancelled, "filter-cancelled"),
+        (CacheKeepaliveSessionFilter::Failed, "filter-failed"),
+    ] {
+        let page = storage
+            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                principal_id: PRINCIPAL_ID.to_owned(),
+                horizon_start_ms: None,
+                filter,
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("list status filter");
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![expected_id]
+        );
+    }
 }

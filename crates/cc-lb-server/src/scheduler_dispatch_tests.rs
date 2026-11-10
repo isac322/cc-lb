@@ -2942,6 +2942,68 @@ async fn cache_keepalive_durable_cancel_makes_queued_old_generation_noop() {
 }
 
 #[tokio::test]
+async fn cache_keepalive_dispatch_authorization_rejects_cancelled_claim_qa14() {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    assert!(
+        fixture
+            .storage
+            .claim_cache_keepalive_turn("session-hash", 1, 2)
+            .await
+            .expect("claim keepalive")
+    );
+    enqueuer
+        .cancel_cache_keepalive(cc_lb_engine::cache_keepalive::CacheKeepaliveCancelRequest {
+            session_key_hash: "session-hash".to_owned(),
+            reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
+            expected_generation: None,
+            cache_anchor_age: Duration::ZERO,
+        })
+        .await
+        .expect("cancel claimed keepalive");
+    assert!(
+        !CacheKeepaliveSessionStore::authorize_cache_keepalive_dispatch(
+            fixture.storage.as_ref(),
+            "session-hash",
+            1,
+        )
+        .await
+        .expect("authorize cancelled keepalive"),
+        "cancellation committed before authorization must prevent dispatch"
+    );
+
+    let dispatch = fixture.dispatch(pusher);
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job)
+            .await
+            .expect("dispatch cancelled keepalive"),
+        JobOutcome::Noop
+    ));
+    assert!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .expect("requests lock")
+            .is_empty()
+    );
+    let turns: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_turns WHERE session_key_hash = ?")
+            .bind("session-hash")
+            .fetch_one(fixture.storage.pool())
+            .await
+            .expect("count turns");
+    assert_eq!(turns, 0);
+}
+
+#[tokio::test]
 async fn cache_keepalive_new_real_request_makes_queued_old_generation_noop() {
     let fixture = Fixture::new().await;
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
