@@ -608,6 +608,36 @@ test('saves optional OpenAI project provenance without workspace fields', async 
   expect(body).not.toHaveProperty('clear_workspace_id');
 });
 
+test('does not preflight or save an empty custom endpoint', async () => {
+  route = () => ({
+    status: 200,
+    body: wire({ verdict: 'ok', inference: 'ok' }),
+  });
+  const rendered = renderDialog({ mode: 'create' });
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', { name: /OpenAI/ }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('radio', { name: /API key/ }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', { name: 'Continue' }),
+  );
+  fireEvent.click(
+    within(rendered.dialog).getByRole('button', {
+      name: 'Use a custom endpoint',
+    }),
+  );
+  await paste(rendered.dialog, 'sk-proj-empty-endpoint');
+  expect(within(rendered.dialog).getByRole('alert').textContent).toContain(
+    'Enter a custom endpoint before checking the key.',
+  );
+  expect(preflightCalls()).toHaveLength(0);
+});
+
 describe('provider-native replacement', () => {
   test.each([
     ['openai_api_key', 'OpenAI', 'openai-replacement-key'],
@@ -960,7 +990,7 @@ describe('key step (UI-D-06…11, UI-D-22, UI-D-27, UI-D-29, UI-D-31, UI-D-32)',
     await paste(dialog, KEY);
     await within(dialog).findByRole('alert');
     expect(helpPaths(dialog)).toEqual(["Don't have a key?"]);
-    expect(preflightCalls()).toHaveLength(3);
+    expect(preflightCalls()).toHaveLength(2);
   });
 
   test('UI-D-27 / UI-AY-04 / UI-CP-08: custom endpoint disclosure', async () => {

@@ -26,7 +26,6 @@ import {
   type RemediationCode,
   type Upstream,
 } from '../../../lib/api';
-import { DEFAULT_ANTHROPIC_BASE_URL } from '../../../lib/constants';
 import {
   defaultEndpointFor,
   PROVIDER_LABELS,
@@ -197,15 +196,6 @@ export function useApiKeyConnect({
   const [baseUrl, setBaseUrl] = useState(
     replace?.base_url ?? defaultEndpointFor(kind),
   );
-  useEffect(() => {
-    if (
-      !opened &&
-      baseUrl.trim().replace(/\/+$/, '') ===
-        DEFAULT_ANTHROPIC_BASE_URL.replace(/\/+$/, '')
-    ) {
-      setBaseUrl(defaultEndpointFor(kind));
-    }
-  }, [baseUrl, kind, opened]);
   /** Result of checking the key alone (no workspace header). */
   const [checked, setChecked] = useState<PreflightResponse | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -259,6 +249,10 @@ export function useApiKeyConnect({
   const defaultEndpoint = defaultEndpointFor(kind);
   const isDefaultEndpoint =
     baseUrl.trim().replace(/\/+$/, '') === defaultEndpoint;
+  const endpointError =
+    endpointOpen && baseUrl.trim() === ''
+      ? 'Enter a custom endpoint before checking the key.'
+      : null;
   const anthropicHost = provider === 'anthropic' && isAnthropicBaseUrl(baseUrl);
   // Client mirror of the server's prefix gate, only for Anthropic.
   const gate = anthropicHost && parsed.kind === 'key' ? parsed.gate : null;
@@ -310,7 +304,7 @@ export function useApiKeyConnect({
 
   const keyBody = (literal?: string): PreflightRequest | null => {
     const key = literal ?? (parsed.kind === 'key' ? parsed.key : null);
-    if (!key) return null;
+    if (!key || endpointError) return null;
     return {
       ...(provider !== 'anthropic' ? { kind } : {}),
       api_key_value: key,
@@ -832,6 +826,11 @@ export function useApiKeyConnect({
               Don't have a key?
             </button>
           ))}
+        {endpointError ? (
+          <Notice tone="warning" role="alert">
+            {endpointError}
+          </Notice>
+        ) : null}
         <KeyProblemNotice
           provider={provider}
           problem={problem}
@@ -846,6 +845,7 @@ export function useApiKeyConnect({
             open={endpointOpen}
             value={baseUrl}
             busy={busy}
+            hint={`Requests and checks go here instead of ${PROVIDER_LABELS[provider]}.`}
             onOpen={() => {
               setBaseUrl('');
               resetCheck();
