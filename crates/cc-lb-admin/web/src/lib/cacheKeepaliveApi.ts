@@ -75,6 +75,8 @@ export const CacheKeepaliveSummarySchema = z.object({
   unlisted_sessions: z.number(),
   unlisted_renewals: z.number(),
   unlisted_spent: z.number(),
+  // Null when a deleted session's renewal has an unknown cost.
+  unlisted_net: z.number().nullable(),
   evidence_status: CacheKeepaliveEvidenceStatusSchema,
   unknown_cycles: z.number(),
   retained_from_ms: z.number().nullable(),

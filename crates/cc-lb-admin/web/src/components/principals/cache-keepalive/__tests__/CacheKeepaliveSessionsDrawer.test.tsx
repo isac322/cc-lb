@@ -52,6 +52,7 @@ const summaryBase = {
   unlisted_sessions: 0,
   unlisted_renewals: 0,
   unlisted_spent: 0,
+  unlisted_net: 0,
   evidence_status: 'observed' as const,
   unknown_cycles: 0,
   retained_from_ms: 1_699_395_200_000,
@@ -549,7 +550,7 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
 });
 
 it('renders the non-clickable deleted-session aggregate with real money', () => {
-  vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+  vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
     data: {
       pages: [
         {
@@ -558,6 +559,7 @@ it('renders the non-clickable deleted-session aggregate with real money', () => 
             unlisted_sessions: 2,
             unlisted_renewals: 5,
             unlisted_spent: 0.03,
+            unlisted_net: -0.03,
           },
           rows: [],
           next_cursor: null,
@@ -585,4 +587,44 @@ it('renders the non-clickable deleted-session aggregate with real money', () => 
   expect(deleted.textContent).toContain('Spent $0.03');
   expect(deleted.textContent).toContain('−$0.03');
   expect(deleted.querySelector('button')).toBeNull();
+});
+
+it('shows an unknown deleted-session net when a deleted renewal has no known cost', () => {
+  cleanup();
+  vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
+    data: {
+      pages: [
+        {
+          summary: {
+            ...summaryBase,
+            cost_saved: null,
+            total_avoided: null,
+            unlisted_sessions: 1,
+            unlisted_renewals: 2,
+            unlisted_spent: 0.01,
+            unlisted_net: null,
+          },
+          rows: [],
+          next_cursor: null,
+        },
+      ],
+    },
+    isLoading: false,
+    isError: false,
+    hasNextPage: false,
+    isFetchingNextPage: false,
+    fetchNextPage: vi.fn(),
+  } as never);
+
+  renderWithProviders(
+    <CacheKeepaliveSessionsDrawer
+      open={true}
+      onOpenChange={() => {}}
+      principal={mockPrincipal}
+    />,
+  );
+
+  const deleted = screen.getByTestId('cache-keepalive-deleted-sessions');
+  expect(deleted.textContent).not.toContain('−$0.01');
+  expect(deleted.textContent).toContain('Spent $0.01');
 });

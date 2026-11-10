@@ -20,6 +20,8 @@ pub(crate) struct CacheKeepaliveSummaryResponse {
     pub(crate) unlisted_sessions: u64,
     pub(crate) unlisted_renewals: u64,
     pub(crate) unlisted_spent: f64,
+    /// `-unlisted_spent`, or null when any unlisted renewal has an unknown cost.
+    pub(crate) unlisted_net: Option<f64>,
     pub(crate) evidence_status: String,
     pub(crate) unknown_cycles: u64,
     pub(crate) retained_from_ms: Option<u64>,

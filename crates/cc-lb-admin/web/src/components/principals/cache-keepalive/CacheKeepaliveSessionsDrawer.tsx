@@ -324,7 +324,7 @@ function DeletedSessionsRow({
       <span className="flex shrink-0 items-baseline gap-1 text-caption text-text-muted">
         Net
         <DecimalAlignedUsd
-          value={-summary.unlisted_spent}
+          value={summary.unlisted_net}
           maxFracDigits={maxFracDigits}
           scope="group"
         />

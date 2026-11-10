@@ -820,7 +820,13 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                  WHERE t_unlisted.principal_id = ?
                    AND (? IS NULL OR t_unlisted.ts * 1000 >= ?)
                    AND NOT EXISTS (SELECT 1 FROM cache_keepalive_sessions s_unlisted WHERE s_unlisted.principal_id = t_unlisted.principal_id AND s_unlisted.session_key_hash = t_unlisted.session_key_hash)
-                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns t_evidence JOIN cache_keepalive_evidence e_unlisted ON e_unlisted.principal_id = t_evidence.principal_id AND e_unlisted.evidence_kind = 'renewal' AND e_unlisted.event_ref = t_evidence.source_ref_id WHERE t_evidence.principal_id = t_unlisted.principal_id AND t_evidence.session_key_hash = t_unlisted.session_key_hash)) AS unlisted_spent_micros
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns t_evidence JOIN cache_keepalive_evidence e_unlisted ON e_unlisted.principal_id = t_evidence.principal_id AND e_unlisted.evidence_kind = 'renewal' AND e_unlisted.event_ref = t_evidence.source_ref_id WHERE t_evidence.principal_id = t_unlisted.principal_id AND t_evidence.session_key_hash = t_unlisted.session_key_hash)) AS unlisted_spent_micros,
+                (SELECT COUNT(*) FROM cache_keepalive_turns t_unlisted
+                 WHERE t_unlisted.principal_id = ?
+                   AND (? IS NULL OR t_unlisted.ts * 1000 >= ?)
+                   AND t_unlisted.cost_known = 0
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_sessions s_unlisted WHERE s_unlisted.principal_id = t_unlisted.principal_id AND s_unlisted.session_key_hash = t_unlisted.session_key_hash)
+                   AND NOT EXISTS (SELECT 1 FROM cache_keepalive_turns t_evidence JOIN cache_keepalive_evidence e_unlisted ON e_unlisted.principal_id = t_evidence.principal_id AND e_unlisted.evidence_kind = 'renewal' AND e_unlisted.event_ref = t_evidence.source_ref_id WHERE t_evidence.principal_id = t_unlisted.principal_id AND t_evidence.session_key_hash = t_unlisted.session_key_hash)) AS unlisted_unknown_costs
              FROM cache_keepalive_evidence e_summary
              WHERE e_summary.principal_id = ?
                AND e_summary.evidence_kind = 'renewal'
@@ -848,6 +854,9 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .bind(horizon_start_ms)
         .bind(horizon_start_ms)
         .bind(principal_id)
+        .bind(principal_id)
+        .bind(horizon_start_ms)
+        .bind(horizon_start_ms)
         .bind(principal_id)
         .bind(horizon_start_ms)
         .bind(horizon_start_ms)
@@ -1087,6 +1096,13 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             unlisted_spent_micros: row
                 .try_get("unlisted_spent_micros")
                 .map_err(map_sqlx_error)?,
+            unlisted_unknown_costs: row
+                .try_get::<i64, _>("unlisted_unknown_costs")
+                .map_err(map_sqlx_error)?
+                .try_into()
+                .map_err(|_| StorageError::Corrupted {
+                    message: "negative cache keepalive unlisted unknown cost count".to_owned(),
+                })?,
             retained_from_ms: row
                 .try_get::<Option<i64>, _>("retained_from_ms")
                 .map_err(map_sqlx_error)?

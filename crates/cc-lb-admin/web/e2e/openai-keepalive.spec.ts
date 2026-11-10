@@ -53,6 +53,7 @@ const summary = {
   unlisted_sessions: 0,
   unlisted_renewals: 0,
   unlisted_spent: 0,
+  unlisted_net: 0,
   evidence_status: 'none',
   unknown_cycles: 0,
   retained_from_ms: null,

@@ -35,6 +35,7 @@ describe('CacheKeepaliveSummarySchema', () => {
       unlisted_sessions: 0,
       unlisted_renewals: 0,
       unlisted_spent: 0,
+      unlisted_net: 0,
       evidence_status: 'observed',
       unknown_cycles: 0,
       retained_from_ms: 1_699_395_200_000,

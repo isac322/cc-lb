@@ -134,6 +134,8 @@ async fn list_cache_keepalive(
         unlisted_sessions: aggregate.unlisted_sessions,
         unlisted_renewals: aggregate.unlisted_renewals,
         unlisted_spent: aggregate.unlisted_spent_micros as f64 / 1_000_000.0,
+        unlisted_net: (aggregate.unlisted_unknown_costs == 0)
+            .then(|| aggregate.unlisted_spent_micros.saturating_neg() as f64 / 1_000_000.0),
         evidence_status: aggregate.evidence_status,
         unknown_cycles: aggregate.unknown_cycles,
         retained_from_ms: aggregate.retained_from_ms,

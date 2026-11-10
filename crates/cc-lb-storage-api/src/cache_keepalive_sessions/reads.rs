@@ -223,6 +223,8 @@ pub struct CacheKeepaliveSummaryAggregate {
     pub unlisted_sessions: u64,
     pub unlisted_renewals: u64,
     pub unlisted_spent_micros: i64,
+    /// Unlisted renewals whose cost is unknown; their net cannot be stated.
+    pub unlisted_unknown_costs: u64,
     pub retained_from_ms: Option<u64>,
     pub evidence_status: String,
     pub groups: Vec<CacheKeepaliveSummaryGroup>,

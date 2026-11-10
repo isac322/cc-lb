@@ -211,6 +211,7 @@ pub(crate) fn summary_for_items(
         unlisted_sessions: 0,
         unlisted_renewals: 0,
         unlisted_spent: 0.0,
+        unlisted_net: Some(0.0),
         evidence_status: evidence_status.to_owned(),
         unknown_cycles,
         retained_from_ms,

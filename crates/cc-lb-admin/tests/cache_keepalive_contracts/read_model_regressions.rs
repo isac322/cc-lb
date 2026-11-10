@@ -1601,7 +1601,18 @@ async fn q1_q7_keepalive_contract_invariants_and_realtime_wire_case() {
         assert!(summary["unlisted_sessions"].is_number());
         assert!(summary["unlisted_renewals"].is_number());
         assert!(summary["unlisted_spent"].is_number());
+        assert_json_dollars(&summary["unlisted_net"], -unlisted_spent);
     }
+
+    // A deleted session whose renewal cost is unknown cannot state its net.
+    sqlx::query("UPDATE cache_keepalive_turns SET cost_known = 0 WHERE source_ref_id = ?")
+        .bind("purged-without-evidence-turn")
+        .execute(storage.pool())
+        .await
+        .expect("mark unlisted cost unknown");
+    let (summary, _rows) = fetch_all_keepalive_pages(&state, &principal_id, "24h").await;
+    assert!(summary["unlisted_net"].is_null(), "{summary:?}");
+    assert!(summary["cost_saved"].is_null(), "{summary:?}");
 }
 
 #[test]

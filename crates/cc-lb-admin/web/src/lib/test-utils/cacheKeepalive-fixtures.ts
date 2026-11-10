@@ -23,6 +23,7 @@ export const cacheKeepaliveSummaryFixture: CacheKeepaliveSummary = {
   unlisted_sessions: 0,
   unlisted_renewals: 0,
   unlisted_spent: 0,
+  unlisted_net: 0,
   evidence_status: 'observed',
   unknown_cycles: 0,
   retained_from_ms: BASE_MS - 7 * 24 * 60 * 60 * 1_000,
