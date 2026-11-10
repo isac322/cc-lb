@@ -163,8 +163,7 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     const pulses = Array.from({ length: 12 }, (_, index) => ({
       pulse_number: index + 1,
       time_ms: 1_700_000_000_000 + (index + 1) * 270_000,
-      offset_sec:
-        index === 10 ? 2980 : index === 11 ? 3250 : (index + 1) * 270,
+      offset_sec: index === 10 ? 2980 : index === 11 ? 3250 : (index + 1) * 270,
       since_prev_renewal_sec: null,
       spent_usd: 0.1,
       hit: false,
