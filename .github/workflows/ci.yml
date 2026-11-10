@@ -535,8 +535,8 @@ jobs:
       - nextest-cov-build
     if: ${{ !cancelled() && needs.nextest-cov-build.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 120
     env:
+      SQLX_OFFLINE: "true"
       LLVM_PROFILE_FILE_NAME: shard-0-%8m.profraw
     steps:
       - uses: actions/checkout@v7
