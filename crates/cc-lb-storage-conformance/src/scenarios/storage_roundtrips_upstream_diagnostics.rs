@@ -24,8 +24,9 @@ where
             status: 200,
             duration_ms: 900,
             error_code: Some("upstream_stream_error".to_owned()),
-            upstream_error_type: Some("upstream_response_body_error".to_owned()),
-            upstream_error_message: Some("upstream response body failed".to_owned()),
+            upstream_error_type: Some("insufficient_quota".to_owned()),
+            upstream_error_message: Some("quota exhausted".to_owned()),
+            upstream_error_code: Some("credit_balance_exhausted".to_owned()),
             stream_message_stop_ms: Some(812),
             upstream_http_version: Some("HTTP/2.0".to_owned()),
             upstream_request_id: Some("req_011CUpstream".to_owned()),
@@ -130,11 +131,15 @@ where
             got.stream_message_stop_ms
         );
         ensure!(
-            got.upstream_error_type.as_deref() == Some("upstream_response_body_error"),
+            got.upstream_error_type.as_deref() == Some("insufficient_quota"),
             "upstream_error_type mismatch: {:?}",
             got.upstream_error_type
         );
-
+        ensure!(
+            got.upstream_error_code.as_deref() == Some("credit_balance_exhausted"),
+            "upstream_error_code mismatch: {:?}",
+            got.upstream_error_code
+        );
         let absent = recent
             .iter()
             .find(|e| e.request_id == "req_upstream_diagnostics_absent")

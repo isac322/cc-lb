@@ -2847,9 +2847,9 @@ mod tests {
         .unwrap();
         tx.send(LifecycleEvent::RequestLogUpstreamErrorObserved {
             event_id: event_id.clone(),
-            error_type: "rate_limit_error".into(),
-            error_message: "bounded".into(),
-            upstream_error_code: None,
+            error_type: "insufficient_quota".into(),
+            error_message: "quota exhausted".into(),
+            upstream_error_code: Some("credit_balance_exhausted".into()),
             retry_after: None,
         })
         .await
@@ -2884,9 +2884,16 @@ mod tests {
         assert_eq!(rows[0].error_code.as_deref(), Some("upstream_4xx"));
         assert_eq!(
             rows[0].upstream_error_type.as_deref(),
-            Some("rate_limit_error")
+            Some("insufficient_quota")
         );
-        assert_eq!(rows[0].upstream_error_message.as_deref(), Some("bounded"));
+        assert_eq!(
+            rows[0].upstream_error_message.as_deref(),
+            Some("quota exhausted")
+        );
+        assert_eq!(
+            rows[0].upstream_error_code.as_deref(),
+            Some("credit_balance_exhausted")
+        );
     }
 
     fn diagnostics_terminated(

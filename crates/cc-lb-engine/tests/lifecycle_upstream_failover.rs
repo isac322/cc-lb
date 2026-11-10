@@ -1162,6 +1162,37 @@ async fn openai_oauth_only_exhaustion_relays_last_429() {
 }
 
 #[tokio::test]
+async fn openai_billing_429_keeps_generic_failover_and_relays_without_fallback() {
+    const BILLING_BODY: &[u8] = br#"{"error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"quota exhausted"}}"#;
+    let billing_reply = || Reply::Body {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        content_type: "application/json",
+        body: Bytes::from_static(BILLING_BODY),
+    };
+
+    let with_fallback = Fixture::new(vec![
+        openai_api_key(34, "openai-billing-1").replies(vec![billing_reply()]),
+        openai_api_key(35, "openai-billing-2"),
+    ]);
+    let (status, _body) = with_fallback.send_request(openai_responses_request()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        with_fallback.hosts(),
+        vec![host("openai-billing-1"), host("openai-billing-2")]
+    );
+
+    let without_fallback = Fixture::new(vec![
+        openai_api_key(36, "openai-billing-alone").replies(vec![billing_reply()]),
+    ]);
+    let (status, body) = without_fallback
+        .send_request(openai_responses_request())
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body, Bytes::from_static(BILLING_BODY));
+    assert_eq!(without_fallback.hosts(), vec![host("openai-billing-alone")]);
+}
+
+#[tokio::test]
 async fn openai_second_oauth_is_tried_before_final_api_key() {
     let fixture = Fixture::new(vec![
         openai_oauth(40, "openai-oauth-1")
