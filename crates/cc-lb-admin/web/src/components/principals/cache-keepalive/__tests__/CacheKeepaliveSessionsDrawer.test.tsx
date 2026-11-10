@@ -258,10 +258,13 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
   });
 
   it('keeps long tool triggers truncated while USD values stay nowrap and decimal-aligned', () => {
-    const longTrigger =
-      'mcp__plugin_supabase_supabase__execute_sql';
-    const rows = cacheKeepaliveRows.map((r) => ({
+    const longTrigger = 'mcp__plugin_supabase_supabase__execute_sql';
+    const rows = cacheKeepaliveRows.map((r, idx) => ({
       ...r,
+      reason:
+        idx === 0
+          ? `agent-in-turn (tool_use: \`${longTrigger}\`)`
+          : (r.reason as string),
       net_pnl: r.netPnl,
       is_active: r.state === 'renewed' || r.state === 'scheduled',
       max_attempts: r.maxAttempts,
@@ -269,7 +272,6 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
       session_key_hash: r.id,
       retained_renewals: r.attempts ?? 0,
     }));
-    rows[0] = { ...rows[0], reason: `tool_use: \`${longTrigger}\`` };
 
     vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
       data: {
