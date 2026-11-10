@@ -30,7 +30,10 @@ for (const width of [390, 768, 1440]) {
         return requested.includes('overage') && requested.includes('unified');
       })).toBe(true);
 
-      await page.goto(`/upstreams?selectedId=${ID}`);
+      await overview.click();
+      await expect(page).toHaveURL(
+        (url) => url.pathname === '/upstreams' && url.searchParams.get('selectedId') === ID,
+      );
       const detail = page.getByTestId('quota-snapshot-grid');
       await expect(detail).toBeVisible();
       await expect(detail.getByRole('listitem')).toHaveCount(3);

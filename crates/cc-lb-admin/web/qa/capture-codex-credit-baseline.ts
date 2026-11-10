@@ -56,7 +56,10 @@ try {
       await expect(overview.getByRole('meter', { name: '7d window used', exact: true })).toHaveAttribute('aria-valuenow', '50');
       await page.screenshot({ path: resolve(outputRoot, `${width}-overview.png`), fullPage: true });
       const overviewCredits = await page.getByTestId('codex-credit-facts').count();
-      await page.goto(`http://127.0.0.1:${port}/upstreams?selectedId=${ID}`);
+      await overview.click();
+      await expect(page).toHaveURL(
+        (url) => url.pathname === '/upstreams' && url.searchParams.get('selectedId') === ID,
+      );
       const detail = page.getByTestId('quota-snapshot-grid');
       await expect(detail).toBeVisible();
       await expect(detail.getByRole('meter', { name: '5h', exact: true })).toHaveAttribute('aria-valuenow', '25');
