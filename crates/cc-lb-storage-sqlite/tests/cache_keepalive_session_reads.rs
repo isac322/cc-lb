@@ -2120,3 +2120,55 @@ async fn reconstructed_purged_session_scopes_refresh_count_and_reason_to_selecte
     );
     assert_eq!(item.reason, "TTL expired before follow-up");
 }
+
+#[tokio::test]
+async fn purged_session_reconstructs_display_reason_from_turn() {
+    let (_temp_dir, storage) = storage().await;
+    let display_reason = "agent-in-turn (tool_use: `Bash`) — first renewal in 4m 30s";
+    let session = storage
+        .replace_from_real_request(&request("purged-display-reason", 100, display_reason))
+        .await
+        .expect("insert display-reason session");
+    let mut projection = economics_projection("purged-display-renewal", None, 200, "hit", 6_000);
+    projection
+        .turn
+        .as_mut()
+        .expect("renewal turn")
+        .session_key_hash = session.session_key_hash.clone();
+    projection.decision.session_key_hash = Some(session.session_key_hash.clone());
+    storage
+        .append_request_event_with_projections(&event("purged-display-renewal", 200), &projection)
+        .await
+        .expect("append renewal turn");
+
+    let persisted_reason: String = sqlx::query_scalar(
+        "SELECT display_reason FROM cache_keepalive_turns WHERE source_ref_id = ?",
+    )
+    .bind("purged-display-renewal")
+    .fetch_one(storage.pool())
+    .await
+    .expect("read persisted display reason");
+    assert_eq!(persisted_reason, display_reason);
+
+    assert_eq!(
+        storage
+            .purge_cache_keepalive_expired(401)
+            .await
+            .expect("purge expired session"),
+        1
+    );
+    let page = storage
+        .list_cache_keepalive_sessions(&all_query(10))
+        .await
+        .expect("list reconstructed session");
+    let reconstructed = page
+        .rows
+        .iter()
+        .find(|row| row.id == "purged-display-reason")
+        .expect("reconstructed purged session");
+    assert_eq!(
+        reconstructed.display_reason.as_deref(),
+        Some(display_reason)
+    );
+    assert_eq!(reconstructed.reason, "TTL expired before follow-up");
+}

@@ -1,4 +1,9 @@
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  CornerDownRight,
+  Terminal,
+} from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type {
   CacheKeepaliveHorizon,
@@ -60,28 +65,63 @@ function normalizeToolTrigger(raw: string): string {
   return match ?? trimmed;
 }
 
-export function extractTriggerLabel(row: CacheKeepaliveRow): string {
+type TriggerKind = 'tool' | 'state';
+
+function extractTriggerDescriptor(row: CacheKeepaliveRow): {
+  label: string;
+  kind: TriggerKind;
+} {
   const sourceText =
     row.display_reason && row.display_reason !== row.reason
       ? `${row.display_reason} · ${row.reason}`
       : (row.display_reason ?? row.reason);
   const backtickToolMatch = sourceText.match(/tool_use:\s*`([^`]+)`/i);
-  if (backtickToolMatch?.[1]) return normalizeToolTrigger(backtickToolMatch[1]);
+  if (backtickToolMatch?.[1]) {
+    return {
+      label: normalizeToolTrigger(backtickToolMatch[1]),
+      kind: 'tool',
+    };
+  }
   const toolMatch = sourceText.match(/tool_use:\s*([A-Za-z0-9_.:/-]+)/i);
-  if (toolMatch?.[1]) return normalizeToolTrigger(toolMatch[1]);
+  if (toolMatch?.[1]) {
+    return {
+      label: normalizeToolTrigger(toolMatch[1]),
+      kind: 'tool',
+    };
+  }
   const stopMatch = sourceText.match(/stop_reason=([A-Za-z0-9_:-]+)/i);
-  if (stopMatch?.[1]) return `stop_reason=${stopMatch[1]}`;
+  if (stopMatch?.[1]) {
+    return { label: `stop_reason=${stopMatch[1]}`, kind: 'state' };
+  }
   const unsupportedMatch = sourceText.match(
     /zero-token renewal unsupported:\s*([^—·\n]+)/i,
   );
-  if (unsupportedMatch?.[1])
-    return `Unsupported: ${unsupportedMatch[1].trim()}`;
-  if (/cached prefix too small/i.test(sourceText)) return 'Prefix < min tokens';
-  if (/snapshot too large/i.test(sourceText)) return 'Snapshot too large';
-  if (/ambiguous turn/i.test(sourceText)) return 'Ambiguous turn';
-  if (/agent-in-turn/i.test(sourceText)) return 'Agent in-turn';
-  if (row.state !== 'not_tracked') return 'Agent in-turn';
-  return 'Other';
+  if (unsupportedMatch?.[1]) {
+    return {
+      label: `Unsupported: ${unsupportedMatch[1].trim()}`,
+      kind: 'state',
+    };
+  }
+  if (/cached prefix too small/i.test(sourceText)) {
+    return { label: 'Prefix < min tokens', kind: 'state' };
+  }
+  if (/snapshot too large/i.test(sourceText)) {
+    return { label: 'Snapshot too large', kind: 'state' };
+  }
+  if (/ambiguous turn/i.test(sourceText)) {
+    return { label: 'Ambiguous turn', kind: 'state' };
+  }
+  if (/agent-in-turn/i.test(sourceText)) {
+    return { label: 'Agent in-turn', kind: 'state' };
+  }
+  if (row.state !== 'not_tracked') {
+    return { label: 'Agent in-turn', kind: 'state' };
+  }
+  return { label: 'Other', kind: 'state' };
+}
+
+export function extractTriggerLabel(row: CacheKeepaliveRow): string {
+  return extractTriggerDescriptor(row).label;
 }
 
 export interface SplitUsdParts {
@@ -156,7 +196,7 @@ export function DecimalAlignedUsd({
       data-decimal-scope={scope}
       style={padRightCh > 0 ? { paddingRight: `${padRightCh}ch` } : undefined}
       className={cx(
-        'inline-flex shrink-0 items-baseline justify-end font-mono text-data tabular-nums',
+        'inline-flex shrink-0 whitespace-nowrap items-baseline justify-end font-mono text-data tabular-nums',
         pnlTone(value),
         className,
       )}
@@ -222,7 +262,7 @@ function SessionMasterRow({
       aria-current={selected ? 'true' : undefined}
       onClick={onSelect}
     >
-      <span className="flex min-w-0 items-center gap-2">
+      <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
         <span
           aria-hidden="true"
           className={cx('status-dot shrink-0', sessionDotTone(row))}
@@ -366,11 +406,15 @@ export function CacheKeepaliveSessionsDrawer({
   }, [enabled, query.data]);
 
   const groups = useMemo(() => {
-    const grouped = new Map<string, CacheKeepaliveRow[]>();
+    const grouped = new Map<
+      string,
+      { sessions: CacheKeepaliveRow[]; kind: TriggerKind }
+    >();
     for (const row of visibleRows) {
-      const trigger = extractTriggerLabel(row);
-      const current = grouped.get(trigger) ?? [];
-      current.push(row);
+      const { label: trigger, kind } = extractTriggerDescriptor(row);
+      const current = grouped.get(trigger) ?? { sessions: [], kind: 'state' };
+      current.sessions.push(row);
+      if (kind === 'tool') current.kind = 'tool';
       grouped.set(trigger, current);
     }
     const orderedTriggers = [
@@ -384,7 +428,8 @@ export function CacheKeepaliveSessionsDrawer({
     ];
     return orderedTriggers
       .map((trigger) => {
-        const sessions = grouped.get(trigger) ?? [];
+        const group = grouped.get(trigger);
+        const sessions = group?.sessions ?? [];
         const pnlValues = sessions
           .map((s) => s.net_pnl)
           .filter((v): v is number => v !== null);
@@ -392,7 +437,7 @@ export function CacheKeepaliveSessionsDrawer({
           pnlValues.length > 0
             ? pnlValues.reduce((acc, v) => acc + v, 0)
             : null;
-        return { trigger, sessions, groupNet };
+        return { trigger, kind: group?.kind ?? 'state', sessions, groupNet };
       })
       .filter((group) => group.sessions.length > 0);
   }, [visibleRows]);
@@ -536,21 +581,49 @@ export function CacheKeepaliveSessionsDrawer({
                         }
                         className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1 text-left transition-colors hover:bg-overlay-2 focus-visible:outline-2 focus-visible:outline-accent"
                       >
-                        <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
                           {isCollapsed ? (
                             <ChevronRight
                               aria-hidden="true"
+                              strokeWidth={1.75}
                               className="h-3.5 w-3.5 shrink-0 text-text-faint"
                             />
                           ) : (
                             <ChevronDown
                               aria-hidden="true"
+                              strokeWidth={1.75}
                               className="h-3.5 w-3.5 shrink-0 text-text-faint"
                             />
                           )}
-                          <span className="truncate text-label text-text-muted">
-                            {group.trigger}
-                          </span>
+                          {group.kind === 'tool' ? (
+                            <>
+                              <Terminal
+                                aria-hidden="true"
+                                strokeWidth={1.75}
+                                className="h-3.5 w-3.5 shrink-0 text-text-faint"
+                              />
+                              <span
+                                title={group.trigger}
+                                className="min-w-0 truncate rounded-sm bg-overlay-4 px-1.5 py-0.5 font-mono text-data text-text"
+                              >
+                                {group.trigger}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <CornerDownRight
+                                aria-hidden="true"
+                                strokeWidth={1.75}
+                                className="h-3.5 w-3.5 shrink-0 text-text-faint"
+                              />
+                              <span
+                                title={group.trigger}
+                                className="min-w-0 truncate text-label text-text-muted"
+                              >
+                                {group.trigger}
+                              </span>
+                            </>
+                          )}
                           <span className="shrink-0 text-caption text-text-faint tabular-nums">
                             ({group.sessions.length})
                           </span>
