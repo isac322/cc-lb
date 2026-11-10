@@ -1467,9 +1467,11 @@ async fn billing_stop_after(events: &[(u64, u16, Option<&str>, Option<&str>)]) -
     append(&h, &events).await;
     usage(&h, legacy.id, "range=24h&step=hour").await.body["month"]["billing_stop"].clone()
 }
+type ProviderBillingEvent<'a> = (u64, u16, Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
 async fn provider_billing_stop_after(
     kind: UpstreamKind,
-    events: &[(u64, u16, Option<&str>, Option<&str>, Option<&str>)],
+    events: &[ProviderBillingEvent<'_>],
 ) -> Value {
     let h = spawn_api_key_harness().await;
     let key = match kind {

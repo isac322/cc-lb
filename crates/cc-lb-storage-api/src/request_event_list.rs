@@ -211,6 +211,7 @@ mod tests {
             thinking_budget_tokens: None,
             thinking_tokens: None,
             service_tier: None,
+            status: 0,
             error_code: None,
             upstream_error_type: None,
             upstream_error_message: None,
