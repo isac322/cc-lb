@@ -63,6 +63,7 @@ where
     update_renames_name_index(Arc::clone(&backend)).await?;
     set_enabled_toggle(Arc::clone(&backend)).await?;
     store_oauth_tokens_roundtrip(Arc::clone(&backend)).await?;
+    complete_refresh_stores_tokens(Arc::clone(&backend)).await?;
     reconnect_rejects_stale_generation_status(Arc::clone(&backend)).await?;
     terminal_refresh_failure_dominates_late_status(Arc::clone(&backend)).await?;
     provider_generic_terminal_latch_dominates_late_status(Arc::clone(&backend)).await?;

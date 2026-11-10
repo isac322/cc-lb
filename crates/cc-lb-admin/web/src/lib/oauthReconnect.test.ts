@@ -369,11 +369,7 @@ describe('classifyOAuthReconnect — provider-specific renewal', () => {
     'keeps terminal reconnect markers visible for %s',
     (kind) => {
       expect(
-        classifyOAuthReconnect(
-          oauthStatus({ kind }),
-          'status_401',
-          NOW,
-        ),
+        classifyOAuthReconnect(oauthStatus({ kind }), 'status_401', NOW),
       ).toMatchObject({
         reason: 'renewal_rejected',
         tone: 'danger',
