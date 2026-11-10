@@ -737,7 +737,9 @@ async fn provider_quotas_list_all_oauth_kinds_and_scope_series() {
                 "overage",
                 "unified",
             ]),
-            "provider-codex" => std::collections::BTreeSet::from(["5h", "7d"]),
+            "provider-codex" => {
+                std::collections::BTreeSet::from(["5h", "7d", "overage", "unified"])
+            }
             "provider-gemini" => std::collections::BTreeSet::from([
                 "gemini_5h",
                 "gemini_7d",

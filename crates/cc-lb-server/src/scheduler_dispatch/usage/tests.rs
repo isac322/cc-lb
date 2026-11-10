@@ -574,6 +574,48 @@ fn codex_credit_precedence_keeps_unlimited_and_limit_reached_distinct() {
 }
 
 #[test]
+fn codex_usage_retains_unavailable_credits_and_optional_estimates() {
+    for balance in [serde_json::json!("0.0000000000"), serde_json::Value::Null] {
+        let records = records_from_openai_api(
+            Uuid::nil(),
+            &serde_json::json!({
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 40,
+                        "limit_window_seconds": 18000,
+                        "reset_at": 1_700_018_000
+                    },
+                    "secondary_window": {
+                        "used_percent": 60,
+                        "limit_window_seconds": 604800,
+                        "reset_at": 1_700_600_000
+                    }
+                },
+                "credits": {
+                    "has_credits": false,
+                    "unlimited": false,
+                    "overage_limit_reached": false,
+                    "balance": balance,
+                    "approx_local_messages": null,
+                    "approx_cloud_messages": [2, 5]
+                }
+            }),
+            1_700_000_000_000,
+        );
+        assert_utilization(&records, SubscriptionQuotaWindow::FiveHour, 0.4);
+        assert_utilization(&records, SubscriptionQuotaWindow::SevenDay, 0.6);
+        let overage = record(&records, SubscriptionQuotaWindow::Overage);
+        assert_eq!(overage.fallback_available, Some(false));
+        assert_eq!(overage.utilization, None);
+        assert_eq!(overage.extra_usage_monthly_limit, None);
+        let credits = overage.credits.as_ref().expect("unavailable credit state");
+        assert_eq!(credits.balance.as_deref(), balance.as_str());
+        assert_eq!(credits.approx_local_messages, None);
+        assert_eq!(credits.approx_cloud_messages, Some([2, 5]));
+    }
+}
+
+#[test]
 fn malformed_openai_usage_body_emits_no_observations() {
     let cache = SubscriptionQuotaCache::new();
     let (sink, mut receiver) = SubscriptionQuotaSink::new();
