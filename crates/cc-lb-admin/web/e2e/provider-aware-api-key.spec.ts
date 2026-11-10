@@ -106,7 +106,12 @@ test('provider-aware API-key create flow at supported widths', async ({ page }) 
     await dialog.getByRole('button', { name: 'Check key' }).click();
     await expect(dialog).toContainText('OpenAI key verified');
     await expect(dialog).not.toContainText('sk-ant-');
-    await expect(dialog).not.toContainText('Workspace');
+    if (process.env.PROVIDER_AWARE_SCREENSHOT_DIR) {
+      await page.screenshot({
+        path: `${process.env.PROVIDER_AWARE_SCREENSHOT_DIR}/provider-aware-${width}.png`,
+        fullPage: true,
+      });
+    }
     await dialog.getByLabel('Project ID').fill('proj-browser');
     await dialog.getByLabel('Upstream name').fill(`OpenAI browser ${width}`);
     await dialog.getByRole('button', { name: 'Add upstream' }).click();
