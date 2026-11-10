@@ -53,6 +53,7 @@ function makeAttempt(
 
 function makeSummary(
   lastAttempt: queries.WarmupAttempt,
+  dialectPlugin: queries.WarmupDialectPluginSnapshot | null = null,
 ): queries.WarmupSummary {
   return {
     upstream_id: upstream.id,
@@ -65,7 +66,7 @@ function makeSummary(
       transient_failure: lastAttempt.status === 'transient_failure' ? 1 : 0,
       permanent_failure: lastAttempt.status === 'permanent_failure' ? 1 : 0,
     },
-    dialect_plugin: null,
+    dialect_plugin: dialectPlugin,
   };
 }
 
@@ -139,9 +140,204 @@ describe('WarmupCardMinimal provider availability', () => {
   test.each(['anthropic_api_key', 'openai_api_key', 'gemini_api_key'] as const)(
     '%s has no warmup control',
     (kind) => {
-      render(<WarmupCardMinimal upstream={makeOauthUpstream({ kind })} />);
+      const plugin = { wasm_registry_id: 'unsupported-shape', config: {} };
+      setSummaryQuery(makeSummary(makeAttempt(), plugin), false);
+      render(
+        <WarmupCardMinimal
+          upstream={makeOauthUpstream({ kind, warmup_dialect_plugin: plugin })}
+        />,
+      );
+      expect(
+        screen.queryByRole('button', { name: 'View plugin config' }),
+      ).toBeNull();
+      expect(screen.queryByRole('dialog')).toBeNull();
       expect(screen.queryByTestId('warmup-card')).toBeNull();
       expect(queries.useWarmupSummary).not.toHaveBeenCalled();
+    },
+  );
+});
+describe('WarmupCardMinimal current plugin config', () => {
+  test.each(['anthropic_oauth', 'openai_oauth', 'gemini_oauth'] as const)(
+    '%s opens the effective plugin snapshot',
+    async (kind) => {
+      const plugin: queries.WarmupDialectPluginSnapshot = {
+        wasm_registry_id: `${kind}-shape`,
+        wire_version: 7,
+        config: { provider: kind, timeout_ms: 123 },
+      };
+      setSummaryQuery(makeSummary(makeAttempt(), plugin), false);
+      render(<WarmupCardMinimal upstream={makeOauthUpstream({ kind })} />);
+
+      await userEvent
+        .setup()
+        .click(screen.getByRole('button', { name: 'View plugin config' }));
+
+      const dialog = screen.getByRole('dialog', { name: /-shape/ });
+      expect(dialog.textContent).toContain(plugin.wasm_registry_id);
+      expect(dialog.textContent).toContain('wire v7');
+      expect(dialog.querySelector('pre')?.textContent).toBe(
+        JSON.stringify(plugin.config, null, 2),
+      );
+      expect(screen.getByRole('button', { name: 'Copy JSON' })).toBeTruthy();
+    },
+  );
+
+  test('prefers the summary snapshot over the configured plugin', async () => {
+    const configuredPlugin: queries.WarmupDialectPluginSnapshot = {
+      wasm_registry_id: 'configured-shape',
+      wire_version: 2,
+      config: { source: 'configured' },
+    };
+    const summaryPlugin: queries.WarmupDialectPluginSnapshot = {
+      wasm_registry_id: 'summary-shape',
+      wire_version: 8,
+      config: { source: 'summary' },
+    };
+    setSummaryQuery(makeSummary(makeAttempt(), summaryPlugin), false);
+    render(
+      <WarmupCardMinimal
+        upstream={makeOauthUpstream({
+          warmup_dialect_plugin: configuredPlugin,
+        })}
+      />,
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole('button', { name: 'View plugin config' }));
+
+    const dialog = screen.getByRole('dialog', { name: /summary-shape/ });
+    expect(dialog.textContent).toContain('"source": "summary"');
+    expect(dialog.textContent).not.toContain('configured-shape');
+    expect(dialog.textContent).not.toContain('"source": "configured"');
+  });
+
+  test.each([false, true])(
+    'falls back to the configured plugin with summary pending=%s',
+    async (pending) => {
+      const configuredPlugin: queries.WarmupDialectPluginSnapshot = {
+        wasm_registry_id: 'configured-shape',
+        config: { source: 'configured' },
+      };
+      setSummaryQuery(
+        pending ? undefined : makeSummary(makeAttempt()),
+        pending,
+      );
+      render(
+        <WarmupCardMinimal
+          upstream={makeOauthUpstream({
+            warmup_dialect_plugin: configuredPlugin,
+          })}
+        />,
+      );
+
+      await userEvent
+        .setup()
+        .click(screen.getByRole('button', { name: 'View plugin config' }));
+
+      const dialog = screen.getByRole('dialog', { name: /configured-shape/ });
+      expect(dialog.querySelector('pre')?.textContent).toBe(
+        JSON.stringify(configuredPlugin.config, null, 2),
+      );
+      expect(dialog.textContent).not.toContain('wire v');
+    },
+  );
+
+  test('ignores an unsaved plugin selection when opening the snapshot', async () => {
+    const summaryPlugin: queries.WarmupDialectPluginSnapshot = {
+      wasm_registry_id: 'summary-shape',
+      config: { source: 'summary' },
+    };
+    setSummaryQuery(makeSummary(makeAttempt(), summaryPlugin), false);
+    vi.mocked(queries.usePluginRegistry).mockReturnValue({
+      data: {
+        entries: [
+          {
+            id: 'new-shape',
+            name: 'New shape',
+            sha256_hex: 'a'.repeat(64),
+            original_filename: 'new-shape.wasm',
+            description: 'fixture',
+            usage: 'fixture',
+            hook_metadata: {
+              shape_anthropic: {
+                wire_version: 1,
+                description: 'fixture',
+                usage: 'fixture',
+                mode: 'active',
+              },
+            },
+            label: null,
+            size_bytes: 1,
+            refcount: 0,
+            revision: 1,
+            uploaded_at_unix_secs: 1,
+            metadata: null,
+            supported_slots: ['shape'],
+          },
+        ],
+      },
+      isPending: false,
+    } as never);
+    render(
+      <WarmupCardMinimal
+        upstream={makeOauthUpstream({
+          warmup_dialect_plugin: null,
+        })}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId('warmup-plugin-select'));
+    await user.click(await screen.findByRole('option', { name: 'New shape' }));
+    await user.click(
+      screen.getByRole('button', { name: 'View plugin config' }),
+    );
+
+    const dialog = screen.getByRole('dialog', { name: /summary-shape/ });
+    expect(dialog.textContent).toContain('"source": "summary"');
+    expect(dialog.textContent).not.toContain('new-shape');
+  });
+
+  test('copies the pretty config without editing', async () => {
+    const writeText = vi
+      .spyOn(navigator.clipboard, 'writeText')
+      .mockResolvedValue(undefined);
+
+    try {
+      const plugin: queries.WarmupDialectPluginSnapshot = {
+        wasm_registry_id: 'copy-shape',
+        config: { enabled: true, nested: { value: 42 } },
+      };
+      setSummaryQuery(makeSummary(makeAttempt(), plugin), false);
+      render(<WarmupCardMinimal upstream={upstream} />);
+
+      const user = userEvent.setup();
+      await user.click(
+        screen.getByRole('button', { name: 'View plugin config' }),
+      );
+      await user.click(screen.getByRole('button', { name: 'Copy JSON' }));
+
+      const copied = await screen.findByRole('button', { name: 'Copied' });
+      expect(copied).toBeTruthy();
+      expect(writeText).toHaveBeenCalledWith(
+        JSON.stringify(plugin.config, null, 2),
+      );
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    } finally {
+      writeText.mockRestore();
+    }
+  });
+
+  test.each(['anthropic_oauth', 'openai_oauth', 'gemini_oauth'] as const)(
+    '%s does not show an opener without an effective snapshot',
+    (kind) => {
+      render(<WarmupCardMinimal upstream={makeOauthUpstream({ kind })} />);
+      expect(screen.getByTestId('warmup-card')).toBeTruthy();
+      expect(
+        screen.queryByRole('button', { name: 'View plugin config' }),
+      ).toBeNull();
+      expect(screen.queryByRole('dialog')).toBeNull();
     },
   );
 });

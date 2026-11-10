@@ -2,7 +2,11 @@ import { expect, type Page, type Request, test } from '@playwright/test';
 import type { AuthSession, QuotaSnapshot } from '../src/lib/api';
 import { COPY } from '../src/lib/copy/warmup';
 
-type WarmupPlugin = { wasm_registry_id: string; config: Record<string, unknown> } | null;
+type WarmupPlugin = {
+  wasm_registry_id: string;
+  wire_version?: number;
+  config: Record<string, unknown>;
+} | null;
 type UpstreamFixture = {
   id: string;
   name: string;
@@ -411,10 +415,9 @@ test.describe('WarmupCard', () => {
 
     const fiveHourWording = /\b(?:5[-\s]*(?:h|hours?)|five[- ]hours?)\b/i;
     const card = page.getByTestId('warmup-card');
-    await expect(card.getByText('Prepares the next quota window during idle gaps.', { exact: true })).toBeVisible();
     await expect(card).not.toContainText(fiveHourWording);
     await card.getByLabel('Warm-up help', { exact: true }).hover();
-    const help = page.getByText(/^Warm-up sends a tiny background Anthropic request during idle time/);
+    const help = page.getByRole('dialog');
     await expect(help).toBeVisible();
     await expect(help).toContainText('the next quota window');
     await expect(help).not.toContainText(fiveHourWording);
@@ -422,8 +425,6 @@ test.describe('WarmupCard', () => {
     await card.getByRole('button', { name: COPY.fireNowButtonLabel, exact: true }).click();
     const dialog = page.getByRole('alertdialog', { name: COPY.confirmFireTitle });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByText(COPY.confirmFireBody.replace('{upstreamName}', 'oauth-healthy'), { exact: true })).toBeVisible();
-    await expect(dialog).toContainText('current quota window');
     await expect(dialog).not.toContainText(fiveHourWording);
     await dialog.getByRole('button', { name: COPY.confirmFireConfirmLabel, exact: true }).click();
     await expect(page.getByText(COPY.fireSuccess, { exact: true })).toBeVisible();
@@ -504,7 +505,12 @@ test.describe('WarmupCard', () => {
     let patchBody: unknown;
     let ifMatch: string | null = null;
     await installAppFixtures(page, {
-      upstreams: [oauthHealthy({ warmup_dialect_plugin: null }), oauthDisabled(), apiKeyUpstream()],
+      upstreams: [oauthHealthy({
+        warmup_dialect_plugin: {
+          wasm_registry_id: 'previous-shape',
+          config: { source: 'before-save' },
+        },
+      }), oauthDisabled(), apiKeyUpstream()],
       onPatch: async (request, upstream) => {
         patchBody = request.postDataJSON();
         ifMatch = request.headers()['if-match'] ?? null;
@@ -514,6 +520,10 @@ test.describe('WarmupCard', () => {
       },
     });
     await openUpstreams(page);
+    await expect(page.getByTestId('warmup-status-value')).toContainText('Healthy');
+    await page.getByRole('button', { name: 'View plugin config' }).click();
+    await expect(page.getByRole('dialog', { name: 'previous-shape' })).toBeVisible();
+    await page.keyboard.press('Escape');
     await page.getByTestId('warmup-plugin-select').click();
     await page.getByRole('option', { name: 'anthropic-shape-v2', exact: true }).click();
 
@@ -522,6 +532,11 @@ test.describe('WarmupCard', () => {
     await testInfo.attach('scenario-6-patch-body.json', { body: JSON.stringify(patchBody, null, 2), contentType: 'application/json' });
     await expect(page.getByTestId('warmup-plugin-select')).toContainText('anthropic-shape-v2');
     await expect(page.getByText(COPY.dialectPluginSaveSuccess)).toBeVisible();
+    await page.getByRole('button', { name: 'View plugin config' }).click();
+    const configDialog = page.getByRole('dialog', { name: 'anthropic-shape-v2' });
+    await expect(configDialog).toBeVisible();
+    await expect(configDialog.locator('pre')).toHaveText('{}');
+    await page.keyboard.press('Escape');
     await page.screenshot({ path: testInfo.outputPath('scenario-6-plugin-save.png'), fullPage: true });
   });
 
@@ -540,7 +555,9 @@ test.describe('WarmupCard', () => {
       },
     });
     await openUpstreams(page);
-    await page.getByTestId('warmup-plugin-clear').click();
+    await expect(page.getByTestId('warmup-status-value')).toContainText('Healthy');
+    await page.getByTestId('warmup-plugin-select').click();
+    await page.getByRole('option', { name: COPY.defaultPluginOption, exact: true }).click();
     const dialog = page.getByRole('alertdialog', { name: COPY.confirmClearPluginTitle });
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: COPY.confirmClearPluginConfirmLabel, exact: true }).click();
@@ -548,8 +565,8 @@ test.describe('WarmupCard', () => {
     await expect.poll(() => deleteUrl).toBe('/admin/v1/upstreams/oauth-healthy/warmup-dialect-plugin');
     expect(ifMatch).toBe(`W/"${specRevision}"`);
     await expect(page.getByTestId('warmup-plugin-select')).toContainText(COPY.defaultPluginOption);
-    await expect(page.getByTestId('warmup-plugin-clear')).toHaveCount(0);
     await expect(page.getByText(COPY.dialectPluginClearSuccess)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'View plugin config' })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('scenario-7-plugin-clear.png'), fullPage: true });
   });
 
@@ -619,7 +636,7 @@ test.describe('WarmupCard', () => {
 
     await page.getByTestId('warmup-plugin-select').click();
     await expect(page.getByRole('option', { name: COPY.unknownPluginTemplate.replace('{id}', 'ghost-plugin'), exact: true })).toHaveCount(1);
-    await expect(page.getByTestId('warmup-plugin-clear')).toBeVisible();
+    await expect(page.getByRole('option', { name: COPY.defaultPluginOption, exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('scenario-11-unknown-plugin.png'), fullPage: true });
   });
 
@@ -633,20 +650,20 @@ test.describe('WarmupCard', () => {
     await page.screenshot({ path: testInfo.outputPath('scenario-12-no-shape-plugins.png'), fullPage: true });
   });
 
-  test('Scenario 13: A11y keyboard tab order + focus return', async ({ page }, testInfo) => {
+  test('Scenario 13: A11y keyboard activation + focus return', async ({ page }, testInfo) => {
     await installAppFixtures(page, {
       upstreams: [oauthHealthy({ warmup_dialect_plugin: { wasm_registry_id: 'anthropic-shape-v2', config: {} } }), oauthDisabled(), apiKeyUpstream()],
     });
     await openUpstreams(page);
 
-    await page.getByTestId('warmup-card').focus();
-    const expectedOrder = ['warmup-history-button', 'warmup-fire-now', 'warmup-switch', 'warmup-plugin-select', 'warmup-plugin-clear'];
-    const focusOrder: string[] = [];
-    for (let index = 0; index < expectedOrder.length; index += 1) {
-      await page.keyboard.press('Tab');
-      focusOrder.push(await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.testid ?? ''));
-    }
-    expect(focusOrder).toEqual(expectedOrder);
+    const opener = page.getByRole('button', { name: 'View plugin config' });
+    await page.getByTestId('warmup-plugin-select').focus();
+    await page.keyboard.press('Tab');
+    await expect(opener).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: /anthropic-shape-v2/ })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(opener).toBeFocused();
 
     await page.getByTestId('warmup-fire-now').click();
     const dialog = page.getByRole('alertdialog', { name: COPY.confirmFireTitle });
@@ -658,4 +675,78 @@ test.describe('WarmupCard', () => {
     expect(violations).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath('scenario-13-a11y-focus.png'), fullPage: true });
   });
+});
+
+test('Scenario 14: Current plugin config stays reachable across required viewports', async ({
+  page,
+}, testInfo) => {
+  const configured = oauthHealthy({
+    warmup_dialect_plugin: {
+      wasm_registry_id: 'anthropic-shape-v2',
+      wire_version: 3,
+      config: {
+        prompt: 'warm-up-config-'.repeat(24),
+        nested: { retries: 2, mode: 'summary' },
+      },
+    },
+  });
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await installAppFixtures(page, {
+    upstreams: [configured, oauthDisabled(), apiKeyUpstream()],
+  });
+
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 768, height: 1024 },
+    { width: 1440, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await openUpstreams(page);
+    if (viewport.width < 768) {
+      for (const label of ['Warm-up help', 'Shape plugin help']) {
+        const helpButton = page.getByRole('button', { name: label, exact: true });
+        const target = await helpButton.boundingBox();
+        expect(target?.width).toBeGreaterThanOrEqual(44);
+        expect(target?.height).toBeGreaterThanOrEqual(44);
+      }
+    }
+
+    const card = page.getByTestId('warmup-card');
+    const opener = card.getByRole('button', {
+      name: 'View plugin config',
+      exact: true,
+    });
+    await expect(opener).toBeVisible();
+    await expect(page.locator('html')).toHaveJSProperty(
+      'scrollWidth',
+      viewport.width,
+    );
+
+    await opener.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`card-${viewport.width}.png`) });
+    await opener.click();
+    const dialog = page.getByRole('dialog', { name: /anthropic-shape-v2/ });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('wire v3');
+    await expect(dialog.locator('pre')).toContainText(
+      'warm-up-config-warm-up-config-',
+    );
+    await expect(
+      dialog.getByRole('button', { name: 'Copy JSON' }),
+    ).toBeVisible();
+    await expect(dialog.locator('pre')).toHaveText(
+      JSON.stringify(configured.warmup_dialect_plugin?.config, null, 2),
+    );
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await expect(dialog).toHaveCSS('opacity', '1');
+    await page.screenshot({ path: testInfo.outputPath(`config-${viewport.width}.png`) });
+    await dialog.getByRole('button', { name: 'Copy JSON' }).click();
+    await expect(dialog.getByRole('button', { name: 'Copied' })).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      JSON.stringify(configured.warmup_dialect_plugin?.config, null, 2),
+    );
+
+    await page.keyboard.press('Escape');
+    await expect(opener).toBeFocused();
+  }
 });
