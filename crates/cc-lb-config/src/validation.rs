@@ -33,6 +33,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
     validate_api_key_usage_poll(config)?;
+    validate_scheduler_keepalive_dispatch_timeout(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
 }
@@ -45,6 +46,7 @@ pub fn validate_config_without_filesystem(config: &Config) -> Result<(), ConfigE
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
     validate_api_key_usage_poll(config)?;
+    validate_scheduler_keepalive_dispatch_timeout(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
 }
@@ -166,6 +168,23 @@ fn validate_api_key_usage_poll(config: &Config) -> Result<(), ValidationError> {
         return Err(ValidationError::new(
             "scheduler.recurring_jobs.api_key_usage_poll.jitter_secs",
             "API-key usage poll jitter must be less than its interval",
+        ));
+    }
+    Ok(())
+}
+
+/// The scheduler worker applies this timeout to every job handler.
+const SCHEDULER_JOB_TIMEOUT_SECS: u64 = 60;
+
+fn validate_scheduler_keepalive_dispatch_timeout(config: &Config) -> Result<(), ValidationError> {
+    if config.scheduler.keepalive_dispatch_timeout_secs == 0
+        || config.scheduler.keepalive_dispatch_timeout_secs >= SCHEDULER_JOB_TIMEOUT_SECS
+    {
+        return Err(ValidationError::new(
+            "scheduler.keepalive_dispatch_timeout_secs",
+            format!(
+                "keep-alive dispatch timeout must be greater than zero and less than the scheduler job timeout of {SCHEDULER_JOB_TIMEOUT_SECS} seconds"
+            ),
         ));
     }
     Ok(())

@@ -77,11 +77,11 @@ impl Default for KeepaliveOptions {
     }
 }
 
-#[derive(Clone, Debug)]
 pub struct HarnessOptions {
     pub backend: Backend,
     pub clock: ClockMode,
     pub keepalive: KeepaliveOptions,
+    pub scheduler_keepalive_dispatch_timeout_secs: u64,
 }
 
 impl Default for HarnessOptions {
@@ -90,6 +90,7 @@ impl Default for HarnessOptions {
             backend: Backend::Sqlite,
             clock: ClockMode::Test { now_secs: NOW },
             keepalive: KeepaliveOptions::default(),
+            scheduler_keepalive_dispatch_timeout_secs: 30,
         }
     }
 }
@@ -302,7 +303,8 @@ impl Harness {
         if let Some(dir) = &dir {
             config.price_catalog.cache_path = dir.path().join("price-catalog.json");
         }
-        config.body.messages_cap_bytes = 12 * 1024 * 1024;
+        config.scheduler.keepalive_dispatch_timeout_secs =
+            options.scheduler_keepalive_dispatch_timeout_secs;
         if matches!(options.clock, ClockMode::System) {
             // Disable unrelated recurring inserts so D1/D2 cannot borrow their notification wakes.
             for job in config.scheduler.recurring_jobs.values_mut() {

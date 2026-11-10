@@ -7,7 +7,7 @@ use http::{HeaderMap, Method, Response, StatusCode};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use cc_lb_control::PromptCacheObservationSinkLike;
@@ -175,6 +175,7 @@ impl cc_lb_storage_api::UpstreamStore for TestUpstreamStore {
 struct RecordingUpstreamDispatch {
     requests: Mutex<Vec<cc_lb_upstream::SignedRequest>>,
     response: Option<(StatusCode, &'static [u8])>,
+    delay: Mutex<Option<Duration>>,
 }
 
 impl RecordingUpstreamDispatch {
@@ -184,6 +185,10 @@ impl RecordingUpstreamDispatch {
             ..Self::default()
         }
     }
+
+    fn set_delay(&self, delay: Duration) {
+        *self.delay.lock().unwrap() = Some(delay);
+    }
 }
 
 #[async_trait::async_trait]
@@ -192,6 +197,10 @@ impl UpstreamDispatch for RecordingUpstreamDispatch {
         &self,
         request: cc_lb_upstream::SignedRequest,
     ) -> Result<Response<crate::lifecycle::Body>, crate::lifecycle::DispatchError> {
+        let delay = *self.delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         self.requests.lock().unwrap().push(request);
         let (status, body) = self.response.unwrap_or((
             StatusCode::OK,
@@ -1616,4 +1625,45 @@ async fn oauth_keepalive_provider_errors_never_publish_success_shaped_usage()
         );
     }
     Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn keepalive_dispatch_timeout_allows_fifteen_second_provider() {
+    let mut fixture = keepalive_observation_fixture(
+        StatusCode::OK,
+        br#"{"usage":{"cache_read_input_tokens":1,"input_tokens":1,"output_tokens":0}}"#,
+    )
+    .expect("keepalive fixture");
+    fixture.http.set_delay(Duration::from_secs(15));
+    fixture.dispatcher = fixture.dispatcher.with_timeout(Duration::from_secs(30));
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "slow".to_owned()),
+        )
+        .await;
+    assert!(matches!(outcome, DispatchOutcome::CacheHit { .. }));
+}
+
+#[tokio::test(start_paused = true)]
+async fn keepalive_dispatch_timeout_has_distinct_error() {
+    let mut fixture = keepalive_observation_fixture(
+        StatusCode::OK,
+        br#"{"usage":{"cache_read_input_tokens":1,"input_tokens":1,"output_tokens":0}}"#,
+    )
+    .expect("keepalive fixture");
+    fixture.http.set_delay(Duration::from_secs(31));
+    fixture.dispatcher = fixture.dispatcher.with_timeout(Duration::from_secs(30));
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "timeout".to_owned()),
+        )
+        .await;
+    let DispatchOutcome::Error(error) = outcome else {
+        panic!("expected timeout error");
+    };
+    assert_eq!(error, "renewal timed out after 30s");
 }

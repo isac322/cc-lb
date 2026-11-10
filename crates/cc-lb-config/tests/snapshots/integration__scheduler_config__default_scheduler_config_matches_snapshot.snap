@@ -75,5 +75,6 @@ expression: "SchedulerConfig::default()"
   "dlq_retention_days": 30,
   "entity_concurrency": 8,
   "singleton_concurrency": 2,
-  "keepalive_concurrency": 4
+  "keepalive_concurrency": 4,
+  "keepalive_dispatch_timeout_secs": 30
 }

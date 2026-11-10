@@ -255,9 +255,12 @@ export const CONFIG_EDITOR_SECTIONS = [
   {
     id: 'concurrency',
     categoryId: 'scheduling',
-    label: 'Concurrency',
-    description: 'Scheduler parallelism limits.',
-    paths: ['scheduler.*_concurrency'],
+    label: 'Concurrency and timeouts',
+    description: 'Scheduler parallelism limits and keepalive dispatch timeout.',
+    paths: [
+      'scheduler.*_concurrency',
+      'scheduler.keepalive_dispatch_timeout_secs',
+    ],
     advancedPaths: [],
     danger: [],
   },
@@ -1557,6 +1560,18 @@ const CONFIG_FIELD_GUIDANCE: readonly {
         'Fewer parallel keepalives, reducing load but risking stale pools.',
       higher: 'More parallel keepalives at higher background load.',
       impactDimensions: ['throughput', 'cpu'],
+    },
+  },
+  {
+    pattern: 'scheduler.keepalive_dispatch_timeout_secs',
+    guidance: {
+      description:
+        'How long one prompt-cache keepalive renewal waits for the provider before it counts as timed out. Must stay below the 60-second scheduler job timeout.',
+      lower:
+        'Gives up sooner on slow upstreams, so more renewals time out and the cached prefix can expire.',
+      higher:
+        'Tolerates slow upstreams, but a stuck renewal holds a keepalive worker slot longer.',
+      impactDimensions: ['availability', 'cost', 'latency'],
     },
   },
   {

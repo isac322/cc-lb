@@ -29,8 +29,8 @@ pub use lifecycle_glue::{
 pub(crate) use lifecycle_glue::{
     LifecycleKeepalive, LifecycleKeepaliveContext, StreamingKeepaliveResponse,
 };
-pub use metrics::CancelReason;
 pub(crate) use metrics::record_cancelled;
+pub use metrics::{CancelReason, record_cancel_error, record_dispatch_skipped};
 pub use request_snapshot::{PersistedRequestSnapshot, RequestSnapshot, SnapshotError};
 pub use scheduler::{
     DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RenewalFinalization,

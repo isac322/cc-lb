@@ -5,7 +5,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason, record_cancel_error,
 };
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
@@ -197,7 +197,7 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         let now_unix_secs = unix_secs(self.clock.now());
         let cancel_anchor_at_unix_secs =
             now_unix_secs.saturating_sub(request.cache_anchor_age.as_secs());
-        CacheKeepaliveSessionStore::cancel_cache_keepalive_fenced(
+        let accepted = match CacheKeepaliveSessionStore::cancel_cache_keepalive_fenced(
             self.storage.as_ref(),
             &request.session_key_hash,
             request.expected_generation,
@@ -206,7 +206,29 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
             now_unix_secs,
         )
         .await
-        .map_err(cache_keepalive_enqueue_error)?;
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                record_cancel_error();
+                tracing::warn!(
+                    target: "cache_keepalive",
+                    session_key_hash = %request.session_key_hash,
+                    generation = ?request.expected_generation,
+                    error = %error,
+                    "cache keepalive cancellation fence failed"
+                );
+                return Err(cache_keepalive_enqueue_error(error));
+            }
+        };
+        if !accepted {
+            // Usually there is simply no active generation left to cancel.
+            tracing::debug!(
+                target: "cache_keepalive",
+                session_key_hash = %request.session_key_hash,
+                generation = ?request.expected_generation,
+                "cache keepalive cancellation fence found nothing to apply"
+            );
+        }
         Ok(())
     }
 

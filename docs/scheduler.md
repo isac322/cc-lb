@@ -113,6 +113,18 @@ The exclusion applies only to credentials that are actually stored as long-lived
 - **Retention.** `UsagePruneJob` deletes reported usage buckets older than both the request-log retention cutoff and the start of the current UTC month, in bounded batches. With request-log retention `0`, reported usage is never pruned.
 
 
+
+### Keep-alive dispatch timeout
+
+`scheduler.keepalive_dispatch_timeout_secs` bounds each provider HTTP
+attempt for a cache keep-alive renewal. It defaults to `30` seconds and must
+be at least `1` and strictly below the scheduler's `60`-second per-job
+timeout. This applies to Anthropic and OpenAI Responses keep-alive requests,
+which share the engine dispatcher.
+
+Timeout outcomes are reported as `renewal timed out after {n}s`, distinct from
+other dispatch errors.
+
 ## 3. DB Pool Isolation
 
 To prevent background tasks from starving the main request-handling path, the scheduler uses a separate connection pool. This isolation is configured via the `separate_pool` setting in `SchedulerConfig`. On PostgreSQL, both pools use the same DSN with separate connection limits. On SQLite, the application pool uses the configured database file, while the scheduler pool uses the derived `path.with_extension("scheduler.sqlite")` file. Application-owned tables such as `cache_keepalive_sessions` stay in the application database; Apalis `Jobs` and `Workers` stay in the derived scheduler database.
