@@ -54,6 +54,7 @@ export type IdentityVerdict =
   | 'first_connect';
 
 export interface ConnectOutcome {
+  provider: OAuthProvider;
   mode: OAuthTokenMode;
   longLivedFallback: boolean;
   fallbackReason: OAuthFallbackReason | null;
@@ -412,6 +413,7 @@ export function useOAuthConnectSession(
           }
         }
         const next: ConnectOutcome = {
+          provider,
           mode: result.mode,
           longLivedFallback: result.long_lived_fallback,
           fallbackReason: result.fallback_reason,

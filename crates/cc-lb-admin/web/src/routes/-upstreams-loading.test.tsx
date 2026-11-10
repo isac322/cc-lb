@@ -2766,6 +2766,16 @@ describe('/upstreams reconnect identity check', () => {
     expect(
       within(dialog).getByText(/A different Claude account was connected/),
     ).toBeDefined();
+    expect(
+      within(dialog).getByText(
+        /Traffic for this upstream now bills the new account/,
+      ),
+    ).toBeDefined();
+    expect(
+      within(dialog).getByText(
+        /sign out of Claude, sign in as the original account/,
+      ),
+    ).toBeDefined();
     expect(within(dialog).getByText('Before')).toBeDefined();
     expect(within(dialog).getByText(ALICE.email)).toBeDefined();
     expect(within(dialog).getByText('Now')).toBeDefined();
