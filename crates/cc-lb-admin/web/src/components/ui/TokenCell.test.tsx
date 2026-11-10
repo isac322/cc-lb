@@ -57,7 +57,7 @@ describe('TokenCell totals and cache hit', () => {
     expect(breakdownRow('Input').textContent).toContain('900');
   });
 
-  it('shows a zero cache hit for a write-only prompt', () => {
+  it('shows a zero cache hit and a composition bar for an aggregate-only write prompt', () => {
     const trigger = renderTokenCell({
       ...baseEvent,
       cache_write_input_tokens: 300,
@@ -65,6 +65,8 @@ describe('TokenCell totals and cache hit', () => {
 
     expect(trigger.getAttribute('aria-label')).toMatch(/300 in/);
     expect(trigger.getAttribute('aria-label')).toMatch(/cache hit 0%/);
+    const bar = trigger.querySelector('[data-cell-bar] > div');
+    expect(bar?.children.length).toBe(1);
   });
 
   it('does not add retention buckets to already normalized input tokens', () => {

@@ -705,7 +705,7 @@ describe('RequestEventsTable', () => {
       expect(cols).toHaveLength(headers.length);
     });
 
-    it('sets the table minimum to the visible columns plus the session floor and reserves card fallback below 42rem', () => {
+    it('sets the table minimum to the visible columns plus the session floor, caps fixed columns at the desktop baseline, and reserves card fallback below 42rem', () => {
       const { container, rerender } = render(
         <RequestEventsTable
           events={shortEvents}
@@ -716,6 +716,10 @@ describe('RequestEventsTable', () => {
       const table = container.querySelector('table');
       expect(table?.style.getPropertyValue('--events-min-w')).toBe(
         '39.6875rem',
+      );
+      expect(table?.style.getPropertyValue('--events-desktop-w')).toBe('59rem');
+      expect(table?.style.getPropertyValue('--events-tablet-span')).toBe(
+        '19.3125rem',
       );
       expect(table?.className).toContain(
         '@min-[42rem]/events:min-w-(--events-min-w)',
@@ -729,6 +733,26 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable events={shortEvents} principalNameMap={names} />,
       );
       expect(table?.style.getPropertyValue('--events-min-w')).toBe('43.75rem');
+      expect(table?.style.getPropertyValue('--events-desktop-w')).toBe(
+        '65.5rem',
+      );
+      expect(table?.style.getPropertyValue('--events-tablet-span')).toBe(
+        '21.75rem',
+      );
+
+      const headers = Array.from(
+        container.querySelectorAll('thead th'),
+        (th) => th.textContent,
+      );
+      const cols = container.querySelectorAll('colgroup > col');
+      const tokensCol = cols[headers.indexOf('Tokens')] as HTMLElement;
+      const principalCol = cols[headers.indexOf('Principal')] as HTMLElement;
+      // Tokens ramps from 8rem to 12rem across the tablet span and caps there.
+      expect(tokensCol.style.width).toContain('8rem');
+      expect(tokensCol.style.width).toContain('clamp(');
+      expect(tokensCol.style.width).not.toContain('var(--events-desktop-w)');
+      // Principal continues growing past the desktop baseline.
+      expect(principalCol.style.width).toContain('var(--events-desktop-w)');
     });
   });
 

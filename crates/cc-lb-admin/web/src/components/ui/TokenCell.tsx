@@ -47,10 +47,13 @@ function TokenFigure({
   return (
     <span
       data-slot={slot}
-      className={cx('inline-flex w-[5.5ch] shrink-0 justify-end', className)}
+      className={cx(
+        'inline-flex w-[5.5ch] shrink-0 justify-end @max-[42rem]/events:w-auto',
+        className,
+      )}
     >
       <span className="text-text">{value}</span>
-      <span className="w-[1.5ch] shrink-0 text-left text-text-muted @min-[42rem]/events:@max-[59rem]/events:w-[1ch]">
+      <span className="w-[1.5ch] shrink-0 text-left text-text-muted @max-[42rem]/events:w-auto @min-[42rem]/events:@max-[59rem]/events:w-[1ch]">
         {unit}
       </span>
     </span>
@@ -86,6 +89,20 @@ export function TokenCell({
     color: category.color,
     value: b[category.key],
   }));
+  const fallbackWrite =
+    b.cache_write_30m === 0 && b.cache_write_12h === 0 ? nativeWrite : 0;
+  const segments =
+    fallbackWrite > 0
+      ? [
+          ...rows.slice(0, 3),
+          {
+            label: 'Cache write',
+            color: 'var(--color-series-cache-create-5m)',
+            value: fallbackWrite,
+          },
+          ...rows.slice(3),
+        ]
+      : rows;
 
   const popover = (
     <BreakdownPopover
@@ -106,9 +123,9 @@ export function TokenCell({
         hit != null ? `, cache hit ${hit}%` : ''
       }, show breakdown`}
       popover={popover}
-      segments={rows}
+      segments={segments}
     >
-      <span className="inline-flex items-baseline">
+      <span className="inline-flex items-baseline @max-[42rem]/events:flex @max-[42rem]/events:w-full">
         <TokenFigure
           tokens={prompt}
           slot="in"
@@ -126,10 +143,22 @@ export function TokenCell({
           className="@min-[42rem]/events:@max-[59rem]/events:w-[4.25ch]"
         />
         <span
+          aria-hidden="true"
+          className="hidden text-caption text-text-faint @max-[42rem]/events:ml-1.5 @max-[42rem]/events:inline"
+        >
+          tokens
+        </span>
+        <span
           data-slot="hit"
           className={cx(
-            'ml-2 w-[4.5ch] shrink-0 text-right @min-[42rem]/events:@max-[59rem]/events:ml-1 @min-[42rem]/events:@max-[59rem]/events:w-[3.5ch]',
-            hit == null ? 'text-text-faint' : 'text-text',
+            'ml-2 w-[4.5ch] shrink-0 text-right @max-[42rem]/events:ml-auto @max-[42rem]/events:w-auto @min-[42rem]/events:@max-[59rem]/events:ml-1 @min-[42rem]/events:@max-[59rem]/events:w-[3.5ch]',
+            hit == null
+              ? 'text-text-faint'
+              : hit < 30
+                ? 'text-text @max-[42rem]/events:font-medium @max-[42rem]/events:text-danger-text'
+                : hit < 80
+                  ? 'text-text @max-[42rem]/events:font-medium @max-[42rem]/events:text-warn-text'
+                  : 'text-text',
           )}
         >
           {hit == null ? '—' : `${hit}%`}
@@ -138,8 +167,19 @@ export function TokenCell({
           className={cx(
             'ml-1 text-caption text-text-faint @min-[42rem]/events:@max-[59rem]/events:hidden',
             hit == null ? 'invisible' : '',
+            hit != null && hit < 30
+              ? '@max-[42rem]/events:text-danger-text'
+              : hit != null && hit < 80
+                ? '@max-[42rem]/events:text-warn-text'
+                : '',
           )}
         >
+          <span
+            aria-hidden="true"
+            className="hidden @max-[42rem]/events:inline"
+          >
+            cache{' '}
+          </span>
           hit
         </span>
       </span>
