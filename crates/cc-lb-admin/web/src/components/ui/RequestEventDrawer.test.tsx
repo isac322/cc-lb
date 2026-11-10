@@ -574,6 +574,42 @@ describe('RequestEventDrawer', () => {
     expect(markerDescription.textContent).not.toMatch(/Anthropic|event:/i);
   });
 
+  it('uses upstream provider context for shared latency event kinds', async () => {
+    const event = {
+      event_id: 'evt_shared_latency',
+      request_id: 'req_shared_latency',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      upstream_id: 'upstream-shared',
+      status: 200,
+      duration_ms: 1000,
+      source_kind: 'proxy',
+      event_kind: 'chat_completions',
+      shape_ms: 25,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse(event))),
+    );
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+        providerByUpstream={new Map([['upstream-shared', 'openai']])}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /^Shape 25 ms$/ }));
+    const shapeDescription = await screen.findByText(
+      /shape the outbound body for OpenAI/i,
+    );
+    expect(shapeDescription.textContent).not.toMatch(/selected upstream/i);
+  });
+
   it('omits Claude session identity rows when absent', () => {
     const event = {
       event_id: 'evt_identity_absent',
