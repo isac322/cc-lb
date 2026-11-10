@@ -1,6 +1,8 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { type Browser, chromium, expect } from '@playwright/test';
+import type { createServer as CreateViteServer } from 'vite';
 import { ID, installFixtures, scenarios } from '../e2e/codexCreditsFixture';
 
 const [appRoot, outputRoot, sourceSha, portArg = '5174'] = process.argv.slice(2);
@@ -9,39 +11,26 @@ if (!appRoot || !outputRoot || !sourceSha) {
 }
 
 const port = Number(portArg);
-const server = Bun.spawn(
-  [process.execPath, resolve(appRoot, 'node_modules/vite/bin/vite.js'), '--host', '127.0.0.1', '--port', String(port), '--strictPort'],
-  { cwd: appRoot, stdout: 'pipe', stderr: 'inherit' },
+// The base worktree is runtime-selected and must use its own frozen Vite version.
+const { createServer }: { createServer: typeof CreateViteServer } = await import(
+  pathToFileURL(resolve(appRoot, 'node_modules/vite/dist/node/index.js')).href
 );
+const server = await createServer({
+  root: appRoot,
+  server: { host: '127.0.0.1', port, strictPort: true },
+});
 let browser: Browser | undefined;
-let readyTimer: NodeJS.Timeout | undefined;
+const deadline = Promise.withResolvers<never>();
+const readyTimer = setTimeout(
+  () => deadline.reject(new Error('Baseline Vite did not become ready within 30 seconds')),
+  30_000,
+);
 
 try {
-  browser = await chromium.launch();
-  const deadline = Promise.withResolvers<never>();
-  readyTimer = setTimeout(
-    () => deadline.reject(new Error('Baseline Vite did not become ready within 30 seconds')),
-    30_000,
-  );
-  await Promise.race([
-    (async () => {
-      const reader = server.stdout.getReader();
-      const decoder = new TextDecoder();
-      let output = '';
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) throw new Error(`Baseline Vite exited before readiness: ${output}`);
-          output += decoder.decode(value, { stream: true });
-          if (output.includes('Local:')) return;
-        }
-      } finally {
-        reader.releaseLock();
-      }
-    })(),
-    deadline.promise,
-  ]);
+  // Resolve the server's actual listen promise; CLI log styling is not readiness.
+  await Promise.race([server.listen(), deadline.promise]);
   clearTimeout(readyTimer);
+  browser = await chromium.launch();
   await mkdir(outputRoot, { recursive: true });
   const captures = [];
   for (const width of [390, 768, 1440]) {
@@ -77,7 +66,6 @@ try {
   try {
     await browser?.close();
   } finally {
-    server.kill('SIGTERM');
-    await server.exited;
+    await server.close();
   }
 }
