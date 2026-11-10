@@ -427,6 +427,26 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
         evidence_status: 'none' as const,
         session_key_hash: 'openai-12h',
       },
+      {
+        id: 'openai-5m-untracked',
+        last_message_at_ms: 1_700_000_000_000,
+        relative_time: '1m ago',
+        state: 'not_tracked' as const,
+        is_active: false,
+        ttl: '5m' as const,
+        attempts: null,
+        max_attempts: 12,
+        reason: '5m retention not tracked',
+        display_reason: null,
+        generation: 1,
+        upstream: 'openai',
+        error: null,
+        net_pnl: null,
+        total_spent: 0,
+        total_avoided: null,
+        evidence_status: 'none' as const,
+        session_key_hash: 'openai-5m-untracked',
+      },
     ];
     vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
       data: {
@@ -452,11 +472,12 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
     );
     expect(queries.useCacheKeepaliveSessions).toHaveBeenCalledWith(
       'p-123',
-      { horizon: '24h', status: 'tracked' },
+      { horizon: '24h', status: 'all' },
       true,
     );
     expect(screen.getByTitle('openai-30m')).toBeDefined();
-    expect(screen.queryByTitle('openai-12h')).toBeNull();
+    expect(screen.getByTitle('openai-12h')).toBeDefined();
+    expect(screen.queryByTitle('openai-5m-untracked')).toBeNull();
 
     cleanup();
     renderWithProviders(

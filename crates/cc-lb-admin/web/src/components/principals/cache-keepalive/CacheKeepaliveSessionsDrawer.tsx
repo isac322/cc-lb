@@ -391,7 +391,7 @@ export function CacheKeepaliveSessionsDrawer({
     principal.id,
     {
       horizon,
-      status: enabled ? 'tracked' : undefined,
+      status: enabled ? 'all' : undefined,
     },
     open,
   );
@@ -403,7 +403,11 @@ export function CacheKeepaliveSessionsDrawer({
       query.data?.pages.length ? query.data.pages.length * 100 : 100,
     );
     return mergeLiveSessions(rawRows, maxRows).filter(
-      (row) => !enabled || row.state !== 'not_tracked' || row.error != null,
+      (row) =>
+        !enabled ||
+        row.state !== 'not_tracked' ||
+        row.error != null ||
+        row.ttl === '12h',
     );
   }, [enabled, query.data]);
 
