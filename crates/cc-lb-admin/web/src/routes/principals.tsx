@@ -72,7 +72,16 @@ import {
   TableHeadCell,
   TableRow,
 } from '../components/ui/Table';
+import { useDesign } from '../designs/registry';
 import { formatCount } from '../lib/format';
+import { isGenerationRequestKind } from '../lib/logRows';
+import { useProviderScope } from '../lib/previewControls';
+import {
+  capabilitiesOf,
+  PROVIDER_FAMILIES,
+  providerOf,
+  requestEventKindsForProvider,
+} from '../lib/providers';
 import {
   type ChainSlot,
   type LimitKind,
@@ -98,6 +107,7 @@ import {
   useTogglePrincipal,
   useUpdatePrincipalDefaultLimits,
   useUpdateRouterTerminalStrategy,
+  useUpstreams,
   useUsage,
 } from '../lib/queries';
 import {
@@ -116,6 +126,13 @@ const PRINCIPAL_FILTERS = [
   'human',
   'machine',
   'admin',
+] as const;
+const PRINCIPAL_GENERATION_EVENT_KINDS = [
+  ...new Set(
+    PROVIDER_FAMILIES.flatMap((provider) =>
+      requestEventKindsForProvider(provider),
+    ).filter(isGenerationRequestKind),
+  ),
 ] as const;
 type PrincipalFilter = (typeof PRINCIPAL_FILTERS)[number];
 // Principal carries no update timestamp, so there is no "Recently updated".
@@ -564,6 +581,22 @@ function PrincipalDetail({
   principal: Principal;
   onBack: () => void;
 }) {
+  const { PrincipalsActivity } = useDesign();
+  const { providers: scopedProviders } = useProviderScope();
+  const inventory = useUpstreams();
+  const anthropicInScope =
+    scopedProviders === undefined || scopedProviders.includes('anthropic');
+  const anthropicConfigured =
+    inventory.data?.upstreams.some(
+      (upstream) => providerOf(upstream.kind) === 'anthropic',
+    ) ?? false;
+  const supportsAnthropicFeatures = anthropicInScope && anthropicConfigured;
+  const supportsKeepalive =
+    supportsAnthropicFeatures &&
+    (inventory.data?.upstreams.some(
+      (upstream) => capabilitiesOf(upstream.kind).cacheKeepalive,
+    ) ??
+      false);
   const toggle = useTogglePrincipal();
   const del = useDeletePrincipal();
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
@@ -701,11 +734,19 @@ function PrincipalDetail({
           table, so pairing any of them leaves a hole. */}
       <DetailSectionGrid>
         {/* `contents` keeps the keepalive section itself the grid item. */}
-        <fieldset className="contents" disabled={principalWritePending}>
-          <CacheKeepaliveCard principal={principal} />
-        </fieldset>
+        {supportsKeepalive ? (
+          <fieldset className="contents" disabled={principalWritePending}>
+            <CacheKeepaliveCard principal={principal} />
+          </fieldset>
+        ) : null}
+        {PrincipalsActivity ? (
+          <PrincipalsActivity principalId={principal.id} />
+        ) : null}
         <RecentRequestsCard principal={principal} />
-        <RouterSlotEditor principal={principal} />
+        <RouterSlotEditor
+          principal={principal}
+          showSubscriptionPreference={supportsAnthropicFeatures}
+        />
         <ShapeSlotEditor principalId={principal.id} />
         <ApiKeysCard principal={principal} />
         <AccessCard principal={principal} />
@@ -716,10 +757,25 @@ function PrincipalDetail({
 
 export function RecentRequestsCard({ principal }: { principal: Principal }) {
   const principalNameMap = usePrincipalNameMap();
+  const { providers: scopedProviders } = useProviderScope();
+  const inventory = useUpstreams();
+  const inventoryRows = inventory.data?.upstreams;
+  const providerByUpstream = useMemo(
+    () =>
+      new Map(
+        (inventoryRows ?? []).map((upstream) => [
+          upstream.id,
+          providerOf(upstream.kind),
+        ]),
+      ),
+    [inventoryRows],
+  );
+  const providerScope =
+    scopedProviders?.length === 1 ? scopedProviders[0] : undefined;
   const feed = useRequestEventsFeed({
     filters: {
       principal_id: principal.id,
-      event_kind: 'messages',
+      event_kind_set: PRINCIPAL_GENERATION_EVENT_KINDS,
     },
     mode: 'infinite',
     initialHistoryLimit: 500,
@@ -737,6 +793,8 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
       <RequestEventsFeed
         feed={feed}
         principalNameMap={principalNameMap}
+        providerByUpstream={providerByUpstream}
+        providerScope={providerScope}
         columns={{ principal: false }}
         tableContainerClassName={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}
         emptyTitle="No recent requests for this principal"
@@ -1525,7 +1583,13 @@ function TerminalStrategyRadioGroup({
   );
 }
 
-export function RouterSlotEditor({ principal }: { principal: Principal }) {
+export function RouterSlotEditor({
+  principal,
+  showSubscriptionPreference = true,
+}: {
+  principal: Principal;
+  showSubscriptionPreference?: boolean;
+}) {
   const principalId = principal.id;
   const slot = 'router' as const;
   const chain = usePluginChain(principalId, slot);
@@ -1824,40 +1888,43 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
       <div>
         {activeTab === 'basic' && (
           <div role="tabpanel" className="space-y-6">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <div className="text-body font-medium text-text">
-                  Keep prompt cache warm by reusing upstreams
+            {showSubscriptionPreference ? (
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-body font-medium text-text">
+                    Keep prompt cache warm by reusing upstreams
+                  </div>
+                  <div className="mt-0.5 text-body text-text-muted">
+                    Requests with similar prompts get routed to the upstream
+                    that already served them, so the prompt cache hits stay
+                    high.
+                  </div>
                 </div>
-                <div className="mt-0.5 text-body text-text-muted">
-                  Requests with similar prompts get routed to the upstream that
-                  already served them, so the prompt cache hits stay high.
+                <div className="flex items-center gap-2.5 shrink-0">
+                  {subscriptionPreferencePending ? (
+                    <span
+                      role="status"
+                      aria-live="polite"
+                      className="inline-flex items-center gap-1.5 text-caption text-text-muted"
+                    >
+                      <Spinner className="w-3 h-3 text-text-muted" />
+                      {hasSubscriptionPreference
+                        ? 'Turning off...'
+                        : 'Turning on...'}
+                    </span>
+                  ) : null}
+                  <ToggleSwitch
+                    variant="compact"
+                    role="switch"
+                    aria-label="Keep prompt cache warm by reusing upstreams"
+                    checked={hasSubscriptionPreference}
+                    onChange={toggleSubscriptionPreference}
+                    aria-busy={subscriptionPreferencePending || undefined}
+                    disabled={isChainMetadataLoading || routerWriteBlocked}
+                  />
                 </div>
               </div>
-              <div className="flex items-center gap-2.5 shrink-0">
-                {subscriptionPreferencePending ? (
-                  <span
-                    role="status"
-                    aria-live="polite"
-                    className="inline-flex items-center gap-1.5 text-caption text-text-muted"
-                  >
-                    <Spinner className="w-3 h-3 text-text-muted" />
-                    {hasSubscriptionPreference
-                      ? 'Turning off...'
-                      : 'Turning on...'}
-                  </span>
-                ) : null}
-                <ToggleSwitch
-                  variant="compact"
-                  role="switch"
-                  aria-label="Keep prompt cache warm by reusing upstreams"
-                  checked={hasSubscriptionPreference}
-                  onChange={toggleSubscriptionPreference}
-                  aria-busy={subscriptionPreferencePending || undefined}
-                  disabled={isChainMetadataLoading || routerWriteBlocked}
-                />
-              </div>
-            </div>
+            ) : null}
 
             <div>
               <div className="text-body font-medium text-text mb-2">
@@ -2229,7 +2296,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
           <SlotRadioCard
             value="none"
             name="None"
-            desc="Inherits the dialect returned by the router (typically anthropic-direct)."
+            desc="Inherits the dialect returned by the router (typically provider-direct)."
             isActive={!activeEntry}
             isMutating={mutatingId === 'none'}
             disabled={shapeWriteBlocked}

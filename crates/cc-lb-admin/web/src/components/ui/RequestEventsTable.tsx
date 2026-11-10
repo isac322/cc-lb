@@ -8,10 +8,16 @@ import {
   requestOutcomeTone,
   STATUS_TONE_TEXT_CLASS,
 } from '../../lib/format';
+import {
+  PROVIDER_LABELS,
+  type ProviderFamily,
+  providersForRequestEventKind,
+} from '../../lib/providers';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { serviceTierBadgeText } from '../../lib/reasoningTier';
 import { CostCell } from './CostCell';
 import { LatencyCell } from './latency/LatencyCell';
+import { ProviderLogo } from './ProviderLogo';
 import {
   Badge,
   cx,
@@ -218,6 +224,16 @@ interface RequestEventsTableProps {
   /** Heading level of the empty-state title; match the surrounding outline. */
   emptyHeadingLevel?: 2 | 3 | 4;
   liveFlashIds?: Set<string>;
+  showProviderLogo?: boolean;
+  /**
+   * Model cells lead with the provider mark by default. Detail views can
+   * suppress it when the surrounding upstream identity already supplies it.
+   * Optional inventory-derived provider identity stays outside the table to
+   * avoid coupling isolated request feeds to the upstream query.
+   */
+  providerByUpstream?: ReadonlyMap<string, ProviderFamily>;
+  /** Active provider lens used to disambiguate shared request kinds. */
+  providerScope?: ProviderFamily;
   /** Hide an entity column the surrounding page already implies. */
   columns?: {
     principal?: boolean;
@@ -300,6 +316,8 @@ interface RequestEventRowProps {
   eventKey: string;
   principalName: string | null;
   upstreamName: string | null;
+  provider: ProviderFamily;
+  showProviderLogo: boolean;
   showPrincipal: boolean;
   showUpstream: boolean;
   selected: boolean;
@@ -308,11 +326,27 @@ interface RequestEventRowProps {
   onAnchorRange?: (tsMs: number, radiusSecs: number) => void;
 }
 
+export function providerForEvent(
+  event: RequestEventWithPhase,
+  providerByUpstream?: ReadonlyMap<string, ProviderFamily>,
+  providerScope?: ProviderFamily,
+): ProviderFamily {
+  const upstreamProvider =
+    event.upstream_id == null
+      ? undefined
+      : providerByUpstream?.get(event.upstream_id);
+  if (upstreamProvider != null) return upstreamProvider;
+  const inferred = providersForRequestEventKind(event.event_kind);
+  return inferred.length === 1 ? inferred[0] : (providerScope ?? 'anthropic');
+}
+
 const RequestEventRow = memo(function RequestEventRow({
   event,
   eventKey,
   principalName,
   upstreamName,
+  provider,
+  showProviderLogo,
   showPrincipal,
   showUpstream,
   selected,
@@ -458,9 +492,17 @@ const RequestEventRow = memo(function RequestEventRow({
           CARD_CELL,
           COMPACT_CELL,
           COLUMNS.model.card,
+          showProviderLogo && '@min-[60rem]/events:max-w-28!',
         )}
       >
         <span className="flex min-w-0 items-center gap-2 @max-[42rem]/events:justify-end">
+          {showProviderLogo ? (
+            <ProviderLogo
+              className="shrink-0 text-text-muted"
+              provider={provider}
+              title={`${PROVIDER_LABELS[provider]} provider`}
+            />
+          ) : null}
           {event.model != null && modelName != null ? (
             // Name first, whole badges only. The name keeps 11 characters (or
             // its whole text when shorter); its shrink weight of 100 makes it
@@ -472,7 +514,7 @@ const RequestEventRow = memo(function RequestEventRow({
             // the spacer's gap. The drawer always shows thinking level and
             // tier.
             <span
-              className="shrink-[100] truncate font-mono text-data"
+              className="min-w-0 shrink-[100] truncate font-mono text-data"
               style={{ minWidth: `${modelFloorCh}ch` }}
               title={event.model}
               aria-label={event.model}
@@ -527,10 +569,13 @@ export const RequestEventsTable = memo(function RequestEventsTable({
   emptyAction,
   emptyHeadingLevel,
   liveFlashIds,
+  showProviderLogo = true,
   columns,
   sentinelRef,
   loadingMore,
   hasMore,
+  providerByUpstream,
+  providerScope,
   onAnchorRange,
 }: RequestEventsTableProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -635,6 +680,12 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                       null
                     }
                     upstreamName={event.upstream_name ?? null}
+                    provider={providerForEvent(
+                      event,
+                      providerByUpstream,
+                      providerScope,
+                    )}
+                    showProviderLogo={showProviderLogo}
                     showPrincipal={showPrincipal}
                     showUpstream={showUpstream}
                     selected={selectedId === eventKey}
@@ -676,6 +727,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
             ? (principalNameMap.get(selected.principal_id) ?? null)
             : null
         }
+        providerByUpstream={providerByUpstream}
         onClose={() => setSelectedId(null)}
       />
     </>

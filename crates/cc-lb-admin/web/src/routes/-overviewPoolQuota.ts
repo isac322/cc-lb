@@ -1,27 +1,89 @@
 import type { AggregateResponse, PoolHistoryWindowResponse } from '../lib/api';
 
 export const POOL_QUOTA_WINDOWS = ['5h', '7d', '7d_fable'] as const;
-export type PoolQuotaWindow = (typeof POOL_QUOTA_WINDOWS)[number];
+const POOL_QUOTA_WINDOW_ORDER = [
+  '5h',
+  '7d',
+  'gemini_5h',
+  'gemini_7d',
+  'third_party_5h',
+  'third_party_7d',
+  '7d_fable',
+  '7d_sonnet',
+  '7d_opus',
+  'overage',
+] as const;
+/** Window keys used by the pool quota chart and readout. */
+export type PoolQuotaWindow = string;
 /** One history bucket, as pool utilization per window (0-100 used). */
 export type PoolQuotaChartRow = {
   unix: number;
-} & Partial<Record<PoolQuotaWindow, number | null>>;
+  [window: string]: number | null;
+};
 /** Latest pool utilization per window (0-100 used), for legends. */
 export type PoolQuotaLatest = Record<PoolQuotaWindow, number | null>;
 
 /**
- * Windows represented by the sparse aggregate/history responses. Unknown
- * provider windows are ignored so callers can keep using the shared window
- * labels and colors.
+ * The default call ignores unknown provider windows; provider-specific callers
+ * supply their own allowed window keys.
  */
 export function poolQuotaWindowsPresent(
   history: readonly PoolHistoryWindowResponse[] | undefined,
   aggregate?: AggregateResponse,
+  defaults: readonly PoolQuotaWindow[] = POOL_QUOTA_WINDOWS,
+  requireData = false,
 ): PoolQuotaWindow[] {
   const returned = new Set<string>();
   for (const entry of history ?? []) returned.add(entry.window);
   for (const entry of aggregate?.windows ?? []) returned.add(entry.window);
-  return POOL_QUOTA_WINDOWS.filter((window) => returned.has(window));
+  return defaults.filter((window) => {
+    const aggregateWindow = aggregate?.windows.find(
+      (candidate) => candidate.window === window,
+    );
+    const providerLots = aggregateWindow?.provider_lots ?? [];
+    if (
+      providerLots.length > 0 &&
+      providerLots.every((lot) => lot.state === 'absent')
+    ) {
+      return false;
+    }
+    if (!requireData) return returned.has(window);
+    const historyWindow = history?.find(
+      (candidate) => candidate.window === window,
+    );
+    return (
+      aggregateWindow?.utilization_percent != null ||
+      (aggregateWindow?.cc_window_reset_unix_secs ?? 0) > 0 ||
+      (historyWindow?.series.length ?? 0) > 0
+    );
+  });
+}
+
+function windowKeys(
+  windows: readonly Pick<PoolHistoryWindowResponse, 'window'>[] | undefined,
+): string[] {
+  const keys: string[] = [];
+  for (const entry of windows ?? []) {
+    if (entry.window === 'unified') continue;
+    if (!keys.includes(entry.window)) keys.push(entry.window);
+  }
+  return keys.length > 0 ? keys : [...POOL_QUOTA_WINDOWS];
+}
+
+const POOL_AGGREGATE_WINDOWS = new Set([
+  ...POOL_QUOTA_WINDOWS,
+  'gemini_5h',
+  'gemini_7d',
+  'third_party_5h',
+  'third_party_7d',
+]);
+
+function aggregateWindowKeys(
+  windows: readonly Pick<PoolHistoryWindowResponse, 'window'>[] | undefined,
+): string[] {
+  return windowKeys(windows).filter((window) =>
+    POOL_AGGREGATE_WINDOWS.has(window),
+  );
 }
 
 function clampPoolQuotaPercent(used: number | null | undefined): number | null {
@@ -39,26 +101,23 @@ function clampPoolQuotaPercent(used: number | null | undefined): number | null {
 export function buildPoolQuotaChartData(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
 ): PoolQuotaChartRow[] {
-  const returnedWindows = poolQuotaWindowsPresent(windows);
-  const buckets = new Map<
-    number,
-    Partial<Record<PoolQuotaWindow, number | null>>
-  >();
-  for (const window of returnedWindows) {
+  const keys = windowKeys(windows);
+  const buckets = new Map<number, PoolQuotaChartRow>();
+  for (const window of keys) {
     const series =
       windows?.find((entry) => entry.window === window)?.series ?? [];
     for (const point of series) {
-      const row = buckets.get(point.snapshot_at_unix_secs) ?? {};
-      if (!buckets.has(point.snapshot_at_unix_secs)) {
-        for (const returnedWindow of returnedWindows) {
-          row[returnedWindow] = null;
-        }
+      let row = buckets.get(point.snapshot_at_unix_secs);
+      if (!row) {
+        row = { unix: point.snapshot_at_unix_secs };
+        for (const key of keys) row[key] = null;
+        buckets.set(point.snapshot_at_unix_secs, row);
       }
       row[window] = clampPoolQuotaPercent(point.utilization_percent);
       buckets.set(point.snapshot_at_unix_secs, row);
     }
   }
-  return Array.from(buckets, ([unix, row]) => ({ unix, ...row })).sort(
+  return Array.from(buckets.values()).sort(
     (left, right) => left.unix - right.unix,
   );
 }
@@ -72,12 +131,11 @@ export function buildPoolQuotaChartData(
 export const POOL_QUOTA_HEARTBEAT_CARRY_SECS = 3_600 + 300;
 
 function hasPoolQuotaValue(row: PoolQuotaChartRow): boolean {
-  return POOL_QUOTA_WINDOWS.some((window) => {
-    const value = row[window];
-    return typeof value === 'number' && Number.isFinite(value);
-  });
+  return Object.entries(row).some(
+    ([key, value]) =>
+      key !== 'unix' && typeof value === 'number' && Number.isFinite(value),
+  );
 }
-
 export function latestPoolQuotaSnapshotUnix(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
 ): number | null {
@@ -101,8 +159,7 @@ function buildCarriedPoolQuotaRow(
     return { ...baseRow, unix: targetUnix };
   }
   const carried: PoolQuotaChartRow = { unix: targetUnix };
-  for (const window of POOL_QUOTA_WINDOWS) {
-    if (!(window in baseRow)) continue;
+  for (const window of Object.keys(baseRow).filter((key) => key !== 'unix')) {
     if (baseRow[window] == null) {
       carried[window] = null;
       continue;
@@ -199,12 +256,10 @@ export function poolQuotaResponseLatest(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
   visibleRows: readonly PoolQuotaChartRow[],
 ): PoolQuotaLatest {
-  const latest: PoolQuotaLatest = {
-    '5h': null,
-    '7d': null,
-    '7d_fable': null,
-  };
-  for (const window of POOL_QUOTA_WINDOWS) {
+  const latest: PoolQuotaLatest = {};
+  for (const window of POOL_QUOTA_WINDOWS) latest[window] = null;
+  for (const window of windowKeys(windows)) {
+    latest[window] = null;
     if (!visibleRows.some((row) => row[window] != null)) continue;
     latest[window] =
       windows?.find((entry) => entry.window === window)?.latest
@@ -220,18 +275,15 @@ export function poolQuotaResponseLatest(
 export function poolWindowResets(
   aggregate: AggregateResponse | undefined,
 ): Record<PoolQuotaWindow, number | null> {
-  const resets: Record<PoolQuotaWindow, number | null> = {
-    '5h': null,
-    '7d': null,
-    '7d_fable': null,
-  };
-  for (const window of POOL_QUOTA_WINDOWS) {
+  const resets: Record<PoolQuotaWindow, number | null> = {};
+  for (const window of aggregateWindowKeys(aggregate?.windows)) {
     const entry = aggregate?.windows.find(
       (candidate) => candidate.window === window,
     );
-    if (entry && entry.cc_window_reset_unix_secs > 0) {
-      resets[window] = entry.cc_window_reset_unix_secs;
-    }
+    resets[window] =
+      entry && entry.cc_window_reset_unix_secs > 0
+        ? entry.cc_window_reset_unix_secs
+        : null;
   }
   return resets;
 }
@@ -244,7 +296,7 @@ export function missingCapacityUpstreams(
   aggregate: AggregateResponse | undefined,
 ): number {
   let missing = 0;
-  for (const window of POOL_QUOTA_WINDOWS) {
+  for (const window of aggregateWindowKeys(aggregate?.windows)) {
     const entry = aggregate?.windows.find(
       (candidate) => candidate.window === window,
     );
@@ -265,7 +317,7 @@ export function oldestProviderObservation(
 ): { observedAtUnixSecs: number | null; stale: boolean } {
   let oldest: number | null = null;
   let stale = false;
-  for (const window of POOL_QUOTA_WINDOWS) {
+  for (const window of aggregateWindowKeys(aggregate?.windows)) {
     const entry = aggregate?.windows.find(
       (candidate) => candidate.window === window,
     );
@@ -298,15 +350,17 @@ export function formatDuration(secs: number): string {
   return `${mins}m`;
 }
 
-/** "resets in 2d 4h" / "resets in 3h 12m" / "resets in 8m"; past resets say so. */
+/** Reset sentence, or only its countdown for a column headed "Resets in". */
 export function formatResetIn(
   resetUnixSecs: number | null,
   nowUnixSecs: number,
+  { compact = false }: { compact?: boolean } = {},
 ): string | null {
   if (resetUnixSecs == null) return null;
   const secs = resetUnixSecs - nowUnixSecs;
-  if (secs <= 0) return 'reset time passed';
-  return `resets in ${formatDuration(secs)}`;
+  if (secs <= 0) return compact ? 'Passed' : 'reset time passed';
+  const duration = formatDuration(secs);
+  return compact ? duration : `resets in ${duration}`;
 }
 
 /** "just now" under a minute, else "12m ago" / "1d 19h ago". */
@@ -316,10 +370,12 @@ export function formatAgo(unixSecs: number, nowUnixSecs: number): string {
   return `${formatDuration(secs)} ago`;
 }
 
-/** Rank of a series key in legend order (5h, 7d, Fable); unknown keys last. */
+/** Rank of a series key in legend order (5h, 7d, Gemini, Fable); unknown keys last. */
 function legendOrder(key: string): number {
-  const index = (POOL_QUOTA_WINDOWS as readonly string[]).indexOf(key);
-  return index === -1 ? POOL_QUOTA_WINDOWS.length : index;
+  const index = POOL_QUOTA_WINDOW_ORDER.indexOf(
+    key as (typeof POOL_QUOTA_WINDOW_ORDER)[number],
+  );
+  return index === -1 ? POOL_QUOTA_WINDOW_ORDER.length : index;
 }
 
 /**

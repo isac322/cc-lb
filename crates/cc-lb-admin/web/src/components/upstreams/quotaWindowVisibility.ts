@@ -1,19 +1,38 @@
 import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
+import type { ProviderFamily } from '../../lib/providers';
 
 /**
  * Canonical window order everywhere a window list is shown: the shared
- * windows, the live model window, the legacy model windows, then extra
- * usage. The backend's `unified` account-restriction envelope is not a
- * web-visible window: snapshots for it are neither requested nor rendered.
+ * windows, Gemini model-family windows, Claude·OSS model-family windows, the
+ * legacy model windows, then extra usage. The backend's `unified`
+ * account-restriction envelope is not a web-visible window: snapshots for it
+ * are neither requested nor rendered.
  */
 export const QUOTA_WINDOW_ORDER = [
   '5h',
   '7d',
+  'gemini_5h',
+  'gemini_7d',
+  'third_party_5h',
+  'third_party_7d',
   '7d_fable',
   '7d_sonnet',
   '7d_opus',
   'overage',
 ] as const;
+
+function orderedWindows(latestWindows: readonly QuotaSnapshot[]): string[] {
+  const known = new Set<string>(QUOTA_WINDOW_ORDER);
+  return [
+    ...QUOTA_WINDOW_ORDER,
+    ...latestWindows
+      .map((snapshot) => snapshot.window)
+      .filter(
+        (window, index, windows) =>
+          !known.has(window) && windows.indexOf(window) === index,
+      ),
+  ];
+}
 
 export interface VisibleGraphWindowsInput {
   latestWindows: readonly QuotaSnapshot[] | undefined;
@@ -23,6 +42,7 @@ export interface VisibleGraphWindowsInput {
 
 export interface QuotaCardSnapshotsInput {
   latestWindows: readonly QuotaSnapshot[] | undefined;
+  provider?: ProviderFamily;
 }
 
 /**
@@ -83,9 +103,10 @@ export function selectVisibleGraphWindows({
   const byWindow = new Map<string, QuotaSnapshot>(
     latestWindows.map((snap) => [snap.window, snap]),
   );
-  return QUOTA_WINDOW_ORDER.filter((window) => {
+  return orderedWindows(latestWindows).filter((window) => {
     const snap = byWindow.get(window);
     if (!snap) return false;
+    if (window === 'unified') return false;
     if (snap.state === 'absent' || snap.state === 'unobserved') return false;
     if (!isObservedAtOrAfter(snap.observed_at_unix_millis, sinceUnixSecs)) {
       return false;
@@ -97,24 +118,30 @@ export function selectVisibleGraphWindows({
 }
 
 /**
- * Windows the Quota rows render, in `QUOTA_WINDOW_ORDER`: every window the
- * API reports for the upstream. Proven-absent windows are hidden. `5h` and
- * `7d` still show an unobserved placeholder before the first successful
- * quota lookup; other windows need an observation. Extra usage additionally
- * requires its switch to be enabled and a finite, positive monthly budget.
+ * API reports for the upstream. Proven-absent windows are hidden. Anthropic
+ * keeps its 5h and 7d unobserved placeholders; OpenAI and Gemini only show
+ * windows with an actual observation. Extra usage additionally requires its
+ * switch to be enabled and a finite, positive monthly budget.
  */
 export function selectQuotaCardSnapshots({
   latestWindows,
+  provider,
 }: QuotaCardSnapshotsInput): QuotaSnapshot[] {
   if (!latestWindows) return [];
   const byWindow = new Map<string, QuotaSnapshot>(
     latestWindows.map((snap) => [snap.window, snap]),
   );
   const result: QuotaSnapshot[] = [];
-  for (const window of QUOTA_WINDOW_ORDER) {
+  for (const window of orderedWindows(latestWindows)) {
     const snap = byWindow.get(window);
     if (!snap) continue;
+    if (window === 'unified') continue;
     if (snap.state === 'absent') continue;
+    if (provider !== undefined && provider !== 'anthropic') {
+      if (snap.state === 'unobserved') continue;
+      result.push(snap);
+      continue;
+    }
     if (window === '5h' || window === '7d') {
       result.push(snap);
       continue;

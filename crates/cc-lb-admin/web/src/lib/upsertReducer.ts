@@ -91,6 +91,17 @@ function evictOldestFinal(
   rememberEvictedFinal(tombstones, oldestId);
 }
 
+/** Retire a scoped request that finalized outside this feed after failover. */
+export function removeLivePartial(
+  eventsMap: LiveEventMap,
+  tombstones: Set<string>,
+  eventId: string,
+): boolean {
+  if (eventsMap.get(eventId)?.phase === 'final') return false;
+  rememberEvictedFinal(tombstones, eventId);
+  return eventsMap.delete(eventId);
+}
+
 export function upsertLiveEvent(
   eventsMap: LiveEventMap,
   finalizedIds: Set<string>,

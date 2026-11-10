@@ -9,6 +9,7 @@ import {
   requestOutcomeTone,
 } from '../../lib/format';
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
+import type { ProviderFamily } from '../../lib/providers';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import {
   reasoningBadgeText,
@@ -22,6 +23,7 @@ import {
 } from '../../lib/requestErrorCodes';
 import { requestKindBadgeText } from '../../lib/requestKind';
 import { useCopyButton } from '../../lib/useCopyButton';
+import { ProviderLogo } from './ProviderLogo';
 import { Badge, cx, Hint, Skeleton, Spinner } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestKindBadge } from './RequestKindBadge';
@@ -116,11 +118,13 @@ export function RequestEventIdentity({
   principalLabel,
   isPartial,
   isDetailPending = false,
+  provider,
 }: {
   event: RequestEventWithPhase;
   principalLabel: string;
   isPartial: boolean;
   isDetailPending?: boolean;
+  provider?: ProviderFamily;
 }) {
   const { copy } = useCopyButton();
   const outcome = getRequestOutcome(
@@ -193,8 +197,13 @@ export function RequestEventIdentity({
         <KvRow
           label="Upstream"
           value={
-            <span className="break-all min-w-0">
-              {event.upstream_name ?? DASH}
+            <span className="flex min-w-0 items-center justify-end gap-2 break-all">
+              {provider != null ? (
+                <ProviderLogo provider={provider} size={16} />
+              ) : null}
+              <span className="min-w-0 break-all">
+                {event.upstream_name ?? DASH}
+              </span>
             </span>
           }
         />

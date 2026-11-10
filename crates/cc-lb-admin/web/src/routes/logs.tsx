@@ -36,6 +36,7 @@ import { Select, type SelectOption } from '../components/ui/Select';
 import { SessionChip } from '../components/ui/SessionChip';
 import { TimeRangeBounds } from '../components/ui/TimeRangeBounds';
 import { TimeRangeStrip } from '../components/ui/TimeRangeStrip';
+import { useDesign } from '../designs/registry';
 import {
   eventTime,
   type RequestEvent,
@@ -43,11 +44,13 @@ import {
   RequestEventKindSchema,
 } from '../lib/api';
 import {
+  GENERATION_REQUEST_EVENT_KINDS,
   LOG_STATUS_FILTER_VALUES,
   REQUEST_EVENT_KIND_LABELS,
   REQUEST_EVENT_KINDS,
 } from '../lib/logRows';
 import { LOGS_PAGE_SIZE } from '../lib/logsPagination';
+import { providerOf } from '../lib/providers';
 import {
   useEventsHistogram,
   usePrincipalNameMap,
@@ -81,18 +84,25 @@ const unixSecondsSearchParam = z.preprocess((value) => {
     : undefined;
 }, z.number().optional());
 
-/** `event_kind` value that lifts the default kind filter. */
 const ALL_EVENT_KINDS = 'all';
-type EffectiveEventKind = RequestEventKind | typeof ALL_EVENT_KINDS;
+type EffectiveEventKind =
+  | RequestEventKind
+  | typeof ALL_EVENT_KINDS
+  | 'generation';
 /** The kind Logs lists when the URL names none: model traffic, `/v1/messages`. */
-export const DEFAULT_EVENT_KIND: RequestEventKind = 'messages';
+export const DEFAULT_EVENT_KIND = 'generation' as const;
 
 /**
  * The kind the list is filtered to: the URL's kind, the default kind when the
- * URL has none, or `all` (every kind) for the explicit opt-out.
+ * URL has none, `generation` for all model traffic, or `all` (every kind) for
+ * the explicit opt-out.
  */
 export function effectiveEventKind(
-  eventKind: RequestEventKind | typeof ALL_EVENT_KINDS | undefined,
+  eventKind:
+    | RequestEventKind
+    | typeof ALL_EVENT_KINDS
+    | 'generation'
+    | undefined,
 ): EffectiveEventKind {
   return eventKind ?? DEFAULT_EVENT_KIND;
 }
@@ -104,11 +114,15 @@ export const logsSearchSchema = z
     session: z.string().optional(),
     model: z.string().optional(),
     status: z.enum(LOG_STATUS_FILTER_VALUES).optional(),
-    // Absent or invalid `event_kind` means the default kind, `messages`
-    // (`effectiveEventKind`), so the default URL stays clean; `all` is the
-    // explicit opt-out that lists every endpoint category.
+    // Absent/invalid kind means all generation endpoints, across providers.
+    // `all` explicitly includes non-generation categories too.
     event_kind: z
-      .union([RequestEventKindSchema, z.literal(ALL_EVENT_KINDS)])
+      .union([
+        RequestEventKindSchema,
+        z.literal(ALL_EVENT_KINDS),
+        z.literal(DEFAULT_EVENT_KIND),
+        z.literal('generation'),
+      ])
       .optional()
       .catch(undefined),
     since_unix_secs: unixSecondsSearchParam,
@@ -137,16 +151,22 @@ export const Route = createFileRoute('/logs')({
 export function buildHistoricalFilters(
   filters: z.infer<typeof logsSearchSchema>,
 ) {
+  const eventKind = effectiveEventKind(filters.event_kind);
   return buildRequestEventsHistoryFilters({
     ...filters,
-    event_kind: effectiveEventKind(filters.event_kind),
+    event_kind: eventKind === 'generation' ? undefined : eventKind,
+    event_kind_set:
+      eventKind === 'generation' ? GENERATION_REQUEST_EVENT_KINDS : undefined,
   });
 }
 
 export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
+  const eventKind = effectiveEventKind(filters.event_kind);
   return buildRequestEventsLiveFilters({
     ...filters,
-    event_kind: effectiveEventKind(filters.event_kind),
+    event_kind: eventKind === 'generation' ? undefined : eventKind,
+    event_kind_set:
+      eventKind === 'generation' ? GENERATION_REQUEST_EVENT_KINDS : undefined,
   });
 }
 
@@ -211,13 +231,32 @@ function resetRowsScroll(el: HTMLElement | null) {
 }
 
 function LogsPage() {
+  const { LogsScopeBar } = useDesign();
   const filters = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
-  const upstreams = useUpstreams();
   const { session: sessionFilter } = filters;
+  const upstreams = useUpstreams();
+  const providerByUpstream = useMemo(
+    () =>
+      new Map(
+        (upstreams.data?.upstreams ?? []).map((upstream) => [
+          upstream.id,
+          providerOf(upstream.kind),
+        ]),
+      ),
+    [upstreams.data],
+  );
   const eventKindFilter = effectiveEventKind(filters.event_kind);
   const feedFilters = useMemo(
-    () => ({ ...filters, event_kind: eventKindFilter }),
+    () => ({
+      ...filters,
+      event_kind:
+        eventKindFilter === 'generation' ? undefined : eventKindFilter,
+      event_kind_set:
+        eventKindFilter === 'generation'
+          ? GENERATION_REQUEST_EVENT_KINDS
+          : undefined,
+    }),
     [eventKindFilter, filters],
   );
   const [userRequestedTailing, setUserRequestedTailing] = useState(true);
@@ -261,8 +300,17 @@ function LogsPage() {
     statusColor,
     filteredRows: visibleRows,
     firstPageEvents,
-    historyFilters: historicalFilters,
+    historyFilters: feedHistoricalFilters,
   } = feed;
+  const historicalFilters = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(feedHistoricalFilters).filter(
+          (entry): entry is [string, string] => entry[1] !== undefined,
+        ),
+      ),
+    [feedHistoricalFilters],
+  );
   const refreshLogs = feed.refresh;
 
   const routeModel = filters.model ?? '';
@@ -371,13 +419,13 @@ function LogsPage() {
   );
 
   const eventKindSelectOptions = useMemo<SelectOption[]>(
-    () =>
-      // Messages is the default; the "All kinds" item (`''`) lifts the
-      // filter, so every kind and the unfiltered list stay selectable.
-      REQUEST_EVENT_KINDS.map((kind) => ({
+    () => [
+      { value: 'generation', label: 'All requests' },
+      ...REQUEST_EVENT_KINDS.map((kind) => ({
         value: kind,
         label: REQUEST_EVENT_KIND_LABELS[kind],
       })),
+    ],
     [],
   );
 
@@ -479,7 +527,9 @@ function LogsPage() {
             value:
               eventKindFilter === ALL_EVENT_KINDS
                 ? 'All kinds'
-                : REQUEST_EVENT_KIND_LABELS[eventKindFilter],
+                : eventKindFilter === 'generation'
+                  ? 'Generation requests'
+                  : REQUEST_EVENT_KIND_LABELS[eventKindFilter],
           },
         ]
       : []),
@@ -497,7 +547,7 @@ function LogsPage() {
         description={
           <span className="flex flex-wrap items-center gap-x-2">
             <span>
-              {visibleRows.length} requests —{' '}
+              Loaded {visibleRows.length} requests —{' '}
               {effectiveTailing ? 'live tailing' : 'paged'}
             </span>
             {effectiveTailing &&
@@ -560,6 +610,7 @@ function LogsPage() {
           </>
         }
       />
+      {LogsScopeBar ? <LogsScopeBar /> : null}
       {/* Filters and the density strip sit on the ground; only the table
           keeps a flat surface. */}
       <div className="flex flex-col gap-3 shrink-0">
@@ -733,6 +784,7 @@ function LogsPage() {
         tableContainerRef={scrollContainerRef}
         onAnchorRange={focusAround}
         principalNameMap={principalNameMap}
+        providerByUpstream={providerByUpstream}
         reservedRowCount={LOGS_RESERVED_ROW_COUNT}
         emptyTitle={emptyCopy.title}
         emptyDescription={emptyCopy.description}

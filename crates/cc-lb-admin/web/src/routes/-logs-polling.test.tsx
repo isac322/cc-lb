@@ -727,7 +727,9 @@ describe('logs polling surfaces', () => {
       expect(
         screen.getAllByTestId('logs-row').map((row) => row.textContent),
       ).toEqual(['live-new', 'historical-new', 'duplicate', 'historical-old']);
-      expect(screen.getByText('4 requests — live tailing')).toBeDefined();
+      expect(
+        screen.getByText('Loaded 4 requests — live tailing'),
+      ).toBeDefined();
 
       fireEvent.click(screen.getByRole('button', { name: 'Export' }));
       expect(anchorClick).toHaveBeenCalledOnce();
@@ -920,7 +922,7 @@ describe('logs polling surfaces', () => {
     ).toBe('false');
     expect(screen.getByLabelText('View request history-renewal')).toBeDefined();
 
-    routeState.search = { status: 'errors' };
+    routeState.search = { event_kind: 'messages', status: 'errors' };
     routeState.recent = {
       ...routeState.recent,
       data: pageFromEvents([...historyEvents]),
@@ -945,17 +947,10 @@ describe('logs polling surfaces', () => {
     ).toBe('true');
   });
 
-  test('lists only messages requests when the URL names no kind', async () => {
+  test('lists generation requests when the URL names no kind', async () => {
     routeState.search = {};
     routeState.recent = {
       data: pageFromEvents([
-        {
-          ts: 1_700_000_000,
-          request_id: 'count-tokens-request',
-          status: 200,
-          duration_ms: 25,
-          event_kind: 'count_tokens',
-        },
         {
           ts: 1_700_000_001,
           request_id: 'messages-request',
@@ -974,14 +969,17 @@ describe('logs polling surfaces', () => {
     await waitFor(() =>
       expect(screen.getByText('messages-request')).toBeDefined(),
     );
-    expect(screen.queryByText('count-tokens-request')).toBeNull();
     expect(routeState.recentCalls.length).toBeGreaterThan(0);
     for (const call of routeState.recentCalls) {
-      expect(call.filters.event_kind).toBe('messages');
+      expect(call.filters.event_kind).toBe(
+        'messages,openai_responses,gemini_generate_content,chat_completions,completions,audio,images,gemini_predict',
+      );
     }
     expect(routeState.liveCalls.length).toBeGreaterThan(0);
     for (const filters of routeState.liveCalls) {
-      expect(filters.event_kind).toBe('messages');
+      expect(filters.event_kind).toBe(
+        'messages,openai_responses,gemini_generate_content,chat_completions,completions,audio,images,gemini_predict',
+      );
     }
     // The default kind is not an applied filter: no chip.
     expect(

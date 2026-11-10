@@ -1,18 +1,16 @@
 import { Link } from '@tanstack/react-router';
 import { ArrowUpRight, MoreHorizontal, PanelLeft, Star } from 'lucide-react';
 import { useId, useMemo } from 'react';
+import { useDesignNavigation } from '../../designs/registry';
+import type { NavGroup, NavItem } from '../../designs/types';
 import {
   type OAuthReconnectNudge,
   useOAuthReconnectNudges,
 } from '../../lib/oauthReconnect';
+import { isOAuthUpstreamKind } from '../../lib/providers';
 import { useUpstreams } from '../../lib/queries';
+import { ProviderLogo } from '../ui/ProviderLogo';
 import { cx, IconButton } from '../ui/primitives';
-import {
-  NAV_GROUPS,
-  NAV_ITEMS,
-  type NavGroup,
-  navItemForPath,
-} from './navItems';
 
 /**
  * Reconnect nudges for all OAuth upstreams: the one source for the
@@ -26,8 +24,8 @@ export function useUpstreamOAuthAttention(): {
   const upstreams = useUpstreams();
   const oauthUpstreams = useMemo(
     () =>
-      (upstreams.data?.upstreams ?? []).filter(
-        (u) => u.kind === 'anthropic_oauth',
+      (upstreams.data?.upstreams ?? []).filter((u) =>
+        isOAuthUpstreamKind(u.kind),
       ),
     [upstreams.data],
   );
@@ -176,15 +174,102 @@ const LABEL_FADE =
 const NAV_ITEM =
   'relative flex items-center gap-2.5 h-9 max-lg:h-11 rounded-sm text-sm font-medium text-text-muted transition-colors hover:bg-overlay-2 hover:text-text ' +
   'data-[status=active]:bg-selected data-[status=active]:text-text data-[status=active]:hover:bg-selected ' +
+  'data-[current=true]:bg-selected data-[current=true]:text-text data-[current=true]:hover:bg-selected ' +
   'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2';
+
+function navItemKey(item: NavItem) {
+  return (
+    item.id ??
+    `${item.path}:${item.params?.provider ?? ''}:${JSON.stringify(item.search)}`
+  );
+}
+
+function SidebarNavItem({
+  item,
+  collapsed,
+  current,
+  onNavigate,
+  nested = false,
+}: {
+  item: NavItem;
+  collapsed: boolean;
+  current?: NavItem;
+  onNavigate: () => void;
+  nested?: boolean;
+}) {
+  const { path, label, Icon, search, params, provider } = item;
+  const isCurrent =
+    current !== undefined && navItemKey(current) === navItemKey(item);
+  return (
+    <li>
+      <Link
+        to={path}
+        params={params}
+        search={search}
+        onClick={onNavigate}
+        activeOptions={{
+          exact: path === '/',
+          includeSearch: search !== undefined,
+          explicitUndefined: true,
+        }}
+        aria-current={isCurrent ? 'page' : undefined}
+        data-current={isCurrent ? 'true' : undefined}
+        title={collapsed ? label : undefined}
+        className={cx(
+          NAV_ITEM,
+          collapsed ? 'justify-center' : 'px-2',
+          nested && !collapsed ? 'ml-5' : undefined,
+        )}
+      >
+        {provider ? (
+          <ProviderLogo
+            provider={provider}
+            size={16}
+            className="size-4 shrink-0"
+          />
+        ) : (
+          <Icon
+            className="size-4 shrink-0"
+            strokeWidth={1.75}
+            aria-hidden="true"
+          />
+        )}
+        {!collapsed ? (
+          <span className={cx('truncate', LABEL_FADE)}>{label}</span>
+        ) : (
+          <span className="sr-only">{label}</span>
+        )}
+        {path === '/upstreams' ? (
+          <UpstreamOAuthAttentionBadge collapsed={collapsed} />
+        ) : null}
+      </Link>
+      {item.children?.length ? (
+        <ul className="mt-0.5 space-y-0.5">
+          {item.children.map((child) => (
+            <SidebarNavItem
+              key={navItemKey(child)}
+              item={child}
+              collapsed={collapsed}
+              current={current}
+              onNavigate={onNavigate}
+              nested
+            />
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
 
 function SidebarNavGroup({
   group,
   collapsed,
+  current,
   onNavigate,
 }: {
   group: NavGroup;
   collapsed: boolean;
+  current?: NavItem;
   onNavigate: () => void;
 }) {
   const headingId = useId();
@@ -201,30 +286,14 @@ function SidebarNavGroup({
         {group.label}
       </div>
       <ul aria-labelledby={headingId} className="space-y-0.5">
-        {group.items.map(({ path, label, Icon }) => (
-          <li key={path}>
-            <Link
-              to={path}
-              onClick={onNavigate}
-              activeOptions={{ exact: path === '/' }}
-              title={collapsed ? label : undefined}
-              className={cx(NAV_ITEM, collapsed ? 'justify-center' : 'px-2')}
-            >
-              <Icon
-                className="w-4 h-4 shrink-0"
-                strokeWidth={1.75}
-                aria-hidden="true"
-              />
-              {!collapsed ? (
-                <span className={cx('truncate', LABEL_FADE)}>{label}</span>
-              ) : (
-                <span className="sr-only">{label}</span>
-              )}
-              {path === '/upstreams' ? (
-                <UpstreamOAuthAttentionBadge collapsed={collapsed} />
-              ) : null}
-            </Link>
-          </li>
+        {group.items.map((item) => (
+          <SidebarNavItem
+            key={navItemKey(item)}
+            item={item}
+            collapsed={collapsed}
+            current={current}
+            onNavigate={onNavigate}
+          />
         ))}
       </ul>
     </div>
@@ -234,10 +303,15 @@ function SidebarNavGroup({
 export function SidebarNav({
   collapsed,
   onNavigate,
+  mobile = false,
 }: {
   collapsed: boolean;
   onNavigate: () => void;
+  mobile?: boolean;
 }) {
+  const { groups, current } = useDesignNavigation(
+    mobile ? 'mobile' : 'desktop',
+  );
   return (
     <nav
       aria-label="Main"
@@ -246,7 +320,7 @@ export function SidebarNav({
         collapsed ? 'space-y-3' : 'space-y-6',
       )}
     >
-      {NAV_GROUPS.map((group, index) => (
+      {groups.map((group, index) => (
         <div
           key={group.label}
           className={
@@ -256,6 +330,7 @@ export function SidebarNav({
           <SidebarNavGroup
             group={group}
             collapsed={collapsed}
+            current={current}
             onNavigate={onNavigate}
           />
         </div>
@@ -341,9 +416,6 @@ export function SidebarFooter({
   );
 }
 
-/** Pages that get their own tab on phones; the rest live under "More". */
-const TAB_BAR_PATHS = ['/', '/upstreams', '/principals', '/logs'] as const;
-
 const TAB_ITEM =
   'relative flex flex-col items-center justify-center gap-1 min-w-0 text-caption font-medium text-text-muted transition-colors hover:text-text ' +
   'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2';
@@ -354,34 +426,46 @@ const TAB_ITEM =
  * selection fill. Page titles stay in the top bar only.
  */
 export function SidebarTabBar({
-  pathname,
   onMore,
   moreOpen,
 }: {
-  pathname: string;
   onMore: () => void;
   moreOpen: boolean;
 }) {
-  const current = navItemForPath(pathname)?.path ?? null;
-  const moreActive =
-    current !== null && !(TAB_BAR_PATHS as readonly string[]).includes(current);
+  const { items, current } = useDesignNavigation('mobile');
+  const tabs = items
+    .filter((item) => item.mobile)
+    .sort(
+      (a, b) =>
+        (a.mobileOrder ?? items.indexOf(a)) -
+        (b.mobileOrder ?? items.indexOf(b)),
+    )
+    .slice(0, 4);
+  const moreActive = current !== undefined && !tabs.includes(current);
   return (
     <nav
       aria-label="Main"
       className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-subtle bg-bg pb-[env(safe-area-inset-bottom)] lg:hidden"
     >
-      {TAB_BAR_PATHS.map((path) => {
-        const item = NAV_ITEMS.find((candidate) => candidate.path === path);
-        if (!item) return null;
-        const { label, Icon } = item;
+      {tabs.map((item) => {
+        const { path, label, Icon, search, id } = item;
+        const isCurrent =
+          current !== undefined && navItemKey(current) === navItemKey(item);
         return (
           <Link
-            key={path}
+            key={id ?? `${path}:${JSON.stringify(search)}`}
             to={path}
-            activeOptions={{ exact: path === '/' }}
+            search={search}
+            activeOptions={{
+              exact: path === '/',
+              includeSearch: search !== undefined,
+              explicitUndefined: true,
+            }}
+            aria-current={isCurrent && !moreOpen ? 'page' : undefined}
+            data-current={isCurrent ? 'true' : undefined}
             className={cx(
               TAB_ITEM,
-              'h-14 data-[status=active]:bg-selected data-[status=active]:text-text',
+              'h-14 data-[status=active]:bg-selected data-[status=active]:text-text data-[current=true]:bg-selected data-[current=true]:text-text',
             )}
           >
             <Icon className="size-4" strokeWidth={1.75} aria-hidden="true" />
@@ -396,7 +480,7 @@ export function SidebarTabBar({
         type="button"
         aria-haspopup="dialog"
         aria-expanded={moreOpen}
-        aria-current={moreActive ? 'page' : undefined}
+        aria-current={moreActive && !moreOpen ? 'page' : undefined}
         onClick={onMore}
         className={cx(TAB_ITEM, 'h-14', moreActive && 'bg-selected text-text')}
       >

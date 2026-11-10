@@ -1,16 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import type {
-  RequestEvent,
-  RequestEventKind,
-  RequestEventPartial,
+import {
+  type RequestEvent,
+  type RequestEventKind,
+  RequestEventKindSchema,
+  type RequestEventPartial,
 } from './api';
 import {
   effectiveRequestEventKind,
   filterLiveEventsByUnixSeconds,
   filterLogRows,
   filterLogRowsByStatusClass,
+  isGenerationRequestEvent,
   isMessagesRequestEvent,
   mergeLogRows,
+  REQUEST_EVENT_KIND_LABELS,
 } from './logRows';
 import type { LiveEventMap } from './upsertReducer';
 
@@ -41,6 +44,29 @@ function makePartial(
     ts_ms: tsMs,
   };
 }
+
+describe('catalog operation event kinds', () => {
+  it('accepts backend labels and keeps non-generation operations out of generation filtering', () => {
+    for (const [kind, generation] of [
+      ['chat_completions', true],
+      ['completions', true],
+      ['embeddings', false],
+      ['moderations', false],
+      ['audio', true],
+      ['images', true],
+      ['codex_auxiliary', false],
+      ['gemini_predict', true],
+    ] as const) {
+      expect(RequestEventKindSchema.parse(kind)).toBe(kind);
+      expect(effectiveRequestEventKind({ event_kind: kind })).toBe(kind);
+      expect(REQUEST_EVENT_KIND_LABELS[kind]).toBeTruthy();
+      expect(isGenerationRequestEvent({ event_kind: kind })).toBe(generation);
+      expect(
+        isGenerationRequestEvent({ event_kind: kind, source_kind: 'renewal' }),
+      ).toBe(false);
+    }
+  });
+});
 
 describe('mergeLogRows', () => {
   it('deduplicates by event identity without collapsing retries sharing a request id', () => {

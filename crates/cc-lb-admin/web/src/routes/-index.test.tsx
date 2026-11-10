@@ -10,13 +10,19 @@ import {
 import userEvent from '@testing-library/user-event';
 import {
   type ComponentProps,
-  type ComponentType,
   createContext,
   type ReactNode,
   useContext,
 } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as RequestEventsTableModule from '../components/ui/RequestEventsTable';
+import DefaultOverviewPage, {
+  PoolQuotaLegend,
+  ProviderOverviewPage,
+  type TopPrincipal,
+  TopPrincipalsSection,
+  ValueTile,
+} from '../designs/default/OverviewPage';
 import type {
   AggregateResponse,
   DashboardSummaryResponse,
@@ -30,12 +36,8 @@ import { getWindowColor } from '../lib/colors';
 import * as queries from '../lib/queries';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
-import {
-  Route,
-  type TopPrincipal,
-  TopPrincipalsSection,
-  ValueTile,
-} from './index';
+import { PrincipalProviderTable } from '../overview/PrincipalProviderTable';
+import { ProviderPoolCard } from '../overview/ProviderPoolCard';
 
 vi.mock('../lib/queries', async () => {
   const actual = await vi.importActual<typeof queries>('../lib/queries');
@@ -277,16 +279,15 @@ vi.mock('recharts', () => ({
   YAxis: () => null,
 }));
 
-const RouteComponent = Route.options.component as ComponentType;
-
 // OAuthReconnectSummary runs its own react-query hooks; give the page the
-// same provider the app shell supplies.
+// same provider the app shell supplies. Mount the incumbent overview directly:
+// the route now selects the adaptive design when no design is supplied.
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false } },
 });
 const OverviewPage = () => (
   <QueryClientProvider client={queryClient}>
-    <RouteComponent />
+    <DefaultOverviewPage />
   </QueryClientProvider>
 );
 
@@ -737,6 +738,194 @@ afterEach(() => {
   cleanup();
 });
 
+describe('Pool quota aligned readout', () => {
+  it.each([
+    {
+      provider: 'anthropic',
+      windows: ['5h', '7d', '7d_fable'],
+      labels: ['5h', '7d', '7d (Fable)'],
+    },
+    {
+      provider: 'openai',
+      windows: ['5h', '7d'],
+      labels: ['5h', '7d'],
+    },
+    {
+      provider: 'gemini',
+      windows: ['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d'],
+      labels: ['Gemini 5h', 'Gemini 7d', 'Claude·OSS 5h', 'Claude·OSS 7d'],
+    },
+  ])(
+    'aligns $provider windows under one set of column headings',
+    ({ windows, labels }) => {
+      render(
+        <PoolQuotaLegend
+          latest={Object.fromEntries(windows.map((window) => [window, 28]))}
+          nowUnixSecs={0}
+          resets={Object.fromEntries(
+            windows.map((window) => [window, 4 * 3600 + 17 * 60]),
+          )}
+          windows={windows}
+        />,
+      );
+      const legend = screen.getByTestId('pool-quota-legend');
+      const grid = legend.querySelector('[data-slot="pool-quota-legend-grid"]');
+      const header = legend.querySelector(
+        '[data-slot="pool-quota-legend-header"]',
+      );
+      expect(within(legend).getAllByText('Used')).toHaveLength(1);
+      expect(within(legend).getAllByText('Resets in')).toHaveLength(1);
+      expect(header?.firstElementChild?.textContent).toBe('Window');
+      expect(header?.firstElementChild?.className).toContain('sr-only');
+      expect(grid?.className).toContain(
+        'grid-cols-[max-content_minmax(1rem,1fr)_4.5ch_8ch]',
+      );
+      expect(grid?.className).toContain('gap-y-2');
+      const rows = screen.getAllByTestId('pool-quota-legend-slot');
+      expect(rows.map((row) => row.dataset.window)).toEqual(windows);
+      expect(grid?.children).toHaveLength(windows.length + 1);
+      for (const [index, row] of rows.entries()) {
+        expect(row.className).toContain('col-span-full grid grid-cols-subgrid');
+        expect(header?.className).toContain('grid-cols-subgrid');
+        expect(row.children).toHaveLength(4);
+        expect(row.children.item(0)?.textContent).toBe(labels.at(index));
+        expect(
+          row.querySelector('[data-slot="pool-quota-legend-used"]')
+            ?.textContent,
+        ).toBe('28%');
+        const reset = row.querySelector(
+          '[data-slot="pool-quota-legend-reset"]',
+        );
+        expect(reset?.textContent).toBe('4h 17m');
+        expect(reset?.getAttribute('title')).toMatch(/^Resets /);
+        expect(row.getAttribute('aria-label')).toContain(
+          'window, 28% used, resets in 4h 17m',
+        );
+        expect(row.textContent).not.toMatch(/used|resets in/);
+      }
+    },
+  );
+
+  it('renders only the OpenAI window with quota data', () => {
+    const aggregate = aggregateResponse(POOL_HISTORY_NOW, 60);
+    const history = poolHistoryResponse(POOL_HISTORY_NOW, 18);
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: {
+        ...aggregate,
+        windows: aggregate.windows.filter((entry) => entry.window === '7d'),
+      },
+      isPending: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: {
+        ...history,
+        windows: history.windows.filter((entry) => entry.window === '7d'),
+      },
+      isPending: false,
+    } as never);
+    render(
+      <ProviderPoolCard hasSubscription provider="openai" rangeSecs={86400} />,
+    );
+    const rows = screen.getAllByTestId('pool-quota-legend-slot');
+    expect(rows.map((row) => row.dataset.window)).toEqual(['7d']);
+    expect(screen.queryByText('5h')).toBeNull();
+    expect(
+      rows[0]?.querySelector('[data-slot="pool-quota-legend-used"]')
+        ?.textContent,
+    ).toBe('28%');
+  });
+
+  it('renders only 5h and 7d when an Anthropic pool has no Fable data', () => {
+    const aggregate = aggregateResponse(POOL_HISTORY_NOW, 60);
+    const history = poolHistoryResponse(POOL_HISTORY_NOW, 18);
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: {
+        ...aggregate,
+        windows: aggregate.windows.filter(
+          (entry) => entry.window !== '7d_fable',
+        ),
+      },
+      isPending: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: {
+        ...history,
+        windows: history.windows.filter((entry) => entry.window !== '7d_fable'),
+      },
+      isPending: false,
+    } as never);
+
+    render(
+      <ProviderPoolCard
+        hasSubscription
+        provider="anthropic"
+        rangeSecs={86400}
+      />,
+    );
+
+    expect(
+      screen
+        .getAllByTestId('pool-quota-legend-slot')
+        .map((row) => row.dataset.window),
+    ).toEqual(['5h', '7d']);
+    expect(screen.queryByText('7d (Fable)')).toBeNull();
+  });
+
+  it('renders all three Anthropic windows when Fable data is present', () => {
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregateResponse(POOL_HISTORY_NOW, 60),
+      isPending: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: poolHistoryResponse(POOL_HISTORY_NOW, 18),
+      isPending: false,
+    } as never);
+
+    render(
+      <ProviderPoolCard
+        hasSubscription
+        provider="anthropic"
+        rangeSecs={86400}
+      />,
+    );
+
+    expect(screen.getAllByTestId('pool-quota-legend-slot')).toHaveLength(3);
+    expect(screen.getByText('7d (Fable)')).toBeDefined();
+  });
+
+  it('keeps the Anthropic default window rows while loading', () => {
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: undefined,
+      isPending: true,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: undefined,
+      isPending: true,
+    } as never);
+
+    render(
+      <ProviderPoolCard
+        hasSubscription
+        provider="anthropic"
+        rangeSecs={86400}
+      />,
+    );
+
+    expect(
+      screen
+        .getAllByTestId('pool-quota-legend-slot')
+        .map((row) => row.dataset.window),
+    ).toEqual(['5h', '7d', '7d_fable']);
+    expect(screen.getAllByTestId('pool-quota-legend-slot')).toHaveLength(3);
+    expect(screen.getAllByText('7d (Fable)')).toHaveLength(1);
+    expect(
+      screen
+        .getAllByTestId('pool-quota-legend-slot')
+        .every((row) => row.querySelector('.skeleton') !== null),
+    ).toBe(true);
+  });
+});
+
 describe('Overview pool quota usage', () => {
   it('leads with the pool chart, legend reads used with its reset, captions qualify it', () => {
     const base = aggregateResponse(POOL_HISTORY_NOW, 60);
@@ -789,11 +978,28 @@ describe('Overview pool quota usage', () => {
     ).toEqual(['Pool quota usage', 'Traffic', 'Top principals']);
 
     const slots = screen.getAllByTestId('pool-quota-legend-slot');
-    expect(slots.map((slot) => slot.textContent)).toEqual([
-      '5h · 12% used · resets in 1h',
-      '7d · 83% used · resets in 1h',
-      '7d (Fable) · 97% used · resets in 1h',
+    expect(slots.map((slot) => slot.getAttribute('aria-label'))).toEqual([
+      '5-hour window, 12% used, resets in 1h',
+      '7-day window, 83% used, resets in 1h',
+      '7-day (Fable) window, 97% used, resets in 1h',
     ]);
+    expect(
+      slots.map(
+        (slot) =>
+          slot.querySelector('[data-slot="pool-quota-legend-used"]')
+            ?.textContent,
+      ),
+    ).toEqual(['12%', '83%', '97%']);
+    expect(
+      slots.map(
+        (slot) =>
+          slot.querySelector('[data-slot="pool-quota-legend-reset"]')
+            ?.textContent,
+      ),
+    ).toEqual(['1h', '1h', '1h']);
+    for (const slot of slots) {
+      expect(slot.textContent).not.toMatch(/used|resets in/);
+    }
 
     const captions = screen.getByTestId('pool-quota-captions');
     expect(captions.textContent).toContain('Plan-weighted across upstreams');
@@ -898,9 +1104,9 @@ describe('Overview pool quota usage', () => {
     expect(
       screen.getByTestId('pool-quota-area-7d_fable').getAttribute('d'),
     ).toBe(`${bucketStart}:40|${now}:20`);
-    expect(screen.getByTestId('pool-quota-legend-slot').textContent).toBe(
-      '7d (Fable) · 20% used · resets in 1h',
-    );
+    expect(
+      screen.getByTestId('pool-quota-legend-slot').getAttribute('aria-label'),
+    ).toBe('7-day (Fable) window, 20% used, resets in 1h');
   });
 
   it('clamps a pre-range pool snapshot across an idle 1h range', () => {
@@ -934,8 +1140,10 @@ describe('Overview pool quota usage', () => {
       `${rangeStart}:27|${now}:27`,
     );
     expect(
-      card.querySelector('[data-testid="pool-quota-legend-slot"]')?.textContent,
-    ).toBe('5h · 27% used · resets in 1h');
+      card
+        .querySelector('[data-testid="pool-quota-legend-slot"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('5-hour window, 27% used, resets in 1h');
     expect(card.textContent).not.toContain(
       'No timeline data yet for this range',
     );
@@ -1142,6 +1350,33 @@ describe('Overview pool quota usage', () => {
         .getByRole('link', { name: 'Manage upstreams' })
         .getAttribute('href'),
     ).toBe('/upstreams');
+  });
+  it('filters the single-provider Overview legend to present windows', () => {
+    mockResolvedKpiQueries();
+    const base = aggregateResponse(POOL_HISTORY_NOW, 60);
+    const history = poolHistoryResponse(POOL_HISTORY_NOW, 18);
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: {
+        ...base,
+        windows: base.windows.filter((entry) => entry.window !== '7d_fable'),
+      },
+      isPending: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: {
+        ...history,
+        windows: history.windows.filter((entry) => entry.window !== '7d_fable'),
+      },
+      isPending: false,
+    } as never);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProviderOverviewPage provider="anthropic" />
+      </QueryClientProvider>,
+    );
+    const slots = screen.getAllByTestId('pool-quota-legend-slot');
+    expect(slots.map((slot) => slot.dataset.window)).toEqual(['5h', '7d']);
+    expect(screen.queryByText('7d (Fable)')).toBeNull();
   });
 });
 
@@ -1558,9 +1793,10 @@ describe('Overview loading geometry', () => {
         'No timeline data yet for this range',
       );
       expect(
-        quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
-          ?.textContent,
-      ).toBe('5h · 20% used · resets in 1h');
+        quotaCard
+          .querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
+          ?.getAttribute('aria-label'),
+      ).toBe('5-hour window, 20% used, resets in 1h');
       expect(principalRow.textContent).toContain('Principal Alpha');
       expect(principalRow.textContent).toContain('$3.00');
 
@@ -1592,9 +1828,10 @@ describe('Overview loading geometry', () => {
         'No timeline data yet for this range',
       );
       expect(
-        quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
-          ?.textContent,
-      ).toBe('5h · 20% used · resets in 1h');
+        quotaCard
+          .querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
+          ?.getAttribute('aria-label'),
+      ).toBe('5-hour window, 20% used, resets in 1h');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(screen.queryByTestId('top-principal-skeleton-row')).toBeNull();
       expect(principalRow.textContent).toContain('$3.00');
@@ -1629,9 +1866,10 @@ describe('Overview loading geometry', () => {
 
       expect(chartSlot.firstElementChild).toBe(chartInstance);
       expect(
-        quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
-          ?.textContent,
-      ).toBe('5h · 55% used · resets in 1h');
+        quotaCard
+          .querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
+          ?.getAttribute('aria-label'),
+      ).toBe('5-hour window, 55% used, resets in 1h');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(principalRow.textContent).toContain('$9.00');
     } finally {
@@ -1822,9 +2060,10 @@ describe('Overview loading geometry', () => {
       oneHourPath,
     );
     expect(
-      quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
-        ?.textContent,
-    ).toBe('5h · 55% used · resets in 1h');
+      quotaCard
+        .querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
+        ?.getAttribute('aria-label'),
+    ).toBe('5-hour window, 55% used, resets in 1h');
     expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
   });
 
@@ -2011,43 +2250,11 @@ describe('Overview loading geometry', () => {
     };
     const liveMap: LiveEventMap = new Map([
       ['live-1', { phase: 'final', event: finalLiveEvent(1) }],
-      [
-        'live-2',
-        {
-          phase: 'final',
-          event: { ...finalLiveEvent(2), source_kind: 'renewal' },
-        },
-      ],
-      [
-        'live-3',
-        {
-          phase: 'final',
-          event: { ...finalLiveEvent(3), event_kind: 'count_tokens' },
-        },
-      ],
-      [
-        'live-4',
-        {
-          phase: 'final',
-          event: {
-            duration_ms: 10,
-            event_id: 'live-4',
-            model: 'model-4',
-            request_id: 'request-4',
-            status: 200,
-            ts: 4,
-          },
-        },
-      ],
     ]);
     mockRequestEventsFeed([historical], { liveEventsMap: liveMap, version: 4 });
 
     render(<OverviewPage />);
 
-    expect(queries.useRecentEventsPage).toHaveBeenCalledWith(
-      { event_kind: 'messages' },
-      { kind: 'initial', limit: 500 },
-    );
     expect(screen.getByLabelText('View request live-1')).toBeDefined();
     expect(screen.getByLabelText('View request historical-1')).toBeDefined();
     expect(screen.queryByLabelText('View request live-2')).toBeNull();
@@ -2408,6 +2615,116 @@ function renderPrincipals(principals: readonly TopPrincipal[]) {
     />,
   );
 }
+
+describe.each(['single-provider', 'multi-provider'] as const)(
+  '%s principal usage row navigation',
+  (surface) => {
+    function renderRow() {
+      if (surface === 'single-provider') {
+        renderPrincipals([COMPLETE_PRINCIPAL]);
+        return screen.getByTestId('top-principal-row');
+      }
+      render(
+        <PrincipalProviderTable
+          error={false}
+          loading={false}
+          providers={['anthropic', 'openai', 'gemini']}
+          rows={[
+            {
+              id: COMPLETE_PRINCIPAL.id,
+              name: COMPLETE_PRINCIPAL.name,
+              providers: {
+                anthropic: {
+                  costMicros: 1_000_000,
+                  cacheHitRatio: 0.87,
+                  requests: 12,
+                  tokens: 345,
+                  promptTokens: 300,
+                },
+              },
+              totalCostMicros: 1_000_000,
+              totalRequests: 12,
+              totalTokens: 345,
+              totalCacheHitRatio: 0.87,
+              sharePct: 100,
+            },
+          ]}
+        />,
+      );
+      return screen.getByTestId('multi-provider-principal-row');
+    }
+
+    it('navigates to the principal detail when a non-name cell or row spacing is clicked', () => {
+      const row = renderRow();
+      const cells = within(row).getAllByRole('cell');
+      for (const cell of cells.slice(1)) {
+        fireEvent.click(cell);
+        expect(routerMock.navigate).toHaveBeenLastCalledWith({
+          to: '/principals',
+          search: { selectedId: COMPLETE_PRINCIPAL.id },
+        });
+      }
+      fireEvent.click(row);
+      expect(routerMock.navigate).toHaveBeenCalledTimes(cells.length);
+      expect(within(row).getByRole('link').getAttribute('href')).toBe(
+        `/principals?selectedId=${COMPLETE_PRINCIPAL.id}`,
+      );
+    });
+
+    it.each([{ metaKey: true }, { ctrlKey: true }, { button: 1 }])(
+      'opens non-name cell navigation in a new tab for %j',
+      (pointer) => {
+        const row = renderRow();
+        const cell = within(row).getAllByRole('cell').at(-1);
+        if (!cell) throw new Error('Missing principal usage cell');
+        const open = vi.spyOn(window, 'open').mockReturnValue(null);
+        try {
+          if ('button' in pointer) {
+            fireEvent(
+              cell,
+              new MouseEvent('auxclick', {
+                bubbles: true,
+                cancelable: true,
+                ...pointer,
+              }),
+            );
+          } else {
+            fireEvent.click(cell, pointer);
+          }
+          expect(open).toHaveBeenCalledWith(
+            within(row).getByRole<HTMLAnchorElement>('link').href,
+            '_blank',
+            'noopener,noreferrer',
+          );
+          expect(routerMock.navigate).not.toHaveBeenCalled();
+        } finally {
+          open.mockRestore();
+        }
+      },
+    );
+
+    it('keeps text selection from navigating and leaves the name link as the tab stop', () => {
+      const row = renderRow();
+      const cell = within(row).getAllByRole('cell').at(-1);
+      if (!cell) throw new Error('Missing principal usage cell');
+      const selection = window.getSelection();
+      if (!selection) throw new Error('Missing text selection');
+      const range = document.createRange();
+      range.selectNodeContents(cell);
+      selection.addRange(range);
+      try {
+        fireEvent.click(cell);
+        expect(routerMock.navigate).not.toHaveBeenCalled();
+        expect(within(row).getByRole<HTMLAnchorElement>('link').tabIndex).toBe(
+          0,
+        );
+        expect(row.tabIndex).toBe(-1);
+      } finally {
+        selection.removeAllRanges();
+      }
+    });
+  },
+);
 
 describe('Top principal cost breakdown and cache hit', () => {
   it('reads requests, tokens, cache hit, cost and share in one row', () => {

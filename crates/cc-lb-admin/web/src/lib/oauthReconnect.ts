@@ -1,9 +1,9 @@
 // OAuth reconnect nudge classification + polling.
 // Single source of truth for deciding when an OAuth upstream needs the user to
-// re-run the connect flow. The deadline clock depends on the credential mode:
-// refreshing credentials are driven by the refresh token's expiry, while a
-// long-lived 365-day grant is driven by the access token itself since nothing
-// ever renews it. Consumed by the per-upstream detail notice and the global
+// re-run the connect flow. Anthropic's long-lived grant uses the access-token
+// deadline; refreshing credentials use a refresh-token deadline only when the
+// provider reports one. OpenAI and Google do not inherit Anthropic's yearly
+// grant lifecycle. Consumed by the per-upstream detail notice and the global
 // summary; both share the same query keys as useUpstreamOAuthStatus so the
 // existing completion invalidation clears every surface at once.
 
@@ -81,6 +81,7 @@ export function classifyOAuthReconnect(
   if (!status) return null;
   // Non-OAuth upstreams are never queried, but stay honest if one arrives.
   if (status.status === 'wrong_kind') return null;
+  const concise = status.kind !== 'anthropic_oauth';
 
   // Corrupted is checked before has_credentials so an undecryptable row can
   // never fall into the "not connected" branch below regardless of how the
@@ -89,9 +90,10 @@ export function classifyOAuthReconnect(
     return {
       reason: 'credentials_unreadable',
       tone: 'danger',
-      label: 'Stored credentials unreadable',
-      description:
-        'The stored OAuth credentials could not be decrypted. Reconnect the account to restore requests.',
+      label: concise ? 'Sign-in unavailable' : 'Stored credentials unreadable',
+      description: concise
+        ? 'The saved sign-in could not be read. Reconnect the account.'
+        : 'The stored OAuth credentials could not be decrypted. Reconnect the account to restore requests.',
       actionLabel: 'Reconnect',
       expiresAt: null,
     };
@@ -101,9 +103,10 @@ export function classifyOAuthReconnect(
     return {
       reason: 'not_connected',
       tone: 'warn',
-      label: 'OAuth not connected',
-      description:
-        'No OAuth credentials are stored for this upstream. Connect an account to enable requests.',
+      label: concise ? 'Account not connected' : 'OAuth not connected',
+      description: concise
+        ? 'Connect an account to enable requests.'
+        : 'No OAuth credentials are stored for this upstream. Connect an account to enable requests.',
       actionLabel: 'Connect',
       expiresAt: null,
     };
@@ -113,7 +116,7 @@ export function classifyOAuthReconnect(
   // unusable, and no renewal ever runs. An authoritative authentication
   // failure still means the credential was rejected and must be reconnected.
   // Check it before access-token expiry so the actionable cause wins.
-  if (status.mode === 'long_lived_365d') {
+  if (status.kind === 'anthropic_oauth' && status.mode === 'long_lived_365d') {
     if (lastApplyError === 'status_400' || lastApplyError === 'status_401') {
       return {
         reason: 'long_lived_rejected',
@@ -164,21 +167,30 @@ export function classifyOAuthReconnect(
     return {
       reason: 'refresh_token_expired',
       tone: 'danger',
-      label: 'Refresh token expired',
-      description:
-        'The OAuth refresh token has expired, so the connection can no longer renew itself. Reconnect the account to restore renewal.',
+      label: concise ? 'Sign-in expired' : 'Refresh token expired',
+      description: concise
+        ? 'The account sign-in has expired. Reconnect to restore requests.'
+        : 'The OAuth refresh token has expired, so the connection can no longer renew itself. Reconnect the account to restore renewal.',
       actionLabel: 'Reconnect',
-      expiresAt: refreshExpiresAt,
+      expiresAt: concise ? null : refreshExpiresAt,
     };
   }
 
-  if (lastApplyError === 'status_400' || lastApplyError === 'status_401') {
+  if (
+    lastApplyError === 'status_400' ||
+    lastApplyError === 'status_401' ||
+    (status.kind === 'openai_oauth' &&
+      (lastApplyError === 'refresh_token_reused' ||
+        lastApplyError === 'refresh_token_invalidated' ||
+        lastApplyError === 'invalid_grant'))
+  ) {
     return {
       reason: 'renewal_rejected',
       tone: 'danger',
-      label: 'Token renewal failed',
-      description:
-        'The latest token renewal attempt failed. Reconnect the account to restore automatic renewal.',
+      label: concise ? 'Sign-in rejected' : 'Token renewal failed',
+      description: concise
+        ? 'The provider rejected this account sign-in. Reconnect to restore requests.'
+        : 'The latest token renewal attempt failed. Reconnect the account to restore automatic renewal.',
       actionLabel: 'Reconnect',
       expiresAt: null,
     };
@@ -191,36 +203,40 @@ export function classifyOAuthReconnect(
     return {
       reason: 'refresh_token_expiring',
       tone: 'warn',
-      label: 'Refresh token expiring soon',
-      description:
-        'The OAuth refresh token expires within 3 days. Reconnect before the deadline to avoid interruption.',
+      label: concise ? 'Sign-in expires soon' : 'Refresh token expiring soon',
+      description: concise
+        ? 'Reconnect before the deadline to keep requests working.'
+        : 'The OAuth refresh token expires within 3 days. Reconnect before the deadline to avoid interruption.',
       actionLabel: 'Reconnect',
       expiresAt: refreshExpiresAt,
     };
   }
 
-  // A missing refresh token means renewal is impossible. Once the access
-  // token is also past its expiry the connection is already broken — danger;
-  // otherwise warn without claiming an outage.
-  if (!status.refresh_token_present) {
+  // Access-only provider imports intentionally cannot refresh. Their access
+  // deadline still matters, but a missing refresh token is only a warning for
+  // credentials that are expected to renew.
+  if (!status.refresh_token_present || (concise && !status.can_refresh)) {
     const accessExpiresAt = status.expires_at_unix_secs;
     if (accessExpiresAt != null && accessExpiresAt <= nowSecs) {
       return {
         reason: 'access_token_expired',
         tone: 'danger',
-        label: 'Access token expired',
-        description:
-          'The OAuth access token has expired and no refresh token is stored to renew it. Reconnect the account to restore requests.',
+        label: concise ? 'Sign-in expired' : 'Access token expired',
+        description: concise
+          ? 'The account sign-in has expired. Reconnect to restore requests.'
+          : 'The OAuth access token has expired and no refresh token is stored to renew it. Reconnect the account to restore requests.',
         actionLabel: 'Reconnect',
-        expiresAt: accessExpiresAt,
+        expiresAt: concise ? null : accessExpiresAt,
       };
     }
+    if (concise && !status.can_refresh) return null;
     return {
       reason: 'refresh_token_missing',
       tone: 'warn',
-      label: 'No refresh token',
-      description:
-        'The stored OAuth credentials have no refresh token, so the connection cannot renew itself. Reconnect the account before the access token expires.',
+      label: concise ? 'Sign-in incomplete' : 'No refresh token',
+      description: concise
+        ? 'This sign-in cannot stay connected. Reconnect to keep requests working.'
+        : 'The stored OAuth credentials have no refresh token, so the connection cannot renew itself. Reconnect the account before the access token expires.',
       actionLabel: 'Reconnect',
       expiresAt: accessExpiresAt,
     };
@@ -252,7 +268,7 @@ export function useOAuthReconnectNudges(
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
 
   const oauthUpstreams = useMemo(
-    () => upstreams.filter((u) => u.kind === 'anthropic_oauth'),
+    () => upstreams.filter((u) => u.kind.endsWith('_oauth')),
     [upstreams],
   );
 

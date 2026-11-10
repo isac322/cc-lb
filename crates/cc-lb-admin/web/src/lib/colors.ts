@@ -1,6 +1,10 @@
 export const WINDOW_DURATION_SECS: Record<string, number> = {
   '5h': 18000,
   '7d': 604800,
+  gemini_5h: 18000,
+  gemini_7d: 604800,
+  third_party_5h: 18000,
+  third_party_7d: 604800,
   '7d_sonnet': 604800,
   '7d_opus': 604800,
   '7d_fable': 604800,
@@ -14,6 +18,10 @@ export const WINDOW_DURATION_SECS: Record<string, number> = {
 const WINDOW_SERIES_TOKEN: Record<string, string> = {
   '5h': 'var(--color-series-5h)',
   '7d': 'var(--color-series-7d)',
+  gemini_5h: 'var(--color-series-5h)',
+  gemini_7d: 'var(--color-series-7d)',
+  third_party_5h: 'var(--color-series-sonnet)',
+  third_party_7d: 'var(--color-series-opus)',
   '7d_fable': 'var(--color-series-fable)',
   '7d_sonnet': 'var(--color-series-sonnet)',
   '7d_opus': 'var(--color-series-opus)',

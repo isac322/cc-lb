@@ -3,17 +3,9 @@ import { requestKindBadgeText, requestKindTone } from '../../lib/requestKind';
 import { cx } from './primitives';
 
 const DASH = '—';
-
-/** `Badge` geometry (20px, 12/500, `px-1.5`, `rounded-sm`). */
 const BADGE =
   'inline-flex min-h-5 max-w-full shrink-0 items-center rounded-sm px-1.5 text-caption font-medium';
 
-/**
- * The request's kind as a short badge in the kind's fixed color. `main`, the
- * bulk of traffic, is the quiet neutral badge; `unknown` is an outlined
- * neutral badge; every other kind gets its own hue (custom kinds a hashed
- * one). A missing kind is a faint dash.
- */
 export function RequestKindBadge({
   requestKind,
 }: {

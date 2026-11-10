@@ -14,6 +14,7 @@ import {
   POOL_QUOTA_HEARTBEAT_CARRY_SECS,
   poolQuotaResponseLatest,
   poolQuotaWindowsPresent,
+  poolTooltipRows,
   poolWindowResets,
   visiblePoolQuotaChartData,
 } from './-overviewPoolQuota';
@@ -370,6 +371,29 @@ describe('poolWindowResets', () => {
       '7d_fable': null,
     });
   });
+
+  it('preserves provider-reported resets for Gemini model windows', () => {
+    const base = aggregate({
+      gemini_5h: [],
+      gemini_7d: [],
+      third_party_5h: [],
+      third_party_7d: [],
+    });
+    expect(
+      poolWindowResets({
+        ...base,
+        windows: base.windows.map((entry, index) => ({
+          ...entry,
+          cc_window_reset_unix_secs: 5_000 + index,
+        })),
+      }),
+    ).toEqual({
+      gemini_5h: 5_000,
+      gemini_7d: 5_001,
+      third_party_5h: 5_002,
+      third_party_7d: 5_003,
+    });
+  });
 });
 
 describe('missingCapacityUpstreams', () => {
@@ -443,6 +467,19 @@ describe('formatResetIn', () => {
       'resets in 2d 4h',
     );
   });
+
+  it('omits the repeated sentence prefix in an aligned countdown column', () => {
+    const compact = { compact: true };
+    expect(formatResetIn(null, 0, compact)).toBeNull();
+    expect(formatResetIn(100, 100, compact)).toBe('Passed');
+    expect(formatResetIn(99, 100, compact)).toBe('Passed');
+    expect(formatResetIn(30, 0, compact)).toBe('1m');
+    expect(formatResetIn(4 * 3600 + 17 * 60, 0, compact)).toBe('4h 17m');
+    expect(formatResetIn(2 * 3600, 0, compact)).toBe('2h');
+    expect(formatResetIn(2 * 86400 + 4 * 3600 + 59 * 60, 0, compact)).toBe(
+      '2d 4h',
+    );
+  });
 });
 
 describe('formatAgo', () => {
@@ -450,5 +487,24 @@ describe('formatAgo', () => {
     expect(formatAgo(100, 130)).toBe('just now');
     expect(formatAgo(0, 12 * 60)).toBe('12m ago');
     expect(formatAgo(0, 86400 + 19 * 3600 + 5)).toBe('1d 19h ago');
+  });
+});
+
+describe('Gemini pool tooltips', () => {
+  it('orders model windows and removes duplicate fill entries', () => {
+    const payload = [
+      { dataKey: 'third_party_7d' },
+      { dataKey: 'gemini_7d', type: 'none' },
+      { dataKey: 'gemini_7d' },
+      { dataKey: 'gemini_5h' },
+      { dataKey: 'third_party_5h' },
+      { dataKey: 'third_party_7d' },
+    ];
+    expect(poolTooltipRows(payload).map((entry) => entry.dataKey)).toEqual([
+      'gemini_5h',
+      'gemini_7d',
+      'third_party_5h',
+      'third_party_7d',
+    ]);
   });
 });

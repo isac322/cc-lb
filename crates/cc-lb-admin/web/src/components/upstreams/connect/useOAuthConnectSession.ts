@@ -1,22 +1,22 @@
-// Engine behind the upstream connect dialog's Claude sign-in:
-//
-// - The authorize URL is fetched *before* the operator clicks, so "Sign in" is
-//   a plain <a target="_blank"> and can never be popup-blocked.
-// - The 15-minute PKCE window is tracked; an expired session is replaced with
-//   one click (never silently, so an open Anthropic tab is not orphaned).
-// - Internal plumbing (state token) never reaches the screen.
-// - Reconnect verifies *which* Claude account came back by refreshing the
-//   upstream's subscription metadata and comparing it to the account that was
-//   connected before.
+// Engine behind every subscription sign-in in the upstream connect dialog.
+// Anthropic uses a paste-code flow; Gemini uses browser PKCE; OpenAI supports both device and browser sign-in.
 
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
+  apiErrorDetail,
   type DraftCompleteResponse,
+  getJson,
+  type OAuthCompletePendingResponse,
   type OAuthFallbackReason,
+  type OAuthFlow,
+  type OAuthProvider,
+  type OAuthStartFlow,
+  type OAuthStartResponse,
   type OAuthTokenMode,
   type OrganizationMetadataInner,
+  type SubscriptionMetadataResponse,
   triggerSubscriptionMetadataRefresh,
 } from '../../../lib/api';
 import {
@@ -32,8 +32,8 @@ import { stateOfAuthorizeUrl } from './parseOAuthPaste';
 export const OAUTH_SESSION_TTL_MS = 900_000;
 
 export type OAuthConnectTarget =
-  | { mode: 'create' }
-  | { mode: 'reconnect'; upstreamId: string };
+  | { mode: 'create'; provider?: OAuthProvider }
+  | { mode: 'reconnect'; upstreamId: string; provider?: OAuthProvider };
 
 export type SessionPhase = 'starting' | 'ready' | 'expired' | 'start_failed';
 
@@ -44,8 +44,9 @@ export interface AccountIdentity {
   organizationName: string | null;
   organizationType: string | null;
   rateLimitTier: string | null;
+  plan: string | null;
+  projectId: string | null;
 }
-
 export type IdentityVerdict =
   | 'same'
   | 'different'
@@ -76,6 +77,46 @@ export function identityOf(
     organizationName: org.organization_name,
     organizationType: org.organization_type,
     rateLimitTier: org.rate_limit_tier,
+    plan: null,
+    projectId: null,
+  };
+}
+export function identityOfResult(
+  result:
+    | Pick<
+        DraftCompleteResponse,
+        | 'organization_metadata'
+        | 'account_email'
+        | 'account_id'
+        | 'plan'
+        | 'project_id'
+      >
+    | null
+    | undefined,
+): AccountIdentity | null {
+  if (!result) return null;
+  const fromOrg = identityOf(result.organization_metadata);
+  if (fromOrg) {
+    return {
+      ...fromOrg,
+      email: fromOrg.email ?? result.account_email ?? null,
+      accountUuid: fromOrg.accountUuid ?? result.account_id ?? null,
+      rateLimitTier: fromOrg.rateLimitTier ?? result.plan ?? null,
+      plan: result.plan ?? fromOrg.plan,
+      projectId: result.project_id ?? fromOrg.projectId,
+    };
+  }
+  if (!result.account_email && !result.account_id && !result.project_id)
+    return null;
+  return {
+    email: result.account_email ?? null,
+    displayName: null,
+    accountUuid: result.account_id ?? null,
+    organizationName: null,
+    organizationType: null,
+    rateLimitTier: result.plan ?? null,
+    plan: result.plan ?? null,
+    projectId: result.project_id ?? null,
   };
 }
 
@@ -98,38 +139,104 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function oauthCompleteErrorMessage(
+  error: unknown,
+  provider: OAuthProvider,
+): string {
+  if (!(error instanceof ApiError)) return errorMessage(error);
+  const detail = apiErrorDetail(error);
+  const body =
+    error.body && typeof error.body === 'object'
+      ? (error.body as Record<string, unknown>)
+      : null;
+  const providerError =
+    body && typeof body.provider_error === 'string'
+      ? body.provider_error
+      : null;
+  const providerName =
+    provider === 'gemini'
+      ? 'Google'
+      : provider === 'openai'
+        ? 'ChatGPT'
+        : 'Anthropic';
+  if (provider === 'gemini' && error.code === 'missing_project_id') {
+    return `This Google account has no Gemini Code Assist project${
+      detail ? `: ${detail}` : ''
+    }`;
+  }
+  if (
+    error.code === 'token_exchange_rejected' ||
+    error.code === 'invalid_grant' ||
+    providerError === 'invalid_grant'
+  ) {
+    const code =
+      providerError ?? (error.code === 'invalid_grant' ? error.code : null);
+    return `${providerName} rejected the code${code ? ` (${code})` : ''}${
+      detail ? `: ${detail}` : ''
+    }`;
+  }
+  const labels: Record<string, string> = {
+    token_endpoint_unreachable:
+      'The provider token service could not be reached',
+    invalid_token_response: 'The provider returned an invalid token response',
+    userinfo_failed: 'The provider could not load account details',
+    load_code_assist_failed: 'Google Code Assist could not load this account',
+    onboard_user_failed: 'Google Code Assist could not provision this account',
+    missing_account_identity: 'The provider did not return account identity',
+  };
+  const label = error.code ? labels[error.code] : undefined;
+  if (label) return `${label}${detail ? `: ${detail}` : ''}`;
+  if (error.code && detail) return `${error.code}: ${detail}`;
+  if (error.code) return error.code;
+  return error.message || `Request failed (${error.status})`;
+}
+
 interface Session {
-  authorizeUrl: string;
+  authorizeUrl: string | null;
+  verificationUrl: string | null;
+  userCode: string | null;
   stateToken: string;
-  /** `state` as Anthropic will echo it back in `code#state`. */
   oauthState: string | null;
+  flow: OAuthFlow;
+  pollIntervalMs: number;
   expiresAtMs: number;
 }
 
 export interface OAuthConnectSession {
+  provider: OAuthProvider;
+  flow: OAuthFlow | null;
   phase: SessionPhase;
-  /** Plain link target for "Sign in with Claude"; null until the session starts. */
   authorizeUrl: string | null;
-  /** `state` Anthropic will echo in `code#state`; compare pastes against it. */
+  verificationUrl: string | null;
+  userCode: string | null;
+  pollIntervalSecs: number;
   oauthState: string | null;
   remainingMs: number;
   startError: string | null;
-  /** Discard the current sign-in and issue a fresh 15-minute one. */
+  startNotice: string | null;
   restart: () => Promise<void>;
-  /** Exchange a code. Resolves null on failure (see `completeError`). */
-  complete: (code: string) => Promise<ConnectOutcome | null>;
+  startBrowser: () => Promise<void>;
+  complete: (code?: string) => Promise<ConnectOutcome | null>;
   completing: boolean;
+  polling: boolean;
   completeError: string | null;
   clearCompleteError: () => void;
   outcome: ConnectOutcome | null;
 }
 
+function isPending(
+  value: DraftCompleteResponse | OAuthCompletePendingResponse | unknown,
+): value is OAuthCompletePendingResponse {
+  if (value === null || typeof value !== 'object' || !('status' in value)) {
+    return false;
+  }
+  return value.status === 'pending';
+}
+
 export function useOAuthConnectSession(
   target: OAuthConnectTarget,
   options: {
-    /** Account connected before a reconnect, for the identity comparison. */
     previousAccount?: AccountIdentity | null;
-    /** Defer starting until the operator picks the Claude path. */
     enabled?: boolean;
   } = {},
 ): OAuthConnectSession {
@@ -139,46 +246,98 @@ export function useOAuthConnectSession(
   const completeDraft = useCompleteOauthDraft();
   const startUpstream = useOAuthStart();
   const completeUpstream = useOAuthComplete();
+  const provider = target.provider ?? 'anthropic';
+  const upstreamId = target.mode === 'reconnect' ? target.upstreamId : null;
   const [session, setSession] = useState<Session | null>(null);
   const [phase, setPhase] = useState<SessionPhase>('starting');
   const [startError, setStartError] = useState<string | null>(null);
+  const [startNotice, setStartNotice] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
+  const [polling, setPolling] = useState(false);
   const [completeError, setCompleteError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<ConnectOutcome | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const generation = useRef(0);
-  const upstreamId = target.mode === 'reconnect' ? target.upstreamId : null;
+  const pollIntervalMsRef = useRef(0);
+  const completeRef = useRef<OAuthConnectSession['complete'] | null>(null);
+  const phaseRef = useRef<SessionPhase>(phase);
+  const outcomeRef = useRef<ConnectOutcome | null>(outcome);
   const startDraftAsync = startDraft.mutateAsync;
   const completeDraftAsync = completeDraft.mutateAsync;
   const startUpstreamAsync = startUpstream.mutateAsync;
   const completeUpstreamAsync = completeUpstream.mutateAsync;
 
-  const start = useCallback(async () => {
-    const mine = ++generation.current;
-    setPhase('starting');
-    setStartError(null);
-    setCompleteError(null);
-    // A new sign-in invalidates any exchanged-but-unsaved result.
-    setOutcome(null);
-    try {
-      const res =
-        upstreamId === null
-          ? await startDraftAsync()
-          : await startUpstreamAsync({ id: upstreamId });
-      if (mine !== generation.current) return;
-      setSession({
-        authorizeUrl: res.authorize_url,
-        stateToken: res.state_token,
-        oauthState: stateOfAuthorizeUrl(res.authorize_url),
-        expiresAtMs: Date.now() + OAUTH_SESSION_TTL_MS,
-      });
-      setPhase('ready');
-    } catch (error) {
-      if (mine !== generation.current) return;
-      setStartError(errorMessage(error));
-      setPhase('start_failed');
-    }
-  }, [upstreamId, startDraftAsync, startUpstreamAsync]);
+  const start = useCallback(
+    async (
+      requestedFlow?: OAuthStartFlow,
+      notice: string | null = null,
+    ): Promise<void> => {
+      const mine = ++generation.current;
+      setPhase('starting');
+      setStartError(null);
+      setStartNotice(notice);
+      setCompleteError(null);
+      setOutcome(null);
+      try {
+        const requestStart = (flow?: OAuthStartFlow) => {
+          const providerBody = provider === 'anthropic' ? {} : { provider };
+          const flowBody = flow ? { flow } : {};
+          if (upstreamId === null && provider === 'anthropic' && !flow) {
+            return startDraftAsync();
+          }
+          return upstreamId === null
+            ? startDraftAsync({ ...providerBody, ...flowBody })
+            : startUpstreamAsync({
+                id: upstreamId,
+                ...providerBody,
+                ...flowBody,
+              });
+        };
+        let res: OAuthStartResponse;
+        try {
+          res = await requestStart(requestedFlow);
+        } catch (error) {
+          if (
+            provider !== 'openai' ||
+            requestedFlow === 'browser' ||
+            !(error instanceof ApiError) ||
+            error.status !== 404 ||
+            error.code !== 'device_login_unavailable'
+          ) {
+            throw error;
+          }
+          setStartNotice(
+            'Device sign-in is turned off by this workspace, so browser sign-in is ready instead.',
+          );
+          res = await requestStart('browser');
+        }
+        if (mine !== generation.current) return;
+        const expiresAtMs = res.expires_at_unix_secs
+          ? res.expires_at_unix_secs * 1000
+          : Date.now() + OAUTH_SESSION_TTL_MS;
+        const pollIntervalMs = Math.max(1, res.poll_interval_secs ?? 5) * 1000;
+        pollIntervalMsRef.current = pollIntervalMs;
+        setSession({
+          authorizeUrl: res.authorize_url,
+          verificationUrl: res.verification_url ?? null,
+          userCode: res.user_code ?? null,
+          stateToken: res.state_token,
+          oauthState: res.authorize_url
+            ? stateOfAuthorizeUrl(res.authorize_url)
+            : null,
+          flow: res.flow,
+          pollIntervalMs,
+          expiresAtMs,
+        });
+        setPhase('ready');
+      } catch (error) {
+        if (mine !== generation.current) return;
+        setStartError(errorMessage(error));
+        setPhase('start_failed');
+      }
+    },
+    [provider, upstreamId, startDraftAsync, startUpstreamAsync],
+  );
 
   useEffect(() => {
     if (!enabled) return;
@@ -203,63 +362,78 @@ export function useOAuthConnectSession(
   }, [phase, session, nowMs]);
 
   const complete = useCallback(
-    async (code: string): Promise<ConnectOutcome | null> => {
+    async (code?: string): Promise<ConnectOutcome | null> => {
       if (!session || phase !== 'ready' || completing) return null;
+      const completionGeneration = generation.current;
       setCompleting(true);
       setCompleteError(null);
       try {
-        let next: ConnectOutcome;
-        if (upstreamId === null) {
-          const draft = await completeDraftAsync({
-            state_token: session.stateToken,
-            code,
-          });
-          next = {
-            mode: draft.mode,
-            longLivedFallback: draft.long_lived_fallback,
-            fallbackReason: draft.fallback_reason,
-            grantedExpiresInSecs: draft.granted_expires_in_secs,
-            account: identityOf(draft.organization_metadata),
-            draft,
-            verdict: 'first_connect',
-            previousAccount: null,
-          };
-        } else {
-          const id = upstreamId;
-          // Stores the credential and invalidates every OAuth-derived query.
-          const res = await completeUpstreamAsync({
-            id,
-            state_token: session.stateToken,
-            code,
-          });
-          // The credential is stored; now learn which account it belongs to.
-          let account: AccountIdentity | null = null;
+        const response =
+          upstreamId === null
+            ? await completeDraftAsync({
+                state_token: session.stateToken,
+                code,
+              })
+            : await completeUpstreamAsync({
+                id: upstreamId,
+                state_token: session.stateToken,
+                code,
+              });
+        if (completionGeneration !== generation.current) return null;
+        if (isPending(response)) {
+          const pollIntervalMs =
+            Math.max(
+              1,
+              response.poll_interval_secs ?? session.pollIntervalMs / 1000,
+            ) * 1000;
+          pollIntervalMsRef.current = pollIntervalMs;
+          setSession((current) =>
+            current && current.pollIntervalMs !== pollIntervalMs
+              ? { ...current, pollIntervalMs }
+              : current,
+          );
+          setPolling(true);
+          return null;
+        }
+        const result = response as DraftCompleteResponse;
+        let account = upstreamId === null ? identityOfResult(result) : null;
+        if (upstreamId !== null) {
           try {
-            const meta = await triggerSubscriptionMetadataRefresh(id);
-            qc.setQueryData(qk.upstreamSubscriptionMetadata(id), meta);
-            account = identityOf(meta.organization_metadata);
+            const meta =
+              provider === 'anthropic'
+                ? await triggerSubscriptionMetadataRefresh(upstreamId)
+                : await getJson<SubscriptionMetadataResponse>(
+                    `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,
+                  );
+            qc.setQueryData(qk.upstreamSubscriptionMetadata(upstreamId), meta);
+            account = identityOfResult(meta);
           } catch {
             account = null;
           }
-          next = {
-            mode: res.mode,
-            longLivedFallback: res.long_lived_fallback,
-            fallbackReason: res.fallback_reason,
-            grantedExpiresInSecs: res.granted_expires_in_secs,
-            account,
-            draft: null,
-            verdict: compareIdentity(previousAccount, account),
-            // Snapshot: the live metadata query flips to the new account.
-            previousAccount,
-          };
         }
+        const next: ConnectOutcome = {
+          mode: result.mode,
+          longLivedFallback: result.long_lived_fallback,
+          fallbackReason: result.fallback_reason,
+          grantedExpiresInSecs: result.granted_expires_in_secs,
+          account,
+          draft: upstreamId === null ? result : null,
+          verdict:
+            upstreamId === null
+              ? 'first_connect'
+              : compareIdentity(previousAccount, account),
+          previousAccount: upstreamId === null ? null : previousAccount,
+        };
+        setPolling(false);
         setOutcome(next);
         return next;
       } catch (error) {
-        const message = errorMessage(error);
+        if (completionGeneration !== generation.current) return null;
+        const message = oauthCompleteErrorMessage(error, provider);
         setCompleteError(message);
-        // A consumed or expired state can never succeed again; offer a restart.
-        if (/expired|already used|restart/i.test(message)) setPhase('expired');
+        setPolling(false);
+        if (/expired|already used|restart|denied/i.test(message))
+          setPhase('expired');
         return null;
       } finally {
         setCompleting(false);
@@ -274,20 +448,58 @@ export function useOAuthConnectSession(
       completeUpstreamAsync,
       qc,
       previousAccount,
+      provider,
     ],
   );
 
-  const remainingMs = session ? Math.max(0, session.expiresAtMs - nowMs) : 0;
+  completeRef.current = complete;
+  phaseRef.current = phase;
+  outcomeRef.current = outcome;
 
+  useEffect(() => {
+    if (phase !== 'ready' || session?.flow !== 'device_code' || outcome) return;
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    const poll = async () => {
+      if (cancelled) return;
+      const result = await completeRef.current?.();
+      if (
+        cancelled ||
+        result ||
+        phaseRef.current !== 'ready' ||
+        outcomeRef.current
+      )
+        return;
+      timeoutId = window.setTimeout(
+        () => void poll(),
+        pollIntervalMsRef.current,
+      );
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, [phase, session?.flow, outcome]);
+
+  const remainingMs = session ? Math.max(0, session.expiresAtMs - nowMs) : 0;
   return {
+    provider,
+    flow: session?.flow ?? null,
     phase,
     authorizeUrl: session?.authorizeUrl ?? null,
+    verificationUrl: session?.verificationUrl ?? null,
+    userCode: session?.userCode ?? null,
+    pollIntervalSecs: session ? session.pollIntervalMs / 1000 : 0,
     oauthState: session?.oauthState ?? null,
     remainingMs,
     startError,
-    restart: start,
+    startNotice,
+    restart: () => start(),
+    startBrowser: () => start('browser'),
     complete,
     completing,
+    polling,
     completeError,
     clearCompleteError: () => setCompleteError(null),
     outcome,

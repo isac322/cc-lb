@@ -72,7 +72,6 @@ function isDefaultBaseUrl(baseUrl: string, defaultBaseUrl: string) {
     return false;
   }
 }
-
 export function EndpointRow({
   upstream,
   kind,

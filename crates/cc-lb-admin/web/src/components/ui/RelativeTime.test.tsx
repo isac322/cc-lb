@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { RelativeTime, ResetCountdown } from './RelativeTime';
+import { formatResetParts, RelativeTime, ResetCountdown } from './RelativeTime';
 
 describe('RelativeTime', () => {
   beforeEach(() => {
@@ -113,5 +113,41 @@ describe('RelativeTime under ko-KR locale', () => {
     expect(screen.getByText('5분 전 초기화됨').textContent).toBe(
       '5분 전 초기화됨',
     );
+  });
+});
+
+describe('formatResetParts', () => {
+  test('splits compact English reset text around its fixed prefix', () => {
+    expect(formatResetParts(2, 'hour', 'from now', 'en-US', true)).toEqual({
+      prefix: 'Resets in',
+      value: '2h',
+      suffix: '',
+    });
+    expect(formatResetParts(3, 'minute', 'ago', 'en-US', true)).toEqual({
+      prefix: 'Reset',
+      value: '3m',
+      suffix: 'ago',
+    });
+  });
+
+  test('keeps the stale compact English reset wording intact', () => {
+    expect(formatResetParts(2, 'day', 'ago', 'en-US', true)).toEqual({
+      prefix: 'Reset',
+      value: '>1d',
+      suffix: 'ago (stale)',
+    });
+  });
+
+  test('splits compact Korean reset text around its fixed suffix', () => {
+    expect(formatResetParts(2, 'hour', 'from now', 'ko-KR', true)).toEqual({
+      prefix: '',
+      value: '2시간',
+      suffix: '후 초기화',
+    });
+    expect(formatResetParts(3, 'minute', 'ago', 'ko-KR', true)).toEqual({
+      prefix: '',
+      value: '3분',
+      suffix: '전 초기화됨',
+    });
   });
 });

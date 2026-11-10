@@ -116,6 +116,30 @@ describe('OAuthReconnectSummary', () => {
       screen.getByText('Refresh token expired: Disabled OAuth'),
     ).toBeDefined();
   });
+  it('scopes attention banners to the requested provider', () => {
+    const geminiOAuth = {
+      ...disabledOAuth,
+      id: 'gemini-oauth',
+      name: 'Gemini OAuth',
+      kind: 'gemini_oauth',
+    } as Upstream;
+    vi.mocked(useUpstreams).mockReturnValue({
+      data: { upstreams: [disabledOAuth, geminiOAuth] },
+      isPending: false,
+      isError: false,
+    } as never);
+    vi.mocked(useOAuthReconnectNudges).mockReturnValue({
+      ...healthy,
+      nudges: new Map([[geminiOAuth.id, expiredNudge]]),
+    });
+
+    render(<OAuthReconnectSummary provider="anthropic" />);
+
+    expect(screen.queryByText('1 OAuth connection needs attention')).toBeNull();
+    expect(vi.mocked(useOAuthReconnectNudges).mock.calls.at(-1)?.[0]).toEqual([
+      disabledOAuth,
+    ]);
+  });
   it('puts terminal rejected credentials before ordinary danger in the overview', () => {
     vi.mocked(useUpstreams).mockReturnValue({
       data: { upstreams: [disabledOAuth, enabledUnreadableOAuth] },

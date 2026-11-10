@@ -21,6 +21,7 @@ import {
   ApiError,
   type Upstream as ApiUpstream,
   type AuditQueryResponse,
+  appendQueryParams,
   type ConfigDraftResponse,
   type ConfigDraftSavedResponse,
   type ConfigEditorResponse,
@@ -30,6 +31,7 @@ import {
   completeOauthDraft,
   createUpstreamFromOauthDraft,
   type DashboardSummaryResponse,
+  type DashboardUsageGroup,
   type DashboardUsageResponse,
   deleteJson,
   type EventsHistogramPayload,
@@ -39,7 +41,11 @@ import {
   getJson,
   type KeyListResponse,
   type LatestResponse,
+  type OAuthCompletePendingResponse,
   type OAuthFallbackReason,
+  type OAuthProvider,
+  type OAuthStartFlow,
+  type OAuthStartResponse,
   type OAuthTokenMode,
   type PoolHistoryResponse,
   patchJson,
@@ -63,6 +69,13 @@ import {
   getCacheKeepaliveSessionDetail,
   getCacheKeepaliveSessions,
 } from './cacheKeepaliveApi';
+import {
+  type ProviderQueryOptions,
+  useEffectiveProviders,
+  usePreviewControls,
+  useProviderFilters,
+} from './previewControls';
+import { type ProviderFamily, providerOf } from './providers';
 import { usePolledData } from './usePolledData';
 import { useVisibility } from './visibilityManager';
 
@@ -209,6 +222,8 @@ interface QuotaQueryIdentity {
   readonly upstreamIds?: string;
   readonly windows?: string;
   readonly source?: string;
+  readonly providers?: string;
+  readonly provider?: ProviderFamily;
 }
 
 function hasSameQuotaIdentity(
@@ -230,7 +245,9 @@ function hasSameQuotaIdentity(
   return (
     previous.upstreamIds === currentParams.upstreamIds &&
     previous.windows === currentParams.windows &&
-    previous.source === currentParams.source
+    previous.source === currentParams.source &&
+    previous.providers === currentParams.providers &&
+    previous.provider === currentParams.provider
   );
 }
 
@@ -273,13 +290,16 @@ function hasSameEventFilters(
 export const qk = {
   health: ['health'] as const,
   status: ['status'] as const,
-  summary: (range: string) => ['summary', range] as const,
+  summary: (range: string, providers?: string) =>
+    ['summary', range, providers ?? null] as const,
   usage: (
     range: string,
     step: string,
     group: string,
     upstreamId?: string,
     projection?: 'full' | 'totals',
+    providers?: string,
+    principalId?: string,
   ) =>
     [
       'usage',
@@ -288,6 +308,8 @@ export const qk = {
       group,
       upstreamId ?? null,
       projection ?? 'full',
+      providers ?? null,
+      principalId ?? null,
     ] as const,
   upstreams: ['upstreams'] as const,
   upstream: (id: string) => ['upstream', id] as const,
@@ -366,14 +388,21 @@ export function useStatus() {
     POLLING_INTERVALS.STATUS_MS,
   );
 }
-export function useSummary(range: string) {
+export function useSummary(range: string, options: ProviderQueryOptions = {}) {
+  const providers = useEffectiveProviders(options.providers);
+  const providerKey = providers?.join(',');
   return usePolledData(
     {
-      queryKey: qk.summary(range),
-      queryFn: () =>
-        getJson<DashboardSummaryResponse>(
-          `/admin/v1/dashboard/summary?range=${encodeURIComponent(range)}`,
-        ),
+      queryKey: qk.summary(range, providerKey),
+      enabled: providerKey !== '',
+      queryFn: ({ signal }) => {
+        const params = new URLSearchParams({ range });
+        if (providerKey !== undefined) params.set('providers', providerKey);
+        return getJson<DashboardSummaryResponse>(
+          `/admin/v1/dashboard/summary?${params.toString()}`,
+          { signal },
+        );
+      },
     },
     POLLING_INTERVALS.SUMMARY_MS,
   );
@@ -381,13 +410,37 @@ export function useSummary(range: string) {
 export function useUsage(
   range: string,
   step: string,
-  group: 'none' | 'model' | 'principal' | 'upstream',
-  upstreamId?: string,
-  projection?: 'full' | 'totals',
+  group: DashboardUsageGroup,
+  upstreamIdOrOptions?: string | ProviderQueryOptions,
+  projectionOrOptions?: 'full' | 'totals' | ProviderQueryOptions,
+  options: ProviderQueryOptions = {},
 ) {
+  const upstreamId =
+    typeof upstreamIdOrOptions === 'string' ? upstreamIdOrOptions : undefined;
+  const projection =
+    typeof projectionOrOptions === 'string' ? projectionOrOptions : undefined;
+  const usageOptions =
+    typeof upstreamIdOrOptions === 'object'
+      ? upstreamIdOrOptions
+      : typeof projectionOrOptions === 'object'
+        ? projectionOrOptions
+        : options;
+  const providers = useEffectiveProviders(usageOptions.providers);
+  const principalId = usageOptions.principalId;
+
+  const providerKey = providers?.join(',');
   return usePolledData(
     {
-      queryKey: qk.usage(range, step, group, upstreamId, projection),
+      queryKey: qk.usage(
+        range,
+        step,
+        group,
+        upstreamId,
+        projection,
+        providerKey,
+        principalId,
+      ),
+      enabled: providerKey !== '',
       queryFn: ({ signal }) => {
         const params = new URLSearchParams({
           range,
@@ -396,6 +449,8 @@ export function useUsage(
         });
         if (upstreamId) params.set('upstream_id', upstreamId);
         if (projection) params.set('projection', projection);
+        if (providerKey) params.set('providers', providerKey);
+        if (principalId) params.set('principal_id', principalId);
         return getJson<DashboardUsageResponse>(
           `/admin/v1/dashboard/usage?${params.toString()}`,
           { signal },
@@ -406,7 +461,9 @@ export function useUsage(
         return previousKey?.[0] === 'usage' &&
           previousKey[3] === group &&
           previousKey[4] === (upstreamId ?? null) &&
-          previousKey[5] === (projection ?? 'full')
+          previousKey[5] === (projection ?? 'full') &&
+          previousKey[6] === (providerKey ?? null) &&
+          previousKey[7] === (principalId ?? null)
           ? previousData
           : undefined;
       },
@@ -414,14 +471,44 @@ export function useUsage(
     POLLING_INTERVALS.USAGE_MS,
   );
 }
+/** Full inventory stays in one cache entry; preview filtering is observer-local. */
 export function useUpstreams() {
+  const { previewProviders } = usePreviewControls();
   return usePolledData(
     {
       queryKey: qk.upstreams,
       queryFn: () => getJson<UpstreamListResp>('/admin/v1/upstreams'),
+      select: (data) =>
+        previewProviders === undefined
+          ? data
+          : {
+              ...data,
+              upstreams: data.upstreams.filter((upstream) =>
+                previewProviders.includes(providerOf(upstream.kind)),
+              ),
+            },
     },
     POLLING_INTERVALS.UPSTREAMS_MS,
   );
+}
+/** Upstream ids inside the effective provider scope; undefined = unrestricted. */
+function useScopedUpstreamIds(
+  providers: readonly ProviderFamily[] | undefined,
+): ReadonlySet<string> | undefined {
+  // Shares the inventory cache entry; unscoped callers never trigger a fetch.
+  const inventory = useQuery({
+    queryKey: qk.upstreams,
+    queryFn: () => getJson<UpstreamListResp>('/admin/v1/upstreams'),
+    enabled: providers !== undefined,
+  });
+  return useMemo(() => {
+    if (providers === undefined) return undefined;
+    return new Set(
+      (inventory.data?.upstreams ?? [])
+        .filter((upstream) => providers.includes(providerOf(upstream.kind)))
+        .map((upstream) => upstream.id),
+    );
+  }, [inventory.data, providers]);
 }
 export function usePrincipals(enabled = true) {
   return useQuery({
@@ -465,12 +552,17 @@ export function useRouterTerminalStrategy(principalId: string | null) {
     enabled: !!principalId,
   });
 }
-export function useRecentEvents(filters: Record<string, string | undefined>) {
+export function useRecentEvents(
+  inputFilters: Record<string, string | undefined>,
+  options: ProviderQueryOptions = {},
+) {
+  const filters = useProviderFilters(inputFilters, options.providers);
   const params = new URLSearchParams();
-  for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
+  appendQueryParams(params, filters);
   return usePolledData(
     {
       queryKey: qk.events(filters),
+      enabled: filters.providers !== '',
       queryFn: ({ signal }) =>
         getJson<RecentEventsPayload>(
           `/admin/v1/events/recent?${params.toString()}`,
@@ -487,10 +579,14 @@ export function useRecentEvents(filters: Record<string, string | undefined>) {
 }
 
 export function useEventsHistogram(
-  filters: Record<string, string | undefined>,
+  inputFilters: Record<string, string | undefined>,
   range: EventsHistogramRange | null,
-  options?: { readonly poll?: boolean },
+  options?: {
+    readonly poll?: boolean;
+    readonly providers?: readonly ProviderFamily[];
+  },
 ) {
+  const filters = useProviderFilters(inputFilters, options?.providers);
   return useQuery<EventsHistogramPayload>({
     queryKey: ['events', 'histogram', filters, range],
     queryFn: () => {
@@ -499,7 +595,7 @@ export function useEventsHistogram(
       }
       return fetchEventsHistogram(filters, range);
     },
-    enabled: range !== null,
+    enabled: range !== null && filters.providers !== '',
     // The bucket-snapped range keeps the key stable, so without a poll the
     // trailing bucket would only grow when a bucket boundary rolls over.
     // Matches the request list interval so both advance together. A parked
@@ -577,9 +673,7 @@ export function fetchRecentEventsPage(
   pageParam: RecentEventsPageParam,
 ): Promise<RecentEventsPayload> {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filters)) {
-    if (value) params.set(key, value);
-  }
+  appendQueryParams(params, filters);
   if (pageParam.kind === 'cursor') {
     params.set('until_ts_ms', String(pageParam.ts_ms));
     params.set('until_event_id', pageParam.event_id);
@@ -610,19 +704,24 @@ export function recentEventsPageQueryOptions(
       cursorEventId,
     ],
     queryFn: () => fetchRecentEventsPage(filters, pageParam),
+    enabled: filters.providers !== '',
   });
 }
 
 export function useRecentEventsPage(
-  filters: Record<string, string | undefined>,
+  inputFilters: Record<string, string | undefined>,
   pageParam: RecentEventsPageParam,
+  options: ProviderQueryOptions = {},
 ) {
+  const filters = useProviderFilters(inputFilters, options.providers);
   return useQuery(recentEventsPageQueryOptions(filters, pageParam));
 }
 
 export function useRecentEventsInfinite(
-  filters: Record<string, string | undefined>,
+  inputFilters: Record<string, string | undefined>,
+  options: ProviderQueryOptions = {},
 ) {
+  const filters = useProviderFilters(inputFilters, options.providers);
   const queryKey: RecentEventsQueryKey = [...qk.events(filters), 'infinite'];
   const initialPageParam: RecentEventsPageParam = {
     kind: 'initial',
@@ -636,6 +735,7 @@ export function useRecentEventsInfinite(
     RecentEventsPageParam
   >({
     queryKey,
+    enabled: filters.providers !== '',
     initialPageParam,
     queryFn: ({ pageParam }) => fetchRecentEventsPage(filters, pageParam),
     getNextPageParam: (last) => {
@@ -697,10 +797,12 @@ export function useUpstreamOAuthStatus(id: string | null | undefined) {
     enabled: Boolean(id),
   });
 }
-export function useUpstreamSubscriptionMetadata(upstreamId: string) {
+export function useUpstreamSubscriptionMetadata(
+  upstreamId: string | null | undefined,
+) {
   return usePolledData(
     {
-      queryKey: qk.upstreamSubscriptionMetadata(upstreamId),
+      queryKey: qk.upstreamSubscriptionMetadata(upstreamId ?? ''),
       queryFn: ({ signal }) =>
         getJson<SubscriptionMetadataResponse>(
           `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,
@@ -755,7 +857,17 @@ export function useSubscriptionQuotaLatest(params: {
   source?: string;
   maxStalenessSecs?: number;
   refetchInterval?: number;
+  enabled?: boolean;
 }) {
+  const providers = useEffectiveProviders();
+  const scopedIds = useScopedUpstreamIds(providers);
+  const scopedParams = {
+    ...params,
+    enabled: undefined,
+    providers: providers?.join(','),
+  };
+  // Latest readings are provider-scoped server-side (Claude, Codex, Gemini windows).
+  const enabled = params.enabled !== false;
   const searchParams = new URLSearchParams();
   if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
   if (params.windows) searchParams.set('windows', params.windows);
@@ -765,14 +877,24 @@ export function useSubscriptionQuotaLatest(params: {
 
   return usePolledData(
     {
-      queryKey: qk.subscriptionQuotaLatest(params),
+      queryKey: qk.subscriptionQuotaLatest(scopedParams),
+      enabled,
+      select: (data: LatestResponse) =>
+        scopedIds === undefined
+          ? data
+          : {
+              ...data,
+              upstreams: data.upstreams.filter((upstream) =>
+                scopedIds.has(upstream.upstream_id),
+              ),
+            },
       queryFn: ({ signal }) =>
         getJson<LatestResponse>(
           `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
           { signal },
         ),
       placeholderData: (previousData, previousQuery) =>
-        hasSameQuotaIdentity(previousQuery?.queryKey, 'latest', params)
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'latest', scopedParams)
           ? previousData
           : undefined,
     },
@@ -787,10 +909,30 @@ export function useSubscriptionQuotaSeries(params: {
   rangeSecs: number;
   bucketSecs?: number;
   maxPointsPerSeries?: number;
+  enabled?: boolean;
 }) {
+  const providers = useEffectiveProviders();
+  const scopedIds = useScopedUpstreamIds(providers);
+  const scopedParams = {
+    ...params,
+    enabled: undefined,
+    providers: providers?.join(','),
+  };
+  // Series are provider-scoped server-side; the lens narrows them client-side.
+  const enabled = params.enabled !== false;
   return usePolledData(
     {
-      queryKey: qk.subscriptionQuotaSeries(params),
+      queryKey: qk.subscriptionQuotaSeries(scopedParams),
+      enabled,
+      select: (data: SeriesResponse) =>
+        scopedIds === undefined
+          ? data
+          : {
+              ...data,
+              series: data.series.filter((item) =>
+                scopedIds.has(item.upstream_id),
+              ),
+            },
       queryFn: ({ signal }) => {
         const untilUnixSecs = Math.floor(Date.now() / 1000);
         const searchParams = new URLSearchParams();
@@ -816,7 +958,7 @@ export function useSubscriptionQuotaSeries(params: {
         );
       },
       placeholderData: (previousData, previousQuery) =>
-        hasSameQuotaIdentity(previousQuery?.queryKey, 'series', params)
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'series', scopedParams)
           ? previousData
           : undefined,
     },
@@ -828,25 +970,47 @@ export function useSubscriptionQuotaAggregate(params: {
   upstreamIds?: string;
   windows?: string;
   source?: string;
+  provider?: ProviderFamily;
   maxStalenessSecs?: number;
+  enabled?: boolean;
 }) {
+  const providers = useEffectiveProviders(
+    params.provider === undefined ? undefined : [params.provider],
+  );
+  const provider =
+    params.provider !== undefined && providers?.includes(params.provider)
+      ? params.provider
+      : undefined;
+  const scopedParams = {
+    ...params,
+    enabled: undefined,
+    provider: params.provider,
+    providers: providers?.join(','),
+  };
+  const enabled =
+    params.enabled !== false &&
+    (params.provider === undefined
+      ? providers === undefined || providers.includes('anthropic')
+      : provider !== undefined);
   const searchParams = new URLSearchParams();
   if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
   if (params.windows) searchParams.set('windows', params.windows);
   if (params.source) searchParams.set('source', params.source);
+  if (provider) searchParams.set('provider', provider);
   if (params.maxStalenessSecs !== undefined)
     searchParams.set('max_staleness_secs', String(params.maxStalenessSecs));
 
   return usePolledData(
     {
-      queryKey: qk.subscriptionQuotaAggregate(params),
+      queryKey: qk.subscriptionQuotaAggregate(scopedParams),
+      enabled,
       queryFn: ({ signal }) =>
         getJson<AggregateResponse>(
           `/admin/v1/subscription-quotas/aggregate?${searchParams.toString()}`,
           { signal },
         ),
       placeholderData: (previousData, previousQuery) =>
-        hasSameQuotaIdentity(previousQuery?.queryKey, 'aggregate', params)
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'aggregate', scopedParams)
           ? previousData
           : undefined,
     },
@@ -863,10 +1027,31 @@ export function useSubscriptionQuotaPoolHistory(params: {
   rangeSecs: number;
   windowQuantumSecs?: number;
   maxPointsPerSeries?: number;
+  provider?: ProviderFamily;
+  enabled?: boolean;
 }) {
+  const providers = useEffectiveProviders(
+    params.provider === undefined ? undefined : [params.provider],
+  );
+  const provider =
+    params.provider !== undefined && providers?.includes(params.provider)
+      ? params.provider
+      : undefined;
+  const scopedParams = {
+    ...params,
+    enabled: undefined,
+    provider: params.provider,
+    providers: providers?.join(','),
+  };
+  const enabled =
+    params.enabled !== false &&
+    (params.provider === undefined
+      ? providers === undefined || providers.includes('anthropic')
+      : provider !== undefined);
   return usePolledData(
     {
-      queryKey: qk.subscriptionQuotaPoolHistory(params),
+      queryKey: qk.subscriptionQuotaPoolHistory(scopedParams),
+      enabled,
       queryFn: async ({ signal }) => {
         const nowUnixSecs = Math.floor(Date.now() / 1000);
         const quantumSecs = params.windowQuantumSecs ?? 0;
@@ -877,6 +1062,7 @@ export function useSubscriptionQuotaPoolHistory(params: {
         const searchParams = new URLSearchParams();
         searchParams.set('series_projection', 'chart');
         if (params.windows) searchParams.set('windows', params.windows);
+        if (provider) searchParams.set('provider', provider);
         searchParams.set(
           'since_unix_secs',
           String(untilUnixSecs - params.rangeSecs - quantumSecs),
@@ -897,7 +1083,11 @@ export function useSubscriptionQuotaPoolHistory(params: {
         } satisfies PoolHistoryQueryData;
       },
       placeholderData: (previousData, previousQuery) =>
-        hasSameQuotaIdentity(previousQuery?.queryKey, 'pool-history', params)
+        hasSameQuotaIdentity(
+          previousQuery?.queryKey,
+          'pool-history',
+          scopedParams,
+        )
           ? previousData
           : undefined,
     },
@@ -913,6 +1103,8 @@ export interface CreateUpstreamRequest {
   kind: string;
   base_url?: string | null;
   api_key_value?: string | null;
+  oauth_token_bundle?: Record<string, unknown> | null;
+  project_id?: string | null;
   /** Org-scoped API keys: the `anthropic-workspace-id` every request carries. */
   workspace_id?: string | null;
   /** Save an API key Anthropic could not be asked about; stored unverified. */
@@ -1179,15 +1371,24 @@ export function useUpdateUpstreamWarmupSettings() {
 }
 export function useOAuthStart() {
   return useMutation({
-    mutationFn: ({ id }: { id: string }) =>
+    mutationFn: ({
+      id,
+      provider,
+      flow,
+    }: {
+      id: string;
+      provider?: OAuthProvider;
+      flow?: OAuthStartFlow;
+    }) =>
       postJson<
-        {
-          authorize_url: string;
-          state_token: string;
-          revision: number;
-        },
-        Record<string, never>
-      >(`/admin/v1/upstreams/${id}/oauth/start`, {}),
+        OAuthStartResponse & { revision?: number },
+        { provider?: OAuthProvider; flow?: OAuthStartFlow }
+      >(
+        `/admin/v1/upstreams/${id}/oauth/start`,
+        provider || flow
+          ? { ...(provider ? { provider } : {}), ...(flow ? { flow } : {}) }
+          : {},
+      ),
     // The connect dialog renders start failures inline with a retry.
     meta: { inlineError: true },
   });
@@ -1202,23 +1403,22 @@ export function useOAuthComplete() {
     }: {
       id: string;
       state_token: string;
-      code: string;
+      code?: string;
     }) =>
       postJson<
-        {
-          upstream_id: string;
-          expires_at_unix_secs: number;
-          access_token_fingerprint: string;
-          mode: OAuthTokenMode;
-          long_lived_fallback: boolean;
-          fallback_reason: OAuthFallbackReason | null;
-          granted_expires_in_secs: number | null;
-        },
-        { state_token: string; code: string }
+        | {
+            upstream_id: string;
+            expires_at_unix_secs: number;
+            access_token_fingerprint: string;
+            mode: OAuthTokenMode;
+            long_lived_fallback: boolean;
+            fallback_reason: OAuthFallbackReason | null;
+            granted_expires_in_secs: number | null;
+            status?: never;
+          }
+        | OAuthCompletePendingResponse,
+        { state_token: string; code?: string }
       >(`/admin/v1/upstreams/${id}/oauth/complete`, { state_token, code }),
-    // Only complete() success means the backend's OAuth credential changed.
-    // useOAuthStart() intentionally invalidates nothing: clicking "Reconnect"
-    // and then bailing out of the modal must NOT flip the OAuth Status card.
     onSuccess: async (_data, { id }) => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: qk.upstreams }),
@@ -1229,7 +1429,6 @@ export function useOAuthComplete() {
         }),
       ]);
     },
-    // The connect dialog maps failures to inline guidance next to the code.
     meta: { inlineError: true },
   });
 }
@@ -1706,14 +1905,17 @@ export function useSaveConfigFile() {
 
 export function useStartOauthDraft() {
   return useMutation({
-    mutationFn: () => startOauthDraft(),
+    mutationFn: (variables?: {
+      provider?: OAuthProvider;
+      flow?: OAuthStartFlow;
+    }) => startOauthDraft(variables?.provider ?? 'anthropic', variables?.flow),
     meta: { inlineError: true },
   });
 }
 
 export function useCompleteOauthDraft() {
   return useMutation({
-    mutationFn: (body: { state_token: string; code: string }) =>
+    mutationFn: (body: { state_token: string; code?: string }) =>
       completeOauthDraft(body),
     meta: { inlineError: true },
   });

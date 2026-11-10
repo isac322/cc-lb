@@ -9,6 +9,11 @@ import {
   TOAST_DURATIONS,
 } from '../../../lib/copy/warmup';
 import {
+  capabilitiesOf,
+  type ProviderFamily,
+  providerOf,
+} from '../../../lib/providers';
+import {
   type FireNowResponse,
   type PluginEntry,
   type Upstream,
@@ -43,11 +48,20 @@ const WARN_PANEL_CLASS =
 const DANGER_PANEL_CLASS =
   'rounded-sm bg-danger/8 px-3 py-2 text-body-sm text-danger-text';
 
-function pluginSupportsSlot(
-  p: { supported_slots?: string[]; slot?: string },
-  slot: string,
+function pluginSupportsWarmup(
+  p: PluginEntry,
+  provider: ProviderFamily,
 ): boolean {
-  return p.supported_slots?.includes(slot) ?? p.slot === slot;
+  if (!p.supported_slots?.includes('shape')) return false;
+  if (provider === 'anthropic') {
+    // Keep legacy Anthropic registry entries selectable.
+    return (
+      !Object.keys(p.hook_metadata).length ||
+      'shape' in p.hook_metadata ||
+      'shape_anthropic' in p.hook_metadata
+    );
+  }
+  return `shape_${provider}` in p.hook_metadata;
 }
 
 function isStaleRevisionError(err: unknown): boolean {
@@ -118,7 +132,7 @@ function WarmupHelpHover() {
   return (
     <HelpIcon
       label="Warm-up help"
-      text="Warm-up sends a tiny background Anthropic request during idle time so the next quota window is ready when traffic resumes. Returning users land in an active window instead of starting one late."
+      text="Warm-up sends a tiny background request during idle time so the next quota window is ready when traffic resumes. It uses only windows the account reports; Gemini warm-up covers Gemini models only."
     />
   );
 }
@@ -127,7 +141,7 @@ function ShapePluginHelpHover() {
   return (
     <HelpIcon
       label="Shape plugin help"
-      text="Warm-up is also an Anthropic request. Shape plugin applies the same request transform used for proxied traffic to that small warm-up prompt."
+      text="The shape plugin transforms the provider's small native warm-up request before OAuth signing. Only plugins with a shape hook for this provider are offered."
     />
   );
 }
@@ -152,7 +166,7 @@ export function WarmupCardMinimal({
   upstream,
   credentialNoticeShown = false,
 }: WarmupCardProps) {
-  if (upstream.kind !== 'anthropic_oauth') {
+  if (!capabilitiesOf(upstream.kind).warmup) {
     return null;
   }
   const stateKey = `${upstream.id}:${
@@ -357,7 +371,7 @@ function WarmupCardMinimalInner({
 
   const shapePlugins =
     registry.data?.entries.filter((p: PluginEntry) =>
-      pluginSupportsSlot(p, 'shape'),
+      pluginSupportsWarmup(p, providerOf(upstream.kind)),
     ) ?? [];
   const selectedPluginKnown =
     !selectedPluginValue ||
@@ -493,7 +507,11 @@ function WarmupCardMinimalInner({
         tabIndex={-1}
         className="outline-none"
         title={headerTitle}
-        description="Prepares the next quota window during idle gaps."
+        description={
+          upstream.kind === 'gemini_oauth'
+            ? COPY.geminiCardSubtitle
+            : COPY.cardSubtitle
+        }
         action={headerActions}
       >
         <div className="space-y-4">
@@ -585,59 +603,61 @@ function WarmupCardMinimalInner({
 
             {/* Phones stack the label over a full-width picker; beside it the
                 picker would squeeze to a truncated sliver at 360px. */}
-            <div
-              className="flex min-h-7 items-center justify-between gap-3 max-md:flex-col max-md:items-stretch max-md:gap-1.5"
-              data-testid="warmup-plugin-row"
-            >
-              <span className="inline-flex shrink-0 items-center gap-1.5 text-body-sm text-text-muted">
-                Shape plugin
-                <ShapePluginHelpHover />
-              </span>
-              {pluginRegistryPending ? (
-                <Skeleton className="h-8 w-48 rounded-sm" />
-              ) : shapePlugins.length === 0 &&
-                !upstream.warmup_dialect_plugin ? (
-                <div className="text-body-sm text-text-muted">
-                  <span>{COPY.noShapePluginsAvailable}</span>{' '}
-                  <a
-                    href="/plugins"
-                    className="rounded-sm text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-                  >
-                    Plugins
-                  </a>
-                </div>
-              ) : (
-                <div className="w-56 max-w-full min-w-0 max-md:w-full">
-                  <Select
-                    id="dialect-plugin-select"
-                    data-testid="warmup-plugin-select"
-                    size="sm"
-                    value={selectedPluginValue}
-                    onChange={handlePluginChange}
-                    disabled={settingsPending}
-                    aria-label={COPY.dialectPluginLabel}
-                    allLabel={COPY.defaultPluginOption}
-                    options={[
-                      ...(selectedPluginValue && !selectedPluginKnown
-                        ? [
-                            {
-                              value: selectedPluginValue,
-                              label: COPY.unknownPluginTemplate.replace(
-                                '{id}',
-                                selectedPluginValue,
-                              ),
-                            },
-                          ]
-                        : []),
-                      ...shapePlugins.map((p: PluginEntry) => ({
-                        value: p.id,
-                        label: p.name,
-                      })),
-                    ]}
-                  />
-                </div>
-              )}
-            </div>
+            {capabilitiesOf(upstream.kind).warmup && (
+              <div
+                className="flex min-h-7 items-center justify-between gap-3 max-md:flex-col max-md:items-stretch max-md:gap-1.5"
+                data-testid="warmup-plugin-row"
+              >
+                <span className="inline-flex shrink-0 items-center gap-1.5 text-body-sm text-text-muted">
+                  Shape plugin
+                  <ShapePluginHelpHover />
+                </span>
+                {pluginRegistryPending ? (
+                  <Skeleton className="h-8 w-48 rounded-sm" />
+                ) : shapePlugins.length === 0 &&
+                  !upstream.warmup_dialect_plugin ? (
+                  <div className="text-body-sm text-text-muted">
+                    <span>{COPY.noShapePluginsAvailable}</span>{' '}
+                    <a
+                      href="/plugins"
+                      className="max-md:relative max-md:inline-flex max-md:min-h-10 max-md:items-center max-md:px-2 max-md:-mx-2 rounded-sm text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                    >
+                      Plugins
+                    </a>
+                  </div>
+                ) : (
+                  <div className="w-56 max-w-full min-w-0 max-md:w-full">
+                    <Select
+                      id="dialect-plugin-select"
+                      data-testid="warmup-plugin-select"
+                      size="sm"
+                      value={selectedPluginValue}
+                      onChange={handlePluginChange}
+                      disabled={settingsPending}
+                      aria-label={COPY.dialectPluginLabel}
+                      allLabel={COPY.defaultPluginOption}
+                      options={[
+                        ...(selectedPluginValue && !selectedPluginKnown
+                          ? [
+                              {
+                                value: selectedPluginValue,
+                                label: COPY.unknownPluginTemplate.replace(
+                                  '{id}',
+                                  selectedPluginValue,
+                                ),
+                              },
+                            ]
+                          : []),
+                        ...shapePlugins.map((p: PluginEntry) => ({
+                          value: p.id,
+                          label: p.name,
+                        })),
+                      ]}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="min-h-12" data-testid="warmup-failure-slot">
               {summaryPending ? (
@@ -745,7 +765,7 @@ function WarmupCardMinimalInner({
         />
       </DetailSection>
 
-      {pluginSnapshot && (
+      {upstream.kind === 'anthropic_oauth' && pluginSnapshot && (
         <WarmupConfigModal
           open={configOpen}
           onOpenChange={setConfigOpen}

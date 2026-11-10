@@ -7,11 +7,16 @@ import {
 } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { LatestResponse, QuotaSnapshot } from '../../lib/api';
+import type {
+  LatestResponse,
+  QuotaSnapshot,
+  SubscriptionQuotaWindow,
+} from '../../lib/api';
 import type { OAuthReconnectNudge } from '../../lib/oauthReconnect';
 import type { Upstream } from '../../lib/queries';
 import {
   buildUpstreamUsageRows,
+  countReconnectNudges,
   rowMaxUsedPct,
   sortUpstreamRowsByUsage,
   type UpstreamUsageData,
@@ -46,7 +51,7 @@ const NOW = Math.floor(Date.now() / 1000);
 
 function upstream(
   id: string,
-  kind: 'anthropic_oauth' | 'anthropic_api_key',
+  kind: Upstream['kind'],
   enabled = true,
 ): Upstream {
   return {
@@ -67,7 +72,7 @@ function upstream(
 }
 
 function snap(
-  window: '5h' | '7d' | '7d_fable',
+  window: SubscriptionQuotaWindow,
   utilization: number | null,
   state: QuotaSnapshot['state'] = 'fresh',
 ): QuotaSnapshot {
@@ -95,7 +100,7 @@ function snap(
 /** `[id, kind, enabled, runtime status, 5h, 7d]` */
 type Spec = [
   string,
-  'anthropic_oauth' | 'anthropic_api_key',
+  Upstream['kind'],
   boolean,
   string,
   number | null,
@@ -148,6 +153,39 @@ const rowNames = () =>
     .map((row) => row.querySelector('[title]')?.getAttribute('title'));
 
 describe('UpstreamUsageTable', () => {
+  it('counts reconnect nudges only from the provider-scoped rows', () => {
+    const usageData = data(
+      [
+        ['anthropic', 'anthropic_oauth', true, 'active', null, null],
+        ['openai', 'openai_oauth', true, 'active', null, null],
+      ],
+      new Map<string, OAuthReconnectNudge>([
+        [
+          'openai',
+          {
+            tone: 'danger',
+            reason: 'renewal_rejected',
+            label: 'Reconnect required',
+            description: 'Reconnect',
+            actionLabel: 'Reconnect',
+            expiresAt: null,
+          },
+        ],
+      ]),
+    );
+    expect(
+      countReconnectNudges(
+        usageData.rows.filter((row) =>
+          row.upstream.kind.startsWith('anthropic'),
+        ),
+      ),
+    ).toBe(0);
+    expect(
+      countReconnectNudges(
+        usageData.rows.filter((row) => row.upstream.kind.startsWith('openai')),
+      ),
+    ).toBe(1);
+  });
   it('orders problems first, then quota by most-used window, API keys, disabled last', () => {
     const usageData = data([
       ['key-a', 'anthropic_api_key', true, 'active', null, null],
@@ -332,6 +370,129 @@ describe('UpstreamUsageTable', () => {
 
     rerender(<UpstreamUsageTable data={usageData} />);
     expect(screen.getByRole('meter', { name: '5h window used' })).toBeTruthy();
+  });
+  it('renders only reported OpenAI subscription windows', () => {
+    render(
+      <UpstreamUsageTable
+        data={data([['pro', 'openai_oauth', true, 'active', null, 0.4]])}
+      />,
+    );
+    const row = screen.getByTestId('upstream-usage-row');
+    expect(row.querySelector('[data-window="5h"]')).toBeNull();
+    expect(row.querySelector('[data-window="7d"]')?.textContent).toContain(
+      '40%used',
+    );
+    expect(row.textContent).toContain('7d');
+    expect(row.textContent).not.toContain('No subscription quota');
+  });
+  it('omits an OpenAI window with no reported utilization', () => {
+    const providerData = data([
+      ['pro', 'openai_oauth', true, 'active', 0.0, 0.18],
+    ]);
+    providerData.rows[0]!.windows[0]!.utilization = null;
+    render(<UpstreamUsageTable data={providerData} />);
+    const row = screen.getByTestId('upstream-usage-row');
+    expect(row.querySelector('[data-window="5h"]')).toBeNull();
+    expect(row.querySelector('[data-window="7d"]')?.textContent).toContain(
+      '18%used',
+    );
+  });
+
+  it.each([
+    ['openai_oauth', '5h', '7d'],
+    ['gemini_oauth', 'gemini_5h', 'gemini_7d'],
+  ] as const)(
+    'omits absent windows across a weekly-only %s fleet and preserves mixed-row alignment',
+    (kind, shortWindow, weeklyWindow) => {
+      const weekly = {
+        ...data([['weekly', kind, true, 'active', null, null]]).rows[0]!,
+        windows: [snap(shortWindow, null, 'absent'), snap(weeklyWindow, 0.2)],
+      };
+      const usageData = {
+        ...data([]),
+        rows: [weekly],
+      };
+      const { rerender } = render(<UpstreamUsageTable data={usageData} />);
+      expect(
+        screen
+          .getByTestId('upstream-usage-row')
+          .querySelector(`[data-window="${shortWindow}"]`),
+      ).toBeNull();
+
+      rerender(
+        <UpstreamUsageTable
+          data={{
+            ...usageData,
+            rows: [
+              weekly,
+              {
+                ...weekly,
+                upstream: { ...weekly.upstream, id: 'normal', name: 'normal' },
+                windows: [snap(shortWindow, 0.4), snap(weeklyWindow, 0.3)],
+              },
+            ],
+          }}
+        />,
+      );
+      const absent = within(
+        screen.getByRole('link', { name: /weekly/ }),
+      ).getByTestId('usage-absent-cell');
+      expect(absent.getAttribute('data-window')).toBe(shortWindow);
+      expect(absent.className).toBe('hidden @4xl:block');
+      expect(absent.textContent).toBe('');
+    },
+  );
+
+  it.each([
+    ['stale', 0.42, '42%used'],
+    ['unobserved', null, 'No reading'],
+  ] as const)(
+    'keeps an Anthropic %s 5h slot visible',
+    (state, utilization, text) => {
+      const providerData = data([
+        ['claude', 'anthropic_oauth', true, 'active', 0.42, 0.18],
+      ]);
+      const row = providerData.rows[0];
+      const fiveHour = row?.windows.find((window) => window.window === '5h');
+      if (!fiveHour) throw new Error('Missing Anthropic 5h fixture');
+      fiveHour.state = state;
+      fiveHour.utilization = utilization;
+
+      render(<UpstreamUsageTable data={providerData} />);
+
+      const usageRow = screen.getByTestId('upstream-usage-row');
+      const fiveHourCell = usageRow.querySelector('[data-window="5h"]');
+      expect(fiveHourCell).not.toBeNull();
+      expect(
+        fiveHourCell?.querySelector('[data-testid="usage-cell-empty"]'),
+      ).toBeNull();
+      expect(fiveHourCell?.textContent).toContain(text);
+    },
+  );
+
+  it('renders Gemini quota windows with their labels', () => {
+    const providerData = data([
+      ['antigravity', 'gemini_oauth', true, 'active', null, null],
+    ]);
+    const rowData = providerData.rows.at(0);
+    if (!rowData) throw new Error('Missing Gemini upstream fixture');
+    rowData.windows = [
+      snap('third_party_7d', 0.5),
+      snap('gemini_5h', 0.75),
+      snap('third_party_5h', 0.5),
+      snap('gemini_7d', 0.25),
+    ];
+    render(<UpstreamUsageTable data={providerData} />);
+    const row = screen.getByTestId('upstream-usage-row');
+    expect(
+      Array.from(row.querySelectorAll('[data-window]'), (cell) =>
+        cell.getAttribute('data-window'),
+      ),
+    ).toEqual(['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d']);
+    expect(within(row).getByText('Gemini 5h')).toBeDefined();
+    expect(within(row).getByText('Gemini 7d')).toBeDefined();
+    expect(within(row).getByText('Claude·OSS 5h')).toBeDefined();
+    expect(within(row).getByText('Claude·OSS 7d')).toBeDefined();
   });
 
   it('keeps a disabled expired OAuth warning above quota danger and disabled healthy rows', () => {

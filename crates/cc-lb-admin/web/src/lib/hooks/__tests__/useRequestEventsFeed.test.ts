@@ -124,6 +124,17 @@ describe('request event feed query filters', () => {
     },
   );
 
+  it('serializes a provider event-kind set as one backend filter', () => {
+    const filters = {
+      event_kind_set: ['gemini_generate_content', 'gemini_predict'] as const,
+    };
+    expect(buildRequestEventsHistoryFilters(filters)).toEqual({
+      event_kind: 'gemini_generate_content,gemini_predict',
+    });
+    expect(buildRequestEventsLiveFilters(filters)).toEqual({
+      event_kind: 'gemini_generate_content,gemini_predict',
+    });
+  });
   it('keeps All kinds in bounded errors history without restricting live corrections', () => {
     const filters = {
       event_kind: 'all' as const,
@@ -314,5 +325,35 @@ describe('useRequestEventsFeed', () => {
       result.current.rows.find((row) => row.request_id === 'request-1001')
         ?._phase,
     ).toBe('final');
+  });
+
+  it('sends a provider event-kind set on history and live-tail requests', async () => {
+    const client = new QueryClient();
+    const { result } = renderHook(
+      () =>
+        useRequestEventsFeed({
+          // A fresh array each render must not change the request identity.
+          filters: {
+            event_kind_set: ['gemini_generate_content', 'gemini_predict'],
+          },
+          initialHistoryLimit: 500,
+          pageSize: 50,
+        }),
+      { wrapper: makeWrapper(client) },
+    );
+
+    await waitFor(() => expect(result.current.rows).toHaveLength(500));
+    expect(mocks.useRecentEventsPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        event_kind: 'gemini_generate_content,gemini_predict',
+      }),
+      expect.anything(),
+    );
+    expect(mocks.useLiveEventStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        event_kind: 'gemini_generate_content,gemini_predict',
+      }),
+      { enabled: true },
+    );
   });
 });

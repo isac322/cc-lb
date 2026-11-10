@@ -5,6 +5,10 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
 const ADMIN_TARGET = process.env.CC_LB_ADMIN_URL ?? 'http://127.0.0.1:8001';
+const ADMIN_TOKEN = process.env.CC_LB_ADMIN_TOKEN;
+const ADMIN_PROXY_HEADERS = ADMIN_TOKEN
+  ? { Authorization: `Bearer ${ADMIN_TOKEN}` }
+  : undefined;
 
 export default defineConfig({
   // TanStackRouterVite MUST run before @vitejs/plugin-react.
@@ -21,8 +25,16 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/admin/v1': { target: ADMIN_TARGET, changeOrigin: true },
-      '/admin/health': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/v1': {
+        target: ADMIN_TARGET,
+        changeOrigin: true,
+        headers: ADMIN_PROXY_HEADERS,
+      },
+      '/admin/health': {
+        target: ADMIN_TARGET,
+        changeOrigin: true,
+        headers: ADMIN_PROXY_HEADERS,
+      },
     },
   },
   test: {

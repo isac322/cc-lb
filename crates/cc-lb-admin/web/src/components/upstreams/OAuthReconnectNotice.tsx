@@ -9,7 +9,8 @@ import {
   type OAuthReconnectNudge,
   useOAuthReconnectNudges,
 } from '../../lib/oauthReconnect';
-import { useUpstreams } from '../../lib/queries';
+import { type ProviderFamily, providerOf } from '../../lib/providers';
+import { useStatus, useUpstreams } from '../../lib/queries';
 import { Button, Notice } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
 
@@ -51,17 +52,29 @@ export function OAuthReconnectNotice({
  * every OAuth connection is healthy or still loading.
  * One line: a count title, the affected names as a sentence, one action.
  */
-export function OAuthReconnectSummary() {
+export function OAuthReconnectSummary({
+  provider,
+}: {
+  provider?: ProviderFamily;
+} = {}) {
   const navigate = useNavigate();
   const upstreams = useUpstreams();
-  const { nudges, isError: nudgeError } = useOAuthReconnectNudges(
-    upstreams.data?.upstreams,
+  const scopedUpstreams = useMemo(
+    () =>
+      provider == null
+        ? upstreams.data?.upstreams
+        : upstreams.data?.upstreams.filter(
+            (upstream) => providerOf(upstream.kind) === provider,
+          ),
+    [provider, upstreams.data],
   );
+  const { nudges, isError: nudgeError } =
+    useOAuthReconnectNudges(scopedUpstreams);
   const isError = upstreams.isError || nudgeError;
 
   const entries = useMemo(() => {
     const list: { id: string; name: string; nudge: OAuthReconnectNudge }[] = [];
-    for (const u of upstreams.data?.upstreams ?? []) {
+    for (const u of scopedUpstreams ?? []) {
       const nudge = nudges.get(u.id);
       if (nudge) list.push({ id: u.id, name: u.name, nudge });
     }
@@ -75,7 +88,7 @@ export function OAuthReconnectSummary() {
       return (a.nudge.expiresAt ?? Infinity) - (b.nudge.expiresAt ?? Infinity);
     });
     return list;
-  }, [upstreams.data, nudges]);
+  }, [scopedUpstreams, nudges]);
 
   if (entries.length === 0) {
     // A failed status check must not read as "all healthy".
@@ -138,6 +151,68 @@ export function OAuthReconnectSummary() {
       }
     >
       {summary}
+    </Notice>
+  );
+}
+
+/** Global banner for upstream apply failures, independent of OAuth nudges. */
+export function UpstreamApplyFailureSummary({
+  provider,
+}: {
+  provider?: ProviderFamily;
+} = {}) {
+  const upstreams = useUpstreams();
+  const status = useStatus();
+  const scopedUpstreamIds = useMemo(
+    () =>
+      new Set(
+        (upstreams.data?.upstreams ?? [])
+          .filter(
+            (upstream) =>
+              provider == null || providerOf(upstream.kind) === provider,
+          )
+          .map((upstream) => upstream.id),
+      ),
+    [provider, upstreams.data],
+  );
+  const failures = useMemo(
+    () =>
+      (status.data?.upstreams ?? [])
+        .map((entry) => {
+          if (!scopedUpstreamIds.has(entry.id)) return null;
+          const upstream = upstreams.data?.upstreams.find(
+            (item) => item.id === entry.id,
+          );
+          return entry.last_apply_error && upstream
+            ? {
+                id: entry.id,
+                name: upstream.name,
+                error: entry.last_apply_error,
+              }
+            : null;
+        })
+        .filter(
+          (entry): entry is { id: string; name: string; error: string } =>
+            entry != null,
+        ),
+    [status.data, upstreams.data, scopedUpstreamIds],
+  );
+  if (failures.length === 0) return null;
+  return (
+    <Notice
+      variant="banner"
+      tone="danger"
+      title={
+        failures.length === 1
+          ? '1 upstream apply failed'
+          : `${failures.length} upstream applies failed`
+      }
+    >
+      <span>
+        {failures
+          .map((failure) => `${failure.name}: ${failure.error}`)
+          .join(' · ')}
+      </span>
     </Notice>
   );
 }
