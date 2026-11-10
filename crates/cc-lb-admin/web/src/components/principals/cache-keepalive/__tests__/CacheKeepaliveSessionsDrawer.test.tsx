@@ -8,10 +8,14 @@ import {
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CacheKeepaliveRow } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
 import * as visibilityManager from '../../../../lib/visibilityManager';
 import { cacheKeepaliveRows } from '../__fixtures__/cacheKeepaliveFixtures';
-import { CacheKeepaliveSessionsDrawer } from '../CacheKeepaliveSessionsDrawer';
+import {
+  CacheKeepaliveSessionsDrawer,
+  extractTriggerLabel,
+} from '../CacheKeepaliveSessionsDrawer';
 
 const mockPrincipal: queries.Principal = {
   id: 'p-123',
@@ -58,6 +62,34 @@ function renderWithProviders(ui: React.ReactElement) {
     <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
   );
 }
+
+describe('extractTriggerLabel', () => {
+  const notTracked = (reason: string, displayReason: string) =>
+    ({
+      id: 'blank-display-reason',
+      state: 'not_tracked',
+      reason,
+      display_reason: displayReason,
+    }) as unknown as CacheKeepaliveRow;
+
+  it('falls back to reason when the persisted display reason is blank', () => {
+    for (const blank of ['', '   ']) {
+      expect(
+        extractTriggerLabel(
+          notTracked(
+            'cached prefix too small (5000 tokens < minimum 10000)',
+            blank,
+          ),
+        ),
+      ).toBe('Prefix < min tokens');
+      expect(
+        extractTriggerLabel(
+          notTracked('agent-in-turn (tool_use: `Bash`) — first renewal', blank),
+        ),
+      ).toBe('Bash');
+    }
+  });
+});
 
 describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
   afterEach(() => {

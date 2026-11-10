@@ -71,10 +71,12 @@ function extractTriggerDescriptor(row: CacheKeepaliveRow): {
   label: string;
   kind: TriggerKind;
 } {
+  // Rows written before display reasons existed store '' rather than null.
+  const displayReason = row.display_reason?.trim() ? row.display_reason : null;
   const sourceText =
-    row.display_reason && row.display_reason !== row.reason
-      ? `${row.display_reason} · ${row.reason}`
-      : (row.display_reason ?? row.reason);
+    displayReason && displayReason !== row.reason
+      ? `${displayReason} · ${row.reason}`
+      : (displayReason ?? row.reason);
   const backtickToolMatch = sourceText.match(/tool_use:\s*`([^`]+)`/i);
   if (backtickToolMatch?.[1]) {
     return {
