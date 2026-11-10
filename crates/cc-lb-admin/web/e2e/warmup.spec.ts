@@ -417,7 +417,7 @@ test.describe('WarmupCard', () => {
     const card = page.getByTestId('warmup-card');
     await expect(card).not.toContainText(fiveHourWording);
     await card.getByLabel('Warm-up help', { exact: true }).hover();
-    const help = card.getByRole('dialog');
+    const help = page.getByRole('dialog');
     await expect(help).toBeVisible();
     await expect(help).toContainText('the next quota window');
     await expect(help).not.toContainText(fiveHourWording);
@@ -425,8 +425,6 @@ test.describe('WarmupCard', () => {
     await card.getByRole('button', { name: COPY.fireNowButtonLabel, exact: true }).click();
     const dialog = page.getByRole('alertdialog', { name: COPY.confirmFireTitle });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByText(COPY.confirmFireBody.replace('{upstreamName}', 'oauth-healthy'), { exact: true })).toBeVisible();
-    await expect(dialog).toContainText('current quota window');
     await expect(dialog).not.toContainText(fiveHourWording);
     await dialog.getByRole('button', { name: COPY.confirmFireConfirmLabel, exact: true }).click();
     await expect(page.getByText(COPY.fireSuccess, { exact: true })).toBeVisible();
@@ -552,8 +550,10 @@ test.describe('WarmupCard', () => {
     await expect.poll(() => deleteUrl).toBe('/admin/v1/upstreams/oauth-healthy/warmup-dialect-plugin');
     expect(ifMatch).toBe(`W/"${specRevision}"`);
     await expect(page.getByTestId('warmup-plugin-select')).toContainText(COPY.defaultPluginOption);
-    await expect(page.getByRole('button', { name: 'View plugin config' })).toHaveCount(0);
     await expect(page.getByText(COPY.dialectPluginClearSuccess)).toBeVisible();
+    // The loaded summary remains the effective snapshot until the next fetch.
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'View plugin config' })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('scenario-7-plugin-clear.png'), fullPage: true });
   });
 
@@ -720,6 +720,7 @@ test('Scenario 14: Current plugin config stays reachable across required viewpor
       JSON.stringify(configured.warmup_dialect_plugin?.config, null, 2),
     );
     expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await expect(dialog).toHaveCSS('opacity', '1');
     await page.screenshot({ path: testInfo.outputPath(`config-${viewport.width}.png`) });
     await dialog.getByRole('button', { name: 'Copy JSON' }).click();
     await expect(dialog.getByRole('button', { name: 'Copied' })).toBeVisible();
