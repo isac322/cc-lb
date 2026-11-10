@@ -446,6 +446,13 @@ export function CacheKeepaliveSessionsDrawer({
         className="flex h-full min-h-0 flex-col"
         data-testid="cache-keepalive-sessions-body"
       >
+        <p
+          className="shrink-0 border-b border-subtle px-4 py-2 text-caption text-text-muted"
+          data-testid="cache-keepalive-scope"
+        >
+          Principal-wide history. The current provider lens does not filter
+          these sessions.
+        </p>
         <SheetSummaryHeader
           horizon={horizon}
           summary={summary}

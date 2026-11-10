@@ -10,6 +10,7 @@ import {
 import type React from 'react';
 import { toast } from 'sonner';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import * as previewControls from '../lib/previewControls';
 import * as queries from '../lib/queries';
 import { queryClient as appQueryClient } from '../lib/queryClient';
 import * as requestEventsFeed from '../lib/useRequestEventsFeed';
@@ -21,6 +22,12 @@ import {
 } from './principals';
 
 const navigateMock = vi.fn();
+vi.mock('../lib/previewControls', async () => {
+  const actual = await vi.importActual<typeof previewControls>(
+    '../lib/previewControls',
+  );
+  return { ...actual, useProviderScope: vi.fn() };
+});
 
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router');
@@ -183,6 +190,9 @@ function cardNamed(title: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(previewControls.useProviderScope).mockReturnValue({
+    providers: undefined,
+  } as never);
   // The list's request counts follow the shared persisted range; reset it.
   window.localStorage.clear();
   navigateMock.mockReset();
@@ -388,8 +398,51 @@ test('principal detail reads keepalive to access with every section expanded', (
   expect(cardNamed('Shape').getByText('None')).toBeDefined();
 });
 
-test.each(['openai_api_key', 'gemini_oauth'] as const)(
-  'principal detail hides unsupported keepalive for a %s installation',
+test.each(['openai_api_key', 'openai_oauth'] as const)(
+  'principal detail exposes keepalive for a %s installation',
+  (kind) => {
+    vi.mocked(queries.useUpstreams).mockReturnValue({
+      data: { upstreams: [{ ...keepaliveUpstream, kind }] },
+      isLoading: false,
+      isPending: false,
+    } as never);
+    renderPrincipalDetail();
+    expect(
+      screen.getByRole('heading', { name: 'Cache keepalive' }),
+    ).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Sessions' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeDefined();
+    expect(
+      screen.queryByRole('switch', { name: 'Subscription preference' }),
+    ).toBeNull();
+  },
+);
+
+test('principal detail follows the effective provider scope for keepalive', () => {
+  vi.mocked(queries.useUpstreams).mockReturnValue({
+    data: {
+      upstreams: [
+        { ...keepaliveUpstream, id: 'anthropic-1', kind: 'anthropic_oauth' },
+        { ...keepaliveUpstream, id: 'openai-1', kind: 'openai_api_key' },
+      ],
+    },
+    isLoading: false,
+    isPending: false,
+  } as never);
+  vi.mocked(previewControls.useProviderScope).mockReturnValue({
+    providers: ['openai'],
+  } as never);
+  renderPrincipalDetail();
+  expect(
+    screen.getByRole('heading', { name: 'Cache keepalive' }),
+  ).toBeDefined();
+  expect(
+    screen.queryByRole('switch', { name: 'Subscription preference' }),
+  ).toBeNull();
+});
+
+test.each(['gemini_api_key', 'gemini_oauth'] as const)(
+  'principal detail hides keepalive for a %s installation',
   (kind) => {
     vi.mocked(queries.useUpstreams).mockReturnValue({
       data: { upstreams: [{ ...keepaliveUpstream, kind }] },
@@ -405,6 +458,24 @@ test.each(['openai_api_key', 'gemini_oauth'] as const)(
     ).toBeDefined();
   },
 );
+
+test('principal detail hides keepalive when no allowed upstream can provide it', () => {
+  const selected = principalFixture({
+    allowed_upstreams: ['gemini-1'],
+  });
+  vi.mocked(queries.useUpstreams).mockReturnValue({
+    data: {
+      upstreams: [
+        { ...keepaliveUpstream, id: 'openai-1', kind: 'openai_api_key' },
+        { ...keepaliveUpstream, id: 'gemini-1', kind: 'gemini_api_key' },
+      ],
+    },
+    isLoading: false,
+    isPending: false,
+  } as never);
+  renderPrincipalDetail(selected);
+  expect(screen.queryByRole('heading', { name: 'Cache keepalive' })).toBeNull();
+});
 
 test('recent requests scope the shared feed and preserve container-fit columns', () => {
   vi.mocked(requestEventsFeed.useRequestEventsFeed).mockReturnValue(

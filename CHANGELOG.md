@@ -37,7 +37,7 @@ All notable changes to this project will be documented in this file.
 - Provider-native prompt-cache routing now gives older OpenAI Responses requests a scoped soft preference when `prompt_cache_key` evidence and native pricing are available. GPT-5.6+ accounting keys, Gemini implicit cache evidence, unknown scopes, and missing rates remain neutral; explicit Gemini `cachedContent` keeps hard owner affinity. (#1127)
 
 ### Fixed
-- Active frame-only Shape plugins now remain in their provider's pipeline without requiring a request-shape hook; absent and noop frame hooks remain inactive. ([#1191](https://github.com/isac322/cc-lb/issues/1191))
+- Admin principal details now expose the existing cache keep-alive controls for OpenAI API-key and OAuth upstreams within the active provider scope, while labeling GPT-5.6+ Responses 30-minute renewal and 12-hour retention semantics. ([#1211](https://github.com/isac322/cc-lb/issues/1211))
 - V2 and V3 Wasm filter requests now remove case-insensitive `key` query parameters before encoding, matching V1 while preserving other query parameters and credential-header redaction. ([#1193](https://github.com/isac322/cc-lb/issues/1193))
 - Corrected the HTML guide and documentation site to describe all six provider upstream kinds, native route boundaries, provider-specific setup, and OpenAI Responses keep-alive limits without claiming Bedrock or Vertex support. Added a focused documentation parity check. ([#1031](https://github.com/isac322/cc-lb/issues/1031))
 - OpenAI and Gemini native model IDs no longer emit Anthropic unknown-alias warnings; Claude alias resolution and the separate cache-threshold diagnostic remain unchanged. ([#1196](https://github.com/isac322/cc-lb/issues/1196))

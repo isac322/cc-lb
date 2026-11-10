@@ -293,4 +293,95 @@ describe('CacheKeepaliveSessionsDrawer (D3 Split Time-Rail)', () => {
 
     expect(screen.getByTestId('cache-keepalive-sessions-off')).toBeDefined();
   });
+  it('keeps principal-wide OpenAI rows and applies tracked filtering for both TTLs', () => {
+    const rows = [
+      {
+        id: 'openai-30m',
+        last_message_at_ms: 1_700_000_000_000,
+        relative_time: '1m ago',
+        state: 'renewed' as const,
+        is_active: false,
+        ttl: '30m' as const,
+        attempts: 1,
+        max_attempts: 12,
+        reason: 'OpenAI Responses 30m renewal',
+        display_reason: null,
+        generation: 1,
+        upstream: 'openai',
+        error: null,
+        net_pnl: null,
+        total_spent: 0,
+        total_avoided: null,
+        evidence_status: 'none' as const,
+        session_key_hash: 'openai-30m',
+        retained_renewals: 1,
+      },
+      {
+        id: 'openai-12h',
+        last_message_at_ms: 1_700_000_000_000,
+        relative_time: '1m ago',
+        state: 'not_tracked' as const,
+        is_active: false,
+        ttl: '12h' as const,
+        attempts: null,
+        max_attempts: 12,
+        reason: '12h retention recorded without read re-anchoring',
+        display_reason: null,
+        generation: 1,
+        upstream: 'openai',
+        error: null,
+        net_pnl: null,
+        total_spent: 0,
+        total_avoided: null,
+        evidence_status: 'none' as const,
+        session_key_hash: 'openai-12h',
+      },
+    ];
+    vi.mocked(queries.useCacheKeepaliveSessions).mockReturnValue({
+      data: {
+        pages: [{ summary: summaryBase, rows, next_cursor: null }],
+      },
+      isLoading: false,
+      isError: false,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    expect(screen.getByTestId('cache-keepalive-scope').textContent).toContain(
+      'Principal-wide history',
+    );
+    expect(queries.useCacheKeepaliveSessions).toHaveBeenCalledWith(
+      'p-123',
+      { horizon: '24h', status: 'tracked' },
+      true,
+    );
+    expect(screen.getByTitle('openai-30m')).toBeDefined();
+    expect(screen.queryByTitle('openai-12h')).toBeNull();
+
+    cleanup();
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={{
+          ...mockPrincipal,
+          cache_keepalive: {
+            ...mockPrincipal.cache_keepalive!,
+            enabled: false,
+          },
+        }}
+      />,
+    );
+    expect(screen.getByTitle('openai-12h')).toBeDefined();
+    expect(screen.getByTestId('cache-keepalive-sessions-off')).toBeDefined();
+  });
 });
