@@ -212,7 +212,12 @@ describe('head-only session polling', () => {
     expect(result.current.data?.pages).toHaveLength(3);
     requests.length = 0;
     const laterPages = result.current.data?.pages.slice(1);
-    head = { ...head, rows: [{ ...head.rows[0], generation: 99 }] };
+    head = {
+      ...head,
+      rows: head.rows.map((row, index) =>
+        index === 0 ? { ...row, generation: 99 } : row,
+      ),
+    };
 
     await act(() => vi.advanceTimersByTimeAsync(15_000));
 
@@ -271,7 +276,7 @@ describe('head-only session polling', () => {
     },
   );
 
-  test('a moved head cursor refreshes the loaded chain once even when aggregates are equal', async () => {
+  test('a moved head boundary refreshes the loaded chain once even when aggregates are equal', async () => {
     const { result } = renderHook(
       () => useCacheKeepaliveSessions(PRINCIPAL_ID),
       { wrapper: makeWrapper(makeClient()) },
@@ -287,7 +292,15 @@ describe('head-only session polling', () => {
     await act(() => vi.advanceTimersByTimeAsync(1));
     requests.length = 0;
     const server = globalThis.fetch;
-    head = { ...head, next_cursor: 'shifted-1' };
+    head = {
+      ...head,
+      rows: head.rows.map((row, index) =>
+        index === head.rows.length - 1
+          ? { ...row, id: 'shifted-boundary' }
+          : row,
+      ),
+      next_cursor: 'shifted-1',
+    };
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string) => {
@@ -327,6 +340,191 @@ describe('head-only session polling', () => {
     await act(() => vi.advanceTimersByTimeAsync(1));
     expect(requests.at(-1)).toBe('shifted-3');
     expect(result.current.data?.pages).toHaveLength(4);
+  });
+
+  test.each(['1h', '6h', '24h', '7d'] as const)(
+    'rolling %s cursor anchors do not refresh an unchanged page boundary',
+    async (horizon) => {
+      const cursorPages = new Map<string, number>();
+      let horizonStart = 1_700_000_000_000;
+      const cursorForPage = (page: number) => {
+        const row =
+          page === 0
+            ? head.rows.at(-1)
+            : {
+                id: `tail-${page}`,
+                last_message_at_ms: 1_700_086_000_000 - page,
+              };
+        const token = btoa(
+          JSON.stringify({
+            horizon,
+            principal_id: PRINCIPAL_ID,
+            horizon_start_ms: horizonStart,
+            filter: 'all',
+            last_message_at_ms: row?.last_message_at_ms,
+            entry_id: `session:${row?.id}`,
+          }),
+        )
+          .replaceAll('+', '-')
+          .replaceAll('/', '_')
+          .replaceAll('=', '');
+        cursorPages.set(token, page + 1);
+        return token;
+      };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string) => {
+          const cursor = new URL(input, 'http://localhost').searchParams.get(
+            'cursor',
+          );
+          if (cursor === null) {
+            requests.push('head');
+            horizonStart += 5_000;
+            return jsonResponse({ ...head, next_cursor: cursorForPage(0) });
+          }
+          const page = cursorPages.get(cursor);
+          requests.push(`tail-${page}`);
+          return jsonResponse({
+            summary: null,
+            groups: null,
+            rows: [{ ...head.rows[0], id: `tail-${page}` }],
+            next_cursor: page === 1 ? cursorForPage(1) : null,
+          });
+        }),
+      );
+      const { result } = renderHook(
+        () => useCacheKeepaliveSessions(PRINCIPAL_ID, { horizon }),
+        { wrapper: makeWrapper(makeClient()) },
+      );
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      await act(async () => {
+        await result.current.fetchNextPage();
+      });
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      await act(async () => {
+        await result.current.fetchNextPage();
+      });
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      const originalParams = result.current.data?.pageParams;
+      requests.length = 0;
+
+      await act(() => vi.advanceTimersByTimeAsync(15_000));
+
+      expect(requests).toEqual(['head', 'head', 'head']);
+      expect(result.current.data?.pageParams).toEqual(originalParams);
+      expect(result.current.data?.pages[0].next_cursor).not.toBe(
+        originalParams?.[1],
+      );
+      requests.length = 0;
+      head = {
+        ...head,
+        rows: head.rows.map((row, index) =>
+          index === head.rows.length - 1
+            ? { ...row, last_message_at_ms: row.last_message_at_ms + 1 }
+            : row,
+        ),
+      };
+
+      await act(() => vi.advanceTimersByTimeAsync(15_000));
+
+      expect(requests).toEqual(['head', 'tail-1', 'tail-2', 'head', 'head']);
+      expect(result.current.data?.pages).toHaveLength(3);
+      expect(result.current.data?.pageParams).not.toEqual(originalParams);
+    },
+  );
+
+  test('a queued Load more is dropped when its horizon is no longer selected', async () => {
+    const client = makeClient();
+    const { result, rerender } = renderHook(
+      ({ horizon }: { horizon: '24h' | 'all' }) =>
+        useCacheKeepaliveSessions(PRINCIPAL_ID, { horizon }),
+      {
+        initialProps: { horizon: '24h' },
+        wrapper: makeWrapper(client),
+      },
+    );
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const original24h = client.getQueryData(
+      qk.cacheKeepaliveSessions(PRINCIPAL_ID, { horizon: '24h' }),
+    );
+    const { promise, resolve } = Promise.withResolvers<Response>();
+    const server = globalThis.fetch;
+    const requestsByHorizon: string[] = [];
+    let holdPoll = true;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = new URL(input, 'http://localhost');
+        const scope = url.searchParams.get('horizon');
+        requestsByHorizon.push(
+          `${scope}:${url.searchParams.get('cursor') ?? 'head'}`,
+        );
+        if (scope === '24h' && holdPoll) {
+          holdPoll = false;
+          return promise;
+        }
+        return server(input);
+      }),
+    );
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    let append: Promise<unknown> | undefined;
+    act(() => {
+      append = result.current.fetchNextPage();
+    });
+    rerender({ horizon: 'all' });
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    await act(async () => {
+      resolve(jsonResponse(head));
+      await append;
+    });
+    await act(() => vi.advanceTimersByTimeAsync(1));
+
+    expect(requestsByHorizon).toEqual(['24h:head', 'all:head']);
+    expect(
+      client.getQueryData(
+        qk.cacheKeepaliveSessions(PRINCIPAL_ID, { horizon: '24h' }),
+      ),
+    ).toEqual(original24h);
+    expect(result.current.data?.pages).toHaveLength(1);
+  });
+
+  test('unchanged totals and boundary retain stale tail rows until the sheet reopens', async () => {
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useCacheKeepaliveSessions(PRINCIPAL_ID, {}, enabled),
+      { initialProps: { enabled: true }, wrapper: makeWrapper(makeClient()) },
+    );
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    await act(async () => {
+      await result.current.fetchNextPage();
+    });
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    await act(async () => {
+      await result.current.fetchNextPage();
+    });
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    head = {
+      ...head,
+      rows: head.rows.map((row, index) =>
+        index === 0 ? { ...row, state: 'expired', is_active: false } : row,
+      ),
+    };
+    requests.length = 0;
+
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+
+    expect(requests).toEqual(['head']);
+    expect(result.current.data?.pages[0].rows[0].state).toBe('expired');
+    expect(result.current.data?.pages[1].rows[0].state).toBe('renewed');
+    rerender({ enabled: false });
+    requests.length = 0;
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(requests).toEqual([]);
+    rerender({ enabled: true });
+    await act(() => vi.advanceTimersByTimeAsync(10_001));
+
+    expect(requests).toEqual(['head', 'cursor-1', 'cursor-2', 'head', 'head']);
+    expect(result.current.data?.pages[1].rows[0].state).toBe('expired');
+    expect(result.current.data?.pages).toHaveLength(3);
   });
 
   test('single-page polling uses one request per interval and Load more still appends', async () => {

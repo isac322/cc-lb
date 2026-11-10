@@ -16,7 +16,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import {
   type AggregateResponse,
   type AnthropicWorkspace,
@@ -2121,6 +2121,13 @@ export function useCacheKeepaliveSessions(
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
   const queryKey = qk.cacheKeepaliveSessions(principalId, filters);
   const overviewKey = [...queryKey, 'overview'] as const;
+  const queryHash = hashKey(queryKey);
+  const activeQueryHash = useRef(queryHash);
+  activeQueryHash.current = queryHash;
+  const wasEnabled = useRef(false);
+  const reopenQueryHash = useRef<string | null>(null);
+  if (enabled && !wasEnabled.current) reopenQueryHash.current = queryHash;
+  wasEnabled.current = enabled;
   const overview = useQuery({
     queryKey: overviewKey,
     enabled: enabled && Boolean(principalId),
@@ -2143,14 +2150,28 @@ export function useCacheKeepaliveSessions(
             pages: [head, ...(current?.pages.slice(1) ?? [])],
             pageParams: current?.pageParams ?? [undefined],
           }));
+          if (reopenQueryHash.current === queryHash)
+            reopenQueryHash.current = null;
           return head;
         }
 
         const aggregatesChanged =
           hashKey([head.summary, head.groups]) !==
           hashKey([previous.pages[0].summary, previous.pages[0].groups]);
-        const cursorChanged = head.next_cursor !== previous.pageParams[1];
-        if (previous.pages.length > 1 && (aggregatesChanged || cursorChanged)) {
+        const boundary = head.rows.at(-1);
+        const previousHead = previous.pages[0];
+        const previousBoundary = previousHead.rows.at(-1);
+        const boundaryChanged =
+          boundary?.id !== previousBoundary?.id ||
+          boundary?.last_message_at_ms !==
+            previousBoundary?.last_message_at_ms ||
+          (head.next_cursor !== null) !== (previousHead.next_cursor !== null);
+        if (
+          previous.pages.length > 1 &&
+          (aggregatesChanged ||
+            boundaryChanged ||
+            reopenQueryHash.current === queryHash)
+        ) {
           // Re-walk only the loaded tail, using the new head's cursor. Serving
           // page zero from this response avoids a second overview request.
           await queryClient.fetchInfiniteQuery({
@@ -2175,6 +2196,8 @@ export function useCacheKeepaliveSessions(
             pageParams: current?.pageParams ?? [undefined],
           }));
         }
+        if (reopenQueryHash.current === queryHash)
+          reopenQueryHash.current = null;
         return head;
       }),
   });
@@ -2209,9 +2232,10 @@ export function useCacheKeepaliveSessions(
     error: sessions.error ?? overview.error,
     refetch: overview.refetch,
     fetchNextPage: (options?: FetchNextPageOptions) =>
-      serializeCacheKeepalivePages(queryClient, queryKey, () =>
-        sessions.fetchNextPage(options),
-      ),
+      serializeCacheKeepalivePages(queryClient, queryKey, async () => {
+        if (activeQueryHash.current !== queryHash) return;
+        return sessions.fetchNextPage(options);
+      }),
   };
 }
 
