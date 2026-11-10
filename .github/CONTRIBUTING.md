@@ -28,9 +28,11 @@ Run the narrowest relevant checks for your change and report the commands and re
 
 ## Documentation and public claims
 
-Public wording must be English, direct, and evidence-backed. Use [`positioning.yml`](../positioning.yml) as the positioning source and [`PRODUCT.md`](../PRODUCT.md) for product context. The supported upstream kinds are Anthropic API-key and Anthropic OAuth; do not add claims for providers or guarantees that are not present in the source evidence.
+Public wording must be English, direct, and evidence-backed. Use [`positioning.yml`](../positioning.yml) as the positioning source and [`PRODUCT.md`](../PRODUCT.md) for product context. The supported upstream kinds are Anthropic, OpenAI, and Gemini API-key and OAuth, with operation and credential limits in [`runtime management`](../docs/runtime-management.md). Bedrock and Vertex remain unsupported; do not add claims or guarantees without source evidence.
 
 When a change alters behavior, configuration, or a supported claim, update the code, the repository docs, the documentation site, and the registry and repository listings together so they describe the same contract.
+
+Run `bun scripts/public-metadata.mjs --check` and `bun scripts/check-docs-provider-parity.mjs` from the repository root for public-surface changes, then build the documentation site as described above.
 
 ## Pull requests
 

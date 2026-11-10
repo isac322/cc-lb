@@ -1,25 +1,41 @@
 ---
 title: Upstreams
-description: Configure the Anthropic API-key and OAuth upstream kinds supported by cc-lb.
+description: Understand the six Anthropic, OpenAI, and Gemini upstream kinds, their credential paths, and OAuth warm-up.
 slug: docs/concepts/upstreams
 ---
 
-An upstream is a named, enabled destination in the database-backed runtime view. The current public contract has two upstream kinds:
+An upstream is a named destination in the database-backed runtime view. cc-lb supports six upstream kinds:
 
 | Kind | Credential path | Default warm-up |
 | --- | --- | --- |
-| `anthropic_api_key` | Operator-supplied API key | Disabled |
-| `anthropic_oauth` | OAuth flow managed by the admin API | Enabled after credentials exist |
+| `anthropic_api_key` | Operator-supplied Anthropic API key | Disabled; API-key warm-up is unsupported |
+| `anthropic_oauth` | Admin-managed Anthropic OAuth connect flow | Enabled; requires credentials before sending |
+| `openai_api_key` | Operator-supplied OpenAI API key | Disabled; API-key warm-up is unsupported |
+| `openai_oauth` | Admin-managed OAuth sign-in or imported OpenAI OAuth token bundle | Enabled; requires credentials before sending |
+| `gemini_api_key` | Operator-supplied Gemini API key | Disabled; API-key warm-up is unsupported |
+| `gemini_oauth` | Antigravity subscription sign-in or imported Gemini OAuth token bundle; existing Gemini CLI enterprise grants retain their profile | Enabled; requires credentials before sending |
 
-The pool can contain either kind. The request path selects only enabled candidates that satisfy principal and routing constraints.
+The pool can contain all six kinds. The request path selects only enabled candidates compatible with the request's provider and operation that satisfy principal and routing constraints. OAuth warm-up starts eligible subscription quota windows; it is separate from prompt-cache keepalive. Operators can opt out per upstream. See the [warm-up reference](/docs/reference/source/upstream-warmup/) for provider-specific windows and limits.
 
-## Fallback between upstreams
+## Native route families
 
-OAuth accounts that need a reconnect, and upstreams whose credentials failed to load, are left out of routing. If the chosen upstream cannot take a request because its credentials cannot be prepared or signed, or the provider answers `401` or `429`, cc-lb sends the same request to the next upstream the routing filters pick: another OAuth account first, then an API key. A request tries at most three upstreams, and the last try goes to an API key when one is available. The client receives the last upstream's answer only when every allowed attempt fails.
+| Provider | Shared routes |
+| --- | --- |
+| Anthropic | `POST /v1/messages`, `POST /v1/messages/count_tokens` |
+| OpenAI | `POST /v1/responses`, `GET /v1/responses` WebSocket |
+| Gemini | `POST /v1beta/models/{model}:generateContent`, `POST /v1beta/models/{model}:streamGenerateContent`, `POST /v1beta/models/{model}:countTokens` |
+
+Provider-prefixed routes use `/anthropic/v1/...`, `/openai/v1/...`, or `/gemini/v1beta/...` (plus Gemini model catalogs under `/gemini/v1/...`). The [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) lists supported operations and credential restrictions.
+
+cc-lb does not translate between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs are outside the supported proxy scope. Supported model catalog routes are limited to those in the endpoint reference.
+
+## Anthropic HTTP fallback between upstreams
+
+For Anthropic HTTP requests, OAuth accounts that need a reconnect, and upstreams whose credentials failed to load, are left out of routing. If the chosen upstream cannot take a request because its credentials cannot be prepared or signed, or the provider answers `401` or `429`, cc-lb sends the same request to the next compatible upstream the routing filters pick: another OAuth account first, then an API key. A request tries at most three upstreams, and the last try goes to an API key when one is available. The client receives the last upstream's answer only when every allowed attempt fails.
 
 cc-lb does not retry `400`, `403`, `5xx`, `529`, or connection failures on another upstream, because they either fail the same way everywhere or may already have reached the provider. Requests pinned to one account by web-search continuity stay on that account.
 
-## API-key upstreams
+## Anthropic API-key upstreams
 
 An API-key upstream stores a literal Anthropic API key supplied at create time:
 
@@ -68,11 +84,39 @@ Credits used are always an estimate at list price, because Anthropic reports tok
 
 API-key preflight and usage state do not affect `/readyz`.
 
+## OpenAI and Gemini API-key upstreams
+
+OpenAI and Gemini API-key upstreams use the same authenticated `POST /admin/v1/upstreams` create request as Anthropic. The request must include `name`, the provider-specific `kind`, and the literal provider key in `api_key_value`; `base_url` is optional and defaults as shown:
+
+| Provider | `kind` | Default `base_url` | Credential field | `project_id` |
+| --- | --- | --- | --- | --- |
+| OpenAI | `openai_api_key` | `https://api.openai.com/` | `api_key_value` (OpenAI API key) | Optional; if supplied, it must be non-empty |
+| Gemini | `gemini_api_key` | `https://generativelanguage.googleapis.com/` | `api_key_value` (Gemini API key) | Optional; if supplied, it must be non-empty |
+
+cc-lb applies the stored credential using the provider-native signer: OpenAI requests use `Authorization: Bearer <key>`, and Gemini native requests use `x-goog-api-key: <key>`. Clients still authenticate to cc-lb with the issued proxy key.
+
+For either kind, send a body such as:
+
+```json
+{
+  "name": "provider-api-key",
+  "kind": "openai_api_key",
+  "base_url": "https://api.openai.com",
+  "api_key_value": "replace-with-the-provider-api-key"
+}
+```
+
+Change `kind` and `base_url` to `gemini_api_key` and `https://generativelanguage.googleapis.com` for Gemini. `project_id` is accepted for either API-key kind but is not required; Anthropic-only `workspace_id` is not used. The admin API preflights the key against the configured provider endpoint unless `skip_preflight` is requested, encrypts the stored credential, and returns only a masked key hint. The [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) lists the provider-native routes and eligible API-key credentials.
+
+Choose a model supported by the provider for the principal's `allowed_models`; the principal and proxy key are provider-neutral and do not require an Anthropic key. The request's model must match that allowed model and the provider-native route.
+
 ## OAuth upstreams
 
-Create an OAuth upstream, start the flow, open the returned authorization URL, then complete the flow with the returned state token and authorization code. The stored credential mode records the lifetime actually granted by the provider.
+For an Anthropic, OpenAI, or Gemini OAuth upstream, use the authenticated [interactive provider OAuth flow](/docs/reference/admin-api/#oauth-flow): start the provider-specific draft, open the returned authorization URL (or follow the OpenAI device-code instructions), then complete it with the returned state token and code.
 
-OAuth warm-up is opt-out after credentials exist. Operators can disable it per upstream with an ETag-protected update.
+OpenAI and Gemini also accept imported OAuth token bundles through the authenticated admin API; see the [CLI/API OAuth bundle reference](/docs/reference/source/runtime-management/#cliapi-oauth-bundle-import) for provider-specific fields. Gemini subscription sign-in requires operator-configured [Antigravity client credentials](/docs/reference/configuration/#subscription-oauth-providers), does not use Vertex or ADC, and carries the [Google Antigravity Additional Terms warning](/docs/reference/admin-api/#oauth-flow).
+
+OAuth warm-up is opt-out after credentials exist for all three OAuth kinds. Operators can disable it per upstream with an ETag-protected update.
 
 ## Revision safety
 

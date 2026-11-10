@@ -4,7 +4,7 @@ description: Build or run cc-lb, configure authenticated runtime state, and reac
 slug: docs/getting-started
 ---
 
-cc-lb puts a self-hosted Anthropic-compatible endpoint in front of pooled API-key and OAuth upstreams. Choose the binary path for a source build or the container path for the published image; both use the same admin and proxy contracts.
+cc-lb puts an operator-managed endpoint in front of pooled Anthropic, OpenAI, and Gemini API-key and OAuth upstreams. Choose the binary path for a source build or the container path for the published image; both use the same admin and proxy contracts.
 
 ## Choose a runtime
 
@@ -13,7 +13,11 @@ cc-lb puts a self-hosted Anthropic-compatible endpoint in front of pooled API-ke
 | [Build the binary](#build-the-binary) | You own the host toolchain and want a local release build. | `target/release/cc-lb` |
 | [Run the published container](#run-the-published-container) | You want the packaged server with no Rust checkout on the host. | `ghcr.io/isac322/cc-lb:1.0.1` |
 
-Both paths need an Anthropic API key or Anthropic OAuth account for an upstream, an admin token, a master key for encrypted credentials, and durable storage.
+Both paths need an upstream, an admin token, a master key for encrypted credentials, and durable storage. The upstream may be Anthropic (`anthropic_api_key` or `anthropic_oauth`), OpenAI (`openai_api_key` or `openai_oauth`), or Gemini (`gemini_api_key` or `gemini_oauth`). See [upstream concepts](/docs/concepts/upstreams/) for credential paths and warm-up limits.
+
+Shared native routes cover Anthropic `POST /v1/messages` and `POST /v1/messages/count_tokens`, OpenAI `POST /v1/responses` and `GET /v1/responses` WebSocket, and Gemini `POST /v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`. The [runtime endpoint reference](/docs/reference/source/runtime-management/#proxy-capability-boundary) lists supported provider-prefixed routes and credential restrictions.
+
+cc-lb does not translate between providers and is not a universal multi-provider gateway. Bedrock, Vertex, SigV4 and ADC credentials, and account-bound provider-management APIs are outside the supported proxy scope.
 
 ## Build the binary
 
@@ -129,4 +133,4 @@ The container exposes the proxy, admin, and metrics listeners. Keep the admin an
 
 ## Continue with runtime setup
 
-Use the [install and configure guide](/docs/getting-started/install/) to create an upstream, principal, and proxy key. Then send a standard Messages API request through the proxy.
+The [install and configure guide](/docs/getting-started/install/) uses an Anthropic API-key example to create an upstream, principal, and proxy key, then send a Messages API request. For OpenAI or Gemini, use the provider-specific credential and route contracts in the [runtime management reference](https://github.com/isac322/cc-lb/blob/master/docs/runtime-management.md) and the [README supported scope](https://github.com/isac322/cc-lb#supported-scope).

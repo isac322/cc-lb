@@ -651,7 +651,7 @@ jobs:
       - nextest-cov-shard
       - nextest-cov
       - e2e
-    if: always()
+    if: ${{ always() }}
     runs-on: ubuntu-26.04
     permissions: {}
     timeout-minutes: 5

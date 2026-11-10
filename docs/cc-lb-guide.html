@@ -248,7 +248,7 @@
     <span class="tag">Anthropic-compatible reverse proxy</span>
   </div>
   <span class="grow"></span>
-  <input type="search" id="search" placeholder="가이드 안에서 검색 (예: bedrock)" />
+  <input type="search" id="search" placeholder="가이드 안에서 검색 (예: OAuth)" />
   <button class="btn-icon" id="theme-toggle" title="테마 전환">☀️</button>
 </div>
 
@@ -263,9 +263,8 @@
       <li class="grp">Use Case</li>
       <li><a href="#uc-proxy">① 단순 프록시 + 로깅</a></li>
       <li><a href="#uc-multi-key">② 여러 Anthropic 키 분산</a></li>
-      <li><a href="#uc-mix-provider">③ Anthropic + Bedrock + Vertex 혼합</a></li>
-      <li><a href="#uc-key-map">④ 내부 키 → 실제 키 매핑</a></li>
-      <li><a href="#uc-oauth">⑤ Claude Pro OAuth 토큰</a></li>
+      <li><a href="#uc-key-map">③ 내부 키 → 실제 키 매핑</a></li>
+      <li><a href="#uc-oauth">④ Claude Pro OAuth 토큰</a></li>
 
       <li class="grp">실전 도구</li>
       <li><a href="#config-builder">Config 빌더 (인터랙티브)</a></li>
@@ -533,19 +532,14 @@ kill -TERM $(pgrep -f &#39;[c]c-lb serve&#39;)</code></pre><button class="copy">
         <h3>② 여러 Anthropic 키 분산</h3>
         <p>한 키가 한계라서 여러 키로 트래픽 나누고 싶을 때. <b>현실: 빌트인 router는 첫 upstream만 씀.</b> 실제 분산 방법 4가지.</p>
       </a>
-      <a href="#uc-mix-provider" class="card">
-        <span class="when">멀티 클라우드</span>
-        <h3>③ Anthropic + Bedrock + Vertex 혼합</h3>
-        <p>모델별로 다른 provider 쓰고 싶을 때. SigV4 / GCP ADC 자동 처리.</p>
-      </a>
       <a href="#uc-key-map" class="card">
         <span class="when">키 보호</span>
-        <h3>④ 내부 키 → 실제 키 매핑</h3>
+        <h3>③ 내부 키 → 실제 키 매핑</h3>
         <p>팀에 발급한 내부 키 <code>ck-internal-*</code>를 실제 Anthropic 키로 매핑. 실제 키 절대 노출 X.</p>
       </a>
       <a href="#uc-oauth" class="card">
         <span class="when">구독자</span>
-        <h3>⑤ Claude Pro OAuth 토큰</h3>
+        <h3>④ Claude Pro OAuth 토큰</h3>
         <p>Claude Pro 구독 토큰 (<code>sk-ant-oat01-*</code>)을 cc-lb 뒤에서 운영 — 연결하면 항상 365일 long-lived 토큰을 요청하고, 안 되면 자동 refresh로 fallback.</p>
       </a>
     </div>
@@ -617,52 +611,8 @@ curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyB&quot; ...
 # 3. upstream별 요청 수 확인 (lifecycle event logger가 요청마다 한 번 집계, 도달하지 못한 단계는 &quot;none&quot;)
 curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_completed_total</code></pre><button class="copy">복사</button></div>
 
-    <h2 id="uc-mix-provider">Use Case ③ · Anthropic + Bedrock + Vertex 혼합</h2>
 
-    <h4>언제</h4>
-    <ul>
-      <li>일부 모델은 AWS Bedrock에 enroll, 일부는 GCP Vertex, 일부는 Anthropic Direct.</li>
-      <li>클라이언트는 Anthropic API 하나만 알면 되고, cc-lb가 뒷단을 알아서 처리.</li>
-    </ul>
-
-    <h4>현실</h4>
-    <ul>
-      <li>4가지 signer가 자동 처리됩니다: <code>api_key</code>, <code>anthropic_oauth</code>, <code>aws_sigv4</code>, <code>gcp_oauth</code>. <span class="pill ok">검증됨</span></li>
-      <li>Bedrock 응답의 AWS event-stream은 cc-lb가 Anthropic SSE 형식으로 자동 변환합니다.</li>
-      <li>Bedrock/Vertex의 에러 JSON도 Anthropic 에러 형식으로 자동 normalize됩니다 (성공 응답은 그대로 passthrough).</li>
-      <li>모델별 허용/거절은 <code>principals.<name>.allowed_models</code>로 처리하고, upstream 후보 조정은 filter plugin 또는 terminal strategy로 처리합니다.</li>
-    </ul>
-
-    <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code># Create provider upstreams with POST /admin/v1/upstreams.
-# Bedrock/Vertex credentials still come from the standard AWS/GCP environments.
-# Upload model_router.wasm with POST /admin/v1/plugins/wasm, then attach it with
-# POST /admin/v1/principals/{principal_id}/plugin-chain.</code></pre><button class="copy">복사</button></div>
-
-    <h4>실행 + 확인</h4>
-    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># AWS / GCP credential은 표준 위치에 있어야 함
-export AWS_PROFILE=default
-export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json
-
-./target/debug/cc-lb config validate --config mix.toml
-./target/debug/cc-lb serve --config mix.toml
-
-# 본인이 enroll된 Bedrock 모델 ID로 호출
-curl -s http://127.0.0.1:8080/v1/messages \
-  -H &quot;x-api-key: $CC_LB_PROXY_KEY&quot; \
-  -H &quot;anthropic-version: 2023-06-01&quot; \
-  -d &#39;{
-    &quot;model&quot;: &quot;anthropic.claude-sonnet-4-5-20250929-v1:0&quot;,
-    &quot;max_tokens&quot;: 16,
-    &quot;messages&quot;: [{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;hi from bedrock&quot;}]
-  }&#39;</code></pre><button class="copy">복사</button></div>
-
-    <div class="callout warn">
-      <span class="label">주의</span>
-      Bedrock/Vertex 모델 ID는 provider 형식을 그대로 본문 <code>model</code>에 넣어야 합니다 — cc-lb는 변환하지 않습니다 (이건 의도, 모델명 자동 변환은 scope 밖).
-    </div>
-
-    <h2 id="uc-key-map">Use Case ④ · 내부 키 → 실제 키 매핑</h2>
+    <h2 id="uc-key-map">Use Case ③ · 내부 키 → 실제 키 매핑</h2>
 
     <h4>언제</h4>
     <ul>
@@ -711,7 +661,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
 curl -s -i http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: ck-internal-unknown&quot; ...
 # → HTTP/1.1 401 authentication_error</code></pre><button class="copy">복사</button></div>
 
-    <h2 id="uc-oauth">Use Case ⑤ · Claude Pro OAuth 토큰</h2>
+    <h2 id="uc-oauth">Use Case ④ · Claude Pro OAuth 토큰</h2>
 
     <h4>언제</h4>
     <ul>
@@ -832,7 +782,6 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>cc_lb_drain_in_progress</code></td><td>SIGTERM 후 drain 진행 중</td></tr>
       <tr><td><code>cc_lb_tls_reload_total{outcome}</code></td><td>TLS 인증서 reload 성공/실패</td></tr>
       <tr><td><code>cc_lb_plugin_failure_total{plugin,kind}</code></td><td>플러그인 패닉/OOM 등</td></tr>
-      <tr><td><code>cc_lb_aws_clock_skew_total</code></td><td>Bedrock SigV4 시계 skew 회수</td></tr>
     </table>
     <p>응답 헤더 메트릭의 <code>principal</code>, <code>upstream</code>, <code>model</code>은 현재 <code>unknown</code>으로 고정되므로 upstream별 트래픽을 구분하지 못합니다. drain 거부 응답은 인증 전에 trace layer를 우회하므로 started/header 및 terminal lifecycle metric 어디에도 집계되지 않습니다.</p>
 
@@ -941,8 +890,6 @@ WantedBy=multi-user.target</code></pre><button class="copy">복사</button></div
       <tr><td><code>CC_LB_MASTER_KEY</code></td><td>32바이트(64hex) AEAD 마스터키. OAuth/quota 저장에 필수.</td></tr>
       <tr><td><code>CC_LB_ADMIN_TOKEN</code></td><td><code>admin.auth.providers</code>의 static-token provider가 참조하는 Admin REST Bearer 토큰</td></tr>
       <tr><td><code>CC_LB_&lt;SEC&gt;__&lt;FIELD&gt;</code></td><td>모든 TOML 필드 환경변수 오버라이드 (nested는 <code>__</code> 이중 언더스코어)</td></tr>
-      <tr><td><code>AWS_PROFILE</code> / 표준 AWS 환경변수</td><td>Bedrock SigV4 credential chain</td></tr>
-      <tr><td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td><td>Vertex ADC</td></tr>
     </table>
 
     <h4>기본 포트</h4>
@@ -970,12 +917,12 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     <h2 id="caveats">알려진 한계</h2>
     <ul>
       <li><b>terminal strategy는 단순 선택만 담당</b> — 가중치, 연결 수, 외부 상태 기반 정책은 filter plugin으로 후보를 줄인 뒤 적용해야 합니다. <a href="#uc-multi-key">Use Case ②</a> 참고.</li>
-      <li><b>모델명 자동 변환 없음</b> — Bedrock/Vertex 모델 ID는 본문 <code>model</code>에 provider 형식 그대로 보내야 합니다.</li>
-      <li><b>cross-LLM 변환 없음</b> — Anthropic Messages API 형식만 지원. OpenAI/Gemini 형식 변환은 scope 밖.</li>
+      <li><b>지원하지 않는 provider 경로</b> — Bedrock, Vertex, SigV4, ADC 자격증명 경로는 지원하지 않습니다.</li>
+      <li><b>지원하는 native route</b> — Anthropic Messages는 POST <code>/v1/messages</code> 및 <code>/v1/messages/count_tokens</code>, OpenAI Responses HTTP는 POST <code>/v1/responses</code> 및 GET <code>/v1/responses</code> WebSocket, Gemini는 POST <code>/v1beta/models/{model}:generateContent</code>, <code>:streamGenerateContent</code>, <code>:countTokens</code>를 지원합니다.</li>
+      <li><b>cross-provider 변환 없음</b> — Anthropic, OpenAI, Gemini 요청·응답 형식 사이의 변환은 지원하지 않습니다.</li>
       <li><b>스트리밍 ↔ 비스트리밍 변환 없음</b> — 요청 그대로 forwarding.</li>
       <li><b>응답 캐싱 없음</b> — 매 요청마다 upstream 호출.</li>
       <li><b>분산 모드 없음</b> — 단일 인스턴스 전제. 여러 인스턴스 띄우려면 Postgres가 필요합니다.</li>
-      <li><b>HTTP/3 / gRPC / WebSocket 없음</b> — Anthropic API가 HTTP/1.1+HTTP/2 SSE 기반이라 그 외 프로토콜은 미지원.</li>
     </ul>
 
   </main>

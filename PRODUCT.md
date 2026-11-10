@@ -35,7 +35,7 @@ The supported mechanisms and their evidence are recorded in `positioning.yml`. C
 
 ## Capabilities and constraints
 
-- Supported upstream kinds are `anthropic_api_key` and `anthropic_oauth`. cc-lb is not a universal multi-provider gateway.
+- Supported upstream kinds are Anthropic, OpenAI, and Gemini API-key and OAuth. Native operation and credential limits are documented in `docs/runtime-management.md`; Bedrock and Vertex remain unsupported. cc-lb is not a universal multi-provider gateway.
 - Listener, storage, master-key, and administrator-authentication configuration is fixed at process startup. Database-backed upstreams, principals, proxy keys, and plugin bindings are managed at runtime without rebuilding the binary.
 - Proxy authentication precedes body buffering, parsing, routing, and upstream dispatch. Administrative configuration and runtime-management APIs require administrator authentication.
 - Plugin authors use the published Wasmtime PDK and wire API. The supported plugin slots are `filter` and `shape`, including buffered-response and SSE-event transformation.
