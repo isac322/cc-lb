@@ -537,36 +537,16 @@ jobs:
     runs-on: ubuntu-26.04
     env:
       SQLX_OFFLINE: "true"
-      LLVM_PROFILE_FILE_NAME: shard-0-%8m.profraw
+      CC_LB_ADMIN_SKIP_SPA: "1"
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov,cargo-nextest
-      - name: Export cargo-installed tools
-        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v8
-        with:
-          name: coverage-nextest-archive
       - name: Run compile-fail contract tests
-        run: |
-          mkdir -p target/llvm-cov-target
-          cargo llvm-cov nextest \
-            --archive-file nextest-archive.tar.zst \
-            -E 'test(authn_rail_typestate_contracts)' \
-            --test-threads=2 \
-            --no-report
-      - uses: actions/upload-artifact@v7
-        with:
-          name: coverage-profraw-0
-          path: target/llvm-cov-target/*.profraw
-          if-no-files-found: error
-          retention-days: 1
+        run: cargo test -p cc-lb-engine --test authn_rail_trybuild
 
       - name: Show sccache stats
         if: always()
@@ -692,7 +672,6 @@ jobs:
     needs:
       - changes
       - nextest-cov-build
-      - nextest-cov-contract
       - nextest-cov-runtime
       - nextest-cov-wasm
       - nextest-cov-shard
@@ -700,7 +679,6 @@ jobs:
       ${{
         !cancelled() &&
         needs.nextest-cov-build.result == 'success' &&
-        needs.nextest-cov-contract.result == 'success' &&
         needs.nextest-cov-runtime.result == 'success' &&
         needs.nextest-cov-wasm.result == 'success' &&
         needs.nextest-cov-shard.result == 'success' &&
