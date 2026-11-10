@@ -635,11 +635,13 @@ fn lifecycle_request_model(capability: Option<ProviderCapability>, model: &str) 
 }
 
 fn canonical_model_for_capability(capability: Option<ProviderCapability>, model: &str) -> &str {
-    if capability.is_some_and(|capability| capability.provider() == cc_lb_domain::Provider::Gemini)
-    {
+    let provider = capability
+        .map(ProviderCapability::provider)
+        .unwrap_or(Provider::Anthropic);
+    if provider == cc_lb_domain::Provider::Gemini {
         canonical_gemini_model_id(model)
     } else {
-        canonical_model_id(model)
+        canonical_model_id(provider, model)
     }
 }
 
