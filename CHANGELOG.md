@@ -38,6 +38,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Active frame-only Shape plugins now remain in their provider's pipeline without requiring a request-shape hook; absent and noop frame hooks remain inactive. ([#1191](https://github.com/isac322/cc-lb/issues/1191))
+- OpenAI organization usage and cost reports now follow bounded opaque cursors across all pages, and successful OpenAI API-key creates, replacements, and first successful Re-checks enqueue an immediate usage poll. Incomplete reports remain stale without advancing their success timestamp. ([#1214](https://github.com/isac322/cc-lb/issues/1214))
 - V2 and V3 Wasm filter requests now remove case-insensitive `key` query parameters before encoding, matching V1 while preserving other query parameters and credential-header redaction. ([#1193](https://github.com/isac322/cc-lb/issues/1193))
 - Corrected the HTML guide and documentation site to describe all six provider upstream kinds, native route boundaries, provider-specific setup, and OpenAI Responses keep-alive limits without claiming Bedrock or Vertex support. Added a focused documentation parity check. ([#1031](https://github.com/isac322/cc-lb/issues/1031))
 - OpenAI and Gemini native model IDs no longer emit Anthropic unknown-alias warnings; Claude alias resolution and the separate cache-threshold diagnostic remain unchanged. ([#1196](https://github.com/isac322/cc-lb/issues/1196))

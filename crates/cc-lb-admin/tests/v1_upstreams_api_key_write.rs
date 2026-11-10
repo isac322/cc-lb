@@ -1663,9 +1663,8 @@ async fn ctr_02_error_envelopes() {
 }
 
 // ------------------------------------------------------ PROVIDER-NATIVE KEYS
-
 #[tokio::test]
-async fn openai_api_key_create_requires_preflight() {
+async fn openai_api_key_create_runs_provider_native_preflight() {
     let harness = harness().await;
     let response = harness
         .create_api_key_upstream(
@@ -1674,13 +1673,87 @@ async fn openai_api_key_create_requires_preflight() {
             json!({"kind": "openai_api_key"}),
         )
         .await;
-    // The fixture serves model discovery, but not the required chat
-    // completion route. A successful model list alone must not create a row.
-    assert_remediation(&response, StatusCode::BAD_REQUEST, "key_invalid");
-    assert_eq!(harness.upstream_count().await, 0);
+    assert_eq!(response.status, StatusCode::CREATED, "{}", response.body);
+    let details = harness
+        .details(response.id())
+        .await
+        .expect("OpenAI details");
+    assert!(details.verified);
+    assert_eq!(details.provider, Some(cc_lb_storage_api::Provider::Openai));
+    assert_eq!(
+        details.usage_report_state,
+        Some(ApiKeyOrgCapability::NotApplicable)
+    );
 }
 
 #[tokio::test]
+async fn openai_successful_create_replace_and_recheck_enqueue_usage_poll() {
+    let harness = harness().await;
+    let created = harness
+        .create_api_key_upstream(
+            "openai-immediate",
+            OPENAI,
+            json!({"kind": "openai_api_key"}),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = created.id();
+    let details = harness.details(id).await.expect("OpenAI details");
+    assert!(details.verified);
+    assert_eq!(details.provider, Some(cc_lb_storage_api::Provider::Openai));
+    assert_eq!(
+        details.usage_report_state,
+        Some(ApiKeyOrgCapability::NotApplicable)
+    );
+    let first_jobs = harness.usage_poll_job_keys().await;
+    assert_eq!(first_jobs.len(), 1, "{first_jobs:?}");
+    assert!(first_jobs[0].starts_with(&format!("api_key_usage_poll:{id}:")));
+
+    let replacement = harness
+        .put(
+            id,
+            &etag(&harness, id).await,
+            json!({"api_key_value": OPENAI}),
+        )
+        .await;
+    assert_eq!(replacement.status, StatusCode::OK, "{}", replacement.body);
+    let replaced_jobs = harness.usage_poll_job_keys().await;
+    assert_eq!(replaced_jobs.len(), 2, "{replaced_jobs:?}");
+
+    let skipped = harness
+        .create_api_key_upstream(
+            "openai-recheck",
+            OPENAI,
+            json!({"kind": "openai_api_key", "skip_preflight": true}),
+        )
+        .await;
+    assert_eq!(skipped.status, StatusCode::CREATED, "{}", skipped.body);
+    let skipped_id = skipped.id();
+    assert_eq!(harness.usage_poll_job_keys().await.len(), 2);
+
+    let recheck = harness
+        .request(
+            "POST",
+            &format!("{UPSTREAMS}/{skipped_id}/preflight"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(recheck.status, StatusCode::OK, "{}", recheck.body);
+    assert_eq!(harness.usage_poll_job_keys().await.len(), 3);
+    let repeated = harness
+        .request(
+            "POST",
+            &format!("{UPSTREAMS}/{skipped_id}/preflight"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(repeated.status, StatusCode::OK, "{}", repeated.body);
+    assert_eq!(harness.usage_poll_job_keys().await.len(), 3);
+}
+#[tokio::test]
+
 async fn gemini_api_key_update_requires_preflight() {
     let harness = harness().await;
     let id = create_ok(
@@ -1743,8 +1816,8 @@ async fn host_change_rechecks_stored_provider_key() {
             json!({"base_url": custom_host(&harness)}),
         )
         .await;
-    // Host-only failures are persisted as the new-host result and do not
-    // reject the host update.
+    // The provider-native fake accepts the stored key on the new host, so the
+    // host update persists a successful re-check.
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     let record = harness.record(id).await;
     assert_eq!(
@@ -1752,8 +1825,9 @@ async fn host_change_rechecks_stored_provider_key() {
         Some(Some("localhost"))
     );
     let details = harness.details(id).await.expect("details row");
-    assert!(!details.verified);
-    assert_eq!(details.remediation, vec![RemediationCode::KeyInvalid]);
+    assert!(details.verified);
+    assert_eq!(details.provider, Some(cc_lb_storage_api::Provider::Openai));
+    assert!(details.remediation.is_empty());
 }
 
 #[tokio::test]

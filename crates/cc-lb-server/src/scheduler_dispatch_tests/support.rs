@@ -362,6 +362,8 @@ impl Fixture {
             clock: Arc::new(SystemClock),
             anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
                 .expect("production Anthropic origin parses"),
+            openai_org_api: cc_lb_control::openai_org_api::OpenAiOrgApi::production()
+                .expect("production OpenAI origin parses"),
         })
     }
 

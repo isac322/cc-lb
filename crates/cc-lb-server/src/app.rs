@@ -1734,6 +1734,8 @@ async fn build_app_with_storage_inner(
             event_bus: event_bus.clone(),
             clock: clock.clone(),
             anthropic_org_api: anthropic_org_api.clone(),
+            openai_org_api: cc_lb_control::openai_org_api::OpenAiOrgApi::production()
+                .expect("OpenAI production organization origin parses"),
         },
     );
     let scheduler_tasks = opened_scheduler

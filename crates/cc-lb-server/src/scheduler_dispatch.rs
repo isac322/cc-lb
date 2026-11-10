@@ -63,6 +63,7 @@ pub(crate) struct SchedulerDispatchDeps {
     pub event_bus: Arc<dyn RequestEventBus>,
     pub clock: ClockHandle,
     pub anthropic_org_api: AnthropicOrgApi,
+    pub openai_org_api: OpenAiOrgApi,
 }
 
 #[derive(Clone)]
@@ -129,8 +130,7 @@ impl SchedulerDispatch {
             event_bus: deps.event_bus,
             clock: deps.clock,
             anthropic_org_api: deps.anthropic_org_api,
-            openai_org_api: OpenAiOrgApi::production()
-                .expect("OpenAI production organization origin parses"),
+            openai_org_api: deps.openai_org_api,
         }
     }
 

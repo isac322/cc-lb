@@ -33,7 +33,7 @@ use cc_lb_storage_api::{
     UpstreamStore,
 };
 use futures_util::StreamExt as _;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -63,6 +63,8 @@ const CLAIM_LEASE_MARGIN_SECS: u64 = 16;
 // A claim that returns at once leaves room for the whole exchange budget.
 const _: () = assert!(CLAIM_EXCHANGE_BUDGET_SECS + CLAIM_LEASE_MARGIN_SECS <= CLAIM_LEASE_SECS);
 const HOUR_SECS: u64 = 3_600;
+/// Maximum pages followed for each OpenAI Usage or Costs request.
+const OPENAI_MAX_PAGES: u32 = 8;
 /// Rolling 7-day window of `1h` buckets, including the current hour.
 const HOURLY_BUCKETS: u32 = 168;
 /// Month-to-date `1d` buckets.
@@ -686,112 +688,186 @@ impl SchedulerDispatch {
             ),
         ];
         let mut incomplete_usage = false;
+        let mut incomplete_costs = false;
+        let mut fetched_any = false;
         let mut projects = BTreeSet::new();
-        for (bucket_width, start_time, limit) in windows {
-            if !self.claim_admits_call_for(
-                upstream,
-                window,
-                self.openai_org_api.limits().per_request,
-            ) {
-                return self
-                    .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::LeaseSpent)
-                    .await;
-            }
-            let query = OpenAiUsageQuery {
-                start_time,
-                end_time: Some(times.now),
-                bucket_width,
-                limit,
-                page: None,
-            };
-            let page = self.openai_org_api.text_usage(&credential, &query);
-            match tokio::time::timeout_at(window.exchange_deadline, page)
-                .await
-                .unwrap_or(Err(OpenAiOrgApiError::Timeout))
-            {
-                Ok(page) => {
-                    incomplete_usage |= page.next_page.is_some();
-                    append_openai_usage_buckets(
-                        details,
-                        upstream,
-                        bucket_width,
-                        page,
-                        &mut projects,
-                        &mut outcome.buckets,
-                    );
-                }
-                Err(error) => {
-                    if matches!(error, OpenAiOrgApiError::Denied { .. }) {
-                        let _ = self
-                            .storage
-                            .mark_openai_org_reporting_credential_denied(
-                                credential_revision,
-                                unix_secs(self.clock.now()),
+        'usage_windows: for (bucket_width, start_time, limit) in windows {
+            let mut cursor = None;
+            let mut seen_cursors = BTreeSet::new();
+            for page_number in 0..OPENAI_MAX_PAGES {
+                if !self.claim_admits_call_for(
+                    upstream,
+                    window,
+                    self.openai_org_api.limits().per_request,
+                ) {
+                    if fetched_any {
+                        incomplete_usage = true;
+                    } else {
+                        return self
+                            .write_api_key_poll_outcome(
+                                upstream,
+                                outcome,
+                                times,
+                                PollLabel::LeaseSpent,
                             )
                             .await;
                     }
-                    apply_openai_error(error, times, unix_secs(self.clock.now()), &mut outcome);
-                    return self
-                        .write_api_key_poll_outcome(
+                    break 'usage_windows;
+                }
+                let query = OpenAiUsageQuery {
+                    start_time,
+                    end_time: Some(times.now),
+                    bucket_width,
+                    limit,
+                    page: cursor.clone(),
+                };
+                let page = self.openai_org_api.text_usage(&credential, &query);
+                match tokio::time::timeout_at(window.exchange_deadline, page)
+                    .await
+                    .unwrap_or(Err(OpenAiOrgApiError::Timeout))
+                {
+                    Ok(page) => {
+                        fetched_any = true;
+                        append_openai_usage_buckets(
+                            details,
                             upstream,
-                            outcome,
-                            times,
-                            openai_error_label(error),
-                        )
-                        .await;
+                            bucket_width,
+                            page.clone(),
+                            &mut projects,
+                            &mut outcome.buckets,
+                        );
+                        match page.next_page {
+                            None => break,
+                            Some(next_page)
+                                if next_page.is_empty()
+                                    || !seen_cursors.insert(next_page.clone()) =>
+                            {
+                                incomplete_usage = true;
+                                break 'usage_windows;
+                            }
+                            Some(next_page) => {
+                                cursor = Some(next_page);
+                                if page_number + 1 == OPENAI_MAX_PAGES {
+                                    incomplete_usage = true;
+                                    break 'usage_windows;
+                                }
+                            }
+                        }
+                    }
+                    Err(OpenAiOrgApiError::Timeout) if fetched_any => {
+                        incomplete_usage = true;
+                        break 'usage_windows;
+                    }
+                    Err(error) => {
+                        if matches!(error, OpenAiOrgApiError::Denied { .. }) {
+                            let _ = self
+                                .storage
+                                .mark_openai_org_reporting_credential_denied(
+                                    credential_revision,
+                                    unix_secs(self.clock.now()),
+                                )
+                                .await;
+                        }
+                        apply_openai_error(error, times, unix_secs(self.clock.now()), &mut outcome);
+                        return self
+                            .write_api_key_poll_outcome(
+                                upstream,
+                                outcome,
+                                times,
+                                openai_error_label(error),
+                            )
+                            .await;
+                    }
                 }
             }
         }
-
-        let (incomplete_costs, unsupported_cost_currency) = if self.claim_admits_call_for(
-            upstream,
-            window,
-            self.openai_org_api.limits().per_request,
-        ) {
-            let query = OpenAiCostsQuery {
-                start_time: utc_month_start_unix_secs(times.now),
-                end_time: Some(times.now),
-                bucket_width: OpenAiBucketWidth::Day,
-                limit: DAILY_BUCKETS,
-                page: None,
-            };
-            let page = self.openai_org_api.costs(&credential, &query);
-            match tokio::time::timeout_at(window.exchange_deadline, page)
-                .await
-                .unwrap_or(Err(OpenAiOrgApiError::Timeout))
-            {
-                Ok(page) => {
-                    let incomplete_costs = page.next_page.is_some();
-                    let unsupported_cost_currency =
-                        append_openai_cost_buckets(upstream, details, page, &mut outcome.buckets);
-                    (incomplete_costs, unsupported_cost_currency)
+        let mut unsupported_cost_currency = false;
+        if !incomplete_usage
+            && self.claim_admits_call_for(
+                upstream,
+                window,
+                self.openai_org_api.limits().per_request,
+            )
+        {
+            let mut cursor = None;
+            let mut seen_cursors = BTreeSet::new();
+            for page_number in 0..OPENAI_MAX_PAGES {
+                if !self.claim_admits_call_for(
+                    upstream,
+                    window,
+                    self.openai_org_api.limits().per_request,
+                ) {
+                    incomplete_costs = true;
+                    break;
                 }
-                Err(error) => {
-                    if matches!(error, OpenAiOrgApiError::Denied { .. }) {
-                        let _ = self
-                            .storage
-                            .mark_openai_org_reporting_credential_denied(
-                                credential_revision,
-                                unix_secs(self.clock.now()),
+                let query = OpenAiCostsQuery {
+                    start_time: utc_month_start_unix_secs(times.now),
+                    end_time: Some(times.now),
+                    bucket_width: OpenAiBucketWidth::Day,
+                    limit: DAILY_BUCKETS,
+                    page: cursor.clone(),
+                };
+                let page = self.openai_org_api.costs(&credential, &query);
+                match tokio::time::timeout_at(window.exchange_deadline, page)
+                    .await
+                    .unwrap_or(Err(OpenAiOrgApiError::Timeout))
+                {
+                    Ok(page) => {
+                        fetched_any = true;
+                        let next_page = page.next_page.clone();
+                        unsupported_cost_currency |= append_openai_cost_buckets(
+                            upstream,
+                            details,
+                            page,
+                            &mut outcome.buckets,
+                        );
+                        match next_page {
+                            None => break,
+                            Some(next_page)
+                                if next_page.is_empty()
+                                    || !seen_cursors.insert(next_page.clone()) =>
+                            {
+                                incomplete_costs = true;
+                                break;
+                            }
+                            Some(next_page) => {
+                                cursor = Some(next_page);
+                                if page_number + 1 == OPENAI_MAX_PAGES {
+                                    incomplete_costs = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(OpenAiOrgApiError::Timeout) if fetched_any => {
+                        incomplete_costs = true;
+                        break;
+                    }
+                    Err(error) => {
+                        if matches!(error, OpenAiOrgApiError::Denied { .. }) {
+                            let _ = self
+                                .storage
+                                .mark_openai_org_reporting_credential_denied(
+                                    credential_revision,
+                                    unix_secs(self.clock.now()),
+                                )
+                                .await;
+                        }
+                        apply_openai_error(error, times, unix_secs(self.clock.now()), &mut outcome);
+                        return self
+                            .write_api_key_poll_outcome(
+                                upstream,
+                                outcome,
+                                times,
+                                openai_error_label(error),
                             )
                             .await;
                     }
-                    apply_openai_error(error, times, unix_secs(self.clock.now()), &mut outcome);
-                    return self
-                        .write_api_key_poll_outcome(
-                            upstream,
-                            outcome,
-                            times,
-                            openai_error_label(error),
-                        )
-                        .await;
                 }
             }
         } else {
-            return self
-                .write_api_key_poll_outcome(upstream, outcome, times, PollLabel::LeaseSpent)
-                .await;
-        };
+            incomplete_costs = true;
+        }
 
         let incomplete = incomplete_usage || incomplete_costs;
         let report_failed = unsupported_cost_currency;
@@ -957,38 +1033,93 @@ fn append_openai_usage_buckets(
         return;
     };
     let expected_api_key_id = details.and_then(|row| row.api_key_id.as_deref());
+    let bucket_width_secs = match bucket_width {
+        OpenAiBucketWidth::Hour => 3_600,
+        OpenAiBucketWidth::Day => 86_400,
+    };
+    if let Some(expected_api_key_id) = expected_api_key_id {
+        for bucket in page.buckets {
+            for result in bucket.results {
+                if result.project_id.as_deref() != Some(project_id)
+                    || !openai_api_key_group_matches(
+                        Some(expected_api_key_id),
+                        result.api_key_id.as_deref(),
+                    )
+                {
+                    continue;
+                }
+                projects.insert(project_id.to_owned());
+                out.push(UpstreamApiUsageBucketWrite {
+                    attribution: ApiUsageAttribution::ApiKey,
+                    subject_id: expected_api_key_id.to_owned(),
+                    bucket_width_secs,
+                    bucket_start_unix_secs: bucket.start_time,
+                    model: result.model.unwrap_or_default(),
+                    uncached_input_tokens: result.input_tokens,
+                    cache_creation_5m_input_tokens: 0,
+                    cache_creation_1h_input_tokens: 0,
+                    cache_read_input_tokens: result.input_cached_tokens,
+                    output_tokens: result.output_tokens,
+                    list_cost_micros: 0,
+                });
+            }
+        }
+        return;
+    }
+
+    // A provider-native snapshot has no serving key id. OpenAI may therefore
+    // return rows grouped by individual key ids. Aggregate those rows into
+    // the configured project workspace so the admin usage view can observe
+    // them instead of attributing them to an unknown serving key.
+    let mut aggregate = BTreeMap::<(u64, String), UpstreamApiUsageBucketWrite>::new();
     for bucket in page.buckets {
         for result in bucket.results {
-            if result.project_id.as_deref() != Some(project_id)
-                || !openai_api_key_group_matches(expected_api_key_id, result.api_key_id.as_deref())
-            {
+            if result.project_id.as_deref() != Some(project_id) {
                 continue;
             }
             projects.insert(project_id.to_owned());
-            let (attribution, subject_id) = if let Some(api_key_id) = result.api_key_id.as_ref() {
-                (ApiUsageAttribution::ApiKey, api_key_id.clone())
-            } else {
-                // A null provider key id is an aggregate row. It is only
-                // accepted when this serving snapshot has no key id and must
-                // remain attributed to the project workspace.
-                (ApiUsageAttribution::Workspace, project_id.to_owned())
-            };
-            out.push(UpstreamApiUsageBucketWrite {
-                attribution,
-                subject_id,
-                bucket_width_secs: match bucket_width {
-                    OpenAiBucketWidth::Hour => 3_600,
-                    OpenAiBucketWidth::Day => 86_400,
-                },
-                bucket_start_unix_secs: bucket.start_time,
-                model: result.model.unwrap_or_default(),
-                uncached_input_tokens: result.input_tokens,
-                cache_creation_5m_input_tokens: 0,
-                cache_creation_1h_input_tokens: 0,
-                cache_read_input_tokens: result.input_cached_tokens,
-                output_tokens: result.output_tokens,
-                list_cost_micros: 0,
-            });
+            let model = result.model.unwrap_or_default();
+            let entry = aggregate
+                .entry((bucket.start_time, model.clone()))
+                .or_insert_with(|| UpstreamApiUsageBucketWrite {
+                    attribution: ApiUsageAttribution::Workspace,
+                    subject_id: project_id.to_owned(),
+                    bucket_width_secs,
+                    bucket_start_unix_secs: bucket.start_time,
+                    model,
+                    uncached_input_tokens: 0,
+                    cache_creation_5m_input_tokens: 0,
+                    cache_creation_1h_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    output_tokens: 0,
+                    list_cost_micros: 0,
+                });
+            entry.uncached_input_tokens = entry
+                .uncached_input_tokens
+                .saturating_add(result.input_tokens);
+            entry.cache_read_input_tokens = entry
+                .cache_read_input_tokens
+                .saturating_add(result.input_cached_tokens);
+            entry.output_tokens = entry.output_tokens.saturating_add(result.output_tokens);
+        }
+    }
+    for bucket in aggregate.into_values() {
+        if let Some(existing) = out.iter_mut().find(|existing| {
+            existing.attribution == ApiUsageAttribution::Workspace
+                && existing.subject_id == bucket.subject_id
+                && existing.bucket_width_secs == bucket.bucket_width_secs
+                && existing.bucket_start_unix_secs == bucket.bucket_start_unix_secs
+                && existing.model == bucket.model
+        }) {
+            existing.uncached_input_tokens = existing
+                .uncached_input_tokens
+                .saturating_add(bucket.uncached_input_tokens);
+            existing.cache_read_input_tokens = existing
+                .cache_read_input_tokens
+                .saturating_add(bucket.cache_read_input_tokens);
+            existing.output_tokens = existing.output_tokens.saturating_add(bucket.output_tokens);
+        } else {
+            out.push(bucket);
         }
     }
 }
