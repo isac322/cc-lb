@@ -474,7 +474,7 @@ async fn merge_stale_gemini_rollups(
         sqlx::query(
             "INSERT INTO usage_rollup_reconciliation_markers_v1 \
              (resolution, bucket_start_unix_secs, principal_id, upstream_id, marker_model) \
-             VALUES ($1, $2, $3, $4, substring($5 FROM 8)) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT DO NOTHING",
         )
         .bind(&resolution)

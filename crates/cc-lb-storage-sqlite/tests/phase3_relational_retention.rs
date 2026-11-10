@@ -366,6 +366,20 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
         cc_lb_storage_sqlite::open_sqlite_existing(&url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open pre-migration sqlite");
+    sqlx::raw_sql(include_str!(
+        "../migrations/0114_canonicalize_gemini_model_identity.sql"
+    ))
+    .execute(storage.pool())
+    .await
+    .expect("install reconciliation state");
+    sqlx::query(
+        "UPDATE usage_rollup_reconciliations_v1
+         SET status = 'complete'
+         WHERE id = 'canonicalize_gemini_model_identity'",
+    )
+    .execute(storage.pool())
+    .await
+    .expect("mark reconciliation complete while seeding history");
     let events = [
         (
             "gemini-prefixed",
@@ -546,12 +560,14 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     .await
     .expect("seed triple-prefix rollup-only row");
 
-    sqlx::raw_sql(include_str!(
-        "../migrations/0114_canonicalize_gemini_model_identity.sql"
-    ))
+    sqlx::query(
+        "UPDATE usage_rollup_reconciliations_v1
+         SET status = 'pending', cursor = 0, event_upper_bound = 0, rollup_upper_bound = 0
+         WHERE id = 'canonicalize_gemini_model_identity'",
+    )
     .execute(storage.pool())
     .await
-    .expect("execute canonicalization migration");
+    .expect("reset reconciliation after seeding history");
 
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -564,10 +580,12 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
         "pending"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_rollups_v2")
-            .fetch_one(storage.pool())
-            .await
-            .expect("count retained rollups"),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM usage_rollups_v2 WHERE resolution = 'minute'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .expect("count retained minute rollups"),
         9
     );
 
@@ -577,10 +595,12 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
         .expect("start historical reconciliation");
     assert_eq!(first_reconciliation_run.processed_events, 0);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_rollups_v2")
-            .fetch_one(storage.pool())
-            .await
-            .expect("count retained rollups"),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM usage_rollups_v2 WHERE resolution = 'minute'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .expect("count retained minute rollups"),
         9
     );
     let second_reconciliation_run = storage
@@ -588,6 +608,16 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
         .await
         .expect("rewrite and merge one reconciliation batch");
     assert_eq!(second_reconciliation_run.processed_events, 0);
+    let nested_reconciliation_run = storage
+        .rollup_usage_once()
+        .await
+        .expect("finish nested reconciliation batch");
+    assert_eq!(nested_reconciliation_run.processed_events, 0);
+    let deep_reconciliation_run = storage
+        .rollup_usage_once()
+        .await
+        .expect("finish deeper nested reconciliation batch");
+    assert_eq!(deep_reconciliation_run.processed_events, 0);
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT status FROM usage_rollup_reconciliations_v1 \
@@ -633,7 +663,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
         .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, 1_800_000_060)
         .await
         .expect("query migrated rollups");
-    assert_eq!(rollups.len(), 9);
+    assert_eq!(rollups.len(), 8);
     let gemini = rollups
         .iter()
         .find(|rollup| rollup.model == "gemini-2.5-flash")
@@ -644,7 +674,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     assert_eq!(gemini.error_count, 1);
     let tuned = rollups
         .iter()
-        .find(|rollup| rollup.model == "models/tunedModels/tuned-1")
+        .find(|rollup| rollup.model == "models_tunedModels_tuned-1")
         .expect("tuned Gemini rollup is preserved");
     assert_eq!(tuned.request_count, 1);
     assert_eq!(tuned.input_tokens, 17);
@@ -659,7 +689,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     let nested = rollups
         .iter()
         .find(|rollup| {
-            rollup.model == "models/gemini-2.5-flash" && rollup.upstream_id == gemini_upstream_id
+            rollup.model == "models_gemini-2.5-flash" && rollup.upstream_id == gemini_upstream_id
         })
         .expect("nested Gemini rollup is canonicalized exactly once");
     assert_eq!(nested.request_count, 1);
@@ -667,7 +697,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     let triple_prefix = rollups
         .iter()
         .find(|rollup| {
-            rollup.model == "models/models/gemini-2.5-flash"
+            rollup.model == "models_models_gemini-2.5-flash"
                 && rollup.principal == "rollup-only-triple-prefix"
         })
         .expect("triple-prefix Gemini rollup is canonicalized exactly once");
@@ -676,7 +706,7 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     let two_prefix_source = rollups
         .iter()
         .find(|rollup| {
-            rollup.model == "models/gemini-2.5-flash"
+            rollup.model == "models_gemini-2.5-flash"
                 && rollup.principal == "rollup-only-triple-prefix"
         })
         .expect("two-prefix source is processed before its deeper destination");
@@ -685,11 +715,11 @@ async fn canonicalize_gemini_model_identity_migration_preserves_historical_rollu
     assert!(
         !rollups
             .iter()
-            .any(|rollup| rollup.model.starts_with("models/models/models/"))
+            .any(|rollup| rollup.model.starts_with("models_models_models_"))
     );
     assert_eq!(gemini.latency_ms_sum, 12);
     assert!(rollups.iter().any(|rollup| {
-        rollup.model == "models/gemini-2.5-flash" && rollup.upstream_id == unrelated_upstream_id
+        rollup.model == "models_gemini-2.5-flash" && rollup.upstream_id == unrelated_upstream_id
     }));
     assert!(rollups.iter().any(|rollup| rollup.model == "unknown"));
 
@@ -833,6 +863,21 @@ async fn canonicalize_gemini_rollup_only_history_merges_prefixed_rows() {
         .rollup_usage_once()
         .await
         .expect("merge stale rollup-only history");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT marker_model FROM usage_rollup_reconciliation_markers_v1
+             WHERE principal_id = ? ORDER BY marker_model LIMIT 1",
+        )
+        .bind("rollup-only-principal")
+        .fetch_one(storage.pool())
+        .await
+        .expect("read source rollup marker"),
+        "models_gemini-2.5-flash"
+    );
+    storage
+        .rollup_usage_once()
+        .await
+        .expect("finish nested stale rollup-only history");
 
     let merged = sqlx::query_as::<
         _,

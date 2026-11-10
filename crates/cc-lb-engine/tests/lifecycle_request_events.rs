@@ -160,6 +160,12 @@ async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
 
     let requests = [
         (
+            "/v1beta/cachedContents",
+            Bytes::from_static(
+                br#"{"model":"models/gemini-2.5-flash","contents":[]}"#,
+            ),
+        ),
+        (
             "/v1beta/models/gemini-2.5-flash:generateContent",
             Bytes::from_static(
                 br#"{"model":"models/gemini-2.5-flash","cachedContent":"cachedContents/example","contents":[]}"#,
@@ -219,12 +225,12 @@ async fn gemini_model_identity_is_canonicalized_without_rewriting_wire_body()
             .as_slice()
     );
     let events = crate::common::stored_request_events(storage.as_ref()).await?;
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     assert!(
         events
             .iter()
             .all(|event| event.model.as_deref() == Some("gemini-2.5-flash")),
-        "cached-content and URL-only requests share one canonical model identity"
+        "cached-content creation and URL-only requests share one canonical model identity"
     );
     Ok(())
 }
