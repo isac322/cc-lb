@@ -396,6 +396,33 @@ describe('provider selection and imported credentials', () => {
     ).toBe('true');
   });
 
+  test('resets a checked API-key draft when switching providers', async () => {
+    route = (call) =>
+      call.path === PREFLIGHT
+        ? { status: 200, body: BOUND }
+        : { status: 404, body: {} };
+    const { dialog } = renderDialog({ mode: 'create' });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    fireEvent.click(within(dialog).getByRole('radio', { name: /API key/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    await paste(dialog, KEY);
+    await within(dialog).findByText('Key verified');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Back' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Back' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Back' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    fireEvent.click(within(dialog).getByRole('radio', { name: /API key/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    const input = await within(dialog).findByPlaceholderText(
+      'Paste the provider key',
+    );
+    expect((input as HTMLInputElement).value).toBe('');
+    expect(within(dialog).getByText('https://api.openai.com')).toBeDefined();
+    expect(within(dialog).queryByText('Key verified')).toBeNull();
+  });
+
   test.each([
     ['OpenAI', 'openai_api_key', 'openai-test-key'],
     ['Gemini', 'gemini_api_key', 'AIza-test-key_123'],

@@ -14,6 +14,7 @@ import {
   type ClipboardEvent,
   type ReactNode,
   useEffect,
+  useRef,
   useState,
 } from 'react';
 import { toast } from 'sonner';
@@ -188,6 +189,7 @@ export function useApiKeyConnect({
       : provider === 'gemini'
         ? 'gemini_api_key'
         : 'anthropic_api_key';
+  const previousKind = useRef(kind);
   const [step, setStep] = useState<ApiKeyStep>('key');
   const [guideVisited, setGuideVisited] = useState(false);
   const [guideTier, setGuideTier] = useState<GuideTier>('full');
@@ -232,6 +234,26 @@ export function useApiKeyConnect({
       (replace?.base_url ?? '').trim().replace(/\/+$/, '') !==
         defaultEndpointFor(kind),
   );
+  useEffect(() => {
+    if (previousKind.current === kind) return;
+    previousKind.current = kind;
+    setStep('key');
+    setGuideVisited(false);
+    setKeyValue('');
+    setBaseUrl(defaultEndpointFor(kind));
+    setChecked(null);
+    setRequestError(null);
+    setKeyFieldError(null);
+    setSaveError(null);
+    setWorkspaceId('');
+    setWorkspaceCheck(null);
+    setWorkspaceFormatError(null);
+    setFinal(null);
+    setUnverified(false);
+    setName('');
+    setProjectId('');
+    setEndpointOpen(false);
+  }, [kind]);
 
   const parsed = parseApiKeyPaste(keyValue);
   const defaultEndpoint = defaultEndpointFor(kind);
@@ -325,7 +347,7 @@ export function useApiKeyConnect({
       setName(
         res?.workspace.name
           ? `${res.workspace.name} API key`
-          : 'Anthropic API key',
+          : `${PROVIDER_LABELS[provider]} API key`,
       );
     }
     setStep('finish');
@@ -624,7 +646,9 @@ export function useApiKeyConnect({
                 finishWith({ ...checked, inference: 'unverified' }, true)
               }
             >
-              Save anyway
+              {provider === 'anthropic'
+                ? 'Save anyway'
+                : 'Save without checking'}
             </Button>
           ) : null}
           <Button
