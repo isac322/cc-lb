@@ -5,6 +5,8 @@
 // `crates/cc-lb-admin/src/v1/`.
 
 import {
+  type FetchNextPageOptions,
+  hashKey,
   type InfiniteData,
   type QueryClient,
   queryOptions,
@@ -14,7 +16,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import {
   type AggregateResponse,
   type AnthropicWorkspace,
@@ -67,6 +69,7 @@ import {
 import {
   type CacheKeepaliveDetail,
   type CacheKeepaliveHorizon,
+  type CacheKeepaliveListResponse,
   type CacheKeepaliveSessionsFilters,
   getCacheKeepaliveSessionDetail,
   getCacheKeepaliveSessions,
@@ -2085,28 +2088,159 @@ export function useWarmupAttempts(
 // ─────────────────────────────────────────────────────────────────────────────
 // Cache keepalive sessions (Principal detail card + drawers)
 
+const cacheKeepalivePageWrites = new WeakMap<
+  QueryClient,
+  Map<string, Promise<void>>
+>();
+
+function serializeCacheKeepalivePages<T>(
+  client: QueryClient,
+  queryKey: readonly unknown[],
+  operation: () => Promise<T>,
+) {
+  const locks =
+    cacheKeepalivePageWrites.get(client) ?? new Map<string, Promise<void>>();
+  cacheKeepalivePageWrites.set(client, locks);
+  const key = hashKey(queryKey);
+  const result = (locks.get(key) ?? Promise.resolve()).then(operation);
+  // Release the queue on either outcome without changing the caller's result.
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  locks.set(key, settled);
+  void settled.then(() => {
+    if (locks.get(key) === settled) locks.delete(key);
+  });
+  return result;
+}
+
 export function useCacheKeepaliveSessions(
   principalId: string,
   filters: CacheKeepaliveSessionsFilters = {},
   enabled = true,
 ) {
+  const queryClient = useQueryClient();
   const visibility = useVisibility();
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
+  const queryKey = qk.cacheKeepaliveSessions(principalId, filters);
+  const overviewKey = [...queryKey, 'overview'] as const;
+  const queryHash = hashKey(queryKey);
+  const activeQueryHash = useRef(queryHash);
+  activeQueryHash.current = queryHash;
+  const wasEnabled = useRef(false);
+  const reopenQueryHash = useRef<string | null>(null);
+  if (enabled && !wasEnabled.current) reopenQueryHash.current = queryHash;
+  wasEnabled.current = enabled;
+  const overview = useQuery({
+    queryKey: overviewKey,
+    enabled: enabled && Boolean(principalId),
+    meta: { inlineError: true },
+    refetchInterval:
+      enabled && !isHidden
+        ? POLLING_INTERVALS.CACHE_KEEPALIVE_SESSIONS_MS
+        : false,
+    queryFn: () =>
+      serializeCacheKeepalivePages(queryClient, queryKey, async () => {
+        const head = await getCacheKeepaliveSessions(principalId, filters);
+        const previous =
+          queryClient.getQueryData<
+            InfiniteData<CacheKeepaliveListResponse, string | undefined>
+          >(queryKey);
+        if (!previous) {
+          queryClient.setQueryData<
+            InfiniteData<CacheKeepaliveListResponse, string | undefined>
+          >(queryKey, (current) => ({
+            pages: [head, ...(current?.pages.slice(1) ?? [])],
+            pageParams: current?.pageParams ?? [undefined],
+          }));
+          if (reopenQueryHash.current === queryHash)
+            reopenQueryHash.current = null;
+          return head;
+        }
 
-  return useInfiniteQuery({
-    queryKey: qk.cacheKeepaliveSessions(principalId, filters),
+        const aggregatesChanged =
+          hashKey([head.summary, head.groups]) !==
+          hashKey([previous.pages[0].summary, previous.pages[0].groups]);
+        const boundary = head.rows.at(-1);
+        const previousHead = previous.pages[0];
+        const previousBoundary = previousHead.rows.at(-1);
+        const boundaryChanged =
+          boundary?.id !== previousBoundary?.id ||
+          boundary?.last_message_at_ms !==
+            previousBoundary?.last_message_at_ms ||
+          (head.next_cursor !== null) !== (previousHead.next_cursor !== null);
+        if (
+          previous.pages.length > 1 &&
+          (aggregatesChanged ||
+            boundaryChanged ||
+            reopenQueryHash.current === queryHash)
+        ) {
+          // Re-walk only the loaded tail, using the new head's cursor. Serving
+          // page zero from this response avoids a second overview request.
+          await queryClient.fetchInfiniteQuery({
+            queryKey,
+            initialPageParam: undefined as string | undefined,
+            pages: previous.pages.length,
+            staleTime: 0,
+            queryFn: ({ pageParam }) =>
+              pageParam === undefined
+                ? Promise.resolve(head)
+                : getCacheKeepaliveSessions(principalId, {
+                    ...filters,
+                    cursor: pageParam,
+                  }),
+            getNextPageParam: (last) => last.next_cursor ?? undefined,
+          });
+        } else {
+          queryClient.setQueryData<
+            InfiniteData<CacheKeepaliveListResponse, string | undefined>
+          >(queryKey, (current) => ({
+            pages: [head, ...(current?.pages.slice(1) ?? [])],
+            pageParams: current?.pageParams ?? [undefined],
+          }));
+        }
+        if (reopenQueryHash.current === queryHash)
+          reopenQueryHash.current = null;
+        return head;
+      }),
+  });
+
+  const sessions = useInfiniteQuery({
+    queryKey,
     enabled: enabled && Boolean(principalId),
     meta: { inlineError: true },
     placeholderData: undefined,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
-      getCacheKeepaliveSessions(principalId, { ...filters, cursor: pageParam }),
+      pageParam === undefined
+        ? (queryClient.getQueryData<CacheKeepaliveListResponse>(overviewKey) ??
+          queryClient.fetchQuery({
+            queryKey: overviewKey,
+            queryFn: () => getCacheKeepaliveSessions(principalId, filters),
+          }))
+        : getCacheKeepaliveSessions(principalId, {
+            ...filters,
+            cursor: pageParam,
+          }),
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    refetchInterval:
-      enabled && !isHidden
-        ? POLLING_INTERVALS.CACHE_KEEPALIVE_SESSIONS_MS
-        : false,
+    refetchInterval: false,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
+
+  return {
+    ...sessions,
+    isError: sessions.isError || overview.isError,
+    error: sessions.error ?? overview.error,
+    refetch: overview.refetch,
+    fetchNextPage: (options?: FetchNextPageOptions) =>
+      serializeCacheKeepalivePages(queryClient, queryKey, async () => {
+        if (activeQueryHash.current !== queryHash) return;
+        return sessions.fetchNextPage(options);
+      }),
+  };
 }
 
 export function useCacheKeepaliveSummary(principalId: string, enabled = true) {
