@@ -882,7 +882,13 @@ where
         wait_backend
             .wait_for_events_visible_for_rollup(&storage)
             .await?;
-        storage.rollup_usage_once().await?;
+        let first_rollup = storage.rollup_usage_once().await?;
+        if first_rollup.processed_events == 0 {
+            // A fresh PostgreSQL schema may spend the first rollup pass
+            // completing a pending model-reconciliation migration before the
+            // request-event cursor can process this scenario's rows.
+            storage.rollup_usage_once().await?;
+        }
 
         let intervals = [
             UsageTokenInterval {
