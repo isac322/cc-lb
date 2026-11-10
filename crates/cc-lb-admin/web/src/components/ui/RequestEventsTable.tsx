@@ -48,19 +48,25 @@ const RESERVED_ROW_REM = 2.5;
  * Layout follows the table's own wrapper (`@container/events`), not the
  * viewport, so every callsite gets the same rule:
  *
- * - Below 42rem (phones and narrow split panes) each row is a three-line card
- *   on fixed tracks (4rem / 3.25rem / 1fr / 1fr / 4rem): time, kind, session
- *   and status; the principal and/or upstream and model; latency, tokens and
- *   cost. Cells keep their DOM order and are only placed on the grid.
+ * - Below 42rem (phones and narrow split panes) each row is a three-line
+ *   session-and-cache-efficiency card (M4) on a seven-track grid
+ *   (`auto / auto / auto / 1fr / auto / auto / auto`):
+ *   line 1 holds the session chip, request kind, model, relative time and
+ *   status; line 2 holds the principal and/or upstream on the left and
+ *   latency and cost on the right; line 3 spans the full card width with
+ *   `in → out tokens`, `N% cache hit`, and the full-width token composition
+ *   bar. Cells keep their DOM order and are only placed on the grid.
  * - From 42rem (tablets in portrait or landscape, and desktops) it is a
  *   `table-fixed` table sized by its `<colgroup>`, so no column width depends
  *   on row content. Each column starts at its compact `rem` minimum (43.75rem
  *   with both entities so a 768px portrait tablet fits without horizontal
- *   scroll, 39.6875rem with one); the container width above the table's minimum
- *   (`100cqw` of the wrapper) is split by `grow` among the columns, and
- *   Session, which has no width of its own, takes its share plus any rounding
- *   remainder. Between 42rem and 59rem cell horizontal padding tightens so all
- *   ten columns fit comfortably.
+ *   scroll, 39.6875rem with one), ramps smoothly to its desktop baseline
+ *   (`remDesktop`, 65.5rem with both entities and 59rem with one) where fixed
+ *   metric and timestamp columns (`Tokens` 12rem, `Latency` 5.75rem, `Cost`
+ *   6.25rem, `Timestamp` 5.75rem, `Status` 4rem, `Kind` 4.75rem) cap, and
+ *   splits any width above the desktop baseline among `Session`, `Principal`,
+ *   `Upstream` and `Model`. Between 42rem and 59rem cell horizontal padding
+ *   tightens so all ten columns fit comfortably.
  */
 type ColumnKey =
   | 'time'
@@ -76,10 +82,13 @@ type ColumnKey =
 
 interface Column {
   label: string;
-  /** Table-arrangement minimum width in rem; null = Session, which takes the remainder. */
+  /** Compact tablet minimum width in rem; null = Session, which takes the remainder. */
   rem: number | null;
+  /** Desktop baseline width in rem (reached at 65.5rem / 59rem). */
+  remDesktop: number;
   /**
-   * Share of the width above the table's compact minimum.
+   * Share of the width above the desktop baseline (`--events-desktop-w`).
+   * Columns without `grow` cap at `remDesktop`.
    */
   grow?: number;
   numeric?: boolean;
@@ -91,79 +100,88 @@ interface Column {
 
 /** Session never shrinks below this in the compact tablet table. */
 const SESSION_FLOOR_REM = 4.125;
+/** Session baseline width at the desktop threshold before desktop slack. */
+const SESSION_DESKTOP_REM = 7;
 
 // The 43.75rem ten-column minimum (700px) fits inside a 768px portrait tablet
 // card (`PageContainer` 2×32px gutter + 2×2px card border = 700px clientWidth);
 // the 39.6875rem nine-column minimum (635px) fits single-entity detail tables.
-// Below 42rem (672px) rows stack into three-line mobile cards.
+// At the 65.5rem (1048px) / 59rem (944px) desktop baseline, Tokens caps at
+// 12rem (192px) and extra desktop width goes to Session, Principal, Upstream
+// and Model. Below 42rem (672px) rows stack into three-line M4 mobile cards.
 const COLUMNS = {
   time: {
     label: 'Timestamp',
     rem: 4.625,
-    grow: 0.4,
-    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-1',
+    remDesktop: 5.75,
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-6 @max-[42rem]/events:justify-self-end @max-[42rem]/events:text-caption @max-[42rem]/events:text-text-faint',
   },
   principal: {
     label: 'Principal',
     rem: 4.0625,
-    grow: 1.4,
-    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-3',
+    remDesktop: 6.5,
+    grow: 1.75,
+    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-4 @max-[42rem]/events:font-medium @max-[42rem]/events:text-text',
     cardBoth:
-      '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-2',
+      '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:max-w-[42cqw] @max-[42rem]/events:font-medium @max-[42rem]/events:text-text',
   },
   upstream: {
     label: 'Upstream',
     rem: 4.0625,
-    grow: 1.4,
-    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-3',
+    remDesktop: 6.5,
+    grow: 1.45,
+    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-4 @max-[42rem]/events:font-medium @max-[42rem]/events:text-text',
     // Reads "principal → upstream" when both cells are shown.
     cardBoth:
-      '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-3 @max-[42rem]/events:before:content-["→_"] @max-[42rem]/events:before:text-text-faint',
+      '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-2 @max-[42rem]/events:col-span-3 @max-[42rem]/events:before:content-["→_"] @max-[42rem]/events:before:text-text-faint',
   },
   session: {
     label: 'Session',
     rem: null,
-    grow: 1.4,
-    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-3 @max-[42rem]/events:col-span-2 @max-[42rem]/events:w-full',
+    remDesktop: SESSION_DESKTOP_REM,
+    grow: 3.8,
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-2 @max-[42rem]/events:max-w-32',
   },
   kind: {
     label: 'Kind',
     rem: 3.25,
-    grow: 0.5,
-    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-2 @max-[42rem]/events:justify-self-start @max-[42rem]/events:max-w-full',
+    remDesktop: 4.75,
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-3 @max-[42rem]/events:justify-self-start @max-[42rem]/events:max-w-full',
   },
   model: {
     label: 'Model',
     rem: 4.625,
-    grow: 1.7,
-    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-4 @max-[42rem]/events:col-span-2 @max-[42rem]/events:text-right',
+    remDesktop: 7,
+    grow: 1,
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-4 @max-[42rem]/events:col-span-2 @max-[42rem]/events:text-left @max-[42rem]/events:text-caption',
   },
   status: {
     label: 'Status',
     rem: 2.75,
+    remDesktop: 4,
     numeric: true,
-    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-5 @max-[42rem]/events:justify-self-end',
+    card: '@max-[42rem]/events:row-start-1 @max-[42rem]/events:col-start-7 @max-[42rem]/events:justify-self-end @max-[42rem]/events:text-caption',
   },
   latency: {
     label: 'Latency',
     rem: 4.125,
-    grow: 0.8,
+    remDesktop: 5.75,
     numeric: true,
-    card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-1 @max-[42rem]/events:text-left',
+    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-5 @max-[42rem]/events:justify-self-end @max-[42rem]/events:[&_[data-cell-bar]]:hidden',
   },
   tokens: {
     label: 'Tokens',
     rem: 8,
-    grow: 5.2,
+    remDesktop: 12,
     numeric: true,
-    card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-2 @max-[42rem]/events:col-span-3 @max-[42rem]/events:justify-self-start @max-[42rem]/events:text-left',
+    card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-1 @max-[42rem]/events:col-span-7 @max-[42rem]/events:w-full @max-[42rem]/events:text-left',
   },
   cost: {
     label: 'Cost',
     rem: 4.125,
-    grow: 0.8,
+    remDesktop: 6.25,
     numeric: true,
-    card: '@max-[42rem]/events:row-start-3 @max-[42rem]/events:col-start-5',
+    card: '@max-[42rem]/events:row-start-2 @max-[42rem]/events:col-start-6 @max-[42rem]/events:col-span-2 @max-[42rem]/events:justify-self-end @max-[42rem]/events:font-semibold @max-[42rem]/events:text-text @max-[42rem]/events:[&_[data-cell-bar]]:hidden',
   },
 } satisfies Record<ColumnKey, Column>;
 
@@ -181,7 +199,7 @@ const COLUMN_ORDER: readonly ColumnKey[] = [
 ];
 
 const CARD_ROW =
-  '@max-[42rem]/events:grid @max-[42rem]/events:h-auto @max-[42rem]/events:grid-cols-[4rem_3.25rem_minmax(0,1fr)_minmax(0,1fr)_4rem] @max-[42rem]/events:items-center @max-[42rem]/events:gap-x-2 @max-[42rem]/events:gap-y-1 @max-[42rem]/events:px-4 @max-[42rem]/events:py-2.5';
+  '@max-[42rem]/events:grid @max-[42rem]/events:h-auto @max-[42rem]/events:grid-cols-[auto_auto_auto_minmax(0,1fr)_auto_auto_auto] @max-[42rem]/events:items-center @max-[42rem]/events:gap-x-1.5 @max-[42rem]/events:gap-y-1.5 @max-[42rem]/events:px-4 @max-[42rem]/events:py-2.5';
 // `p-0!` must beat `Table`'s `[&_td:first-child]:pl-4` / `last-child:pr-4`,
 // descendant selectors with higher specificity than a plain utility.
 const CARD_CELL = '@max-[42rem]/events:p-0! @max-[42rem]/events:min-w-0';
@@ -421,7 +439,7 @@ const RequestEventRow = memo(function RequestEventRow({
         )}
         <RelativeTime compact ts={at} className="block truncate" />
         {onAnchorRange != null && at != null && (
-          <span className="absolute inset-y-0 left-0 z-1 flex items-center gap-0.5 whitespace-nowrap bg-bg-sub pl-[inherit] pr-1 opacity-0 transition-opacity group-hover/ts:opacity-100 group-focus-within/ts:opacity-100">
+          <span className="absolute inset-y-0 left-0 z-1 flex items-center gap-0.5 whitespace-nowrap bg-bg-sub pl-[inherit] pr-1 opacity-0 transition-opacity group-hover/ts:opacity-100 group-focus-within/ts:opacity-100 @max-[42rem]/events:right-0 @max-[42rem]/events:left-auto">
             {ANCHOR_RADII_SECS.map(([label, radius]) => (
               <button
                 key={label}
@@ -495,7 +513,7 @@ const RequestEventRow = memo(function RequestEventRow({
           showProviderLogo && '@min-[60rem]/events:max-w-28!',
         )}
       >
-        <span className="flex min-w-0 items-center gap-2 @max-[42rem]/events:justify-end">
+        <span className="flex min-w-0 items-center gap-2">
           {showProviderLogo ? (
             <ProviderLogo
               className="shrink-0 text-text-muted"
@@ -596,6 +614,11 @@ export const RequestEventsTable = memo(function RequestEventsTable({
     (sum, k) => sum + (COLUMNS[k].rem ?? 0),
     SESSION_FLOOR_REM,
   );
+  const desktopWidthRem = visible.reduce(
+    (sum, k) => sum + COLUMNS[k].remDesktop,
+    0,
+  );
+  const tabletSpanRem = desktopWidthRem - minWidthRem;
   const totalGrow = visible.reduce(
     (sum, k) => sum + ((COLUMNS[k] as Column).grow ?? 0),
     0,
@@ -611,18 +634,23 @@ export const RequestEventsTable = memo(function RequestEventsTable({
         <Table
           className="table-fixed @min-[42rem]/events:min-w-(--events-min-w) @max-[42rem]/events:block"
           style={
-            { '--events-min-w': `${minWidthRem}rem` } as React.CSSProperties
+            {
+              '--events-min-w': `${minWidthRem}rem`,
+              '--events-desktop-w': `${desktopWidthRem}rem`,
+              '--events-tablet-span': `${tabletSpanRem}rem`,
+            } as React.CSSProperties
           }
         >
           <colgroup className="@max-[42rem]/events:hidden">
             {visible.map((k) => {
-              const { rem, grow }: Column = COLUMNS[k];
+              const { rem, remDesktop, grow }: Column = COLUMNS[k];
               if (rem == null) return <col key={k} />;
-              const share = (grow ?? 0) / totalGrow;
+              const tabletShare = (remDesktop - rem) / tabletSpanRem;
+              const desktopShare = totalGrow > 0 ? (grow ?? 0) / totalGrow : 0;
               const width =
-                share > 0
-                  ? `calc(${rem}rem + max(0rem, 100cqw - var(--events-min-w)) * ${share})`
-                  : `${rem}rem`;
+                desktopShare > 0
+                  ? `calc(${rem}rem + clamp(0rem, 100cqw - var(--events-min-w), var(--events-tablet-span)) * ${tabletShare} + max(0rem, 100cqw - var(--events-desktop-w)) * ${desktopShare})`
+                  : `calc(${rem}rem + clamp(0rem, 100cqw - var(--events-min-w), var(--events-tablet-span)) * ${tabletShare})`;
               return <col key={k} style={{ width }} />;
             })}
           </colgroup>
