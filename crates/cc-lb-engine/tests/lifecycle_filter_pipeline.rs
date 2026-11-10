@@ -1,6 +1,9 @@
 use crate::common;
+use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, messages_request};
 
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,10 +20,94 @@ use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::{HeaderValue, StatusCode};
 use parking_lot::Mutex as ParkingMutex;
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::layer::{Context, SubscriberExt as _};
+use tracing_subscriber::{Layer, Registry};
 use url::Url;
 use uuid::Uuid;
 
-use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, messages_request};
+const UNKNOWN_ALIAS_MESSAGE: &str = "unknown model alias, returning unchanged";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CapturedWarning {
+    message: String,
+    model: Option<String>,
+}
+
+#[derive(Default)]
+struct EventFields {
+    message: Option<String>,
+    model: Option<String>,
+}
+
+impl tracing::field::Visit for EventFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+        let value = format!("{value:?}");
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .map_or(value.clone(), str::to_owned);
+        self.record(field, value);
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.record(field, value.to_owned());
+    }
+}
+
+impl EventFields {
+    fn record(&mut self, field: &tracing::field::Field, value: String) {
+        match field.name() {
+            "message" => self.message = Some(value),
+            "model" => self.model = Some(value),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WarningLayer {
+    warnings: Arc<Mutex<Vec<CapturedWarning>>>,
+}
+
+impl<S> Layer<S> for WarningLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if *event.metadata().level() != Level::WARN {
+            return;
+        }
+        let mut fields = EventFields::default();
+        event.record(&mut fields);
+        let Some(message) = fields.message else {
+            return;
+        };
+        self.warnings
+            .lock()
+            .expect("warning capture lock")
+            .push(CapturedWarning {
+                message,
+                model: fields.model,
+            });
+    }
+}
+
+async fn capture_warnings<F, Fut, R>(operation: F) -> (R, Vec<CapturedWarning>)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = R>,
+{
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let layer = WarningLayer {
+        warnings: Arc::clone(&warnings),
+    };
+    let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+    let result = operation().await;
+    let warnings = warnings.lock().expect("warning capture lock").clone();
+    (result, warnings)
+}
 
 #[tokio::test]
 async fn pipeline_filters_candidates_before_terminal_strategy()
@@ -171,21 +258,25 @@ async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn realtime_provider_filters_see_bounded_precedence_identity_without_claude_ancestry()
 -> Result<(), Box<dyn std::error::Error>> {
     let openai_id = Uuid::from_u128(2);
     let gemini_id = Uuid::from_u128(3);
     let openai_threads = Arc::new(Mutex::new(Vec::new()));
     let gemini_threads = Arc::new(Mutex::new(Vec::new()));
+    let openai_models = Arc::new(Mutex::new(Vec::new()));
+    let gemini_models = Arc::new(Mutex::new(Vec::new()));
     let openai_filter = Arc::new(RecordingIdentityFilter {
         name: "openai-identity",
         threads: Arc::clone(&openai_threads),
+        canonical_models: Arc::clone(&openai_models),
         kept_upstream_ids: vec![openai_id],
     });
     let gemini_filter = Arc::new(RecordingIdentityFilter {
         name: "gemini-identity",
         threads: Arc::clone(&gemini_threads),
+        canonical_models: Arc::clone(&gemini_models),
         kept_upstream_ids: vec![gemini_id],
     });
     let principal_view =
@@ -275,23 +366,37 @@ async fn realtime_provider_filters_see_bounded_precedence_identity_without_claud
             );
 
             let observation = lifecycle.begin_realtime_websocket(&auth, path);
-            let result = lifecycle
-                .prepare_realtime_websocket(
-                    &auth,
-                    observation,
-                    kind,
-                    &headers,
-                    RealtimeWebSocketTarget {
-                        path,
-                        query: None,
-                        model: Some(model),
-                    },
-                    Bytes::from_static(br#"{"setup":{"type":"realtime"}}"#),
-                )
-                .await;
+            let (result, warnings) = capture_warnings(|| async {
+                lifecycle
+                    .prepare_realtime_websocket(
+                        &auth,
+                        observation,
+                        kind,
+                        &headers,
+                        RealtimeWebSocketTarget {
+                            path,
+                            query: None,
+                            model: Some(model),
+                        },
+                        Bytes::from_static(br#"{"setup":{"type":"realtime"}}"#),
+                    )
+                    .await
+            })
+            .await;
             assert!(
                 result.is_ok(),
                 "{expected_provider:?} setup should route after filtering"
+            );
+            assert_eq!(
+                warnings
+                    .iter()
+                    .filter(|warning| {
+                        warning.message == UNKNOWN_ALIAS_MESSAGE
+                            && warning.model.as_deref() == Some(model)
+                    })
+                    .count(),
+                0,
+                "{expected_provider:?} native setup model emitted alias warnings: {warnings:?}"
             );
 
             let parse = loop {
@@ -306,6 +411,7 @@ async fn realtime_provider_filters_see_bounded_precedence_identity_without_claud
                     break info;
                 }
             };
+            assert_eq!(parse.model.as_deref(), Some(model));
             assert_eq!(parse.thread_id.as_deref(), Some(expected_thread.as_str()));
             assert_eq!(parse.claude_agent_id, None);
             assert_eq!(parse.claude_parent_agent_id, None);
@@ -320,6 +426,14 @@ async fn realtime_provider_filters_see_bounded_precedence_identity_without_claud
     assert_eq!(
         gemini_threads.lock().unwrap().as_slice(),
         ["gemini-top", "gemini-fallback"]
+    );
+    assert_eq!(
+        openai_models.lock().unwrap().as_slice(),
+        ["gpt-realtime", "gpt-realtime"]
+    );
+    assert_eq!(
+        gemini_models.lock().unwrap().as_slice(),
+        ["gemini-live", "gemini-live"]
     );
     Ok(())
 }
@@ -438,6 +552,7 @@ fn default_upstream_id() -> Uuid {
 struct RecordingIdentityFilter {
     name: &'static str,
     threads: Arc<Mutex<Vec<String>>>,
+    canonical_models: Arc<Mutex<Vec<String>>>,
     kept_upstream_ids: Vec<Uuid>,
 }
 
@@ -453,6 +568,10 @@ impl FilterPlugin for RecordingIdentityFilter {
                 .clone()
                 .expect("thread identity reaches filter"),
         );
+        self.canonical_models
+            .lock()
+            .unwrap()
+            .push(ctx.canonical_model_id.clone());
         Ok(FilterOutput {
             kept_upstream_ids: self.kept_upstream_ids.clone(),
             reason: format!("{} kept identity", self.name),

@@ -1123,6 +1123,7 @@ mod tests {
         model_resolution::canonical_model_id,
         tokenizer::{reset_tokenizer_call_count, tokenizer_call_count},
     };
+    use cc_lb_domain::Provider;
 
     use super::{
         V3PromptCacheBlockSource, analyze_v3_prompt_cache, cacheable_breakpoint_prefix_keys,
@@ -1136,7 +1137,10 @@ mod tests {
             "messages": [{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.blocks.len(), 3);
         assert_eq!(analysis.blocks[0].source, V3PromptCacheBlockSource::Tools);
@@ -1161,7 +1165,10 @@ mod tests {
             ]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.blocks.len(), 3);
         assert_eq!(analysis.blocks[0].path, "messages[0].content[1]");
@@ -1189,7 +1196,10 @@ mod tests {
             ]}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.blocks.len(), 2);
         assert_eq!(analysis.blocks[0].path, "messages[0].content[2]");
@@ -1209,7 +1219,10 @@ mod tests {
             ]}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.blocks.len(), 2);
         assert_eq!(analysis.breakpoints.len(), 1);
@@ -1229,7 +1242,10 @@ mod tests {
             ]}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.blocks.len(), 2);
         assert!(analysis.breakpoints.is_empty());
@@ -1255,7 +1271,7 @@ mod tests {
         reset_tokenizer_call_count();
         let deduplicated = analyze_v3_prompt_cache(
             &deduplicated_request,
-            canonical_model_id("claude-sonnet-4-5"),
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
         );
 
         assert_eq!(deduplicated.blocks.len(), 4);
@@ -1277,8 +1293,10 @@ mod tests {
         });
 
         reset_tokenizer_call_count();
-        let over_cap =
-            analyze_v3_prompt_cache(&over_cap_request, canonical_model_id("claude-sonnet-4-5"));
+        let over_cap = analyze_v3_prompt_cache(
+            &over_cap_request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert!(over_cap.blocks.is_empty());
         assert!(over_cap.breakpoints.is_empty());
@@ -1297,7 +1315,10 @@ mod tests {
             }]}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.blocks.len(), 1);
         assert_eq!(analysis.breakpoints.len(), 1);
@@ -1323,7 +1344,10 @@ mod tests {
             ]}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.blocks.len(), 2);
         assert_eq!(analysis.breakpoints.len(), 2);
@@ -1357,10 +1381,14 @@ mod tests {
             ]}]
         });
 
-        let without_thinking =
-            analyze_v3_prompt_cache(&without_thinking, canonical_model_id("claude-sonnet-4-5"));
-        let with_thinking =
-            analyze_v3_prompt_cache(&with_thinking, canonical_model_id("claude-sonnet-4-5"));
+        let without_thinking = analyze_v3_prompt_cache(
+            &without_thinking,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
+        let with_thinking = analyze_v3_prompt_cache(
+            &with_thinking,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(without_thinking.breakpoints[0].block_index, 1);
         assert_eq!(with_thinking.breakpoints[0].block_index, 2);
@@ -1403,11 +1431,18 @@ mod tests {
         let mut explicit_speed = omitted.clone();
         explicit_speed["speed"] = json!("standard");
 
-        let omitted = analyze_v3_prompt_cache(&omitted, canonical_model_id("claude-sonnet-4-5"));
-        let explicit_effort =
-            analyze_v3_prompt_cache(&explicit_effort, canonical_model_id("claude-sonnet-4-5"));
-        let explicit_speed =
-            analyze_v3_prompt_cache(&explicit_speed, canonical_model_id("claude-sonnet-4-5"));
+        let omitted = analyze_v3_prompt_cache(
+            &omitted,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
+        let explicit_effort = analyze_v3_prompt_cache(
+            &explicit_effort,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
+        let explicit_speed = analyze_v3_prompt_cache(
+            &explicit_speed,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
         let prefix_keys = |analysis: &super::V3PromptCacheAnalysis| {
             analysis
                 .breakpoints
@@ -1438,8 +1473,14 @@ mod tests {
         let mut disabled = omitted.clone();
         disabled["thinking"] = json!({"type":"disabled"});
 
-        let omitted = analyze_v3_prompt_cache(&omitted, canonical_model_id("claude-sonnet-4-5"));
-        let disabled = analyze_v3_prompt_cache(&disabled, canonical_model_id("claude-sonnet-4-5"));
+        let omitted = analyze_v3_prompt_cache(
+            &omitted,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
+        let disabled = analyze_v3_prompt_cache(
+            &disabled,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_ne!(
             omitted.breakpoints[0].prefix_key,
@@ -1493,8 +1534,14 @@ mod tests {
         let keepalive: serde_json::Value =
             serde_json::from_slice(&snapshot.build_keepalive_body().unwrap()).unwrap();
 
-        let live = analyze_v3_prompt_cache(&base, canonical_model_id("claude-opus-5-5"));
-        let renewal = analyze_v3_prompt_cache(&keepalive, canonical_model_id("claude-opus-5-5"));
+        let live = analyze_v3_prompt_cache(
+            &base,
+            canonical_model_id(Provider::Anthropic, "claude-opus-5-5"),
+        );
+        let renewal = analyze_v3_prompt_cache(
+            &keepalive,
+            canonical_model_id(Provider::Anthropic, "claude-opus-5-5"),
+        );
         assert_eq!(
             live.breakpoints[2].prefix_key,
             renewal.breakpoints[2].prefix_key
@@ -1502,7 +1549,10 @@ mod tests {
 
         let mut disabled = base.clone();
         disabled["thinking"] = json!({"type": "disabled"});
-        let disabled = analyze_v3_prompt_cache(&disabled, canonical_model_id("claude-opus-5-5"));
+        let disabled = analyze_v3_prompt_cache(
+            &disabled,
+            canonical_model_id(Provider::Anthropic, "claude-opus-5-5"),
+        );
         assert_ne!(
             live.breakpoints[2].prefix_key,
             disabled.breakpoints[2].prefix_key
@@ -1510,8 +1560,10 @@ mod tests {
 
         let mut changed_tool_choice = keepalive;
         changed_tool_choice["tool_choice"] = json!({"type": "none"});
-        let changed_tool_choice =
-            analyze_v3_prompt_cache(&changed_tool_choice, canonical_model_id("claude-opus-5-5"));
+        let changed_tool_choice = analyze_v3_prompt_cache(
+            &changed_tool_choice,
+            canonical_model_id(Provider::Anthropic, "claude-opus-5-5"),
+        );
         assert_ne!(
             live.breakpoints[2].prefix_key,
             changed_tool_choice.breakpoints[2].prefix_key
@@ -1586,7 +1638,10 @@ mod tests {
             "messages": [{"role":"user","content": content}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
         let lookback = &analysis.breakpoints[0].lookback_prefixes;
 
         assert_eq!(lookback.len(), 20);
@@ -1610,7 +1665,10 @@ mod tests {
         });
 
         reset_tokenizer_call_count();
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert!(analysis.breakpoints.is_empty());
         assert_eq!(tokenizer_call_count(), 0);
@@ -1633,7 +1691,10 @@ mod tests {
         });
 
         reset_tokenizer_call_count();
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.breakpoints.len(), 2);
         assert_eq!(tokenizer_call_count(), 0);
@@ -1652,7 +1713,10 @@ mod tests {
         });
 
         reset_tokenizer_call_count();
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert!(analysis.blocks.is_empty());
         assert!(analysis.breakpoints.is_empty());
@@ -1676,7 +1740,10 @@ mod tests {
         });
 
         reset_tokenizer_call_count();
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.breakpoints.len(), 4);
         assert_eq!(tokenizer_call_count(), 0);
@@ -1695,7 +1762,7 @@ mod tests {
                 }]
             }]
         });
-        let model = canonical_model_id("claude-sonnet-4-5");
+        let model = canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5");
         let analysis = analyze_v3_prompt_cache(&request, model);
 
         reset_tokenizer_call_count();
@@ -1718,7 +1785,7 @@ mod tests {
                 }]
             }]
         });
-        let model = canonical_model_id("claude-sonnet-4-5");
+        let model = canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5");
         let analysis = analyze_v3_prompt_cache(&request, model);
         assert!((1_024..8_192).contains(&analysis.breakpoints[0].prefix_bytes.get()));
 
@@ -1751,7 +1818,7 @@ mod tests {
             reset_tokenizer_call_count();
             let _ = analyze_v3_prompt_cache(
                 &one_breakpoint(block_count),
-                canonical_model_id("claude-sonnet-4-5"),
+                canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
             );
             assert_eq!(tokenizer_call_count(), 0, "block_count={block_count}");
         }
@@ -1773,7 +1840,10 @@ mod tests {
             "messages": [{"role":"user","content": content}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
         let indices = analysis.breakpoints[0]
             .lookback_prefixes
             .iter()
@@ -1800,7 +1870,10 @@ mod tests {
             "messages": [{"role":"user","content": content}]
         });
 
-        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let analysis = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(analysis.breakpoints.len(), 2);
         assert!(analysis.breakpoints.iter().all(|breakpoint| {
@@ -1826,9 +1899,14 @@ mod tests {
             }]}]
         });
 
-        let five_minute =
-            analyze_v3_prompt_cache(&five_minute, canonical_model_id("claude-sonnet-4-5"));
-        let one_hour = analyze_v3_prompt_cache(&one_hour, canonical_model_id("claude-sonnet-4-5"));
+        let five_minute = analyze_v3_prompt_cache(
+            &five_minute,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
+        let one_hour = analyze_v3_prompt_cache(
+            &one_hour,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
 
         assert_eq!(
             five_minute.breakpoints[0].prefix_key,
@@ -1854,8 +1932,14 @@ mod tests {
             ]}]
         });
 
-        let previous = analyze_v3_prompt_cache(&previous, canonical_model_id("claude-sonnet-4-5"));
-        let current = analyze_v3_prompt_cache(&current, canonical_model_id("claude-sonnet-4-5"));
+        let previous = analyze_v3_prompt_cache(
+            &previous,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
+        let current = analyze_v3_prompt_cache(
+            &current,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        );
         let previous_breakpoint = previous
             .breakpoints
             .first()
@@ -2030,11 +2114,11 @@ mod tests {
 
         let first = analyze_v3_prompt_cache(
             &request_with_first_suffix("cron-a"),
-            canonical_model_id("claude-sonnet-4-5"),
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
         );
         let second = analyze_v3_prompt_cache(
             &request_with_first_suffix("cron-b"),
-            canonical_model_id("claude-sonnet-4-5"),
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
         );
 
         assert_eq!(first.blocks.len(), 3);
@@ -2079,7 +2163,7 @@ mod tests {
 
         let analysis = super::analyze_v3_prompt_cache_literal(
             &request,
-            canonical_model_id("claude-sonnet-4-5"),
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
         );
 
         assert_eq!(analysis.breakpoints.len(), 1);
@@ -2094,7 +2178,13 @@ mod tests {
 
     #[test]
     fn model_canonicalization_does_not_fabricate_four_six_dates() {
-        assert_eq!(canonical_model_id("claude-sonnet-4-6"), "claude-sonnet-4-6");
-        assert_eq!(canonical_model_id("claude-opus-4-6"), "claude-opus-4-6");
+        assert_eq!(
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            canonical_model_id(Provider::Anthropic, "claude-opus-4-6"),
+            "claude-opus-4-6"
+        );
     }
 }

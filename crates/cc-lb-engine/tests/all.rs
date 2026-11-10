@@ -88,6 +88,8 @@ mod limit_engine_smoke;
 mod load_once_bind_dispatch;
 #[path = "loom_principal_view.rs"]
 mod loom_principal_view;
+#[path = "model_resolution_provider.rs"]
+mod model_resolution_provider;
 #[path = "no_modification_of_success_body.rs"]
 mod no_modification_of_success_body;
 #[path = "open_rejects_immediately.rs"]

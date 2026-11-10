@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use cc_lb_domain::Provider;
+
 use cc_lb_lifecycle::{EventId, LifecycleEvent};
 use cc_lb_observability::EngineMetricsHook;
 use tokio::sync::{mpsc, oneshot};
@@ -285,7 +287,7 @@ fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: 
     }
     let upstream = partial.upstream_name.as_deref().unwrap_or("unknown");
     let raw_model = partial.model.as_deref().unwrap_or("");
-    let model = canonical_model_id(raw_model);
+    let model = canonical_model_id(Provider::Anthropic, raw_model);
     let actual_hit = partial.cache_read_input_tokens > 0;
     if actual_hit {
         metrics_hook.record_cache_hit(upstream, model);

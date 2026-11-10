@@ -3923,7 +3923,7 @@ impl Lifecycle {
         } else {
             path_model
                 .as_deref()
-                .map(canonical_model_id)
+                .map(|model| canonical_model_id(request_capability.provider(), model))
                 .unwrap_or(&cache_metadata.canonical_model_id)
                 .to_owned()
         };
@@ -4675,7 +4675,7 @@ impl Lifecycle {
         }
         let mut downstream_headers = ingress.headers.clone();
         strip_hop_by_hop(&mut downstream_headers);
-        let canonical_model = canonical_model_id(model).to_owned();
+        let canonical_model = canonical_model_id(Provider::Openai, model).to_owned();
         let service_tier = body.get("service_tier").and_then(Value::as_str);
         let identity = request_identity_metadata(ingress.headers, Some(body));
         let ctx = RequestContext::builder()
@@ -5258,7 +5258,7 @@ impl Lifecycle {
                 let canonical_model = value
                     .get("model")
                     .and_then(Value::as_str)
-                    .map(canonical_model_id)
+                    .map(|model| canonical_model_id(Provider::Anthropic, model))
                     .unwrap_or_default()
                     .to_owned();
                 let token_threshold = Some(cache_threshold_tokens(&canonical_model));
@@ -5335,7 +5335,7 @@ impl Lifecycle {
         } else {
             path_model
                 .as_deref()
-                .map(canonical_model_id)
+                .map(|model| canonical_model_id(request_capability.provider(), model))
                 .unwrap_or(&cache_metadata.canonical_model_id)
                 .to_owned()
         };
@@ -11029,7 +11029,7 @@ mod prompt_cache_policy_tests {
                 "cache_control": {"type": "ephemeral"}
             }));
             let request = json!({"model":"claude-sonnet-4-5","system":system});
-            let canonical_model = canonical_model_id("claude-sonnet-4-5");
+            let canonical_model = canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5");
             crate::tokenizer::reset_tokenizer_call_count();
             let analysis = analyze_v3_prompt_cache(&request, canonical_model);
             let eligible = cacheable_breakpoint_prefix_keys(
@@ -11079,7 +11079,7 @@ mod prompt_cache_policy_tests {
                 "cache_control": {"type": "ephemeral"}
             }]
         });
-        let canonical_model = canonical_model_id("claude-sonnet-4-5");
+        let canonical_model = canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5");
         let output = PromptCacheAnalysisExecutor::default()
             .analyze(
                 Arc::new(request.clone()),
@@ -11521,7 +11521,7 @@ fn request_cache_metadata_from_value(
         let canonical_model = value
             .get("model")
             .and_then(Value::as_str)
-            .map(canonical_model_id)
+            .map(|model| canonical_model_id(Provider::Anthropic, model))
             .unwrap_or_default();
         PromptCacheAnalysisOutput {
             analysis: analyze_v3_prompt_cache(value, canonical_model),
@@ -11785,7 +11785,13 @@ fn request_cache_metadata_from_value_with_analysis_for_capability(
     } else {
         value.get("model").and_then(Value::as_str)
     };
-    let canonical_model_id = model.map(canonical_model_id).unwrap_or_default().to_owned();
+    let provider = capability
+        .map(ProviderCapability::provider)
+        .unwrap_or(Provider::Anthropic);
+    let canonical_model_id = model
+        .map(|model| canonical_model_id(provider, model))
+        .unwrap_or_default()
+        .to_owned();
     let modern_openai_interpretation = if capability == Some(ProviderCapability::OpenaiResponses)
         && crate::cache_keepalive::openai::is_gpt56_or_newer(&canonical_model_id)
     {
@@ -12947,6 +12953,7 @@ fn db_principal_kind_as_str(kind: DbPrincipalKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
@@ -12958,6 +12965,9 @@ mod tests {
         upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord},
     };
     use http::header::{HeaderName, HeaderValue};
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt as _};
+    use tracing_subscriber::{Layer, Registry};
 
     use super::*;
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
@@ -13056,6 +13066,190 @@ mod tests {
             );
             assert!(metadata.native_cache.is_none());
         }
+    }
+    #[derive(Default)]
+    struct ResolverWarningFields {
+        message: Option<String>,
+        model: Option<String>,
+    }
+
+    impl tracing::field::Visit for ResolverWarningFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+            let value = format!("{value:?}");
+            let value = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .map_or(value.clone(), str::to_owned);
+            self.record(field, value);
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record(field, value.to_owned());
+        }
+    }
+
+    impl ResolverWarningFields {
+        fn record(&mut self, field: &tracing::field::Field, value: String) {
+            match field.name() {
+                "message" => self.message = Some(value),
+                "model" => self.model = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    type ResolverWarning = (String, Option<String>);
+
+    #[derive(Clone)]
+    struct ResolverWarningLayer {
+        warnings: Arc<Mutex<Vec<ResolverWarning>>>,
+    }
+
+    impl<S> Layer<S> for ResolverWarningLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() != Level::WARN {
+                return;
+            }
+            let mut fields = ResolverWarningFields::default();
+            event.record(&mut fields);
+            let Some(message) = fields.message else {
+                return;
+            };
+            self.warnings
+                .lock()
+                .expect("resolver warning capture lock")
+                .push((message, fields.model));
+        }
+    }
+
+    fn capture_resolver_warnings<R>(operation: impl FnOnce() -> R) -> (R, Vec<ResolverWarning>) {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let layer = ResolverWarningLayer {
+            warnings: Arc::clone(&warnings),
+        };
+        let result = tracing::subscriber::with_default(Registry::default().with(layer), operation);
+        let warnings = warnings
+            .lock()
+            .expect("resolver warning capture lock")
+            .clone();
+        (result, warnings)
+    }
+
+    fn alias_warnings(warnings: &[ResolverWarning]) -> Vec<&ResolverWarning> {
+        warnings
+            .iter()
+            .filter(|(message, _)| message == "unknown model alias, returning unchanged")
+            .collect()
+    }
+
+    #[test]
+    fn request_cache_metadata_resolves_provider_models_without_alias_warnings() {
+        let (metadata, warnings) = capture_resolver_warnings(|| {
+            let openai = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&json!({"model": "gpt-5-mini", "input": []})),
+                None,
+                Some(ProviderCapability::OpenaiResponses),
+                None,
+            );
+            let gemini_generate = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&json!({"contents": []})),
+                None,
+                Some(ProviderCapability::GeminiGenerateContent),
+                Some("gemini-3.5-flash-lite"),
+            );
+            let gemini_count_tokens =
+                request_cache_metadata_from_value_with_analysis_for_capability(
+                    &HeaderMap::new(),
+                    Some(&json!({"model": "gemini-3.5-flash-lite", "contents": []})),
+                    None,
+                    Some(ProviderCapability::GeminiCountTokens),
+                    Some("gemini-3.5-flash-lite"),
+                );
+            let anthropic_rolling = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&json!({"model": "claude-sonnet-4-5", "messages": []})),
+                None,
+                Some(ProviderCapability::AnthropicMessages),
+                None,
+            );
+            let anthropic_dated = request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&json!({"model": "claude-sonnet-4-5-20250929", "messages": []})),
+                None,
+                Some(ProviderCapability::AnthropicMessages),
+                None,
+            );
+            [
+                openai,
+                gemini_generate,
+                gemini_count_tokens,
+                anthropic_rolling,
+                anthropic_dated,
+            ]
+        });
+
+        assert_eq!(metadata[0].canonical_model_id, "gpt-5-mini");
+        assert_eq!(metadata[1].canonical_model_id, "gemini-3.5-flash-lite");
+        assert_eq!(metadata[2].canonical_model_id, "gemini-3.5-flash-lite");
+        assert_eq!(metadata[3].canonical_model_id, "claude-sonnet-4-5-20250929");
+        assert_eq!(metadata[4].canonical_model_id, "claude-sonnet-4-5-20250929");
+        assert!(
+            alias_warnings(&warnings).is_empty(),
+            "unexpected alias warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn request_cache_metadata_warns_once_for_unknown_anthropic_model() {
+        let body = json!({"model": "claude-future-model", "messages": []});
+        let (metadata, warnings) = capture_resolver_warnings(|| {
+            request_cache_metadata_from_value_with_analysis_for_capability(
+                &HeaderMap::new(),
+                Some(&body),
+                None,
+                Some(ProviderCapability::AnthropicMessages),
+                None,
+            )
+        });
+
+        assert_eq!(metadata.canonical_model_id, "claude-future-model");
+        let alias_warnings = alias_warnings(&warnings);
+        assert_eq!(
+            alias_warnings.len(),
+            1,
+            "unexpected alias warnings: {alias_warnings:?}"
+        );
+        assert_eq!(
+            alias_warnings[0].0,
+            "unknown model alias, returning unchanged"
+        );
+        assert_eq!(alias_warnings[0].1.as_deref(), Some("claude-future-model"));
+    }
+
+    #[test]
+    fn request_cache_metadata_without_capability_warns_for_unknown_anthropic_model() {
+        let body = json!({"model": "claude-future-model", "messages": []});
+        let (metadata, warnings) = capture_resolver_warnings(|| {
+            request_cache_metadata_from_value(&HeaderMap::new(), Some(&body))
+        });
+
+        assert_eq!(metadata.canonical_model_id, "claude-future-model");
+        let alias_warnings = alias_warnings(&warnings);
+        assert!(
+            !alias_warnings.is_empty(),
+            "expected an unknown Anthropic alias warning"
+        );
+        assert!(
+            alias_warnings
+                .iter()
+                .all(|(_, model)| model.as_deref() == Some("claude-future-model")),
+            "unexpected alias warning fields: {alias_warnings:?}"
+        );
     }
 
     #[tokio::test]
@@ -17111,13 +17305,15 @@ mod tests {
             .cache_breakpoints
             .first()
             .expect("system cache breakpoint");
-        let expected_v3 =
-            analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"))
-                .breakpoints
-                .first()
-                .expect("system cache breakpoint")
-                .prefix_key
-                .clone();
+        let expected_v3 = analyze_v3_prompt_cache(
+            &request,
+            canonical_model_id(Provider::Anthropic, "claude-sonnet-4-5"),
+        )
+        .breakpoints
+        .first()
+        .expect("system cache breakpoint")
+        .prefix_key
+        .clone();
 
         assert_eq!(breakpoint.prefix_hash, expected_v3);
     }

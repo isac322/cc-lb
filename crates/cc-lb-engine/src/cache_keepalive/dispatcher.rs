@@ -7,8 +7,8 @@ use bytes::Bytes;
 use cc_lb_clock::{ClockHandle, unix_millis, unix_secs};
 use cc_lb_control::dynamic_view::DynamicViewHolder;
 use cc_lb_domain::{
-    CacheBreakpoint, CacheBreakpointSource, PrefixBytes, Principal, PrincipalKind, TtlClass,
-    Upstream,
+    CacheBreakpoint, CacheBreakpointSource, PrefixBytes, Principal, PrincipalKind, Provider,
+    TtlClass, Upstream,
 };
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -365,7 +365,7 @@ fn keepalive_observation_plan(
     let canonical_model = value
         .get("model")
         .and_then(Value::as_str)
-        .map(canonical_model_id)?
+        .map(|requested| canonical_model_id(Provider::Anthropic, requested))?
         .to_owned();
     let (analysis, _) = analyze_v3_prompt_cache_with_policy(
         &value,
