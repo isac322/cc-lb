@@ -89,16 +89,18 @@ export function TokenCell({
     color: category.color,
     value: b[category.key],
   }));
-  const fallbackWrite =
-    b.cache_write_30m === 0 && b.cache_write_12h === 0 ? nativeWrite : 0;
+  const residualWrite = Math.max(
+    0,
+    nativeWrite - b.cache_write_30m - b.cache_write_12h,
+  );
   const segments =
-    fallbackWrite > 0
+    residualWrite > 0
       ? [
           ...rows.slice(0, 3),
           {
             label: 'Cache write',
             color: 'var(--color-series-cache-create-5m)',
-            value: fallbackWrite,
+            value: residualWrite,
           },
           ...rows.slice(3),
         ]
@@ -107,7 +109,7 @@ export function TokenCell({
   const popover = (
     <BreakdownPopover
       title="Tokens"
-      rows={rows.map((row) => ({ ...row, fmt: fmtTokens }))}
+      rows={segments.map((row) => ({ ...row, fmt: fmtTokens }))}
       footer={
         hit != null
           ? { label: 'Cache hit of prompt', value: hit, fmt: (v) => `${v}%` }
