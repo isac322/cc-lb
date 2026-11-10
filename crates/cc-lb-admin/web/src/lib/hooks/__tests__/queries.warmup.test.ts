@@ -8,6 +8,7 @@ import {
   useFireNowUpstreamWarmup,
   useUpdateUpstreamWarmupSettings,
   useWarmupAttempts,
+  useWarmupSummary,
 } from '../../queries';
 import {
   makeFireNowError,
@@ -209,32 +210,6 @@ describe('useClearUpstreamWarmupDialectPlugin', () => {
     expect(init?.method).toBe('DELETE');
     expect(headersFrom(init).get('If-Match')).toBe(`W/"${SPEC_REVISION}"`);
   });
-
-  test('returns updated upstream and invalidates upstream detail before list', async () => {
-    const updatedUpstream = makeOauthUpstream({
-      id: UPSTREAM_ID,
-      spec_revision: SPEC_REVISION + 1,
-      warmup_dialect_plugin: null,
-    });
-    stubFetchOnce(updatedUpstream);
-    const client = makeClient();
-    const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
-    const { result } = renderHook(() => useClearUpstreamWarmupDialectPlugin(), {
-      wrapper: makeWrapper(client),
-    });
-
-    await expect(
-      result.current.mutateAsync({
-        id: UPSTREAM_ID,
-        spec_revision: SPEC_REVISION,
-      }),
-    ).resolves.toEqual(updatedUpstream);
-
-    expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
-      qk.upstream(UPSTREAM_ID),
-      qk.upstreams,
-    ]);
-  });
 });
 
 describe('useUpdateUpstreamWarmupSettings', () => {
@@ -297,32 +272,99 @@ describe('useUpdateUpstreamWarmupSettings', () => {
     expect(init?.method).toBe('PATCH');
     expect(init?.body).toBe(JSON.stringify(patch));
   });
+});
 
-  test('returns updated upstream and invalidates upstream detail before list', async () => {
-    const patch = { warmup_enabled: false };
-    const updatedUpstream = makeOauthUpstream({
-      id: UPSTREAM_ID,
-      spec_revision: SPEC_REVISION + 1,
-      ...patch,
-    });
-    stubFetchOnce(updatedUpstream);
-    const client = makeClient();
-    const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
-    const { result } = renderHook(() => useUpdateUpstreamWarmupSettings(), {
-      wrapper: makeWrapper(client),
-    });
-
-    await expect(
-      result.current.mutateAsync({
+describe('warm-up plugin snapshot after mutation', () => {
+  test.each(['save', 'clear'] as const)(
+    '%s refreshes the effective snapshot before the next poll',
+    async (operation) => {
+      const previousPlugin = {
+        wasm_registry_id: 'shape-before',
+        wire_version: 1,
+        config: { source: 'before' },
+      };
+      const nextPlugin = {
+        wasm_registry_id: 'shape-after',
+        wire_version: 2,
+        config: { source: 'after' },
+      };
+      let upstream = makeOauthUpstream({
         id: UPSTREAM_ID,
         spec_revision: SPEC_REVISION,
-        body: patch,
-      }),
-    ).resolves.toEqual(updatedUpstream);
-
-    expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
-      qk.upstream(UPSTREAM_ID),
-      qk.upstreams,
-    ]);
-  });
+        warmup_dialect_plugin: previousPlugin,
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/warmup')) {
+            return jsonResponse({
+              upstream_id: UPSTREAM_ID,
+              last_attempt: null,
+              recent_attempts: [],
+              next_scheduled_at_unix_secs: null,
+              recent_summary_7d: {
+                success: 0,
+                skipped: 0,
+                transient_failure: 0,
+                permanent_failure: 0,
+              },
+              dialect_plugin: upstream.warmup_dialect_plugin,
+            });
+          }
+          if (init?.method === 'PATCH') {
+            const patch = JSON.parse(String(init.body));
+            upstream = {
+              ...upstream,
+              ...patch,
+              spec_revision: upstream.spec_revision + 1,
+            };
+          } else if (init?.method === 'DELETE') {
+            upstream = {
+              ...upstream,
+              warmup_dialect_plugin: null,
+              spec_revision: upstream.spec_revision + 1,
+            };
+          }
+          return jsonResponse(upstream);
+        }),
+      );
+      const client = makeClient();
+      const { result, unmount } = renderHook(
+        () => ({
+          summary: useWarmupSummary(UPSTREAM_ID),
+          save: useUpdateUpstreamWarmupSettings(),
+          clear: useClearUpstreamWarmupDialectPlugin(),
+        }),
+        { wrapper: makeWrapper(client) },
+      );
+      try {
+        await waitFor(() =>
+          expect(result.current.summary.data?.dialect_plugin).toEqual(
+            previousPlugin,
+          ),
+        );
+        if (operation === 'save') {
+          await result.current.save.mutateAsync({
+            id: UPSTREAM_ID,
+            spec_revision: SPEC_REVISION,
+            body: { warmup_dialect_plugin: nextPlugin },
+          });
+        } else {
+          await result.current.clear.mutateAsync({
+            id: UPSTREAM_ID,
+            spec_revision: SPEC_REVISION,
+          });
+        }
+        await waitFor(() =>
+          expect(result.current.summary.data?.dialect_plugin).toEqual(
+            operation === 'save' ? nextPlugin : null,
+          ),
+        );
+      } finally {
+        unmount();
+        client.clear();
+      }
+    },
+  );
 });

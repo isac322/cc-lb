@@ -505,7 +505,12 @@ test.describe('WarmupCard', () => {
     let patchBody: unknown;
     let ifMatch: string | null = null;
     await installAppFixtures(page, {
-      upstreams: [oauthHealthy({ warmup_dialect_plugin: null }), oauthDisabled(), apiKeyUpstream()],
+      upstreams: [oauthHealthy({
+        warmup_dialect_plugin: {
+          wasm_registry_id: 'previous-shape',
+          config: { source: 'before-save' },
+        },
+      }), oauthDisabled(), apiKeyUpstream()],
       onPatch: async (request, upstream) => {
         patchBody = request.postDataJSON();
         ifMatch = request.headers()['if-match'] ?? null;
@@ -515,6 +520,10 @@ test.describe('WarmupCard', () => {
       },
     });
     await openUpstreams(page);
+    await expect(page.getByTestId('warmup-status-value')).toContainText('Healthy');
+    await page.getByRole('button', { name: 'View plugin config' }).click();
+    await expect(page.getByRole('dialog', { name: 'previous-shape' })).toBeVisible();
+    await page.keyboard.press('Escape');
     await page.getByTestId('warmup-plugin-select').click();
     await page.getByRole('option', { name: 'anthropic-shape-v2', exact: true }).click();
 
@@ -523,6 +532,11 @@ test.describe('WarmupCard', () => {
     await testInfo.attach('scenario-6-patch-body.json', { body: JSON.stringify(patchBody, null, 2), contentType: 'application/json' });
     await expect(page.getByTestId('warmup-plugin-select')).toContainText('anthropic-shape-v2');
     await expect(page.getByText(COPY.dialectPluginSaveSuccess)).toBeVisible();
+    await page.getByRole('button', { name: 'View plugin config' }).click();
+    const configDialog = page.getByRole('dialog', { name: 'anthropic-shape-v2' });
+    await expect(configDialog).toBeVisible();
+    await expect(configDialog.locator('pre')).toHaveText('{}');
+    await page.keyboard.press('Escape');
     await page.screenshot({ path: testInfo.outputPath('scenario-6-plugin-save.png'), fullPage: true });
   });
 
@@ -541,6 +555,7 @@ test.describe('WarmupCard', () => {
       },
     });
     await openUpstreams(page);
+    await expect(page.getByTestId('warmup-status-value')).toContainText('Healthy');
     await page.getByTestId('warmup-plugin-select').click();
     await page.getByRole('option', { name: COPY.defaultPluginOption, exact: true }).click();
     const dialog = page.getByRole('alertdialog', { name: COPY.confirmClearPluginTitle });
@@ -551,8 +566,6 @@ test.describe('WarmupCard', () => {
     expect(ifMatch).toBe(`W/"${specRevision}"`);
     await expect(page.getByTestId('warmup-plugin-select')).toContainText(COPY.defaultPluginOption);
     await expect(page.getByText(COPY.dialectPluginClearSuccess)).toBeVisible();
-    // The loaded summary remains the effective snapshot until the next fetch.
-    await page.reload();
     await expect(page.getByRole('button', { name: 'View plugin config' })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('scenario-7-plugin-clear.png'), fullPage: true });
   });
@@ -689,6 +702,14 @@ test('Scenario 14: Current plugin config stays reachable across required viewpor
   ]) {
     await page.setViewportSize(viewport);
     await openUpstreams(page);
+    if (viewport.width < 768) {
+      for (const label of ['Warm-up help', 'Shape plugin help']) {
+        const helpButton = page.getByRole('button', { name: label, exact: true });
+        const target = await helpButton.boundingBox();
+        expect(target?.width).toBeGreaterThanOrEqual(44);
+        expect(target?.height).toBeGreaterThanOrEqual(44);
+      }
+    }
 
     const card = page.getByTestId('warmup-card');
     const opener = card.getByRole('button', {
