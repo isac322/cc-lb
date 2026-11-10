@@ -76,6 +76,7 @@ fn v2_encoding_includes_provider_kind_and_quota_sample() {
             extra_usage_enabled: None,
             extra_usage_monthly_limit: None,
             extra_usage_used_credits: None,
+            credits: None,
             observed_at_unix_millis: Some(456),
             max_staleness_secs: 60,
             fallback_available: None,

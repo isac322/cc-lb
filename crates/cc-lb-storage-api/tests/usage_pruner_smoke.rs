@@ -217,6 +217,7 @@ async fn auxiliary_quota_history_keeps_cutoff_anchors() -> Result<(), Box<dyn st
                     extra_usage_enabled: None,
                     extra_usage_monthly_limit: None,
                     extra_usage_used_credits: None,
+                    credits: None,
                     ingested_at_unix_millis: ts * 1_000,
                 }])
                 .await?;

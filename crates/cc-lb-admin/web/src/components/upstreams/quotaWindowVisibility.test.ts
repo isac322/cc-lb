@@ -221,9 +221,9 @@ describe('selectVisibleGraphWindows', () => {
     expect(result).toEqual([]);
   });
 
-  it('keeps the backend-only unified window out of rows and series', () => {
-    // `unified` is not a SubscriptionQuotaWindow; the backend may still
-    // report it on the wire for routing, but it never reaches the UI.
+  it('keeps a unified restriction without credits out of rows and series', () => {
+    // Unified is requested for account restrictions. Only Codex credit facts
+    // are listed; the transport envelope never becomes a chart series.
     const unified = snap({
       window: 'unified',
       observed_at_unix_millis: 1_500_000,

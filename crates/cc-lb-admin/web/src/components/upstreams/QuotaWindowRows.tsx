@@ -16,6 +16,7 @@ import {
 import { cx, Hint, Skeleton } from '../ui/primitives';
 import { ResetCountdownParts } from '../ui/RelativeTime';
 import { UsageMeter } from '../ui/UsageMeter';
+import { CodexCreditSummary, selectCodexCredits } from './codexCredits';
 import { isOverageActive } from './quotaWindowVisibility';
 
 const ROWS_CLASS =
@@ -76,17 +77,31 @@ export function QuotaWindowRow({
   snap,
   nowUnixSecs,
   label,
+  creditObservations,
 }: {
   snap: QuotaSnapshot;
   nowUnixSecs: number;
   label?: string;
+  creditObservations?: readonly QuotaSnapshot[];
 }) {
   const { effective: locale } = useLocale();
   const korean = locale.toLowerCase().startsWith('ko');
-  // `unified` is not a renderable SubscriptionQuotaWindow, but the wire can
-  // still report it (routing/overage) — the row never renders either way.
+  // The unified window is visible only when it carries Codex credit state.
   const windowName: string = snap.window;
-  if (windowName === 'unified' || snap.state === 'absent') return null;
+  if (
+    (windowName === 'unified' && snap.credits == null) ||
+    snap.state === 'absent'
+  ) {
+    return null;
+  }
+  if (snap.credits != null) {
+    return (
+      <CodexCreditsRow
+        observations={creditObservations ?? [snap]}
+        label={label}
+      />
+    );
+  }
   const displayLabel = label ?? windowLabel(windowName);
   const longLabel = windowLabel(windowName, { long: true });
   const isOverage = snap.window === 'overage';
@@ -225,6 +240,29 @@ export function QuotaWindowRow({
         <span className={USED_CELL_CLASS}>{used}</span>
       </div>
       {resetStatus}
+    </div>
+  );
+}
+
+function CodexCreditsRow({
+  observations,
+  label,
+}: {
+  observations: readonly QuotaSnapshot[];
+  label?: string;
+}) {
+  const facts = selectCodexCredits(observations);
+  if (facts == null) return null;
+  return (
+    <div role="listitem" data-window="unified" className={ROW_CLASS}>
+      <WindowName
+        window="unified"
+        label={label ?? 'Codex credits'}
+        longLabel="Codex credits"
+      />
+      <div className="col-start-2 col-span-4 ml-3 min-w-0 @[40rem]:ml-6">
+        <CodexCreditSummary facts={facts} />
+      </div>
     </div>
   );
 }

@@ -735,6 +735,7 @@ fn latest_absent_five_hour_sample_overrides_older_stale_sample_for_weekly_cadenc
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: NOW_UNIX_MILLIS,
     };
     cache.upsert_observation(upstream_id, &sample);
@@ -789,6 +790,7 @@ fn quota_snapshot(
         disabled_reason: None,
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
+        credits: None,
         extra_usage_used_credits: None,
         observed_at_unix_millis: Some(NOW_UNIX_MILLIS),
         max_staleness_secs: 1_800,

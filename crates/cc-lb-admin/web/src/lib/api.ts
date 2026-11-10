@@ -1474,10 +1474,8 @@ export interface AuditQueryResponse {
 }
 
 /**
- * Quota windows the web UI knows how to present. The backend may report
- * others — notably `unified`, the account restriction envelope, which still
- * exists on the wire and in admin payloads — but it is never rendered here
- * and is filtered out by the visibility selectors.
+ * Quota windows the web UI knows how to present. `unified` is rendered as
+ * Codex credits when the snapshot carries credit state.
  */
 export type SubscriptionQuotaWindow =
   | '5h'
@@ -1489,7 +1487,8 @@ export type SubscriptionQuotaWindow =
   | '7d_sonnet'
   | '7d_opus'
   | '7d_fable'
-  | 'overage';
+  | 'overage'
+  | 'unified';
 
 export interface WindowLabelOptions {
   /** Use the complete model-family name for titles and accessible names. */
@@ -1507,6 +1506,7 @@ export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
   '7d_sonnet': '7d (Sonnet)',
   '7d_opus': '7d (Opus)',
   '7d_fable': '7d (Fable)',
+  unified: 'Codex credits',
   overage: 'Extra usage',
 };
 
@@ -1541,6 +1541,15 @@ export type SubscriptionQuotaDataState =
   | 'unobserved';
 export type SubscriptionQuotaSourceMerge = 'header' | 'api' | 'merged';
 
+export interface QuotaCredits {
+  has_credits: boolean | null;
+  unlimited: boolean | null;
+  limit_reached: boolean | null;
+  balance: string | null;
+  approx_local_messages: number[] | null;
+  approx_cloud_messages: number[] | null;
+}
+
 export interface QuotaSnapshot {
   window: SubscriptionQuotaWindow;
   state: SubscriptionQuotaDataState;
@@ -1552,6 +1561,8 @@ export interface QuotaSnapshot {
   representative_claim: string | null;
   disabled_reason: string | null;
   extra_usage_enabled: boolean | null;
+  credits?: QuotaCredits | null;
+  fallback_available?: boolean | null;
   extra_usage_monthly_limit: number | null;
   extra_usage_used_credits: number | null;
   observed_at_unix_millis: number | null;

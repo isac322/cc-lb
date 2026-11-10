@@ -846,9 +846,9 @@ const QUOTA_CHART_HEIGHT = 280;
 /**
  * Windows that keep a gradient fill in the quota-history chart: the two
  * shared windows, Gemini's two model-family windows and Anthropic's Fable
- * window. Legacy model windows, unified and overage draw as bare strokes so
- * five-plus overlapping windows stay readable instead of stacking into a
- * tinted wash.
+ * window. Legacy model windows and Anthropic overage draw as bare strokes so
+ * five-plus overlapping windows stay readable. Unified restrictions and
+ * Codex credits never draw.
  */
 const QUOTA_FILL_WINDOWS: Record<string, true> = {
   '5h': true,
@@ -1531,6 +1531,7 @@ export function DetailView({
             <QuotaWindowRow
               key={snap.window}
               snap={snap}
+              creditObservations={selectedLatest.windows}
               nowUnixSecs={nowUnixSecs}
             />
           ))}
@@ -1862,9 +1863,9 @@ export function DetailView({
                     dataKey={windowName}
                     stroke={getWindowColor(windowName).stroke}
                     strokeWidth={1.5}
-                    // Only the live windows get a gradient fill; legacy
-                    // windows, unified and overage draw as strokes so
-                    // overlapping series stay individually traceable.
+                    // Only live windows get a gradient fill; legacy windows
+                    // and Anthropic overage remain individually traceable
+                    // strokes. Credit observations are excluded upstream.
                     fill={
                       QUOTA_FILL_WINDOWS[windowName]
                         ? `url(#${chartId}-${windowName})`

@@ -45,6 +45,7 @@ pub fn unified_observation_to_sample(
         overage_in_use: observation.overage_in_use,
         overage_period_monthly_utilization: observation.overage_period_monthly_utilization,
         upgrade_paths: observation.upgrade_paths,
+        credits: observation.credits,
         disabled_reason: observation.disabled_reason,
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,

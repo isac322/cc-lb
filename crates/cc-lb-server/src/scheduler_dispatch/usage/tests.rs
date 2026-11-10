@@ -328,6 +328,294 @@ fn codex_api_response_maps_pro_primary_to_seven_day_and_marks_five_hour_absent()
 }
 
 #[test]
+fn codex_api_response_maps_available_credits_without_changing_base_windows() {
+    let value = serde_json::json!({
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 100.0,
+                "limit_window_seconds": 604800,
+                "reset_at": 1_800_600_000
+            },
+            "secondary_window": null
+        },
+        "credits": {
+            "has_credits": true,
+            "unlimited": false,
+            "overage_limit_reached": false,
+            "balance": "62500.0000000000",
+            "approx_local_messages": [10, 20],
+            "approx_cloud_messages": null
+        }
+    });
+
+    let records = records_from_openai_api(Uuid::nil(), &value, 1_700_000_000_000);
+
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::SevenDay).utilization,
+        Some(1.0)
+    );
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::FiveHour).sample_kind,
+        SubscriptionQuotaSampleKind::Absent
+    );
+    let overage = record(&records, SubscriptionQuotaWindow::Overage);
+    assert_eq!(overage.fallback_available, Some(true));
+    let credits = overage.credits.as_ref().expect("credit state");
+    assert_eq!(credits.has_credits, Some(true));
+    assert_eq!(credits.unlimited, Some(false));
+    assert_eq!(credits.limit_reached, Some(false));
+    assert_eq!(credits.balance.as_deref(), Some("62500.0000000000"));
+    assert_eq!(credits.approx_local_messages, Some([10, 20]));
+    assert!(credits.approx_cloud_messages.is_none());
+}
+
+#[test]
+fn codex_usage_and_header_credit_observations_drive_routing_and_keep_poll_restrictions() {
+    use cc_lb_domain::{
+        Principal, PrincipalKind, SubscriptionQuotaDataState, SubscriptionTier, UpstreamCandidate,
+    };
+    use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+    use cc_lb_routing::{FilterPlugin, RoutingContext};
+
+    const OBSERVED: u64 = 1_700_000_000_000;
+    let cache = SubscriptionQuotaCache::new();
+    let (sink, _receiver) = SubscriptionQuotaSink::new();
+    let upstream_id = Uuid::from_u128(1);
+    let key_id = Uuid::from_u128(2);
+    let context = RoutingContext {
+        request_id: "codex-credit-routing".to_owned(),
+        thread_id: None,
+        requested_service_tier: None,
+        downstream_headers: http::HeaderMap::new(),
+        method: http::Method::POST,
+        path: "/openai/v1/responses".to_owned(),
+        query: None,
+        body_bytes: bytes::Bytes::new(),
+        canonical_model_id: "gpt-5".to_owned(),
+        cache_pricing: Default::default(),
+    };
+    let principal = Principal {
+        id: "credit-test".to_owned(),
+        kind: PrincipalKind::InternalKey,
+    };
+    let candidate = |kind, id, snapshots| UpstreamCandidate {
+        upstream_id: id,
+        name: "credit-test".to_owned(),
+        kind,
+        subscription_quotas: snapshots,
+        observed_at_unix_secs: OBSERVED / 1_000,
+        cache_score: None,
+        base_url: None,
+        plan_capacity_ratio: None,
+        organization_type: None,
+        rate_limit_tier: None,
+        seat_tier: None,
+    };
+    let evaluate = |now| {
+        SubscriptionPreferenceFilter::new()
+            .filter(
+                &context,
+                &principal,
+                &[
+                    candidate(
+                        cc_lb_domain::UpstreamKind::OpenaiOauth,
+                        upstream_id,
+                        cache.snapshot_for_upstream(upstream_id, now, 60),
+                    ),
+                    candidate(cc_lb_domain::UpstreamKind::OpenaiApiKey, key_id, vec![]),
+                ],
+            )
+            .expect("quota filter")
+    };
+    let usage_body = |blocked| {
+        serde_json::json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 100,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1_700_600_000u64
+                },
+                "secondary_window": null
+            },
+            "credits": {
+                "has_credits": true,
+                "unlimited": false,
+                "overage_limit_reached": blocked,
+                "balance": "62500.0000000000"
+            }
+        })
+    };
+    let observe = |blocked, at| {
+        observe_provider_usage_body(
+            ProviderUsageContext {
+                upstream_id,
+                kind: UpstreamKind::OpenaiOauth,
+                profile: GeminiOAuthProfile::Antigravity,
+                project_id: None,
+            },
+            &serde_json::to_vec(&usage_body(blocked)).expect("usage JSON"),
+            at,
+            &sink,
+            &cache,
+        )
+        .expect("observe usage");
+    };
+    observe(true, OBSERVED);
+    let headers = [
+        ("x-codex-credits-has-credits", "True"),
+        ("x-codex-credits-unlimited", "False"),
+        ("x-codex-credits-balance", "62500.0000000000"),
+    ]
+    .into_iter()
+    .map(|(name, value)| {
+        (
+            http::header::HeaderName::from_static(name),
+            http::HeaderValue::from_static(value),
+        )
+    })
+    .collect();
+    for sample in cc_lb_quota::build_subscription_quota_samples(&headers, upstream_id, OBSERVED + 1)
+    {
+        cache.upsert_observation(upstream_id, &sample);
+    }
+    let snapshots = cache.snapshot_for_upstream(upstream_id, OBSERVED + 1, 60);
+    let poll = snapshots
+        .iter()
+        .find(|snap| snap.window == "overage")
+        .unwrap();
+    let header = snapshots
+        .iter()
+        .find(|snap| snap.window == "unified")
+        .unwrap();
+    assert_eq!(poll.source.as_deref(), Some("api"));
+    assert_eq!(header.source.as_deref(), Some("header"));
+    assert_eq!(poll.credits.as_ref().unwrap().limit_reached, Some(true));
+    assert_eq!(header.credits.as_ref().unwrap().limit_reached, None);
+    assert_eq!(evaluate(OBSERVED + 1).kept_upstream_ids, vec![key_id]);
+
+    // Missing credit information must not clear the usage-poll restriction.
+    for sample in records_from_openai_api(
+        upstream_id,
+        &serde_json::json!({"rate_limit": usage_body(false)["rate_limit"]}),
+        OBSERVED + 2,
+    ) {
+        cache.upsert_observation(upstream_id, &sample);
+    }
+    assert_eq!(evaluate(OBSERVED + 2).kept_upstream_ids, vec![key_id]);
+
+    observe(false, OBSERVED + 3);
+    let output = evaluate(OBSERVED + 3);
+    assert_eq!(output.kept_upstream_ids, vec![upstream_id]);
+    assert_eq!(
+        output.subscription_preference.unwrap().chosen_tier,
+        SubscriptionTier::Overage
+    );
+    let stale = cache.snapshot_for_upstream(upstream_id, OBSERVED + 61_000, 60);
+    assert_eq!(
+        stale
+            .iter()
+            .find(|snap| snap.window == "overage")
+            .unwrap()
+            .state,
+        SubscriptionQuotaDataState::Stale
+    );
+    assert_eq!(evaluate(OBSERVED + 61_000).kept_upstream_ids, vec![key_id]);
+}
+
+#[test]
+fn codex_credit_precedence_keeps_unlimited_and_limit_reached_distinct() {
+    let unlimited = serde_json::json!({
+        "credits": {
+            "has_credits": false,
+            "unlimited": true,
+            "overage_limit_reached": false,
+            "balance": null
+        }
+    });
+    let unlimited_records = records_from_openai_api(Uuid::nil(), &unlimited, 1_700_000_000_000);
+    let unlimited_record = record(&unlimited_records, SubscriptionQuotaWindow::Overage);
+    assert_eq!(unlimited_record.fallback_available, Some(true));
+    assert_eq!(
+        unlimited_record
+            .credits
+            .as_ref()
+            .and_then(|credits| credits.unlimited),
+        Some(true)
+    );
+
+    let blocked = serde_json::json!({
+        "credits": {
+            "has_credits": true,
+            "unlimited": true,
+            "overage_limit_reached": true,
+            "balance": "62500.0000000000"
+        }
+    });
+    let blocked_records = records_from_openai_api(Uuid::nil(), &blocked, 1_700_000_000_000);
+    let blocked_record = record(&blocked_records, SubscriptionQuotaWindow::Overage);
+    assert_eq!(blocked_record.fallback_available, Some(false));
+    assert_eq!(
+        blocked_record
+            .credits
+            .as_ref()
+            .and_then(|credits| credits.limit_reached),
+        Some(true)
+    );
+
+    let balance_only = serde_json::json!({
+        "credits": {
+            "balance": "62500.0000000000"
+        }
+    });
+    let balance_only_records =
+        records_from_openai_api(Uuid::nil(), &balance_only, 1_700_000_000_000);
+    let balance_only_record = record(&balance_only_records, SubscriptionQuotaWindow::Overage);
+    assert_eq!(balance_only_record.fallback_available, None);
+}
+
+#[test]
+fn codex_usage_retains_unavailable_credits_and_optional_estimates() {
+    for balance in [serde_json::json!("0.0000000000"), serde_json::Value::Null] {
+        let records = records_from_openai_api(
+            Uuid::nil(),
+            &serde_json::json!({
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 40,
+                        "limit_window_seconds": 18000,
+                        "reset_at": 1_700_018_000
+                    },
+                    "secondary_window": {
+                        "used_percent": 60,
+                        "limit_window_seconds": 604800,
+                        "reset_at": 1_700_600_000
+                    }
+                },
+                "credits": {
+                    "has_credits": false,
+                    "unlimited": false,
+                    "overage_limit_reached": false,
+                    "balance": balance,
+                    "approx_local_messages": null,
+                    "approx_cloud_messages": [2, 5]
+                }
+            }),
+            1_700_000_000_000,
+        );
+        assert_utilization(&records, SubscriptionQuotaWindow::FiveHour, 0.4);
+        assert_utilization(&records, SubscriptionQuotaWindow::SevenDay, 0.6);
+        let overage = record(&records, SubscriptionQuotaWindow::Overage);
+        assert_eq!(overage.fallback_available, Some(false));
+        assert_eq!(overage.utilization, None);
+        assert_eq!(overage.extra_usage_monthly_limit, None);
+        let credits = overage.credits.as_ref().expect("unavailable credit state");
+        assert_eq!(credits.balance.as_deref(), balance.as_str());
+        assert_eq!(credits.approx_local_messages, None);
+        assert_eq!(credits.approx_cloud_messages, Some([2, 5]));
+    }
+}
+
+#[test]
 fn malformed_openai_usage_body_emits_no_observations() {
     let cache = SubscriptionQuotaCache::new();
     let (sink, mut receiver) = SubscriptionQuotaSink::new();

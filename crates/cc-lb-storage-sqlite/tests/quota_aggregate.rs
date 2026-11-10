@@ -52,6 +52,7 @@ fn quota_checkpoint(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: changed_at_unix_millis,
     })
 }
@@ -408,6 +409,7 @@ async fn quota_checkpoint_deadband_preserves_exact_latest_and_semantic_changes()
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: at,
     };
     let records = [

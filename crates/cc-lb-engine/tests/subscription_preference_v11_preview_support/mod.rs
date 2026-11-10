@@ -304,6 +304,7 @@ fn quota(window: &str, utilization: f64, reset: u64) -> SubscriptionQuotaCandida
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         fallback_available: None,
         overage_in_use: None,
         overage_period_monthly_utilization: None,

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use cc_lb_domain::SubscriptionQuotaCredits;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -368,6 +369,7 @@ pub struct SubscriptionQuotaSample {
     pub extra_usage_enabled: Option<bool>,
     pub extra_usage_monthly_limit: Option<f64>,
     pub extra_usage_used_credits: Option<f64>,
+    pub credits: Option<SubscriptionQuotaCredits>,
 
     pub ingested_at_unix_millis: u64,
 }

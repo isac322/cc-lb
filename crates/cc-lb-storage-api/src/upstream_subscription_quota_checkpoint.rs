@@ -6,7 +6,7 @@ use crate::{
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };
 
-const SEMANTIC_FINGERPRINT_VERSION: u8 = 1;
+const SEMANTIC_FINGERPRINT_VERSION: u8 = 2;
 const DECIMAL_DIGITS: &[u8; 10] = b"0123456789";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -29,6 +29,7 @@ impl SubscriptionQuotaSemanticFingerprint {
         write_optional_bool(&mut bytes, record.extra_usage_enabled);
         write_optional_f64(&mut bytes, record.extra_usage_monthly_limit);
         write_optional_f64(&mut bytes, record.extra_usage_used_credits);
+        write_optional_credits(&mut bytes, record.credits.as_ref());
         Self(*blake3::hash(&bytes).as_bytes())
     }
 
@@ -69,6 +70,7 @@ pub struct SubscriptionQuotaCheckpointRecord {
     pub extra_usage_enabled: Option<bool>,
     pub extra_usage_monthly_limit: Option<f64>,
     pub extra_usage_used_credits: Option<f64>,
+    pub credits: Option<cc_lb_domain::SubscriptionQuotaCredits>,
 
     pub ingested_at_unix_millis: u64,
 }
@@ -96,6 +98,7 @@ impl From<&SubscriptionQuotaSample> for SubscriptionQuotaCheckpointRecord {
             disabled_reason: record.disabled_reason.clone(),
             extra_usage_enabled: record.extra_usage_enabled,
             extra_usage_monthly_limit: record.extra_usage_monthly_limit,
+            credits: record.credits.clone(),
             extra_usage_used_credits: record.extra_usage_used_credits,
             ingested_at_unix_millis: record.ingested_at_unix_millis,
         }
@@ -166,6 +169,49 @@ fn write_optional_string(bytes: &mut Vec<u8>, value: Option<&str>) {
         Some(value) => {
             bytes.push(1);
             write_string(bytes, value);
+        }
+        None => bytes.push(0),
+    }
+}
+
+fn write_optional_credits(
+    bytes: &mut Vec<u8>,
+    value: Option<&cc_lb_domain::SubscriptionQuotaCredits>,
+) {
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            write_optional_bool(bytes, value.has_credits);
+            write_optional_bool(bytes, value.unlimited);
+            write_optional_bool(bytes, value.limit_reached);
+            write_optional_string(bytes, value.balance.as_deref());
+            write_optional_u64s(
+                bytes,
+                value
+                    .approx_local_messages
+                    .as_ref()
+                    .map(|pair| pair.as_slice()),
+            );
+            write_optional_u64s(
+                bytes,
+                value
+                    .approx_cloud_messages
+                    .as_ref()
+                    .map(|pair| pair.as_slice()),
+            );
+        }
+        None => bytes.push(0),
+    }
+}
+
+fn write_optional_u64s(bytes: &mut Vec<u8>, value: Option<&[u64]>) {
+    match value {
+        Some(values) => {
+            bytes.push(1);
+            write_len(bytes, values.len());
+            for value in values {
+                write_optional_u64(bytes, Some(*value));
+            }
         }
         None => bytes.push(0),
     }

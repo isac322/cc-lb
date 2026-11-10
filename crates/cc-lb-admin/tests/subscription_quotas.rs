@@ -737,7 +737,9 @@ async fn provider_quotas_list_all_oauth_kinds_and_scope_series() {
                 "overage",
                 "unified",
             ]),
-            "provider-codex" => std::collections::BTreeSet::from(["5h", "7d"]),
+            "provider-codex" => {
+                std::collections::BTreeSet::from(["5h", "7d", "overage", "unified"])
+            }
             "provider-gemini" => std::collections::BTreeSet::from([
                 "gemini_5h",
                 "gemini_7d",
@@ -1477,6 +1479,7 @@ fn quota_observation_with_status_and_reset(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: observed_at_unix_secs.saturating_mul(1_000),
     }
 }

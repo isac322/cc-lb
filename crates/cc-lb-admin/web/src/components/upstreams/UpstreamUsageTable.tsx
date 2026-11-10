@@ -42,6 +42,11 @@ import {
 } from '../../lib/quotaSeverity';
 import { cx, Skeleton } from '../ui/primitives';
 import { PaceLegend, UsageMeter } from '../ui/UsageMeter';
+import {
+  type CodexCreditFacts,
+  CodexCreditSummary,
+  selectCodexCredits,
+} from './codexCredits';
 import { QUOTA_WINDOW_ORDER } from './quotaWindowVisibility';
 import { type UpstreamHealth, upstreamHealth } from './upstreamHealth';
 
@@ -51,7 +56,7 @@ const USAGE_WINDOWS_BY_PROVIDER: Record<
   readonly SubscriptionQuotaWindow[]
 > = {
   anthropic: ['5h', '7d', '7d_fable'],
-  openai: ['5h', '7d'],
+  openai: ['5h', '7d', 'unified'],
   gemini: ['gemini_5h', 'gemini_7d', 'third_party_5h', 'third_party_7d'],
 };
 type UsageWindow = SubscriptionQuotaWindow;
@@ -78,7 +83,7 @@ export const UPSTREAM_LATEST_WINDOWS_BY_PROVIDER: Record<
   string
 > = {
   anthropic: '5h,7d,7d_sonnet,7d_opus,7d_fable,overage',
-  openai: USAGE_WINDOWS_BY_PROVIDER.openai.join(','),
+  openai: '5h,7d,overage,unified',
   gemini: USAGE_WINDOWS_BY_PROVIDER.gemini.join(','),
 };
 
@@ -381,13 +386,25 @@ function WindowCell({
   pending,
   nowUnixSecs,
   timeZone,
+  creditFacts,
 }: {
   windowName: UsageWindow;
   snap: QuotaSnapshot | undefined;
   pending: boolean;
   nowUnixSecs: number;
   timeZone: string;
+  creditFacts?: CodexCreditFacts | null;
 }) {
+  if (windowName === 'unified' && creditFacts != null) {
+    return (
+      <div className="min-w-0" data-testid="usage-cell" data-window="unified">
+        <span className="mb-1.5 block text-label text-text-muted @4xl:hidden">
+          Codex credits
+        </span>
+        <CodexCreditSummary facts={creditFacts} />
+      </div>
+    );
+  }
   // Keep the desktop column aligned without presenting absent quota as an
   // unknown reading. Stacked rows omit the cell entirely.
   if (snap?.state === 'absent') {
@@ -555,12 +572,19 @@ const NO_QUOTA_SPAN_CLASS: Record<number, string> = {
 };
 
 function hasReportedUsageWindow(row: UpstreamUsageRow, window: UsageWindow) {
+  if (window === 'unified') {
+    return (
+      row.upstream.kind === 'openai_oauth' &&
+      selectCodexCredits(row.windows) != null
+    );
+  }
   const snap = row.windows.find((candidate) => candidate.window === window);
   return (
     row.upstream.kind.endsWith('_oauth') &&
     snap != null &&
     snap.state !== 'absent' &&
     (providerOf(row.upstream.kind) === 'anthropic' ||
+      snap.credits != null ||
       (snap.state !== 'unobserved' &&
         snap.utilization != null &&
         Number.isFinite(snap.utilization)))
@@ -617,6 +641,9 @@ function RowBody({
               snap={snapshot}
               timeZone={timeZone}
               windowName={w}
+              creditFacts={
+                w === 'unified' ? selectCodexCredits(row.windows) : null
+              }
             />
           );
         })

@@ -220,6 +220,7 @@ fn observation(
         extra_usage_enabled: Some(true),
         extra_usage_monthly_limit: Some(10.0),
         extra_usage_used_credits: Some(utilization),
+        credits: None,
         ingested_at_unix_millis: observed_at_unix_millis + 1,
     }
 }

@@ -177,6 +177,7 @@ fn absent_sample(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: observed_at_unix_millis,
     }
 }
@@ -214,6 +215,7 @@ fn checkpoint(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: observed_at_unix_millis,
     })
 }

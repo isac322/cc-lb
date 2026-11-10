@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
+use cc_lb_domain::SubscriptionQuotaCredits;
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, SubscriptionQuotaCheckpointRangeQuery,
     SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
@@ -25,6 +26,7 @@ where
         + UsageRollupStore,
 {
     append_then_list_latest_roundtrip(Arc::clone(&backend)).await?;
+    credit_only_changes_create_checkpoints(Arc::clone(&backend)).await?;
     same_millis_appends_with_different_sample_ids_dont_collide(Arc::clone(&backend)).await?;
     header_and_api_sources_coexist_in_latest(Arc::clone(&backend)).await?;
     latest_is_monotonic_in_millis(Arc::clone(&backend)).await?;
@@ -70,7 +72,16 @@ macro_rules! aggregate_scenario {
 
 scenario!(append_then_list_latest_roundtrip, |storage| async move {
     let upstream = upstream_id(1);
-    let record = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.25);
+    let mut record = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.25);
+    record.fallback_available = Some(true);
+    record.credits = Some(SubscriptionQuotaCredits {
+        has_credits: Some(true),
+        unlimited: Some(false),
+        limit_reached: Some(false),
+        balance: Some("62500.0000000000".to_owned()),
+        approx_local_messages: Some([10, 20]),
+        approx_cloud_messages: Some([30, 40]),
+    });
     storage
         .record_subscription_quota_samples(std::slice::from_ref(&record))
         .await?;
@@ -78,11 +89,76 @@ scenario!(append_then_list_latest_roundtrip, |storage| async move {
         .list_latest_subscription_quota_for_upstreams(&[upstream])
         .await?;
     ensure!(
-        latest == [record],
+        latest == [record.clone()],
         "latest should round-trip inserted record"
+    );
+    ensure!(
+        checkpoint_rows(&*storage, &[upstream]).await? == [checkpoint(&record)],
+        "credit flags, raw balance and estimate pairs should round-trip through checkpoints"
     );
     Ok(())
 });
+
+scenario!(
+    credit_only_changes_create_checkpoints,
+    |storage| async move {
+        let upstream = upstream_id(34);
+        let mut record = observation(upstream, 100, 1, SubscriptionQuotaSource::Api, 0.25);
+        let mut expected = Vec::new();
+        let mut credits = SubscriptionQuotaCredits {
+            has_credits: Some(true),
+            unlimited: Some(false),
+            limit_reached: Some(false),
+            balance: Some("62500.0000000000".to_owned()),
+            approx_local_messages: Some([10, 20]),
+            approx_cloud_messages: Some([30, 40]),
+        };
+        for step in 0..8 {
+            match step {
+                1 => credits.has_credits = Some(false),
+                2 => credits.unlimited = Some(true),
+                3 => credits.limit_reached = Some(true),
+                4 => credits.balance = Some("62500.0000000001".to_owned()),
+                5 => credits.approx_local_messages = Some([11, 21]),
+                6 => credits.approx_cloud_messages = Some([31, 41]),
+                _ => {}
+            }
+            record.observed_at_unix_millis += 1;
+            record.ingested_at_unix_millis += 1;
+            record.sample_id = Uuid::from_u128(100 + step);
+            record.credits = (step != 7).then(|| credits.clone());
+            storage
+                .record_subscription_quota_samples(std::slice::from_ref(&record))
+                .await?;
+            expected.push(checkpoint(&record));
+        }
+        ensure!(
+            checkpoint_rows(&*storage, &[upstream]).await? == expected,
+            "every credit-only transition, including removal, must bypass deadband and fingerprint dedup"
+        );
+        let duplicate = {
+            let mut duplicate = record.clone();
+            duplicate.observed_at_unix_millis += 1;
+            duplicate.sample_id = Uuid::from_u128(200);
+            duplicate
+        };
+        storage
+            .record_subscription_quota_samples(std::slice::from_ref(&duplicate))
+            .await?;
+        ensure!(
+            checkpoint_rows(&*storage, &[upstream]).await? == expected,
+            "unchanged credit state should still deduplicate checkpoints"
+        );
+        ensure!(
+            storage
+                .list_latest_subscription_quota_for_upstreams(&[upstream])
+                .await?
+                == [duplicate],
+            "latest freshness must advance even when an unchanged credit state is deduplicated"
+        );
+        Ok(())
+    }
+);
 
 scenario!(
     same_millis_appends_with_different_sample_ids_dont_collide,
@@ -1215,6 +1291,7 @@ fn observation(
         extra_usage_enabled: Some(true),
         extra_usage_monthly_limit: Some(10.0),
         extra_usage_used_credits: Some(utilization),
+        credits: None,
         ingested_at_unix_millis: observed_at_unix_millis + 1,
     }
 }
@@ -1347,6 +1424,7 @@ mod checkpoint_rows {
         pub extra_usage_enabled: Option<bool>,
         pub extra_usage_monthly_limit: Option<f64>,
         pub extra_usage_used_credits: Option<f64>,
+        pub credits: Option<cc_lb_domain::SubscriptionQuotaCredits>,
         pub ingested_at_unix_millis: u64,
     }
 
@@ -1374,6 +1452,7 @@ mod checkpoint_rows {
                 extra_usage_enabled: record.extra_usage_enabled,
                 extra_usage_monthly_limit: record.extra_usage_monthly_limit,
                 extra_usage_used_credits: record.extra_usage_used_credits,
+                credits: record.credits.clone(),
                 ingested_at_unix_millis: record.ingested_at_unix_millis,
             }
         }
@@ -1437,6 +1516,12 @@ mod checkpoint_rows {
                 extra_usage_enabled: row.try_get("extra_usage_enabled")?,
                 extra_usage_monthly_limit: row.try_get("extra_usage_monthly_limit")?,
                 extra_usage_used_credits: row.try_get("extra_usage_used_credits")?,
+                credits: row
+                    .try_get::<Option<String>, _>("credits_json")?
+                    .map(|text| {
+                        serde_json::from_str::<cc_lb_domain::SubscriptionQuotaCredits>(&text)
+                    })
+                    .transpose()?,
                 ingested_at_unix_millis: u64::try_from(
                     row.try_get::<i64, _>("ingested_at_unix_millis")?,
                 )?,
@@ -1533,7 +1618,7 @@ mod checkpoint_rows {
                     status, resets_at_unix_secs, surpassed_threshold, fallback_percentage, \
                     fallback_available, overage_in_use, overage_period_monthly_utilization, \
                     upgrade_paths, disabled_reason, extra_usage_enabled, \
-                    extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis \
+                    extra_usage_monthly_limit, extra_usage_used_credits, credits_json, ingested_at_unix_millis \
              FROM upstream_subscription_quota_checkpoints_v1 \
              WHERE upstream_id = ANY($1::uuid[])",
         )

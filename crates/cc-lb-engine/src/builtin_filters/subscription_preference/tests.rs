@@ -2683,6 +2683,10 @@ impl SnapBuilder {
         self.inner.extra_usage_used_credits = Some(value);
         self
     }
+    fn credits(mut self, value: cc_lb_domain::SubscriptionQuotaCredits) -> Self {
+        self.inner.credits = Some(value);
+        self
+    }
 }
 
 fn fresh(window: &str) -> SnapBuilder {
@@ -2726,6 +2730,7 @@ fn blank_snapshot(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         observed_at_unix_millis: None,
         max_staleness_secs: 60,
         fallback_available: None,

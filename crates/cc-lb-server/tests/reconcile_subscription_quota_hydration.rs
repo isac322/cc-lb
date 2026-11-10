@@ -71,6 +71,7 @@ fn sample(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
+        credits: None,
         ingested_at_unix_millis: observed_at_unix_millis,
     }
 }
@@ -156,13 +157,13 @@ impl Peer {
     }
 }
 
-async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
+async fn create_upstream(storage: &Storage, name: &str, kind: UpstreamKind) -> UpstreamRecord {
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
             id: Uuid::new_v4(),
             name: name.to_owned(),
-            kind: UpstreamKind::AnthropicApiKey,
+            kind,
             base_url: None,
             api_key_ciphertext: None,
             oauth_tokens: None,
@@ -174,6 +175,9 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
     )
     .await
     .expect("upstream created");
+    if kind != UpstreamKind::AnthropicApiKey {
+        return created;
+    }
     let ciphertext = AeadService::from_master_key(AEAD_KEY)
         .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
         .expect("api-key ciphertext");
@@ -183,6 +187,13 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
 }
 
 async fn peer(upstream_names: &[&str]) -> (Peer, Vec<UpstreamRecord>) {
+    peer_with_kind(upstream_names, UpstreamKind::AnthropicApiKey).await
+}
+
+async fn peer_with_kind(
+    upstream_names: &[&str],
+    kind: UpstreamKind,
+) -> (Peer, Vec<UpstreamRecord>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let url = format!(
         "sqlite://{}",
@@ -196,7 +207,7 @@ async fn peer(upstream_names: &[&str]) -> (Peer, Vec<UpstreamRecord>) {
     storage.initialize().await.expect("init");
     let mut upstreams = Vec::new();
     for name in upstream_names {
-        upstreams.push(create_upstream(&storage, name).await);
+        upstreams.push(create_upstream(&storage, name, kind).await);
     }
 
     let quota_store = Arc::new(SwitchableQuotaStore {
@@ -304,6 +315,144 @@ async fn reconcile_hydrates_committed_quota_without_notification() {
     peer.reconciler.reconcile_once().await.expect("reconcile");
     assert_eq!(peer.five_hour_utilization(upstream.id), Some(0.9));
     assert_eq!(peer.holder.generation(), generation);
+}
+
+#[tokio::test]
+async fn latest_admin_api_preserves_persisted_credits_source_and_freshness() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use cc_lb_control::api_keys::{
+        concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
+    };
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    let (peer, upstreams) =
+        peer_with_kind(&["credit-quota-upstream"], UpstreamKind::OpenaiOauth).await;
+    let upstream_id = upstreams[0].id;
+    let now = 1_800_000_000_u64;
+    let test_clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(now));
+    let clock: cc_lb_clock::ClockHandle = test_clock.clone();
+    let mut config = cc_lb_config::Config::default();
+    config.admin.auth.providers = vec![cc_lb_config::AdminAuthProviderConfig::StaticToken {
+        id: "test".to_owned(),
+        token_env: crate::common::TEST_NONEMPTY_ENV.to_owned(),
+    }];
+    let providers = cc_lb_admin::auth::build_providers(&config.admin.auth).expect("admin auth");
+    let app = cc_lb_admin::router(cc_lb_admin::AdminState {
+        config_path: None,
+        build: cc_lb_server::build_meta::BuildMeta::current().admin_build_info(),
+        startup_config_overrides: Default::default(),
+        storage: Some(peer.storage.clone()),
+        key_store: Some(Arc::new(KeyStore::new(peer.storage.clone()))),
+        aead: Arc::new(AeadService::from_master_key(AEAD_KEY)),
+        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
+        lifecycle: None,
+        lazy_refresher: None,
+        runtime: None,
+        data_dir: None,
+        warmup_dialect_dispatcher: None,
+        dynamic_view: peer.holder.clone(),
+        config: Arc::new(config),
+        dynamic_view_rebinder: None,
+        scheduler: None,
+        admin_auth: Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(providers)),
+        start_time: std::time::Instant::now(),
+        event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
+        clock,
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production origin"),
+    });
+    for (index, source, window, expected_state) in [
+        (
+            0_u128,
+            SubscriptionQuotaSource::Header,
+            SubscriptionQuotaWindow::Unified,
+            "fresh",
+        ),
+        (
+            1,
+            SubscriptionQuotaSource::Api,
+            SubscriptionQuotaWindow::Overage,
+            "fresh",
+        ),
+        (
+            2,
+            SubscriptionQuotaSource::Api,
+            SubscriptionQuotaWindow::Overage,
+            "stale",
+        ),
+    ] {
+        if expected_state == "stale" {
+            test_clock.advance_secs(120);
+        }
+        let mut record = sample(upstream_id, (now - 5) * 1_000, 0.75);
+        record.window = window;
+        record.source = source;
+        record.utilization = None;
+        record.status = None;
+        record.resets_at_unix_secs = None;
+        record.sample_id = Uuid::from_u128(500 + index);
+        record.credits = Some(cc_lb_domain::SubscriptionQuotaCredits {
+            has_credits: Some(true),
+            unlimited: Some(false),
+            limit_reached: Some(index == 2),
+            balance: Some("62500.0000000001".to_owned()),
+            approx_local_messages: Some([10, 20]),
+            approx_cloud_messages: Some([30, 40]),
+        });
+        peer.storage
+            .record_subscription_quota_samples(std::slice::from_ref(&record))
+            .await
+            .expect("persist credits");
+        peer.reconciler
+            .reconcile_once()
+            .await
+            .expect("hydrate real cache");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/v1/subscription-quotas/latest?upstream_ids={upstream_id}&windows={}&max_staleness_secs=30",
+                        record.window.as_str()
+                    ))
+                    .header("authorization", concat!("Bearer ", env!("CARGO_PKG_NAME")))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("latest response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("latest JSON");
+        let windows = body["upstreams"][0]["windows"].as_array().expect("windows");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0]["state"], expected_state);
+        assert_eq!(windows[0]["source"], source.as_str());
+        assert_eq!(
+            windows[0]["observed_at_unix_millis"],
+            record.observed_at_unix_millis
+        );
+        assert_eq!(
+            windows[0]["credits"],
+            json!({
+                "has_credits": true,
+                "unlimited": false,
+                "limit_reached": index == 2,
+                "balance": "62500.0000000001",
+                "approx_local_messages": [10, 20],
+                "approx_cloud_messages": [30, 40],
+            })
+        );
+    }
 }
 
 /// A failed periodic quota read is logged and does not fail an otherwise

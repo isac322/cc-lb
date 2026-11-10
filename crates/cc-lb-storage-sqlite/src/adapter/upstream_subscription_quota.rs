@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use cc_lb_domain::SubscriptionQuotaCredits;
 use cc_lb_storage_api::{
     StorageError, StorageResult, SubscriptionQuotaCheckpointRangeQuery,
     SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLot,
@@ -163,6 +164,7 @@ pub(super) async fn insert_checkpoint_if_changed(
     record: &SubscriptionQuotaCheckpointRecord,
 ) -> StorageResult<bool> {
     let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
+    let credits_json = encode_credits(record.credits.as_ref())?;
     let unchanged = sqlx::query_scalar::<_, bool>(
         "SELECT semantic_fingerprint = ?1 OR ( \
              status IS ?2 AND resets_at_unix_secs IS ?3 \
@@ -171,9 +173,10 @@ pub(super) async fn insert_checkpoint_if_changed(
              AND overage_period_monthly_utilization IS ?8 AND upgrade_paths IS ?9 \
              AND disabled_reason IS ?10 AND extra_usage_enabled IS ?11 \
              AND extra_usage_monthly_limit IS ?12 AND extra_usage_used_credits IS ?13 \
-             AND utilization IS NOT NULL AND ?14 IS NOT NULL AND ABS(utilization - ?14) < 0.001 \
+             AND credits_json IS ?14 \
+             AND utilization IS NOT NULL AND ?15 IS NOT NULL AND ABS(utilization - ?15) < 0.001 \
          ) FROM upstream_subscription_quota_checkpoints_v1 \
-         WHERE upstream_id = ?15 AND window = ?16 AND source = ?17 \
+         WHERE upstream_id = ?16 AND window = ?17 AND source = ?18 \
          ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1",
     )
     .bind(&record.semantic_fingerprint.as_bytes()[..])
@@ -194,6 +197,7 @@ pub(super) async fn insert_checkpoint_if_changed(
     .bind(record.extra_usage_enabled)
     .bind(record.extra_usage_monthly_limit)
     .bind(record.extra_usage_used_credits)
+    .bind(credits_json.as_deref())
     .bind(record.utilization)
     .bind(record.upstream_id.to_string())
     .bind(record.window.as_str())
@@ -211,8 +215,8 @@ pub(super) async fn insert_checkpoint_if_changed(
           sample_kind, representative_claim, utilization, status, resets_at_unix_secs, \
           surpassed_threshold, fallback_percentage, fallback_available, overage_in_use, \
           overage_period_monthly_utilization, upgrade_paths, disabled_reason, extra_usage_enabled, \
-          extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
+          extra_usage_monthly_limit, extra_usage_used_credits, credits_json, ingested_at_unix_millis) \
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
          ON CONFLICT DO NOTHING",
     )
     .bind(record.upstream_id.to_string())
@@ -244,6 +248,7 @@ pub(super) async fn insert_checkpoint_if_changed(
     .bind(record.extra_usage_enabled)
     .bind(record.extra_usage_monthly_limit)
     .bind(record.extra_usage_used_credits)
+    .bind(credits_json)
     .bind(u64_to_i64(
         record.ingested_at_unix_millis,
         "subscription quota ingested_at_unix_millis",
@@ -380,14 +385,15 @@ async fn upsert_latest(
     record: &SubscriptionQuotaSample,
 ) -> StorageResult<()> {
     let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
+    let credits_json = encode_credits(record.credits.as_ref())?;
     sqlx::query(
         "INSERT INTO upstream_subscription_quota_latest_v1 \
          (upstream_id, window, source, sample_kind, observed_at_unix_millis, sample_id, \
            utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, \
            fallback_percentage, fallback_available, overage_in_use, overage_period_monthly_utilization, upgrade_paths, \
            disabled_reason, \
-           extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
+           extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, credits_json, ingested_at_unix_millis) \
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
          ON CONFLICT(upstream_id, window, source) DO UPDATE SET \
          sample_kind = excluded.sample_kind, observed_at_unix_millis = excluded.observed_at_unix_millis, \
          sample_id = excluded.sample_id, utilization = excluded.utilization, status = excluded.status, \
@@ -398,7 +404,8 @@ async fn upsert_latest(
           upgrade_paths = excluded.upgrade_paths, \
           disabled_reason = excluded.disabled_reason, \
          extra_usage_enabled = excluded.extra_usage_enabled, extra_usage_monthly_limit = excluded.extra_usage_monthly_limit, \
-         extra_usage_used_credits = excluded.extra_usage_used_credits, ingested_at_unix_millis = excluded.ingested_at_unix_millis \
+         extra_usage_used_credits = excluded.extra_usage_used_credits, credits_json = excluded.credits_json, \
+         ingested_at_unix_millis = excluded.ingested_at_unix_millis \
          WHERE excluded.observed_at_unix_millis >= upstream_subscription_quota_latest_v1.observed_at_unix_millis",
     )
     .bind(record.upstream_id.to_string())
@@ -421,6 +428,7 @@ async fn upsert_latest(
     .bind(record.extra_usage_enabled)
     .bind(record.extra_usage_monthly_limit)
     .bind(record.extra_usage_used_credits)
+    .bind(credits_json)
     .bind(u64_to_i64(record.ingested_at_unix_millis, "subscription quota ingested_at_unix_millis")?)
     .execute(&mut **tx)
     .await
@@ -454,6 +462,24 @@ fn decode_upgrade_paths(raw: Option<String>) -> StorageResult<Option<Vec<String>
         }
         None => Ok(None),
     }
+}
+
+fn encode_credits(value: Option<&SubscriptionQuotaCredits>) -> StorageResult<Option<String>> {
+    value
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| StorageError::Corrupted {
+            message: format!("failed to serialize subscription quota credits: {error}"),
+        })
+}
+
+fn decode_credits(raw: Option<String>) -> StorageResult<Option<SubscriptionQuotaCredits>> {
+    raw.map(|text| {
+        serde_json::from_str(&text).map_err(|error| StorageError::Corrupted {
+            message: format!("invalid subscription quota credits {text}: {error}"),
+        })
+    })
+    .transpose()
 }
 
 pub(super) fn row_to_record(row: SqliteRow) -> StorageResult<SubscriptionQuotaSample> {
@@ -513,6 +539,7 @@ pub(super) fn row_to_record(row: SqliteRow) -> StorageResult<SubscriptionQuotaSa
         extra_usage_used_credits: row
             .try_get("extra_usage_used_credits")
             .map_err(map_sqlx_error)?,
+        credits: decode_credits(row.try_get("credits_json").map_err(map_sqlx_error)?)?,
         ingested_at_unix_millis: i64_to_u64(
             row.try_get("ingested_at_unix_millis")
                 .map_err(map_sqlx_error)?,

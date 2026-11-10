@@ -164,3 +164,40 @@ jobs:
           bun run --shell=bun lint
           bun run --shell=bun typecheck
           bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
+      - name: Install browser for credit visual regression
+        run: bunx playwright install --with-deps chromium
+      - name: Verify and capture Codex credit views
+        run: |
+          bun run e2e e2e/codex-credits.spec.ts --retries=0 \
+            --output="$RUNNER_TEMP/codex-credit-visuals/after"
+          git rev-parse HEAD > "$RUNNER_TEMP/codex-credit-visuals/after-source.txt"
+      - name: Capture matching base-branch credit views
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base_root="$RUNNER_TEMP/codex-credit-base"
+          cleanup() {
+            git worktree remove --force "$base_root"
+          }
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git worktree add --detach "$base_root" "$BASE_SHA"
+          trap cleanup EXIT
+          bun install --frozen-lockfile --cwd "$base_root/crates/cc-lb-admin/web"
+          bun qa/capture-codex-credit-baseline.ts \
+            "$base_root/crates/cc-lb-admin/web" \
+            "$RUNNER_TEMP/codex-credit-visuals/before" "$BASE_SHA"
+      - name: Publish Codex credit visual evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: codex-credit-visuals-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/codex-credit-visuals/after/**/overview.png
+            ${{ runner.temp }}/codex-credit-visuals/after/**/detail.png
+            ${{ runner.temp }}/codex-credit-visuals/after-source.txt
+            ${{ runner.temp }}/codex-credit-visuals/before/*.png
+            ${{ runner.temp }}/codex-credit-visuals/before/capture.json
+          retention-days: 14
+          if-no-files-found: error

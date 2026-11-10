@@ -1,3 +1,4 @@
+use cc_lb_domain::SubscriptionQuotaCredits;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
 mod standard;
@@ -23,6 +24,7 @@ pub struct UnifiedQuotaObservation {
     pub overage_period_monthly_utilization: Option<f64>,
     pub upgrade_paths: Option<Vec<String>>,
     pub disabled_reason: Option<String>,
+    pub credits: Option<SubscriptionQuotaCredits>,
 }
 
 impl Default for UnifiedQuotaObservation {
@@ -39,6 +41,7 @@ impl Default for UnifiedQuotaObservation {
             overage_in_use: None,
             overage_period_monthly_utilization: None,
             upgrade_paths: None,
+            credits: None,
             disabled_reason: None,
         }
     }
