@@ -481,11 +481,13 @@ export function friendlyCompleteError(message: string): string {
 // ─── Account card ────────────────────────────────────────────────────────────
 export function AccountCard({
   account,
+  provider = 'anthropic',
   label,
   tone = 'neutral',
   className,
 }: {
   account: AccountIdentity | null;
+  provider?: OAuthProvider;
   label?: string;
   tone?: 'neutral' | 'ok' | 'danger';
   className?: string;
@@ -496,6 +498,22 @@ export function AccountCard({
       : tone === 'danger'
         ? 'text-danger-text'
         : 'text-text-muted';
+  const accountFallback =
+    provider === 'anthropic'
+      ? 'Claude account'
+      : `${PROVIDER_LABELS[provider]} account`;
+  const accountSubtitle =
+    account &&
+    [
+      account.organizationName,
+      planLabel(account, provider),
+      account.projectId ? `Project: ${account.projectId}` : null,
+      account.plan && account.accountUuid
+        ? `Workspace: ${account.accountUuid}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
   return (
     <div className={cx('well p-3', className)}>
       {label ? (
@@ -522,16 +540,7 @@ export function AccountCard({
                 account.plan || account.projectId ? 'break-all' : 'truncate',
               )}
             >
-              {[
-                account.organizationName,
-                planLabel(account),
-                account.projectId ? `Project: ${account.projectId}` : null,
-                account.plan && account.accountUuid
-                  ? `Workspace: ${account.accountUuid}`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join(' · ') || 'Claude account'}
+              {accountSubtitle || accountFallback}
             </div>
           </div>
         </div>
@@ -590,45 +599,73 @@ export function oauthNameSuggestion(
   return parts.join(' · ') || draft.suggested_name.trim() || 'OAuth Upstream';
 }
 
-export function planLabel(account: AccountIdentity): string | null {
+export function planLabel(
+  account: AccountIdentity,
+  provider: OAuthProvider = 'anthropic',
+): string | null {
   if (account.plan)
     return account.plan
       .replace(/[_-]/g, ' ')
       .replace(/\b\w/g, (letter) => letter.toUpperCase());
   const type = account.organizationType;
   if (!type) return null;
-  if (/max/i.test(type)) return 'Claude Max';
-  if (/pro/i.test(type)) return 'Claude Pro';
-  if (/team/i.test(type)) return 'Claude Team';
-  if (/enterprise/i.test(type)) return 'Claude Enterprise';
+  const providerName =
+    provider === 'openai'
+      ? 'ChatGPT'
+      : provider === 'gemini'
+        ? 'Google'
+        : 'Claude';
+  if (/max/i.test(type)) return `${providerName} Max`;
+  if (/pro/i.test(type)) return `${providerName} Pro`;
+  if (/team/i.test(type)) return `${providerName} Team`;
+  if (/enterprise/i.test(type)) return `${providerName} Enterprise`;
   return type.replace(/_/g, ' ');
 }
-
 // ─── Identity verdict ────────────────────────────────────────────────────────
 export function IdentityVerdictNotice({
   outcome,
 }: {
   outcome: ConnectOutcome;
 }) {
+  const providerName =
+    outcome.provider === 'openai'
+      ? 'ChatGPT'
+      : outcome.provider === 'gemini'
+        ? 'Google'
+        : 'Claude';
   if (outcome.verdict === 'same') {
     return (
       <div className="flex items-center gap-2 text-body-sm text-traffic-success-text">
         <ShieldCheck className="size-4" strokeWidth={1.75} />
-        Same account as before — nothing else changed.
+        {outcome.provider === 'anthropic'
+          ? 'Same account as before — nothing else changed.'
+          : `Same ${providerName} account as before — nothing else changed.`}
       </div>
     );
   }
   if (outcome.verdict === 'different') {
     return (
-      <Notice tone="danger" title="A different Claude account was connected">
+      <Notice
+        tone="danger"
+        title={`A different ${providerName} account was connected`}
+      >
         <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <AccountCard account={outcome.previousAccount} label="Before" />
-          <AccountCard account={outcome.account} label="Now" tone="danger" />
+          <AccountCard
+            account={outcome.previousAccount}
+            provider={outcome.provider}
+            label="Before"
+          />
+          <AccountCard
+            account={outcome.account}
+            provider={outcome.provider}
+            label="Now"
+            tone="danger"
+          />
         </div>
         <p className="mt-2">
-          Traffic for this upstream now bills the new account. If this was a
-          mistake, sign out of Claude, sign in as the original account, and
-          reconnect again.
+          {outcome.provider === 'anthropic'
+            ? 'Traffic for this upstream now bills the new account. If this was a mistake, sign out of Claude, sign in as the original account, and reconnect again.'
+            : `Reconnect with the same ${providerName} account as the saved upstream.`}
         </p>
       </Notice>
     );
@@ -647,34 +684,42 @@ export function IdentityVerdictNotice({
 // ─── Token lifetime explainer ────────────────────────────────────────────────
 // Calm, outcome-first copy: a fallback is still a working connection.
 export function TokenLifetimeNote({ outcome }: { outcome: ConnectOutcome }) {
-  if (!outcome.longLivedFallback) {
-    const days =
-      outcome.grantedExpiresInSecs === null
-        ? null
-        : Math.round(outcome.grantedExpiresInSecs / 86_400);
+  if (outcome.longLivedFallback) {
     return (
-      <div className="text-caption text-text-faint flex items-center gap-1.5">
-        <CheckCircle2 className="size-3.5 text-ok" strokeWidth={1.75} />
-        {days === null
-          ? 'Long-lived connection — it needs no renewal until it expires.'
-          : `Long-lived connection — no sign-in needed for about ${days} days.`}
+      <div
+        data-testid="oauth-long-lived-fallback-notice"
+        data-reason={outcome.fallbackReason ?? 'unknown'}
+      >
+        <Notice tone="warning" title="Connected — renews automatically">
+          {outcome.fallbackReason === 'scope_rejected'
+            ? 'Claude will not grant a year-long connection for the scopes configured in oauth.anthropic.scopes, '
+            : 'Claude did not grant a year-long connection for this account, '}
+          so cc-lb keeps it alive by renewing it in the background. You may be
+          asked to sign in again in about 30 days. When Claude reports when
+          renewal ends, cc-lb reminds you beforehand; otherwise a reconnect
+          notice appears if renewal stops working.
+        </Notice>
       </div>
     );
   }
+  if (outcome.mode === 'refreshing') {
+    return (
+      <div className="text-caption text-text-faint flex items-center gap-1.5">
+        <CheckCircle2 className="size-3.5 text-ok" strokeWidth={1.75} />
+        Refreshing connection — renews automatically.
+      </div>
+    );
+  }
+  const days =
+    outcome.grantedExpiresInSecs === null
+      ? null
+      : Math.round(outcome.grantedExpiresInSecs / 86_400);
   return (
-    <div
-      data-testid="oauth-long-lived-fallback-notice"
-      data-reason={outcome.fallbackReason ?? 'unknown'}
-    >
-      <Notice tone="warning" title="Connected — renews automatically">
-        {outcome.fallbackReason === 'scope_rejected'
-          ? 'Claude will not grant a year-long connection for the scopes configured in oauth.anthropic.scopes, '
-          : 'Claude did not grant a year-long connection for this account, '}
-        so cc-lb keeps it alive by renewing it in the background. You may be
-        asked to sign in again in about 30 days. When Claude reports when
-        renewal ends, cc-lb reminds you beforehand; otherwise a reconnect notice
-        appears if renewal stops working.
-      </Notice>
+    <div className="text-caption text-text-faint flex items-center gap-1.5">
+      <CheckCircle2 className="size-3.5 text-ok" strokeWidth={1.75} />
+      {days === null
+        ? 'Long-lived connection — it needs no renewal until it expires.'
+        : `Long-lived connection — no sign-in needed for about ${days} days.`}
     </div>
   );
 }

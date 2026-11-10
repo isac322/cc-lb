@@ -9,13 +9,22 @@ import {
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { ApiError, type Upstream } from '../../../lib/api';
-import { AccountCard, DeviceCodePanel, friendlyCompleteError } from './parts';
+import { ApiError, type OAuthProvider, type Upstream } from '../../../lib/api';
+import {
+  AccountCard,
+  DeviceCodePanel,
+  friendlyCompleteError,
+  IdentityVerdictNotice,
+  TokenLifetimeNote,
+} from './parts';
 import {
   UpstreamConnectDialog,
   type UpstreamConnectTarget,
 } from './UpstreamConnectDialog';
 import {
+  type AccountIdentity,
+  type ConnectOutcome,
+  compareIdentity,
   identityOfResult,
   oauthCompleteErrorMessage,
 } from './useOAuthConnectSession';
@@ -114,6 +123,40 @@ function response(body: unknown, status = 200) {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function accountIdentity(
+  overrides: Partial<AccountIdentity> = {},
+): AccountIdentity {
+  return {
+    email: 'account@example.com',
+    displayName: null,
+    accountUuid: 'account-uuid',
+    organizationName: null,
+    organizationType: null,
+    rateLimitTier: null,
+    plan: null,
+    projectId: null,
+    ...overrides,
+  };
+}
+
+function reconnectOutcome(
+  provider: OAuthProvider,
+  overrides: Partial<ConnectOutcome> = {},
+): ConnectOutcome {
+  return {
+    provider,
+    mode: 'refreshing',
+    longLivedFallback: false,
+    fallbackReason: null,
+    grantedExpiresInSecs: null,
+    account: accountIdentity(),
+    draft: null,
+    verdict: 'same',
+    previousAccount: accountIdentity(),
+    ...overrides,
+  };
 }
 
 async function chooseSubscription(
@@ -775,6 +818,70 @@ describe('OAuth completion error messages', () => {
     ).toBeDefined();
     expect(within(dialog).queryByText(/Bad Request/)).toBeNull();
   });
+  test.each([
+    ['openai', 'ChatGPT'],
+    ['gemini', 'Google'],
+  ] as const)(
+    '%s account mismatch keeps the reconnect on the error path',
+    async (provider, label) => {
+      route = (path) => {
+        if (path.endsWith('/oauth/start')) {
+          return {
+            status: 200,
+            body:
+              provider === 'openai'
+                ? browserStartResponse()
+                : startResponse('gemini'),
+          };
+        }
+        if (path.endsWith('/oauth/complete')) {
+          return {
+            status: 409,
+            body: {
+              error: 'account_mismatch',
+              detail: `Reconnect with the same ${label} account as the saved upstream.`,
+            },
+          };
+        }
+        return { status: 404, body: {} };
+      };
+
+      const rendered = renderDialog({
+        mode: 'reconnect',
+        upstream: upstream(`${provider}_oauth`),
+      });
+      const dialog = rendered.dialog();
+      fireEvent.click(
+        await within(dialog).findByRole('link', {
+          name:
+            provider === 'openai'
+              ? 'Sign in with ChatGPT'
+              : 'Sign in with Google',
+        }),
+      );
+      fireEvent.change(within(dialog).getByLabelText('Authorization code'), {
+        target: {
+          value:
+            provider === 'openai'
+              ? 'http://localhost:1455/auth/callback?code=ac_mismatch_1234567890abcdef&state=openai-state'
+              : 'http://localhost:51121/oauth-callback?code=gemini-mismatch-1234567890&state=google-state',
+        },
+      });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
+
+      expect(
+        await within(dialog).findByText(
+          new RegExp(`Reconnect with the same ${label} account`),
+        ),
+      ).toBeDefined();
+      expect(within(dialog).queryByRole('button', { name: 'Done' })).toBeNull();
+      expect(
+        within(dialog).queryByText(
+          /bills the new account|A different Claude account|Before|Now/,
+        ),
+      ).toBeNull();
+    },
+  );
 });
 
 describe('provider account cards', () => {
@@ -797,4 +904,203 @@ describe('provider account cards', () => {
       expect(screen.queryByText('No account connected yet')).toBeNull();
     },
   );
+});
+
+describe('provider-aware reconnect result copy', () => {
+  test.each([
+    ['anthropic', 'Claude account'],
+    ['openai', 'OpenAI account'],
+    ['gemini', 'Gemini account'],
+  ] as const)(
+    'uses the selected provider for sparse accounts',
+    (provider, label) => {
+      render(
+        <AccountCard
+          provider={provider}
+          account={accountIdentity({
+            email: 'sparse@example.com',
+            accountUuid: null,
+          })}
+        />,
+      );
+
+      expect(screen.getByText(label)).toBeDefined();
+      if (provider !== 'anthropic')
+        expect(screen.queryByText('Claude account')).toBeNull();
+    },
+  );
+  test.each([
+    ['openai', 'ChatGPT Team'],
+    ['gemini', 'Google Team'],
+  ] as const)('does not use Claude plan names for %s', (provider, label) => {
+    render(
+      <AccountCard
+        provider={provider}
+        account={accountIdentity({
+          organizationType: 'team',
+          plan: null,
+        })}
+      />,
+    );
+
+    expect(screen.getByText(label)).toBeDefined();
+    expect(screen.queryByText(/Claude (Max|Pro|Team|Enterprise)/)).toBeNull();
+  });
+
+  test.each([
+    ['anthropic', 'Same account as before — nothing else changed.'],
+    ['openai', 'Same ChatGPT account as before — nothing else changed.'],
+    ['gemini', 'Same Google account as before — nothing else changed.'],
+  ] as const)('identifies the same %s account', (provider, copy) => {
+    render(
+      <IdentityVerdictNotice
+        outcome={reconnectOutcome(provider, { verdict: 'same' })}
+      />,
+    );
+
+    expect(screen.getByText(copy)).toBeDefined();
+  });
+
+  test.each(['anthropic', 'openai', 'gemini'] as const)(
+    'keeps %s unknown when identity data is missing',
+    (provider) => {
+      render(
+        <IdentityVerdictNotice
+          outcome={reconnectOutcome(provider, {
+            account: null,
+            verdict: 'unknown',
+          })}
+        />,
+      );
+
+      expect(
+        screen.getByText(
+          'Connected. Account details are still loading — check the Subscription card to confirm which account this is.',
+        ),
+      ).toBeDefined();
+      expect(
+        screen.queryByText(/Claude account|ChatGPT account|Google account/),
+      ).toBeNull();
+    },
+  );
+
+  test('shows Gemini project context only when supplied', () => {
+    const { rerender } = render(
+      <AccountCard
+        provider="gemini"
+        account={accountIdentity({
+          email: 'gemini@example.com',
+          accountUuid: null,
+          projectId: 'code-assist-project',
+        })}
+      />,
+    );
+    expect(screen.getByText('Project: code-assist-project')).toBeDefined();
+
+    rerender(
+      <AccountCard
+        provider="gemini"
+        account={accountIdentity({
+          email: 'gemini@example.com',
+          accountUuid: null,
+          projectId: null,
+        })}
+      />,
+    );
+    expect(screen.queryByText(/Project:/)).toBeNull();
+  });
+
+  test.each(['anthropic', 'openai', 'gemini'] as const)(
+    'describes %s refreshing credentials as automatically renewed',
+    (provider) => {
+      render(<TokenLifetimeNote outcome={reconnectOutcome(provider)} />);
+
+      expect(
+        screen.getByText('Refreshing connection — renews automatically.'),
+      ).toBeDefined();
+      expect(
+        screen.queryByText(
+          /Long-lived connection|no renewal|no sign-in needed/,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  test.each(['anthropic', 'openai', 'gemini'] as const)(
+    'preserves long-lived copy for %s',
+    (provider) => {
+      render(
+        <TokenLifetimeNote
+          outcome={reconnectOutcome(provider, {
+            mode: 'long_lived_365d',
+            grantedExpiresInSecs: null,
+          })}
+        />,
+      );
+
+      expect(
+        screen.getByText(
+          'Long-lived connection — it needs no renewal until it expires.',
+        ),
+      ).toBeDefined();
+    },
+  );
+
+  test('preserves Anthropic fallback guidance', () => {
+    render(
+      <TokenLifetimeNote
+        outcome={reconnectOutcome('anthropic', {
+          longLivedFallback: true,
+          fallbackReason: 'scope_rejected',
+        })}
+      />,
+    );
+
+    expect(
+      screen
+        .getByTestId('oauth-long-lived-fallback-notice')
+        .getAttribute('data-reason'),
+    ).toBe('scope_rejected');
+    expect(screen.getByText(/oauth\.anthropic\.scopes/)).toBeDefined();
+  });
+
+  test('keeps UUID-first and email-fallback identity comparison', () => {
+    expect(
+      compareIdentity(
+        accountIdentity({ email: 'same@example.com', accountUuid: 'uuid-a' }),
+        accountIdentity({
+          email: 'different@example.com',
+          accountUuid: 'uuid-a',
+        }),
+      ),
+    ).toBe('same');
+    expect(
+      compareIdentity(
+        accountIdentity({ email: 'same@example.com', accountUuid: 'uuid-a' }),
+        accountIdentity({ email: 'same@example.com', accountUuid: 'uuid-b' }),
+      ),
+    ).toBe('different');
+    expect(
+      compareIdentity(
+        accountIdentity({ email: 'same@example.com', accountUuid: null }),
+        accountIdentity({ email: 'same@example.com', accountUuid: null }),
+      ),
+    ).toBe('same');
+    expect(
+      compareIdentity(
+        accountIdentity({ email: 'before@example.com', accountUuid: 'uuid-a' }),
+        accountIdentity({ email: 'after@example.com', accountUuid: null }),
+      ),
+    ).toBe('different');
+    expect(
+      compareIdentity(
+        accountIdentity({ email: 'before@example.com', accountUuid: 'uuid-a' }),
+        accountIdentity({
+          email: null,
+          accountUuid: null,
+          projectId: 'project-only',
+        }),
+      ),
+    ).toBe('unknown');
+  });
 });

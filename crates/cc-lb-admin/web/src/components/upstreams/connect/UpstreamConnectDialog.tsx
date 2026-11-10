@@ -492,6 +492,7 @@ function ConnectDialogBody({
                     <div className="flex flex-col gap-1.5">
                       <AccountCard
                         account={previousAccount}
+                        provider={provider}
                         label="Sign in as"
                       />
                       <p className="text-body-sm text-text-muted">
@@ -605,6 +606,7 @@ function ConnectDialogBody({
                     />
                     <AccountCard
                       account={outcome.account}
+                      provider={provider}
                       tone="ok"
                       label="Connected account"
                     />
@@ -662,6 +664,7 @@ function ConnectDialogBody({
                     {outcome.verdict !== 'different' && outcome.account ? (
                       <AccountCard
                         account={outcome.account}
+                        provider={outcome.provider}
                         tone="ok"
                         label="Now"
                       />
