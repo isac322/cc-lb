@@ -33,7 +33,7 @@ Rather than reparse request bodies on read, the missing UI display fields are pe
 
 The Principal-detail surfaces stay live through the existing admin-web React Query polling pattern (visibility-gated `refetchInterval`), not Server-Sent Events. We deliberately did not use the admin event stream: its subscription filters (`crates/cc-lb-admin/src/events.rs` `StreamFilters`) carry principal/model/upstream/status/source-kind but no session or cache identity, and renewal completion is the only keep-alive mutation that emits an event, so it cannot replace polling. Polling is limited to data that can still change:
 
-- The session sheet polls only the pages the operator has loaded (one page until they choose "Load more sessions"); it never walks every page on its own.
+- The session sheet polls only the first page. When its summary, groups, or next-page cursor change, it refreshes the later loaded pages once. Unchanged aggregates and an unchanged cursor require only the first-page request. Polling and "Load more sessions" share a serialization queue so neither operation overwrites pages appended by the other.
 - While the sheet is open the card pauses its own summary poll; when the sheet shows the 24h horizon it writes its overview summary into the card's query.
 - The open session detail polls only while the session is active or its follow-up evidence is pending, and refetches when the selected row's generation or active state changes in the list.
 
