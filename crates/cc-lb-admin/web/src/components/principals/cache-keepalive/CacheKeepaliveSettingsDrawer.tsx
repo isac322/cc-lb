@@ -378,7 +378,7 @@ export function CacheKeepaliveSettingsDrawer({
         <ToggleSwitch
           role="switch"
           label="Cache keepalive enabled"
-          description="Renew the prompt-cache TTL for this principal's sessions."
+          description="Configure supported provider sessions for this principal. OpenAI Responses 30m renewal requires GPT-5.6+; 12h retention is recorded without read re-anchoring."
           aria-label="Cache keepalive enabled"
           checked={enabled}
           onChange={(e) => setEnabled(e.target.checked)}
@@ -542,7 +542,7 @@ export function CacheKeepaliveSettingsDrawer({
           <ToggleSwitch
             role="switch"
             label="OpenAI Responses GPT-5.6+ keepalive"
-            description="Opt in to cost-aware 30m prompt-cache read refreshes for OpenAI Responses only. Off by default."
+            description="Opt in to cost-aware 30m prompt-cache read refreshes for OpenAI Responses only. A 12h retention is recorded without read re-anchoring and is not periodically renewed. Off by default."
             aria-label="OpenAI Responses GPT-5.6+ keepalive"
             checked={openaiResponsesEnabled}
             onChange={(e) => setOpenaiResponsesEnabled(e.target.checked)}

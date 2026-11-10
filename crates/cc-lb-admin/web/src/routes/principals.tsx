@@ -592,11 +592,15 @@ function PrincipalDetail({
     ) ?? false;
   const supportsAnthropicFeatures = anthropicInScope && anthropicConfigured;
   const supportsKeepalive =
-    supportsAnthropicFeatures &&
-    (inventory.data?.upstreams.some(
-      (upstream) => capabilitiesOf(upstream.kind).cacheKeepalive,
-    ) ??
-      false);
+    inventory.data?.upstreams.some((upstream) => {
+      const provider = providerOf(upstream.kind);
+      const inScope =
+        scopedProviders === undefined || scopedProviders.includes(provider);
+      const allowed =
+        principal.allowed_upstreams.length === 0 ||
+        principal.allowed_upstreams.includes(upstream.id);
+      return inScope && allowed && capabilitiesOf(upstream.kind).cacheKeepalive;
+    }) ?? false;
   const toggle = useTogglePrincipal();
   const del = useDeletePrincipal();
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;

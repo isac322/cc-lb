@@ -391,7 +391,7 @@ export function CacheKeepaliveSessionsDrawer({
     principal.id,
     {
       horizon,
-      status: enabled ? 'tracked' : undefined,
+      status: enabled ? 'all' : undefined,
     },
     open,
   );
@@ -403,7 +403,11 @@ export function CacheKeepaliveSessionsDrawer({
       query.data?.pages.length ? query.data.pages.length * 100 : 100,
     );
     return mergeLiveSessions(rawRows, maxRows).filter(
-      (row) => !enabled || row.state !== 'not_tracked' || row.error != null,
+      (row) =>
+        !enabled ||
+        row.state !== 'not_tracked' ||
+        row.error != null ||
+        row.ttl === '12h',
     );
   }, [enabled, query.data]);
 
@@ -493,6 +497,13 @@ export function CacheKeepaliveSessionsDrawer({
         className="flex h-full min-h-0 flex-col"
         data-testid="cache-keepalive-sessions-body"
       >
+        <p
+          className="shrink-0 border-b border-subtle px-4 py-2 text-caption text-text-muted"
+          data-testid="cache-keepalive-scope"
+        >
+          Principal-wide history. The current provider lens does not filter
+          these sessions.
+        </p>
         <SheetSummaryHeader
           horizon={horizon}
           summary={summary}
@@ -551,10 +562,24 @@ export function CacheKeepaliveSessionsDrawer({
           ) : !enabled && visibleRows.length === 0 ? (
             <EmptyState title="No sessions recorded" />
           ) : visibleRows.length === 0 ? (
-            <EmptyState
-              title="No sessions"
-              description="No sessions recorded in this horizon."
-            />
+            query.hasNextPage ? (
+              <div className="flex min-h-[340px] items-center justify-center">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => query.fetchNextPage()}
+                  disabled={query.isFetchingNextPage}
+                  iconLeft={query.isFetchingNextPage ? <Spinner /> : undefined}
+                >
+                  Loading older sessions...
+                </Button>
+              </div>
+            ) : (
+              <EmptyState
+                title="No sessions"
+                description="No sessions recorded in this horizon."
+              />
+            )
           ) : (
             <div className="min-h-full md:grid md:grid-cols-[248px_minmax(0,1fr)] md:divide-x md:divide-subtle lg:grid-cols-[272px_minmax(0,1fr)]">
               {/* Left Pane: Collapsible Trigger groups + Decimal-aligned USD columns */}

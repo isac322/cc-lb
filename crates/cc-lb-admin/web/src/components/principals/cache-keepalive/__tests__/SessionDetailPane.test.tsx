@@ -246,4 +246,129 @@ describe('SessionDetailPane (D3 Time-Rail)', () => {
     expect(pulse11Pct).not.toBeCloseTo(91.7, 1);
     expect(pulse11Pct).not.toBe(pulse12Pct);
   });
+  it('uses the 30m renewal window for OpenAI Responses sessions', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: {
+        id: 'openai-30m',
+        last_message_at_ms: 1_700_000_323_000,
+        state: 'scheduled',
+        is_active: true,
+        ttl: '30m',
+        attempts: 0,
+        retained_renewals: 0,
+        max_attempts: 12,
+        reason: 'waiting for follow-up',
+        generation: 1,
+        upstream: 'openai',
+        error: null,
+        net_pnl: null,
+        session_key_hash: 'openai-30m',
+        renewal_tokens: 604_506,
+        total_avoided: null,
+        total_spent: 0,
+        total_renewals_current_cycle: 0,
+        is_last_pending: true,
+        evidence_status: 'none',
+        turns: [],
+        gaps: [],
+        config_snapshot: {
+          lead_5m: 30,
+          lead_1h: 300,
+          max_renewals: 12,
+          max_duration: 14_400,
+          snapshot_bytes: 8_388_608,
+        },
+        raw_record: {
+          session_key_hash: 'openai-30m',
+          principal_id: 'p-123',
+          upstream_id: 'openai',
+          generation: 1,
+          renewal_count: 0,
+          ttl: '30m',
+          status: 'scheduled',
+          enqueue_state: 'pending',
+        },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="openai-30m"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByTestId('session-detail-time-rail')).toBeDefined();
+    expect(screen.getByText('Next renewal at +29m 30s')).toBeDefined();
+  });
+
+  it('labels 12h retention without rendering a periodic renewal rail', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: {
+        id: 'openai-12h',
+        last_message_at_ms: 1_700_000_323_000,
+        state: 'not_tracked',
+        is_active: false,
+        ttl: '12h',
+        attempts: 0,
+        retained_renewals: 0,
+        max_attempts: 12,
+        reason: 'openai 12h retention is recorded without read re-anchoring',
+        generation: 1,
+        upstream: 'openai',
+        error: null,
+        net_pnl: null,
+        session_key_hash: 'openai-12h',
+        renewal_tokens: 604_506,
+        total_avoided: null,
+        total_spent: 0,
+        total_renewals_current_cycle: 0,
+        is_last_pending: false,
+        evidence_status: 'none',
+        turns: [],
+        gaps: [],
+        config_snapshot: {
+          lead_5m: 30,
+          lead_1h: 300,
+          max_renewals: 12,
+          max_duration: 14_400,
+          snapshot_bytes: 8_388_608,
+        },
+        raw_record: {
+          session_key_hash: 'openai-12h',
+          principal_id: 'p-123',
+          upstream_id: 'openai',
+          generation: 1,
+          renewal_count: 0,
+          ttl: '12h',
+          status: 'not_tracked',
+          enqueue_state: null,
+        },
+      },
+      isLoading: false,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="openai-12h"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      screen
+        .getByTestId('cache-keepalive-12h-retention')
+        .textContent?.includes(
+          '12h retention is recorded without read re-anchoring',
+        ),
+    ).toBe(true);
+    expect(screen.queryByTestId('session-detail-time-rail')).toBeNull();
+    expect(screen.queryByText(/Next renewal/)).toBeNull();
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+  });
 });
