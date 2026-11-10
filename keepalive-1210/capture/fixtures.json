@@ -1,0 +1,36 @@
+{
+  "fixedNow": 1700004000000,
+  "principalId": "demo-principal",
+  "principal": {
+    "id": "demo-principal",
+    "name": "demo-agent",
+    "kind": "machine",
+    "enabled": true,
+    "revision": 7,
+    "allowed_models": [],
+    "allowed_upstreams": [],
+    "default_limits": [],
+    "cache_keepalive": {
+      "enabled": true,
+      "refresh_lead_time_5m_secs": 30,
+      "refresh_lead_time_1h_secs": 300,
+      "max_refreshes_per_session": 12,
+      "max_total_duration_secs": 14400,
+      "snapshot_max_bytes": 8388608,
+      "min_cache_tokens": 10000,
+      "classifier": {"extra_wait_for_user_tools": [], "treat_end_turn_as_ambiguous": false}
+    }
+  },
+  "upstream": {
+    "id": "demo-upstream",
+    "name": "demo-upstream",
+    "kind": "anthropic_api_key",
+    "enabled": true,
+    "base_url": null,
+    "api_key_access": null,
+    "warmup_enabled": false,
+    "warmup_dialect_plugin": null,
+    "spec_revision": 1,
+    "status": {"last_apply_error": null, "last_apply_at_unix_secs": null, "last_warmup_at_unix_secs": null}
+  }
+}
